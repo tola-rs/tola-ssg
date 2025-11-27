@@ -28,8 +28,6 @@
 
           rustToolchain = pkgs.rust-bin.stable.latest.minimal;
 
-          buildDeps = with pkgs; [ libiconvReal nasm ];
-
           mkPackage = targetPkgs:
             targetPkgs.rustPlatform.buildRustPackage {
               pname = "tola";
@@ -38,15 +36,10 @@
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
 
-              cargo = rustToolchain;
-              rustc = rustToolchain;
+              # buildInputs = with targetPkgs; [ libiconv ];
+              nativeBuildInputs = with pkgs; [ nasm libiconvReal ];
 
-              buildInputs = buildDeps;
-              nativeBuildInputs = [ pkgs.nasm ];
-
-              configurePhase = ''
-                export LIBRARY_PATH="${lib.makeLibraryPath buildDeps}"
-              '';
+              env.LIBRARY_PATH = lib.makeLibraryPath [ pkgs.libiconvReal ];
 
               doCheck = false;
               enableParallelBuilding = true;

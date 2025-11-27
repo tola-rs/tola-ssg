@@ -22,7 +22,7 @@ jobs:
         authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
     - run: |
         set -e
-        nix build --no-link --print-out-paths \
+        nix build -j auto--no-link --print-out-paths \
           ./#x86_64-linux \
           ./#x86_64-linux-static \
           ./#aarch64-linux \
