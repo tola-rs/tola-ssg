@@ -23,6 +23,12 @@ use std::{
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 
+/// Directory listing HTML template
+const DIRECTORY_TEMPLATE: &str = include_str!("../assets/serve/directory.html");
+
+/// Welcome page HTML template
+const WELCOME_TEMPLATE: &str = include_str!("../assets/serve/welcome.html");
+
 /// Start the development server with file watching
 pub async fn serve_site(config: &'static SiteConfig) -> Result<()> {
     let server_ready = Arc::new(AtomicBool::new(false));
@@ -137,37 +143,53 @@ async fn handle_path(uri: Uri, base_path: PathBuf) -> impl IntoResponse {
 fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io::Result<String> {
     let entries: Vec<_> = fs::read_dir(dir_path)?
         .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            // Filter out hidden files (starting with '.')
+            !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.')
+        })
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let icon = if is_dir { "📁" } else { "📄" };
             let href = if request_path.is_empty() {
                 format!("/{name}")
             } else {
                 format!("/{request_path}/{name}")
             };
-            format!("<li><a href='{href}'>{name}</a></li>")
+            format!(r#"<li><span class="icon">{icon}</span><a href="{href}">{name}</a></li>"#)
         })
         .collect();
 
-    Ok(format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Directory: /{request_path}</title>
-    <style>
-        body {{ background: #273748; color: white; font-family: system-ui; padding: 2rem; }}
-        a {{ color: #60a5fa; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        li {{ padding: 0.25rem 0; }}
-    </style>
-</head>
-<body>
-    <h1>Directory: /{request_path}</h1>
-    <ul>{}</ul>
-</body>
-</html>"#,
-        entries.join("\n        ")
-    ))
+    // If no visible entries, show welcome page
+    if entries.is_empty() {
+        return Ok(WELCOME_TEMPLATE
+            .replace("{title}", "Welcome")
+            .replace("{version}", env!("CARGO_PKG_VERSION")));
+    }
+
+    // Generate parent link if not at root
+    let parent_link = if request_path.is_empty() {
+        String::new()
+    } else {
+        let parent_path = std::path::Path::new(request_path)
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let parent_href = if parent_path.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{parent_path}")
+        };
+        format!(r#"<li class="parent"><span class="icon">📂</span><a href="{parent_href}">..</a></li>"#)
+    };
+
+    Ok(DIRECTORY_TEMPLATE
+        .replace("{path}", request_path)
+        .replace("{parent_link}", &parent_link)
+        .replace("{entries}", &entries.join("\n            ")))
 }
 
 /// Handle graceful shutdown on Ctrl+C
