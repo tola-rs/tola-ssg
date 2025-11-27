@@ -389,6 +389,188 @@ fn test_build_tailwind_config() {
 }
 
 #[test]
+fn test_build_head_config_icon() {
+    let config = r#"
+        [base]
+        title = "Test"
+        description = "Test blog"
+
+        [build.head]
+        icon = "./assets/images/favicon.avif"
+    "#;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert_eq!(
+        config.build.head.icon,
+        Some(PathBuf::from("./assets/images/favicon.avif"))
+    );
+}
+
+#[test]
+fn test_build_head_config_styles() {
+    let config = r#"
+        [base]
+        title = "Test"
+        description = "Test blog"
+
+        [build.head]
+        styles = [
+            "./assets/fonts/custom/font.css",
+            "./assets/styles/highlight.min.css"
+        ]
+    "#;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert_eq!(config.build.head.styles.len(), 2);
+    assert_eq!(
+        config.build.head.styles[0],
+        PathBuf::from("./assets/fonts/custom/font.css")
+    );
+    assert_eq!(
+        config.build.head.styles[1],
+        PathBuf::from("./assets/styles/highlight.min.css")
+    );
+}
+
+#[test]
+fn test_build_head_config_scripts_simple() {
+    let config = r#"
+        [base]
+        title = "Test"
+        description = "Test blog"
+
+        [build.head]
+        scripts = [
+            "./assets/scripts/a.js",
+            "./assets/scripts/b.js"
+        ]
+    "#;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert_eq!(config.build.head.scripts.len(), 2);
+    assert_eq!(
+        config.build.head.scripts[0].path(),
+        Path::new("./assets/scripts/a.js")
+    );
+    assert!(!config.build.head.scripts[0].is_defer());
+    assert!(!config.build.head.scripts[0].is_async());
+}
+
+#[test]
+fn test_build_head_config_scripts_with_options() {
+    let config = r#"
+        [base]
+        title = "Test"
+        description = "Test blog"
+
+        [build.head]
+        scripts = [
+            { path = "./assets/scripts/a.js", defer = true },
+            "./assets/scripts/b.js",
+            { path = "./assets/scripts/c.js", async = true }
+        ]
+    "#;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert_eq!(config.build.head.scripts.len(), 3);
+    
+    // First script with defer
+    assert_eq!(
+        config.build.head.scripts[0].path(),
+        Path::new("./assets/scripts/a.js")
+    );
+    assert!(config.build.head.scripts[0].is_defer());
+    assert!(!config.build.head.scripts[0].is_async());
+    
+    // Second script - simple path
+    assert_eq!(
+        config.build.head.scripts[1].path(),
+        Path::new("./assets/scripts/b.js")
+    );
+    assert!(!config.build.head.scripts[1].is_defer());
+    assert!(!config.build.head.scripts[1].is_async());
+    
+    // Third script with async
+    assert_eq!(
+        config.build.head.scripts[2].path(),
+        Path::new("./assets/scripts/c.js")
+    );
+    assert!(!config.build.head.scripts[2].is_defer());
+    assert!(config.build.head.scripts[2].is_async());
+}
+
+#[test]
+fn test_build_head_config_elements() {
+    let config = r##"
+        [base]
+        title = "Test"
+        description = "Test blog"
+
+        [build.head]
+        elements = [
+            '<meta name="darkreader-lock">',
+            '<meta name="theme-color" content="#ffffff">'
+        ]
+    "##;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert_eq!(config.build.head.elements.len(), 2);
+    assert_eq!(
+        config.build.head.elements[0],
+        "<meta name=\"darkreader-lock\">"
+    );
+    assert_eq!(
+        config.build.head.elements[1],
+        "<meta name=\"theme-color\" content=\"#ffffff\">"
+    );
+}
+
+#[test]
+fn test_build_head_config_full() {
+    let config = r#"
+        [base]
+        title = "Test"
+        description = "Test blog"
+
+        [build.head]
+        icon = "./assets/images/blog/avatar.avif"
+        styles = [
+            "./assets/fonts/MapleMono-NF-CN-Regular/result.css",
+            "./assets/styles/highlight.min.css"
+        ]
+        scripts = [
+            { path = "./assets/scripts/a.js", defer = true },
+            "./assets/scripts/b.js",
+            { path = "./assets/scripts/c.js", async = true }
+        ]
+        elements = [
+            '<meta name="darkreader-lock">'
+        ]
+    "#;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert!(config.build.head.icon.is_some());
+    assert_eq!(config.build.head.styles.len(), 2);
+    assert_eq!(config.build.head.scripts.len(), 3);
+    assert_eq!(config.build.head.elements.len(), 1);
+}
+
+#[test]
+fn test_build_head_config_defaults() {
+    let config = r#"
+        [base]
+        title = "Test"
+        description = "Test blog"
+    "#;
+    let config: SiteConfig = toml::from_str(config).unwrap();
+
+    assert!(config.build.head.icon.is_none());
+    assert!(config.build.head.styles.is_empty());
+    assert!(config.build.head.scripts.is_empty());
+    assert!(config.build.head.elements.is_empty());
+}
+
+#[test]
 fn test_serve_config() {
     let config = r#"
         [base]
@@ -780,6 +962,10 @@ pub struct BuildConfig {
     /// Tailwind CSS configuration
     #[serde(default)]
     pub tailwind: TailwindConfig,
+
+    /// Custom head elements configuration
+    #[serde(default)]
+    pub head: HeadConfig,
 }
 
 /// `[build.rss]` section
@@ -869,6 +1055,71 @@ pub struct TailwindConfig {
     #[serde(default = "config_defaults::build::tailwind::command")]
     #[educe(Default = config_defaults::build::tailwind::command())]
     pub command: Vec<String>,
+}
+
+/// Script entry for `[build.head.scripts]`
+/// Can be either a simple path string or an object with path and defer/async options
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScriptEntry {
+    /// Simple path string
+    Simple(PathBuf),
+    /// Object with path and optional defer/async
+    WithOptions {
+        path: PathBuf,
+        #[serde(default)]
+        defer: bool,
+        #[serde(default)]
+        r#async: bool,
+    },
+}
+
+impl ScriptEntry {
+    /// Get the path for this script entry
+    pub fn path(&self) -> &Path {
+        match self {
+            ScriptEntry::Simple(path) => path,
+            ScriptEntry::WithOptions { path, .. } => path,
+        }
+    }
+
+    /// Check if defer attribute should be added
+    pub fn is_defer(&self) -> bool {
+        match self {
+            ScriptEntry::Simple(_) => false,
+            ScriptEntry::WithOptions { defer, .. } => *defer,
+        }
+    }
+
+    /// Check if async attribute should be added
+    pub fn is_async(&self) -> bool {
+        match self {
+            ScriptEntry::Simple(_) => false,
+            ScriptEntry::WithOptions { r#async, .. } => *r#async,
+        }
+    }
+}
+
+/// `[build.head]` section for custom head elements
+#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
+#[educe(Default)]
+#[serde(deny_unknown_fields)]
+pub struct HeadConfig {
+    /// Favicon path (relative to assets directory)
+    #[serde(default)]
+    pub icon: Option<PathBuf>,
+
+    /// CSS stylesheet paths (relative to assets directory)
+    #[serde(default)]
+    pub styles: Vec<PathBuf>,
+
+    /// Script entries (relative to assets directory)
+    #[serde(default)]
+    pub scripts: Vec<ScriptEntry>,
+
+    /// Raw HTML elements to insert into head (e.g., `<meta name="darkreader-lock">`)
+    #[serde(default)]
+    pub elements: Vec<String>,
 }
 
 /// `[serve]` section in tola.toml
