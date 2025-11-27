@@ -70,6 +70,12 @@ pub mod config_defaults {
         pub fn assets() -> PathBuf {
             "assets".into()
         }
+        pub fn templates() -> PathBuf {
+            "templates".into()
+        }
+        pub fn utils() -> PathBuf {
+            "utils".into()
+        }
 
         pub mod rss {
             use std::path::PathBuf;
@@ -937,6 +943,16 @@ pub struct BuildConfig {
     #[educe(Default = config_defaults::build::assets())]
     pub assets: PathBuf,
 
+    /// Templates directory path (relative to root)
+    #[serde(default = "config_defaults::build::templates")]
+    #[educe(Default = config_defaults::build::templates())]
+    pub templates: PathBuf,
+
+    /// Utils directory path (relative to root)
+    #[serde(default = "config_defaults::build::utils")]
+    #[educe(Default = config_defaults::build::utils())]
+    pub utils: PathBuf,
+
     /// Minify HTML output
     #[serde(default = "config_defaults::r#true")]
     #[educe(Default = true)]
@@ -1224,6 +1240,10 @@ pub struct SiteConfig {
     #[serde(skip)]
     pub cli: Option<&'static Cli>,
 
+    /// Absolute path to the config file (set after loading)
+    #[serde(skip)]
+    pub config_path: PathBuf,
+
     /// Basic site information
     #[serde(default)]
     pub base: BaseConfig,
@@ -1300,7 +1320,15 @@ impl SiteConfig {
     pub fn update_with_cli(&mut self, cli: &'static Cli) {
         self.cli = Some(cli);
 
-        let root = cli.root.as_ref().cloned().unwrap_or_else(|| self.get_root().to_owned());
+        // Determine the final root path based on command
+        let root = match &cli.command {
+            Commands::Init { name: Some(name) } => {
+                let base = cli.root.as_ref().cloned().unwrap_or_else(|| self.get_root().to_owned());
+                base.join(name)
+            }
+            _ => cli.root.as_ref().cloned().unwrap_or_else(|| self.get_root().to_owned()),
+        };
+
         self.set_root(&root);
         self.update_path_with_root(&root);
 
@@ -1310,13 +1338,6 @@ impl SiteConfig {
         self.build.typst.svg.inline_max_size = self.build.typst.svg.inline_max_size.to_uppercase();
 
         match &cli.command {
-            Commands::Init { name: Some(name) } => {
-                let new_root = self.build.root.as_ref().map_or_else(
-                    || name.clone(),
-                    |r| r.join(name),
-                );
-                self.update_path_with_root(&new_root);
-            }
             Commands::Serve { interface, port, watch } => {
                 Self::update_option(&mut self.serve.interface, interface.as_ref());
                 Self::update_option(&mut self.serve.port, port.as_ref());
@@ -1337,35 +1358,59 @@ impl SiteConfig {
         }
     }
 
-    /// Update all paths relative to root directory
+    /// Update all paths relative to root directory and normalize to absolute paths
     fn update_path_with_root(&mut self, root: &Path) {
         let cli = self.get_cli();
 
-        self.set_root(root);
+        // Apply CLI overrides first
         Self::update_option(&mut self.build.content, cli.content.as_ref());
         Self::update_option(&mut self.build.assets, cli.assets.as_ref());
         Self::update_option(&mut self.build.output, cli.output.as_ref());
 
-        self.build.content = root.join(&self.build.content);
-        self.build.assets = root.join(&self.build.assets);
-        self.build.output = root.join(&self.build.output);
+        // Normalize root to absolute path
+        let root = Self::normalize_path(root);
+        self.set_root(&root);
+
+        // Normalize config path
+        self.config_path = Self::normalize_path(&root.join(&cli.config));
+
+        // Normalize all directory paths
+        self.build.content = Self::normalize_path(&root.join(&self.build.content));
+        self.build.assets = Self::normalize_path(&root.join(&self.build.assets));
+        self.build.output = Self::normalize_path(&root.join(&self.build.output));
+        self.build.templates = Self::normalize_path(&root.join(&self.build.templates));
+        self.build.utils = Self::normalize_path(&root.join(&self.build.utils));
         self.build.rss.path = self.build.output.join(&self.build.rss.path);
 
-        if self.build.tailwind.enable
-            && let Some(input) = self.build.tailwind.input.as_ref()
-        {
-            self.build.tailwind.input.replace(root.join(input));
+        // Normalize tailwind input path
+        if let Some(input) = self.build.tailwind.input.as_ref() {
+            self.build.tailwind.input = Some(Self::normalize_path(&root.join(input)));
         }
 
+        // Normalize token path (with tilde expansion)
         if let Some(token_path) = &self.deploy.github_provider.token_path {
-            let path = shellexpand::tilde(token_path.to_str().unwrap()).into_owned();
-            let path = PathBuf::from(path);
-            self.deploy.github_provider.token_path = if path.is_relative() {
-                Some(root.join(path))
+            let expanded = shellexpand::tilde(token_path.to_str().unwrap()).into_owned();
+            let path = PathBuf::from(expanded);
+            self.deploy.github_provider.token_path = Some(if path.is_relative() {
+                Self::normalize_path(&root.join(path))
             } else {
-                Some(path.to_owned())
-            };
+                Self::normalize_path(&path)
+            });
         }
+    }
+
+    /// Normalize a path to absolute, using canonicalize if the path exists
+    fn normalize_path(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| {
+            // For non-existent paths, manually make them absolute
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(path))
+                    .unwrap_or_else(|_| path.to_path_buf())
+            }
+        })
     }
 
     /// Validate configuration for the current command
@@ -1373,7 +1418,7 @@ impl SiteConfig {
     pub fn validate(&self) -> Result<()> {
         let cli = self.get_cli();
 
-        if !self.get_root().join(&cli.config).exists() {
+        if !self.config_path.exists() {
             bail!("Config file not found");
         }
 
