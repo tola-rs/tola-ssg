@@ -606,7 +606,7 @@ fn process_link_attribute<'a>(
         Some('/') => process_absolute_link(value_str, config)?,
         Some('#') => process_fragment_link(value_str, config)?,
         Some(_) => process_relative_or_external_link(value_str, config)?,
-        None => String::new(),
+        None => anyhow::bail!("empty link URL found in typst file"),
     };
     Ok(processed_value.into_bytes().into())
 }
