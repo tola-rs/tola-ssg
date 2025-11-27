@@ -1,32 +1,36 @@
 # tola-ssg
 
-(Still writing the document, releasing it shortly when I have some spare time)  
-
 ## Introduction
 
-`tola`: static site generator for Typst-based blog.  
+`tola`: A static site generator for Typst-based blogs.  
 It handles the most tedious tasks unrelated to Typst itself.  
 
 e.g.,  
-- automatically extract embedded svg images for smaller size and faster loading
-- slugify the paths && fragments for posts
-- watch changes and recompile it 
-- local server for previewing the generated size
-- prevent users from typing repetitive command which user doesn't matter
-- built-in tailwind-css support, out of the box
-- deploy the generated site to github page (other provider is in plan)
-- provide template file with a small kernal, so that most people can customize their own site easily (in plan)
-- rss2.0 support
+- Automatically extract embedded SVG images for smaller size and faster loading
+- Slugify paths and fragments for posts
+- Watch for changes and recompile automatically
+- Local server for previewing the generated site
+- Eliminate repetitive commands that users don't need to worry about
+- Built-in Tailwind CSS support, out of the box
+- Deploy the generated site to GitHub Pages (other providers are planned)
+- Provide template files with a small kernel, so users can easily customize their own site (planned)
+- RSS 2.0 support
 
 ## Philosophy
 
 The philosophy of `tola`:  
-**keeping your focus on the content itself**  
+**Keep your focus on the content itself.**  
 
-`tola` helps you get closer!  
-- A lightweight and minimal abstraction layer should be provided, which allows users to work without being locked into a rigid framework.
-- If you can accomplish something in post more easily with Typst, then you’d better use it. (e.g.: [TODO](todo))
+`tola` helps you get closer to that goal!  
+- Provide a lightweight and minimal abstraction layer that allows users to work without being locked into a rigid framework.
+- If you can accomplish something more easily with Typst in your posts, then use it. (e.g., [TODO](todo))
 - Keep the core simple and maintainable, and enjoy the pure joy of writing.
+
+## Note
+
+- This documentation is still a work in progress. More details and tutorials coming soon.
+- The experience of Typst/HTML is fundamentally different from Typst/PDF. `tola` is designed for users who want to use Typst as a replacement for both LaTeX and Markdown for personal blog, and who are open to embracing html/css/javascript for convenience, simplicity, and aesthetics.
+- `tola` aims to offer maximum flexibility and freedom — almost everything can be easily customized by yourself. It eliminates boilerplate and repetitive code, providing as many conveniences as possible so you can focus purely on your content.
 
 ## Examples
 
@@ -39,8 +43,8 @@ The philosophy of `tola`:
 ## Installation
 
 - `cargo install tola`
-- install the binary in [release page](https://github.com/KawaYww/tola/releases).
-- for nix users, a `flake.nix` already exists in the repo root, and you could use binary cache in [tola.cachix.org](https://tola.cachix.org):
+- Install the binary from the [release page](https://github.com/KawaYww/tola/releases).
+- For Nix users, a `flake.nix` already exists in the repo root, and you can use the binary cache at [tola.cachix.org](https://tola.cachix.org):
 
 ```nix
 # flake.nix
@@ -113,7 +117,7 @@ Options:
   -V, --version              Print version
 ```
 
-You should keep the directory structure identical to the below:
+Your project should follow the directory structure below:
 
 ```text
 .
@@ -129,17 +133,19 @@ You should keep the directory structure identical to the below:
 │   ├── index.typ
 │   ├── programming.typ
 ├── templates
-│   └── normal.typ
+│   └── tola-conf.typ
+├── utils
+│   └── main.typ
 └── utils
     └── main.typ
 ```
 
 Files under the `content/` directory are mapped to their respective routes:  
-e.g., `content/posts/examples/aaa.typ` -> `http://127.0.0.1:8282/posts/examples/aaa`  
-(`content/index.typ` will be specially compiled into `http://127.0.0.1:8282/index.html`)  
+e.g., `content/posts/examples/aaa.typ` -> `http://127.0.0.1:5277/posts/examples/aaa`  
+(`content/index.typ` will be specially compiled into `http://127.0.0.1:5277/index.html`)  
 
 ```text
-http://127.0.0.1:8000:
+http://127.0.0.1:5277:
 ├── assets
 │   ├── fonts
 │   ├── iconfonts
@@ -150,5 +156,3 @@ http://127.0.0.1:8000:
 ├── categories/
 └── index.html
 ```
-
-

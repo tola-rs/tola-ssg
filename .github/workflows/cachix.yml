@@ -23,8 +23,8 @@ jobs:
     - run: |
         set -e
         nix build --no-link --print-out-paths \
-          ./#x86 \
-          ./#x86-static \
-          ./#aarch64 \
-          ./#aarch64-static \
-          ./#darwin
+          ./#x86_64-linux \
+          ./#x86_64-linux-static \
+          ./#aarch64-linux \
+          ./#aarch64-linux-static \
+          ./#aarch64-darwin

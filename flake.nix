@@ -1,5 +1,5 @@
 {
-  description = "static site generator for typst-based blog - keeping your focus on the content";
+  description = "Static site generator for typst-based blog";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -12,64 +12,65 @@
 
   outputs = inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      imports = [];
-      systems = [ 
-        "x86_64-linux" 
-        "aarch64-linux" 
-        "x86_64-darwin" 
-        "aarch64-darwin" 
-        "x86_64-windows"
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
       ];
-      perSystem = { self', inputs', config, pkgs, lib, system, ... }:
+
+      perSystem = { lib, system, ... }:
         let
-          overlayedPkgs = import inputs.nixpkgs {
+          pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [ inputs.rust-overlay.overlays.default ];
           };
-          rustStable = overlayedPkgs.rust-bin.stable.latest.minimal;
-          buildPackage = pkgs':
-            let
-              app_deps = with pkgs'; [
-                libiconvReal
-                nasm
-              ];
-            in
-            pkgs'.rustPlatform.buildRustPackage rec {
-              configurePhase = ''
-                export LIBRARY_PATH="${lib.makeLibraryPath app_deps}"
-              '';
-              
+
+          rustToolchain = pkgs.rust-bin.stable.latest.minimal;
+
+          buildDeps = with pkgs; [ libiconvReal nasm ];
+
+          mkPackage = targetPkgs:
+            targetPkgs.rustPlatform.buildRustPackage {
               pname = "tola";
-              version = "0.5.14";
-              cargo = rustStable;
-              rustc = rustStable;
+              version = "0.5.15";
+
               src = ./.;
-              cargoLock.lockFile = src + /Cargo.lock;
+              cargoLock.lockFile = ./Cargo.lock;
+
+              cargo = rustToolchain;
+              rustc = rustToolchain;
+
+              buildInputs = buildDeps;
+              nativeBuildInputs = [ pkgs.nasm ];
+
+              configurePhase = ''
+                export LIBRARY_PATH="${lib.makeLibraryPath buildDeps}"
+              '';
+
               doCheck = false;
               enableParallelBuilding = true;
-              buildInputs = app_deps;
-              nativeBuildInputs = [
-                overlayedPkgs.nasm
-              ];
+
               meta = {
-                description = "static site generator for typst-based blog, written in Rust";
-                homepage = "https://github.com/KawaYww/tola";
+                description = "Static site generator for typst-based blog";
+                homepage = "https://github.com/kawayww/tola-ssg";
                 license = lib.licenses.mit;
               };
             };
-        in {
+        in
+        {
           packages = {
-            default = buildPackage overlayedPkgs;
-            static = buildPackage overlayedPkgs.pkgsStatic;
+            default = mkPackage pkgs;
+            static = mkPackage pkgs.pkgsStatic;
 
-            x86 = buildPackage overlayedPkgs.pkgsCross.gnu64;
-            x86-static = buildPackage overlayedPkgs.pkgsCross.gnu64.pkgsStatic;
+            x86_64-linux = mkPackage pkgs.pkgsCross.gnu64;
+            x86_64-linux-static = mkPackage pkgs.pkgsCross.gnu64.pkgsStatic;
 
-            aarch64 = buildPackage overlayedPkgs.pkgsCross.aarch64-multiplatform;
-            aarch64-static = buildPackage overlayedPkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
+            aarch64-linux = mkPackage pkgs.pkgsCross.aarch64-multiplatform;
+            aarch64-linux-static = mkPackage pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
 
-            windows = buildPackage overlayedPkgs.pkgsCross.mingwW64;
-            darwin = buildPackage overlayedPkgs.pkgsCross.aarch64-darwin;
+            x86_64-windows = mkPackage pkgs.pkgsCross.mingwW64;
+            aarch64-darwin = mkPackage pkgs.pkgsCross.aarch64-darwin;
           };
         };
     };
