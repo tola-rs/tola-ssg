@@ -24,30 +24,81 @@ use std::{
     fs,
     io::{Cursor, Write},
     path::{Path, PathBuf},
+    str,
     sync::OnceLock,
 };
+
+// ============================================================================
+// Types and Constants
+// ============================================================================
 
 type DirCache = LazyLock<Mutex<LruCache<PathBuf, Arc<Vec<PathBuf>>>>>;
 type CreatedDirCache = LazyLock<DashSet<PathBuf>>;
 
 const PADDING_TOP_FOR_SVG: f32 = 5.0;
 const PADDING_BOTTOM_FOR_SVG: f32 = 4.0;
+
 static ASSET_TOP_LEVELS: OnceLock<Vec<OsString>> = OnceLock::new();
 static CREATED_DIRS: CreatedDirCache = LazyLock::new(DashSet::new);
+
 pub static CONTENT_CACHE: DirCache =
     LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(50).unwrap())));
 pub static ASSETS_CACHE: DirCache =
     LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(50).unwrap())));
+
 pub const IGNORED_FILE_NAME: &[&str] = &[".DS_Store"];
 
+/// Extracted SVG data with dimensions
 struct Svg {
     data: Vec<u8>,
     size: (f32, f32),
+    index: usize,
 }
 
 impl Svg {
-    pub fn new(data: Vec<u8>, size: (f32, f32)) -> Self {
-        Self { data, size }
+    fn new(data: Vec<u8>, size: (f32, f32), index: usize) -> Self {
+        Self { data, size, index }
+    }
+
+    /// Determine output filename based on extract type and size
+    fn output_filename(&self, config: &SiteConfig) -> String {
+        let use_svg = matches!(config.build.typst.svg.extract_type, ExtractSvgType::JustSvg)
+            || self.data.len() < config.get_inline_max_size();
+
+        if use_svg {
+            format!("svg-{}.svg", self.index)
+        } else {
+            format!("svg-{}.avif", self.index)
+        }
+    }
+
+    /// Check if this SVG should be kept as SVG (not compressed to AVIF)
+    fn should_keep_as_svg(&self, config: &SiteConfig) -> bool {
+        matches!(config.build.typst.svg.extract_type, ExtractSvgType::JustSvg)
+            || self.data.len() < config.get_inline_max_size()
+    }
+}
+
+// ============================================================================
+// HTML Processing - Element Handlers
+// ============================================================================
+
+/// Context for HTML processing, avoiding repeated config access
+struct HtmlContext<'a> {
+    config: &'static SiteConfig,
+    html_path: &'a Path,
+    svg_count: usize,
+    extract_svg: bool,
+}
+
+impl<'a> HtmlContext<'a> {
+    fn new(config: &'static SiteConfig, html_path: &'a Path) -> Self {
+        Self {
+            config,
+            html_path,
+            svg_count: 0,
+            extract_svg: !matches!(config.build.typst.svg.extract_type, ExtractSvgType::Embedded),
+        }
     }
 }
 
@@ -153,6 +204,7 @@ pub fn process_content(
     content_path: &Path,
     config: &'static SiteConfig,
     should_log_newline: bool,
+    force_rebuild: bool,
 ) -> Result<()> {
     let root = config.get_root();
     let content = &config.build.content;
@@ -171,7 +223,8 @@ pub fn process_content(
         let output = output.join(relative_asset_path);
         ensure_dir_exists(output.parent().unwrap())?;
 
-        if let (Ok(src_meta), Ok(dst_meta)) = (content_path.metadata(), output.metadata())
+        if !force_rebuild
+            && let (Ok(src_meta), Ok(dst_meta)) = (content_path.metadata(), output.metadata())
             && let (Ok(src_time), Ok(dst_time)) = (src_meta.modified(), dst_meta.modified())
             && src_time <= dst_time
         {
@@ -202,7 +255,7 @@ pub fn process_content(
         output.join("index.html")
     };
     let html_path = slugify_path(&html_path, config);
-    if html_path.exists() {
+    if !force_rebuild && html_path.exists() {
         let src_time = content_path.metadata()?.modified()?;
         let dst_time = html_path
             .metadata()?
@@ -268,18 +321,14 @@ pub fn process_asset(
     match asset_extension {
         "css" if config.build.tailwind.enable => {
             let input = config.build.tailwind.input.as_ref().unwrap();
-            let input = input.canonicalize().unwrap();
+            // Config paths are already absolute, just canonicalize the runtime path
             let asset_path = asset_path.canonicalize().unwrap();
-            match input == asset_path {
-                true => {
-                    let output_path = output.canonicalize().unwrap().join(relative_asset_path);
-                    run_command!(config.get_root(); &config.build.tailwind.command;
-                        "-i", input, "-o", output_path, if config.build.minify { "--minify" } else { "" }
-                    )?;
-                }
-                false => {
-                    fs::copy(asset_path, &output_path)?;
-                }
+            if *input == asset_path {
+                run_command!(config.get_root(); &config.build.tailwind.command;
+                    "-i", input, "-o", &output_path, if config.build.minify { "--minify" } else { "" }
+                )?;
+            } else {
+                fs::copy(asset_path, &output_path)?;
             }
         }
         _ => {
@@ -290,244 +339,359 @@ pub fn process_asset(
     Ok(())
 }
 
-fn process_html(html_path: &Path, content: &[u8], config: &'static SiteConfig) -> Result<Vec<u8>> {
-    let mut svg_cnt = 0;
-    let mut writer = Writer::new(Cursor::new(Vec::new()));
-    let mut reader = {
-        let mut reader = Reader::from_reader(content);
-        reader.config_mut().trim_text(false);
-        reader.config_mut().enable_all_checks(false);
-        reader
-    };
+// ============================================================================
+// HTML Processing
+// ============================================================================
 
-    let mut svgs = vec![];
+fn process_html(html_path: &Path, content: &[u8], config: &'static SiteConfig) -> Result<Vec<u8>> {
+    let mut ctx = HtmlContext::new(config, html_path);
+    let mut writer = Writer::new(Cursor::new(Vec::with_capacity(content.len())));
+    let mut reader = create_xml_reader(content);
+    let mut svgs = Vec::new();
 
     loop {
         match reader.read_event() {
-            Ok(Event::Start(elem)) => match elem.name().as_ref() {
-                b"html" => {
-                    let mut elem = elem.into_owned();
-                    elem.push_attribute(("lang", config.base.language.as_str()));
-                    writer.write_event(Event::Start(elem))?;
-                }
-                b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
-                    let attrs: Vec<Attribute> = elem
-                        .attributes()
-                        .flatten()
-                        .map(|attr| {
-                            let key = attr.key;
-                            let value = if key.as_ref() == b"id" {
-                                let value = str::from_utf8(attr.value.as_ref()).unwrap();
-                                slugify_fragment(value, config).into_bytes().into()
-                            } else {
-                                attr.value
-                            };
-                            Attribute { key, value }
-                        })
-                        .collect();
-                    let elem = elem.to_owned().with_attributes(attrs);
-                    writer.write_event(Event::Start(elem))?;
-                }
-                b"svg" => match config.build.typst.svg.extract_type {
-                    ExtractSvgType::Embedded => writer.write_event(Event::Start(elem))?,
-                    _ => {
-                        let svg = process_svg_in_html(
-                            html_path, &mut svg_cnt, &mut reader, &mut writer, elem, config,
-                        )?;
-                        svgs.push(svg);
-                    }
-                },
-                _ => process_link_in_html(&mut writer, elem, config)?,
-            },
-            Ok(Event::End(elem)) => match elem.name().as_ref() {
-                b"head" => process_head_in_html(&mut writer, config)?,
-                _ => writer.write_event(Event::End(elem))?,
-            },
+            Ok(Event::Start(elem)) => {
+                handle_start_element(&elem, &mut reader, &mut writer, &mut ctx, &mut svgs)?;
+            }
+            Ok(Event::End(elem)) => {
+                handle_end_element(&elem, &mut writer, config)?;
+            }
             Ok(Event::Eof) => break,
-            Ok(elem) => writer.write_event(elem)?,
+            Ok(event) => writer.write_event(event)?,
             Err(e) => anyhow::bail!("XML parse error at position {}: {:?}", reader.error_position(), e),
         }
     }
 
-    if !matches!(config.build.typst.svg.extract_type, ExtractSvgType::Embedded) {
-        let svgs: Vec<_> = svgs.into_iter().flatten().collect();
-        compress_svgs(svgs, html_path, config)?;
+    // Compress SVGs in parallel
+    if ctx.extract_svg && !svgs.is_empty() {
+        compress_svgs_parallel(&svgs, html_path, config)?;
     }
 
     Ok(writer.into_inner().into_inner())
 }
 
-fn process_svg_in_html(
-    html_path: &Path,
-    cnt: &mut i32,
+#[inline]
+fn create_xml_reader(content: &[u8]) -> Reader<&[u8]> {
+    let mut reader = Reader::from_reader(content);
+    reader.config_mut().trim_text(false);
+    reader.config_mut().enable_all_checks(false);
+    reader
+}
+
+fn handle_start_element(
+    elem: &BytesStart<'_>,
     reader: &mut Reader<&[u8]>,
     writer: &mut Writer<Cursor<Vec<u8>>>,
-    elem: BytesStart<'_>,
-    config: &'static SiteConfig,
-) -> Result<Option<Svg>> {
-    if let ExtractSvgType::Embedded = config.build.typst.svg.extract_type {
-        writer.write_event(Event::Start(elem))?;
-        return Ok(None);
+    ctx: &mut HtmlContext<'_>,
+    svgs: &mut Vec<Svg>,
+) -> Result<()> {
+    match elem.name().as_ref() {
+        b"html" => write_html_with_lang(elem, writer, ctx.config)?,
+        b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
+            write_heading_with_slugified_id(elem, writer, ctx.config)?;
+        }
+        b"svg" if ctx.extract_svg => {
+            if let Some(svg) = extract_svg_element(reader, writer, elem, ctx)? {
+                svgs.push(svg);
+            }
+        }
+        _ => write_element_with_processed_links(elem, writer, ctx.config)?,
     }
+    Ok(())
+}
 
+fn handle_end_element(
+    elem: &BytesEnd<'_>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    config: &'static SiteConfig,
+) -> Result<()> {
+    match elem.name().as_ref() {
+        b"head" => write_head_content(writer, config)?,
+        _ => writer.write_event(Event::End(elem.to_owned()))?,
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Element Writers
+// ============================================================================
+
+fn write_html_with_lang(
+    elem: &BytesStart<'_>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    config: &SiteConfig,
+) -> Result<()> {
+    let mut elem = elem.to_owned();
+    elem.push_attribute(("lang", config.base.language.as_str()));
+    writer.write_event(Event::Start(elem))?;
+    Ok(())
+}
+
+fn write_heading_with_slugified_id(
+    elem: &BytesStart<'_>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    config: &'static SiteConfig,
+) -> Result<()> {
+    let attrs: Vec<Attribute> = elem
+        .attributes()
+        .flatten()
+        .map(|attr| {
+            let key = attr.key;
+            let value = if key.as_ref() == b"id" {
+                let v = str::from_utf8(attr.value.as_ref()).unwrap_or_default();
+                slugify_fragment(v, config).into_bytes().into()
+            } else {
+                attr.value
+            };
+            Attribute { key, value }
+        })
+        .collect();
+    
+    let elem = elem.to_owned().with_attributes(attrs);
+    writer.write_event(Event::Start(elem))?;
+    Ok(())
+}
+
+fn write_element_with_processed_links(
+    elem: &BytesStart<'_>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    config: &'static SiteConfig,
+) -> Result<()> {
+    let attrs: Result<Vec<Attribute>> = elem
+        .attributes()
+        .flatten()
+        .map(|attr| {
+            let key = attr.key;
+            let value = if key.as_ref() == b"href" || key.as_ref() == b"src" {
+                process_link_value(&attr.value, config)?
+            } else {
+                attr.value
+            };
+            Ok(Attribute { key, value })
+        })
+        .collect();
+
+    let elem = elem.to_owned().with_attributes(attrs?);
+    writer.write_event(Event::Start(elem))?;
+    Ok(())
+}
+
+fn process_link_value<'a>(value: &Cow<'a, [u8]>, config: &'static SiteConfig) -> Result<Cow<'a, [u8]>> {
+    let value_str = str::from_utf8(value.as_ref())?;
+    let processed = match value_str.bytes().next() {
+        Some(b'/') => process_absolute_link(value_str, config)?,
+        Some(b'#') => process_fragment_link(value_str, config)?,
+        Some(_) => process_relative_or_external_link(value_str)?,
+        None => anyhow::bail!("empty link URL found in typst file"),
+    };
+    Ok(processed.into_bytes().into())
+}
+
+// ============================================================================
+// SVG Extraction and Processing
+// ============================================================================
+
+fn extract_svg_element(
+    reader: &mut Reader<&[u8]>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    elem: &BytesStart<'_>,
+    ctx: &mut HtmlContext<'_>,
+) -> Result<Option<Svg>> {
+    // Filter and transform SVG attributes
     let attrs: Vec<_> = elem
         .attributes()
         .flatten()
         .filter_map(|attr| match attr.key.as_ref() {
-            b"height" => process_height_attr(attr).ok(),
-            b"viewBox" => process_viewbox_attr(attr).ok(),
+            b"height" => adjust_height_attr(attr).ok(),
+            b"viewBox" => adjust_viewbox_attr(attr).ok(),
             _ => Some(attr),
         })
         .collect();
 
-    let mut svg_writer = Writer::new(Cursor::new(Vec::new()));
-    svg_writer.write_event(Event::Start(BytesStart::new("svg").with_attributes(attrs)))?;
+    // Capture SVG content
+    let svg_content = capture_svg_content(reader, &attrs)?;
+    
+    // Parse and optimize SVG
+    let (svg_data, size) = optimize_svg(&svg_content, ctx.config)?;
+    
+    // Write img placeholder to HTML
+    let svg_index = ctx.svg_count;
+    ctx.svg_count += 1;
+    
+    let svg = Svg::new(svg_data, size, svg_index);
+    write_svg_img_placeholder(writer, &svg, ctx)?;
 
+    Ok(Some(svg))
+}
+
+fn capture_svg_content(reader: &mut Reader<&[u8]>, attrs: &[Attribute<'_>]) -> Result<Vec<u8>> {
+    let mut svg_writer = Writer::new(Cursor::new(Vec::with_capacity(4096)));
+    svg_writer.write_event(Event::Start(BytesStart::new("svg").with_attributes(attrs.iter().cloned())))?;
+
+    let mut depth = 1u32;
     loop {
         let event = reader.read_event()?;
-        let is_end = matches!(&event, Event::End(e) if e.name().as_ref() == b"svg");
-        svg_writer.write_event(event)?;
-        if is_end {
-            break;
+        match &event {
+            Event::Start(_) => depth += 1,
+            Event::End(e) if e.name().as_ref() == b"svg" => {
+                depth -= 1;
+                if depth == 0 {
+                    svg_writer.write_event(event)?;
+                    break;
+                }
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
         }
+        svg_writer.write_event(event)?;
     }
 
-    let svg_data = svg_writer.into_inner().into_inner();
-    let inline_max_size = config.get_inline_max_size();
-    // println!("{} {cnt} {} {}", html_path.display(), svg_data.len(), inline_max_size);
-    let svg_filename = match (&config.build.typst.svg.extract_type, svg_data.len()) {
-        (ExtractSvgType::JustSvg, _) => format!("svg-{cnt}.svg"),
-        (_, size) if size < inline_max_size => format!("svg-{cnt}.svg"),
-        _ => format!("svg-{cnt}.avif"),
-    };
-    let svg_path = html_path.parent().unwrap().join(svg_filename.as_str());
-    *cnt += 1;
+    Ok(svg_writer.into_inner().into_inner())
+}
 
-    let dpi = config.build.typst.svg.dpi;
+fn optimize_svg(svg_content: &[u8], config: &SiteConfig) -> Result<(Vec<u8>, (f32, f32))> {
     let opt = usvg::Options {
-        dpi,
+        dpi: config.build.typst.svg.dpi,
         ..Default::default()
     };
-    let usvg_tree = usvg::Tree::from_data(&svg_data, &opt).unwrap();
+    let tree = usvg::Tree::from_data(svg_content, &opt)
+        .context("Failed to parse SVG")?;
+    
     let write_opt = usvg::WriteOptions {
         indent: usvg::Indent::None,
         ..Default::default()
     };
-    let usvg = usvg_tree.to_string(&write_opt);
-
-    let (width, height) = extract_svg_size(&usvg).unwrap();
-    let img_elem = {
-        let svg_path = svg_path.strip_prefix(&config.build.output).unwrap();
-        let svg_path = PathBuf::from("/").join(svg_path);
-        let svg_path = svg_path.to_str().unwrap();
-        let scale = config.get_scale();
-        let attrs = [
-            ("src", svg_path),
-            ("style", &format!("width:{}px;height:{}px;", width / scale, height / scale)),
-        ];
-        BytesStart::new("img").with_attributes(attrs)
-    };
-    writer.write_event(Event::Start(img_elem)).unwrap();
-
-    Ok(Some(Svg::new(usvg.into_bytes(), (width, height))))
+    let optimized = tree.to_string(&write_opt);
+    let size = parse_svg_dimensions(&optimized).unwrap_or((0.0, 0.0));
+    
+    Ok((optimized.into_bytes(), size))
 }
 
-fn process_height_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
-    let height = str::from_utf8(attr.value.as_ref())?.trim_end_matches("pt");
-    let height = height.parse::<f32>()? + PADDING_TOP_FOR_SVG;
+fn write_svg_img_placeholder(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    svg: &Svg,
+    ctx: &HtmlContext<'_>,
+) -> Result<()> {
+    let svg_filename = svg.output_filename(ctx.config);
+    let svg_path = ctx.html_path.parent().unwrap().join(&svg_filename);
+    let src = svg_path
+        .strip_prefix(&ctx.config.build.output)
+        .map(|p| format!("/{}", p.display()))
+        .unwrap_or_else(|_| svg_filename);
+
+    let scale = ctx.config.get_scale();
+    let (w, h) = svg.size;
+    let style = format!("width:{}px;height:{}px;", w / scale, h / scale);
+    
+    let mut img = BytesStart::new("img");
+    img.push_attribute(("src", src.as_str()));
+    img.push_attribute(("style", style.as_str()));
+    writer.write_event(Event::Start(img))?;
+    
+    Ok(())
+}
+
+fn adjust_height_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
+    let height_str = str::from_utf8(attr.value.as_ref())?;
+    let height: f32 = height_str.trim_end_matches("pt").parse()?;
+    let new_height = height + PADDING_TOP_FOR_SVG;
+    
     Ok(Attribute {
         key: attr.key,
-        value: format!("{height}pt").into_bytes().into(),
+        value: format!("{new_height}pt").into_bytes().into(),
     })
 }
 
-fn process_viewbox_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
-    let viewbox_inner: Vec<_> = str::from_utf8(attr.value.as_ref())
-        .unwrap()
+fn adjust_viewbox_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
+    let viewbox_str = str::from_utf8(attr.value.as_ref())?;
+    let parts: Vec<f32> = viewbox_str
         .split_whitespace()
-        .map(|x| x.parse::<f32>().unwrap())
+        .filter_map(|s| s.parse().ok())
         .collect();
-    let viewbox = format!(
+    
+    if parts.len() != 4 {
+        anyhow::bail!("Invalid viewBox format");
+    }
+    
+    let new_viewbox = format!(
         "{} {} {} {}",
-        viewbox_inner[0],
-        viewbox_inner[1] - PADDING_TOP_FOR_SVG,
-        viewbox_inner[2],
-        viewbox_inner[3] + PADDING_BOTTOM_FOR_SVG + PADDING_TOP_FOR_SVG
+        parts[0],
+        parts[1] - PADDING_TOP_FOR_SVG,
+        parts[2],
+        parts[3] + PADDING_BOTTOM_FOR_SVG + PADDING_TOP_FOR_SVG
     );
+    
     Ok(Attribute {
         key: attr.key,
-        value: viewbox.as_bytes().to_vec().into(),
+        value: new_viewbox.into_bytes().into(),
     })
 }
 
-fn extract_svg_size(svg_data: &str) -> Option<(f32, f32)> {
-    let width_start = svg_data.find("width=\"")? + "width=\"".len();
-    let width_end = svg_data[width_start..].find('"')? + width_start;
-    let width_str = &svg_data[width_start..width_end];
-
-    let height_start = svg_data[width_end..].find("height=\"")? + width_end + "height=\"".len();
-    let height_end = svg_data[height_start..].find('"')? + height_start;
-    let height_str = &svg_data[height_start..height_end];
-
-    let width = width_str.parse::<f32>().unwrap();
-    let height = height_str.parse::<f32>().unwrap();
-
+/// Parse width and height from SVG string (fast string search, no regex)
+fn parse_svg_dimensions(svg_data: &str) -> Option<(f32, f32)> {
+    let width = extract_attr_value(svg_data, "width=\"")?.parse().ok()?;
+    let height = extract_attr_value(svg_data, "height=\"")?.parse().ok()?;
     Some((width, height))
 }
 
-fn compress_svgs(svgs: Vec<Svg>, html_path: &Path, config: &'static SiteConfig) -> Result<()> {
-    let scale = config.get_scale();
+#[inline]
+fn extract_attr_value<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let start = s.find(prefix)? + prefix.len();
+    let end = s[start..].find('"')? + start;
+    Some(&s[start..end])
+}
+
+// ============================================================================
+// SVG Compression (Parallel)
+// ============================================================================
+
+fn compress_svgs_parallel(svgs: &[Svg], html_path: &Path, config: &'static SiteConfig) -> Result<()> {
     let parent = html_path.parent().context("Invalid html path")?;
-    let inline_max_size = config.get_inline_max_size();
     let relative_path = html_path
         .strip_prefix(&config.build.output)
         .map(|p| p.to_string_lossy())
         .unwrap_or_default();
     let relative_path = relative_path.trim_end_matches("index.html");
+    let scale = config.get_scale();
 
-    for (cnt, svg) in svgs.iter().enumerate() {
-        log!("svg"; "in {relative_path}: compress svg-{cnt}");
+    svgs.par_iter().try_for_each(|svg| {
+        log!("svg"; "in {relative_path}: compress svg-{}", svg.index);
+        
+        let svg_path = parent.join(svg.output_filename(config));
+        compress_single_svg(svg, &svg_path, scale, config)?;
+        
+        log!("svg"; "in {relative_path}: finish compressing svg-{}", svg.index);
+        Ok(())
+    })
+}
 
-        let svg_data = svg.data.as_slice();
-        let use_svg = matches!(config.build.typst.svg.extract_type, ExtractSvgType::JustSvg)
-            || svg_data.len() < inline_max_size;
-
-        let svg_filename = if use_svg {
-            format!("svg-{cnt}.svg")
-        } else {
-            format!("svg-{cnt}.avif")
-        };
-        let svg_path = parent.join(&svg_filename);
-
-        match &config.build.typst.svg.extract_type {
-            ExtractSvgType::Embedded => continue,
-            _ if use_svg => fs::write(&svg_path, svg_data)?,
-            ExtractSvgType::Magick => compress_svg_with_magick(&svg_path, svg_data, scale)?,
-            ExtractSvgType::Ffmpeg => compress_svg_with_ffmpeg(&svg_path, svg_data, scale)?,
-            ExtractSvgType::Builtin => {
-                compress_svg_with_builtin(&svg_path, svg_data, svg.size, scale)?
-            }
-            ExtractSvgType::JustSvg => unreachable!(),
-        }
-
-        log!("svg"; "in {relative_path}: finish compressing svg-{cnt}");
+fn compress_single_svg(svg: &Svg, output_path: &Path, scale: f32, config: &SiteConfig) -> Result<()> {
+    if svg.should_keep_as_svg(config) {
+        return fs::write(output_path, &svg.data).map_err(Into::into);
     }
 
-    Ok(())
+    match &config.build.typst.svg.extract_type {
+        ExtractSvgType::Embedded => Ok(()),
+        ExtractSvgType::JustSvg => fs::write(output_path, &svg.data).map_err(Into::into),
+        ExtractSvgType::Magick => compress_with_magick(output_path, &svg.data, scale),
+        ExtractSvgType::Ffmpeg => compress_with_ffmpeg(output_path, &svg.data),
+        ExtractSvgType::Builtin => compress_with_builtin(output_path, &svg.data, svg.size, scale),
+    }
 }
 
-fn compress_svg_with_magick(svg_path: &Path, svg_data: &[u8], scale: f32) -> Result<()> {
-    let density = (scale * 96.).to_string();
-    let mut child_stdin = run_command_with_stdin!(
+fn compress_with_magick(output_path: &Path, svg_data: &[u8], scale: f32) -> Result<()> {
+    let density = (scale * 96.0).to_string();
+    let mut stdin = run_command_with_stdin!(
         ["magick"];
-        "-background", "none", "-density", density, "-", &svg_path
+        "-background", "none", "-density", density, "-", output_path
     )?;
-    child_stdin.write_all(svg_data)?;
+    stdin.write_all(svg_data)?;
     Ok(())
 }
 
-fn compress_svg_with_ffmpeg(svg_path: &Path, svg_data: &[u8], _scale: f32) -> Result<()> {
-    let mut child_stdin = run_command_with_stdin!(
+fn compress_with_ffmpeg(output_path: &Path, svg_data: &[u8]) -> Result<()> {
+    let mut stdin = run_command_with_stdin!(
         ["ffmpeg"];
         "-f", "svg_pipe",
         "-frame_size", "1000000000",
@@ -543,19 +707,19 @@ fn compress_svg_with_ffmpeg(svg_path: &Path, svg_data: &[u8], _scale: f32) -> Re
         "-still-picture", "1",
         "-strict", "experimental",
         "-c:v", "libaom-av1",
-        "-y", &svg_path
+        "-y", output_path
     )?;
-    child_stdin.write_all(svg_data)?;
+    stdin.write_all(svg_data)?;
     Ok(())
 }
 
-fn compress_svg_with_builtin(
-    svg_path: &Path,
+fn compress_with_builtin(
+    output_path: &Path,
     svg_data: &[u8],
     size: (f32, f32),
     scale: f32,
 ) -> Result<()> {
-    let (width, height) = (size.0 * scale, size.1 * scale);
+    let (width, height) = ((size.0 * scale) as usize, (size.1 * scale) as usize);
 
     let pixmap: Vec<_> = svg_data
         .chunks(4)
@@ -563,88 +727,178 @@ fn compress_svg_with_builtin(
         .collect();
 
     let img = ravif::Encoder::new()
-        .with_quality(90.)
+        .with_quality(90.0)
         .with_speed(4)
-        .encode_rgba(ravif::Img::new(&pixmap, width as usize, height as usize))?;
+        .encode_rgba(ravif::Img::new(&pixmap, width, height))?;
 
-    fs::write(svg_path, img.avif_file)?;
+    fs::write(output_path, img.avif_file)?;
     Ok(())
 }
 
-fn process_link_in_html(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    elem: BytesStart<'_>,
-    config: &'static SiteConfig,
-) -> Result<()> {
-    let attrs: Result<Vec<Attribute>> = elem
-        .attributes()
-        .flatten()
-        .map(|attr| {
-            let key = attr.key;
-            let value = attr.value;
-            let attr = if key.as_ref() == b"href" || key.as_ref() == b"src" {
-                let value = process_link_attribute(value, config)?;
-                Attribute { key, value }
-            } else {
-                Attribute { key, value }
-            };
-            Ok(attr)
-        })
-        .collect();
-
-    let elem = elem.to_owned().with_attributes(attrs?);
-    writer.write_event(Event::Start(elem)).unwrap();
-    Ok(())
-}
-
-fn process_link_attribute<'a>(
-    value: Cow<'a, [u8]>,
-    config: &'static SiteConfig,
-) -> Result<Cow<'a, [u8]>> {
-    let value_str = str::from_utf8(value.as_ref())?;
-    let processed_value = match value_str.chars().next() {
-        Some('/') => process_absolute_link(value_str, config)?,
-        Some('#') => process_fragment_link(value_str, config)?,
-        Some(_) => process_relative_or_external_link(value_str, config)?,
-        None => anyhow::bail!("empty link URL found in typst file"),
-    };
-    Ok(processed_value.into_bytes().into())
-}
+// ============================================================================
+// Link Processing
+// ============================================================================
 
 fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result<String> {
-    let base_path = PathBuf::from("/").join(config.build.base_path.as_path());
-    let path = if is_asset_link(value, config) {
-        base_path.join(value).to_string_lossy().into_owned()
-    } else {
-        let (path, fragment) = value.split_once('#').unwrap_or((value, ""));
-        let slugified_path = slugify_path(path, config);
-        let slugified_fragment = if !fragment.is_empty() {
-            format!("#{}", slugify_fragment(fragment, config))
-        } else {
-            String::new()
-        };
-        format!(
-            "{}{}",
-            base_path.join(slugified_path).to_string_lossy(),
-            slugified_fragment
-        )
-    };
-    Ok(path)
+    let base_path = &config.build.base_path;
+    
+    if is_asset_link(value, config) {
+        return Ok(format!("/{}{}", base_path.display(), value));
+    }
+    
+    let (path, fragment) = value.split_once('#').unwrap_or((value, ""));
+    let slugified_path = slugify_path(path, config);
+    
+    let mut result = format!("/{}", base_path.join(&slugified_path).display());
+    if !fragment.is_empty() {
+        result.push('#');
+        result.push_str(&slugify_fragment(fragment, config));
+    }
+    Ok(result)
 }
 
 fn process_fragment_link(value: &str, config: &'static SiteConfig) -> Result<String> {
-    let fragment = &value[1..];
-    Ok(format!("#{}", slugify_fragment(fragment, config)))
+    Ok(format!("#{}", slugify_fragment(&value[1..], config)))
 }
 
-fn process_relative_or_external_link(value: &str, _config: &'static SiteConfig) -> Result<String> {
-    let link = if is_external_link(value) {
+fn process_relative_or_external_link(value: &str) -> Result<String> {
+    Ok(if is_external_link(value) {
         value.to_string()
     } else {
         format!("../{value}")
-    };
-    Ok(link)
+    })
 }
+
+// ============================================================================
+// Head Section Processing
+// ============================================================================
+
+fn write_head_content(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    config: &'static SiteConfig,
+) -> Result<()> {
+    let head = &config.build.head;
+    let base_path = &config.build.base_path;
+
+    // Title
+    if !config.base.title.is_empty() {
+        write_text_element(writer, "title", &config.base.title)?;
+    }
+
+    // Description meta tag
+    if !config.base.description.is_empty() {
+        write_meta_tag(writer, "description", &config.base.description)?;
+    }
+
+    // Favicon
+    if let Some(icon) = &head.icon {
+        write_icon_link(writer, icon, base_path)?;
+    }
+
+    // Stylesheets
+    for style in &head.styles {
+        let href = compute_asset_href(style, base_path)?;
+        write_stylesheet_link(writer, &href)?;
+    }
+
+    // Tailwind stylesheet
+    if config.build.tailwind.enable
+        && let Some(input) = &config.build.tailwind.input
+    {
+        let href = compute_stylesheet_href(input, config)?;
+        write_stylesheet_link(writer, &href)?;
+    }
+
+    // Scripts
+    for script in &head.scripts {
+        let src = compute_asset_href(script.path(), base_path)?;
+        write_script_element(writer, &src, script.is_defer(), script.is_async())?;
+    }
+
+    // Raw HTML elements (trusted input)
+    for raw in &head.elements {
+        writer.get_mut().write_all(raw.as_bytes())?;
+    }
+
+    writer.write_event(Event::End(BytesEnd::new("head")))?;
+    Ok(())
+}
+
+#[inline]
+fn write_text_element(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    tag: &str,
+    text: &str,
+) -> Result<()> {
+    writer.write_event(Event::Start(BytesStart::new(tag)))?;
+    writer.write_event(Event::Text(BytesText::new(text)))?;
+    writer.write_event(Event::End(BytesEnd::new(tag)))?;
+    Ok(())
+}
+
+#[inline]
+fn write_meta_tag(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    name: &str,
+    content: &str,
+) -> Result<()> {
+    let mut elem = BytesStart::new("meta");
+    elem.push_attribute(("name", name));
+    elem.push_attribute(("content", content));
+    writer.write_event(Event::Empty(elem))?;
+    Ok(())
+}
+
+#[inline]
+fn write_icon_link(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    icon: &Path,
+    base_path: &Path,
+) -> Result<()> {
+    let href = compute_asset_href(icon, base_path)?;
+    let mime_type = get_icon_mime_type(icon);
+    
+    let mut elem = BytesStart::new("link");
+    elem.push_attribute(("rel", "shortcut icon"));
+    elem.push_attribute(("href", href.as_str()));
+    elem.push_attribute(("type", mime_type));
+    writer.write_event(Event::Empty(elem))?;
+    Ok(())
+}
+
+#[inline]
+fn write_stylesheet_link(writer: &mut Writer<Cursor<Vec<u8>>>, href: &str) -> Result<()> {
+    let mut elem = BytesStart::new("link");
+    elem.push_attribute(("rel", "stylesheet"));
+    elem.push_attribute(("href", href));
+    writer.write_event(Event::Empty(elem))?;
+    Ok(())
+}
+
+fn write_script_element(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    src: &str,
+    defer: bool,
+    async_attr: bool,
+) -> Result<()> {
+    let mut elem = BytesStart::new("script");
+    elem.push_attribute(("src", src));
+    if defer {
+        elem.push_attribute(("defer", ""));
+    }
+    if async_attr {
+        elem.push_attribute(("async", ""));
+    }
+    writer.write_event(Event::Start(elem))?;
+    // Space ensures proper HTML parsing of script tags
+    writer.write_event(Event::Text(BytesText::new(" ")))?;
+    writer.write_event(Event::End(BytesEnd::new("script")))?;
+    Ok(())
+}
+
+// ============================================================================
+// Asset Utilities
+// ============================================================================
 
 /// Get MIME type for icon based on file extension
 fn get_icon_mime_type(path: &Path) -> &'static str {
@@ -663,107 +917,6 @@ fn get_icon_mime_type(path: &Path) -> &'static str {
         .unwrap_or("image/x-icon")
 }
 
-/// Process the `<head>` section by adding configured elements
-fn process_head_in_html(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    config: &'static SiteConfig,
-) -> Result<()> {
-    let head = &config.build.head;
-    let base_path = &config.build.base_path;
-
-    // Title from [base.title]
-    let title = config.base.title.as_str();
-    if !title.is_empty() {
-        writer.write_event(Event::Start(BytesStart::new("title")))?;
-        writer.write_event(Event::Text(BytesText::new(title)))?;
-        writer.write_event(Event::End(BytesEnd::new("title")))?;
-    }
-
-    // Description from [base.description]
-    let description = config.base.description.as_str();
-    if !description.is_empty() {
-        let mut elem = BytesStart::new("meta");
-        elem.push_attribute(("name", "description"));
-        elem.push_attribute(("content", description));
-        writer.write_event(Event::Empty(elem))?;
-    }
-
-    // Favicon
-    if let Some(icon) = &head.icon {
-        let href = compute_asset_href(icon, base_path)?;
-        let mime_type = get_icon_mime_type(icon);
-        write_empty_elem(writer, "link", &[
-            ("rel", "shortcut icon"),
-            ("href", &href),
-            ("type", mime_type),
-        ])?;
-    }
-
-    // Stylesheets from head config
-    for style in &head.styles {
-        let href = compute_asset_href(style, base_path)?;
-        write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
-    }
-
-    // Tailwind stylesheet
-    if config.build.tailwind.enable
-        && let Some(input) = &config.build.tailwind.input
-    {
-        let href = compute_stylesheet_href(input, config)?;
-        write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
-    }
-
-    // Scripts from head config
-    for script in &head.scripts {
-        let src = compute_asset_href(script.path(), base_path)?;
-        write_script_elem(writer, &src, script.is_defer(), script.is_async())?;
-    }
-
-    // Raw HTML elements from config file (trusted input from site owner)
-    for raw in &head.elements {
-        writer.get_mut().write_all(raw.as_bytes())?;
-    }
-
-    writer.write_event(Event::End(BytesEnd::new("head")))?;
-    Ok(())
-}
-
-/// Write a self-closing element with attributes
-fn write_empty_elem(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    tag: &str,
-    attrs: &[(&str, &str)],
-) -> Result<()> {
-    let mut elem = BytesStart::new(tag);
-    for (key, value) in attrs {
-        elem.push_attribute((*key, *value));
-    }
-    writer.write_event(Event::Empty(elem))?;
-    Ok(())
-}
-
-/// Write a script element with optional defer/async attributes
-fn write_script_elem(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    src: &str,
-    defer: bool,
-    async_attr: bool,
-) -> Result<()> {
-    let mut elem = BytesStart::new("script");
-    elem.push_attribute(("src", src));
-    if defer {
-        elem.push_attribute(("defer", ""));
-    }
-    if async_attr {
-        elem.push_attribute(("async", ""));
-    }
-    writer.write_event(Event::Start(elem))?;
-    // Add a space to ensure proper HTML output - empty script tags may not be parsed correctly
-    writer.write_event(Event::Text(BytesText::new(" ")))?;
-    writer.write_event(Event::End(BytesEnd::new("script")))?;
-    Ok(())
-}
-
 /// Compute href for an asset path relative to base_path
 fn compute_asset_href(asset_path: &Path, base_path: &Path) -> Result<String> {
     // Strip the leading "./" prefix if present
@@ -780,9 +933,10 @@ fn compute_asset_href(asset_path: &Path, base_path: &Path) -> Result<String> {
 
 fn compute_stylesheet_href(input: &Path, config: &'static SiteConfig) -> Result<String> {
     let base_path = &config.build.base_path;
-    let assets = config.build.assets.canonicalize()?;
+    // Config assets path is already absolute
+    let assets = &config.build.assets;
     let input = input.canonicalize()?;
-    let relative = input.strip_prefix(&assets)?;
+    let relative = input.strip_prefix(assets)?;
     let path = PathBuf::from("/").join(base_path).join(relative);
     Ok(path.to_string_lossy().into_owned())
 }
@@ -795,31 +949,24 @@ fn get_asset_top_levels(assets_dir: &Path) -> &'static [OsString] {
     })
 }
 
-fn is_asset_link(path: impl AsRef<Path>, config: &'static SiteConfig) -> bool {
-    let path = path.as_ref();
+fn is_asset_link(path: &str, config: &'static SiteConfig) -> bool {
     let asset_top_levels = get_asset_top_levels(&config.build.assets);
-
-    // println!("{:?}, {:?}", path, asset_top_levels);
-    match path.components().nth(1) {
-        Some(std::path::Component::Normal(first)) => {
-            asset_top_levels.iter().any(|name| name == first)
-        }
-        _ => false,
-    }
+    
+    // Extract first path component after the leading slash
+    let first_component = path
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    
+    asset_top_levels.iter().any(|name| name == first_component)
 }
 
+#[inline]
 fn is_external_link(link: &str) -> bool {
-    match link.find(':') {
-        Some(colon_pos) => {
-            let scheme = &link[..colon_pos];
-            // scheme must be ASCII letters + digits + `+` / `-` / `.`
-            // and must not contain `/` before the colon
-            scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-        }
-        None => false,
-    }
+    link.find(':').is_some_and(|pos| {
+        link[..pos].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
 }
 
 #[cfg(test)]
@@ -920,9 +1067,9 @@ mod tests {
     }
 
     #[test]
-    fn test_write_empty_elem() {
+    fn test_write_stylesheet_link() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_empty_elem(&mut writer, "link", &[("rel", "stylesheet"), ("href", "/styles/main.css")]).unwrap();
+        write_stylesheet_link(&mut writer, "/styles/main.css").unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("link"));
         assert!(output.contains("rel=\"stylesheet\""));
@@ -930,17 +1077,9 @@ mod tests {
     }
 
     #[test]
-    fn test_write_empty_elem_no_attrs() {
+    fn test_write_script_element_basic() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_empty_elem(&mut writer, "br", &[]).unwrap();
-        let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
-        assert!(output.contains("br"));
-    }
-
-    #[test]
-    fn test_write_script_elem_basic() {
-        let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_elem(&mut writer, "/scripts/main.js", false, false).unwrap();
+        write_script_element(&mut writer, "/scripts/main.js", false, false).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("<script"));
         assert!(output.contains("src=\"/scripts/main.js\""));
@@ -950,27 +1089,27 @@ mod tests {
     }
 
     #[test]
-    fn test_write_script_elem_with_defer() {
+    fn test_write_script_element_with_defer() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_elem(&mut writer, "/scripts/main.js", true, false).unwrap();
+        write_script_element(&mut writer, "/scripts/main.js", true, false).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("defer"));
         assert!(!output.contains("async"));
     }
 
     #[test]
-    fn test_write_script_elem_with_async() {
+    fn test_write_script_element_with_async() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_elem(&mut writer, "/scripts/main.js", false, true).unwrap();
+        write_script_element(&mut writer, "/scripts/main.js", false, true).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(!output.contains("defer"));
         assert!(output.contains("async"));
     }
 
     #[test]
-    fn test_write_script_elem_with_both_defer_and_async() {
+    fn test_write_script_element_with_both_defer_and_async() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_elem(&mut writer, "/scripts/main.js", true, true).unwrap();
+        write_script_element(&mut writer, "/scripts/main.js", true, true).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("defer"));
         assert!(output.contains("async"));
