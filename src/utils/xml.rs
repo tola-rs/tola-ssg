@@ -1,11 +1,9 @@
-//! XML processing utilities.
-//!
-//! Provides XML reader creation and element processing helpers.
+//! XML/HTML processing utilities.
 
 use anyhow::Result;
 use quick_xml::{
     Reader, Writer,
-    events::{BytesEnd, BytesStart, BytesText, Event, attributes::Attribute},
+    events::{BytesEnd, BytesStart, BytesText, Event},
 };
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -16,10 +14,15 @@ use crate::config::SiteConfig;
 use crate::utils::slug::{slugify_fragment, slugify_path};
 
 // ============================================================================
-// XML Reader Creation
+// Type Aliases
 // ============================================================================
 
-/// Create a configured XML reader from content bytes
+pub type XmlWriter = Writer<Cursor<Vec<u8>>>;
+
+// ============================================================================
+// XML Reader
+// ============================================================================
+
 #[inline]
 pub fn create_xml_reader(content: &[u8]) -> Reader<&[u8]> {
     let mut reader = Reader::from_reader(content);
@@ -29,13 +32,63 @@ pub fn create_xml_reader(content: &[u8]) -> Reader<&[u8]> {
 }
 
 // ============================================================================
+// Element Builder
+// ============================================================================
+
+/// Rebuild an element with transformed attributes (avoids duplication bug).
+fn rebuild_elem<F>(elem: &BytesStart<'_>, mut transform: F) -> BytesStart<'static>
+where
+    F: FnMut(&[u8], Cow<'_, [u8]>) -> Cow<'static, [u8]>,
+{
+    let tag = String::from_utf8_lossy(elem.name().as_ref()).into_owned();
+    let attrs: Vec<_> = elem
+        .attributes()
+        .flatten()
+        .map(|attr| {
+            let key = attr.key.as_ref().to_vec();
+            let value = transform(attr.key.as_ref(), attr.value);
+            (key, value)
+        })
+        .collect();
+
+    let mut new_elem = BytesStart::new(tag);
+    for (k, v) in attrs {
+        new_elem.push_attribute((k.as_slice(), v.as_ref()));
+    }
+    new_elem
+}
+
+/// Rebuild an element with fallible attribute transformation.
+fn rebuild_elem_try<F>(elem: &BytesStart<'_>, mut transform: F) -> Result<BytesStart<'static>>
+where
+    F: FnMut(&[u8], Cow<'_, [u8]>) -> Result<Cow<'static, [u8]>>,
+{
+    let tag = String::from_utf8_lossy(elem.name().as_ref()).into_owned();
+    let attrs: Result<Vec<_>> = elem
+        .attributes()
+        .flatten()
+        .map(|attr| {
+            let key = attr.key.as_ref().to_vec();
+            let value = transform(attr.key.as_ref(), attr.value)?;
+            Ok((key, value))
+        })
+        .collect();
+
+    let mut new_elem = BytesStart::new(tag);
+    for (k, v) in attrs? {
+        new_elem.push_attribute((k.as_slice(), v.as_ref()));
+    }
+    Ok(new_elem)
+}
+
+// ============================================================================
 // Element Writers
 // ============================================================================
 
-/// Write HTML element with lang attribute
+/// Write `<html>` element with `lang` attribute.
 pub fn write_html_with_lang(
     elem: &BytesStart<'_>,
-    writer: &mut Writer<Cursor<Vec<u8>>>,
+    writer: &mut XmlWriter,
     config: &SiteConfig,
 ) -> Result<()> {
     let mut elem = elem.to_owned();
@@ -44,57 +97,37 @@ pub fn write_html_with_lang(
     Ok(())
 }
 
-/// Write heading element with slugified id attribute
+/// Write heading element with slugified `id` attribute.
 pub fn write_heading_with_slugified_id(
     elem: &BytesStart<'_>,
-    writer: &mut Writer<Cursor<Vec<u8>>>,
+    writer: &mut XmlWriter,
     config: &'static SiteConfig,
 ) -> Result<()> {
-    let attrs: Vec<Attribute> = elem
-        .attributes()
-        .flatten()
-        .map(|attr| {
-            let key = attr.key;
-            let value = if key.as_ref() == b"id" {
-                let v = str::from_utf8(attr.value.as_ref()).unwrap_or_default();
-                slugify_fragment(v, config).into_bytes().into()
-            } else {
-                attr.value
-            };
-            Attribute { key, value }
-        })
-        .collect();
-
-    // Create new element with only processed attrs to avoid duplication
-    let tag_name = String::from_utf8_lossy(elem.name().as_ref()).into_owned();
-    let new_elem = BytesStart::new(&tag_name).with_attributes(attrs);
+    let new_elem = rebuild_elem(elem, |key, value| {
+        if key == b"id" {
+            let v = str::from_utf8(value.as_ref()).unwrap_or_default();
+            slugify_fragment(v, config).into_bytes().into()
+        } else {
+            value.into_owned().into()
+        }
+    });
     writer.write_event(Event::Start(new_elem))?;
     Ok(())
 }
 
-/// Write element with processed href/src links
+/// Write element with processed `href` and `src` attributes.
 pub fn write_element_with_processed_links(
     elem: &BytesStart<'_>,
-    writer: &mut Writer<Cursor<Vec<u8>>>,
+    writer: &mut XmlWriter,
     config: &'static SiteConfig,
 ) -> Result<()> {
-    let attrs: Result<Vec<Attribute>> = elem
-        .attributes()
-        .flatten()
-        .map(|attr| {
-            let key = attr.key;
-            let value = if key.as_ref() == b"href" || key.as_ref() == b"src" {
-                process_link_value(&attr.value, config)?
-            } else {
-                attr.value
-            };
-            Ok(Attribute { key, value })
-        })
-        .collect();
-
-    // Create new element with only processed attrs to avoid duplication
-    let tag_name = String::from_utf8_lossy(elem.name().as_ref()).into_owned();
-    let new_elem = BytesStart::new(&tag_name).with_attributes(attrs?);
+    let new_elem = rebuild_elem_try(elem, |key, value| {
+        if matches!(key, b"href" | b"src") {
+            process_link_value(&value, config)
+        } else {
+            Ok(value.into_owned().into())
+        }
+    })?;
     writer.write_event(Event::Start(new_elem))?;
     Ok(())
 }
@@ -103,22 +136,36 @@ pub fn write_element_with_processed_links(
 // Link Processing
 // ============================================================================
 
-/// Process a link value (href or src attribute)
-pub fn process_link_value<'a>(
-    value: &Cow<'a, [u8]>,
-    config: &'static SiteConfig,
-) -> Result<Cow<'a, [u8]>> {
-    let value_str = str::from_utf8(value.as_ref())?;
+/// Process a link value (href or src attribute).
+///
+/// # Link Type Detection
+///
+/// | Prefix | Type | Handler |
+/// |--------|------|---------|
+/// | `/` or `//` | Absolute | `process_absolute_link` |
+/// | `#` | Fragment | `process_fragment_link` |
+/// | `../` or `../../` | Relative | `process_relative_or_external_link` |
+/// | `https://` | External | kept unchanged |
+pub fn process_link_value(value: &[u8], config: &'static SiteConfig) -> Result<Cow<'static, [u8]>> {
+    let value_str = str::from_utf8(value)?;
     let processed = match value_str.bytes().next() {
         Some(b'/') => process_absolute_link(value_str, config)?,
         Some(b'#') => process_fragment_link(value_str, config)?,
         Some(_) => process_relative_or_external_link(value_str)?,
         None => anyhow::bail!("empty link URL found in typst file"),
     };
-    Ok(processed.into_bytes().into())
+    Ok(Cow::Owned(processed.into_bytes()))
 }
 
-/// Process absolute links (starting with /)
+/// Process absolute links (starting with `/` or `//`).
+///
+/// # Examples
+///
+/// | Input | Output (base_path="") |
+/// |-------|----------------------|
+/// | `/about` | `/about` |
+/// | `/about#team` | `/about#team` (fragment slugified) |
+/// | `//example.com` | `//example.com` (protocol-relative) |
 pub fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result<String> {
     let base_path = &config.build.base_path;
 
@@ -139,12 +186,24 @@ pub fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result
     Ok(result)
 }
 
-/// Process fragment links (starting with #)
+/// Process fragment links (starting with `#`).
 pub fn process_fragment_link(value: &str, config: &'static SiteConfig) -> Result<String> {
     Ok(format!("#{}", slugify_fragment(&value[1..], config)))
 }
 
-/// Process relative or external links
+/// Process relative or external links.
+///
+/// # Examples
+///
+/// | Input | Output |
+/// |-------|--------|
+/// | `../images/logo.png` | `../../images/logo.png` |
+/// | `../../assets/doc.pdf` | `../../../assets/doc.pdf` |
+/// | `other.html` | `../other.html` |
+/// | `https://example.com` | `https://example.com` (unchanged) |
+///
+/// Note: Relative links get `../` prepended because content pages
+/// are at `/post/index.html`, so need to go up one level first.
 pub fn process_relative_or_external_link(value: &str) -> Result<String> {
     Ok(if is_external_link(value) {
         value.to_string()
@@ -157,47 +216,54 @@ pub fn process_relative_or_external_link(value: &str) -> Result<String> {
 // Head Section Processing
 // ============================================================================
 
-/// Write head section content (title, meta, links, scripts)
-pub fn write_head_content(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    config: &'static SiteConfig,
-) -> Result<()> {
+/// Write `<head>` section content before closing tag.
+pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -> Result<()> {
     let head = &config.build.head;
     let base_path = &config.build.base_path;
 
-    // Title
     if !config.base.title.is_empty() {
         write_text_element(writer, "title", &config.base.title)?;
     }
-
-    // Description meta tag
     if !config.base.description.is_empty() {
-        write_meta_tag(writer, "description", &config.base.description)?;
+        write_empty_elem(
+            writer,
+            "meta",
+            &[
+                ("name", "description"),
+                ("content", &config.base.description),
+            ],
+        )?;
     }
 
-    // Favicon
     if let Some(icon) = &head.icon {
-        write_icon_link(writer, icon, base_path)?;
+        let href = compute_asset_href(icon, base_path)?;
+        write_empty_elem(
+            writer,
+            "link",
+            &[
+                ("rel", "shortcut icon"),
+                ("href", &href),
+                ("type", get_icon_mime_type(icon)),
+            ],
+        )?;
     }
 
-    // Stylesheets
     for style in &head.styles {
         let href = compute_asset_href(style, base_path)?;
-        write_stylesheet_link(writer, &href)?;
+        write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 
-    // Tailwind stylesheet
     if config.build.tailwind.enable
         && let Some(input) = &config.build.tailwind.input
     {
         let href = compute_stylesheet_href(input, config)?;
-        write_stylesheet_link(writer, &href)?;
+        write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 
     // Scripts
     for script in &head.scripts {
         let src = compute_asset_href(script.path(), base_path)?;
-        write_script_element(writer, &src, script.is_defer(), script.is_async())?;
+        write_script(writer, &src, script.is_defer(), script.is_async())?;
     }
 
     // Raw HTML elements (trusted input)
@@ -209,56 +275,33 @@ pub fn write_head_content(
     Ok(())
 }
 
-/// Write a simple text element (e.g., <title>text</title>)
+// ============================================================================
+// Element Helpers
+// ============================================================================
+
+/// Write a text element: `<tag>text</tag>`.
 #[inline]
-pub fn write_text_element(writer: &mut Writer<Cursor<Vec<u8>>>, tag: &str, text: &str) -> Result<()> {
+pub fn write_text_element(writer: &mut XmlWriter, tag: &str, text: &str) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new(tag)))?;
     writer.write_event(Event::Text(BytesText::new(text)))?;
     writer.write_event(Event::End(BytesEnd::new(tag)))?;
     Ok(())
 }
 
-/// Write a meta tag
+/// Write an empty element with attributes: `<tag attr1="val1" ... />`.
 #[inline]
-pub fn write_meta_tag(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, content: &str) -> Result<()> {
-    let mut elem = BytesStart::new("meta");
-    elem.push_attribute(("name", name));
-    elem.push_attribute(("content", content));
+pub fn write_empty_elem(writer: &mut XmlWriter, tag: &str, attrs: &[(&str, &str)]) -> Result<()> {
+    let mut elem = BytesStart::new(tag);
+    for (k, v) in attrs {
+        elem.push_attribute((*k, *v));
+    }
     writer.write_event(Event::Empty(elem))?;
     Ok(())
 }
 
-/// Write an icon link element
-#[inline]
-pub fn write_icon_link(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    icon: &std::path::Path,
-    base_path: &std::path::Path,
-) -> Result<()> {
-    let href = compute_asset_href(icon, base_path)?;
-    let mime_type = get_icon_mime_type(icon);
-
-    let mut elem = BytesStart::new("link");
-    elem.push_attribute(("rel", "shortcut icon"));
-    elem.push_attribute(("href", href.as_str()));
-    elem.push_attribute(("type", mime_type));
-    writer.write_event(Event::Empty(elem))?;
-    Ok(())
-}
-
-/// Write a stylesheet link element
-#[inline]
-pub fn write_stylesheet_link(writer: &mut Writer<Cursor<Vec<u8>>>, href: &str) -> Result<()> {
-    let mut elem = BytesStart::new("link");
-    elem.push_attribute(("rel", "stylesheet"));
-    elem.push_attribute(("href", href));
-    writer.write_event(Event::Empty(elem))?;
-    Ok(())
-}
-
-/// Write a script element
-pub fn write_script_element(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
+/// Write a script element with optional defer/async.
+pub fn write_script(
+    writer: &mut XmlWriter,
     src: &str,
     defer: bool,
     async_attr: bool,
@@ -464,9 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn test_write_stylesheet_link() {
+    fn test_write_empty_elem_stylesheet() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_stylesheet_link(&mut writer, "/styles/main.css").unwrap();
+        write_empty_elem(
+            &mut writer,
+            "link",
+            &[("rel", "stylesheet"), ("href", "/styles/main.css")],
+        )
+        .unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("link"));
         assert!(output.contains("rel=\"stylesheet\""));
@@ -474,9 +522,9 @@ mod tests {
     }
 
     #[test]
-    fn test_write_script_element_basic() {
+    fn test_write_script_basic() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_element(&mut writer, "/scripts/main.js", false, false).unwrap();
+        write_script(&mut writer, "/scripts/main.js", false, false).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("<script"));
         assert!(output.contains("src=\"/scripts/main.js\""));
@@ -486,27 +534,27 @@ mod tests {
     }
 
     #[test]
-    fn test_write_script_element_with_defer() {
+    fn test_write_script_with_defer() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_element(&mut writer, "/scripts/main.js", true, false).unwrap();
+        write_script(&mut writer, "/scripts/main.js", true, false).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("defer"));
         assert!(!output.contains("async"));
     }
 
     #[test]
-    fn test_write_script_element_with_async() {
+    fn test_write_script_with_async() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_element(&mut writer, "/scripts/main.js", false, true).unwrap();
+        write_script(&mut writer, "/scripts/main.js", false, true).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(!output.contains("defer"));
         assert!(output.contains("async"));
     }
 
     #[test]
-    fn test_write_script_element_with_both_defer_and_async() {
+    fn test_write_script_with_both_defer_and_async() {
         let mut writer = Writer::new(Cursor::new(Vec::new()));
-        write_script_element(&mut writer, "/scripts/main.js", true, true).unwrap();
+        write_script(&mut writer, "/scripts/main.js", true, true).unwrap();
         let output = String::from_utf8(writer.into_inner().into_inner()).unwrap();
         assert!(output.contains("defer"));
         assert!(output.contains("async"));

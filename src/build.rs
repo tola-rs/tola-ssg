@@ -40,9 +40,12 @@ pub fn build_site(
             .context("Failed to compile posts")
         },
         || {
-            process_files(assets, config, |_| true, |path, cfg| {
-                process_asset(path, cfg, false, false)
-            })
+            process_files(
+                assets,
+                config,
+                |_| true,
+                |path, cfg| process_asset(path, cfg, false, false),
+            )
             .context("Failed to copy assets")
         },
     );

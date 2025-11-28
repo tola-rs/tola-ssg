@@ -1,14 +1,19 @@
-//! URL slugification utilities.
+//! URL slugification and path utilities.
 //!
 //! Converts paths and fragments to URL-safe formats.
 
 use crate::config::{SiteConfig, SlugMode};
+use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
 /// Characters forbidden in file paths and fragments
 const FORBIDDEN_CHARS: &[char] = &[
     '<', '>', ':', '|', '?', '*', '#', '\\', '(', ')', '[', ']', '\t', '\r', '\n',
 ];
+
+// ============================================================================
+// Slugification
+// ============================================================================
 
 /// Convert fragment text to URL-safe format based on config
 pub fn slugify_fragment(text: &str, config: &'static SiteConfig) -> String {
@@ -42,6 +47,61 @@ fn sanitize_path(path: &Path) -> PathBuf {
     path.components()
         .map(|c| sanitize_text(&c.as_os_str().to_string_lossy()))
         .collect()
+}
+
+// ============================================================================
+// Content Path Utilities
+// ============================================================================
+
+/// Computed paths for a content file.
+pub struct ContentPaths {
+    /// Relative path without `.typ` extension.
+    /// Example: `content/posts/hello.typ` → `"posts/hello"`
+    pub relative: String,
+
+    /// Full output HTML path (slugified).
+    /// Example: `public/posts/hello/index.html`
+    pub html: PathBuf,
+}
+
+/// Compute output paths for a `.typ` content file.
+///
+/// This function maps a source `.typ` file to its HTML output location:
+/// - Strips the content directory prefix
+/// - Removes the `.typ` extension
+/// - Applies path slugification
+/// - Generates the final HTML path
+///
+/// # Path Mapping Examples
+///
+/// | Source | relative | html |
+/// |--------|----------|------|
+/// | `content/posts/hello.typ` | `posts/hello` | `public/posts/hello/index.html` |
+/// | `content/index.typ` | `index` | `public/index.html` |
+pub fn content_paths(content_path: &Path, config: &'static SiteConfig) -> Result<ContentPaths> {
+    let content_dir = &config.build.content;
+    let output_dir = config.build.output.join(&config.build.base_path);
+
+    // Strip content dir and .typ extension: "content/posts/hello.typ" → "posts/hello"
+    let relative = content_path
+        .strip_prefix(content_dir)?
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid path encoding"))?
+        .strip_suffix(".typ")
+        .ok_or_else(|| anyhow!("Not a .typ file: {}", content_path.display()))?
+        .to_owned();
+
+    // Special case: index.typ → public/index.html (not public/index/index.html)
+    let is_index = content_path.file_name().is_some_and(|p| p == "index.typ");
+
+    let html = if is_index {
+        config.build.output.join("index.html")
+    } else {
+        output_dir.join(&relative).join("index.html")
+    };
+    let html = slugify_path(html, config);
+
+    Ok(ContentPaths { relative, html })
 }
 
 #[cfg(test)]

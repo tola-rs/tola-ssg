@@ -8,13 +8,8 @@ use crate::utils::xml::{
     create_xml_reader, write_element_with_processed_links, write_head_content,
     write_heading_with_slugified_id, write_html_with_lang,
 };
-use crate::{
-    config::SiteConfig,
-    log, run_command,
-    utils::slug::slugify_path,
-};
-use anyhow::{Context, Result, anyhow};
-use walkdir::WalkDir;
+use crate::{config::SiteConfig, log, run_command, utils::slug::content_paths};
+use anyhow::{Result, anyhow};
 use quick_xml::{
     Reader, Writer,
     events::{BytesEnd, BytesStart, Event},
@@ -25,6 +20,7 @@ use std::{
     io::Cursor,
     path::{Path, PathBuf},
 };
+use walkdir::WalkDir;
 
 // ============================================================================
 // Directory Operations
@@ -62,7 +58,9 @@ where
     F: Fn(&Path, &'static SiteConfig) -> Result<()> + Sync,
 {
     let files = collect_files(dir, should_process);
-    files.par_iter().try_for_each(|path| processor(path, config))
+    files
+        .par_iter()
+        .try_for_each(|path| processor(path, config))
 }
 
 // ============================================================================
@@ -108,29 +106,20 @@ pub fn process_content(
         return Ok(());
     }
 
-    // println!("{:?}, {:?}, {:?}, {:?}", root, content, output, content_path);
-    let relative_post_path = content_path
-        .strip_prefix(content)?
-        .to_str()
-        .ok_or(anyhow!("Invalid path"))?
-        .strip_suffix(".typ")
-        .ok_or(anyhow!("Not a .typ file"))
-        .with_context(|| format!("compiling post: {:?}", content_path))?;
+    // Process .typ file: get output paths, compile, and post-process
+    let paths = content_paths(content_path, config)?;
+    log!(should_log_newline; "content"; "{}", paths.relative);
 
-    log!(should_log_newline; "content"; "{}", relative_post_path);
+    // Create output directory for the post
+    if let Some(parent) = paths.html.parent() {
+        fs::create_dir_all(parent)?;
+    }
 
-    let output = output.join(relative_post_path);
-    fs::create_dir_all(&output)?;
-
-    let html_path = if content_path.file_name().is_some_and(|p| p == "index.typ") {
-        config.build.output.join("index.html")
-    } else {
-        output.join("index.html")
-    };
-    let html_path = slugify_path(&html_path, config);
-    if !force_rebuild && html_path.exists() {
+    // Skip if up-to-date
+    if !force_rebuild && paths.html.exists() {
         let src_time = content_path.metadata()?.modified()?;
-        let dst_time = html_path
+        let dst_time = paths
+            .html
             .metadata()?
             .modified()
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
@@ -143,12 +132,10 @@ pub fn process_content(
         "compile", "--features", "html", "--format", "html",
         "--font-path", root, "--root", root,
         content_path, "-"
-    )
-    // .with_context(|| format!("post path: {}", content_path.display()))
-?;
+    )?;
 
     let html_content = output.stdout;
-    let html_content = process_html(&html_path, &html_content, config)?;
+    let html_content = process_html(&paths.html, &html_content, config)?;
 
     let html_content = if config.build.minify {
         minify_html::minify(html_content.as_slice(), &minify_html::Cfg::new())
@@ -156,7 +143,7 @@ pub fn process_content(
         html_content
     };
 
-    fs::write(&html_path, html_content)?;
+    fs::write(&paths.html, html_content)?;
     Ok(())
 }
 

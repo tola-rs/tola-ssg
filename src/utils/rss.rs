@@ -5,18 +5,14 @@
 use crate::{
     config::SiteConfig,
     log, run_command,
-    utils::{build::collect_files, slug::slugify_path},
+    utils::{build::collect_files, slug::content_paths},
 };
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use rayon::prelude::*;
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
+use std::{fs, path::Path, sync::LazyLock};
 
 // ============================================================================
 // Constants
@@ -345,30 +341,25 @@ pub fn build_rss(config: &'static SiteConfig) -> Result<()> {
     Ok(())
 }
 
-/// Generate GUID URL for a content file
+/// Generate GUID URL for a content file.
+///
+/// Converts a `.typ` content path to its corresponding public URL.
+/// Example: `content/posts/hello.typ` → `https://example.com/posts/hello/index.html`
 pub fn get_guid_from_content_path(
     content_path: &Path,
     config: &'static SiteConfig,
 ) -> Result<String> {
-    let content_dir = &config.build.content;
     let base_url = config.base.url.as_deref().unwrap_or_default();
+    let paths = content_paths(content_path, config)?;
 
-    let relative_path = content_path
-        .strip_prefix(content_dir)?
-        .to_str()
-        .ok_or_else(|| anyhow!("Invalid path encoding"))?
-        .strip_suffix(".typ")
-        .ok_or_else(|| anyhow!("Not a .typ file"))?;
+    // Strip output dir prefix to get relative path for URL
+    let html_relative = paths
+        .html
+        .strip_prefix(&config.build.output)
+        .unwrap_or(&paths.html);
 
-    // Build the GUID path
-    let guid_path = if content_path.file_name().is_some_and(|p| p == "index.typ") {
-        PathBuf::from("index.html")
-    } else {
-        PathBuf::from(relative_path).join("index.html")
-    };
-
-    let guid_path = slugify_path(&guid_path, config);
-    let encoded = urlencoding::encode(guid_path.to_str().unwrap_or_default());
+    // URL-encode path components but preserve slashes
+    let encoded = urlencoding::encode(html_relative.to_str().unwrap_or_default());
     let encoded = encoded.replace("%2F", "/");
 
     Ok(format!("{}/{}", base_url.trim_end_matches('/'), encoded))
@@ -383,10 +374,9 @@ impl RssFeed {
     pub fn build(config: &'static SiteConfig) -> Result<Self> {
         log!(true; "rss"; "generating rss feed started");
 
-        let posts_paths = collect_files(
-            &config.build.content,
-            |path| path.extension().is_some_and(|ext| ext == "typ"),
-        );
+        let posts_paths = collect_files(&config.build.content, |path| {
+            path.extension().is_some_and(|ext| ext == "typ")
+        });
 
         let posts: Vec<PostMeta> = posts_paths
             .par_iter()

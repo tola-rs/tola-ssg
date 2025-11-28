@@ -248,14 +248,16 @@ fn adjust_height(attr: Attribute<'_>) -> Result<Attribute<'_>> {
 
     Ok(Attribute {
         key: attr.key,
-        value: format!("{}pt", height + SVG_PADDING_TOP).into_bytes().into(),
+        value: format!("{}pt", height + SVG_PADDING_TOP)
+            .into_bytes()
+            .into(),
     })
 }
 
 /// Adjust viewBox attribute (expand for padding)
 fn adjust_viewbox(attr: Attribute<'_>) -> Result<Attribute<'_>> {
     let value = std::str::from_utf8(attr.value.as_ref())?;
-    
+
     // Parse 4 values without allocating a Vec
     let mut iter = value.split_whitespace();
     let (v0, v1, v2, v3) = match (iter.next(), iter.next(), iter.next(), iter.next()) {
@@ -397,7 +399,7 @@ fn compress_builtin(output: &Path, data: &[u8], size: (f32, f32), scale: f32) ->
 
     // Pre-allocate with exact capacity
     let mut pixmap = Vec::with_capacity(pixel_count);
-    
+
     // Use chunks_exact for better optimization
     for c in data.chunks_exact(4) {
         pixmap.push(ravif::RGBA8::new(c[0], c[1], c[2], c[3]));

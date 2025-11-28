@@ -110,10 +110,7 @@ pub fn to_cmd_vec<C: ToCmd>(cmd: C) -> Vec<OsString> {
 /// Filter out empty args.
 #[inline]
 pub fn filter_args(args: &[OsString]) -> Vec<OsString> {
-    args.iter()
-        .filter(|a| !a.is_empty())
-        .cloned()
-        .collect()
+    args.iter().filter(|a| !a.is_empty()).cloned().collect()
 }
 
 // ============================================================================
@@ -159,11 +156,7 @@ pub fn spawn_with_stdin(
 }
 
 /// Prepare a Command from components.
-fn prepare(
-    root: Option<&Path>,
-    cmd: &[OsString],
-    args: &[OsString],
-) -> Result<(String, Command)> {
+fn prepare(root: Option<&Path>, cmd: &[OsString], args: &[OsString]) -> Result<(String, Command)> {
     let name = cmd
         .first()
         .and_then(|s| s.to_str())
@@ -283,11 +276,7 @@ mod tests {
 
     #[test]
     fn test_filter_args() {
-        let args = [
-            OsString::from("a"),
-            OsString::from(""),
-            OsString::from("b"),
-        ];
+        let args = [OsString::from("a"), OsString::from(""), OsString::from("b")];
         let filtered = filter_args(&args);
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0], OsString::from("a"));
