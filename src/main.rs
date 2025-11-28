@@ -54,9 +54,9 @@ fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
     // Validate config state based on command
     let config_exists = config.config_path.exists();
     match (cli.is_init(), config_exists) {
-        (true, true) => bail!(
-            "Config file already exists. Remove it manually or init in a different path."
-        ),
+        (true, true) => {
+            bail!("Config file already exists. Remove it manually or init in a different path.")
+        }
         (false, false) => bail!("Config file not found."),
         _ => {}
     }
@@ -70,8 +70,10 @@ fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
 
 /// Run build and RSS generation in parallel
 fn run_build(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
-    let (build_result, rss_result) =
-        rayon::join(|| build_site(config, config.build.clear), || build_rss(config));
+    let (build_result, rss_result) = rayon::join(
+        || build_site(config, config.build.clear),
+        || build_rss(config),
+    );
 
     rss_result?;
     build_result

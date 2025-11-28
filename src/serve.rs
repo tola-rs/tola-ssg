@@ -145,10 +145,7 @@ fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             // Filter out hidden files (starting with '.')
-            !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with('.')
+            !entry.file_name().to_string_lossy().starts_with('.')
         })
         .map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -183,7 +180,9 @@ fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io
         } else {
             format!("/{parent_path}")
         };
-        format!(r#"<li class="parent"><span class="icon">📂</span><a href="{parent_href}">..</a></li>"#)
+        format!(
+            r#"<li class="parent"><span class="icon">📂</span><a href="{parent_href}">..</a></li>"#
+        )
     };
 
     Ok(DIRECTORY_TEMPLATE

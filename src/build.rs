@@ -6,7 +6,7 @@ use crate::{
     config::SiteConfig,
     log,
     utils::{
-        build::{process_asset, process_content, process_files, ASSETS_CACHE, CONTENT_CACHE},
+        build::{ASSETS_CACHE, CONTENT_CACHE, process_asset, process_content, process_files},
         git,
     },
 };
@@ -17,7 +17,10 @@ use std::{ffi::OsStr, fs};
 /// Build the entire site, processing content and assets in parallel
 ///
 /// If `force_rebuild` is true, skips timestamp checks and rebuilds all content.
-pub fn build_site(config: &'static SiteConfig, force_rebuild: bool) -> Result<ThreadSafeRepository> {
+pub fn build_site(
+    config: &'static SiteConfig,
+    force_rebuild: bool,
+) -> Result<ThreadSafeRepository> {
     let output = &config.build.output;
     let content = &config.build.content;
     let assets = &config.build.assets;
@@ -38,13 +41,9 @@ pub fn build_site(config: &'static SiteConfig, force_rebuild: bool) -> Result<Th
             .context("Failed to compile posts")
         },
         || {
-            process_files(
-                &ASSETS_CACHE,
-                assets,
-                config,
-                &|_| true,
-                &|path, cfg| process_asset(path, cfg, false, false),
-            )
+            process_files(&ASSETS_CACHE, assets, config, &|_| true, &|path, cfg| {
+                process_asset(path, cfg, false, false)
+            })
             .context("Failed to copy assets")
         },
     );

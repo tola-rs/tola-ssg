@@ -31,7 +31,10 @@ pub fn new_site(config: &'static SiteConfig) -> Result<()> {
     let repo = git::create_repo(root)?;
     init_site_structure(root)?;
     init_default_config(root)?;
-    init_ignored_files(root, &[config.build.output.as_path(), Path::new("/assets/images/")])?;
+    init_ignored_files(
+        root,
+        &[config.build.output.as_path(), Path::new("/assets/images/")],
+    )?;
     git::commit_all(&repo, "initial commit")?;
 
     Ok(())
@@ -54,7 +57,8 @@ fn init_site_structure(root: &Path) -> Result<()> {
                 path.display()
             );
         }
-        fs::create_dir_all(&path).with_context(|| format!("Failed to create {}", path.display()))?;
+        fs::create_dir_all(&path)
+            .with_context(|| format!("Failed to create {}", path.display()))?;
     }
     Ok(())
 }

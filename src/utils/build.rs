@@ -97,7 +97,10 @@ impl<'a> HtmlContext<'a> {
             config,
             html_path,
             svg_count: 0,
-            extract_svg: !matches!(config.build.typst.svg.extract_type, ExtractSvgType::Embedded),
+            extract_svg: !matches!(
+                config.build.typst.svg.extract_type,
+                ExtractSvgType::Embedded
+            ),
         }
     }
 }
@@ -125,7 +128,11 @@ pub fn _copy_dir_recursively(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-fn collect_files_vec<P>(dir_cache: &DirCache, dir: &Path, should_collect: &P) -> Result<Vec<PathBuf>>
+fn collect_files_vec<P>(
+    dir_cache: &DirCache,
+    dir: &Path,
+    should_collect: &P,
+) -> Result<Vec<PathBuf>>
 where
     P: Fn(&PathBuf) -> bool + Sync,
 {
@@ -359,7 +366,11 @@ fn process_html(html_path: &Path, content: &[u8], config: &'static SiteConfig) -
             }
             Ok(Event::Eof) => break,
             Ok(event) => writer.write_event(event)?,
-            Err(e) => anyhow::bail!("XML parse error at position {}: {:?}", reader.error_position(), e),
+            Err(e) => anyhow::bail!(
+                "XML parse error at position {}: {:?}",
+                reader.error_position(),
+                e
+            ),
         }
     }
 
@@ -447,7 +458,7 @@ fn write_heading_with_slugified_id(
             Attribute { key, value }
         })
         .collect();
-    
+
     let elem = elem.to_owned().with_attributes(attrs);
     writer.write_event(Event::Start(elem))?;
     Ok(())
@@ -477,7 +488,10 @@ fn write_element_with_processed_links(
     Ok(())
 }
 
-fn process_link_value<'a>(value: &Cow<'a, [u8]>, config: &'static SiteConfig) -> Result<Cow<'a, [u8]>> {
+fn process_link_value<'a>(
+    value: &Cow<'a, [u8]>,
+    config: &'static SiteConfig,
+) -> Result<Cow<'a, [u8]>> {
     let value_str = str::from_utf8(value.as_ref())?;
     let processed = match value_str.bytes().next() {
         Some(b'/') => process_absolute_link(value_str, config)?,
@@ -511,14 +525,14 @@ fn extract_svg_element(
 
     // Capture SVG content
     let svg_content = capture_svg_content(reader, &attrs)?;
-    
+
     // Parse and optimize SVG
     let (svg_data, size) = optimize_svg(&svg_content, ctx.config)?;
-    
+
     // Write img placeholder to HTML
     let svg_index = ctx.svg_count;
     ctx.svg_count += 1;
-    
+
     let svg = Svg::new(svg_data, size, svg_index);
     write_svg_img_placeholder(writer, &svg, ctx)?;
 
@@ -527,7 +541,9 @@ fn extract_svg_element(
 
 fn capture_svg_content(reader: &mut Reader<&[u8]>, attrs: &[Attribute<'_>]) -> Result<Vec<u8>> {
     let mut svg_writer = Writer::new(Cursor::new(Vec::with_capacity(4096)));
-    svg_writer.write_event(Event::Start(BytesStart::new("svg").with_attributes(attrs.iter().cloned())))?;
+    svg_writer.write_event(Event::Start(
+        BytesStart::new("svg").with_attributes(attrs.iter().cloned()),
+    ))?;
 
     let mut depth = 1u32;
     loop {
@@ -555,16 +571,15 @@ fn optimize_svg(svg_content: &[u8], config: &SiteConfig) -> Result<(Vec<u8>, (f3
         dpi: config.build.typst.svg.dpi,
         ..Default::default()
     };
-    let tree = usvg::Tree::from_data(svg_content, &opt)
-        .context("Failed to parse SVG")?;
-    
+    let tree = usvg::Tree::from_data(svg_content, &opt).context("Failed to parse SVG")?;
+
     let write_opt = usvg::WriteOptions {
         indent: usvg::Indent::None,
         ..Default::default()
     };
     let optimized = tree.to_string(&write_opt);
     let size = parse_svg_dimensions(&optimized).unwrap_or((0.0, 0.0));
-    
+
     Ok((optimized.into_bytes(), size))
 }
 
@@ -583,12 +598,12 @@ fn write_svg_img_placeholder(
     let scale = ctx.config.get_scale();
     let (w, h) = svg.size;
     let style = format!("width:{}px;height:{}px;", w / scale, h / scale);
-    
+
     let mut img = BytesStart::new("img");
     img.push_attribute(("src", src.as_str()));
     img.push_attribute(("style", style.as_str()));
     writer.write_event(Event::Start(img))?;
-    
+
     Ok(())
 }
 
@@ -596,7 +611,7 @@ fn adjust_height_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
     let height_str = str::from_utf8(attr.value.as_ref())?;
     let height: f32 = height_str.trim_end_matches("pt").parse()?;
     let new_height = height + PADDING_TOP_FOR_SVG;
-    
+
     Ok(Attribute {
         key: attr.key,
         value: format!("{new_height}pt").into_bytes().into(),
@@ -609,11 +624,11 @@ fn adjust_viewbox_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    
+
     if parts.len() != 4 {
         anyhow::bail!("Invalid viewBox format");
     }
-    
+
     let new_viewbox = format!(
         "{} {} {} {}",
         parts[0],
@@ -621,7 +636,7 @@ fn adjust_viewbox_attr(attr: Attribute<'_>) -> Result<Attribute<'_>> {
         parts[2],
         parts[3] + PADDING_BOTTOM_FOR_SVG + PADDING_TOP_FOR_SVG
     );
-    
+
     Ok(Attribute {
         key: attr.key,
         value: new_viewbox.into_bytes().into(),
@@ -646,7 +661,11 @@ fn extract_attr_value<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
 // SVG Compression (Parallel)
 // ============================================================================
 
-fn compress_svgs_parallel(svgs: &[Svg], html_path: &Path, config: &'static SiteConfig) -> Result<()> {
+fn compress_svgs_parallel(
+    svgs: &[Svg],
+    html_path: &Path,
+    config: &'static SiteConfig,
+) -> Result<()> {
     let parent = html_path.parent().context("Invalid html path")?;
     let relative_path = html_path
         .strip_prefix(&config.build.output)
@@ -657,16 +676,21 @@ fn compress_svgs_parallel(svgs: &[Svg], html_path: &Path, config: &'static SiteC
 
     svgs.par_iter().try_for_each(|svg| {
         log!("svg"; "in {relative_path}: compress svg-{}", svg.index);
-        
+
         let svg_path = parent.join(svg.output_filename(config));
         compress_single_svg(svg, &svg_path, scale, config)?;
-        
+
         log!("svg"; "in {relative_path}: finish compressing svg-{}", svg.index);
         Ok(())
     })
 }
 
-fn compress_single_svg(svg: &Svg, output_path: &Path, scale: f32, config: &SiteConfig) -> Result<()> {
+fn compress_single_svg(
+    svg: &Svg,
+    output_path: &Path,
+    scale: f32,
+    config: &SiteConfig,
+) -> Result<()> {
     if svg.should_keep_as_svg(config) {
         return fs::write(output_path, &svg.data).map_err(Into::into);
     }
@@ -741,14 +765,16 @@ fn compress_with_builtin(
 
 fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result<String> {
     let base_path = &config.build.base_path;
-    
+
     if is_asset_link(value, config) {
-        return Ok(format!("/{}{}", base_path.display(), value));
+        let value = value.trim_start_matches('/');
+        return Ok(format!("/{}", base_path.join(value).display()));
     }
-    
+
     let (path, fragment) = value.split_once('#').unwrap_or((value, ""));
+    let path = path.trim_start_matches('/');
     let slugified_path = slugify_path(path, config);
-    
+
     let mut result = format!("/{}", base_path.join(&slugified_path).display());
     if !fragment.is_empty() {
         result.push('#');
@@ -825,11 +851,7 @@ fn write_head_content(
 }
 
 #[inline]
-fn write_text_element(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    tag: &str,
-    text: &str,
-) -> Result<()> {
+fn write_text_element(writer: &mut Writer<Cursor<Vec<u8>>>, tag: &str, text: &str) -> Result<()> {
     writer.write_event(Event::Start(BytesStart::new(tag)))?;
     writer.write_event(Event::Text(BytesText::new(text)))?;
     writer.write_event(Event::End(BytesEnd::new(tag)))?;
@@ -837,11 +859,7 @@ fn write_text_element(
 }
 
 #[inline]
-fn write_meta_tag(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    name: &str,
-    content: &str,
-) -> Result<()> {
+fn write_meta_tag(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str, content: &str) -> Result<()> {
     let mut elem = BytesStart::new("meta");
     elem.push_attribute(("name", name));
     elem.push_attribute(("content", content));
@@ -857,7 +875,7 @@ fn write_icon_link(
 ) -> Result<()> {
     let href = compute_asset_href(icon, base_path)?;
     let mime_type = get_icon_mime_type(icon);
-    
+
     let mut elem = BytesStart::new("link");
     elem.push_attribute(("rel", "shortcut icon"));
     elem.push_attribute(("href", href.as_str()));
@@ -920,9 +938,7 @@ fn get_icon_mime_type(path: &Path) -> &'static str {
 /// Compute href for an asset path relative to base_path
 fn compute_asset_href(asset_path: &Path, base_path: &Path) -> Result<String> {
     // Strip the leading "./" prefix if present
-    let without_dot_prefix = asset_path
-        .strip_prefix("./")
-        .unwrap_or(asset_path);
+    let without_dot_prefix = asset_path.strip_prefix("./").unwrap_or(asset_path);
     // Strip the "assets/" prefix if present to get relative path within assets
     let relative_path = without_dot_prefix
         .strip_prefix("assets/")
@@ -951,21 +967,23 @@ fn get_asset_top_levels(assets_dir: &Path) -> &'static [OsString] {
 
 fn is_asset_link(path: &str, config: &'static SiteConfig) -> bool {
     let asset_top_levels = get_asset_top_levels(&config.build.assets);
-    
+
     // Extract first path component after the leading slash
     let first_component = path
         .trim_start_matches('/')
         .split('/')
         .next()
         .unwrap_or_default();
-    
+
     asset_top_levels.iter().any(|name| name == first_component)
 }
 
 #[inline]
 fn is_external_link(link: &str) -> bool {
     link.find(':').is_some_and(|pos| {
-        link[..pos].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        link[..pos]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     })
 }
 
@@ -1041,13 +1059,15 @@ mod tests {
 
     #[test]
     fn test_compute_asset_href_with_assets_prefix() {
-        let result = compute_asset_href(Path::new("assets/images/icon.png"), Path::new("")).unwrap();
+        let result =
+            compute_asset_href(Path::new("assets/images/icon.png"), Path::new("")).unwrap();
         assert_eq!(result, "/images/icon.png");
     }
 
     #[test]
     fn test_compute_asset_href_with_dot_and_assets_prefix() {
-        let result = compute_asset_href(Path::new("./assets/images/icon.png"), Path::new("")).unwrap();
+        let result =
+            compute_asset_href(Path::new("./assets/images/icon.png"), Path::new("")).unwrap();
         assert_eq!(result, "/images/icon.png");
     }
 
@@ -1059,10 +1079,8 @@ mod tests {
 
     #[test]
     fn test_compute_asset_href_full_path_with_base() {
-        let result = compute_asset_href(
-            Path::new("./assets/scripts/main.js"),
-            Path::new("mysite")
-        ).unwrap();
+        let result =
+            compute_asset_href(Path::new("./assets/scripts/main.js"), Path::new("mysite")).unwrap();
         assert_eq!(result, "/mysite/scripts/main.js");
     }
 
@@ -1136,5 +1154,40 @@ mod tests {
     #[test]
     fn test_is_external_link_anchor() {
         assert!(!is_external_link("#section"));
+    }
+
+    #[test]
+    fn test_process_link_value() {
+        let config = Box::leak(Box::new(SiteConfig::default()));
+
+        // Absolute link
+        let value = Cow::Borrowed(b"/about".as_slice());
+        let result = process_link_value(&value, config).unwrap();
+        assert_eq!(String::from_utf8_lossy(&result), "/about");
+
+        // Fragment link
+        let value = Cow::Borrowed(b"#header".as_slice());
+        let result = process_link_value(&value, config).unwrap();
+        assert_eq!(String::from_utf8_lossy(&result), "#header");
+
+        // Relative link
+        let value = Cow::Borrowed(b"contact".as_slice());
+        let result = process_link_value(&value, config).unwrap();
+        assert_eq!(String::from_utf8_lossy(&result), "../contact");
+
+        // Absolute link with fragment
+        let value = Cow::Borrowed(b"/about#team".as_slice());
+        let result = process_link_value(&value, config).unwrap();
+        assert_eq!(String::from_utf8_lossy(&result), "/about#team");
+
+        // Relative link with fragment
+        let value = Cow::Borrowed(b"contact#form".as_slice());
+        let result = process_link_value(&value, config).unwrap();
+        assert_eq!(String::from_utf8_lossy(&result), "../contact#form");
+
+        // Relative link with parent directory
+        let value = Cow::Borrowed(b"../images/logo.png".as_slice());
+        let result = process_link_value(&value, config).unwrap();
+        assert_eq!(String::from_utf8_lossy(&result), "../../images/logo.png");
     }
 }

@@ -43,7 +43,14 @@ pub struct DateTimeUtc {
 #[allow(dead_code)]
 impl DateTimeUtc {
     pub const fn new(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> Self {
-        Self { year, month, day, hour, minute, second }
+        Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        }
     }
 
     pub const fn from_ymd(year: u16, month: u8, day: u8) -> Self {
@@ -53,22 +60,29 @@ impl DateTimeUtc {
     /// Parse from "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SSZ" format
     pub fn parse(s: &str) -> Option<Self> {
         let bytes = s.as_bytes();
-        
+
         // Minimum: "YYYY-MM-DD" (10 chars)
         if bytes.len() < 10 {
             return None;
         }
-        
+
         // Parse date part
         let year = parse_u16(&bytes[0..4])?;
-        if bytes[4] != b'-' { return None; }
+        if bytes[4] != b'-' {
+            return None;
+        }
         let month = parse_u8(&bytes[5..7])?;
-        if bytes[7] != b'-' { return None; }
+        if bytes[7] != b'-' {
+            return None;
+        }
         let day = parse_u8(&bytes[8..10])?;
-        
+
         // Check for time part (RFC3339)
-        let (hour, minute, second) = if bytes.len() >= 20 && bytes[10] == b'T' && bytes[19] == b'Z' {
-            if bytes[13] != b':' || bytes[16] != b':' { return None; }
+        let (hour, minute, second) = if bytes.len() >= 20 && bytes[10] == b'T' && bytes[19] == b'Z'
+        {
+            if bytes[13] != b':' || bytes[16] != b':' {
+                return None;
+            }
             (
                 parse_u8(&bytes[11..13])?,
                 parse_u8(&bytes[14..16])?,
@@ -79,14 +93,21 @@ impl DateTimeUtc {
         } else {
             return None;
         };
-        
+
         let dt = Self::new(year, month, day, hour, minute, second);
         dt.validate().ok()?;
         Some(dt)
     }
 
     pub fn validate(&self) -> Result<()> {
-        let Self { year, month, day, hour, minute, second } = *self;
+        let Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        } = *self;
 
         if !(1..=12).contains(&month) {
             bail!("month is invalid: {month}");
@@ -128,8 +149,7 @@ impl DateTimeUtc {
     pub fn to_rfc2822(self) -> String {
         const WEEKDAYS: [&str; 7] = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
         const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
 
         // Zeller's congruence for weekday calculation
@@ -162,21 +182,29 @@ impl DateTimeUtc {
 /// Parse 2-digit ASCII number
 #[inline]
 fn parse_u8(bytes: &[u8]) -> Option<u8> {
-    if bytes.len() != 2 { return None; }
+    if bytes.len() != 2 {
+        return None;
+    }
     let d1 = bytes[0].wrapping_sub(b'0');
     let d2 = bytes[1].wrapping_sub(b'0');
-    if d1 > 9 || d2 > 9 { return None; }
+    if d1 > 9 || d2 > 9 {
+        return None;
+    }
     Some(d1 * 10 + d2)
 }
 
 /// Parse 4-digit ASCII number
 #[inline]
 fn parse_u16(bytes: &[u8]) -> Option<u16> {
-    if bytes.len() != 4 { return None; }
+    if bytes.len() != 4 {
+        return None;
+    }
     let mut result = 0u16;
     for &b in bytes {
         let d = b.wrapping_sub(b'0');
-        if d > 9 { return None; }
+        if d > 9 {
+            return None;
+        }
         result = result * 10 + d as u16;
     }
     Some(result)
@@ -238,10 +266,19 @@ impl PostMeta {
 enum TypstElement {
     Space,
     Linebreak,
-    Text { text: String },
-    Strike { text: String },
-    Link { dest: String, body: Box<TypstElement> },
-    Sequence { children: Vec<TypstElement> },
+    Text {
+        text: String,
+    },
+    Strike {
+        text: String,
+    },
+    Link {
+        dest: String,
+        body: Box<TypstElement>,
+    },
+    Sequence {
+        children: Vec<TypstElement>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -368,7 +405,11 @@ impl RssFeed {
 
     /// Generate RSS XML string
     fn into_xml(self) -> Result<String> {
-        let items: Vec<_> = self.posts.into_iter().filter_map(PostMeta::into_rss_item).collect();
+        let items: Vec<_> = self
+            .posts
+            .into_iter()
+            .filter_map(PostMeta::into_rss_item)
+            .collect();
 
         let channel = ChannelBuilder::default()
             .title(self.title)
@@ -379,7 +420,9 @@ impl RssFeed {
             .items(items)
             .build();
 
-        channel.validate().map_err(|e| anyhow!("RSS validation failed: {e}"))?;
+        channel
+            .validate()
+            .map_err(|e| anyhow!("RSS validation failed: {e}"))?;
         Ok(channel.to_string())
     }
 
@@ -414,11 +457,13 @@ fn query_post_meta(post_path: &Path, config: &'static SiteConfig) -> Result<Post
         post_path,
         META_TAG_NAME, "--field", "value", "--one"
     )
-    .with_context(|| format!(
-        "Failed to query metadata for post: {}\nEnsure tag name \"{}\" is correct",
-        post_path.display(),
-        META_TAG_NAME
-    ))?;
+    .with_context(|| {
+        format!(
+            "Failed to query metadata for post: {}\nEnsure tag name \"{}\" is correct",
+            post_path.display(),
+            META_TAG_NAME
+        )
+    })?;
 
     let json_str = std::str::from_utf8(&output.stdout)?;
     parse_post_meta(guid, json_str, config)
@@ -429,9 +474,7 @@ fn parse_post_meta(guid: String, json_str: &str, config: &'static SiteConfig) ->
     let json: serde_json::Value = serde_json::from_str(json_str)
         .with_context(|| format!("Failed to parse post metadata JSON:\n{json_str}"))?;
 
-    let get_string = |key: &str| {
-        json.get(key).and_then(|v| v.as_str()).map(String::from)
-    };
+    let get_string = |key: &str| json.get(key).and_then(|v| v.as_str()).map(String::from);
 
     // Parse summary from Typst element
     let base_url = config.base.url.as_deref().unwrap_or_default();
@@ -465,23 +508,23 @@ fn parse_typst_element(content: &str) -> Result<TypstElement> {
 /// 2. Site config author if in valid format  
 /// 3. Combine site config email and author
 fn normalize_rss_author(author: Option<&String>, config: &'static SiteConfig) -> Option<String> {
-    static RE_VALID_AUTHOR: LazyLock<Regex> = LazyLock::new(||
+    static RE_VALID_AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*\([^)]+\)$").unwrap()
-    );
+    });
 
     let author = author?;
-    
+
     // Check if post author is already valid
     if RE_VALID_AUTHOR.is_match(author) {
         return Some(author.clone());
     }
-    
+
     // Try site config author
     let site_author = &config.base.author;
     if RE_VALID_AUTHOR.is_match(site_author) {
         return Some(site_author.clone());
     }
-    
+
     // Combine email and author name
     Some(format!("{} ({})", config.base.email, site_author))
 }
@@ -565,7 +608,11 @@ fn test_datetime_utc_validate_valid() {
     assert!(DateTimeUtc::new(2024, 1, 1, 0, 0, 0).validate().is_ok());
 
     // Edge cases - end of day
-    assert!(DateTimeUtc::new(2024, 12, 31, 23, 59, 59).validate().is_ok());
+    assert!(
+        DateTimeUtc::new(2024, 12, 31, 23, 59, 59)
+            .validate()
+            .is_ok()
+    );
 }
 
 #[test]
@@ -621,7 +668,11 @@ fn test_datetime_utc_validate_invalid_minute() {
 #[test]
 fn test_datetime_utc_validate_invalid_second() {
     // Second 60
-    assert!(DateTimeUtc::new(2024, 6, 15, 12, 30, 60).validate().is_err());
+    assert!(
+        DateTimeUtc::new(2024, 6, 15, 12, 30, 60)
+            .validate()
+            .is_err()
+    );
 }
 
 #[test]
@@ -671,7 +722,12 @@ fn test_datetime_utc_all_months() {
         let dt = DateTimeUtc::new(2024, month_num, 15, 12, 0, 0);
         assert!(dt.validate().is_ok());
         let rfc2822 = dt.to_rfc2822();
-        assert!(rfc2822.contains(month_name), "Month {} should contain {}", month_num, month_name);
+        assert!(
+            rfc2822.contains(month_name),
+            "Month {} should contain {}",
+            month_num,
+            month_name
+        );
     }
 }
 

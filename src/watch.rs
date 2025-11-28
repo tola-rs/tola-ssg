@@ -6,7 +6,7 @@
 use crate::{
     config::SiteConfig,
     log,
-    utils::watch::{process_watched_files, ChangeType},
+    utils::watch::{ChangeType, process_watched_files},
 };
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
@@ -14,8 +14,8 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -138,10 +138,7 @@ fn watch_file(watcher: &mut impl Watcher, name: &str, path: &Path) -> Result<()>
 
 /// Determine if an event should trigger a rebuild
 fn should_process_event(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::Modify(_) | EventKind::Create(_)
-    )
+    matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
 }
 
 /// Classify file change type based on path
@@ -181,7 +178,9 @@ fn handle_event(paths: &[std::path::PathBuf], config: &'static SiteConfig) -> bo
     }
 
     // Process incremental changes
-    if let Err(err) = process_watched_files(paths, config).context("Failed to process changed files") {
+    if let Err(err) =
+        process_watched_files(paths, config).context("Failed to process changed files")
+    {
         log!("watch"; "{err}");
     }
     false
@@ -192,15 +191,23 @@ fn get_rebuild_reason(path: &Path, config: &SiteConfig) -> String {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     if path == config.config_path {
-        let config_name = config.config_path.file_name()
+        let config_name = config
+            .config_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("config");
         format!("config ({config_name})")
     } else if path.starts_with(&config.build.templates) {
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
         format!("template ({file_name})")
     } else if path.starts_with(&config.build.utils) {
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
         format!("utils ({file_name})")
     } else {
         "unknown".to_string()

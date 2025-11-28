@@ -141,7 +141,11 @@ impl Remote {
 
 /// Configure origin remote (add or update URL)
 fn configure_origin_remote(root: &Path, repo: &Repository, url: &str) -> Result<()> {
-    let action = if Remote::origin_exists(repo)? { "set-url" } else { "add" };
+    let action = if Remote::origin_exists(repo)? {
+        "set-url"
+    } else {
+        "add"
+    };
     run_command!(root; ["git"]; "remote", action, "origin", url)?;
     Ok(())
 }

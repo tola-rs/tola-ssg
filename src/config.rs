@@ -479,7 +479,7 @@ fn test_build_head_config_scripts_with_options() {
     let config: SiteConfig = toml::from_str(config).unwrap();
 
     assert_eq!(config.build.head.scripts.len(), 3);
-    
+
     // First script with defer
     assert_eq!(
         config.build.head.scripts[0].path(),
@@ -487,7 +487,7 @@ fn test_build_head_config_scripts_with_options() {
     );
     assert!(config.build.head.scripts[0].is_defer());
     assert!(!config.build.head.scripts[0].is_async());
-    
+
     // Second script - simple path
     assert_eq!(
         config.build.head.scripts[1].path(),
@@ -495,7 +495,7 @@ fn test_build_head_config_scripts_with_options() {
     );
     assert!(!config.build.head.scripts[1].is_defer());
     assert!(!config.build.head.scripts[1].is_async());
-    
+
     // Third script with async
     assert_eq!(
         config.build.head.scripts[2].path(),
@@ -659,7 +659,10 @@ fn test_extra_fields() {
         Some("custom_value")
     );
     assert_eq!(
-        config.extra.get("number_field").and_then(|v| v.as_integer()),
+        config
+            .extra
+            .get("number_field")
+            .and_then(|v| v.as_integer()),
         Some(42)
     );
 }
@@ -1323,10 +1326,18 @@ impl SiteConfig {
         // Determine the final root path based on command
         let root = match &cli.command {
             Commands::Init { name: Some(name) } => {
-                let base = cli.root.as_ref().cloned().unwrap_or_else(|| self.get_root().to_owned());
+                let base = cli
+                    .root
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| self.get_root().to_owned());
                 base.join(name)
             }
-            _ => cli.root.as_ref().cloned().unwrap_or_else(|| self.get_root().to_owned()),
+            _ => cli
+                .root
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.get_root().to_owned()),
         };
 
         self.set_root(&root);
@@ -1338,11 +1349,18 @@ impl SiteConfig {
         self.build.typst.svg.inline_max_size = self.build.typst.svg.inline_max_size.to_uppercase();
 
         match &cli.command {
-            Commands::Serve { interface, port, watch } => {
+            Commands::Serve {
+                interface,
+                port,
+                watch,
+            } => {
                 Self::update_option(&mut self.serve.interface, interface.as_ref());
                 Self::update_option(&mut self.serve.port, port.as_ref());
                 Self::update_option(&mut self.serve.watch, watch.as_ref());
-                self.base.url = Some(format!("http://{}:{}", self.serve.interface, self.serve.port));
+                self.base.url = Some(format!(
+                    "http://{}:{}",
+                    self.serve.interface, self.serve.port
+                ));
             }
             Commands::Deploy { force } => {
                 Self::update_option(&mut self.deploy.force, force.as_ref());
@@ -1437,24 +1455,34 @@ impl SiteConfig {
         }
 
         if self.build.tailwind.enable {
-            Self::check_command_installed("[build.tailwind.command]", &self.build.tailwind.command)?;
+            Self::check_command_installed(
+                "[build.tailwind.command]",
+                &self.build.tailwind.command,
+            )?;
 
             match &self.build.tailwind.input {
                 None => bail!(
                     "[build.tailwind.enable] = true requires [build.tailwind.input] to be set"
                 ),
                 Some(path) if !path.exists() => {
-                    bail!(ConfigError::Validation("[build.tailwind.input] not found".into()))
+                    bail!(ConfigError::Validation(
+                        "[build.tailwind.input] not found".into()
+                    ))
                 }
                 Some(path) if !path.is_file() => {
-                    bail!(ConfigError::Validation("[build.tailwind.input] is not a file".into()))
+                    bail!(ConfigError::Validation(
+                        "[build.tailwind.input] is not a file".into()
+                    ))
                 }
                 _ => {}
             }
         }
 
         let valid_size_suffixes = ["B", "KB", "MB"];
-        if !valid_size_suffixes.iter().any(|s| self.build.typst.svg.inline_max_size.ends_with(s)) {
+        if !valid_size_suffixes
+            .iter()
+            .any(|s| self.build.typst.svg.inline_max_size.ends_with(s))
+        {
             bail!(ConfigError::Validation(
                 "[build.typst.svg.inline_max_size] must end with B, KB, or MB".into()
             ));
@@ -1467,10 +1495,14 @@ impl SiteConfig {
             Commands::Deploy { .. } => {
                 if let Some(path) = &self.deploy.github_provider.token_path {
                     if !path.exists() {
-                        bail!(ConfigError::Validation("[deploy.github.token_path] not found".into()));
+                        bail!(ConfigError::Validation(
+                            "[deploy.github.token_path] not found".into()
+                        ));
                     }
                     if !path.is_file() {
-                        bail!(ConfigError::Validation("[deploy.github.token_path] is not a file".into()));
+                        bail!(ConfigError::Validation(
+                            "[deploy.github.token_path] is not a file".into()
+                        ));
                     }
                 }
             }
