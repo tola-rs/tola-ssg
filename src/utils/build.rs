@@ -14,7 +14,7 @@ use crate::{
     utils::slug::slugify_path,
 };
 use anyhow::{Context, Result, anyhow};
-use jwalk::WalkDir;
+use walkdir::WalkDir;
 use quick_xml::{
     Reader, Writer,
     events::{BytesEnd, BytesStart, Event},
@@ -33,7 +33,7 @@ use std::{
 /// Files to ignore during directory traversal
 const IGNORED_FILES: &[&str] = &[".DS_Store"];
 
-/// Collect files from a directory using parallel directory traversal (jwalk)
+/// Collect files from a directory recursively
 pub fn collect_files<P>(dir: &Path, should_collect: P) -> Vec<PathBuf>
 where
     P: Fn(&Path) -> bool + Send + Sync,
@@ -44,9 +44,9 @@ where
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
             let name = e.file_name().to_str().unwrap_or_default();
-            !IGNORED_FILES.contains(&name) && should_collect(&e.path())
+            !IGNORED_FILES.contains(&name) && should_collect(e.path())
         })
-        .map(|e| e.path())
+        .map(|e| e.into_path())
         .collect()
 }
 

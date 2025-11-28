@@ -65,8 +65,10 @@ pub fn write_heading_with_slugified_id(
         })
         .collect();
 
-    let elem = elem.to_owned().with_attributes(attrs);
-    writer.write_event(Event::Start(elem))?;
+    // Create new element with only processed attrs to avoid duplication
+    let tag_name = String::from_utf8_lossy(elem.name().as_ref()).into_owned();
+    let new_elem = BytesStart::new(&tag_name).with_attributes(attrs);
+    writer.write_event(Event::Start(new_elem))?;
     Ok(())
 }
 
@@ -90,8 +92,10 @@ pub fn write_element_with_processed_links(
         })
         .collect();
 
-    let elem = elem.to_owned().with_attributes(attrs?);
-    writer.write_event(Event::Start(elem))?;
+    // Create new element with only processed attrs to avoid duplication
+    let tag_name = String::from_utf8_lossy(elem.name().as_ref()).into_owned();
+    let new_elem = BytesStart::new(&tag_name).with_attributes(attrs?);
+    writer.write_event(Event::Start(new_elem))?;
     Ok(())
 }
 
