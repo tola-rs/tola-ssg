@@ -2,7 +2,7 @@
 //!
 //! Handles repository initialization, commits, and remote pushing.
 
-use crate::{config::SiteConfig, init::init_ignored_files, log, run_command};
+use crate::{config::SiteConfig, exec, init::init_ignored_files, log};
 use anyhow::{Context, Result, anyhow, bail};
 use gix::{
     Repository, ThreadSafeRepository,
@@ -103,7 +103,7 @@ impl Remote {
     /// Parse remotes from `git remote -v` output
     fn list_from_repo(repo: &Repository) -> Result<Vec<Self>> {
         let root = get_repo_root(repo)?;
-        let output = run_command!(root; ["git"]; "remote", "-v")?;
+        let output = exec!(root; ["git"]; "remote", "-v")?;
         let stdout = std::str::from_utf8(&output.stdout)?;
 
         let remotes = stdout
@@ -146,16 +146,16 @@ fn configure_origin_remote(root: &Path, repo: &Repository, url: &str) -> Result<
     } else {
         "add"
     };
-    run_command!(root; ["git"]; "remote", action, "origin", url)?;
+    exec!(root; ["git"]; "remote", action, "origin", url)?;
     Ok(())
 }
 
 /// Push to remote with optional force flag
 fn push_to_remote(root: &Path, branch: &str, force: bool) -> Result<()> {
     if force {
-        run_command!(root; ["git"]; "push", "--set-upstream", "origin", branch, "-f")?;
+        exec!(root; ["git"]; "push", "--set-upstream", "origin", branch, "-f")?;
     } else {
-        run_command!(root; ["git"]; "push", "--set-upstream", "origin", branch)?;
+        exec!(root; ["git"]; "push", "--set-upstream", "origin", branch)?;
     }
     Ok(())
 }

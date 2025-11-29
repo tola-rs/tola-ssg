@@ -8,7 +8,7 @@ use crate::utils::xml::{
     create_xml_reader, write_element_with_processed_links, write_head_content,
     write_heading_with_slugified_id, write_html_with_lang,
 };
-use crate::{config::SiteConfig, log, run_command, utils::slug::content_paths};
+use crate::{config::SiteConfig, exec, log, utils::slug::content_paths};
 use anyhow::{Result, anyhow};
 use quick_xml::{
     Reader, Writer,
@@ -128,7 +128,7 @@ pub fn process_content(
         }
     }
 
-    let output = run_command!(&config.build.typst.command;
+    let output = exec!(&config.build.typst.command;
         "compile", "--features", "html", "--format", "html",
         "--font-path", root, "--root", root,
         content_path, "-"
@@ -188,7 +188,7 @@ pub fn process_asset(
             // Config paths are already absolute, just canonicalize the runtime path
             let asset_path = asset_path.canonicalize().unwrap();
             if *input == asset_path {
-                run_command!(config.get_root(); &config.build.tailwind.command;
+                exec!(config.get_root(); &config.build.tailwind.command;
                     "-i", input, "-o", &output_path, if config.build.minify { "--minify" } else { "" }
                 )?;
             } else {

@@ -20,13 +20,13 @@ use std::{
 /// # Examples
 /// ```ignore
 /// // Without working directory
-/// run_command!(["git"]; "status", "-s")?;
+/// exec!(["git"]; "status", "-s")?;
 ///
 /// // With working directory
-/// run_command!(root; ["typst"]; "compile", input, output)?;
+/// exec!(root; ["typst"]; "compile", input, output)?;
 /// ```
 #[macro_export]
-macro_rules! run_command {
+macro_rules! exec {
     ($cmd:expr; $($arg:expr),* $(,)?) => {{
         $crate::utils::command::exec(
             None,
@@ -48,7 +48,7 @@ macro_rules! run_command {
 /// The child process is spawned with stdin piped, stdout/stderr nulled.
 /// Caller is responsible for writing to stdin and dropping it to signal EOF.
 #[macro_export]
-macro_rules! run_command_with_stdin {
+macro_rules! exec_with_stdin {
     ($cmd:expr; $($arg:expr),* $(,)?) => {{
         $crate::utils::command::spawn_with_stdin(
             None,

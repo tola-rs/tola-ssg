@@ -16,7 +16,7 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 
 use crate::config::{ExtractSvgType, SiteConfig};
-use crate::{log, run_command_with_stdin};
+use crate::{exec_with_stdin, log};
 
 // ============================================================================
 // Constants
@@ -360,7 +360,7 @@ fn compress_svg(svg: &Svg, output_path: &Path, scale: f32, config: &SiteConfig) 
 /// Compress using ImageMagick
 fn compress_magick(output: &Path, data: &[u8], scale: f32) -> Result<()> {
     let density = (scale * 96.0).to_string();
-    let mut stdin = run_command_with_stdin!(
+    let mut stdin = exec_with_stdin!(
         ["magick"];
         "-background", "none", "-density", density, "-", output
     )?;
@@ -370,7 +370,7 @@ fn compress_magick(output: &Path, data: &[u8], scale: f32) -> Result<()> {
 
 /// Compress using FFmpeg
 fn compress_ffmpeg(output: &Path, data: &[u8]) -> Result<()> {
-    let mut stdin = run_command_with_stdin!(
+    let mut stdin = exec_with_stdin!(
         ["ffmpeg"];
         "-f", "svg_pipe",
         "-frame_size", "1000000000",

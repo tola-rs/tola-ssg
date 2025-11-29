@@ -4,7 +4,7 @@
 
 use crate::{
     config::SiteConfig,
-    log, run_command,
+    exec, log,
     utils::{build::collect_files, slug::content_paths},
 };
 use anyhow::{Context, Ok, Result, anyhow, bail};
@@ -439,7 +439,7 @@ fn query_post_meta(post_path: &Path, config: &'static SiteConfig) -> Result<Post
     let root = config.get_root();
     let guid = get_guid_from_content_path(post_path, config)?;
 
-    let output = run_command!(
+    let output = exec!(
         &config.build.typst.command;
         "query", "--features", "html", "--format", "json",
         "--font-path", root, "--root", root,

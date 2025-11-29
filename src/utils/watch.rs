@@ -3,7 +3,7 @@
 //! Handles content and asset changes triggered by file watcher.
 
 use super::build::{process_asset, process_content};
-use crate::{config::SiteConfig, log, run_command};
+use crate::{config::SiteConfig, exec, log};
 use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 use std::{
@@ -115,7 +115,7 @@ fn rebuild_tailwind(config: &'static SiteConfig) -> Result<()> {
     // Config paths are already absolute
     let output = config.build.output.join(relative_path);
 
-    run_command!(
+    exec!(
         config.get_root();
         &config.build.tailwind.command;
         "-i", input, "-o", output,
