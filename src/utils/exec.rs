@@ -28,17 +28,17 @@ use std::{
 #[macro_export]
 macro_rules! exec {
     ($cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::command::exec(
+        $crate::utils::exec::exec(
             None,
-            &$crate::utils::command::to_cmd_vec($cmd),
-            &$crate::utils::command::filter_args(&[$($crate::utils::command::to_os($arg)),*]),
+            &$crate::utils::exec::to_cmd_vec($cmd),
+            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
         )
     }};
     ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::command::exec(
+        $crate::utils::exec::exec(
             Some($root),
-            &$crate::utils::command::to_cmd_vec($cmd),
-            &$crate::utils::command::filter_args(&[$($crate::utils::command::to_os($arg)),*]),
+            &$crate::utils::exec::to_cmd_vec($cmd),
+            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
         )
     }};
 }
@@ -50,17 +50,17 @@ macro_rules! exec {
 #[macro_export]
 macro_rules! exec_with_stdin {
     ($cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::command::spawn_with_stdin(
+        $crate::utils::exec::spawn_with_stdin(
             None,
-            &$crate::utils::command::to_cmd_vec($cmd),
-            &$crate::utils::command::filter_args(&[$($crate::utils::command::to_os($arg)),*]),
+            &$crate::utils::exec::to_cmd_vec($cmd),
+            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
         )
     }};
     ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::command::spawn_with_stdin(
+        $crate::utils::exec::spawn_with_stdin(
             Some($root),
-            &$crate::utils::command::to_cmd_vec($cmd),
-            &$crate::utils::command::filter_args(&[$($crate::utils::command::to_os($arg)),*]),
+            &$crate::utils::exec::to_cmd_vec($cmd),
+            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
         )
     }};
 }
@@ -177,102 +177,48 @@ fn prepare(root: Option<&Path>, cmd: &[OsString], args: &[OsString]) -> Result<(
 // Output Filtering
 // ============================================================================
 
-/// Filter rule for CLI output noise.
+/// Filter rule for skipping entire output blocks.
 ///
-/// Matches lines that start with a prefix AND contain all required keywords.
-/// This is more precise than keyword-only matching to avoid filtering user errors.
+/// If output starts with any of the specified prefixes, the entire block is skipped.
 struct FilterRule {
-    /// Line must start with one of these (case-insensitive, after trim).
-    starts_with: &'static [&'static str],
-    /// Line must also contain ALL of these keywords (case-insensitive).
-    contains: &'static [&'static str],
-}
-
-impl FilterRule {
-    const fn new(starts_with: &'static [&'static str], contains: &'static [&'static str]) -> Self {
-        Self { starts_with, contains }
-    }
-
-    fn matches(&self, line: &str) -> bool {
-        let lower = line.trim().to_ascii_lowercase();
-        // Must start with one of the prefixes
-        let has_prefix = self.starts_with.is_empty()
-            || self.starts_with.iter().any(|p| lower.starts_with(p));
-        // Must contain all keywords
-        let has_keywords = self.contains.iter().all(|kw| lower.contains(kw));
-        has_prefix && has_keywords
-    }
-}
-
-/// Output filter configuration.
-struct OutputFilter {
-    /// Lines matching any rule are filtered out.
-    line_rules: &'static [FilterRule],
-    /// Prefixes indicating non-output (HTML, JSON).
+    /// Prefixes to match at the start of output.
     skip_prefixes: &'static [&'static str],
 }
 
-impl OutputFilter {
-    const STDOUT: Self = Self {
-        line_rules: &[],
-        skip_prefixes: &["<!DOCTYPE", "{"],
-    };
+impl FilterRule {
+    const fn new(skip_prefixes: &'static [&'static str]) -> Self {
+        Self { skip_prefixes }
+    }
 
-    // Typst warning example:
-    //   warning: html export is under active development and incomplete
-    //    = hint: its behaviour may change at any time
-    //   warning: elem `xxx` was ignored during html export
-    //
-    // Tailwindcss example:
-    //   ≈ tailwindcss v4.0.0
-    const STDERR: Self = Self {
-        line_rules: &[
-            // Typst warnings about experimental features
-            FilterRule::new(&["warning:"], &["html export"]),
-            FilterRule::new(&["warning:"], &["was ignored during", "export"]),
-            // Typst hints (always start with "= hint:")
-            FilterRule::new(&["= hint:"], &[]),
-            // Tailwindcss version banner (starts with ≈ or ~)
-            FilterRule::new(&["≈", "~"], &["tailwindcss"]),
-        ],
-        skip_prefixes: &[],
-    };
-
-    /// Check if entire output block should be skipped.
+    /// Check if output should be skipped entirely.
     fn should_skip(&self, output: &str) -> bool {
         output.is_empty() || self.skip_prefixes.iter().any(|p| output.starts_with(p))
     }
 
-    /// Check if a line should be filtered.
-    fn should_filter_line(&self, line: &str) -> bool {
-        self.line_rules.iter().any(|r| r.matches(line))
-    }
-
-    /// Log non-filtered lines.
+    /// Log output lines if not skipped.
     fn log(&self, name: &str, output: &str) {
         if self.should_skip(output) {
             return;
         }
         for line in output.lines() {
-            if !line.trim().is_empty() && !self.should_filter_line(line) {
+            if !line.trim().is_empty() {
                 log!(name; "{line}");
             }
         }
     }
-
-    /// Extract error message, skipping filtered lines at start.
-    fn extract_error<'a>(&self, stderr: &'a str) -> &'a str {
-        stderr
-            .lines()
-            .find(|line| !line.trim().is_empty() && !self.should_filter_line(line))
-            .map(|first| {
-                let offset = first.as_ptr() as usize - stderr.as_ptr() as usize;
-                &stderr[offset..]
-            })
-            .unwrap_or(stderr)
-            .trim()
-    }
 }
+
+/// Stdout filter: skip HTML and JSON output.
+const STDOUT_FILTER: FilterRule = FilterRule::new(&["<!DOCTYPE", "{"]);
+
+/// Stderr filter: skip known warnings/noise.
+const STDERR_FILTER: FilterRule = FilterRule::new(&[
+    // Typst HTML export warnings
+    "warning: html export is under active development",
+    "warning: elem",
+    // Tailwindcss version banner
+    "≈ tailwindcss",
+]);
 
 /// Log command output, filtering known noise.
 fn log_output(name: &str, output: &Output) -> Result<()> {
@@ -284,15 +230,19 @@ fn log_output(name: &str, output: &Output) -> Result<()> {
         .trim();
 
     if !output.status.success() {
-        let error_msg = OutputFilter::STDERR.extract_error(stderr);
+        // Strip warning prefix from error output
+        let error_msg = STDERR_FILTER
+            .skip_prefixes
+            .iter()
+            .fold(stderr, |s, p| s.trim_start_matches(p).trim_start());
         if !error_msg.is_empty() {
             eprintln!("{error_msg}");
         }
         anyhow::bail!("Command `{name}` failed with {}", output.status);
     }
 
-    OutputFilter::STDOUT.log(name, stdout);
-    OutputFilter::STDERR.log(name, stderr);
+    STDOUT_FILTER.log(name, stdout);
+    STDERR_FILTER.log(name, stderr);
 
     Ok(())
 }
