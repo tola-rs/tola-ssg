@@ -61,3 +61,4 @@ rss = { version = "2.0.12", default-features = false, features = ["validation", 
 walkdir = "2.5"
 tiny_http = "0.12.0"
 ctrlc = "3.5.1"
+deunicode = "1.6.2"

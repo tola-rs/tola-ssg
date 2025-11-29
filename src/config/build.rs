@@ -12,16 +12,33 @@ use std::path::{Path, PathBuf};
 // ============================================================================
 
 /// URL slug generation mode for paths and anchors.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugMode {
-    /// Always convert to ASCII slug (e.g., "你好" → "ni-hao").
-    On,
-    /// Only slugify non-ASCII; keep ASCII as-is (default).
+    /// Full slugify: Unicode → ASCII, lowercase, use separator.
+    Full,
+    /// Safe mode: remove dangerous chars, preserve Unicode, use separator (default).
     #[default]
     Safe,
-    /// No slugification; preserve original text.
+    /// ASCII mode: transliterate Unicode → ASCII, use separator.
+    Ascii,
+    /// No modification; preserve original text.
     No,
+}
+
+/// Case transformation mode for slugs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SlugCase {
+    /// Convert to lowercase (default).
+    #[default]
+    Lower,
+    /// Convert to UPPERCASE.
+    Upper,
+    /// Capitalize each word (Title Case).
+    Capitalize,
+    /// Preserve original case.
+    Preserve,
 }
 
 /// SVG image extraction method for embedded raster images.
@@ -189,9 +206,19 @@ pub struct SlugConfig {
     pub path: SlugMode,
 
     /// Slugify URL fragments (anchors)
-    #[serde(default = "defaults::build::slug::on")]
-    #[educe(Default = defaults::build::slug::on())]
+    #[serde(default = "defaults::build::slug::full")]
+    #[educe(Default = defaults::build::slug::full())]
     pub fragment: SlugMode,
+
+    /// Separator character for spaces: '-' or '_' (default: '-')
+    #[serde(default = "defaults::build::slug::separator")]
+    #[educe(Default = defaults::build::slug::separator())]
+    pub separator: char,
+
+    /// Case transformation: lower, upper, or preserve (default: lower)
+    #[serde(default = "defaults::build::slug::case")]
+    #[educe(Default = defaults::build::slug::case())]
+    pub case: SlugCase,
 }
 
 /// `[build.typst]` section
@@ -376,31 +403,28 @@ mod tests {
             description = "Test blog"
 
             [build.slug]
-            path = "on"
+            path = "full"
             fragment = "no"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
-        assert!(matches!(config.build.slug.path, SlugMode::On));
+        assert!(matches!(config.build.slug.path, SlugMode::Full));
         assert!(matches!(config.build.slug.fragment, SlugMode::No));
     }
 
     #[test]
     fn test_slug_mode_parsing() {
-        // Test "on"
-        let config: SiteConfig = toml::from_str(
-            r#"
+        // Test "full"
+        let config: SiteConfig = toml::from_str(r#"
             [base]
             title = "Test"
             description = "Test"
             [build.slug]
-            path = "on"
-            fragment = "on"
-        "#,
-        )
-        .unwrap();
-        assert!(matches!(config.build.slug.path, SlugMode::On));
-        assert!(matches!(config.build.slug.fragment, SlugMode::On));
+            path = "full"
+            fragment = "full"
+        "#).unwrap();
+        assert!(matches!(config.build.slug.path, SlugMode::Full));
+        assert!(matches!(config.build.slug.fragment, SlugMode::Full));
 
         // Test "safe"
         let config: SiteConfig = toml::from_str(
@@ -793,7 +817,7 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
         assert!(matches!(config.build.slug.path, SlugMode::Safe));
-        assert!(matches!(config.build.slug.fragment, SlugMode::On));
+        assert!(matches!(config.build.slug.fragment, SlugMode::Full));
     }
 
     #[test]

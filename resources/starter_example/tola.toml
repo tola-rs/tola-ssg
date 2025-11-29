@@ -20,7 +20,7 @@ path = "feed.xml"
 
 [build.slug]
 path = "safe"
-fragment = "on"
+fragment = "full"
 
 [build.typst]
 command = ["typst"]

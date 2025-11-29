@@ -34,7 +34,7 @@
 use crate::{
     config::SiteConfig,
     log,
-    utils::slug::{FORBIDDEN_CHARS, slugify_path},
+    utils::slug::{slugify_path, remove_forbidden_chars},
 };
 use anyhow::{Result, anyhow};
 use rayon::prelude::*;
@@ -209,10 +209,7 @@ impl PageMeta {
         };
 
         // Sanitize url_path (remove forbidden chars)
-        let url_path: String = url_path
-            .chars()
-            .filter(|c| !FORBIDDEN_CHARS.contains(c))
-            .collect();
+        let url_path = remove_forbidden_chars(&url_path);
 
         let full_url = format!("{}{}", base_url, url_path);
         let lastmod = fs::metadata(&html).and_then(|m| m.modified()).ok();

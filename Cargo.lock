@@ -3604,6 +3604,7 @@ dependencies = [
  "colored",
  "crossterm",
  "ctrlc",
+ "deunicode",
  "educe",
  "gix",
  "minify-html",
