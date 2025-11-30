@@ -20,6 +20,7 @@ use init::new_site;
 use serve::serve_site;
 use std::path::Path;
 use utils::rss::build_rss;
+use utils::sitemap::build_sitemap;
 
 fn main() -> Result<()> {
     let cli: &'static Cli = Box::leak(Box::new(Cli::parse()));
@@ -68,16 +69,22 @@ fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
     Ok(config)
 }
 
-/// Build site and optionally generate RSS feed in parallel.
+/// Build site and optionally generate rss/sitemap in parallel.
 ///
 /// RSS generation is controlled by `config.build.rss.enable`.
+/// Sitemap generation is controlled by `config.build.sitemap.enable`.
 /// Output cleanup is controlled by `config.build.clean`.
 fn build_all(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
-    let (build_result, rss_result) = rayon::join(
-        || build_site(config),
-        || build_rss(config),
+    // Build site first, collecting page metadata
+    let (repo, pages) = build_site(config)?;
+
+    // Generate RSS and sitemap in parallel using collected pages
+    let (rss_result, sitemap_result) = rayon::join(
+        || build_rss(config, &pages),
+        || build_sitemap(config, &pages),
     );
 
     rss_result?;
-    build_result
+    sitemap_result?;
+    Ok(repo)
 }

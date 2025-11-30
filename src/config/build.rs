@@ -113,6 +113,10 @@ pub struct BuildConfig {
     #[serde(default)]
     pub rss: RssConfig,
 
+    /// Sitemap generation settings.
+    #[serde(default)]
+    pub sitemap: SitemapConfig,
+
     /// URL slugification settings.
     #[serde(default)]
     pub slug: SlugConfig,
@@ -153,6 +157,24 @@ pub struct RssConfig {
     /// Output path for RSS feed file.
     #[serde(default = "defaults::build::rss::path")]
     #[educe(Default = defaults::build::rss::path())]
+    pub path: PathBuf,
+}
+
+/// `[build.sitemap]` section - Sitemap generation configuration.
+///
+/// Generates a sitemap.xml file listing all pages for search engine indexing.
+#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
+#[educe(Default)]
+#[serde(deny_unknown_fields)]
+pub struct SitemapConfig {
+    /// Enable sitemap generation.
+    #[serde(default = "defaults::r#false")]
+    #[educe(Default = defaults::r#false())]
+    pub enable: bool,
+
+    /// Output path for sitemap file.
+    #[serde(default = "defaults::build::sitemap::path")]
+    #[educe(Default = defaults::build::sitemap::path())]
     pub path: PathBuf,
 }
 

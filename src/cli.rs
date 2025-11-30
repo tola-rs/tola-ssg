@@ -52,6 +52,10 @@ pub struct BuildArgs {
     /// enable RSS feed generation
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub rss: Option<bool>,
+
+    /// enable sitemap generation
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
+    pub sitemap: Option<bool>,
 }
 
 /// Available subcommands

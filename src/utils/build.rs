@@ -8,7 +8,7 @@ use crate::utils::xml::{
     create_xml_reader, write_element_with_processed_links, write_head_content,
     write_heading_with_slugified_id, write_html_with_lang,
 };
-use crate::{config::SiteConfig, exec, log, utils::slug::content_paths};
+use crate::{config::SiteConfig, exec, log, utils::page::PageMeta};
 use anyhow::{Result, anyhow};
 use quick_xml::{
     Reader, Writer,
@@ -129,16 +129,16 @@ pub fn process_content(
     }
 
     // Process .typ file: get output paths, compile, and post-process
-    let paths = content_paths(content_path, config)?;
+    let page = PageMeta::from_source(content_path.to_path_buf(), config)?;
 
     // Check source and dependencies (templates, utils, config)
-    if !force_rebuild && is_up_to_date(content_path, &paths.html, deps_mtime) {
+    if !force_rebuild && is_up_to_date(content_path, &page.html, deps_mtime) {
         return Ok(());
     }
 
-    log!(should_log_newline; "content"; "{}", paths.relative);
+    log!(should_log_newline; "content"; "{}", page.relative);
 
-    if let Some(parent) = paths.html.parent() {
+    if let Some(parent) = page.html.parent() {
         fs::create_dir_all(parent)?;
     }
 
@@ -149,7 +149,7 @@ pub fn process_content(
     )?;
 
     let html_content = output.stdout;
-    let html_content = process_html(&paths.html, &html_content, config)?;
+    let html_content = process_html(&page.html, &html_content, config)?;
 
     let html_content = if config.build.minify {
         minify_html::minify(html_content.as_slice(), &minify_html::Cfg::new())
@@ -157,7 +157,7 @@ pub fn process_content(
         html_content
     };
 
-    fs::write(&paths.html, html_content)?;
+    fs::write(&page.html, html_content)?;
     Ok(())
 }
 
