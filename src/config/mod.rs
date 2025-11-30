@@ -418,50 +418,62 @@ mod tests {
 
     #[test]
     fn test_get_inline_max_size_kb() {
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.typst.svg]
             inline_max_size = "20KB"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(config.get_inline_max_size(), 20 * 1024);
     }
 
     #[test]
     fn test_get_inline_max_size_mb() {
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.typst.svg]
             inline_max_size = "5MB"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(config.get_inline_max_size(), 5 * 1024 * 1024);
     }
 
     #[test]
     fn test_get_inline_max_size_bytes() {
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.typst.svg]
             inline_max_size = "100B"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         assert_eq!(config.get_inline_max_size(), 100);
     }
 
     #[test]
     fn test_get_scale_default_dpi() {
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // Default DPI is 96, so scale should be 1.0
         assert_eq!(config.get_scale(), 1.0);
@@ -469,13 +481,16 @@ mod tests {
 
     #[test]
     fn test_get_scale_custom_dpi() {
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.typst.svg]
             dpi = 192.0
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
 
         // 192 / 96 = 2.0
         assert_eq!(config.get_scale(), 2.0);
@@ -540,7 +555,10 @@ mod tests {
             Some("custom_value")
         );
         assert_eq!(
-            config.extra.get("number_field").and_then(|v| v.as_integer()),
+            config
+                .extra
+                .get("number_field")
+                .and_then(|v| v.as_integer()),
             Some(42)
         );
     }
@@ -562,8 +580,14 @@ mod tests {
         let social = config.extra.get("social").and_then(|v| v.as_table());
         assert!(social.is_some());
         let social = social.unwrap();
-        assert_eq!(social.get("twitter").and_then(|v| v.as_str()), Some("@user"));
-        assert_eq!(social.get("github").and_then(|v| v.as_str()), Some("username"));
+        assert_eq!(
+            social.get("twitter").and_then(|v| v.as_str()),
+            Some("@user")
+        );
+        assert_eq!(
+            social.get("github").and_then(|v| v.as_str()),
+            Some("username")
+        );
     }
 
     #[test]
@@ -597,8 +621,14 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
-        assert_eq!(config.extra.get("show_comments").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(config.extra.get("version").and_then(|v| v.as_float()), Some(1.5));
+        assert_eq!(
+            config.extra.get("show_comments").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            config.extra.get("version").and_then(|v| v.as_float()),
+            Some(1.5)
+        );
     }
 
     #[test]

@@ -118,9 +118,15 @@ mod tests {
 
         assert_eq!(config.deploy.provider, "github");
         assert!(config.deploy.force);
-        assert_eq!(config.deploy.github.url, "https://github.com/user/user.github.io");
+        assert_eq!(
+            config.deploy.github.url,
+            "https://github.com/user/user.github.io"
+        );
         assert_eq!(config.deploy.github.branch, "gh-pages");
-        assert_eq!(config.deploy.github.token_path, Some(PathBuf::from("~/.github-token")));
+        assert_eq!(
+            config.deploy.github.token_path,
+            Some(PathBuf::from("~/.github-token"))
+        );
     }
 
     #[test]

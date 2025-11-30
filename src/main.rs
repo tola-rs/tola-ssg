@@ -27,13 +27,14 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { .. } => new_site(config),
-        Commands::Build { .. } => run_build(config).map(|_| ()),
+        Commands::Build { .. } => build_all(config, true).map(|_| ()),
         Commands::Deploy { .. } => {
-            let repo = run_build(config)?;
+            let repo = build_all(config, true)?;
             deploy_site(repo, config)
         }
         Commands::Serve { .. } => {
-            run_build(config)?;
+            // Skip RSS generation during serve - it's not needed for local preview
+            build_all(config, false)?;
             tokio::runtime::Runtime::new()?.block_on(serve_site(config))
         }
     }
@@ -68,11 +69,19 @@ fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
     Ok(config)
 }
 
-/// Run build and RSS generation in parallel
-fn run_build(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
+/// Build site and optionally generate RSS feed in parallel.
+///
+/// RSS generation is controlled by two factors:
+/// - `with_rss`: caller decides if RSS should be considered (false for serve mode)
+/// - `config.build.rss.enable`: user config to enable/disable RSS entirely
+///
+/// Both must be true for RSS to be generated.
+fn build_all(config: &'static SiteConfig, with_rss: bool) -> Result<ThreadSafeRepository> {
     let (build_result, rss_result) = rayon::join(
         || build_site(config, config.build.clear),
-        || build_rss(config),
+        || {
+            if with_rss { build_rss(config) } else { Ok(()) }
+        },
     );
 
     rss_result?;

@@ -59,9 +59,9 @@ pub fn watch_for_changes_blocking(
             } else {
                 RecursiveMode::NonRecursive
             };
-            watcher
-                .watch(&path, mode)
-                .with_context(|| format!("Failed to watch {}: {}", category.name(), path.display()))?;
+            watcher.watch(&path, mode).with_context(|| {
+                format!("Failed to watch {}: {}", category.name(), path.display())
+            })?;
             log!("watch"; "watching for changes in {}: {}", category.name(), path.display());
         }
     }

@@ -131,7 +131,10 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
-        assert_eq!(config.base.url, Some("https://example.com/blog".to_string()));
+        assert_eq!(
+            config.base.url,
+            Some("https://example.com/blog".to_string())
+        );
     }
 
     #[test]

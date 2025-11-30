@@ -134,17 +134,23 @@ pub struct BuildConfig {
 // Sub-configurations
 // ============================================================================
 
-/// `[build.rss]` section
+/// `[build.rss]` section - RSS feed generation configuration.
+///
+/// RSS generation is controlled by two factors:
+/// - `enable`: this config option (user-controlled)
+/// - Mode: `build`/`deploy` generate RSS, `serve` skips it for faster local preview
+///
+/// See `build_all` in `main.rs` and `build_rss` in `utils/rss.rs` for implementation.
 #[derive(Debug, Clone, Educe, Serialize, Deserialize)]
 #[educe(Default)]
 #[serde(deny_unknown_fields)]
 pub struct RssConfig {
-    /// Enable RSS feed generation
+    /// Enable RSS feed generation (only effective in build/deploy mode).
     #[serde(default = "defaults::r#false")]
     #[educe(Default = defaults::r#false())]
     pub enable: bool,
 
-    /// Output path for RSS feed file
+    /// Output path for RSS feed file.
     #[serde(default = "defaults::build::rss::path")]
     #[educe(Default = defaults::build::rss::path())]
     pub path: PathBuf,
@@ -361,38 +367,47 @@ mod tests {
     #[test]
     fn test_slug_mode_parsing() {
         // Test "on"
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.slug]
             path = "on"
             fragment = "on"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(config.build.slug.path, SlugMode::On));
         assert!(matches!(config.build.slug.fragment, SlugMode::On));
 
         // Test "safe"
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.slug]
             path = "safe"
             fragment = "safe"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(config.build.slug.path, SlugMode::Safe));
         assert!(matches!(config.build.slug.fragment, SlugMode::Safe));
 
         // Test "no"
-        let config: SiteConfig = toml::from_str(r#"
+        let config: SiteConfig = toml::from_str(
+            r#"
             [base]
             title = "Test"
             description = "Test"
             [build.slug]
             path = "no"
             fragment = "no"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert!(matches!(config.build.slug.path, SlugMode::No));
         assert!(matches!(config.build.slug.fragment, SlugMode::No));
     }
@@ -415,7 +430,10 @@ mod tests {
         let config: SiteConfig = toml::from_str(config).unwrap();
 
         assert_eq!(config.build.typst.command, vec!["typst-custom".to_string()]);
-        assert!(matches!(config.build.typst.svg.extract_type, ExtractSvgType::Magick));
+        assert!(matches!(
+            config.build.typst.svg.extract_type,
+            ExtractSvgType::Magick
+        ));
         assert_eq!(config.build.typst.svg.inline_max_size, "50KB");
         assert_eq!(config.build.typst.svg.dpi, 144.0);
     }
@@ -431,13 +449,15 @@ mod tests {
         ];
 
         for (str_type, expected) in types {
-            let config = format!(r#"
+            let config = format!(
+                r#"
                 [base]
                 title = "Test"
                 description = "Test"
                 [build.typst.svg]
                 extract_type = "{str_type}"
-            "#);
+            "#
+            );
             let config: SiteConfig = toml::from_str(&config).unwrap();
 
             assert!(
@@ -463,8 +483,14 @@ mod tests {
         let config: SiteConfig = toml::from_str(config).unwrap();
 
         assert!(config.build.tailwind.enable);
-        assert_eq!(config.build.tailwind.input, Some(PathBuf::from("assets/styles/main.css")));
-        assert_eq!(config.build.tailwind.command, vec!["tailwindcss-v4".to_string()]);
+        assert_eq!(
+            config.build.tailwind.input,
+            Some(PathBuf::from("assets/styles/main.css"))
+        );
+        assert_eq!(
+            config.build.tailwind.command,
+            vec!["tailwindcss-v4".to_string()]
+        );
     }
 
     #[test]
@@ -479,7 +505,10 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
-        assert_eq!(config.build.head.icon, Some(PathBuf::from("./assets/images/favicon.avif")));
+        assert_eq!(
+            config.build.head.icon,
+            Some(PathBuf::from("./assets/images/favicon.avif"))
+        );
     }
 
     #[test]
@@ -498,8 +527,14 @@ mod tests {
         let config: SiteConfig = toml::from_str(config).unwrap();
 
         assert_eq!(config.build.head.styles.len(), 2);
-        assert_eq!(config.build.head.styles[0], PathBuf::from("./assets/fonts/custom/font.css"));
-        assert_eq!(config.build.head.styles[1], PathBuf::from("./assets/styles/highlight.min.css"));
+        assert_eq!(
+            config.build.head.styles[0],
+            PathBuf::from("./assets/fonts/custom/font.css")
+        );
+        assert_eq!(
+            config.build.head.styles[1],
+            PathBuf::from("./assets/styles/highlight.min.css")
+        );
     }
 
     #[test]
@@ -518,7 +553,10 @@ mod tests {
         let config: SiteConfig = toml::from_str(config).unwrap();
 
         assert_eq!(config.build.head.scripts.len(), 2);
-        assert_eq!(config.build.head.scripts[0].path(), Path::new("./assets/scripts/a.js"));
+        assert_eq!(
+            config.build.head.scripts[0].path(),
+            Path::new("./assets/scripts/a.js")
+        );
         assert!(!config.build.head.scripts[0].is_defer());
         assert!(!config.build.head.scripts[0].is_async());
     }
@@ -542,17 +580,26 @@ mod tests {
         assert_eq!(config.build.head.scripts.len(), 3);
 
         // First script with defer
-        assert_eq!(config.build.head.scripts[0].path(), Path::new("./assets/scripts/a.js"));
+        assert_eq!(
+            config.build.head.scripts[0].path(),
+            Path::new("./assets/scripts/a.js")
+        );
         assert!(config.build.head.scripts[0].is_defer());
         assert!(!config.build.head.scripts[0].is_async());
 
         // Second script - simple path
-        assert_eq!(config.build.head.scripts[1].path(), Path::new("./assets/scripts/b.js"));
+        assert_eq!(
+            config.build.head.scripts[1].path(),
+            Path::new("./assets/scripts/b.js")
+        );
         assert!(!config.build.head.scripts[1].is_defer());
         assert!(!config.build.head.scripts[1].is_async());
 
         // Third script with async
-        assert_eq!(config.build.head.scripts[2].path(), Path::new("./assets/scripts/c.js"));
+        assert_eq!(
+            config.build.head.scripts[2].path(),
+            Path::new("./assets/scripts/c.js")
+        );
         assert!(!config.build.head.scripts[2].is_defer());
         assert!(config.build.head.scripts[2].is_async());
     }
@@ -573,8 +620,14 @@ mod tests {
         let config: SiteConfig = toml::from_str(config).unwrap();
 
         assert_eq!(config.build.head.elements.len(), 2);
-        assert_eq!(config.build.head.elements[0], "<meta name=\"darkreader-lock\">");
-        assert_eq!(config.build.head.elements[1], "<meta name=\"theme-color\" content=\"#ffffff\">");
+        assert_eq!(
+            config.build.head.elements[0],
+            "<meta name=\"darkreader-lock\">"
+        );
+        assert_eq!(
+            config.build.head.elements[1],
+            "<meta name=\"theme-color\" content=\"#ffffff\">"
+        );
     }
 
     #[test]
@@ -757,7 +810,10 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
         assert_eq!(config.build.typst.command, vec!["typst".to_string()]);
-        assert!(matches!(config.build.typst.svg.extract_type, ExtractSvgType::Embedded));
+        assert!(matches!(
+            config.build.typst.svg.extract_type,
+            ExtractSvgType::Embedded
+        ));
         assert_eq!(config.build.typst.svg.inline_max_size, "20KB");
         assert_eq!(config.build.typst.svg.dpi, 96.0);
     }
@@ -798,7 +854,10 @@ mod tests {
         let config: SiteConfig = toml::from_str(config).unwrap();
         assert!(!config.build.tailwind.enable);
         assert!(config.build.tailwind.input.is_none());
-        assert_eq!(config.build.tailwind.command, vec!["tailwindcss".to_string()]);
+        assert_eq!(
+            config.build.tailwind.command,
+            vec!["tailwindcss".to_string()]
+        );
     }
 
     #[test]

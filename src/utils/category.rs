@@ -87,7 +87,10 @@ impl FileCategory {
 
     /// Returns true if this category represents a directory (vs a single file)
     pub fn is_directory(self) -> bool {
-        matches!(self, Self::Content | Self::Asset | Self::Template | Self::Utils)
+        matches!(
+            self,
+            Self::Content | Self::Asset | Self::Template | Self::Utils
+        )
     }
 }
 

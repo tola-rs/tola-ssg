@@ -334,6 +334,11 @@ fn normalize_link(dest: &str, base_url: &str) -> String {
 // Public API
 // ============================================================================
 
+/// Build RSS feed if enabled in config.
+///
+/// This checks `config.build.rss.enable` before generating.
+/// The caller (`build_all` in `main.rs`) may also skip calling this entirely
+/// in serve mode to speed up local preview.
 pub fn build_rss(config: &'static SiteConfig) -> Result<()> {
     if config.build.rss.enable {
         RssFeed::build(config)?.write(config)?;
@@ -458,7 +463,7 @@ fn query_post_meta(post_path: &Path, config: &'static SiteConfig) -> Result<Post
     parse_post_meta(guid, json_str, config)
 }
 
-/// Parse post metadata from JSON string  
+/// Parse post metadata from JSON string
 fn parse_post_meta(guid: String, json_str: &str, config: &'static SiteConfig) -> Result<PostMeta> {
     let json: serde_json::Value = serde_json::from_str(json_str)
         .with_context(|| format!("Failed to parse post metadata JSON:\n{json_str}"))?;
@@ -494,7 +499,7 @@ fn parse_typst_element(content: &str) -> Result<TypstElement> {
 ///
 /// Priority:
 /// 1. Post meta author if already in valid format
-/// 2. Site config author if in valid format  
+/// 2. Site config author if in valid format
 /// 3. Combine site config email and author
 fn normalize_rss_author(author: Option<&String>, config: &'static SiteConfig) -> Option<String> {
     static RE_VALID_AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
@@ -525,12 +530,12 @@ fn test_parse_element_from_typst_sequence() {
         "func": "sequence",
         "children": [
             { "func": "space" },
-            { "func": "text", "text": "小鹤双拼是一个简洁, 流畅, 自由的双拼输入法方案" },
+            { "func": "text", "text": "This is a simple, fluent, and flexible typing scheme" },
             { "func": "space" },
             { "func": "linebreak" },
             { "func": "space" },
-            { "func": "link", "dest": "https://example.com", "body": { "func": "text", "text": "小鹤双拼" } },
-            { "func": "text", "text": "适合想提高打字速度, 但又不想投入巨量精力进行记忆, 追求高性价比的同学" },
+            { "func": "link", "dest": "https://example.com", "body": { "func": "text", "text": "Learn more" } },
+            { "func": "text", "text": "Suitable for those who want to improve typing speed without too much effort" },
             { "func": "space" },
             { "func": "unknown_func" }
         ]
@@ -544,7 +549,7 @@ fn test_parse_element_from_typst_sequence() {
             children: vec![
                 TypstElement::Space,
                 TypstElement::Text {
-                    text: "小鹤双拼是一个简洁, 流畅, 自由的双拼输入法方案".to_string()
+                    text: "This is a simple, fluent, and flexible typing scheme".to_string()
                 },
                 TypstElement::Space,
                 TypstElement::Linebreak,
@@ -552,11 +557,11 @@ fn test_parse_element_from_typst_sequence() {
                 TypstElement::Link {
                     dest: "https://example.com".to_string(),
                     body: Box::new(TypstElement::Text {
-                        text: "小鹤双拼".to_string()
+                        text: "Learn more".to_string()
                     }),
                 },
                 TypstElement::Text {
-                    text: "适合想提高打字速度, 但又不想投入巨量精力进行记忆, 追求高性价比的同学"
+                    text: "Suitable for those who want to improve typing speed without too much effort"
                         .to_string()
                 },
                 TypstElement::Space,
