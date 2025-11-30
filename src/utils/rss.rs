@@ -5,7 +5,7 @@
 use crate::{
     config::SiteConfig,
     exec, log,
-    utils::{build::collect_files, slug::content_paths},
+    utils::page::Pages,
 };
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use rayon::prelude::*;
@@ -336,38 +336,13 @@ fn normalize_link(dest: &str, base_url: &str) -> String {
 
 /// Build RSS feed if enabled in config.
 ///
-/// This checks `config.build.rss.enable` before generating.
-/// The caller (`build_all` in `main.rs`) may also skip calling this entirely
-/// in serve mode to speed up local preview.
-pub fn build_rss(config: &'static SiteConfig) -> Result<()> {
+/// Uses pre-collected page metadata for URLs, but still queries typst
+/// for title/summary/date since those require parsing the source files.
+pub fn build_rss(config: &'static SiteConfig, pages: &Pages) -> Result<()> {
     if config.build.rss.enable {
-        RssFeed::build(config)?.write(config)?;
+        RssFeed::build(config, pages)?.write(config)?;
     }
     Ok(())
-}
-
-/// Generate GUID URL for a content file.
-///
-/// Converts a `.typ` content path to its corresponding public URL.
-/// Example: `content/posts/hello.typ` → `https://example.com/posts/hello/index.html`
-pub fn get_guid_from_content_path(
-    content_path: &Path,
-    config: &'static SiteConfig,
-) -> Result<String> {
-    let base_url = config.base.url.as_deref().unwrap_or_default();
-    let paths = content_paths(content_path, config)?;
-
-    // Strip output dir prefix to get relative path for URL
-    let html_relative = paths
-        .html
-        .strip_prefix(&config.build.output)
-        .unwrap_or(&paths.html);
-
-    // URL-encode path components but preserve slashes
-    let encoded = urlencoding::encode(html_relative.to_str().unwrap_or_default());
-    let encoded = encoded.replace("%2F", "/");
-
-    Ok(format!("{}/{}", base_url.trim_end_matches('/'), encoded))
 }
 
 // ============================================================================
@@ -375,17 +350,19 @@ pub fn get_guid_from_content_path(
 // ============================================================================
 
 impl RssFeed {
-    /// Build RSS feed by collecting and parsing all posts
-    pub fn build(config: &'static SiteConfig) -> Result<Self> {
-        log!(true; "rss"; "generating rss feed started");
+    /// Build RSS feed using pre-collected page metadata.
+    ///
+    /// Uses `Pages` for URL information, but queries typst for
+    /// title/summary/date metadata in parallel.
+    pub fn build(config: &'static SiteConfig, pages: &Pages) -> Result<Self> {
+        log!(true; "rss"; "generating rss feed from {} pages", pages.len());
 
-        let posts_paths = collect_files(&config.build.content, |path| {
-            path.extension().is_some_and(|ext| ext == "typ")
-        });
-
-        let posts: Vec<PostMeta> = posts_paths
+        // Parallel query for better performance
+        let posts: Vec<PostMeta> = pages
+            .iter()
+            .collect::<Vec<_>>()
             .par_iter()
-            .map(|path| query_post_meta(path, config))
+            .map(|page| query_post_meta(&page.source, &page.full_url, config))
             .collect::<Result<_>>()?;
 
         Ok(Self {
@@ -428,9 +405,9 @@ impl RssFeed {
         if let Some(parent) = rss_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(rss_path, xml)?;
+        fs::write(rss_path, &xml)?;
 
-        log!(true; "rss"; "rss feed written successfully");
+        log!("rss"; "{}", rss_path.display());
         Ok(())
     }
 }
@@ -440,9 +417,8 @@ impl RssFeed {
 // ============================================================================
 
 /// Query metadata from a Typst post file
-fn query_post_meta(post_path: &Path, config: &'static SiteConfig) -> Result<PostMeta> {
+fn query_post_meta(post_path: &Path, guid: &str, config: &'static SiteConfig) -> Result<PostMeta> {
     let root = config.get_root();
-    let guid = get_guid_from_content_path(post_path, config)?;
 
     let output = exec!(
         &config.build.typst.command;
@@ -460,7 +436,7 @@ fn query_post_meta(post_path: &Path, config: &'static SiteConfig) -> Result<Post
     })?;
 
     let json_str = std::str::from_utf8(&output.stdout)?;
-    parse_post_meta(guid, json_str, config)
+    parse_post_meta(guid.to_string(), json_str, config)
 }
 
 /// Parse post metadata from JSON string

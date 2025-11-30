@@ -3,11 +3,10 @@
 //! Converts paths and fragments to URL-safe formats.
 
 use crate::config::{SiteConfig, SlugMode};
-use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
 /// Characters forbidden in file paths and fragments
-const FORBIDDEN_CHARS: &[char] = &[
+pub const FORBIDDEN_CHARS: &[char] = &[
     '<', '>', ':', '|', '?', '*', '#', '\\', '(', ')', '[', ']', '\t', '\r', '\n',
 ];
 
@@ -47,62 +46,6 @@ fn sanitize_path(path: &Path) -> PathBuf {
     path.components()
         .map(|c| sanitize_text(&c.as_os_str().to_string_lossy()))
         .collect()
-}
-
-// ============================================================================
-// Content Path Utilities
-// ============================================================================
-
-/// Computed paths for a content file.
-pub struct ContentPaths {
-    /// Relative path without `.typ` extension.
-    /// Example: `content/posts/hello.typ` → `"posts/hello"`
-    pub relative: String,
-
-    /// Full output HTML path (slugified).
-    /// Example: `public/posts/hello/index.html`
-    pub html: PathBuf,
-}
-
-/// Compute output paths for a `.typ` content file.
-///
-/// This function maps a source `.typ` file to its HTML output location:
-/// - Strips the content directory prefix
-/// - Removes the `.typ` extension
-/// - Applies path slugification
-/// - Generates the final HTML path
-///
-/// # Path Mapping Examples
-///
-/// | Source | relative | html |
-/// |--------|----------|------|
-/// | `content/posts/hello.typ` | `posts/hello` | `public/posts/hello/index.html` |
-/// | `content/index.typ` | `index` | `public/index.html` |
-pub fn content_paths(content_path: &Path, config: &'static SiteConfig) -> Result<ContentPaths> {
-    let content_dir = &config.build.content;
-    let output_dir = config.build.output.join(&config.build.path_prefix);
-
-    // Strip content dir and .typ extension: "content/posts/hello.typ" → "posts/hello"
-    let relative = content_path
-        .strip_prefix(content_dir)?
-        .to_str()
-        .ok_or_else(|| anyhow!("Invalid path encoding"))?
-        .strip_suffix(".typ")
-        .ok_or_else(|| anyhow!("Not a .typ file: {}", content_path.display()))?
-        .to_owned();
-
-    // Special case: root index.typ → public/path_prefix/index.html (not public/path_prefix/index/index.html)
-    // Only content/index.typ is the root index, not content/subdir/index.typ
-    let is_root_index = relative == "index";
-
-    let html = if is_root_index {
-        output_dir.join("index.html")
-    } else {
-        output_dir.join(&relative).join("index.html")
-    };
-    let html = slugify_path(html, config);
-
-    Ok(ContentPaths { relative, html })
 }
 
 #[cfg(test)]

@@ -9,16 +9,18 @@ use crate::{
         build::{process_asset, process_content, process_files},
         category::get_deps_mtime,
         git,
+        page::{collect_pages, Pages},
     },
 };
 use anyhow::{Context, Result};
 use gix::ThreadSafeRepository;
 use std::{ffi::OsStr, fs, path::Path};
 
-/// Build the entire site, processing content and assets in parallel
+/// Build the entire site, processing content and assets in parallel.
 ///
+/// Returns the collected page metadata for RSS/sitemap generation.
 /// If `config.build.clean` is true, clears the entire output directory first.
-pub fn build_site(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
+pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, Pages)> {
     let output = &config.build.output;
     let content = &config.build.content;
     let assets = &config.build.assets;
@@ -55,9 +57,12 @@ pub fn build_site(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
     posts_result?;
     assets_result?;
 
+    // Collect page metadata for RSS/sitemap
+    let pages = collect_pages(config);
+
     log_build_result(output)?;
 
-    Ok(repo)
+    Ok((repo, pages))
 }
 
 /// Initialize output directory with git repository

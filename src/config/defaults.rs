@@ -80,6 +80,14 @@ pub mod build {
         }
     }
 
+    pub mod sitemap {
+        use std::path::PathBuf;
+
+        pub fn path() -> PathBuf {
+            "sitemap.xml".into()
+        }
+    }
+
     #[allow(unused)]
     pub mod slug {
         use super::super::super::SlugMode;
