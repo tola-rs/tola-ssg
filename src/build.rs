@@ -13,33 +13,31 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use gix::ThreadSafeRepository;
-use std::{ffi::OsStr, fs};
+use std::{ffi::OsStr, fs, path::Path};
 
 /// Build the entire site, processing content and assets in parallel
 ///
-/// If `force_rebuild` is true, skips timestamp checks and rebuilds all content.
-pub fn build_site(
-    config: &'static SiteConfig,
-    force_rebuild: bool,
-) -> Result<ThreadSafeRepository> {
+/// If `config.build.clean` is true, clears the entire output directory first.
+pub fn build_site(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
     let output = &config.build.output;
     let content = &config.build.content;
     let assets = &config.build.assets;
 
-    // Initialize or clear output directory with git repo
-    let repo = init_output_repo(output, force_rebuild)?;
+    // Initialize output directory with git repo
+    let repo = init_output_repo(output, config.build.clean)?;
 
     // Calculate deps mtime once for all content files
     let deps_mtime = get_deps_mtime(config);
 
     // Process content and assets in parallel
+    let clean = config.build.clean;
     let (posts_result, assets_result) = rayon::join(
         || {
             process_files(
                 content,
                 config,
                 |path| path.starts_with(content),
-                |path, cfg| process_content(path, cfg, false, force_rebuild, deps_mtime),
+                |path, cfg| process_content(path, cfg, false, clean, deps_mtime),
             )
             .context("Failed to compile posts")
         },
@@ -63,8 +61,8 @@ pub fn build_site(
 }
 
 /// Initialize output directory with git repository
-fn init_output_repo(output: &std::path::Path, force_rebuild: bool) -> Result<ThreadSafeRepository> {
-    match (output.exists(), force_rebuild) {
+fn init_output_repo(output: &Path, clean: bool) -> Result<ThreadSafeRepository> {
+    match (output.exists(), clean) {
         (true, true) => {
             fs::remove_dir_all(output).with_context(|| {
                 format!("Failed to clear output directory: {}", output.display())
@@ -80,7 +78,7 @@ fn init_output_repo(output: &std::path::Path, force_rebuild: bool) -> Result<Thr
 }
 
 /// Log build result based on output directory contents
-fn log_build_result(output: &std::path::Path) -> Result<()> {
+fn log_build_result(output: &Path) -> Result<()> {
     let file_count = fs::read_dir(output)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name() != OsStr::new(".git"))

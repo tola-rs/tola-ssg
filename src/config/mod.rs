@@ -201,16 +201,24 @@ impl SiteConfig {
         self.set_root(&root);
         self.update_path_with_root(&root);
 
-        Self::update_option(&mut self.build.minify, cli.minify.as_ref());
-        Self::update_option(&mut self.build.tailwind.enable, cli.tailwind.as_ref());
-
         self.build.typst.svg.inline_max_size = self.build.typst.svg.inline_max_size.to_uppercase();
+
+        match &cli.command {
+            Commands::Build { build_args } | Commands::Serve { build_args, .. } => {
+                Self::update_option(&mut self.build.minify, build_args.minify.as_ref());
+                Self::update_option(&mut self.build.tailwind.enable, build_args.tailwind.as_ref());
+                Self::update_option(&mut self.build.rss.enable, build_args.rss.as_ref());
+                self.build.clean = build_args.clean;
+            }
+            _ => {}
+        }
 
         match &cli.command {
             Commands::Serve {
                 interface,
                 port,
                 watch,
+                ..
             } => {
                 Self::update_option(&mut self.serve.interface, interface.as_ref());
                 Self::update_option(&mut self.serve.port, port.as_ref());
@@ -639,7 +647,6 @@ mod tests {
         assert_eq!(config.config_path, PathBuf::new());
         assert_eq!(config.base.title, "");
         assert!(config.build.minify);
-        assert!(!config.build.clear);
         assert_eq!(config.serve.port, 5277);
         assert_eq!(config.deploy.provider, "github");
     }
@@ -666,7 +673,6 @@ mod tests {
             content = "posts"
             output = "dist"
             minify = true
-            clear = false
 
             [build.rss]
             enable = true

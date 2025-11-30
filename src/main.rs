@@ -25,17 +25,16 @@ fn main() -> Result<()> {
     let cli: &'static Cli = Box::leak(Box::new(Cli::parse()));
     let config: &'static SiteConfig = Box::leak(Box::new(load_config(cli)?));
 
-    match cli.command {
+    match &cli.command {
         Commands::Init { .. } => new_site(config),
-        Commands::Build { .. } => build_all(config, true).map(|_| ()),
+        Commands::Build { .. } => build_all(config).map(|_| ()),
         Commands::Deploy { .. } => {
-            let repo = build_all(config, true)?;
+            let repo = build_all(config)?;
             deploy_site(repo, config)
         }
         Commands::Serve { .. } => {
-            // Skip RSS generation during serve - it's not needed for local preview
-            build_all(config, false)?;
-            tokio::runtime::Runtime::new()?.block_on(serve_site(config))
+            build_all(config)?;
+            serve_site(config)
         }
     }
 }
@@ -71,17 +70,12 @@ fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
 
 /// Build site and optionally generate RSS feed in parallel.
 ///
-/// RSS generation is controlled by two factors:
-/// - `with_rss`: caller decides if RSS should be considered (false for serve mode)
-/// - `config.build.rss.enable`: user config to enable/disable RSS entirely
-///
-/// Both must be true for RSS to be generated.
-fn build_all(config: &'static SiteConfig, with_rss: bool) -> Result<ThreadSafeRepository> {
+/// RSS generation is controlled by `config.build.rss.enable`.
+/// Output cleanup is controlled by `config.build.clean`.
+fn build_all(config: &'static SiteConfig) -> Result<ThreadSafeRepository> {
     let (build_result, rss_result) = rayon::join(
-        || build_site(config, config.build.clear),
-        || {
-            if with_rss { build_rss(config) } else { Ok(()) }
-        },
+        || build_site(config),
+        || build_rss(config),
     );
 
     rss_result?;

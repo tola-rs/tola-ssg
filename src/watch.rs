@@ -15,10 +15,6 @@ use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::{
     collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     time::{Duration, Instant},
 };
 
@@ -37,11 +33,8 @@ const WATCH_CATEGORIES: &[FileCategory] = &[
     FileCategory::Config,
 ];
 
-/// Start blocking file watcher for content and asset changes
-pub fn watch_for_changes_blocking(
-    config: &'static SiteConfig,
-    server_ready: Arc<AtomicBool>,
-) -> Result<()> {
+/// Start blocking file watcher for content and asset changes.
+pub fn watch_for_changes_blocking(config: &'static SiteConfig) -> Result<()> {
     if !config.serve.watch {
         return Ok(());
     }
@@ -82,10 +75,6 @@ pub fn watch_for_changes_blocking(
 
         match rx.recv_timeout(timeout) {
             Ok(res) => {
-                if !server_ready.load(Ordering::Relaxed) {
-                    break;
-                }
-
                 match res {
                     Err(e) => log!("watch"; "error: {e:?}"),
                     Ok(event) if should_process_event(&event) => {
@@ -145,7 +134,8 @@ fn handle_event(paths: &[std::path::PathBuf], config: &'static SiteConfig) -> bo
     if let Some((trigger_path, category)) = rebuild_trigger {
         let reason = category.description(trigger_path);
         log!("watch"; "{reason} changed, triggering full rebuild...");
-        if let Err(err) = crate::build::build_site(config, true) {
+        // Full rebuild for template/utils/config changes, but no need to clean output
+        if let Err(err) = crate::build::build_site(config) {
             log!("watch"; "full rebuild failed: {err}");
         }
         return true;

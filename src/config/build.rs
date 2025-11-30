@@ -104,10 +104,10 @@ pub struct BuildConfig {
     #[educe(Default = true)]
     pub minify: bool,
 
-    /// Clear output directory before each build.
-    #[serde(default = "defaults::r#false")]
+    /// Clean output directory completely before building (CLI only, not from config file).
+    #[serde(skip)]
     #[educe(Default = false)]
-    pub clear: bool,
+    pub clean: bool,
 
     /// RSS feed generation settings.
     #[serde(default)]
@@ -327,7 +327,6 @@ mod tests {
         assert_eq!(config.build.output, PathBuf::from("public"));
         assert_eq!(config.build.assets, PathBuf::from("assets"));
         assert!(config.build.minify);
-        assert!(!config.build.clear);
     }
 
     #[test]
@@ -736,19 +735,6 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
         assert!(!config.build.minify);
-    }
-
-    #[test]
-    fn test_build_clear_enabled() {
-        let config = r#"
-            [base]
-            title = "Test"
-            description = "Test"
-            [build]
-            clear = true
-        "#;
-        let config: SiteConfig = toml::from_str(config).unwrap();
-        assert!(config.build.clear);
     }
 
     #[test]

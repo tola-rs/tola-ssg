@@ -29,6 +29,18 @@ pub struct Cli {
     #[arg(short = 'C', long, default_value = "tola.toml")]
     pub config: PathBuf,
 
+    /// subcommands
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+/// Shared build arguments for Build and Serve commands
+#[derive(clap::Args, Debug, Clone)]
+pub struct BuildArgs {
+    /// Clean output directory completely before building
+    #[arg(long)]
+    pub clean: bool,
+
     /// Minify the html content
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub minify: Option<bool>,
@@ -37,9 +49,9 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub tailwind: Option<bool>,
 
-    /// subcommands
-    #[command(subcommand)]
-    pub command: Commands,
+    /// enable RSS feed generation
+    #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
+    pub rss: Option<bool>,
 }
 
 /// Available subcommands
@@ -52,10 +64,16 @@ pub enum Commands {
     },
 
     /// Deletes the output directory if there is one and rebuilds the site
-    Build {},
+    Build {
+        #[command(flatten)]
+        build_args: BuildArgs,
+    },
 
     /// Serve the site. Rebuild and reload on change automatically
     Serve {
+        #[command(flatten)]
+        build_args: BuildArgs,
+
         /// Interface to bind on
         #[arg(short, long)]
         interface: Option<String>,
