@@ -161,24 +161,24 @@ pub fn process_link_value(value: &[u8], config: &'static SiteConfig) -> Result<C
 ///
 /// # Examples
 ///
-/// | Input | Output (base_path="") |
+/// | Input | Output (path_prefix="") |
 /// |-------|----------------------|
 /// | `/about` | `/about` |
 /// | `/about#team` | `/about#team` (fragment slugified) |
 /// | `//example.com` | `//example.com` (protocol-relative) |
 pub fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result<String> {
-    let base_path = &config.build.base_path;
+    let path_prefix = &config.build.path_prefix;
 
     if is_asset_link(value, config) {
         let value = value.trim_start_matches('/');
-        return Ok(format!("/{}", base_path.join(value).display()));
+        return Ok(format!("/{}", path_prefix.join(value).display()));
     }
 
     let (path, fragment) = value.split_once('#').unwrap_or((value, ""));
     let path = path.trim_start_matches('/');
     let slugified_path = slugify_path(path, config);
 
-    let mut result = format!("/{}", base_path.join(&slugified_path).display());
+    let mut result = format!("/{}", path_prefix.join(&slugified_path).display());
     if !fragment.is_empty() {
         result.push('#');
         result.push_str(&slugify_fragment(fragment, config));
@@ -219,7 +219,7 @@ pub fn process_relative_or_external_link(value: &str) -> Result<String> {
 /// Write `<head>` section content before closing tag.
 pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -> Result<()> {
     let head = &config.build.head;
-    let base_path = &config.build.base_path;
+    let path_prefix = &config.build.path_prefix;
 
     if !config.base.title.is_empty() {
         write_text_element(writer, "title", &config.base.title)?;
@@ -236,7 +236,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
     }
 
     if let Some(icon) = &head.icon {
-        let href = compute_asset_href(icon, base_path)?;
+        let href = compute_asset_href(icon, path_prefix)?;
         write_empty_elem(
             writer,
             "link",
@@ -249,7 +249,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
     }
 
     for style in &head.styles {
-        let href = compute_asset_href(style, base_path)?;
+        let href = compute_asset_href(style, path_prefix)?;
         write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 
@@ -262,7 +262,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
 
     // Scripts
     for script in &head.scripts {
-        let src = compute_asset_href(script.path(), base_path)?;
+        let src = compute_asset_href(script.path(), path_prefix)?;
         write_script(writer, &src, script.is_defer(), script.is_async())?;
     }
 
@@ -349,26 +349,26 @@ pub fn get_icon_mime_type(path: &Path) -> &'static str {
         .unwrap_or("image/x-icon")
 }
 
-/// Compute href for an asset path relative to base_path
-pub fn compute_asset_href(asset_path: &Path, base_path: &Path) -> Result<String> {
+/// Compute href for an asset path relative to path_prefix
+pub fn compute_asset_href(asset_path: &Path, path_prefix: &Path) -> Result<String> {
     // Strip the leading "./" prefix if present
     let without_dot_prefix = asset_path.strip_prefix("./").unwrap_or(asset_path);
     // Strip the "assets/" prefix if present to get relative path within assets
     let relative_path = without_dot_prefix
         .strip_prefix("assets/")
         .unwrap_or(without_dot_prefix);
-    let path = PathBuf::from("/").join(base_path).join(relative_path);
+    let path = PathBuf::from("/").join(path_prefix).join(relative_path);
     Ok(path.to_string_lossy().into_owned())
 }
 
 /// Compute stylesheet href from input path
 pub fn compute_stylesheet_href(input: &Path, config: &'static SiteConfig) -> Result<String> {
-    let base_path = &config.build.base_path;
+    let path_prefix = &config.build.path_prefix;
     // Config assets path is already absolute
     let assets = &config.build.assets;
     let input = input.canonicalize()?;
     let relative = input.strip_prefix(assets)?;
-    let path = PathBuf::from("/").join(base_path).join(relative);
+    let path = PathBuf::from("/").join(path_prefix).join(relative);
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -494,13 +494,13 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_asset_href_with_base_path() {
+    fn test_compute_asset_href_with_path_prefix() {
         let result = compute_asset_href(Path::new("images/icon.png"), Path::new("blog")).unwrap();
         assert_eq!(result, "/blog/images/icon.png");
     }
 
     #[test]
-    fn test_compute_asset_href_full_path_with_base() {
+    fn test_compute_asset_href_full_path_with_prefix() {
         let result =
             compute_asset_href(Path::new("./assets/scripts/main.js"), Path::new("mysite")).unwrap();
         assert_eq!(result, "/mysite/scripts/main.js");

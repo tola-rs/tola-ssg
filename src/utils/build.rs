@@ -19,6 +19,7 @@ use std::{
     fs,
     io::Cursor,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 use walkdir::WalkDir;
 
@@ -67,15 +68,40 @@ where
 // Content Processing
 // ============================================================================
 
+/// Check if destination is up-to-date compared to source and dependencies
+pub fn is_up_to_date(src: &Path, dst: &Path, deps_mtime: Option<SystemTime>) -> bool {
+    let Ok(src_time) = src.metadata().and_then(|m| m.modified()) else {
+        return false;
+    };
+    let Ok(dst_time) = dst.metadata().and_then(|m| m.modified()) else {
+        return false;
+    };
+
+    // Check if source is newer than destination
+    if src_time > dst_time {
+        return false;
+    }
+
+    // Check if any dependency is newer than destination
+    if let Some(deps) = deps_mtime
+        && deps > dst_time
+    {
+        return false;
+    }
+
+    true
+}
+
 pub fn process_content(
     content_path: &Path,
     config: &'static SiteConfig,
     should_log_newline: bool,
     force_rebuild: bool,
+    deps_mtime: Option<SystemTime>,
 ) -> Result<()> {
     let root = config.get_root();
     let content = &config.build.content;
-    let output = &config.build.output.join(&config.build.base_path);
+    let output = &config.build.output.join(&config.build.path_prefix);
 
     let is_relative_asset = content_path.extension().is_some_and(|ext| ext != "typ");
 
@@ -85,21 +111,17 @@ pub fn process_content(
             .to_str()
             .ok_or(anyhow!("Invalid path"))?;
 
-        log!(should_log_newline; "content"; "{}", relative_asset_path);
-
         let output = output.join(relative_asset_path);
 
-        // Ensure parent directory exists
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
+        // Relative assets don't depend on templates/config, just check source vs dest
+        if !force_rebuild && is_up_to_date(content_path, &output, None) {
+            return Ok(());
         }
 
-        if !force_rebuild
-            && let (Ok(src_meta), Ok(dst_meta)) = (content_path.metadata(), output.metadata())
-            && let (Ok(src_time), Ok(dst_time)) = (src_meta.modified(), dst_meta.modified())
-            && src_time <= dst_time
-        {
-            return Ok(());
+        log!(should_log_newline; "content"; "{}", relative_asset_path);
+
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
         }
 
         fs::copy(content_path, output)?;
@@ -108,24 +130,16 @@ pub fn process_content(
 
     // Process .typ file: get output paths, compile, and post-process
     let paths = content_paths(content_path, config)?;
-    log!(should_log_newline; "content"; "{}", paths.relative);
 
-    // Create output directory for the post
-    if let Some(parent) = paths.html.parent() {
-        fs::create_dir_all(parent)?;
+    // Check source and dependencies (templates, utils, config)
+    if !force_rebuild && is_up_to_date(content_path, &paths.html, deps_mtime) {
+        return Ok(());
     }
 
-    // Skip if up-to-date
-    if !force_rebuild && paths.html.exists() {
-        let src_time = content_path.metadata()?.modified()?;
-        let dst_time = paths
-            .html
-            .metadata()?
-            .modified()
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        if src_time <= dst_time {
-            return Ok(());
-        }
+    log!(should_log_newline; "content"; "{}", paths.relative);
+
+    if let Some(parent) = paths.html.parent() {
+        fs::create_dir_all(parent)?;
     }
 
     let output = exec!(&config.build.typst.command;
@@ -158,7 +172,7 @@ pub fn process_asset(
     should_log_newline: bool,
 ) -> Result<()> {
     let assets = &config.build.assets;
-    let output = &config.build.output.join(&config.build.base_path);
+    let output = &config.build.output.join(&config.build.path_prefix);
 
     let asset_extension = asset_path
         .extension()

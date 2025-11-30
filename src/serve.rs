@@ -98,23 +98,23 @@ pub async fn start_server(
 
 /// Create the Axum router with static file serving
 fn create_router(config: &'static SiteConfig) -> Router {
-    let base_path = config.build.output.clone();
+    let serve_root = config.build.output.clone();
     let serve_dir = ServeDir::new(&config.build.output)
         .append_index_html_on_directories(false)
         .not_found_service(axum::routing::get(move |uri| {
-            let base = base_path.clone();
-            async move { handle_path(uri, base).await }
+            let root = serve_root.clone();
+            async move { handle_path(uri, root).await }
         }));
     Router::new().fallback_service(serve_dir)
 }
 
 /// Handle incoming requests, serving files or directory listings
-async fn handle_path(uri: Uri, base_path: PathBuf) -> impl IntoResponse {
+async fn handle_path(uri: Uri, serve_root: PathBuf) -> impl IntoResponse {
     let request_path = uri.path().trim_matches('/');
     let request_path = urlencoding::decode(request_path)
         .map(|s| s.into_owned())
         .unwrap_or_default();
-    let local_path = base_path.join(&request_path);
+    let local_path = serve_root.join(&request_path);
 
     // Try to read the file directly
     if local_path.is_file()

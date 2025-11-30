@@ -3,34 +3,24 @@
 //! Handles content and asset changes triggered by file watcher.
 
 use super::build::{process_asset, process_content};
+use super::category::{FileCategory, categorize_path, normalize_path};
 use crate::{config::SiteConfig, exec, log};
 use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     thread,
     time::Duration,
 };
 
-/// Type of file change detected
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChangeType {
-    /// Content file (.typ) changed
-    Content,
-    /// Asset file changed
-    Asset,
-    /// Template, utils, or config changed - requires full rebuild
-    FullRebuild,
-    /// Unknown file type
-    Unknown,
-}
-
 /// Process changed content files (.typ)
 pub fn process_watched_content(files: &[&PathBuf], config: &'static SiteConfig) -> Result<()> {
+    // In watch mode, we always force rebuild changed files (deps_mtime = None)
+    // because FullRebuild is triggered separately for template/config changes
     files.par_iter().for_each(|path| {
-        let path = normalize_path(path, config);
-        if let Err(e) = process_content(&path, config, true, false) {
+        let path = normalize_path(path);
+        if let Err(e) = process_content(&path, config, true, false, None) {
             log!("watch"; "{e}");
         }
     });
@@ -53,25 +43,26 @@ pub fn process_watched_assets(
         .par_iter()
         .filter(|path| path.exists())
         .try_for_each(|path| {
-            let path = normalize_path(path, config);
+            let path = normalize_path(path);
             process_asset(&path, config, should_wait_until_stable, true)
         })
 }
 
 /// Process all watched file changes
 pub fn process_watched_files(files: &[PathBuf], config: &'static SiteConfig) -> Result<()> {
-    let content_files: Vec<_> = files
-        .iter()
-        .filter(|p| p.exists() && p.extension().is_some_and(|ext| ext == "typ"))
-        .collect();
+    let mut content_files = Vec::new();
+    let mut asset_files = Vec::new();
 
-    let asset_files: Vec<_> = files
-        .iter()
-        .filter(|p| {
-            let normalized = normalize_path(p, config);
-            normalized.starts_with(&config.build.assets)
-        })
-        .collect();
+    // Categorize files by type
+    for path in files.iter().filter(|p| p.exists()) {
+        match categorize_path(path, config) {
+            FileCategory::Content => content_files.push(path),
+            FileCategory::Asset => asset_files.push(path),
+            // Dependency changes trigger full rebuild in watch.rs before reaching here.
+            // Unknown files (e.g., .DS_Store) are silently ignored.
+            _ => {}
+        }
+    }
 
     if !content_files.is_empty() {
         process_watched_content(&content_files, config)?;
@@ -81,21 +72,6 @@ pub fn process_watched_files(files: &[PathBuf], config: &'static SiteConfig) -> 
     }
 
     Ok(())
-}
-
-/// Normalize path to absolute for comparison with config paths
-fn normalize_path(path: &Path, _config: &SiteConfig) -> PathBuf {
-    // Config paths are already absolute/canonicalized
-    // Notify usually sends absolute paths, but canonicalize to be safe
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    })
 }
 
 /// Rebuild tailwind CSS
@@ -112,8 +88,12 @@ fn rebuild_tailwind(config: &'static SiteConfig) -> Result<()> {
         .to_str()
         .ok_or_else(|| anyhow!("Invalid tailwind input path"))?;
 
-    // Config paths are already absolute
-    let output = config.build.output.join(relative_path);
+    // Output path includes path_prefix for consistency with other assets
+    let output = config
+        .build
+        .output
+        .join(&config.build.path_prefix)
+        .join(relative_path);
 
     exec!(
         config.get_root();

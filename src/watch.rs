@@ -6,13 +6,15 @@
 use crate::{
     config::SiteConfig,
     log,
-    utils::watch::{ChangeType, process_watched_files},
+    utils::{
+        category::{FileCategory, categorize_path},
+        watch::process_watched_files,
+    },
 };
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::{
     collections::HashMap,
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -26,6 +28,15 @@ const DEBOUNCE_MS: u64 = 300;
 /// Cooldown duration after full rebuild to prevent loops
 const FULL_REBUILD_COOLDOWN_MS: u64 = 1000;
 
+/// All file categories to watch
+const WATCH_CATEGORIES: &[FileCategory] = &[
+    FileCategory::Content,
+    FileCategory::Asset,
+    FileCategory::Template,
+    FileCategory::Utils,
+    FileCategory::Config,
+];
+
 /// Start blocking file watcher for content and asset changes
 pub fn watch_for_changes_blocking(
     config: &'static SiteConfig,
@@ -38,21 +49,21 @@ pub fn watch_for_changes_blocking(
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx).context("Failed to create file watcher")?;
 
-    // All paths are already absolute from config
-    watch_directory(&mut watcher, "content", &config.build.content)?;
-    watch_directory(&mut watcher, "assets", &config.build.assets)?;
-
-    // Watch templates and utils directories (for full rebuild)
-    if config.build.templates.exists() {
-        watch_directory(&mut watcher, "templates", &config.build.templates)?;
-    }
-    if config.build.utils.exists() {
-        watch_directory(&mut watcher, "utils", &config.build.utils)?;
-    }
-
-    // Watch config file
-    if config.config_path.exists() {
-        watch_file(&mut watcher, "config", &config.config_path)?;
+    // Register watchers for all categories
+    for &category in WATCH_CATEGORIES {
+        if let Some(path) = category.path(config)
+            && path.exists()
+        {
+            let mode = if category.is_directory() {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            watcher
+                .watch(&path, mode)
+                .with_context(|| format!("Failed to watch {}: {}", category.name(), path.display()))?;
+            log!("watch"; "watching for changes in {}: {}", category.name(), path.display());
+        }
     }
 
     let debounce_duration = Duration::from_millis(DEBOUNCE_MS);
@@ -118,58 +129,21 @@ pub fn watch_for_changes_blocking(
     Ok(())
 }
 
-/// Watch a directory and log the action
-fn watch_directory(watcher: &mut impl Watcher, name: &str, path: &Path) -> Result<()> {
-    watcher
-        .watch(path, RecursiveMode::Recursive)
-        .with_context(|| format!("Failed to watch {name} directory: {}", path.display()))?;
-    log!("watch"; "watching for changes in {}: {}", name, path.display());
-    Ok(())
-}
-
-/// Watch a single file and log the action
-fn watch_file(watcher: &mut impl Watcher, name: &str, path: &Path) -> Result<()> {
-    watcher
-        .watch(path, RecursiveMode::NonRecursive)
-        .with_context(|| format!("Failed to watch {name} file: {}", path.display()))?;
-    log!("watch"; "watching for changes in {}: {}", name, path.display());
-    Ok(())
-}
-
 /// Determine if an event should trigger a rebuild
 fn should_process_event(event: &Event) -> bool {
     matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
 }
 
-/// Classify file change type based on path
-fn classify_change(path: &Path, config: &SiteConfig) -> ChangeType {
-    // Canonicalize the incoming path for comparison
-    // Config paths are already absolute/canonicalized
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-
-    if path == config.config_path
-        || path.starts_with(&config.build.templates)
-        || path.starts_with(&config.build.utils)
-    {
-        ChangeType::FullRebuild
-    } else if path.starts_with(&config.build.content) {
-        ChangeType::Content
-    } else if path.starts_with(&config.build.assets) {
-        ChangeType::Asset
-    } else {
-        ChangeType::Unknown
-    }
-}
-
 /// Handle file change events, returns true if full rebuild was performed
 fn handle_event(paths: &[std::path::PathBuf], config: &'static SiteConfig) -> bool {
-    // Classify all paths and find which triggered full rebuild
+    // Find if any changed file requires a full rebuild
     let rebuild_trigger = paths
         .iter()
-        .find(|p| matches!(classify_change(p, config), ChangeType::FullRebuild));
+        .map(|p| (p, categorize_path(p, config)))
+        .find(|(_, cat)| cat.requires_full_rebuild());
 
-    if let Some(trigger_path) = rebuild_trigger {
-        let reason = get_rebuild_reason(trigger_path, config);
+    if let Some((trigger_path, category)) = rebuild_trigger {
+        let reason = category.description(trigger_path);
         log!("watch"; "{reason} changed, triggering full rebuild...");
         if let Err(err) = crate::build::build_site(config, true) {
             log!("watch"; "full rebuild failed: {err}");
@@ -177,39 +151,11 @@ fn handle_event(paths: &[std::path::PathBuf], config: &'static SiteConfig) -> bo
         return true;
     }
 
-    // Process incremental changes
+    // Process incremental changes (content/asset files only)
     if let Err(err) =
         process_watched_files(paths, config).context("Failed to process changed files")
     {
         log!("watch"; "{err}");
     }
     false
-}
-
-/// Get a human-readable reason for the rebuild trigger
-fn get_rebuild_reason(path: &Path, config: &SiteConfig) -> String {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-
-    if path == config.config_path {
-        let config_name = config
-            .config_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("config");
-        format!("config ({config_name})")
-    } else if path.starts_with(&config.build.templates) {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-        format!("template ({file_name})")
-    } else if path.starts_with(&config.build.utils) {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown");
-        format!("utils ({file_name})")
-    } else {
-        "unknown".to_string()
-    }
 }

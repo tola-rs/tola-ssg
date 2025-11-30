@@ -69,10 +69,10 @@ pub struct BuildConfig {
     #[educe(Default = defaults::build::root())]
     pub root: Option<PathBuf>,
 
-    /// URL base path prefix (e.g., "blog" → `/blog/...`).
-    #[serde(default = "defaults::build::base_path")]
-    #[educe(Default = defaults::build::base_path())]
-    pub base_path: PathBuf,
+    /// URL path prefix for subdirectory deployment (e.g., "blog" → `/blog/...`).
+    #[serde(default = "defaults::build::path_prefix")]
+    #[educe(Default = defaults::build::path_prefix())]
+    pub path_prefix: PathBuf,
 
     /// Content source directory (Typst files).
     #[serde(default = "defaults::build::content")]
@@ -660,16 +660,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_base_path() {
+    fn test_build_path_prefix() {
         let config = r#"
             [base]
             title = "Test"
             description = "Test"
             [build]
-            base_path = "blog"
+            path_prefix = "blog"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
-        assert_eq!(config.build.base_path, PathBuf::from("blog"));
+        assert_eq!(config.build.path_prefix, PathBuf::from("blog"));
     }
 
     #[test]

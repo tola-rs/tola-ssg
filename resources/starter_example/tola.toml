@@ -7,7 +7,7 @@ language = "zh-Hans"
 copyright = ""
 
 [build]
-base_path = ""
+path_prefix = ""
 content = "content"
 output = "public"
 assets = "assets"

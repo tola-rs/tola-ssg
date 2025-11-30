@@ -80,7 +80,7 @@ pub struct ContentPaths {
 /// | `content/index.typ` | `index` | `public/index.html` |
 pub fn content_paths(content_path: &Path, config: &'static SiteConfig) -> Result<ContentPaths> {
     let content_dir = &config.build.content;
-    let output_dir = config.build.output.join(&config.build.base_path);
+    let output_dir = config.build.output.join(&config.build.path_prefix);
 
     // Strip content dir and .typ extension: "content/posts/hello.typ" → "posts/hello"
     let relative = content_path
@@ -91,11 +91,12 @@ pub fn content_paths(content_path: &Path, config: &'static SiteConfig) -> Result
         .ok_or_else(|| anyhow!("Not a .typ file: {}", content_path.display()))?
         .to_owned();
 
-    // Special case: index.typ → public/index.html (not public/index/index.html)
-    let is_index = content_path.file_name().is_some_and(|p| p == "index.typ");
+    // Special case: root index.typ → public/path_prefix/index.html (not public/path_prefix/index/index.html)
+    // Only content/index.typ is the root index, not content/subdir/index.typ
+    let is_root_index = relative == "index";
 
-    let html = if is_index {
-        config.build.output.join("index.html")
+    let html = if is_root_index {
+        output_dir.join("index.html")
     } else {
         output_dir.join(&relative).join("index.html")
     };

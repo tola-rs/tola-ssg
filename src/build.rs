@@ -7,6 +7,7 @@ use crate::{
     log,
     utils::{
         build::{process_asset, process_content, process_files},
+        category::get_deps_mtime,
         git,
     },
 };
@@ -28,6 +29,9 @@ pub fn build_site(
     // Initialize or clear output directory with git repo
     let repo = init_output_repo(output, force_rebuild)?;
 
+    // Calculate deps mtime once for all content files
+    let deps_mtime = get_deps_mtime(config);
+
     // Process content and assets in parallel
     let (posts_result, assets_result) = rayon::join(
         || {
@@ -35,7 +39,7 @@ pub fn build_site(
                 content,
                 config,
                 |path| path.starts_with(content),
-                |path, cfg| process_content(path, cfg, false, force_rebuild),
+                |path, cfg| process_content(path, cfg, false, force_rebuild, deps_mtime),
             )
             .context("Failed to compile posts")
         },

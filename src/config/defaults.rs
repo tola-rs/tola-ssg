@@ -48,7 +48,7 @@ pub mod build {
         None
     }
 
-    pub fn base_path() -> PathBuf {
+    pub fn path_prefix() -> PathBuf {
         "".into()
     }
 

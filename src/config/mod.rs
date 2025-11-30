@@ -41,12 +41,13 @@ mod error;
 mod serve;
 
 // Re-export public types used by other modules
-pub use build::{BuildConfig, ExtractSvgType, SlugMode};
-pub use deploy::DeployConfig;
-pub use error::ConfigError;
+pub use build::{ExtractSvgType, SlugMode};
 
 // Internal imports used in this module
 use base::BaseConfig;
+use build::BuildConfig;
+use deploy::DeployConfig;
+use error::ConfigError;
 use serve::ServeConfig;
 
 use crate::cli::{Cli, Commands};

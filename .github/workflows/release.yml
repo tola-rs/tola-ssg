@@ -54,7 +54,7 @@ jobs:
         run: |
           # Use commit message as release notes
           git log -1 --format="%B" > notes.md
-          
+
           # Delete existing release if it exists, then create new one
           gh release delete ${{ github.ref_name }} --yes || true
           gh release create ${{ github.ref_name }} artifacts/* --notes-file notes.md
