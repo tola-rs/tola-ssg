@@ -10,7 +10,7 @@ use crate::{
     utils::{
         category::get_deps_mtime,
         git,
-        page::{collect_pages, Pages},
+        meta::{collect_pages, Pages},
     },
 };
 use anyhow::{Context, Result, anyhow};

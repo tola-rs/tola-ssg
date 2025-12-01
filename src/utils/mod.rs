@@ -3,7 +3,7 @@
 pub mod category;
 pub mod exec;
 pub mod git;
-pub mod page;
+pub mod meta;
 pub mod slug;
 pub mod svg;
 pub mod xml;

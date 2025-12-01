@@ -14,8 +14,10 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{Cursor, Write};
 use std::path::Path;
+use std::time::SystemTime;
 
 use crate::config::{ExtractSvgType, SiteConfig};
+use crate::utils::meta::url_from_output_path;
 use crate::{exec_with_stdin, log};
 
 // ============================================================================
@@ -25,6 +27,9 @@ use crate::{exec_with_stdin, log};
 /// Padding adjustments for SVG viewBox (typst HTML output quirks)
 const SVG_PADDING_TOP: f32 = 5.0;
 const SVG_PADDING_BOTTOM: f32 = 4.0;
+
+/// Initial buffer size for capturing SVG content (16KB)
+const INITIAL_SVG_BUFFER_SIZE: usize = 16 * 1024;
 
 // ============================================================================
 // Core Types
@@ -109,14 +114,8 @@ pub fn extract_svg_element(
     elem: &BytesStart<'_>,
     ctx: &mut HtmlContext<'_>,
 ) -> Result<Option<Svg>> {
-    // Transform SVG attributes (adjust height/viewBox for typst quirks)
-    let attrs = transform_svg_attrs(elem)?;
-
-    // Capture complete SVG content
-    let raw_svg = capture_svg_content(reader, &attrs)?;
-
-    // Optimize with usvg
-    let (optimized_data, size) = optimize_svg(&raw_svg, ctx.config)?;
+    // Process SVG data (transform, capture, optimize)
+    let (optimized_data, size) = process_svg_data(reader, elem, ctx.config)?;
 
     // Create SVG and write placeholder
     let svg = Svg::new(optimized_data, size, ctx.svg_count);
@@ -127,7 +126,32 @@ pub fn extract_svg_element(
     Ok(Some(svg))
 }
 
-/// Transform SVG attributes (height, viewBox adjustments)
+/// Process SVG element: transform attributes, capture content, and optimize.
+///
+/// This function orchestrates the entire SVG processing pipeline:
+/// 1. Transforms attributes (e.g., adjusting viewBox for padding).
+/// 2. Captures the full SVG content from the reader.
+/// 3. Optimizes the SVG using `usvg` and potentially compresses it.
+fn process_svg_data(
+    reader: &mut Reader<&[u8]>,
+    elem: &BytesStart<'_>,
+    config: &SiteConfig,
+) -> Result<(Vec<u8>, (f32, f32))> {
+    // Transform SVG attributes (adjust height/viewBox for typst quirks)
+    let attrs = transform_svg_attrs(elem)?;
+
+    // Capture complete SVG content
+    let raw_svg = capture_svg_content(reader, &attrs)?;
+
+    // Optimize with usvg
+    optimize_svg(&raw_svg, config)
+}
+
+/// Transform SVG attributes (height, viewBox adjustments).
+///
+/// This function iterates through the attributes of the SVG element and applies
+/// specific transformations required to fix layout quirks in Typst-generated SVGs.
+/// Specifically, it adjusts `height` and `viewBox` to add padding.
 fn transform_svg_attrs<'a>(elem: &'a BytesStart<'_>) -> Result<Vec<Attribute<'a>>> {
     let attrs = elem.attributes();
     // SVG typically has ~5-8 attributes
@@ -143,39 +167,111 @@ fn transform_svg_attrs<'a>(elem: &'a BytesStart<'_>) -> Result<Vec<Attribute<'a>
     Ok(result)
 }
 
-/// Capture complete SVG element content from reader
+/// Capture complete SVG element content from reader.
+///
+/// This function manually reconstructs the SVG content byte-by-byte to avoid
+/// stability issues with `quick-xml`'s Writer when handling borrowed events.
+/// It also optimizes performance by using `Vec<u8>` directly, avoiding unnecessary
+/// UTF-8 validation overhead.
 fn capture_svg_content(reader: &mut Reader<&[u8]>, attrs: &[Attribute<'_>]) -> Result<Vec<u8>> {
-    // Typst SVGs typically range from 4KB to 64KB
-    let mut svg_writer = Writer::new(Cursor::new(Vec::with_capacity(16384)));
+    let mut content = Vec::with_capacity(INITIAL_SVG_BUFFER_SIZE);
 
-    // Write opening tag with transformed attributes
-    svg_writer.write_event(Event::Start(
-        BytesStart::new("svg").with_attributes(attrs.iter().cloned()),
-    ))?;
+    // Write opening tag manually
+    content.extend_from_slice(b"<svg");
+    for attr in attrs {
+        content.push(b' ');
+        content.extend_from_slice(attr.key.as_ref());
+        content.extend_from_slice(b"=\"");
+        content.extend_from_slice(attr.value.as_ref());
+        content.push(b'"');
+    }
+    content.push(b'>');
 
-    // Capture nested content
+    // Capture nested content by tracking depth
     let mut depth = 1u32;
     loop {
         let event = reader.read_event()?;
-        match &event {
-            Event::Start(_) => depth += 1,
-            Event::End(e) if e.name().as_ref() == b"svg" => {
-                depth -= 1;
-                if depth == 0 {
-                    svg_writer.write_event(event)?;
-                    break;
+        match event {
+            Event::Start(e) => {
+                depth += 1;
+                content.push(b'<');
+                content.extend_from_slice(e.name().as_ref());
+                for attr in e.attributes() {
+                    let attr = attr?;
+                    content.push(b' ');
+                    content.extend_from_slice(attr.key.as_ref());
+                    content.extend_from_slice(b"=\"");
+                    content.extend_from_slice(attr.value.as_ref());
+                    content.push(b'"');
                 }
+                content.push(b'>');
             }
-            Event::End(_) => depth -= 1,
+            Event::End(e) => {
+                if e.name().as_ref() == b"svg" {
+                    depth -= 1;
+                    if depth == 0 {
+                        content.extend_from_slice(b"</svg>");
+                        break;
+                    }
+                } else {
+                    depth -= 1;
+                }
+                content.extend_from_slice(b"</");
+                content.extend_from_slice(e.name().as_ref());
+                content.push(b'>');
+            }
+            Event::Empty(e) => {
+                content.push(b'<');
+                content.extend_from_slice(e.name().as_ref());
+                for attr in e.attributes() {
+                    let attr = attr?;
+                    content.push(b' ');
+                    content.extend_from_slice(attr.key.as_ref());
+                    content.extend_from_slice(b"=\"");
+                    content.extend_from_slice(attr.value.as_ref());
+                    content.push(b'"');
+                }
+                content.extend_from_slice(b"/>");
+            }
+            Event::Text(e) => content.extend_from_slice(e.as_ref()),
+            Event::CData(e) => {
+                content.extend_from_slice(b"<![CDATA[");
+                content.extend_from_slice(e.as_ref());
+                content.extend_from_slice(b"]]>");
+            }
+            Event::Comment(e) => {
+                content.extend_from_slice(b"<!--");
+                content.extend_from_slice(e.as_ref());
+                content.extend_from_slice(b"-->");
+            }
+            Event::Decl(e) => {
+                content.extend_from_slice(b"<?");
+                content.extend_from_slice(e.as_ref());
+                content.extend_from_slice(b"?>");
+            }
+            Event::PI(e) => {
+                content.extend_from_slice(b"<?");
+                content.extend_from_slice(e.as_ref());
+                content.extend_from_slice(b"?>");
+            }
+            Event::DocType(e) => {
+                content.extend_from_slice(b"<!DOCTYPE ");
+                content.extend_from_slice(e.as_ref());
+                content.push(b'>');
+            }
+            Event::Eof => anyhow::bail!("Unexpected EOF while parsing SVG"),
             _ => {}
         }
-        svg_writer.write_event(event)?;
     }
 
-    Ok(svg_writer.into_inner().into_inner())
+    Ok(content)
 }
 
-/// Optimize SVG using usvg, returning optimized bytes and dimensions
+/// Optimize SVG using usvg, returning optimized bytes and dimensions.
+///
+/// This function parses the raw SVG data using `usvg`, which performs various
+/// optimizations (cleaning up attributes, removing useless elements, etc.).
+/// It then serializes the optimized tree back to a string and parses the dimensions.
 fn optimize_svg(content: &[u8], config: &SiteConfig) -> Result<(Vec<u8>, (f32, f32))> {
     let options = usvg::Options {
         dpi: config.build.typst.svg.dpi,
@@ -203,9 +299,10 @@ fn write_img_placeholder(
 ) -> Result<()> {
     let filename = svg.filename(ctx.config);
     let output_dir = ctx.html_path.parent().context("Invalid html path")?;
+    let full_path = output_dir.join(&filename);
 
     // Build src attribute
-    let src = build_src_path(output_dir, &filename, &ctx.config.build.output);
+    let src = url_from_output_path(&full_path, ctx.config).unwrap_or_else(|_| filename.clone());
 
     // Build style attribute with scaled dimensions
     let scale = ctx.config.get_scale();
@@ -220,21 +317,6 @@ fn write_img_placeholder(
     writer.write_event(Event::Start(img))?;
 
     Ok(())
-}
-
-/// Build the src path for an SVG file
-fn build_src_path(output_dir: &Path, filename: &str, output_root: &Path) -> String {
-    let full_path = output_dir.join(filename);
-
-    match full_path.strip_prefix(output_root) {
-        Ok(relative) => {
-            let mut src = String::with_capacity(relative.as_os_str().len() + 1);
-            src.push('/');
-            let _ = write!(src, "{}", relative.display());
-            src
-        }
-        Err(_) => filename.to_string(),
-    }
 }
 
 // ============================================================================
@@ -320,11 +402,7 @@ pub fn compress_svgs_parallel(
     config: &'static SiteConfig,
 ) -> Result<()> {
     let output_dir = html_path.parent().context("Invalid html path")?;
-    let relative_path = html_path
-        .strip_prefix(&config.build.output)
-        .map(|p| p.to_string_lossy())
-        .unwrap_or_default();
-    let log_prefix = relative_path.trim_end_matches("index.html");
+    let log_prefix = get_log_prefix(html_path, config);
     let scale = config.get_scale();
 
     // Get HTML file's mtime for cache invalidation
@@ -333,11 +411,7 @@ pub fn compress_svgs_parallel(
     svgs.par_iter().try_for_each(|svg| {
         let output_path = output_dir.join(svg.filename(config));
 
-        // Skip if output exists and is newer than HTML (content unchanged)
-        if let Some(html_time) = html_mtime
-            && let Ok(svg_time) = output_path.metadata().and_then(|m| m.modified())
-            && svg_time >= html_time
-        {
+        if should_skip_compression(&output_path, html_mtime) {
             return Ok(());
         }
 
@@ -346,6 +420,24 @@ pub fn compress_svgs_parallel(
 
         Ok(())
     })
+}
+
+fn get_log_prefix(html_path: &Path, config: &SiteConfig) -> String {
+    let relative_path = html_path
+        .strip_prefix(&config.build.output)
+        .map(|p| p.to_string_lossy())
+        .unwrap_or_default();
+    relative_path.trim_end_matches("index.html").to_string()
+}
+
+fn should_skip_compression(output_path: &Path, html_mtime: Option<SystemTime>) -> bool {
+    if let Some(html_time) = html_mtime
+        && let Ok(svg_time) = output_path.metadata().and_then(|m| m.modified())
+        && svg_time >= html_time
+    {
+        return true;
+    }
+    false
 }
 
 /// Compress a single SVG based on configuration
@@ -554,32 +646,9 @@ mod tests {
     // Path Building Tests
     // ------------------------------------------------------------------------
 
-    #[test]
-    fn test_build_src_path() {
-        // Normal case: output inside root
-        let src = build_src_path(
-            &PathBuf::from("/site/output/posts"),
-            "svg-0.svg",
-            &PathBuf::from("/site/output"),
-        );
-        assert_eq!(src, "/posts/svg-0.svg");
+    // test_build_src_path removed as it tests removed function.
+    // Logic moved to utils::page::url_from_output_path
 
-        // Nested path
-        let src = build_src_path(
-            &PathBuf::from("/site/output/blog/2024/post"),
-            "svg-1.avif",
-            &PathBuf::from("/site/output"),
-        );
-        assert_eq!(src, "/blog/2024/post/svg-1.avif");
-
-        // Fallback: output outside root
-        let src = build_src_path(
-            &PathBuf::from("/other/path"),
-            "svg-0.svg",
-            &PathBuf::from("/site/output"),
-        );
-        assert_eq!(src, "svg-0.svg");
-    }
 
     // ------------------------------------------------------------------------
     // Output Format Tests
@@ -639,5 +708,113 @@ mod tests {
         let config = Box::leak(Box::new(config));
         let ctx = HtmlContext::new(config, Path::new("/test.html"));
         assert!(!ctx.extract_svg);
+    }
+
+    // ------------------------------------------------------------------------
+    // Logic Tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_get_log_prefix() {
+        let mut config = SiteConfig::default();
+        config.build.output = PathBuf::from("public");
+
+        let path = PathBuf::from("public/blog/post/index.html");
+        assert_eq!(get_log_prefix(&path, &config), "blog/post/");
+
+        let path = PathBuf::from("public/index.html");
+        assert_eq!(get_log_prefix(&path, &config), "");
+    }
+
+    #[test]
+    fn test_capture_svg_content() {
+        // Input XML fragment (simulating content after <svg> tag)
+        // Note: capture_svg_content expects to read until </svg>
+        // We must provide a full SVG so the reader tracks the opening tag
+        let xml = r#"<svg><rect x="0" y="0" width="10" height="10" /></svg>"#;
+        let mut reader = Reader::from_str(xml);
+        // reader.config_mut().trim_text(true);
+        reader.config_mut().check_end_names = false;
+
+        // Advance past the opening <svg> tag to simulate the state when capture_svg_content is called
+        let _ = reader.read_event().unwrap();
+
+        let attrs = vec![];
+        let captured = capture_svg_content(&mut reader, &attrs).unwrap();
+        let s = String::from_utf8(captured).unwrap();
+
+        // Should wrap in <svg>...</svg>
+        assert_eq!(s, r#"<svg><rect x="0" y="0" width="10" height="10"/></svg>"#);
+    }
+
+    #[test]
+    fn test_capture_svg_content_nested() {
+        let xml = r#"<svg><g><svg viewBox="0 0 10 10"><rect /></svg></g></svg>"#;
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().check_end_names = false;
+
+        // Advance past the opening <svg> tag
+        let _ = reader.read_event().unwrap();
+
+        let attrs = vec![];
+        let captured = capture_svg_content(&mut reader, &attrs).unwrap();
+        let s = String::from_utf8(captured).unwrap();
+
+        assert_eq!(s, r#"<svg><g><svg viewBox="0 0 10 10"><rect/></svg></g></svg>"#);
+    }
+
+    #[test]
+    fn test_capture_svg_content_with_attrs() {
+        let xml = r#"<svg><rect /></svg>"#;
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().check_end_names = false;
+        let _ = reader.read_event().unwrap();
+
+        let attrs = vec![
+            Attribute { key: quick_xml::name::QName(b"width"), value: b"100".as_slice().into() },
+            Attribute { key: quick_xml::name::QName(b"height"), value: b"100".as_slice().into() },
+        ];
+
+        let captured = capture_svg_content(&mut reader, &attrs).unwrap();
+        let s = String::from_utf8(captured).unwrap();
+
+        assert_eq!(s, r#"<svg width="100" height="100"><rect/></svg>"#);
+    }
+
+    #[test]
+    fn test_transform_svg_attrs() {
+        let xml = r#"<svg width="100" height="100pt" viewBox="0 0 100 100">"#;
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+
+        if let Ok(Event::Start(ref e)) = reader.read_event() {
+            let attrs = transform_svg_attrs(e).unwrap();
+
+            // Check if attributes are transformed
+            let mut found_height = false;
+            let mut found_viewbox = false;
+
+            for attr in attrs {
+                match attr.key.as_ref() {
+                    b"height" => {
+                        found_height = true;
+                        assert_eq!(attr.value.as_ref(), b"105pt"); // 100 + 5
+                    }
+                    b"viewBox" => {
+                        found_viewbox = true;
+                        // 0 0 100 100 -> 0 -5 100 109
+                        assert_eq!(attr.value.as_ref(), b"0 -5 100 109");
+                    }
+                    b"width" => {
+                        assert_eq!(attr.value.as_ref(), b"100");
+                    }
+                    _ => {}
+                }
+            }
+            assert!(found_height);
+            assert!(found_viewbox);
+        } else {
+            panic!("Failed to read start event");
+        }
     }
 }

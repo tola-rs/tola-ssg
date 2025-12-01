@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, log, utils::page::Pages};
+use crate::{config::SiteConfig, log, utils::meta::Pages};
 use anyhow::{Context, Result};
 use std::fs;
 
@@ -129,7 +129,7 @@ fn escape_xml(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::page::PageMeta;
+    use crate::utils::meta::PageMeta;
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
 

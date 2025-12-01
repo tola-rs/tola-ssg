@@ -2,7 +2,7 @@
 //!
 //! Parses post metadata and generates RSS/Atom feeds.
 
-use crate::{config::SiteConfig, exec, log, utils::page::Pages};
+use crate::{config::SiteConfig, exec, log, utils::meta::Pages};
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use rayon::prelude::*;
 use regex::Regex;

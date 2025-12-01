@@ -11,6 +11,7 @@ use std::io::{Cursor, Write};
 use std::str;
 
 use crate::config::SiteConfig;
+use crate::utils::meta::AssetMeta;
 use crate::utils::slug::{slugify_fragment, slugify_path};
 use crate::utils::svg::{HtmlContext, Svg, compress_svgs_parallel, extract_svg_element};
 use std::path::Path;
@@ -221,7 +222,6 @@ pub fn process_relative_or_external_link(value: &str) -> Result<String> {
 /// Write `<head>` section content before closing tag.
 pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -> Result<()> {
     let head = &config.build.head;
-    let path_prefix = &config.build.path_prefix;
 
     if !config.base.title.is_empty() {
         write_text_element(writer, "title", &config.base.title)?;
@@ -238,7 +238,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
     }
 
     if let Some(icon) = &head.icon {
-        let href = compute_asset_href(icon, path_prefix)?;
+        let href = compute_asset_href(icon, config)?;
         write_empty_elem(
             writer,
             "link",
@@ -251,7 +251,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
     }
 
     for style in &head.styles {
-        let href = compute_asset_href(style, path_prefix)?;
+        let href = compute_asset_href(style, config)?;
         write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 
@@ -264,7 +264,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
 
     // Scripts
     for script in &head.scripts {
-        let src = compute_asset_href(script.path(), path_prefix)?;
+        let src = compute_asset_href(script.path(), config)?;
         write_script(writer, &src, script.is_defer(), script.is_async())?;
     }
 
@@ -399,7 +399,6 @@ fn handle_end_element(
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 static ASSET_TOP_LEVELS: OnceLock<HashSet<OsString>> = OnceLock::new();
@@ -422,26 +421,25 @@ pub fn get_icon_mime_type(path: &Path) -> &'static str {
 }
 
 /// Compute href for an asset path relative to path_prefix
-pub fn compute_asset_href(asset_path: &Path, path_prefix: &Path) -> Result<String> {
+pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<String> {
+    let assets_dir = &config.build.assets;
     // Strip the leading "./" prefix if present
     let without_dot_prefix = asset_path.strip_prefix("./").unwrap_or(asset_path);
     // Strip the "assets/" prefix if present to get relative path within assets
     let relative_path = without_dot_prefix
         .strip_prefix("assets/")
         .unwrap_or(without_dot_prefix);
-    let path = PathBuf::from("/").join(path_prefix).join(relative_path);
-    Ok(path.to_string_lossy().into_owned())
+
+    let source = assets_dir.join(relative_path);
+    let meta = AssetMeta::from_source(source, config)?;
+    Ok(meta.url)
 }
 
 /// Compute stylesheet href from input path
-pub fn compute_stylesheet_href(input: &Path, config: &'static SiteConfig) -> Result<String> {
-    let path_prefix = &config.build.path_prefix;
-    // Config assets path is already absolute
-    let assets = &config.build.assets;
+pub fn compute_stylesheet_href(input: &Path, config: &SiteConfig) -> Result<String> {
     let input = input.canonicalize()?;
-    let relative = input.strip_prefix(assets)?;
-    let path = PathBuf::from("/").join(path_prefix).join(relative);
-    Ok(path.to_string_lossy().into_owned())
+    let meta = AssetMeta::from_source(input, config)?;
+    Ok(meta.url)
 }
 
 /// Get top-level asset directory names
@@ -484,7 +482,7 @@ pub fn is_external_link(link: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn test_get_icon_mime_type_ico() {
@@ -541,40 +539,72 @@ mod tests {
 
     #[test]
     fn test_compute_asset_href_simple_path() {
-        let result = compute_asset_href(Path::new("images/icon.png"), Path::new("")).unwrap();
+        let mut config = SiteConfig::default();
+        config.build.assets = PathBuf::from("/assets");
+        config.build.output = PathBuf::from("/output");
+        let config = &config;
+
+        let result = compute_asset_href(Path::new("images/icon.png"), config).unwrap();
         assert_eq!(result, "/images/icon.png");
     }
 
     #[test]
     fn test_compute_asset_href_with_dot_prefix() {
-        let result = compute_asset_href(Path::new("./images/icon.png"), Path::new("")).unwrap();
+        let mut config = SiteConfig::default();
+        config.build.assets = PathBuf::from("/assets");
+        config.build.output = PathBuf::from("/output");
+        let config = &config;
+
+        let result = compute_asset_href(Path::new("./images/icon.png"), config).unwrap();
         assert_eq!(result, "/images/icon.png");
     }
 
     #[test]
     fn test_compute_asset_href_with_assets_prefix() {
+        let mut config = SiteConfig::default();
+        config.build.assets = PathBuf::from("/assets");
+        config.build.output = PathBuf::from("/output");
+        let config = &config;
+
         let result =
-            compute_asset_href(Path::new("assets/images/icon.png"), Path::new("")).unwrap();
+            compute_asset_href(Path::new("assets/images/icon.png"), config).unwrap();
         assert_eq!(result, "/images/icon.png");
     }
 
     #[test]
     fn test_compute_asset_href_with_dot_and_assets_prefix() {
+        let mut config = SiteConfig::default();
+        config.build.assets = PathBuf::from("/assets");
+        config.build.output = PathBuf::from("/output");
+        let config = &config;
+
         let result =
-            compute_asset_href(Path::new("./assets/images/icon.png"), Path::new("")).unwrap();
+            compute_asset_href(Path::new("./assets/images/icon.png"), config).unwrap();
         assert_eq!(result, "/images/icon.png");
     }
 
     #[test]
     fn test_compute_asset_href_with_path_prefix() {
-        let result = compute_asset_href(Path::new("images/icon.png"), Path::new("blog")).unwrap();
+        let mut config = SiteConfig::default();
+        config.build.assets = PathBuf::from("/assets");
+        config.build.output = PathBuf::from("/output");
+        config.build.path_prefix = PathBuf::from("blog");
+        let config = &config;
+
+        let result = compute_asset_href(Path::new("images/icon.png"), config).unwrap();
         assert_eq!(result, "/blog/images/icon.png");
     }
 
     #[test]
     fn test_compute_asset_href_full_path_with_prefix() {
+        let mut config = SiteConfig::default();
+        config.build.assets = PathBuf::from("/assets");
+        config.build.output = PathBuf::from("/output");
+        config.build.path_prefix = PathBuf::from("mysite");
+        let config = &config;
+
         let result =
-            compute_asset_href(Path::new("./assets/scripts/main.js"), Path::new("mysite")).unwrap();
+            compute_asset_href(Path::new("./assets/scripts/main.js"), config).unwrap();
         assert_eq!(result, "/mysite/scripts/main.js");
     }
 
