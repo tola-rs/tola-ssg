@@ -4,12 +4,10 @@
 //! and triggers rebuilds accordingly.
 
 use crate::{
+    compiler::process_watched_files,
     config::SiteConfig,
     log,
-    utils::{
-        category::{FileCategory, categorize_path},
-        watch::process_watched_files,
-    },
+    utils::category::{FileCategory, categorize_path},
 };
 use anyhow::{Context, Result};
 use notify::{Event, EventKind, RecursiveMode, Watcher};

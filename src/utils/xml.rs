@@ -12,6 +12,8 @@ use std::str;
 
 use crate::config::SiteConfig;
 use crate::utils::slug::{slugify_fragment, slugify_path};
+use crate::utils::svg::{HtmlContext, Svg, compress_svgs_parallel, extract_svg_element};
+use std::path::Path;
 
 // ============================================================================
 // Type Aliases
@@ -322,12 +324,82 @@ pub fn write_script(
 }
 
 // ============================================================================
+// HTML Processing
+// ============================================================================
+
+pub fn process_html(html_path: &Path, content: &[u8], config: &'static SiteConfig) -> Result<Vec<u8>> {
+    let mut ctx = HtmlContext::new(config, html_path);
+    let mut writer = Writer::new(Cursor::new(Vec::with_capacity(content.len())));
+    let mut reader = create_xml_reader(content);
+    let mut svgs = Vec::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(elem)) => {
+                handle_start_element(&elem, &mut reader, &mut writer, &mut ctx, &mut svgs)?;
+            }
+            Ok(Event::End(elem)) => {
+                handle_end_element(&elem, &mut writer, config)?;
+            }
+            Ok(Event::Eof) => break,
+            Ok(event) => writer.write_event(event)?,
+            Err(e) => anyhow::bail!(
+                "XML parse error at position {}: {:?}",
+                reader.error_position(),
+                e
+            ),
+        }
+    }
+
+    // Compress SVGs in parallel
+    if ctx.extract_svg && !svgs.is_empty() {
+        compress_svgs_parallel(&svgs, html_path, config)?;
+    }
+
+    Ok(writer.into_inner().into_inner())
+}
+
+fn handle_start_element(
+    elem: &BytesStart<'_>,
+    reader: &mut Reader<&[u8]>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    ctx: &mut HtmlContext<'_>,
+    svgs: &mut Vec<Svg>,
+) -> Result<()> {
+    match elem.name().as_ref() {
+        b"html" => write_html_with_lang(elem, writer, ctx.config)?,
+        b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
+            write_heading_with_slugified_id(elem, writer, ctx.config)?;
+        }
+        b"svg" if ctx.extract_svg => {
+            if let Some(svg) = extract_svg_element(reader, writer, elem, ctx)? {
+                svgs.push(svg);
+            }
+        }
+        _ => write_element_with_processed_links(elem, writer, ctx.config)?,
+    }
+    Ok(())
+}
+
+fn handle_end_element(
+    elem: &BytesEnd<'_>,
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    config: &'static SiteConfig,
+) -> Result<()> {
+    match elem.name().as_ref() {
+        b"head" => write_head_content(writer, config)?,
+        _ => writer.write_event(Event::End(elem.to_owned()))?,
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Asset Utilities
 // ============================================================================
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 static ASSET_TOP_LEVELS: OnceLock<HashSet<OsString>> = OnceLock::new();

@@ -84,7 +84,7 @@ fn get_terminal_width() -> u16 {
 #[macro_export]
 macro_rules! log {
     ($module:expr; $($arg:tt)*) => {{
-        $crate::utils::log::log($module, &format!($($arg)*))
+        $crate::logger::log($module, &format!($($arg)*))
     }};
 }
 

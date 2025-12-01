@@ -16,7 +16,7 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 
 use crate::config::{ExtractSvgType, SiteConfig};
-use crate::utils::exec::wait_child;
+use crate::exec::wait_child;
 use crate::{exec_with_stdin, log};
 
 // ============================================================================

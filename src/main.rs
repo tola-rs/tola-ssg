@@ -2,9 +2,13 @@
 
 mod build;
 mod cli;
+mod compiler;
 mod config;
 mod deploy;
+mod exec;
+mod generator;
 mod init;
+mod logger;
 mod serve;
 mod utils;
 mod watch;
@@ -15,12 +19,11 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use config::SiteConfig;
 use deploy::deploy_site;
+use generator::{rss::build_rss, sitemap::build_sitemap};
 use gix::ThreadSafeRepository;
 use init::new_site;
 use serve::serve_site;
 use std::path::Path;
-use utils::rss::build_rss;
-use utils::sitemap::build_sitemap;
 
 fn main() -> Result<()> {
     let cli: &'static Cli = Box::leak(Box::new(Cli::parse()));

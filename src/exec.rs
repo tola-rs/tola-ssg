@@ -28,17 +28,17 @@ use std::{
 #[macro_export]
 macro_rules! exec {
     ($cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::exec(
+        $crate::exec::exec(
             None,
-            &$crate::utils::exec::to_cmd_vec($cmd),
-            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
+            &$crate::exec::to_cmd_vec($cmd),
+            &$crate::exec::filter_args(&[$($crate::exec::to_os($arg)),*]),
         )
     }};
     ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::exec(
+        $crate::exec::exec(
             Some($root),
-            &$crate::utils::exec::to_cmd_vec($cmd),
-            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
+            &$crate::exec::to_cmd_vec($cmd),
+            &$crate::exec::filter_args(&[$($crate::exec::to_os($arg)),*]),
         )
     }};
 }
@@ -50,17 +50,17 @@ macro_rules! exec {
 #[macro_export]
 macro_rules! exec_with_stdin {
     ($cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::spawn_with_stdin(
+        $crate::exec::spawn_with_stdin(
             None,
-            &$crate::utils::exec::to_cmd_vec($cmd),
-            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
+            &$crate::exec::to_cmd_vec($cmd),
+            &$crate::exec::filter_args(&[$($crate::exec::to_os($arg)),*]),
         )
     }};
     ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::spawn_with_stdin(
+        $crate::exec::spawn_with_stdin(
             Some($root),
-            &$crate::utils::exec::to_cmd_vec($cmd),
-            &$crate::utils::exec::filter_args(&[$($crate::utils::exec::to_os($arg)),*]),
+            &$crate::exec::to_cmd_vec($cmd),
+            &$crate::exec::filter_args(&[$($crate::exec::to_os($arg)),*]),
         )
     }};
 }

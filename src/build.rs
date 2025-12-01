@@ -3,20 +3,25 @@
 //! Coordinates content compilation and asset processing.
 
 use crate::{
+    compiler::{collect_all_files, process_asset, process_content},
     config::SiteConfig,
     log,
+    logger::ProgressBars,
     utils::{
-        build::{collect_all_files, process_asset, process_content},
         category::get_deps_mtime,
         git,
-        log::ProgressBars,
         page::{collect_pages, Pages},
     },
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use gix::ThreadSafeRepository;
 use rayon::prelude::*;
-use std::{ffi::OsStr, fs, path::{Path, PathBuf}};
+use std::{
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// Build the entire site, processing content and assets in parallel.
 ///
@@ -49,28 +54,43 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
         ("assets", asset_files.len()),
     ]);
 
+    // Shared flag to abort early on error and prevent duplicate error logs
+    let has_error = AtomicBool::new(false);
+
     // Process content and assets in parallel
     let clean = config.build.clean;
     let (posts_result, assets_result) = rayon::join(
         || {
-            content_files
-                .par_iter()
-                .try_for_each(|path| {
-                    let result = process_content(path, config, clean, deps_mtime, false);
-                    progress.inc(0);
-                    result
-                })
-                .context("Failed to compile posts")
+            content_files.par_iter().try_for_each(|path| {
+                if has_error.load(Ordering::Relaxed) {
+                    return Err(anyhow!("Aborted"));
+                }
+                let result = process_content(path, config, clean, deps_mtime, false);
+                if let Err(e) = result {
+                    if !has_error.swap(true, Ordering::Relaxed) {
+                        log!("error"; "{e}");
+                    }
+                    return Err(anyhow!("Build failed"));
+                }
+                progress.inc(0);
+                Ok(())
+            })
         },
         || {
-            asset_files
-                .par_iter()
-                .try_for_each(|path| {
-                    let result = process_asset(path, config, false, false);
-                    progress.inc(1);
-                    result
-                })
-                .context("Failed to copy assets")
+            asset_files.par_iter().try_for_each(|path| {
+                if has_error.load(Ordering::Relaxed) {
+                    return Err(anyhow!("Aborted"));
+                }
+                let result = process_asset(path, config, false, false);
+                if let Err(e) = result {
+                    if !has_error.swap(true, Ordering::Relaxed) {
+                        log!("error"; "{e}");
+                    }
+                    return Err(anyhow!("Build failed"));
+                }
+                progress.inc(1);
+                Ok(())
+            })
         },
     );
 

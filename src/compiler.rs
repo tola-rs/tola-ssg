@@ -1,24 +1,18 @@
-//! Content and asset processing.
+//! Content and asset compilation logic.
 //!
-//! Handles compilation of Typst files to HTML and asset copying/optimization.
+//! Handles compilation of Typst files to HTML, asset processing, and batch operations.
 
-use crate::utils::svg::{HtmlContext, Svg, compress_svgs_parallel, extract_svg_element};
-use crate::utils::watch::wait_until_stable;
-use crate::utils::xml::{
-    create_xml_reader, write_element_with_processed_links, write_head_content,
-    write_heading_with_slugified_id, write_html_with_lang,
-};
-use crate::{config::SiteConfig, exec, log, utils::page::PageMeta};
-use anyhow::{Result, anyhow};
-use quick_xml::{
-    Reader, Writer,
-    events::{BytesEnd, BytesStart, Event},
-};
+use crate::utils::category::{FileCategory, categorize_path, normalize_path};
+use crate::utils::page::PageMeta;
+use crate::utils::xml::process_html;
+use crate::{config::SiteConfig, exec, log};
+use anyhow::{Result, anyhow, bail};
+use rayon::prelude::*;
 use std::{
     fs,
-    io::Cursor,
     path::{Path, PathBuf},
-    time::SystemTime,
+    thread,
+    time::{Duration, SystemTime},
 };
 use walkdir::WalkDir;
 
@@ -78,7 +72,6 @@ pub fn process_content(
     deps_mtime: Option<SystemTime>,
     log_file: bool,
 ) -> Result<()> {
-    let root = config.get_root();
     let content = &config.build.content;
     let output = &config.build.output.join(&config.build.path_prefix);
 
@@ -125,13 +118,7 @@ pub fn process_content(
         fs::create_dir_all(parent)?;
     }
 
-    let output = exec!(&config.build.typst.command;
-        "compile", "--features", "html", "--format", "html",
-        "--font-path", root, "--root", root,
-        content_path, "-"
-    )?;
-
-    let html_content = output.stdout;
+    let html_content = compile_typst(content_path, config)?;
     let html_content = process_html(&page.html, &html_content, config)?;
 
     let html_content = if config.build.minify {
@@ -142,6 +129,16 @@ pub fn process_content(
 
     fs::write(&page.html, html_content)?;
     Ok(())
+}
+
+fn compile_typst(content_path: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
+    let root = config.get_root();
+    let output = exec!(&config.build.typst.command;
+        "compile", "--features", "html", "--format", "html",
+        "--font-path", root, "--root", root,
+        content_path, "-"
+    )?;
+    Ok(output.stdout)
 }
 
 // ============================================================================
@@ -187,9 +184,7 @@ pub fn process_asset(
             // Config paths are already absolute, just canonicalize the runtime path
             let asset_path = asset_path.canonicalize().unwrap();
             if *input == asset_path {
-                exec!(config.get_root(); &config.build.tailwind.command;
-                    "-i", input, "-o", &output_path, if config.build.minify { "--minify" } else { "" }
-                )?;
+                run_tailwind(input, &output_path, config)?;
             } else {
                 fs::copy(asset_path, &output_path)?;
             }
@@ -203,71 +198,120 @@ pub fn process_asset(
 }
 
 // ============================================================================
-// HTML Processing
+// Batch Processing (for Watch Mode)
 // ============================================================================
 
-fn process_html(html_path: &Path, content: &[u8], config: &'static SiteConfig) -> Result<Vec<u8>> {
-    let mut ctx = HtmlContext::new(config, html_path);
-    let mut writer = Writer::new(Cursor::new(Vec::with_capacity(content.len())));
-    let mut reader = create_xml_reader(content);
-    let mut svgs = Vec::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(elem)) => {
-                handle_start_element(&elem, &mut reader, &mut writer, &mut ctx, &mut svgs)?;
-            }
-            Ok(Event::End(elem)) => {
-                handle_end_element(&elem, &mut writer, config)?;
-            }
-            Ok(Event::Eof) => break,
-            Ok(event) => writer.write_event(event)?,
-            Err(e) => anyhow::bail!(
-                "XML parse error at position {}: {:?}",
-                reader.error_position(),
-                e
-            ),
+/// Process changed content files (.typ)
+pub fn process_watched_content(files: &[&PathBuf], config: &'static SiteConfig) -> Result<()> {
+    // In watch mode, we always force rebuild changed files (deps_mtime = None)
+    // because FullRebuild is triggered separately for template/config changes
+    files.par_iter().for_each(|path| {
+        let path = normalize_path(path);
+        if let Err(e) = process_content(&path, config, false, None, true) {
+            log!("watch"; "{e}");
         }
+    });
+
+    // Rebuild tailwind CSS if enabled
+    if config.build.tailwind.enable {
+        rebuild_tailwind(config)?;
     }
 
-    // Compress SVGs in parallel
-    if ctx.extract_svg && !svgs.is_empty() {
-        compress_svgs_parallel(&svgs, html_path, config)?;
-    }
-
-    Ok(writer.into_inner().into_inner())
-}
-
-fn handle_start_element(
-    elem: &BytesStart<'_>,
-    reader: &mut Reader<&[u8]>,
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    ctx: &mut HtmlContext<'_>,
-    svgs: &mut Vec<Svg>,
-) -> Result<()> {
-    match elem.name().as_ref() {
-        b"html" => write_html_with_lang(elem, writer, ctx.config)?,
-        b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" => {
-            write_heading_with_slugified_id(elem, writer, ctx.config)?;
-        }
-        b"svg" if ctx.extract_svg => {
-            if let Some(svg) = extract_svg_element(reader, writer, elem, ctx)? {
-                svgs.push(svg);
-            }
-        }
-        _ => write_element_with_processed_links(elem, writer, ctx.config)?,
-    }
     Ok(())
 }
 
-fn handle_end_element(
-    elem: &BytesEnd<'_>,
-    writer: &mut Writer<Cursor<Vec<u8>>>,
+/// Process changed asset files
+pub fn process_watched_assets(
+    files: &[&PathBuf],
     config: &'static SiteConfig,
+    should_wait_until_stable: bool,
 ) -> Result<()> {
-    match elem.name().as_ref() {
-        b"head" => write_head_content(writer, config)?,
-        _ => writer.write_event(Event::End(elem.to_owned()))?,
+    files
+        .par_iter()
+        .filter(|path| path.exists())
+        .try_for_each(|path| {
+            let path = normalize_path(path);
+            process_asset(&path, config, should_wait_until_stable, true)
+        })
+}
+
+/// Process all watched file changes
+pub fn process_watched_files(files: &[PathBuf], config: &'static SiteConfig) -> Result<()> {
+    let mut content_files = Vec::new();
+    let mut asset_files = Vec::new();
+
+    // Categorize files by type
+    for path in files.iter().filter(|p| p.exists()) {
+        match categorize_path(path, config) {
+            FileCategory::Content => content_files.push(path),
+            FileCategory::Asset => asset_files.push(path),
+            // Dependency changes trigger full rebuild in watch.rs before reaching here.
+            // Unknown files (e.g., .DS_Store) are silently ignored.
+            _ => {}
+        }
     }
+
+    if !content_files.is_empty() {
+        process_watched_content(&content_files, config)?;
+    }
+    if !asset_files.is_empty() {
+        process_watched_assets(&asset_files, config, true)?;
+    }
+
     Ok(())
 }
+
+/// Rebuild tailwind CSS
+fn rebuild_tailwind(config: &'static SiteConfig) -> Result<()> {
+    let input = config
+        .build
+        .tailwind
+        .input
+        .as_ref()
+        .ok_or_else(|| anyhow!("Tailwind input path not configured"))?;
+
+    let relative_path = input
+        .strip_prefix(&config.build.assets)?
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid tailwind input path"))?;
+
+    // Output path includes path_prefix for consistency with other assets
+    let output = config
+        .build
+        .output
+        .join(&config.build.path_prefix)
+        .join(relative_path);
+
+    run_tailwind(input, &output, config)?;
+
+    Ok(())
+}
+
+fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig) -> Result<()> {
+    exec!(
+        config.get_root();
+        &config.build.tailwind.command;
+        "-i", input, "-o", output,
+        if config.build.minify { "--minify" } else { "" }
+    )?;
+    Ok(())
+}
+
+/// Wait for file to stop being written to
+pub fn wait_until_stable(path: &Path, max_retries: usize) -> Result<()> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+    let mut last_size = fs::metadata(path)?.len();
+
+    for _ in 0..max_retries {
+        thread::sleep(POLL_INTERVAL);
+        let current_size = fs::metadata(path)?.len();
+        if current_size == last_size {
+            return Ok(());
+        }
+        last_size = current_size;
+    }
+
+    bail!("File did not stabilize after {max_retries} retries")
+}
+
