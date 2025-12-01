@@ -206,7 +206,10 @@ impl SiteConfig {
         match &cli.command {
             Commands::Build { build_args } | Commands::Serve { build_args, .. } => {
                 Self::update_option(&mut self.build.minify, build_args.minify.as_ref());
-                Self::update_option(&mut self.build.tailwind.enable, build_args.tailwind.as_ref());
+                Self::update_option(
+                    &mut self.build.tailwind.enable,
+                    build_args.tailwind.as_ref(),
+                );
                 Self::update_option(&mut self.build.rss.enable, build_args.rss.as_ref());
                 Self::update_option(&mut self.build.sitemap.enable, build_args.sitemap.as_ref());
                 self.build.clean = build_args.clean;

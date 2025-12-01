@@ -64,14 +64,13 @@ const WELCOME_TEMPLATE: &str = include_str!("../assets/serve/welcome.html");
 pub fn serve_site(config: &'static SiteConfig) -> Result<()> {
     let addr = SocketAddr::new(config.serve.interface.parse()?, config.serve.port);
 
-    let server = Arc::new(
-        Server::http(addr).map_err(|e| anyhow::anyhow!("Failed to bind to {addr}: {e}"))?,
-    );
+    let server =
+        Arc::new(Server::http(addr).map_err(|e| anyhow::anyhow!("Failed to bind to {addr}: {e}"))?);
 
     // Set up Ctrl+C handler for graceful shutdown
     let server_for_signal = Arc::clone(&server);
     ctrlc::set_handler(move || {
-        log!(true; "serve"; "shutting down...");
+        log!("serve"; "shutting down...");
         server_for_signal.unblock();
     })
     .context("Failed to set Ctrl+C handler")?;
@@ -151,9 +150,8 @@ fn serve_file(request: Request, path: &Path) -> Result<()> {
     let content = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let content_type = guess_content_type(path);
 
-    let response = Response::from_data(content).with_header(
-        Header::from_bytes("Content-Type", content_type).unwrap(),
-    );
+    let response = Response::from_data(content)
+        .with_header(Header::from_bytes("Content-Type", content_type).unwrap());
 
     request.respond(response)?;
     Ok(())
@@ -161,9 +159,8 @@ fn serve_file(request: Request, path: &Path) -> Result<()> {
 
 /// Serve HTML content.
 fn serve_html(request: Request, content: String) -> Result<()> {
-    let response = Response::from_string(content).with_header(
-        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
-    );
+    let response = Response::from_string(content)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
     request.respond(response)?;
     Ok(())
 }
@@ -283,4 +280,3 @@ fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io
         .replace("{parent_link}", &parent_link)
         .replace("{entries}", &entries.join("\n            ")))
 }
-

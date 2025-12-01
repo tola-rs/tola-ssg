@@ -14,7 +14,6 @@ use quick_xml::{
     Reader, Writer,
     events::{BytesEnd, BytesStart, Event},
 };
-use rayon::prelude::*;
 use std::{
     fs,
     io::Cursor,
@@ -30,38 +29,18 @@ use walkdir::WalkDir;
 /// Files to ignore during directory traversal
 const IGNORED_FILES: &[&str] = &[".DS_Store"];
 
-/// Collect files from a directory recursively
-pub fn collect_files<P>(dir: &Path, should_collect: P) -> Vec<PathBuf>
-where
-    P: Fn(&Path) -> bool + Send + Sync,
-{
+/// Collect all files from a directory recursively
+pub fn collect_all_files(dir: &Path) -> Vec<PathBuf> {
     WalkDir::new(dir)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
             let name = e.file_name().to_str().unwrap_or_default();
-            !IGNORED_FILES.contains(&name) && should_collect(e.path())
+            !IGNORED_FILES.contains(&name)
         })
         .map(|e| e.into_path())
         .collect()
-}
-
-/// Process files in parallel with the given processor function
-pub fn process_files<P, F>(
-    dir: &Path,
-    config: &'static SiteConfig,
-    should_process: P,
-    processor: F,
-) -> Result<()>
-where
-    P: Fn(&Path) -> bool + Send + Sync,
-    F: Fn(&Path, &'static SiteConfig) -> Result<()> + Sync,
-{
-    let files = collect_files(dir, should_process);
-    files
-        .par_iter()
-        .try_for_each(|path| processor(path, config))
 }
 
 // ============================================================================
@@ -95,9 +74,9 @@ pub fn is_up_to_date(src: &Path, dst: &Path, deps_mtime: Option<SystemTime>) -> 
 pub fn process_content(
     content_path: &Path,
     config: &'static SiteConfig,
-    should_log_newline: bool,
     force_rebuild: bool,
     deps_mtime: Option<SystemTime>,
+    log_file: bool,
 ) -> Result<()> {
     let root = config.get_root();
     let content = &config.build.content;
@@ -118,7 +97,9 @@ pub fn process_content(
             return Ok(());
         }
 
-        log!(should_log_newline; "content"; "{}", relative_asset_path);
+        if log_file {
+            log!("content"; "{}", relative_asset_path);
+        }
 
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
@@ -136,7 +117,9 @@ pub fn process_content(
         return Ok(());
     }
 
-    log!(should_log_newline; "content"; "{}", page.relative);
+    if log_file {
+        log!("content"; "{}", page.relative);
+    }
 
     if let Some(parent) = page.html.parent() {
         fs::create_dir_all(parent)?;
@@ -169,7 +152,7 @@ pub fn process_asset(
     asset_path: &Path,
     config: &'static SiteConfig,
     should_wait_until_stable: bool,
-    should_log_newline: bool,
+    log_file: bool,
 ) -> Result<()> {
     let assets = &config.build.assets;
     let output = &config.build.output.join(&config.build.path_prefix);
@@ -184,7 +167,9 @@ pub fn process_asset(
         .to_str()
         .ok_or(anyhow!("Invalid path"))?;
 
-    log!(should_log_newline; "assets"; "{}", relative_asset_path);
+    if log_file {
+        log!("assets"; "{}", relative_asset_path);
+    }
 
     let output_path = output.join(relative_asset_path);
 

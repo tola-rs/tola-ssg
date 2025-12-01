@@ -20,7 +20,7 @@ pub fn process_watched_content(files: &[&PathBuf], config: &'static SiteConfig) 
     // because FullRebuild is triggered separately for template/config changes
     files.par_iter().for_each(|path| {
         let path = normalize_path(path);
-        if let Err(e) = process_content(&path, config, true, false, None) {
+        if let Err(e) = process_content(&path, config, false, None, true) {
             log!("watch"; "{e}");
         }
     });

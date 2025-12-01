@@ -2,11 +2,7 @@
 //!
 //! Parses post metadata and generates RSS/Atom feeds.
 
-use crate::{
-    config::SiteConfig,
-    exec, log,
-    utils::page::Pages,
-};
+use crate::{config::SiteConfig, exec, log, utils::page::Pages};
 use anyhow::{Context, Ok, Result, anyhow, bail};
 use rayon::prelude::*;
 use regex::Regex;
@@ -355,7 +351,7 @@ impl RssFeed {
     /// Uses `Pages` for URL information, but queries typst for
     /// title/summary/date metadata in parallel.
     pub fn build(config: &'static SiteConfig, pages: &Pages) -> Result<Self> {
-        log!(true; "rss"; "generating from {} pages", pages.len());
+        log!("rss"; "generating from {} pages", pages.len());
 
         // Parallel query for better performance
         let posts: Vec<PostMeta> = pages

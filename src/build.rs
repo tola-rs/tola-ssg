@@ -6,15 +6,17 @@ use crate::{
     config::SiteConfig,
     log,
     utils::{
-        build::{process_asset, process_content, process_files},
+        build::{collect_all_files, process_asset, process_content},
         category::get_deps_mtime,
         git,
+        log::ProgressBars,
         page::{collect_pages, Pages},
     },
 };
 use anyhow::{Context, Result};
 use gix::ThreadSafeRepository;
-use std::{ffi::OsStr, fs, path::Path};
+use rayon::prelude::*;
+use std::{ffi::OsStr, fs, path::{Path, PathBuf}};
 
 /// Build the entire site, processing content and assets in parallel.
 ///
@@ -31,34 +33,54 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
     // Calculate deps mtime once for all content files
     let deps_mtime = get_deps_mtime(config);
 
+    // Collect files first for progress tracking
+    let content_files = collect_all_files(content);
+    let asset_files = collect_all_files(assets);
+
+    // Extract .typ file references for later page collection
+    let typ_files: Vec<&PathBuf> = content_files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|ext| ext == "typ"))
+        .collect();
+
+    // Create multi-line progress bars (index 0 = content, index 1 = assets)
+    let progress = ProgressBars::new(&[
+        ("content", content_files.len()),
+        ("assets", asset_files.len()),
+    ]);
+
     // Process content and assets in parallel
     let clean = config.build.clean;
     let (posts_result, assets_result) = rayon::join(
         || {
-            process_files(
-                content,
-                config,
-                |path| path.starts_with(content),
-                |path, cfg| process_content(path, cfg, false, clean, deps_mtime),
-            )
-            .context("Failed to compile posts")
+            content_files
+                .par_iter()
+                .try_for_each(|path| {
+                    let result = process_content(path, config, clean, deps_mtime, false);
+                    progress.inc(0);
+                    result
+                })
+                .context("Failed to compile posts")
         },
         || {
-            process_files(
-                assets,
-                config,
-                |_| true,
-                |path, cfg| process_asset(path, cfg, false, false),
-            )
-            .context("Failed to copy assets")
+            asset_files
+                .par_iter()
+                .try_for_each(|path| {
+                    let result = process_asset(path, config, false, false);
+                    progress.inc(1);
+                    result
+                })
+                .context("Failed to copy assets")
         },
     );
+
+    progress.finish();
 
     posts_result?;
     assets_result?;
 
-    // Collect page metadata for RSS/sitemap
-    let pages = collect_pages(config);
+    // Collect page metadata for RSS/sitemap (reuse already collected .typ files)
+    let pages = collect_pages(config, &typ_files);
 
     log_build_result(output)?;
 

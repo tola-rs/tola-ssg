@@ -34,10 +34,7 @@
 use crate::{
     config::SiteConfig,
     log,
-    utils::{
-        build::collect_files,
-        slug::{slugify_path, FORBIDDEN_CHARS},
-    },
+    utils::slug::{FORBIDDEN_CHARS, slugify_path},
 };
 use anyhow::{Result, anyhow};
 use rayon::prelude::*;
@@ -192,22 +189,16 @@ impl Pages {
     }
 }
 
-/// Collect page metadata from all .typ files in content directory.
+/// Collect page metadata from .typ files.
 ///
 /// This is the **central entry point** for collecting page information.
-pub fn collect_pages(config: &'static SiteConfig) -> Pages {
-    let content_dir = &config.build.content;
-
-    let typ_files = collect_files(content_dir, |path| {
-        path.extension().is_some_and(|ext| ext == "typ")
-    });
-
+pub fn collect_pages(config: &'static SiteConfig, typ_files: &[&PathBuf]) -> Pages {
     let items: Vec<PageMeta> = typ_files
         .par_iter()
-        .filter_map(|typ_path| PageMeta::from_source(typ_path.clone(), config).ok())
+        .filter_map(|typ_path| PageMeta::from_source((*typ_path).clone(), config).ok())
         .collect();
 
-    log!(true; "pages"; "collected {} pages", items.len());
+    log!("pages"; "collected {} pages", items.len());
 
     Pages { items }
 }
@@ -378,7 +369,10 @@ mod tests {
             lastmod: None,
         };
 
-        assert_eq!(page.html, PathBuf::from("public/blog/posts/hello/index.html"));
+        assert_eq!(
+            page.html,
+            PathBuf::from("public/blog/posts/hello/index.html")
+        );
         assert_eq!(page.url_path, "/blog/posts/hello/");
         assert_eq!(page.full_url, "https://example.com/blog/posts/hello/");
     }

@@ -61,7 +61,7 @@ struct UrlEntry {
 impl Sitemap {
     /// Build sitemap from pre-collected page metadata.
     fn from_pages(pages: &Pages) -> Self {
-        log!(true; "sitemap"; "generating from {} pages", pages.len());
+        log!("sitemap"; "generating from {} pages", pages.len());
 
         let urls: Vec<UrlEntry> = pages
             .iter()
