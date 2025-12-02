@@ -142,6 +142,26 @@ mod tests {
     use super::*;
     use gix::objs::tree::Entry;
     use gix::objs::tree::EntryKind;
+    use std::fs::File;
+
+    fn with_temp_repo<F>(f: F)
+    where
+        F: FnOnce(&Path, &ThreadSafeRepository),
+    {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("tola_test_tree_{}", unique));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let repo = gix::init(&temp_dir).unwrap().into_sync();
+
+        f(&temp_dir, &repo);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 
     #[test]
     fn test_sort_tree_entries() {
@@ -159,5 +179,51 @@ mod tests {
         assert_eq!(entries[0].filename, "foo-bar");
         assert_eq!(entries[1].filename, "foo.rs");
         assert_eq!(entries[2].filename, "foo");
+    }
+
+    #[test]
+    fn test_tree_builder_respects_gitignore() {
+        with_temp_repo(|dir, repo| {
+            // Create files
+            File::create(dir.join("file.txt")).unwrap();
+            File::create(dir.join("ignore.me")).unwrap();
+            fs::create_dir(dir.join("ignored_dir")).unwrap();
+            File::create(dir.join("ignored_dir/file")).unwrap();
+
+            // Create .gitignore content (not file, passed to builder)
+            let gitignore = b"*.me\nignored_dir/";
+
+            let mut index = State::new(repo.to_thread_local().object_hash());
+            let builder = TreeBuilder::new(repo, gitignore);
+            let tree = builder.build_from_dir(dir, &mut index).unwrap();
+
+            // Check tree entries
+            assert_eq!(tree.entries.len(), 1);
+            assert_eq!(tree.entries[0].filename, "file.txt");
+        });
+    }
+
+    #[test]
+    fn test_tree_builder_nested() {
+        with_temp_repo(|dir, repo| {
+            // Structure:
+            // /main.rs
+            // /src/
+            //   /lib.rs
+
+            File::create(dir.join("main.rs")).unwrap();
+            fs::create_dir(dir.join("src")).unwrap();
+            File::create(dir.join("src/lib.rs")).unwrap();
+
+            let mut index = State::new(repo.to_thread_local().object_hash());
+            let builder = TreeBuilder::new(repo, &[]);
+            let tree = builder.build_from_dir(dir, &mut index).unwrap();
+
+            assert_eq!(tree.entries.len(), 2);
+            // Sorted: main.rs, src/ (because 'm' < 's')
+            assert_eq!(tree.entries[0].filename, "main.rs");
+            assert_eq!(tree.entries[1].filename, "src");
+            assert_eq!(tree.entries[1].mode, EntryKind::Tree.into());
+        });
     }
 }

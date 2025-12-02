@@ -79,3 +79,93 @@ fn get_parent_commit_ids(repo: &ThreadSafeRepository) -> Result<Vec<gix::ObjectI
 
     Ok(parent_ids)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    fn with_temp_repo<F>(f: F)
+    where
+        F: FnOnce(&Path, &ThreadSafeRepository),
+    {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("tola_test_repo_{}", unique));
+        let _ = fs::remove_dir_all(&temp_dir); // Ensure clean start
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let repo = create_repo(&temp_dir).expect("Failed to create repo");
+
+        f(&temp_dir, &repo);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_create_and_open_repo() {
+        with_temp_repo(|dir, _repo| {
+            assert!(dir.join(".git").exists());
+            assert!(dir.join(".gitignore").exists()); // Created by init_ignored_files
+
+            let opened = open_repo(dir);
+            assert!(opened.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_commit_all() {
+        with_temp_repo(|dir, repo| {
+            // Create a file
+            let file_path = dir.join("test.txt");
+            let mut file = File::create(&file_path).unwrap();
+            writeln!(file, "Hello World").unwrap();
+
+            // Commit
+            commit_all(repo, "Initial commit").expect("Commit failed");
+
+            // Verify commit exists
+            let repo_local = repo.to_thread_local();
+            let mut head = repo_local.head().unwrap();
+            let commit = head.peel_to_commit_in_place().unwrap();
+
+            assert_eq!(commit.message().unwrap().summary().to_string(), "Initial commit");
+        });
+    }
+
+    #[test]
+    fn test_commit_empty_message() {
+        with_temp_repo(|_dir, repo| {
+            let result = commit_all(repo, "   ");
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err().to_string(), "Commit message cannot be empty");
+        });
+    }
+
+    #[test]
+    fn test_read_gitignore() {
+        with_temp_repo(|dir, _repo| {
+            // Overwrite .gitignore
+            let gitignore_path = dir.join(".gitignore");
+            let mut file = File::create(&gitignore_path).unwrap();
+            writeln!(file, "*.log").unwrap();
+
+            let content = read_gitignore(dir).unwrap();
+            assert_eq!(String::from_utf8_lossy(&content).trim(), "*.log");
+        });
+    }
+
+    #[test]
+    fn test_read_gitignore_missing() {
+        with_temp_repo(|dir, _repo| {
+            let gitignore_path = dir.join(".gitignore");
+            fs::remove_file(gitignore_path).unwrap();
+
+            let content = read_gitignore(dir).unwrap();
+            assert!(content.is_empty());
+        });
+    }
+}

@@ -119,6 +119,32 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_origin_exists() {
+        with_temp_dir(|dir| {
+            // 1. Init repo
+            {
+                let _repo = gix::init(dir).unwrap();
+            } // Drop repo to release any locks
+
+            // 2. Add remote using git command
+            let status = std::process::Command::new("git")
+                .args(["remote", "add", "origin", "https://example.com/repo.git"])
+                .current_dir(dir)
+                .status()
+                .expect("Failed to execute git command");
+
+            assert!(status.success(), "git remote add failed");
+
+            // 3. Re-open repo and check
+            let repo = gix::open(dir).unwrap();
+
+            assert!(Remote::origin_exists(&repo).unwrap());
+            assert!(Remote::origin_matches(&repo, "https://example.com/repo.git").unwrap());
+            assert!(!Remote::origin_matches(&repo, "https://other.com/repo.git").unwrap());
+        });
+    }
+
+    #[test]
     fn test_build_authenticated_url_no_token() {
         let url = "https://github.com/user/repo.git";
         let result = build_authenticated_url(url, None).unwrap();
