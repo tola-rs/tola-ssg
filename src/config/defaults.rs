@@ -90,7 +90,7 @@ pub mod build {
 
     #[allow(unused)]
     pub mod slug {
-        use super::super::super::{SlugCase, SlugMode};
+        use super::super::super::{SlugCase, SlugMode, SlugSeparator};
 
         pub fn default() -> SlugMode {
             SlugMode::default()
@@ -108,8 +108,8 @@ pub mod build {
             SlugMode::Full
         }
 
-        pub fn separator() -> char {
-            '-'
+        pub fn separator() -> SlugSeparator {
+            SlugSeparator::default()
         }
 
         pub fn case() -> SlugCase {

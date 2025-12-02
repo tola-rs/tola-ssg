@@ -59,12 +59,13 @@ pub const FORBIDDEN_CHARS: &[char] = &[
 /// ```
 pub fn slugify_fragment(text: &str, config: &'static SiteConfig) -> String {
     let slug = &config.build.slug;
+    let sep = slug.separator.as_char();
 
     let result = match slug.fragment {
         SlugMode::No => return text.to_owned(),
-        SlugMode::Full => slugify_full(text, slug.separator),
-        SlugMode::Safe => sanitize(text, slug.separator),
-        SlugMode::Ascii => sanitize(&deunicode::deunicode(text), slug.separator),
+        SlugMode::Full => slugify_full(text, sep),
+        SlugMode::Safe => sanitize(text, sep),
+        SlugMode::Ascii => sanitize(&deunicode::deunicode(text), sep),
     };
 
     apply_case(&result, &slug.case)
@@ -86,12 +87,13 @@ pub fn slugify_fragment(text: &str, config: &'static SiteConfig) -> String {
 /// ```
 pub fn slugify_path(path: impl AsRef<Path>, config: &'static SiteConfig) -> PathBuf {
     let slug = &config.build.slug;
+    let sep = slug.separator.as_char();
 
     match slug.path {
         SlugMode::No => path.as_ref().to_path_buf(),
-        SlugMode::Full => slugify_full(&path.as_ref().to_string_lossy(), slug.separator).into(),
-        SlugMode::Safe => transform_path_components(path.as_ref(), slug.separator, &slug.case, false),
-        SlugMode::Ascii => transform_path_components(path.as_ref(), slug.separator, &slug.case, true),
+        SlugMode::Full => slugify_full(&path.as_ref().to_string_lossy(), sep).into(),
+        SlugMode::Safe => transform_path_components(path.as_ref(), sep, &slug.case, false),
+        SlugMode::Ascii => transform_path_components(path.as_ref(), sep, &slug.case, true),
     }
 }
 
@@ -279,7 +281,8 @@ mod tests {
     use super::*;
 
     // Default separator and case for tests
-    const SEP: char = '_';
+    const SEP_UNDERSCORE: char = '_';
+    const SEP_DASH: char = '-';
     const CASE: SlugCase = SlugCase::Preserve;
 
     // ========================================================================
@@ -288,57 +291,57 @@ mod tests {
 
     #[test]
     fn test_sanitize_replaces_forbidden_chars() {
-        assert_eq!(sanitize("Hello<World>", SEP), "Hello_World");
+        assert_eq!(sanitize("Hello<World>", SEP_UNDERSCORE), "Hello_World");
     }
 
     #[test]
     fn test_sanitize_replaces_all_forbidden_chars() {
         // All forbidden chars replaced, consecutive separators collapsed
-        assert_eq!(sanitize("a<b>c:d|e?f*g#h\\i(j)k[l]m", SEP), "a_b_c_d_e_f_g_h_i_j_k_l_m");
+        assert_eq!(sanitize("a<b>c:d|e?f*g#h\\i(j)k[l]m", SEP_UNDERSCORE), "a_b_c_d_e_f_g_h_i_j_k_l_m");
     }
 
     #[test]
     fn test_sanitize_replaces_whitespace() {
-        assert_eq!(sanitize("Hello World", SEP), "Hello_World");
+        assert_eq!(sanitize("Hello World", SEP_UNDERSCORE), "Hello_World");
     }
 
     #[test]
     fn test_sanitize_replaces_various_whitespace() {
         // \t and \n are forbidden chars, replaced with separator
-        assert_eq!(sanitize("Hello\tWorld\nTest", SEP), "Hello_World_Test");
+        assert_eq!(sanitize("Hello\tWorld\nTest", SEP_UNDERSCORE), "Hello_World_Test");
     }
 
     #[test]
     fn test_sanitize_trims() {
-        assert_eq!(sanitize("  Hello World  ", SEP), "Hello_World");
+        assert_eq!(sanitize("  Hello World  ", SEP_UNDERSCORE), "Hello_World");
     }
 
     #[test]
     fn test_sanitize_preserves_unicode() {
-        assert_eq!(sanitize("你好世界", SEP), "你好世界");
+        assert_eq!(sanitize("你好世界", SEP_UNDERSCORE), "你好世界");
     }
 
     #[test]
     fn test_sanitize_complex_input() {
         // Forbidden chars replaced, consecutive separators collapsed
-        assert_eq!(sanitize("  Hello (World) [Test]: #anchor?  ", SEP), "Hello_World_Test_anchor");
+        assert_eq!(sanitize("  Hello (World) [Test]: #anchor?  ", SEP_UNDERSCORE), "Hello_World_Test_anchor");
     }
 
     #[test]
     fn test_sanitize_empty_string() {
-        assert_eq!(sanitize("", SEP), "");
+        assert_eq!(sanitize("", SEP_UNDERSCORE), "");
     }
 
     #[test]
     fn test_sanitize_only_forbidden_chars() {
         // All forbidden chars collapse to empty string
-        assert_eq!(sanitize("<>:?*#", SEP), "");
+        assert_eq!(sanitize("<>:?*#", SEP_UNDERSCORE), "");
     }
 
     #[test]
     fn test_sanitize_mixed_content() {
         // () and # replaced with separator, consecutive collapsed
-        assert_eq!(sanitize("My Article (2024) - Part #1", SEP), "My_Article_2024_-_Part_1");
+        assert_eq!(sanitize("My Article (2024) - Part #1", SEP_UNDERSCORE), "My_Article_2024_-_Part_1");
     }
 
     // ========================================================================
@@ -348,22 +351,22 @@ mod tests {
     #[test]
     fn test_sanitize_consecutive_separators() {
         // Consecutive forbidden chars and spaces should be collapsed into single separator
-        assert_eq!(sanitize("你:   好", '-'), "你-好");
-        assert_eq!(sanitize("你::::  ::: ::好", '-'), "你-好");
-        assert_eq!(sanitize("Hello:::World", '-'), "Hello-World");
-        assert_eq!(sanitize("a   b", '-'), "a-b");
-        assert_eq!(sanitize("a<><><>b", '-'), "a-b");
-        assert_eq!(sanitize("test::: :::test", '_'), "test_test");
-        assert_eq!(sanitize("你[[[好]]]世界", '-'), "你-好-世界");
-        assert_eq!(sanitize("a((((b))))c", '-'), "a-b-c");
+        assert_eq!(sanitize("你:   好", SEP_DASH), "你-好");
+        assert_eq!(sanitize("你::::  ::: ::好", SEP_DASH), "你-好");
+        assert_eq!(sanitize("Hello:::World", SEP_DASH), "Hello-World");
+        assert_eq!(sanitize("a   b", SEP_DASH), "a-b");
+        assert_eq!(sanitize("a<><><>b", SEP_DASH), "a-b");
+        assert_eq!(sanitize("test::: :::test", SEP_UNDERSCORE), "test_test");
+        assert_eq!(sanitize("你[[[好]]]世界", SEP_DASH), "你-好-世界");
+        assert_eq!(sanitize("a((((b))))c", SEP_DASH), "a-b-c");
     }
 
     #[test]
     fn test_collapse_consecutive_separators() {
-        assert_eq!(collapse_consecutive_separators("a--b--c", '-'), "a-b-c");
-        assert_eq!(collapse_consecutive_separators("--abc--", '-'), "abc");
-        assert_eq!(collapse_consecutive_separators("------", '-'), "");
-        assert_eq!(collapse_consecutive_separators("a-b-c", '-'), "a-b-c");
+        assert_eq!(collapse_consecutive_separators("a--b--c", SEP_DASH), "a-b-c");
+        assert_eq!(collapse_consecutive_separators("--abc--", SEP_DASH), "abc");
+        assert_eq!(collapse_consecutive_separators("------", SEP_DASH), "");
+        assert_eq!(collapse_consecutive_separators("a-b-c", SEP_DASH), "a-b-c");
     }
 
     // ========================================================================
@@ -372,66 +375,66 @@ mod tests {
 
     #[test]
     fn test_sanitize_chinese() {
-        assert_eq!(sanitize("你好", SEP), "你好");
-        assert_eq!(sanitize("你好世界", SEP), "你好世界");
-        assert_eq!(sanitize("关于我", SEP), "关于我");
+        assert_eq!(sanitize("你好", SEP_UNDERSCORE), "你好");
+        assert_eq!(sanitize("你好世界", SEP_UNDERSCORE), "你好世界");
+        assert_eq!(sanitize("关于我", SEP_UNDERSCORE), "关于我");
     }
 
     #[test]
     fn test_sanitize_chinese_with_forbidden() {
         // Forbidden chars are replaced with separator
-        assert_eq!(sanitize("你好#世界", SEP), "你好_世界");
-        assert_eq!(sanitize("关于(我)", SEP), "关于_我");
-        assert_eq!(sanitize("我[我]", SEP), "我_我");
-        assert_eq!(sanitize("第一章：开始", SEP), "第一章：开始"); // Chinese colon ：is NOT forbidden
-        assert_eq!(sanitize("第一章:开始", SEP), "第一章_开始"); // ASCII colon : IS forbidden
+        assert_eq!(sanitize("你好#世界", SEP_UNDERSCORE), "你好_世界");
+        assert_eq!(sanitize("关于(我)", SEP_UNDERSCORE), "关于_我");
+        assert_eq!(sanitize("我[我]", SEP_UNDERSCORE), "我_我");
+        assert_eq!(sanitize("第一章：开始", SEP_UNDERSCORE), "第一章：开始"); // Chinese colon ：is NOT forbidden
+        assert_eq!(sanitize("第一章:开始", SEP_UNDERSCORE), "第一章_开始"); // ASCII colon : IS forbidden
     }
 
     #[test]
     fn test_sanitize_chinese_with_spaces() {
-        assert_eq!(sanitize("你好 世界", SEP), "你好_世界");
-        assert_eq!(sanitize("  关于 我  ", SEP), "关于_我");
+        assert_eq!(sanitize("你好 世界", SEP_UNDERSCORE), "你好_世界");
+        assert_eq!(sanitize("  关于 我  ", SEP_UNDERSCORE), "关于_我");
     }
 
     #[test]
     fn test_sanitize_japanese() {
-        assert_eq!(sanitize("こんにちは", SEP), "こんにちは");
-        assert_eq!(sanitize("コンニチハ", SEP), "コンニチハ");
-        assert_eq!(sanitize("日本語#テスト", SEP), "日本語_テスト");
+        assert_eq!(sanitize("こんにちは", SEP_UNDERSCORE), "こんにちは");
+        assert_eq!(sanitize("コンニチハ", SEP_UNDERSCORE), "コンニチハ");
+        assert_eq!(sanitize("日本語#テスト", SEP_UNDERSCORE), "日本語_テスト");
     }
 
     #[test]
     fn test_sanitize_korean() {
-        assert_eq!(sanitize("안녕하세요", SEP), "안녕하세요");
-        assert_eq!(sanitize("한글 테스트", SEP), "한글_테스트");
+        assert_eq!(sanitize("안녕하세요", SEP_UNDERSCORE), "안녕하세요");
+        assert_eq!(sanitize("한글 테스트", SEP_UNDERSCORE), "한글_테스트");
     }
 
     #[test]
     fn test_sanitize_cyrillic() {
-        assert_eq!(sanitize("Привет", SEP), "Привет");
-        assert_eq!(sanitize("Москва#Россия", SEP), "Москва_Россия");
+        assert_eq!(sanitize("Привет", SEP_UNDERSCORE), "Привет");
+        assert_eq!(sanitize("Москва#Россия", SEP_UNDERSCORE), "Москва_Россия");
     }
 
     #[test]
     fn test_sanitize_european_accents() {
-        assert_eq!(sanitize("café", SEP), "café");
-        assert_eq!(sanitize("naïve", SEP), "naïve");
-        assert_eq!(sanitize("über", SEP), "über");
-        assert_eq!(sanitize("señor", SEP), "señor");
+        assert_eq!(sanitize("café", SEP_UNDERSCORE), "café");
+        assert_eq!(sanitize("naïve", SEP_UNDERSCORE), "naïve");
+        assert_eq!(sanitize("über", SEP_UNDERSCORE), "über");
+        assert_eq!(sanitize("señor", SEP_UNDERSCORE), "señor");
     }
 
     #[test]
     fn test_sanitize_mixed_unicode_ascii() {
-        assert_eq!(sanitize("Hello 你好", SEP), "Hello_你好");
-        assert_eq!(sanitize("About 关于", SEP), "About_关于");
-        assert_eq!(sanitize("2024年总结", SEP), "2024年总结");
-        assert_eq!(sanitize("第1章", SEP), "第1章");
+        assert_eq!(sanitize("Hello 你好", SEP_UNDERSCORE), "Hello_你好");
+        assert_eq!(sanitize("About 关于", SEP_UNDERSCORE), "About_关于");
+        assert_eq!(sanitize("2024年总结", SEP_UNDERSCORE), "2024年总结");
+        assert_eq!(sanitize("第1章", SEP_UNDERSCORE), "第1章");
     }
 
     #[test]
     fn test_sanitize_emoji() {
-        assert_eq!(sanitize("Hello 🎉", SEP), "Hello_🎉");
-        assert_eq!(sanitize("测试 🚀 emoji", SEP), "测试_🚀_emoji");
+        assert_eq!(sanitize("Hello 🎉", SEP_UNDERSCORE), "Hello_🎉");
+        assert_eq!(sanitize("测试 🚀 emoji", SEP_UNDERSCORE), "测试_🚀_emoji");
     }
 
     // ========================================================================
@@ -441,91 +444,91 @@ mod tests {
     #[test]
     fn test_transform_path_simple() {
         let path = Path::new("content/posts/hello-world");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("content/posts/hello-world"));
     }
 
     #[test]
     fn test_transform_path_with_forbidden_chars() {
         let path = Path::new("content/posts/hello<world>");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("content/posts/hello_world"));
     }
 
     #[test]
     fn test_transform_path_with_spaces() {
         let path = Path::new("content/my posts/hello world");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("content/my_posts/hello_world"));
     }
 
     #[test]
     fn test_transform_path_chinese() {
         let path = Path::new("content/文章/你好世界");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("content/文章/你好世界"));
     }
 
     #[test]
     fn test_transform_path_chinese_with_forbidden() {
         let path = Path::new("content/文章#1/你好[世界]");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("content/文章_1/你好_世界"));
     }
 
     #[test]
     fn test_transform_path_mixed_unicode() {
         let path = Path::new("posts/2024年/第一篇 文章");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("posts/2024年/第一篇_文章"));
     }
 
     #[test]
     fn test_transform_path_japanese() {
         let path = Path::new("ブログ/記事/こんにちは");
-        let result = transform_path_components(path, SEP, &CASE, false);
+        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
         assert_eq!(result, PathBuf::from("ブログ/記事/こんにちは"));
     }
 
     #[test]
     fn test_transform_path_with_hyphen_separator() {
         let path = Path::new("content/my posts/hello world");
-        let result = transform_path_components(path, '-', &CASE, false);
+        let result = transform_path_components(path, SEP_DASH, &CASE, false);
         assert_eq!(result, PathBuf::from("content/my-posts/hello-world"));
     }
 
     #[test]
     fn test_transform_path_ascii_mode() {
         let path = Path::new("content/文章/你好世界");
-        let result = transform_path_components(path, '-', &SlugCase::Preserve, true);
+        let result = transform_path_components(path, SEP_DASH, &SlugCase::Preserve, true);
         assert_eq!(result, PathBuf::from("content/Wen-Zhang/Ni-Hao-Shi-Jie"));
     }
 
     #[test]
     fn test_transform_path_ascii_with_case_lower() {
         let path = Path::new("content/文章/你好世界");
-        let result = transform_path_components(path, '-', &SlugCase::Lower, true);
+        let result = transform_path_components(path, SEP_DASH, &SlugCase::Lower, true);
         assert_eq!(result, PathBuf::from("content/wen-zhang/ni-hao-shi-jie"));
     }
 
     #[test]
     fn test_transform_path_with_case_lower() {
         let path = Path::new("Content/Posts/Hello World");
-        let result = transform_path_components(path, '-', &SlugCase::Lower, false);
+        let result = transform_path_components(path, SEP_DASH, &SlugCase::Lower, false);
         assert_eq!(result, PathBuf::from("content/posts/hello-world"));
     }
 
     #[test]
     fn test_transform_path_with_case_upper() {
         let path = Path::new("content/posts/hello world");
-        let result = transform_path_components(path, '-', &SlugCase::Upper, false);
+        let result = transform_path_components(path, SEP_DASH, &SlugCase::Upper, false);
         assert_eq!(result, PathBuf::from("CONTENT/POSTS/HELLO-WORLD"));
     }
 
     #[test]
     fn test_transform_path_with_case_capitalize() {
         let path = Path::new("content/posts/hello world");
-        let result = transform_path_components(path, '-', &SlugCase::Capitalize, false);
+        let result = transform_path_components(path, SEP_DASH, &SlugCase::Capitalize, false);
         assert_eq!(result, PathBuf::from("Content/Posts/Hello-World"));
     }
 
@@ -535,27 +538,27 @@ mod tests {
 
     #[test]
     fn test_slugify_full_basic() {
-        assert_eq!(slugify_full("Hello World", '-'), "hello-world");
-        assert_eq!(slugify_full("Hello World", '_'), "hello_world");
+        assert_eq!(slugify_full("Hello World", SEP_DASH), "hello-world");
+        assert_eq!(slugify_full("Hello World", SEP_UNDERSCORE), "hello_world");
     }
 
     #[test]
     fn test_slugify_full_unicode_to_ascii() {
         // Chinese → Pinyin
-        assert_eq!(slugify_full("你好", '-'), "ni-hao");
-        assert_eq!(slugify_full("你好世界", '-'), "ni-hao-shi-jie");
+        assert_eq!(slugify_full("你好", SEP_DASH), "ni-hao");
+        assert_eq!(slugify_full("你好世界", SEP_DASH), "ni-hao-shi-jie");
 
         // European accents → ASCII
-        assert_eq!(slugify_full("café", '-'), "cafe");
-        assert_eq!(slugify_full("über", '-'), "uber");
-        assert_eq!(slugify_full("naïve", '-'), "naive");
+        assert_eq!(slugify_full("café", SEP_DASH), "cafe");
+        assert_eq!(slugify_full("über", SEP_DASH), "uber");
+        assert_eq!(slugify_full("naïve", SEP_DASH), "naive");
     }
 
     #[test]
     fn test_slugify_full_mixed() {
-        assert_eq!(slugify_full("Hello 你好", '-'), "hello-ni-hao");
+        assert_eq!(slugify_full("Hello 你好", SEP_DASH), "hello-ni-hao");
         // Note: 2024年 → "2024nian" (no space between number and transliteration)
-        assert_eq!(slugify_full("2024年总结", '-'), "2024nian-zong-jie");
+        assert_eq!(slugify_full("2024年总结", SEP_DASH), "2024nian-zong-jie");
     }
 
     // ========================================================================
@@ -623,6 +626,7 @@ mod tests {
     // ========================================================================
 
     fn make_config(path_mode: &str, fragment_mode: &str, case: &str, sep: char) -> &'static SiteConfig {
+        let sep_str = if sep == '-' { "dash" } else { "underscore" };
         let toml = format!(
             r#"
             [base]
@@ -634,7 +638,7 @@ mod tests {
             case = "{}"
             separator = "{}"
             "#,
-            path_mode, fragment_mode, case, sep
+            path_mode, fragment_mode, case, sep_str
         );
         // Leak memory to get &'static SiteConfig for tests
         let config: SiteConfig = toml::from_str(&toml).unwrap();
@@ -644,41 +648,41 @@ mod tests {
     #[test]
     fn test_slugify_fragment_modes() {
         // Full mode
-        let config = make_config("safe", "full", "lower", '-');
+        let config = make_config("safe", "full", "lower", SEP_DASH);
         assert_eq!(slugify_fragment("Hello World", config), "hello-world");
         assert_eq!(slugify_fragment("你好", config), "ni-hao");
 
         // Safe mode
-        let config = make_config("safe", "safe", "preserve", '_');
+        let config = make_config("safe", "safe", "preserve", SEP_UNDERSCORE);
         assert_eq!(slugify_fragment("Hello World", config), "Hello_World");
         assert_eq!(slugify_fragment("你好", config), "你好");
 
         // Ascii mode
-        let config = make_config("safe", "ascii", "lower", '-');
+        let config = make_config("safe", "ascii", "lower", SEP_DASH);
         assert_eq!(slugify_fragment("Hello World", config), "hello-world");
         assert_eq!(slugify_fragment("你好", config), "ni-hao");
 
         // No mode
-        let config = make_config("safe", "no", "preserve", '-');
+        let config = make_config("safe", "no", "preserve", SEP_DASH);
         assert_eq!(slugify_fragment("Hello World", config), "Hello World");
     }
 
     #[test]
     fn test_slugify_path_modes() {
         // Full mode
-        let config = make_config("full", "safe", "lower", '-');
+        let config = make_config("full", "safe", "lower", SEP_DASH);
         assert_eq!(slugify_path("content/My Posts/Hello", config), PathBuf::from("content/my-posts/hello"));
 
         // Safe mode
-        let config = make_config("safe", "safe", "preserve", '_');
+        let config = make_config("safe", "safe", "preserve", SEP_UNDERSCORE);
         assert_eq!(slugify_path("content/My Posts/Hello", config), PathBuf::from("content/My_Posts/Hello"));
 
         // Ascii mode
-        let config = make_config("ascii", "safe", "lower", '-');
+        let config = make_config("ascii", "safe", "lower", SEP_DASH);
         assert_eq!(slugify_path("content/My Posts/你好", config), PathBuf::from("content/my-posts/ni-hao"));
 
         // No mode
-        let config = make_config("no", "safe", "preserve", '-');
+        let config = make_config("no", "safe", "preserve", SEP_DASH);
         assert_eq!(slugify_path("content/My Posts/Hello", config), PathBuf::from("content/My Posts/Hello"));
     }
 }

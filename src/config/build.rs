@@ -41,6 +41,27 @@ pub enum SlugCase {
     Preserve,
 }
 
+/// Separator character for slugs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SlugSeparator {
+    /// Dash separator (`-`) (default).
+    #[default]
+    Dash,
+    /// Underscore separator (`_`).
+    Underscore,
+}
+
+impl SlugSeparator {
+    /// Get the character representation.
+    pub fn as_char(&self) -> char {
+        match self {
+            SlugSeparator::Dash => '-',
+            SlugSeparator::Underscore => '_',
+        }
+    }
+}
+
 /// SVG image extraction method for embedded raster images.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -213,7 +234,7 @@ pub struct SlugConfig {
     /// Separator character for spaces: '-' or '_' (default: '-')
     #[serde(default = "defaults::build::slug::separator")]
     #[educe(Default = defaults::build::slug::separator())]
-    pub separator: char,
+    pub separator: SlugSeparator,
 
     /// Case transformation: lower, upper, or preserve (default: lower)
     #[serde(default = "defaults::build::slug::case")]
@@ -993,5 +1014,28 @@ mod tests {
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
         assert_eq!(config.build.typst.svg.dpi, 72.5);
+    }
+
+    #[test]
+    fn test_slug_separator_parsing() {
+        // Test "dash"
+        let config: SiteConfig = toml::from_str(r#"
+            [base]
+            title = "Test"
+            description = "Test"
+            [build.slug]
+            separator = "dash"
+        "#).unwrap();
+        assert!(matches!(config.build.slug.separator, SlugSeparator::Dash));
+
+        // Test "underscore"
+        let config: SiteConfig = toml::from_str(r#"
+            [base]
+            title = "Test"
+            description = "Test"
+            [build.slug]
+            separator = "underscore"
+        "#).unwrap();
+        assert!(matches!(config.build.slug.separator, SlugSeparator::Underscore));
     }
 }

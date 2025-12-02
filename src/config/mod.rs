@@ -41,7 +41,7 @@ mod error;
 mod serve;
 
 // Re-export public types used by other modules
-pub use build::{BuildConfig, ExtractSvgType, SlugCase, SlugMode};
+pub use build::{BuildConfig, ExtractSvgType, SlugCase, SlugMode, SlugSeparator};
 pub use deploy::DeployConfig;
 pub use error::ConfigError;
 
