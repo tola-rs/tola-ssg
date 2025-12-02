@@ -83,7 +83,7 @@ impl PostMeta {
 ///
 /// Uses pre-collected page metadata for URLs, but still queries typst
 /// for title/summary/date since those require parsing the source files.
-pub fn build_rss(config: &'static SiteConfig, pages: &Pages) -> Result<()> {
+pub fn build_rss(config: &SiteConfig, pages: &Pages) -> Result<()> {
     if config.build.rss.enable {
         RssFeed::build(config, pages)?.write(config)?;
     }
@@ -99,7 +99,7 @@ impl RssFeed {
     ///
     /// Uses `Pages` for URL information, but queries typst for
     /// title/summary/date metadata in parallel.
-    pub fn build(config: &'static SiteConfig, pages: &Pages) -> Result<Self> {
+    pub fn build(config: &SiteConfig, pages: &Pages) -> Result<Self> {
         log!("rss"; "generating from {} pages", pages.len());
 
         // Parallel query for better performance
@@ -143,7 +143,7 @@ impl RssFeed {
     }
 
     /// Write RSS feed to file
-    pub fn write(self, config: &'static SiteConfig) -> Result<()> {
+    pub fn write(self, config: &SiteConfig) -> Result<()> {
         let xml = self.into_xml()?;
         let rss_path = &config.build.rss.path;
 
@@ -162,7 +162,7 @@ impl RssFeed {
 // ============================================================================
 
 /// Query metadata from a Typst post file
-fn query_post_meta(post_path: &Path, guid: &str, config: &'static SiteConfig) -> Result<PostMeta> {
+fn query_post_meta(post_path: &Path, guid: &str, config: &SiteConfig) -> Result<PostMeta> {
     let root = config.get_root();
 
     let output = exec!(
@@ -185,7 +185,7 @@ fn query_post_meta(post_path: &Path, guid: &str, config: &'static SiteConfig) ->
 }
 
 /// Parse post metadata from JSON string
-fn parse_post_meta(guid: String, json_str: &str, config: &'static SiteConfig) -> Result<PostMeta> {
+fn parse_post_meta(guid: String, json_str: &str, config: &SiteConfig) -> Result<PostMeta> {
     let json: serde_json::Value = serde_json::from_str(json_str)
         .with_context(|| format!("Failed to parse post metadata JSON:\n{json_str}"))?;
 
@@ -222,9 +222,9 @@ fn parse_typst_element(content: &str) -> Result<TypstElement> {
 /// 1. Post meta author if already in valid format
 /// 2. Site config author if in valid format
 /// 3. Combine site config email and author
-fn normalize_rss_author(author: Option<&String>, config: &'static SiteConfig) -> Option<String> {
+fn normalize_rss_author(author: Option<&String>, config: &SiteConfig) -> Option<String> {
     static RE_VALID_AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\s*\([^)]+\)$").unwrap()
+        Regex::new(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}[ \t]*\([^)]+\)$").unwrap()
     });
 
     let author = author?;
@@ -242,6 +242,123 @@ fn normalize_rss_author(author: Option<&String>, config: &'static SiteConfig) ->
 
     // Combine email and author name
     Some(format!("{} ({})", config.base.email, site_author))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to create a config for testing
+    fn make_config(author: &str, email: &str) -> SiteConfig {
+        let mut config = SiteConfig::default();
+        config.base.author = author.to_string();
+        config.base.email = email.to_string();
+        config.base.url = Some("https://example.com".to_string());
+        config
+    }
+
+    #[test]
+    fn test_normalize_rss_author() {
+        let config = make_config("Site Author", "site@example.com");
+
+        // Case 1: Post author is already valid
+        let post_author = "post@example.com (Post Author)".to_string();
+        assert_eq!(
+            normalize_rss_author(Some(&post_author), &config),
+            Some(post_author)
+        );
+
+        // Case 2: Post author is invalid (just name), fallback to site config (combined)
+        let post_author_invalid = "Post Author".to_string();
+        assert_eq!(
+            normalize_rss_author(Some(&post_author_invalid), &config),
+            Some("site@example.com (Site Author)".to_string())
+        );
+
+        // Case 3: Post author None, returns None (current behavior)
+        assert_eq!(normalize_rss_author(None, &config), None);
+
+        // Case 4: Site author is valid email format
+        let config_valid = make_config("site@example.com (Site Author)", "");
+        assert_eq!(
+            normalize_rss_author(Some(&post_author_invalid), &config_valid),
+            Some("site@example.com (Site Author)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_post_meta_into_rss_item() {
+        let meta = PostMeta {
+            title: Some("Test Title".to_string()),
+            link: Some("https://example.com/post".to_string()),
+            date: Some("2024-01-01T00:00:00Z".to_string()),
+            summary: Some("Test Summary".to_string()),
+            author: Some("author@example.com (Author)".to_string()),
+            ..Default::default()
+        };
+
+        let item = meta.into_rss_item().expect("Should convert to RSS item");
+        assert_eq!(item.title(), Some("Test Title"));
+        assert_eq!(item.link(), Some("https://example.com/post"));
+        assert_eq!(item.description(), Some("Test Summary"));
+        assert_eq!(item.author(), Some("author@example.com (Author)"));
+        // RFC2822 format check
+        assert!(item.pub_date().unwrap().contains("Jan 2024"));
+    }
+
+    #[test]
+    fn test_post_meta_missing_fields() {
+        let meta = PostMeta {
+            title: None,
+            link: Some("link".to_string()),
+            date: Some("2024-01-01".to_string()),
+            ..Default::default()
+        };
+        assert!(meta.into_rss_item().is_none());
+    }
+
+    #[test]
+    fn test_parse_post_meta_basic() {
+        let config = make_config("Author", "email@example.com");
+        let json = r#"{
+            "title": "Test Post",
+            "date": "2024-01-01",
+            "author": "Post Author"
+        }"#;
+
+        let meta = parse_post_meta("guid-123".to_string(), json, &config).unwrap();
+        assert_eq!(meta.title, Some("Test Post".to_string()));
+        assert_eq!(meta.link, Some("guid-123".to_string()));
+        assert_eq!(meta.author, Some("email@example.com (Author)".to_string()));
+        assert_eq!(meta.summary, None);
+    }
+
+    #[test]
+    fn test_parse_post_meta_with_summary() {
+        let config = make_config("Author", "email@example.com");
+        // Construct a JSON string where "summary" is a string containing JSON
+        // This matches the current implementation expectation:
+        // get_string("summary") -> returns string -> parse_typst_element(string)
+        let summary_inner = r#"{"func": "text", "text": "Summary Content"}"#;
+        // Escape quotes for the outer JSON string
+        let summary_escaped = summary_inner.replace('"', "\\\"");
+        
+        let json = format!(r#"{{
+            "title": "Test Post",
+            "date": "2024-01-01",
+            "summary": "{}"
+        }}"#, summary_escaped);
+
+        let meta = parse_post_meta("guid".to_string(), &json, &config).unwrap();
+        assert_eq!(meta.summary, Some("Summary Content".to_string()));
+    }
+    
+    #[test]
+    fn test_parse_post_meta_invalid_json() {
+        let config = make_config("Author", "email@example.com");
+        let json = r#"{"title": "Unclosed brace""#;
+        assert!(parse_post_meta("guid".to_string(), json, &config).is_err());
+    }
 }
 
 

@@ -31,7 +31,6 @@
 //! ```
 
 use crate::config::{SiteConfig, SlugCase, SlugMode};
-use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
 /// Characters that are unsafe for URLs and file paths.
@@ -274,62 +273,6 @@ fn capitalize_words(text: &str) -> String {
     result
 }
 
-// ============================================================================
-// Content Path Utilities
-// ============================================================================
-
-/// Computed paths for a content file.
-#[allow(dead_code)]
-pub struct ContentPaths {
-    /// Relative path without `.typ` extension.
-    /// Example: `content/posts/hello.typ` → `"posts/hello"`
-    pub relative: String,
-
-    /// Full output HTML path (slugified).
-    /// Example: `public/posts/hello/index.html`
-    pub html: PathBuf,
-}
-
-/// Compute output paths for a `.typ` content file.
-///
-/// This function maps a source `.typ` file to its HTML output location:
-/// - Strips the content directory prefix
-/// - Removes the `.typ` extension
-/// - Applies path slugification
-/// - Generates the final HTML path
-///
-/// # Path Mapping Examples
-///
-/// | Source | relative | html |
-/// |--------|----------|------|
-/// | `content/posts/hello.typ` | `posts/hello` | `public/posts/hello/index.html` |
-/// | `content/index.typ` | `index` | `public/index.html` |
-#[allow(dead_code)]
-pub fn content_paths(content_path: &Path, config: &'static SiteConfig) -> Result<ContentPaths> {
-    let content_dir = &config.build.content;
-    let output_dir = config.build.output.join(&config.build.path_prefix);
-
-    // Strip content dir and .typ extension: "content/posts/hello.typ" → "posts/hello"
-    let relative = content_path
-        .strip_prefix(content_dir)?
-        .to_str()
-        .ok_or_else(|| anyhow!("Invalid path encoding"))?
-        .strip_suffix(".typ")
-        .ok_or_else(|| anyhow!("Not a .typ file: {}", content_path.display()))?
-        .to_owned();
-
-    // Special case: index.typ → public/index.html (not public/index/index.html)
-    let is_index = content_path.file_name().is_some_and(|p| p == "index.typ");
-
-    let html = if is_index {
-        config.build.output.join("index.html")
-    } else {
-        output_dir.join(&relative).join("index.html")
-    };
-    let html = slugify_path(html, config);
-
-    Ok(ContentPaths { relative, html })
-}
 
 #[cfg(test)]
 mod tests {
@@ -673,5 +616,69 @@ mod tests {
         assert_eq!(remove_forbidden_chars("a<b>c:d|e?f*g#h\\i(j)k[l]m"), "abcdefghijklm");
         assert_eq!(remove_forbidden_chars("Hello World"), "Hello World");
         assert_eq!(remove_forbidden_chars("Hello\tWorld\nTest"), "HelloWorldTest");
+    }
+
+    // ========================================================================
+    // Integration tests with SiteConfig
+    // ========================================================================
+
+    fn make_config(path_mode: &str, fragment_mode: &str, case: &str, sep: char) -> &'static SiteConfig {
+        let toml = format!(
+            r#"
+            [base]
+            title = "Test"
+            description = "Test"
+            [build.slug]
+            path = "{}"
+            fragment = "{}"
+            case = "{}"
+            separator = "{}"
+            "#,
+            path_mode, fragment_mode, case, sep
+        );
+        // Leak memory to get &'static SiteConfig for tests
+        let config: SiteConfig = toml::from_str(&toml).unwrap();
+        Box::leak(Box::new(config))
+    }
+
+    #[test]
+    fn test_slugify_fragment_modes() {
+        // Full mode
+        let config = make_config("safe", "full", "lower", '-');
+        assert_eq!(slugify_fragment("Hello World", config), "hello-world");
+        assert_eq!(slugify_fragment("你好", config), "ni-hao");
+
+        // Safe mode
+        let config = make_config("safe", "safe", "preserve", '_');
+        assert_eq!(slugify_fragment("Hello World", config), "Hello_World");
+        assert_eq!(slugify_fragment("你好", config), "你好");
+
+        // Ascii mode
+        let config = make_config("safe", "ascii", "lower", '-');
+        assert_eq!(slugify_fragment("Hello World", config), "hello-world");
+        assert_eq!(slugify_fragment("你好", config), "ni-hao");
+
+        // No mode
+        let config = make_config("safe", "no", "preserve", '-');
+        assert_eq!(slugify_fragment("Hello World", config), "Hello World");
+    }
+
+    #[test]
+    fn test_slugify_path_modes() {
+        // Full mode
+        let config = make_config("full", "safe", "lower", '-');
+        assert_eq!(slugify_path("content/My Posts/Hello", config), PathBuf::from("content/my-posts/hello"));
+
+        // Safe mode
+        let config = make_config("safe", "safe", "preserve", '_');
+        assert_eq!(slugify_path("content/My Posts/Hello", config), PathBuf::from("content/My_Posts/Hello"));
+
+        // Ascii mode
+        let config = make_config("ascii", "safe", "lower", '-');
+        assert_eq!(slugify_path("content/My Posts/你好", config), PathBuf::from("content/my-posts/ni-hao"));
+
+        // No mode
+        let config = make_config("no", "safe", "preserve", '-');
+        assert_eq!(slugify_path("content/My Posts/Hello", config), PathBuf::from("content/My Posts/Hello"));
     }
 }
