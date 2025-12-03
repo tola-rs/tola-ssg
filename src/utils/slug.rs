@@ -7,10 +7,10 @@
 //!
 //! | Mode | Unicode | Forbidden Chars | Case | Example |
 //! |------|---------|-----------------|------|---------|
-//! | `On` | → ASCII | → separator | lowercase | `"你好 World"` → `"ni-hao-world"` |
-//! | `Safe` | preserved | → separator | configurable | `"你好 World"` → `"你好-World"` |
-//! | `Ascii` | → ASCII | → separator | configurable | `"你好 World"` → `"Ni-Hao-World"` |
-//! | `No` | preserved | preserved | preserved | `"你好 World"` → `"你好 World"` |
+//! | `On` | → ASCII | → separator | lowercase | `"Café World"` → `"cafe-world"` |
+//! | `Safe` | preserved | → separator | configurable | `"Café World"` → `"Café-World"` |
+//! | `Ascii` | → ASCII | → separator | configurable | `"Café World"` → `"Cafe-World"` |
+//! | `No` | preserved | preserved | preserved | `"Café World"` → `"Café World"` |
 //!
 //! # Forbidden Characters
 //!
@@ -23,11 +23,11 @@
 //!
 //! ```ignore
 //! // Safe mode: preserves Unicode, replaces forbidden chars
-//! sanitize_text("第一章:开始", '-') // → "第一章-开始"
-//! sanitize_text("你::::好", '-')    // → "你-好" (consecutive collapsed)
+//! sanitize_text("Chapter:One", '-') // → "Chapter-One"
+//! sanitize_text("A::::B", '-')    // → "A-B" (consecutive collapsed)
 //!
 //! // Full slugify: converts to ASCII lowercase
-//! slugify_on("你好世界", '-')       // → "ni-hao-shi-jie"
+//! slugify_on("München", '-')       // → "munchen"
 //! ```
 
 use crate::config::{SiteConfig, SlugCase, SlugMode};
@@ -55,7 +55,7 @@ pub const FORBIDDEN_CHARS: &[char] = &[
 /// ```ignore
 /// // With SlugMode::Safe, separator='-', case=Lower
 /// slugify_fragment("Hello World") // → "hello-world"
-/// slugify_fragment("第一章:开始") // → "第一章-开始"
+/// slugify_fragment("Chapter:One") // → "Chapter-One"
 /// ```
 pub fn slugify_fragment(text: &str, config: &'static SiteConfig) -> String {
     let slug = &config.build.slug;
@@ -127,7 +127,7 @@ pub fn remove_forbidden_chars(text: &str) -> String {
 /// # Examples
 /// ```ignore
 /// slugify_full("Hello World", '-')  // → "hello-world"
-/// slugify_full("你好世界", '-')      // → "ni-hao-shi-jie"
+/// slugify_full("München", '-')      // → "munchen"
 /// slugify_full("Café Naïve", '-')   // → "cafe-naive"
 /// slugify_full("a:::b", '-')        // → "a-b"
 /// ```
@@ -150,9 +150,9 @@ fn slugify_full(text: &str, sep: char) -> String {
 /// # Examples
 /// ```ignore
 /// sanitize("Hello World", '-')   // → "Hello-World"
-/// sanitize("你好#世界", '-')      // → "你好-世界"
+/// sanitize("Café#World", '-')      // → "Café-World"
 /// sanitize("a:::b   c", '-')     // → "a-b-c"
-/// sanitize("第一章:开始", '-')   // → "第一章-开始"
+/// sanitize("Chapter:One", '-')   // → "Chapter-One"
 /// ```
 fn sanitize(text: &str, sep: char) -> String {
     let replaced = replace_special_chars(text.trim(), sep);
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_preserves_unicode() {
-        assert_eq!(sanitize("你好世界", SEP_UNDERSCORE), "你好世界");
+        assert_eq!(sanitize("CaféWorld", SEP_UNDERSCORE), "CaféWorld");
     }
 
     #[test]
@@ -351,13 +351,13 @@ mod tests {
     #[test]
     fn test_sanitize_consecutive_separators() {
         // Consecutive forbidden chars and spaces should be collapsed into single separator
-        assert_eq!(sanitize("你:   好", SEP_DASH), "你-好");
-        assert_eq!(sanitize("你::::  ::: ::好", SEP_DASH), "你-好");
+        assert_eq!(sanitize("A:   B", SEP_DASH), "A-B");
+        assert_eq!(sanitize("A::::  ::: ::B", SEP_DASH), "A-B");
         assert_eq!(sanitize("Hello:::World", SEP_DASH), "Hello-World");
         assert_eq!(sanitize("a   b", SEP_DASH), "a-b");
         assert_eq!(sanitize("a<><><>b", SEP_DASH), "a-b");
         assert_eq!(sanitize("test::: :::test", SEP_UNDERSCORE), "test_test");
-        assert_eq!(sanitize("你[[[好]]]世界", SEP_DASH), "你-好-世界");
+        assert_eq!(sanitize("A[[[B]]]C", SEP_DASH), "A-B-C");
         assert_eq!(sanitize("a((((b))))c", SEP_DASH), "a-b-c");
     }
 
@@ -374,26 +374,26 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_sanitize_chinese() {
-        assert_eq!(sanitize("你好", SEP_UNDERSCORE), "你好");
-        assert_eq!(sanitize("你好世界", SEP_UNDERSCORE), "你好世界");
-        assert_eq!(sanitize("关于我", SEP_UNDERSCORE), "关于我");
+    fn test_sanitize_unicode_text() {
+        assert_eq!(sanitize("Café", SEP_UNDERSCORE), "Café");
+        assert_eq!(sanitize("München", SEP_UNDERSCORE), "München");
+        assert_eq!(sanitize("Über", SEP_UNDERSCORE), "Über");
     }
 
     #[test]
-    fn test_sanitize_chinese_with_forbidden() {
+    fn test_sanitize_unicode_with_forbidden() {
         // Forbidden chars are replaced with separator
-        assert_eq!(sanitize("你好#世界", SEP_UNDERSCORE), "你好_世界");
-        assert_eq!(sanitize("关于(我)", SEP_UNDERSCORE), "关于_我");
-        assert_eq!(sanitize("我[我]", SEP_UNDERSCORE), "我_我");
-        assert_eq!(sanitize("第一章：开始", SEP_UNDERSCORE), "第一章：开始"); // Chinese colon ：is NOT forbidden
-        assert_eq!(sanitize("第一章:开始", SEP_UNDERSCORE), "第一章_开始"); // ASCII colon : IS forbidden
+        assert_eq!(sanitize("Café#World", SEP_UNDERSCORE), "Café_World");
+        assert_eq!(sanitize("Über(Mich)", SEP_UNDERSCORE), "Über_Mich");
+        assert_eq!(sanitize("Ich[Ich]", SEP_UNDERSCORE), "Ich_Ich");
+        assert_eq!(sanitize("Start：End", SEP_UNDERSCORE), "Start：End"); // Fullwidth colon ：is NOT forbidden
+        assert_eq!(sanitize("Start:End", SEP_UNDERSCORE), "Start_End"); // ASCII colon : IS forbidden
     }
 
     #[test]
-    fn test_sanitize_chinese_with_spaces() {
-        assert_eq!(sanitize("你好 世界", SEP_UNDERSCORE), "你好_世界");
-        assert_eq!(sanitize("  关于 我  ", SEP_UNDERSCORE), "关于_我");
+    fn test_sanitize_unicode_with_spaces() {
+        assert_eq!(sanitize("Café World", SEP_UNDERSCORE), "Café_World");
+        assert_eq!(sanitize("  Über Mich  ", SEP_UNDERSCORE), "Über_Mich");
     }
 
     #[test]
@@ -425,10 +425,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_mixed_unicode_ascii() {
-        assert_eq!(sanitize("Hello 你好", SEP_UNDERSCORE), "Hello_你好");
-        assert_eq!(sanitize("About 关于", SEP_UNDERSCORE), "About_关于");
-        assert_eq!(sanitize("2024年总结", SEP_UNDERSCORE), "2024年总结");
-        assert_eq!(sanitize("第1章", SEP_UNDERSCORE), "第1章");
+        assert_eq!(sanitize("Hello Café", SEP_UNDERSCORE), "Hello_Café");
+        assert_eq!(sanitize("About Über", SEP_UNDERSCORE), "About_Über");
+        assert_eq!(sanitize("2024år", SEP_UNDERSCORE), "2024år");
+        assert_eq!(sanitize("No1", SEP_UNDERSCORE), "No1");
     }
 
     #[test]
@@ -463,17 +463,17 @@ mod tests {
     }
 
     #[test]
-    fn test_transform_path_chinese() {
-        let path = Path::new("content/文章/你好世界");
+    fn test_transform_path_unicode() {
+        let path = Path::new("content/Artikel/Café");
         let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/文章/你好世界"));
+        assert_eq!(result, PathBuf::from("content/Artikel/Café"));
     }
 
     #[test]
-    fn test_transform_path_chinese_with_forbidden() {
-        let path = Path::new("content/文章#1/你好[世界]");
+    fn test_transform_path_unicode_with_forbidden() {
+        let path = Path::new("content/Artikel#1/Café[World]");
         let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/文章_1/你好_世界"));
+        assert_eq!(result, PathBuf::from("content/Artikel_1/Café_World"));
     }
 
     #[test]
@@ -499,16 +499,16 @@ mod tests {
 
     #[test]
     fn test_transform_path_ascii_mode() {
-        let path = Path::new("content/文章/你好世界");
+        let path = Path::new("content/Artikel/Café");
         let result = transform_path_components(path, SEP_DASH, &SlugCase::Preserve, true);
-        assert_eq!(result, PathBuf::from("content/Wen-Zhang/Ni-Hao-Shi-Jie"));
+        assert_eq!(result, PathBuf::from("content/Artikel/Cafe"));
     }
 
     #[test]
     fn test_transform_path_ascii_with_case_lower() {
-        let path = Path::new("content/文章/你好世界");
+        let path = Path::new("content/Artikel/Café");
         let result = transform_path_components(path, SEP_DASH, &SlugCase::Lower, true);
-        assert_eq!(result, PathBuf::from("content/wen-zhang/ni-hao-shi-jie"));
+        assert_eq!(result, PathBuf::from("content/artikel/cafe"));
     }
 
     #[test]
@@ -544,9 +544,9 @@ mod tests {
 
     #[test]
     fn test_slugify_full_unicode_to_ascii() {
-        // Chinese → Pinyin
-        assert_eq!(slugify_full("你好", SEP_DASH), "ni-hao");
-        assert_eq!(slugify_full("你好世界", SEP_DASH), "ni-hao-shi-jie");
+        // Unicode → ASCII
+        assert_eq!(slugify_full("München", SEP_DASH), "munchen");
+        assert_eq!(slugify_full("Åland", SEP_DASH), "aland");
 
         // European accents → ASCII
         assert_eq!(slugify_full("café", SEP_DASH), "cafe");
@@ -556,9 +556,9 @@ mod tests {
 
     #[test]
     fn test_slugify_full_mixed() {
-        assert_eq!(slugify_full("Hello 你好", SEP_DASH), "hello-ni-hao");
-        // Note: 2024年 → "2024nian" (no space between number and transliteration)
-        assert_eq!(slugify_full("2024年总结", SEP_DASH), "2024nian-zong-jie");
+        assert_eq!(slugify_full("Hello München", SEP_DASH), "hello-munchen");
+        // Note: 2024år → "2024ar"
+        assert_eq!(slugify_full("2024år", SEP_DASH), "2024ar");
     }
 
     // ========================================================================
@@ -650,17 +650,17 @@ mod tests {
         // Full mode
         let config = make_config("safe", "full", "lower", SEP_DASH);
         assert_eq!(slugify_fragment("Hello World", config), "hello-world");
-        assert_eq!(slugify_fragment("你好", config), "ni-hao");
+        assert_eq!(slugify_fragment("München", config), "munchen");
 
         // Safe mode
         let config = make_config("safe", "safe", "preserve", SEP_UNDERSCORE);
         assert_eq!(slugify_fragment("Hello World", config), "Hello_World");
-        assert_eq!(slugify_fragment("你好", config), "你好");
+        assert_eq!(slugify_fragment("München", config), "München");
 
         // Ascii mode
         let config = make_config("safe", "ascii", "lower", SEP_DASH);
         assert_eq!(slugify_fragment("Hello World", config), "hello-world");
-        assert_eq!(slugify_fragment("你好", config), "ni-hao");
+        assert_eq!(slugify_fragment("München", config), "munchen");
 
         // No mode
         let config = make_config("safe", "no", "preserve", SEP_DASH);
@@ -679,7 +679,7 @@ mod tests {
 
         // Ascii mode
         let config = make_config("ascii", "safe", "lower", SEP_DASH);
-        assert_eq!(slugify_path("content/My Posts/你好", config), PathBuf::from("content/my-posts/ni-hao"));
+        assert_eq!(slugify_path("content/My Posts/München", config), PathBuf::from("content/my-posts/munchen"));
 
         // No mode
         let config = make_config("no", "safe", "preserve", SEP_DASH);

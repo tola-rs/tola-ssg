@@ -63,7 +63,7 @@ mod tests {
             title = "KawaYww"
             description = "KawaYww's Blog"
             url = "https://kawayww.com"
-            language = "zh_Hans"
+            language = "en-US"
             copyright = "2025 KawaYww"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
@@ -71,7 +71,7 @@ mod tests {
         assert_eq!(config.base.title, "KawaYww");
         assert_eq!(config.base.description, "KawaYww's Blog");
         assert_eq!(config.base.url, Some("https://kawayww.com".to_string()));
-        assert_eq!(config.base.language, "zh_Hans");
+        assert_eq!(config.base.language, "en-US");
         assert_eq!(config.base.copyright, "2025 KawaYww");
     }
 
@@ -158,15 +158,15 @@ mod tests {
     fn test_base_config_unicode() {
         let config = r#"
             [base]
-            title = "我的博客"
-            description = "这是一个中文博客"
-            author = "张三"
-            language = "zh-Hans"
+            title = "My Blog 🚀"
+            description = "This is a blog with unicode"
+            author = "René"
+            language = "en-US"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
-        assert_eq!(config.base.title, "我的博客");
-        assert_eq!(config.base.description, "这是一个中文博客");
-        assert_eq!(config.base.author, "张三");
+        assert_eq!(config.base.title, "My Blog 🚀");
+        assert_eq!(config.base.description, "This is a blog with unicode");
+        assert_eq!(config.base.author, "René");
     }
 }
