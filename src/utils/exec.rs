@@ -288,7 +288,7 @@ fn exec_with_pty(
         let code = status.exit_code();
         std::process::ExitStatus::from_raw(code)
     };
-    
+
     Ok(Output {
         status,
         stdout: output_str.into_bytes(),
@@ -620,13 +620,13 @@ mod tests {
         // Basic colors
         assert_eq!(strip_ansi("\x1b[31mRed\x1b[0m"), "Red");
         assert_eq!(strip_ansi("\x1b[1;32mGreen Bold\x1b[0m"), "Green Bold");
-        
+
         // Multiple codes
         assert_eq!(strip_ansi("\x1b[31;42mRed on Green\x1b[0m"), "Red on Green");
-        
+
         // No colors
         assert_eq!(strip_ansi("Plain text"), "Plain text");
-        
+
         // Mixed content
         assert_eq!(
             strip_ansi("Start \x1b[33mYellow\x1b[0m End"),

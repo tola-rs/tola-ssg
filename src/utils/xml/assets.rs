@@ -38,14 +38,14 @@ pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<Stri
 
     let source = assets_dir.join(relative_path);
     let meta = AssetMeta::from_source(source, config)?;
-    Ok(meta.url)
+    Ok(meta.paths.url)
 }
 
 /// Compute stylesheet href from input path
 pub fn compute_stylesheet_href(input: &Path, config: &SiteConfig) -> Result<String> {
     let input = input.canonicalize()?;
     let meta = AssetMeta::from_source(input, config)?;
-    Ok(meta.url)
+    Ok(meta.paths.url)
 }
 
 /// Get top-level asset directory names

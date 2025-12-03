@@ -107,7 +107,7 @@ impl RssFeed {
             .iter()
             .collect::<Vec<_>>()
             .par_iter()
-            .map(|page| query_post_meta(&page.source, &page.full_url, config))
+            .map(|page| query_post_meta(&page.paths.source, &page.paths.full_url, config))
             .collect::<Result<_>>()?;
 
         Ok(Self {
@@ -342,7 +342,7 @@ mod tests {
         let summary_inner = r#"{"func": "text", "text": "Summary Content"}"#;
         // Escape quotes for the outer JSON string
         let summary_escaped = summary_inner.replace('"', "\\\"");
-        
+
         let json = format!(r#"{{
             "title": "Test Post",
             "date": "2024-01-01",
@@ -352,7 +352,7 @@ mod tests {
         let meta = parse_post_meta("guid".to_string(), &json, &config).unwrap();
         assert_eq!(meta.summary, Some("Summary Content".to_string()));
     }
-    
+
     #[test]
     fn test_parse_post_meta_invalid_json() {
         let config = make_config("Author", "email@example.com");
