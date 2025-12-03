@@ -379,24 +379,24 @@ mod tests {
 
     #[test]
     fn test_truncate_str_unicode_boundary() {
-        // UTF-8 multibyte: "你好" is 6 bytes (3 bytes per char)
+        // UTF-8 multibyte: "€€" is 6 bytes (3 bytes per char)
         // Truncating at byte 4 should find boundary at byte 3
-        let s = "你好";
-        assert_eq!(truncate_str(s, 4), "你"); // Only first char fits
+        let s = "€€";
+        assert_eq!(truncate_str(s, 4), "€"); // Only first char fits
     }
 
     #[test]
     fn test_truncate_str_unicode_exact() {
-        // "你" is exactly 3 bytes
-        let s = "你好";
-        assert_eq!(truncate_str(s, 3), "你");
+        // "€" is exactly 3 bytes
+        let s = "€€";
+        assert_eq!(truncate_str(s, 3), "€");
     }
 
     #[test]
     fn test_truncate_str_unicode_full() {
         // Both chars fit (6 bytes)
-        let s = "你好";
-        assert_eq!(truncate_str(s, 6), "你好");
+        let s = "€€";
+        assert_eq!(truncate_str(s, 6), "€€");
     }
 
     #[test]
@@ -413,10 +413,10 @@ mod tests {
 
     #[test]
     fn test_truncate_str_mixed_unicode() {
-        // "a你b" = 1 + 3 + 1 = 5 bytes
-        let s = "a你b";
-        assert_eq!(truncate_str(s, 4), "a你"); // "a" + "你" = 4 bytes
-        assert_eq!(truncate_str(s, 3), "a"); // Can't fit "你" (needs 3 bytes starting at position 1)
+        // "a€b" = 1 + 3 + 1 = 5 bytes
+        let s = "a€b";
+        assert_eq!(truncate_str(s, 4), "a€"); // "a" + "€" = 4 bytes
+        assert_eq!(truncate_str(s, 3), "a"); // Can't fit "€" (needs 3 bytes starting at position 1)
         assert_eq!(truncate_str(s, 2), "a"); // Only ASCII fits
     }
 

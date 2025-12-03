@@ -172,11 +172,11 @@ docs/*.md";
 
     #[test]
     fn test_ignore_matcher_unicode() {
-        let gitignore = "测试/*.log\n!重要.log".as_bytes();
+        let gitignore = "🧪/*.log\n!❗.log".as_bytes();
         let matcher = IgnoreMatcher::new(gitignore);
 
-        assert!(matcher.matches("测试/error.log", false));
-        assert!(!matcher.matches("测试/重要.log", false));
-        assert!(!matcher.matches("其他/error.log", false));
+        assert!(matcher.matches("🧪/error.log", false));
+        assert!(!matcher.matches("🧪/❗.log", false));
+        assert!(!matcher.matches("🤷/error.log", false));
     }
 }
