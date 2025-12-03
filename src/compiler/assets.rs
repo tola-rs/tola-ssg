@@ -111,6 +111,7 @@ pub fn rebuild_tailwind(config: &'static SiteConfig) -> Result<()> {
 
 fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig) -> Result<()> {
     exec!(
+        pty=true;
         filter=&TAILWIND_FILTER;
         config.get_root();
         &config.build.tailwind.command;

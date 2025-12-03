@@ -65,16 +65,16 @@ fn configure_origin_remote(root: &Path, repo: &Repository, url: &str) -> Result<
     } else {
         "add"
     };
-    exec!(root; ["git"]; "remote", action, "origin", url)?;
+    exec!(pty=true; root; ["git"]; "remote", action, "origin", url)?;
     Ok(())
 }
 
 /// Push to remote with optional force flag
 fn push_to_remote(root: &Path, branch: &str, force: bool) -> Result<()> {
     if force {
-        exec!(root; ["git"]; "push", "--set-upstream", "origin", branch, "-f")?;
+        exec!(pty=true; root; ["git"]; "push", "--set-upstream", "origin", branch, "-f")?;
     } else {
-        exec!(root; ["git"]; "push", "--set-upstream", "origin", branch)?;
+        exec!(pty=true; root; ["git"]; "push", "--set-upstream", "origin", branch)?;
     }
     Ok(())
 }

@@ -81,12 +81,32 @@ fn process_typst_page(
 
 fn compile_typst(content_path: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
     let root = config.get_root();
-    let output = exec!(
+
+    // Use a temporary file for output to separate content from PTY diagnostics
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_file = std::env::temp_dir().join(format!("tola_typst_{}.html", timestamp));
+
+    let result = exec!(
+        pty=true;
         filter=&TYPST_FILTER;
         &config.build.typst.command;
         "compile", "--features", "html", "--format", "html",
         "--font-path", root, "--root", root,
-        content_path, "-"
-    )?;
-    Ok(output.stdout)
+        content_path, &temp_file
+    );
+
+    match result {
+        Ok(_) => {
+            let content = fs::read(&temp_file);
+            let _ = fs::remove_file(&temp_file);
+            Ok(content?)
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&temp_file);
+            Err(e)
+        }
+    }
 }

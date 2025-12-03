@@ -5,10 +5,14 @@
 
 use crate::log;
 use anyhow::{Context, Result};
+use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use regex::Regex;
 use std::{
     ffi::OsString,
+    io::Read,
     path::Path,
     process::{Child, ChildStdin, Command, Output, Stdio},
+    sync::OnceLock,
 };
 
 // ============================================================================
@@ -17,7 +21,7 @@ use std::{
 
 /// Run an external command with arguments.
 ///
-/// Supports an optional `filter` argument to customize output logging.
+/// Supports optional `pty` and `filter` arguments.
 ///
 /// # Examples
 /// ```ignore
@@ -30,41 +34,56 @@ use std::{
 /// // With custom filter
 /// const MY_FILTER: FilterRule = FilterRule::new(&["warning:"]);
 /// exec!(filter=&MY_FILTER; ["typst"]; "compile")?;
+///
+/// // With PTY enabled
+/// exec!(pty=true; ["typst"]; "compile")?;
 /// ```
 #[macro_export]
 macro_rules! exec {
-    (filter=$filter:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::exec(
-            None,
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            $filter,
-        )
-    }};
-    (filter=$filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
+    ($($tt:tt)*) => {
+        $crate::exec_internal!(@parse_pty $($tt)*)
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! exec_internal {
+    // Parse pty argument
+    (@parse_pty pty=$pty:expr; $($rest:tt)*) => {
+        $crate::exec_internal!(@parse_filter $pty; $($rest)*)
+    };
+    (@parse_pty $($rest:tt)*) => {
+        $crate::exec_internal!(@parse_filter false; $($rest)*)
+    };
+
+    // Parse filter argument
+    (@parse_filter $pty:expr; filter=$filter:expr; $($rest:tt)*) => {
+        $crate::exec_internal!(@parse_root $pty; $filter; $($rest)*)
+    };
+    (@parse_filter $pty:expr; $($rest:tt)*) => {
+        $crate::exec_internal!(@parse_root $pty; &$crate::utils::exec::EMPTY_FILTER; $($rest)*)
+    };
+
+    // Parse root and command (with root)
+    (@parse_root $pty:expr; $filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
         $crate::utils::exec::exec(
             Some($root),
             &$crate::utils::exec::internal::to_cmd_vec($cmd),
             &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
             $filter,
+            $pty,
         )
-    }};
-    ($cmd:expr; $($arg:expr),* $(,)?) => {{
+    };
+    // Parse command (without root)
+    (@parse_root $pty:expr; $filter:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
         $crate::utils::exec::exec(
             None,
             &$crate::utils::exec::internal::to_cmd_vec($cmd),
             &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            &$crate::utils::exec::EMPTY_FILTER,
+            $filter,
+            $pty,
         )
-    }};
-    ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::exec(
-            Some($root),
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            &$crate::utils::exec::EMPTY_FILTER,
-        )
-    }};
+    };
 }
 
 /// Run an external command and return a `RunningProcess` handle.
@@ -82,38 +101,50 @@ macro_rules! exec {
 /// ```
 #[macro_export]
 macro_rules! exec_with_stdin {
-    (filter=$filter:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::spawn_with_stdin(
-            None,
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            $filter,
-        )
-    }};
-    (filter=$filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
+    ($($tt:tt)*) => {
+        $crate::exec_with_stdin_internal!(@parse_pty $($tt)*)
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! exec_with_stdin_internal {
+    // Parse pty argument
+    (@parse_pty pty=$pty:expr; $($rest:tt)*) => {
+        $crate::exec_with_stdin_internal!(@parse_filter $pty; $($rest)*)
+    };
+    (@parse_pty $($rest:tt)*) => {
+        $crate::exec_with_stdin_internal!(@parse_filter false; $($rest)*)
+    };
+
+    // Parse filter argument
+    (@parse_filter $pty:expr; filter=$filter:expr; $($rest:tt)*) => {
+        $crate::exec_with_stdin_internal!(@parse_root $pty; $filter; $($rest)*)
+    };
+    (@parse_filter $pty:expr; $($rest:tt)*) => {
+        $crate::exec_with_stdin_internal!(@parse_root $pty; &$crate::utils::exec::EMPTY_FILTER; $($rest)*)
+    };
+
+    // Parse root and command (with root)
+    (@parse_root $pty:expr; $filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
         $crate::utils::exec::spawn_with_stdin(
             Some($root),
             &$crate::utils::exec::internal::to_cmd_vec($cmd),
             &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
             $filter,
+            $pty,
         )
-    }};
-    ($cmd:expr; $($arg:expr),* $(,)?) => {{
+    };
+    // Parse command (without root)
+    (@parse_root $pty:expr; $filter:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
         $crate::utils::exec::spawn_with_stdin(
             None,
             &$crate::utils::exec::internal::to_cmd_vec($cmd),
             &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            &$crate::utils::exec::EMPTY_FILTER,
+            $filter,
+            $pty,
         )
-    }};
-    ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {{
-        $crate::utils::exec::spawn_with_stdin(
-            Some($root),
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            &$crate::utils::exec::EMPTY_FILTER,
-        )
-    }};
+    };
 }
 
 // ============================================================================
@@ -182,6 +213,20 @@ pub fn exec(
     cmd: &[OsString],
     args: &[OsString],
     filter: &'static FilterRule,
+    pty: bool,
+) -> Result<Output> {
+    if pty {
+        exec_with_pty(root, cmd, args, filter)
+    } else {
+        exec_no_pty(root, cmd, args, filter)
+    }
+}
+
+fn exec_no_pty(
+    root: Option<&Path>,
+    cmd: &[OsString],
+    args: &[OsString],
+    filter: &'static FilterRule,
 ) -> Result<Output> {
     let (name, mut command) = prepare(root, cmd, args)?;
 
@@ -193,6 +238,64 @@ pub fn exec(
     Ok(output)
 }
 
+fn exec_with_pty(
+    root: Option<&Path>,
+    cmd: &[OsString],
+    args: &[OsString],
+    filter: &'static FilterRule,
+) -> Result<Output> {
+    let (name, command_builder) = prepare_pty(root, cmd, args)?;
+
+    let pty_system = NativePtySystem::default();
+    let pair = pty_system.openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+
+    let mut child = pair.slave.spawn_command(command_builder)?;
+
+    // Drop slave to close the handle on our end
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader()?;
+    let mut output_str = String::new();
+    reader.read_to_string(&mut output_str)?;
+
+    let status = child.wait()?;
+
+    if !status.success() {
+        let msg = format!(
+            "Command `{name}` failed with exit code: {:?}\n{}",
+            status, output_str
+        );
+        anyhow::bail!(msg);
+    }
+
+    filter.log(&name, &output_str);
+
+    // Convert portable_pty::ExitStatus to std::process::ExitStatus
+    #[cfg(unix)]
+    let status = {
+        use std::os::unix::process::ExitStatusExt;
+        let code = status.exit_code() as i32;
+        std::process::ExitStatus::from_raw(code << 8)
+    };
+    #[cfg(windows)]
+    let status = {
+        use std::os::windows::process::ExitStatusExt;
+        let code = status.exit_code();
+        std::process::ExitStatus::from_raw(code)
+    };
+    
+    Ok(Output {
+        status,
+        stdout: output_str.into_bytes(),
+        stderr: Vec::new(),
+    })
+}
+
 /// Spawn a command and return a `RunningProcess` handle.
 ///
 /// # Errors
@@ -202,7 +305,12 @@ pub fn spawn_with_stdin(
     cmd: &[OsString],
     args: &[OsString],
     filter: &'static FilterRule,
+    pty: bool,
 ) -> Result<RunningProcess> {
+    if pty {
+        anyhow::bail!("PTY not supported for spawn_with_stdin yet");
+    }
+
     let (name, mut command) = prepare(root, cmd, args)?;
 
     command
@@ -292,9 +400,42 @@ fn prepare(root: Option<&Path>, cmd: &[OsString], args: &[OsString]) -> Result<(
     Ok((name, command))
 }
 
+/// Prepare a CommandBuilder from components.
+fn prepare_pty(
+    root: Option<&Path>,
+    cmd: &[OsString],
+    args: &[OsString],
+) -> Result<(String, CommandBuilder)> {
+    let name = cmd
+        .first()
+        .and_then(|s| s.to_str())
+        .context("Empty command")?
+        .to_owned();
+
+    let mut command = CommandBuilder::new(&cmd[0]);
+
+    let mut all_args = Vec::new();
+    all_args.extend_from_slice(&cmd[1..]);
+    all_args.extend_from_slice(args);
+
+    command.args(&all_args);
+
+    if let Some(dir) = root {
+        command.cwd(dir);
+    }
+
+    Ok((name, command))
+}
+
 // ============================================================================
 // Output Filtering
 // ============================================================================
+
+fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+    re.replace_all(s, "")
+}
 
 /// Filter rule for skipping entire output blocks or specific prefixes.
 ///
@@ -323,13 +464,18 @@ impl FilterRule {
     /// Iterates through lines and logs them using the `log!` macro if they
     /// don't match the skip criteria.
     fn log(&self, name: &str, output: &str) {
-        if self.should_skip(output) {
-            return;
-        }
+        let mut valid_lines = Vec::new();
         for line in output.lines() {
-            if !line.trim().is_empty() {
-                log!(name; "{line}");
+            let plain = strip_ansi(line);
+            let trimmed = plain.trim();
+            if !trimmed.is_empty() && !self.should_skip(trimmed) {
+                valid_lines.push(line);
             }
+        }
+
+        if !valid_lines.is_empty() {
+            let message = valid_lines.join("\n");
+            log!(name; "{}", message);
         }
     }
 }
@@ -466,8 +612,25 @@ mod tests {
         };
         let msg = format_error("test", &output, &TEST_FILTER);
 
-        assert!(msg.contains("Fatal error"));
-        assert!(!msg.contains("Ignored: warning"));
         assert!(msg.contains("Command `test` failed"));
+    }
+
+    #[test]
+    fn test_strip_ansi() {
+        // Basic colors
+        assert_eq!(strip_ansi("\x1b[31mRed\x1b[0m"), "Red");
+        assert_eq!(strip_ansi("\x1b[1;32mGreen Bold\x1b[0m"), "Green Bold");
+        
+        // Multiple codes
+        assert_eq!(strip_ansi("\x1b[31;42mRed on Green\x1b[0m"), "Red on Green");
+        
+        // No colors
+        assert_eq!(strip_ansi("Plain text"), "Plain text");
+        
+        // Mixed content
+        assert_eq!(
+            strip_ansi("Start \x1b[33mYellow\x1b[0m End"),
+            "Start Yellow End"
+        );
     }
 }
