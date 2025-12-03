@@ -66,7 +66,7 @@ impl Sitemap {
         let urls: Vec<UrlEntry> = pages
             .iter()
             .map(|page| UrlEntry {
-                loc: page.full_url.clone(),
+                loc: page.paths.full_url.clone(),
                 lastmod: page.lastmod_ymd(),
             })
             .collect();
@@ -135,11 +135,13 @@ mod tests {
 
     fn make_page(full_url: &str, lastmod_days: Option<u64>) -> PageMeta {
         PageMeta {
-            source: PathBuf::from("test.typ"),
-            html: PathBuf::from("public/test/index.html"),
-            relative: "test".to_string(),
-            url_path: "/test/".to_string(),
-            full_url: full_url.to_string(),
+            paths: crate::utils::meta::PagePaths {
+                source: PathBuf::from("test.typ"),
+                html: PathBuf::from("public/test/index.html"),
+                relative: "test".to_string(),
+                url_path: "/test/".to_string(),
+                full_url: full_url.to_string(),
+            },
             lastmod: lastmod_days.map(|days| UNIX_EPOCH + Duration::from_secs(days * 86400)),
         }
     }

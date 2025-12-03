@@ -45,20 +45,20 @@ fn process_typst_page(
     let page = PageMeta::from_source(path.to_path_buf(), config)?;
 
     // Check source and dependencies (templates, utils, config)
-    if !force_rebuild && is_up_to_date(path, &page.html, deps_mtime) {
+    if !force_rebuild && is_up_to_date(path, &page.paths.html, deps_mtime) {
         return Ok(());
     }
 
     if log_file {
-        log!("content"; "{}", page.relative);
+        log!("content"; "{}", page.paths.relative);
     }
 
-    if let Some(parent) = page.html.parent() {
+    if let Some(parent) = page.paths.html.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let html_content = compile_typst(path, config)?;
-    let html_content = process_html(&page.html, &html_content, config)?;
+    let html_content = process_html(&page.paths.html, &html_content, config)?;
 
     // Minify HTML if enabled
     let html_content = if config.build.minify {
@@ -75,7 +75,7 @@ fn process_typst_page(
         html_content
     };
 
-    fs::write(&page.html, html_content)?;
+    fs::write(&page.paths.html, html_content)?;
     Ok(())
 }
 

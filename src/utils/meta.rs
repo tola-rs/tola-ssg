@@ -50,6 +50,13 @@ use std::{fs, path::{Path, PathBuf}, time::SystemTime};
 /// and output path calculation.
 #[derive(Debug, Clone)]
 pub struct AssetMeta {
+    /// Path information
+    pub paths: AssetPaths,
+}
+
+/// Path information for an asset.
+#[derive(Debug, Clone)]
+pub struct AssetPaths {
     /// Source file path
     pub source: PathBuf,
     /// Output file path (in public directory)
@@ -77,10 +84,12 @@ impl AssetMeta {
         let url = url_from_output_path(&dest, config)?;
 
         Ok(Self {
-            source,
-            dest,
-            relative,
-            url,
+            paths: AssetPaths {
+                source,
+                dest,
+                relative,
+                url,
+            },
         })
     }
 }
@@ -122,14 +131,23 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
 ///
 /// | Field | Example | Used By |
 /// |-------|---------|---------|
-/// | `source` | `content/posts/hello.typ` | build, RSS query |
-/// | `html` | `public/posts/hello/index.html` | build output |
-/// | `relative` | `posts/hello` | logging |
-/// | `url_path` | `/posts/hello/` | URL construction |
-/// | `full_url` | `https://example.com/posts/hello/` | RSS, sitemap |
+/// | `paths.source` | `content/posts/hello.typ` | build, RSS query |
+/// | `paths.html` | `public/posts/hello/index.html` | build output |
+/// | `paths.relative` | `posts/hello` | logging |
+/// | `paths.url_path` | `/posts/hello/` | URL construction |
+/// | `paths.full_url` | `https://example.com/posts/hello/` | RSS, sitemap |
 /// | `lastmod` | `SystemTime` | sitemap |
 #[derive(Debug, Clone)]
 pub struct PageMeta {
+    /// Path information
+    pub paths: PagePaths,
+    /// Last modification time of the HTML file
+    pub lastmod: Option<SystemTime>,
+}
+
+/// Path information for a page.
+#[derive(Debug, Clone)]
+pub struct PagePaths {
     /// Source .typ file path
     pub source: PathBuf,
     /// Generated HTML file path (includes path_prefix)
@@ -141,8 +159,6 @@ pub struct PageMeta {
     pub url_path: String,
     /// Full URL including base (e.g., `https://example.com/posts/hello/`)
     pub full_url: String,
-    /// Last modification time of the HTML file
-    pub lastmod: Option<SystemTime>,
 }
 
 impl PageMeta {
@@ -215,11 +231,13 @@ impl PageMeta {
         let lastmod = fs::metadata(&html).and_then(|m| m.modified()).ok();
 
         Ok(Self {
-            source,
-            html,
-            relative,
-            url_path,
-            full_url,
+            paths: PagePaths {
+                source,
+                html,
+                relative,
+                url_path,
+                full_url,
+            },
             lastmod,
         })
     }
@@ -364,11 +382,13 @@ mod tests {
         let time = UNIX_EPOCH + Duration::from_secs(secs);
 
         let page = PageMeta {
-            source: PathBuf::from("test.typ"),
-            html: PathBuf::from("public/test/index.html"),
-            relative: "test".to_string(),
-            url_path: "/test/".to_string(),
-            full_url: "https://example.com/test/".to_string(),
+            paths: PagePaths {
+                source: PathBuf::from("test.typ"),
+                html: PathBuf::from("public/test/index.html"),
+                relative: "test".to_string(),
+                url_path: "/test/".to_string(),
+                full_url: "https://example.com/test/".to_string(),
+            },
             lastmod: Some(time),
         };
 
@@ -380,11 +400,13 @@ mod tests {
     #[test]
     fn test_lastmod_ymd_none() {
         let page = PageMeta {
-            source: PathBuf::from("test.typ"),
-            html: PathBuf::from("public/test/index.html"),
-            relative: "test".to_string(),
-            url_path: "/test/".to_string(),
-            full_url: "https://example.com/test/".to_string(),
+            paths: PagePaths {
+                source: PathBuf::from("test.typ"),
+                html: PathBuf::from("public/test/index.html"),
+                relative: "test".to_string(),
+                url_path: "/test/".to_string(),
+                full_url: "https://example.com/test/".to_string(),
+            },
             lastmod: None,
         };
 
@@ -394,54 +416,60 @@ mod tests {
     #[test]
     fn test_page_meta_fields() {
         let page = PageMeta {
-            source: PathBuf::from("content/posts/hello.typ"),
-            html: PathBuf::from("public/posts/hello/index.html"),
-            relative: "posts/hello".to_string(),
-            url_path: "/posts/hello/".to_string(),
-            full_url: "https://example.com/posts/hello/".to_string(),
+            paths: PagePaths {
+                source: PathBuf::from("content/posts/hello.typ"),
+                html: PathBuf::from("public/posts/hello/index.html"),
+                relative: "posts/hello".to_string(),
+                url_path: "/posts/hello/".to_string(),
+                full_url: "https://example.com/posts/hello/".to_string(),
+            },
             lastmod: None,
         };
 
-        assert_eq!(page.source, PathBuf::from("content/posts/hello.typ"));
-        assert_eq!(page.html, PathBuf::from("public/posts/hello/index.html"));
-        assert_eq!(page.relative, "posts/hello");
-        assert_eq!(page.url_path, "/posts/hello/");
-        assert_eq!(page.full_url, "https://example.com/posts/hello/");
+        assert_eq!(page.paths.source, PathBuf::from("content/posts/hello.typ"));
+        assert_eq!(page.paths.html, PathBuf::from("public/posts/hello/index.html"));
+        assert_eq!(page.paths.relative, "posts/hello");
+        assert_eq!(page.paths.url_path, "/posts/hello/");
+        assert_eq!(page.paths.full_url, "https://example.com/posts/hello/");
     }
 
     #[test]
     fn test_page_meta_root_index() {
         let page = PageMeta {
-            source: PathBuf::from("content/index.typ"),
-            html: PathBuf::from("public/index.html"),
-            relative: "index".to_string(),
-            url_path: "/".to_string(),
-            full_url: "https://example.com/".to_string(),
+            paths: PagePaths {
+                source: PathBuf::from("content/index.typ"),
+                html: PathBuf::from("public/index.html"),
+                relative: "index".to_string(),
+                url_path: "/".to_string(),
+                full_url: "https://example.com/".to_string(),
+            },
             lastmod: None,
         };
 
-        assert_eq!(page.relative, "index");
-        assert_eq!(page.url_path, "/");
-        assert_eq!(page.full_url, "https://example.com/");
+        assert_eq!(page.paths.relative, "index");
+        assert_eq!(page.paths.url_path, "/");
+        assert_eq!(page.paths.full_url, "https://example.com/");
     }
 
     #[test]
     fn test_page_meta_with_path_prefix() {
         let page = PageMeta {
-            source: PathBuf::from("content/posts/hello.typ"),
-            html: PathBuf::from("public/blog/posts/hello/index.html"),
-            relative: "posts/hello".to_string(),
-            url_path: "/blog/posts/hello/".to_string(),
-            full_url: "https://example.com/blog/posts/hello/".to_string(),
+            paths: PagePaths {
+                source: PathBuf::from("content/posts/hello.typ"),
+                html: PathBuf::from("public/blog/posts/hello/index.html"),
+                relative: "posts/hello".to_string(),
+                url_path: "/blog/posts/hello/".to_string(),
+                full_url: "https://example.com/blog/posts/hello/".to_string(),
+            },
             lastmod: None,
         };
 
         assert_eq!(
-            page.html,
+            page.paths.html,
             PathBuf::from("public/blog/posts/hello/index.html")
         );
-        assert_eq!(page.url_path, "/blog/posts/hello/");
-        assert_eq!(page.full_url, "https://example.com/blog/posts/hello/");
+        assert_eq!(page.paths.url_path, "/blog/posts/hello/");
+        assert_eq!(page.paths.full_url, "https://example.com/blog/posts/hello/");
     }
 
     #[test]
@@ -456,19 +484,23 @@ mod tests {
         let pages = Pages {
             items: vec![
                 PageMeta {
-                    source: PathBuf::from("a.typ"),
-                    html: PathBuf::from("public/a/index.html"),
-                    relative: "a".to_string(),
-                    url_path: "/a/".to_string(),
-                    full_url: "https://example.com/a/".to_string(),
+                    paths: PagePaths {
+                        source: PathBuf::from("a.typ"),
+                        html: PathBuf::from("public/a/index.html"),
+                        relative: "a".to_string(),
+                        url_path: "/a/".to_string(),
+                        full_url: "https://example.com/a/".to_string(),
+                    },
                     lastmod: None,
                 },
                 PageMeta {
-                    source: PathBuf::from("b.typ"),
-                    html: PathBuf::from("public/b/index.html"),
-                    relative: "b".to_string(),
-                    url_path: "/b/".to_string(),
-                    full_url: "https://example.com/b/".to_string(),
+                    paths: PagePaths {
+                        source: PathBuf::from("b.typ"),
+                        html: PathBuf::from("public/b/index.html"),
+                        relative: "b".to_string(),
+                        url_path: "/b/".to_string(),
+                        full_url: "https://example.com/b/".to_string(),
+                    },
                     lastmod: None,
                 },
             ],
@@ -483,25 +515,29 @@ mod tests {
         let pages = Pages {
             items: vec![
                 PageMeta {
-                    source: PathBuf::from("index.typ"),
-                    html: PathBuf::from("public/index.html"),
-                    relative: "index".to_string(),
-                    url_path: "/".to_string(),
-                    full_url: "https://example.com/".to_string(),
+                    paths: PagePaths {
+                        source: PathBuf::from("index.typ"),
+                        html: PathBuf::from("public/index.html"),
+                        relative: "index".to_string(),
+                        url_path: "/".to_string(),
+                        full_url: "https://example.com/".to_string(),
+                    },
                     lastmod: None,
                 },
                 PageMeta {
-                    source: PathBuf::from("posts/hello.typ"),
-                    html: PathBuf::from("public/posts/hello/index.html"),
-                    relative: "posts/hello".to_string(),
-                    url_path: "/posts/hello/".to_string(),
-                    full_url: "https://example.com/posts/hello/".to_string(),
+                    paths: PagePaths {
+                        source: PathBuf::from("posts/hello.typ"),
+                        html: PathBuf::from("public/posts/hello/index.html"),
+                        relative: "posts/hello".to_string(),
+                        url_path: "/posts/hello/".to_string(),
+                        full_url: "https://example.com/posts/hello/".to_string(),
+                    },
                     lastmod: None,
                 },
             ],
         };
 
-        let urls: Vec<_> = pages.iter().map(|p| p.full_url.as_str()).collect();
+        let urls: Vec<_> = pages.iter().map(|p| p.paths.full_url.as_str()).collect();
         assert_eq!(
             urls,
             vec!["https://example.com/", "https://example.com/posts/hello/"]

@@ -18,10 +18,10 @@ pub fn process_asset(
     let meta = AssetMeta::from_source(asset_path.to_path_buf(), config)?;
 
     if log_file {
-        log!("assets"; "{}", meta.relative);
+        log!("assets"; "{}", meta.paths.relative);
     }
 
-    if let Some(parent) = meta.dest.parent() {
+    if let Some(parent) = meta.paths.dest.parent() {
         fs::create_dir_all(parent)?;
     }
 
@@ -37,13 +37,13 @@ pub fn process_asset(
             // Config paths are already absolute, just canonicalize the runtime path
             let asset_path = asset_path.canonicalize().unwrap();
             if *input == asset_path {
-                run_tailwind(input, &meta.dest, config)?;
+                run_tailwind(input, &meta.paths.dest, config)?;
             } else {
-                fs::copy(&meta.source, &meta.dest)?;
+                fs::copy(&meta.paths.source, &meta.paths.dest)?;
             }
         }
         _ => {
-            fs::copy(&meta.source, &meta.dest)?;
+            fs::copy(&meta.paths.source, &meta.paths.dest)?;
         }
     }
 
@@ -104,7 +104,7 @@ pub fn rebuild_tailwind(config: &'static SiteConfig) -> Result<()> {
     // We can use AssetMeta here if input is in assets dir
     let meta = AssetMeta::from_source(input.clone(), config)?;
 
-    run_tailwind(input, &meta.dest, config)?;
+    run_tailwind(input, &meta.paths.dest, config)?;
 
     Ok(())
 }
