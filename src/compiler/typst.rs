@@ -3,11 +3,12 @@ use crate::utils::xml::process_html;
 use crate::compiler::utils::is_up_to_date;
 use crate::compiler::assets::process_relative_asset;
 use crate::utils::exec::FilterRule;
-use crate::{config::SiteConfig, exec, log};
+use crate::{config::SiteConfig, exec, log, typst_lib};
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
+use tempfile::Builder as TempFileBuilder;
 
 /// Typst filter: skip known warnings.
 const TYPST_FILTER: FilterRule = FilterRule::new(&[
@@ -80,14 +81,30 @@ fn process_typst_page(
 }
 
 fn compile_typst(content_path: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
+    if config.build.typst.use_lib {
+        compile_typst_lib(content_path, config)
+    } else {
+        compile_typst_cli(content_path, config)
+    }
+}
+
+/// Compile using typst library directly (faster, no process spawn overhead)
+fn compile_typst_lib(content_path: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
+    let root = config.get_root();
+    let html = typst_lib::compile_to_html(content_path, root)?;
+    Ok(html.into_bytes())
+}
+
+/// Compile using typst CLI (more stable, process isolation)
+fn compile_typst_cli(content_path: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
     let root = config.get_root();
 
     // Use a temporary file for output to separate content from PTY diagnostics
-    let timestamp = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temp_file = std::env::temp_dir().join(format!("tola_typst_{}.html", timestamp));
+    // tempfile ensures automatic cleanup even on panic
+    let temp_file = TempFileBuilder::new()
+        .prefix("tola_typst_")
+        .suffix(".html")
+        .tempfile()?;
 
     let result = exec!(
         pty=true;
@@ -95,18 +112,12 @@ fn compile_typst(content_path: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
         &config.build.typst.command;
         "compile", "--features", "html", "--format", "html",
         "--font-path", root, "--root", root,
-        content_path, &temp_file
+        content_path, temp_file.path()
     );
 
     match result {
-        Ok(_) => {
-            let content = fs::read(&temp_file);
-            let _ = fs::remove_file(&temp_file);
-            Ok(content?)
-        }
-        Err(e) => {
-            let _ = fs::remove_file(&temp_file);
-            Err(e)
-        }
+        Ok(_) => Ok(fs::read(temp_file.path())?),
+        Err(e) => Err(e),
     }
+    // temp_file automatically deleted on drop
 }

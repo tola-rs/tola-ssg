@@ -9,6 +9,7 @@ mod generator;
 mod init;
 mod logger;
 mod serve;
+mod typst_lib;
 mod utils;
 mod watch;
 

@@ -7,6 +7,7 @@ use crate::{
     config::SiteConfig,
     log,
     logger::ProgressBars,
+    typst_lib,
     utils::{
         category::get_deps_mtime,
         git,
@@ -31,6 +32,13 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
     let output = &config.build.output;
     let content = &config.build.content;
     let assets = &config.build.assets;
+
+    // Pre-warm typst library resources if using lib mode
+    // This moves font loading (~100ms) to a predictable point before parallel compilation
+    // Also includes project root in font search path for custom fonts
+    if config.build.typst.use_lib {
+        typst_lib::warmup_with_root(config.get_root());
+    }
 
     // Initialize output directory with git repo
     let repo = init_output_repo(output, config.build.clean)?;

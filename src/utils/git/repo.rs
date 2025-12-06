@@ -85,24 +85,16 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn with_temp_repo<F>(f: F)
     where
         F: FnOnce(&Path, &ThreadSafeRepository),
     {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("tola_test_repo_{}", unique));
-        let _ = fs::remove_dir_all(&temp_dir); // Ensure clean start
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        let repo = create_repo(&temp_dir).expect("Failed to create repo");
-
-        f(&temp_dir, &repo);
-
-        let _ = fs::remove_dir_all(&temp_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let repo = create_repo(temp_dir.path()).expect("Failed to create repo");
+        f(temp_dir.path(), &repo);
+        // TempDir automatically cleans up on drop
     }
 
     #[test]
