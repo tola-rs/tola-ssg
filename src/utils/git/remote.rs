@@ -101,21 +101,15 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+    use tempfile::TempDir;
 
     fn with_temp_dir<F>(f: F)
     where
         F: FnOnce(&Path),
     {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("tola_test_{}", unique));
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        f(&temp_dir);
-
-        let _ = fs::remove_dir_all(&temp_dir);
+        let temp_dir = TempDir::new().unwrap();
+        f(temp_dir.path());
+        // TempDir automatically cleans up on drop
     }
 
     #[test]

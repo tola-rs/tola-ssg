@@ -50,7 +50,6 @@ gix = { version = "0.72.1", default-features = false, features = [
 ] }
 shellexpand = { version = "3.1.1", features = ["path", "tilde"] }
 quick-xml = "0.38.0"
-slug = "0.1.6"
 usvg = "0.45.1"
 ravif = { version = "0.12.0", default-features = false, features = [
     "asm",
@@ -63,3 +62,12 @@ tiny_http = "0.12.0"
 ctrlc = "3.5.1"
 deunicode = "1.6.2"
 portable-pty = "0.9.0"
+
+# typst library integration
+typst = "0.14.1"
+typst-kit = { version = "0.14.1", features = ["fonts", "packages"] }
+typst-html = "0.14.1"
+chrono = "0.4.41"
+parking_lot = "0.12.5"
+rustc-hash = "2.1.1"
+tempfile = "3"

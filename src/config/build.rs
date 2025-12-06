@@ -249,7 +249,12 @@ pub struct SlugConfig {
 #[educe(Default)]
 #[serde(deny_unknown_fields)]
 pub struct TypstConfig {
-    /// Typst command and arguments
+    /// Use typst library directly instead of CLI (experimental, faster but less stable)
+    #[serde(default = "defaults::r#false")]
+    #[educe(Default = false)]
+    pub use_lib: bool,
+
+    /// Typst command and arguments (only used when use_lib = false)
     #[serde(default = "defaults::build::typst::command")]
     #[educe(Default = defaults::build::typst::command())]
     pub command: Vec<String>,

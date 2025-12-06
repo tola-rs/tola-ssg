@@ -143,24 +143,16 @@ mod tests {
     use gix::objs::tree::Entry;
     use gix::objs::tree::EntryKind;
     use std::fs::File;
+    use tempfile::TempDir;
 
     fn with_temp_repo<F>(f: F)
     where
         F: FnOnce(&Path, &ThreadSafeRepository),
     {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("tola_test_tree_{}", unique));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        let repo = gix::init(&temp_dir).unwrap().into_sync();
-
-        f(&temp_dir, &repo);
-
-        let _ = fs::remove_dir_all(&temp_dir);
+        let temp_dir = TempDir::new().unwrap();
+        let repo = gix::init(temp_dir.path()).unwrap().into_sync();
+        f(temp_dir.path(), &repo);
+        // TempDir automatically cleans up on drop
     }
 
     #[test]
