@@ -254,6 +254,7 @@ impl Pages {
     }
 
     /// Number of pages.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.items.len()
     }

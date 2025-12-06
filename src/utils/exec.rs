@@ -543,6 +543,9 @@ const STDOUT_FILTER: FilterRule = FilterRule::new(&["<!DOCTYPE", "{"]);
 /// Empty filter (no skipping).
 pub const EMPTY_FILTER: FilterRule = FilterRule::new(&[]);
 
+/// Silent filter: skip all output.
+pub const SILENT_FILTER: FilterRule = FilterRule::new(&[""]);
+
 /// Log command output, filtering known noise.
 fn log_output(name: &str, output: &Output, filter: &'static FilterRule) -> Result<()> {
     if !output.status.success() {

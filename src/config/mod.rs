@@ -302,6 +302,7 @@ impl SiteConfig {
         self.build.templates = Self::normalize_path(&root.join(&self.build.templates));
         self.build.utils = Self::normalize_path(&root.join(&self.build.utils));
         self.build.rss.path = self.build.output.join(&self.build.rss.path);
+        self.build.sitemap.path = self.build.output.join(&self.build.sitemap.path);
 
         // Normalize optional paths
         self.normalize_optional_paths(&root);

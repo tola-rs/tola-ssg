@@ -7,6 +7,7 @@ use crate::{
     exec, log,
     utils::{
         date::DateTimeUtc,
+        exec::SILENT_FILTER,
         meta::Pages,
         typst::TypstElement,
     },
@@ -100,7 +101,7 @@ impl RssFeed {
     /// Uses `Pages` for URL information, but queries typst for
     /// title/summary/date metadata in parallel.
     pub fn build(config: &SiteConfig, pages: &Pages) -> Result<Self> {
-        log!("rss"; "generating from {} pages", pages.len());
+        // log!("rss"; "generating from {} pages", pages.len());
 
         // Parallel query for better performance
         let posts: Vec<PostMeta> = pages
@@ -152,7 +153,7 @@ impl RssFeed {
         }
         fs::write(rss_path, &xml)?;
 
-        log!("rss"; "{}", config.build.rss.path.display());
+        log!("rss"; "{}", rss_path.file_name().unwrap_or_default().to_string_lossy());
         Ok(())
     }
 }
@@ -161,11 +162,13 @@ impl RssFeed {
 // Metadata Extraction
 // ============================================================================
 
-/// Query metadata from a Typst post file
+/// Query metadata from a Typst post file.
+/// Uses SILENT_FILTER to suppress warnings (already shown during build).
 fn query_post_meta(post_path: &Path, guid: &str, config: &SiteConfig) -> Result<PostMeta> {
     let root = config.get_root();
 
     let output = exec!(
+        filter=&SILENT_FILTER;
         &config.build.typst.command;
         "query", "--features", "html", "--format", "json",
         "--font-path", root, "--root", root,

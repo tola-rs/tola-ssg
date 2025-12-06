@@ -61,7 +61,7 @@ struct UrlEntry {
 impl Sitemap {
     /// Build sitemap from pre-collected page metadata.
     fn from_pages(pages: &Pages) -> Self {
-        log!("sitemap"; "generating from {} pages", pages.len());
+        // log!("sitemap"; "generating from {} pages", pages.len());
 
         let urls: Vec<UrlEntry> = pages
             .iter()
@@ -98,13 +98,13 @@ impl Sitemap {
 
     /// Write sitemap to output file.
     fn write(self, config: &'static SiteConfig) -> Result<()> {
-        let output_path = config.build.output.join(&config.build.sitemap.path);
+        let sitemap_path = &config.build.sitemap.path;
         let xml = self.into_xml();
 
-        fs::write(&output_path, &xml)
-            .with_context(|| format!("Failed to write sitemap to {}", output_path.display()))?;
+        fs::write(sitemap_path, &xml)
+            .with_context(|| format!("Failed to write sitemap to {}", sitemap_path.display()))?;
 
-        log!("sitemap"; "{}", config.build.sitemap.path.display());
+        log!("sitemap"; "{}", sitemap_path.file_name().unwrap_or_default().to_string_lossy());
         Ok(())
     }
 }
