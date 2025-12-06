@@ -6,34 +6,59 @@
 //! # Architecture
 //!
 //! ```text
-//! collect_pages() ──► Pages { items: Vec<PageMeta> }
-//!                              │
-//!          ┌───────────────────┼───────────────────┐
-//!          │                   │                   │
-//!          ▼                   ▼                   ▼
-//!     build_site()       build_rss()        build_sitemap()
-//!     (process each)     (query meta)       (use as-is)
+//! build_site()
+//!     │
+//!     └── process_content() ──► compile_typst_with_meta()
+//!                                       │
+//!                                       ├── HTML output (written to disk)
+//!                                       └── ContentMeta (optional, from <tola-meta>)
+//!                                               │
+//!                                               ▼
+//!                                         PageMeta::with_content()
+//!                                               │
+//!                                               ▼
+//!                                    Pages { items: Vec<PageMeta> }
+//!                                               │
+//!                          ┌────────────────────┴────────────────────┐
+//!                          ▼                                         ▼
+//!                    build_rss()                              build_sitemap()
+//!                    (uses page.content_meta)                 (uses page.paths)
 //! ```
+//!
+//! # Key Optimization
+//!
+//! Each `.typ` file is compiled **exactly once**. During compilation:
+//! - HTML is generated and written to disk
+//! - Metadata (from `<tola-meta>` label) is extracted from the same Document
+//!
+//! This avoids the previous architecture where files were compiled twice
+//! (once for HTML, once for metadata query).
 //!
 //! # Usage
 //!
 //! ```ignore
-//! let pages = collect_pages(config)?;
+//! // In build_site, pages are collected during compilation:
+//! let pages = content_files
+//!     .par_iter()
+//!     .filter_map(|path| process_content(path, config, ...)?)
+//!     .collect();
 //!
 //! for page in pages.iter() {
-//!     // All path info available:
-//!     // - page.source: original .typ file
-//!     // - page.html: output HTML path
-//!     // - page.relative: relative path (for logging)
-//!     // - page.url_path: URL path with path_prefix
-//!     // - page.full_url: complete URL with base
-//!     // - page.lastmod_ymd(): formatted date for sitemap
+//!     // Path info:
+//!     // - page.paths.html: output HTML path
+//!     // - page.paths.relative: for logging
+//!     // - page.paths.full_url: complete URL
+//!     //
+//!     // Content metadata (from <tola-meta>):
+//!     // - page.content_meta.title
+//!     // - page.content_meta.summary
+//!     // - page.content_meta.date
 //! }
 //! ```
 
-use crate::{config::SiteConfig, log, utils::slug::slugify_path};
+use crate::{config::SiteConfig, utils::slug::slugify_path};
 use anyhow::{Result, anyhow};
-use rayon::prelude::*;
+use serde::Deserialize;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -122,10 +147,27 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
 // Page Metadata
 // ============================================================================
 
+/// Content metadata from `#metadata(...) <tola-meta>` in typst files.
+///
+/// Deserialized directly from typst `Value` via serde.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ContentMeta {
+    pub title: Option<String>,
+    /// Summary content (converted to HTML from Typst elements)
+    #[serde(default, deserialize_with = "deserialize_summary")]
+    pub summary: Option<String>,
+    pub date: Option<String>,
+    #[allow(dead_code)] // Reserved for future use
+    pub update: Option<String>,
+    pub author: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+}
+
 /// Primary metadata structure for a content page.
 ///
 /// Contains all path and URL information needed by build, rss and sitemap.
-/// This is the **single source of truth** for page paths.
+/// This is the **single source of truth** for page paths and content metadata.
 ///
 /// # Fields
 ///
@@ -137,18 +179,25 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
 /// | `paths.url_path` | `/posts/hello/` | URL construction |
 /// | `paths.full_url` | `https://example.com/posts/hello/` | rss, sitemap |
 /// | `lastmod` | `SystemTime` | sitemap |
+/// | `content_meta` | `ContentMeta` | rss (title/summary/date) |
+/// | `compiled_html` | `Vec<u8>` | Lib mode pre-compiled HTML |
 #[derive(Debug, Clone)]
 pub struct PageMeta {
     /// Path information
     pub paths: PagePaths,
     /// Last modification time of the HTML file
     pub lastmod: Option<SystemTime>,
+    /// Content metadata from `<tola-meta>` (None if not present)
+    pub content_meta: Option<ContentMeta>,
+    /// Pre-compiled HTML content (Lib mode only, None for CLI mode)
+    pub compiled_html: Option<Vec<u8>>,
 }
 
 /// Path information for a page.
 #[derive(Debug, Clone)]
 pub struct PagePaths {
     /// Source .typ file path
+    #[allow(dead_code)] // Reserved for future use
     pub source: PathBuf,
     /// Generated HTML file path (includes path_prefix)
     pub html: PathBuf,
@@ -162,15 +211,17 @@ pub struct PagePaths {
 }
 
 impl PageMeta {
-    /// Create PageMeta from a source .typ file path.
+    /// Create PageMeta from a source .typ file path without querying metadata.
     ///
-    /// Computes all derived paths:
-    /// - `html`: output path with path_prefix
-    /// - `relative`: for logging
-    /// - `url_path`: URL path with path_prefix
-    /// - `full_url`: complete URL with base
-    /// - `lastmod`: from HTML file metadata
-    pub fn from_source(source: PathBuf, config: &'static SiteConfig) -> Result<Self> {
+    /// This is the lightweight version that only computes paths.
+    /// Use `with_content` to set the content metadata later.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - File is not in content directory
+    /// - File is not a .typ file
+    pub fn from_paths(source: PathBuf, config: &'static SiteConfig) -> Result<Self> {
         let content_dir = &config.build.content;
         let path_prefix = &config.build.path_prefix;
         let output_dir = config.build.output.join(path_prefix);
@@ -224,7 +275,21 @@ impl PageMeta {
                 full_url,
             },
             lastmod,
+            content_meta: None,
+            compiled_html: None,
         })
+    }
+
+    /// Set content metadata and check for draft status.
+    ///
+    /// Returns `Some(self)` if not a draft, `None` if draft.
+    #[allow(dead_code)] // Utility method for future use
+    pub fn with_content(mut self, content: Option<ContentMeta>) -> Option<Self> {
+        if content.as_ref().is_some_and(|c| c.draft) {
+            return None;
+        }
+        self.content_meta = content;
+        Some(self)
     }
 
     /// Get lastmod as YYYY-MM-DD string for sitemap.
@@ -260,18 +325,74 @@ impl Pages {
     }
 }
 
-/// Collect page metadata from .typ files.
-///
-/// This is the **central entry point** for collecting page information.
-pub fn collect_pages(config: &'static SiteConfig, typ_files: &[&PathBuf]) -> Pages {
-    let items: Vec<PageMeta> = typ_files
-        .par_iter()
-        .filter_map(|typ_path| PageMeta::from_source((*typ_path).clone(), config).ok())
-        .collect();
+// ============================================================================
+// Typst Element Parsing (for summary field)
+// ============================================================================
 
-    log!("pages"; "collected {} pages", items.len());
+/// Deserialize summary field: parse Typst elements and convert to HTML.
+fn deserialize_summary<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        Some(v) => {
+            let elem: TypstElement = serde_json::from_value(v)
+                .map_err(|e| D::Error::custom(format!("Invalid summary format: {}", e)))?;
+            Ok(Some(elem.to_html()))
+        }
+        None => Ok(None),
+    }
+}
 
-    Pages { items }
+/// Represents parsed Typst content elements for summary field.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "func", rename_all = "lowercase")]
+enum TypstElement {
+    Space,
+    Linebreak,
+    Text { text: String },
+    Strike { text: String },
+    Link { dest: String, body: Box<TypstElement> },
+    Sequence { children: Vec<TypstElement> },
+    #[serde(other)]
+    Unknown,
+}
+
+impl TypstElement {
+    /// Convert Typst element to HTML string.
+    fn to_html(&self) -> String {
+        match self {
+            Self::Space => " ".into(),
+            Self::Linebreak => "<br/>".into(),
+            Self::Text { text } => html_escape(text),
+            Self::Strike { text } => format!("<s>{}</s>", html_escape(text)),
+            Self::Link { dest, body } => {
+                format!("<a href=\"{}\">{}</a>", dest, body.to_html())
+            }
+            Self::Sequence { children } => {
+                children.iter().map(|c| c.to_html()).collect()
+            }
+            Self::Unknown => String::new(),
+        }
+    }
+}
+
+/// Escape HTML special characters.
+#[inline]
+fn html_escape(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '&' => result.push_str("&amp;"),
+            '"' => result.push_str("&quot;"),
+            _ => result.push(c),
+        }
+    }
+    result
 }
 
 // ============================================================================
@@ -376,6 +497,8 @@ mod tests {
                 full_url: "https://example.com/test/".to_string(),
             },
             lastmod: Some(time),
+            content_meta: None,
+            compiled_html: None,
         };
 
         let ymd = page.lastmod_ymd().unwrap();
@@ -394,6 +517,8 @@ mod tests {
                 full_url: "https://example.com/test/".to_string(),
             },
             lastmod: None,
+            content_meta: None,
+            compiled_html: None,
         };
 
         assert_eq!(page.lastmod_ymd(), None);
@@ -410,6 +535,8 @@ mod tests {
                 full_url: "https://example.com/posts/hello/".to_string(),
             },
             lastmod: None,
+            content_meta: None,
+            compiled_html: None,
         };
 
         assert_eq!(page.paths.source, PathBuf::from("content/posts/hello.typ"));
@@ -433,6 +560,8 @@ mod tests {
                 full_url: "https://example.com/".to_string(),
             },
             lastmod: None,
+            content_meta: None,
+            compiled_html: None,
         };
 
         assert_eq!(page.paths.relative, "index");
@@ -451,6 +580,8 @@ mod tests {
                 full_url: "https://example.com/blog/posts/hello/".to_string(),
             },
             lastmod: None,
+            content_meta: None,
+            compiled_html: None,
         };
 
         assert_eq!(
@@ -470,11 +601,11 @@ mod tests {
         config.build.output = PathBuf::from("Public");
         config.build.content = PathBuf::from("content");
 
-        // Leak config to get 'static lifetime required by from_source
+        // Leak config to get 'static lifetime required by from_paths
         let config: &'static SiteConfig = Box::leak(Box::new(config));
 
         let source = PathBuf::from("content/Posts/Hello.typ");
-        let page = PageMeta::from_source(source, config).unwrap();
+        let page = PageMeta::from_paths(source, config).unwrap();
 
         // Output path: "Public" (preserved) + "posts/hello" (slugified) + "index.html"
         assert_eq!(
@@ -506,6 +637,8 @@ mod tests {
                         full_url: "https://example.com/a/".to_string(),
                     },
                     lastmod: None,
+                    content_meta: None,
+                    compiled_html: None,
                 },
                 PageMeta {
                     paths: PagePaths {
@@ -516,6 +649,8 @@ mod tests {
                         full_url: "https://example.com/b/".to_string(),
                     },
                     lastmod: None,
+                    content_meta: None,
+                    compiled_html: None,
                 },
             ],
         };
@@ -537,6 +672,8 @@ mod tests {
                         full_url: "https://example.com/".to_string(),
                     },
                     lastmod: None,
+                    content_meta: None,
+                    compiled_html: None,
                 },
                 PageMeta {
                     paths: PagePaths {
@@ -547,6 +684,8 @@ mod tests {
                         full_url: "https://example.com/posts/hello/".to_string(),
                     },
                     lastmod: None,
+                    content_meta: None,
+                    compiled_html: None,
                 },
             ],
         };
@@ -556,5 +695,201 @@ mod tests {
             urls,
             vec!["https://example.com/", "https://example.com/posts/hello/"]
         );
+    }
+
+    // ========================================================================
+    // TypstElement tests
+    // ========================================================================
+
+    #[test]
+    fn test_typst_element_text() {
+        let json = r#"{"func": "text", "text": "Hello World"}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        assert_eq!(elem.to_html(), "Hello World");
+    }
+
+    #[test]
+    fn test_typst_element_space() {
+        let json = r#"{"func": "space"}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        assert!(matches!(elem, TypstElement::Space));
+        assert_eq!(elem.to_html(), " ");
+    }
+
+    #[test]
+    fn test_typst_element_linebreak() {
+        let json = r#"{"func": "linebreak"}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        assert!(matches!(elem, TypstElement::Linebreak));
+        assert_eq!(elem.to_html(), "<br/>");
+    }
+
+    #[test]
+    fn test_typst_element_strike() {
+        let json = r#"{"func": "strike", "text": "deleted"}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        assert_eq!(elem.to_html(), "<s>deleted</s>");
+    }
+
+    #[test]
+    fn test_typst_element_link() {
+        let json = r#"{"func": "link", "dest": "https://example.com", "body": {"func": "text", "text": "click here"}}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        if let TypstElement::Link { dest, body } = &elem {
+            assert_eq!(dest, "https://example.com");
+            assert!(matches!(body.as_ref(), TypstElement::Text { text } if text == "click here"));
+        } else {
+            panic!("Expected Link element");
+        }
+        assert_eq!(elem.to_html(), r#"<a href="https://example.com">click here</a>"#);
+    }
+
+    #[test]
+    fn test_typst_element_sequence() {
+        let json = r#"{"func": "sequence", "children": [{"func": "text", "text": "Hello"}, {"func": "space"}, {"func": "text", "text": "World"}]}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        if let TypstElement::Sequence { children } = &elem {
+            assert_eq!(children.len(), 3);
+            assert!(matches!(&children[0], TypstElement::Text { text } if text == "Hello"));
+            assert!(matches!(&children[1], TypstElement::Space));
+            assert!(matches!(&children[2], TypstElement::Text { text } if text == "World"));
+        } else {
+            panic!("Expected Sequence element");
+        }
+        assert_eq!(elem.to_html(), "Hello World");
+    }
+
+    #[test]
+    fn test_typst_element_unknown() {
+        let json = r#"{"func": "some_unknown_func"}"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        assert!(matches!(elem, TypstElement::Unknown));
+        assert_eq!(elem.to_html(), "");
+    }
+
+    #[test]
+    fn test_typst_element_nested_sequence() {
+        let json = r#"{
+            "func": "sequence",
+            "children": [
+                {"func": "text", "text": "Start "},
+                {"func": "link", "dest": "https://rust-lang.org", "body": {"func": "text", "text": "Rust"}},
+                {"func": "text", "text": " is great"}
+            ]
+        }"#;
+        let elem: TypstElement = serde_json::from_str(json).unwrap();
+        assert_eq!(elem.to_html(), r#"Start <a href="https://rust-lang.org">Rust</a> is great"#);
+    }
+
+    // ========================================================================
+    // html_escape tests
+    // ========================================================================
+
+    #[test]
+    fn test_html_escape_plain() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_html_escape_special_chars() {
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+        assert_eq!(html_escape("a & b"), "a &amp; b");
+        assert_eq!(html_escape("say \"hi\""), "say &quot;hi&quot;");
+    }
+
+    #[test]
+    fn test_html_escape_mixed() {
+        assert_eq!(html_escape("<a href=\"#\">link & text</a>"), "&lt;a href=&quot;#&quot;&gt;link &amp; text&lt;/a&gt;");
+    }
+
+    #[test]
+    fn test_html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    // ========================================================================
+    // ContentMeta summary deserialization tests
+    // ========================================================================
+
+    #[test]
+    fn test_content_meta_summary_text() {
+        let json = r#"{"title": "Test", "summary": {"func": "text", "text": "A simple summary"}}"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.title, Some("Test".to_string()));
+        assert_eq!(meta.summary, Some("A simple summary".to_string()));
+    }
+
+    #[test]
+    fn test_content_meta_summary_sequence() {
+        let json = r#"{
+            "title": "Post",
+            "summary": {
+                "func": "sequence",
+                "children": [
+                    {"func": "text", "text": "This is a "},
+                    {"func": "link", "dest": "https://example.com", "body": {"func": "text", "text": "link"}},
+                    {"func": "text", "text": " in summary"}
+                ]
+            }
+        }"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.title, Some("Post".to_string()));
+        assert_eq!(meta.summary, Some(r#"This is a <a href="https://example.com">link</a> in summary"#.to_string()));
+    }
+
+    #[test]
+    fn test_content_meta_summary_none() {
+        let json = r#"{"title": "No Summary"}"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.title, Some("No Summary".to_string()));
+        assert_eq!(meta.summary, None);
+    }
+
+    #[test]
+    fn test_content_meta_summary_null() {
+        let json = r#"{"title": "Null Summary", "summary": null}"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.title, Some("Null Summary".to_string()));
+        assert_eq!(meta.summary, None);
+    }
+
+    #[test]
+    fn test_content_meta_summary_with_html_escape() {
+        let json = r#"{"summary": {"func": "text", "text": "Use <code> & \"quotes\""}}"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.summary, Some("Use &lt;code&gt; &amp; &quot;quotes&quot;".to_string()));
+    }
+
+    #[test]
+    fn test_content_meta_full() {
+        let json = r#"{
+            "title": "My Blog Post",
+            "summary": {"func": "text", "text": "This is the summary"},
+            "date": "2025-01-15",
+            "update": "2025-01-20",
+            "author": "Alice",
+            "draft": false
+        }"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(meta.title, Some("My Blog Post".to_string()));
+        assert_eq!(meta.summary, Some("This is the summary".to_string()));
+        assert_eq!(meta.date, Some("2025-01-15".to_string()));
+        assert_eq!(meta.update, Some("2025-01-20".to_string()));
+        assert_eq!(meta.author, Some("Alice".to_string()));
+        assert!(!meta.draft);
+    }
+
+    #[test]
+    fn test_content_meta_draft_default() {
+        let json = r#"{"title": "Draft Test"}"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert!(!meta.draft); // default is false
+    }
+
+    #[test]
+    fn test_content_meta_draft_true() {
+        let json = r#"{"title": "Draft", "draft": true}"#;
+        let meta: ContentMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.draft);
     }
 }

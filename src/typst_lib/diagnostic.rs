@@ -340,6 +340,25 @@ pub fn has_errors(diagnostics: &[SourceDiagnostic]) -> bool {
     diagnostics.iter().any(|d| d.severity == Severity::Error)
 }
 
+/// Filter out known HTML export development warnings.
+///
+/// Typst's HTML export is experimental and always produces a warning.
+/// This function filters out that warning to reduce noise in error output.
+pub fn filter_html_warnings(diagnostics: &[SourceDiagnostic]) -> Vec<SourceDiagnostic> {
+    diagnostics
+        .iter()
+        .filter(|d| {
+            // Keep all errors
+            if d.severity == Severity::Error {
+                return true;
+            }
+            // Filter out HTML export warning
+            !d.message.contains("html export is under active development")
+        })
+        .cloned()
+        .collect()
+}
+
 // ============================================================================
 // Diagnostic Formatting (Internal)
 // ============================================================================

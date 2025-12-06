@@ -111,20 +111,20 @@ mod slot {
             process: impl FnOnce(Vec<u8>, Option<T>) -> FileResult<T>,
         ) -> FileResult<T> {
             // Fast path: already accessed in this compilation
-            if mem::replace(&mut self.accessed, true) {
-                if let Some(data) = &self.data {
-                    return data.clone();
-                }
+            if mem::replace(&mut self.accessed, true)
+                && let Some(data) = &self.data
+            {
+                return data.clone();
             }
 
             let result = load();
             let fingerprint = typst::utils::hash128(&result);
 
             // Fingerprint unchanged: reuse previous result
-            if mem::replace(&mut self.fingerprint, fingerprint) == fingerprint {
-                if let Some(data) = &self.data {
-                    return data.clone();
-                }
+            if mem::replace(&mut self.fingerprint, fingerprint) == fingerprint
+                && let Some(data) = &self.data
+            {
+                return data.clone();
             }
 
             // Process and cache new data

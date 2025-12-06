@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, log, utils::meta::Pages};
+use crate::{compiler::meta::Pages, config::SiteConfig, log, utils::minify::{minify, MinifyType}};
 use anyhow::{Context, Result};
 use std::fs;
 
@@ -100,8 +100,9 @@ impl Sitemap {
     fn write(self, config: &'static SiteConfig) -> Result<()> {
         let sitemap_path = &config.build.sitemap.path;
         let xml = self.into_xml();
+        let xml = minify(MinifyType::Xml(xml.as_bytes()), config);
 
-        fs::write(sitemap_path, &xml)
+        fs::write(sitemap_path, &*xml)
             .with_context(|| format!("Failed to write sitemap to {}", sitemap_path.display()))?;
 
         log!("sitemap"; "{}", sitemap_path.file_name().unwrap_or_default().to_string_lossy());
@@ -129,13 +130,13 @@ fn escape_xml(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::meta::PageMeta;
+    use crate::compiler::meta::{PageMeta, PagePaths};
     use std::path::PathBuf;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn make_page(full_url: &str, lastmod_days: Option<u64>) -> PageMeta {
         PageMeta {
-            paths: crate::utils::meta::PagePaths {
+            paths: PagePaths {
                 source: PathBuf::from("test.typ"),
                 html: PathBuf::from("public/test/index.html"),
                 relative: "test".to_string(),
@@ -143,6 +144,8 @@ mod tests {
                 full_url: full_url.to_string(),
             },
             lastmod: lastmod_days.map(|days| UNIX_EPOCH + Duration::from_secs(days * 86400)),
+            content_meta: None,
+            compiled_html: None,
         }
     }
 

@@ -6,7 +6,7 @@ use std::fmt::Write as FmtWrite;
 use std::io::Cursor;
 
 use crate::config::SiteConfig;
-use crate::utils::meta::url_from_output_path;
+use crate::compiler::meta::url_from_output_path;
 use crate::utils::svg::{HtmlContext, Svg, INITIAL_SVG_BUFFER_SIZE};
 use super::optimize::optimize_svg;
 use super::transform::transform_svg_attrs;

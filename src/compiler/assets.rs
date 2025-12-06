@@ -1,7 +1,7 @@
 use crate::config::SiteConfig;
 use crate::utils::exec::FilterRule;
-use crate::utils::meta::AssetMeta;
-use crate::compiler::utils::is_up_to_date;
+use crate::compiler::meta::AssetMeta;
+use crate::compiler::is_up_to_date;
 use crate::{exec, log};
 use anyhow::{Result, anyhow};
 use std::fs;
@@ -10,12 +10,19 @@ use std::path::Path;
 /// Tailwind filter: skip version banner.
 const TAILWIND_FILTER: FilterRule = FilterRule::new(&["≈ tailwindcss"]);
 
+/// Process an asset file from the assets directory.
 pub fn process_asset(
     asset_path: &Path,
     config: &'static SiteConfig,
+    clean: bool,
     log_file: bool,
 ) -> Result<()> {
     let meta = AssetMeta::from_source(asset_path.to_path_buf(), config)?;
+
+    // Skip if up-to-date (assets don't depend on templates)
+    if !clean && is_up_to_date(asset_path, &meta.paths.dest, None) {
+        return Ok(());
+    }
 
     if log_file {
         log!("assets"; "{}", meta.paths.relative);
@@ -25,46 +32,32 @@ pub fn process_asset(
         fs::create_dir_all(parent)?;
     }
 
-    let asset_extension = asset_path
+    let ext = asset_path
         .extension()
-        .unwrap_or_default()
-        .to_str()
+        .and_then(|e| e.to_str())
         .unwrap_or_default();
 
-    match asset_extension {
-        "css" if config.build.tailwind.enable => {
-            let input = config.build.tailwind.input.as_ref().unwrap();
-            // Config paths are already absolute, just canonicalize the runtime path
-            let asset_path = asset_path.canonicalize().unwrap();
-            if *input == asset_path {
-                run_tailwind(input, &meta.paths.dest, config)?;
-            } else {
-                fs::copy(&meta.paths.source, &meta.paths.dest)?;
-            }
-        }
-        _ => {
-            fs::copy(&meta.paths.source, &meta.paths.dest)?;
-        }
+    // Handle tailwind CSS specially
+    if ext == "css"
+        && config.build.tailwind.enable
+        && let Some(input) = &config.build.tailwind.input
+        && asset_path.canonicalize().ok().as_ref() == Some(input)
+    {
+        return run_tailwind(input, &meta.paths.dest, config);
     }
 
+    // Default: copy file
+    fs::copy(&meta.paths.source, &meta.paths.dest)?;
     Ok(())
 }
 
+/// Process an asset file from the content directory (non-.typ files).
 pub fn process_relative_asset(
     path: &Path,
     config: &SiteConfig,
-    force_rebuild: bool,
+    clean: bool,
     log_file: bool,
 ) -> Result<()> {
-    // Relative assets are in content directory, but we treat them similar to assets
-    // However, AssetMeta expects them to be in assets directory.
-    // So we can't use AssetMeta::from_source directly if it enforces assets dir check.
-    // Let's check AssetMeta implementation.
-    // It does: source.strip_prefix(assets_dir)
-
-    // So for relative assets (in content dir), we need manual logic or a different helper.
-    // Let's keep manual logic for now but use url_from_output_path if needed (not needed here, just copy).
-
     let content = &config.build.content;
     let output = &config.build.output.join(&config.build.path_prefix);
 
@@ -76,7 +69,7 @@ pub fn process_relative_asset(
     let output_path = output.join(relative_path);
 
     // Relative assets don't depend on templates/config, just check source vs dest
-    if !force_rebuild && is_up_to_date(path, &output_path, None) {
+    if !clean && is_up_to_date(path, &output_path, None) {
         return Ok(());
     }
 

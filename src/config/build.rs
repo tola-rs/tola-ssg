@@ -186,8 +186,8 @@ pub struct BuildConfig {
 #[serde(deny_unknown_fields)]
 pub struct RssConfig {
     /// Enable RSS feed generation (only effective in build/deploy mode).
-    #[serde(default = "defaults::r#false")]
-    #[educe(Default = defaults::r#false())]
+    #[serde(default = "defaults::r#true")]
+    #[educe(Default = defaults::r#true())]
     pub enable: bool,
 
     /// Output path for RSS feed file.
@@ -208,8 +208,8 @@ pub struct RssConfig {
 #[serde(deny_unknown_fields)]
 pub struct SitemapConfig {
     /// Enable sitemap generation.
-    #[serde(default = "defaults::r#false")]
-    #[educe(Default = defaults::r#false())]
+    #[serde(default = "defaults::r#true")]
+    #[educe(Default = defaults::r#true())]
     pub enable: bool,
 
     /// Output path for sitemap file.
@@ -250,8 +250,8 @@ pub struct SlugConfig {
 #[serde(deny_unknown_fields)]
 pub struct TypstConfig {
     /// Use typst library directly instead of CLI (experimental, faster but less stable)
-    #[serde(default = "defaults::r#false")]
-    #[educe(Default = false)]
+    #[serde(default = "defaults::r#true")]
+    #[educe(Default = true)]
     pub use_lib: bool,
 
     /// Typst command and arguments (only used when use_lib = false)
@@ -819,7 +819,7 @@ mod tests {
             description = "Test"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
-        assert!(!config.build.rss.enable);
+        assert!(config.build.rss.enable); // RSS enabled by default
         assert_eq!(config.build.rss.path, PathBuf::from("feed.xml"));
     }
 

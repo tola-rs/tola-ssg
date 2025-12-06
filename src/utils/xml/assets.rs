@@ -1,5 +1,5 @@
 use crate::config::SiteConfig;
-use crate::utils::meta::AssetMeta;
+use crate::compiler::meta::AssetMeta;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::ffi::OsString;

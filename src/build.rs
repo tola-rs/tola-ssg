@@ -1,9 +1,28 @@
 //! Site building orchestration.
 //!
 //! Coordinates content compilation and asset processing.
+//!
+//! # Architecture
+//!
+//! ```text
+//! build_site()
+//!     │
+//!     ├── collect_pages()  ──► Pages (with metadata + optional pre-compiled HTML)
+//!     │       │
+//!     │       ├── Lib mode: compile + extract metadata (HTML cached in PageMeta)
+//!     │       └── CLI mode: query metadata only (no HTML yet)
+//!     │
+//!     ├── compile_pages()  ──► Write HTML files
+//!     │       │
+//!     │       ├── Lib mode: use cached HTML from PageMeta
+//!     │       └── CLI mode: compile each page
+//!     │
+//!     └── process_assets() ──► Copy/process asset files
+//! ```
 
 use crate::{
-    compiler::{collect_all_files, process_asset, process_content},
+    compiler::{collect_all_files, collect_pages, compile_pages, process_asset, process_relative_asset},
+    compiler::meta::Pages,
     config::SiteConfig,
     log,
     logger::ProgressBars,
@@ -11,7 +30,6 @@ use crate::{
     utils::{
         category::get_deps_mtime,
         git,
-        meta::{collect_pages, Pages},
     },
 };
 use anyhow::{Context, Result, anyhow};
@@ -20,7 +38,7 @@ use rayon::prelude::*;
 use std::{
     ffi::OsStr,
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -30,12 +48,9 @@ use std::{
 /// If `config.build.clean` is true, clears the entire output directory first.
 pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, Pages)> {
     let output = &config.build.output;
-    let content = &config.build.content;
     let assets = &config.build.assets;
 
     // Pre-warm typst library resources if using lib mode
-    // This moves font loading (~100ms) to a predictable point before parallel compilation
-    // Also includes project root in font search path for custom fonts
     if config.build.typst.use_lib {
         typst_lib::warmup_with_root(config.get_root());
     }
@@ -46,88 +61,86 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
     // Calculate deps mtime once for all content files
     let deps_mtime = get_deps_mtime(config);
 
-    // Collect files in parallel for faster startup
-    let (content_files, asset_files) = rayon::join(
-        || collect_all_files(content),
-        || collect_all_files(assets),
-    );
+    // Step 1: Collect pages (metadata + optional pre-compiled HTML)
+    log!("collect"; "scanning content files...");
+    let pages = collect_pages(config)?;
+    log!("pages"; "found {} pages", pages.items.len());
 
-    // Extract .typ file references for later page collection
-    let typ_files: Vec<&PathBuf> = content_files
-        .iter()
-        .filter(|p| p.extension().is_some_and(|ext| ext == "typ"))
+    // Collect asset files
+    let asset_files = collect_all_files(assets);
+
+    // Collect non-typ content files (images, etc. in content dir)
+    let content_asset_files: Vec<_> = collect_all_files(&config.build.content)
+        .into_iter()
+        .filter(|p| p.extension().is_none_or(|ext| ext != "typ"))
         .collect();
 
-    // Create multi-line progress bars (index 0 = content, index 1 = assets)
+    // Create progress bars
     let progress = ProgressBars::new(&[
-        ("content", content_files.len()),
-        ("assets", asset_files.len()),
+        ("content", pages.items.len()),
+        ("assets", asset_files.len() + content_asset_files.len()),
     ]);
 
-    // Shared flag to abort early on error and prevent duplicate error logs
     let has_error = AtomicBool::new(false);
+    let clean = config.build.clean;
 
-    // Helper to process files in parallel with error handling and progress tracking
-    fn process_files(
-        files: &[PathBuf],
-        idx: usize,
-        task: impl Fn(&PathBuf) -> Result<()> + Sync,
-        has_error: &AtomicBool,
-        progress: &ProgressBars,
-    ) -> Result<()> {
-        files.par_iter().try_for_each(|path| {
-            if has_error.load(Ordering::Relaxed) {
-                return Err(anyhow!("Aborted"));
-            }
-            if let Err(e) = task(path) {
+    // Step 2: Compile pages and process assets in parallel
+    let (compile_result, assets_result) = rayon::join(
+        || {
+            // Compile all pages
+            if let Err(e) = compile_pages(&pages, config, clean, deps_mtime, || progress.inc(0)) {
                 if !has_error.swap(true, Ordering::Relaxed) {
-                    let relative_path = std::env::current_dir()
-                        .ok()
-                        .and_then(|cwd| path.strip_prefix(cwd).ok())
-                        .unwrap_or(path);
-                    log!("error"; "{}: {:#}", relative_path.display(), e);
+                    log!("error"; "compile failed: {:#}", e);
                 }
                 return Err(anyhow!("Build failed"));
             }
-            progress.inc(idx);
             Ok(())
-        })
-    }
-
-    // Process content and assets in parallel
-    let clean = config.build.clean;
-    let (posts_result, assets_result) = rayon::join(
-        || {
-            process_files(
-                &content_files,
-                0,
-                |p| process_content(p, config, clean, deps_mtime, false),
-                &has_error,
-                &progress,
-            )
         },
         || {
-            process_files(
-                &asset_files,
-                1,
-                |p| process_asset(p, config, false),
-                &has_error,
-                &progress,
-            )
+            // Process asset files
+            let process_assets = || {
+                asset_files.par_iter().try_for_each(|path| {
+                    if has_error.load(Ordering::Relaxed) {
+                        return Err(anyhow!("Aborted"));
+                    }
+                    if let Err(e) = process_asset(path, config, clean, false) {
+                        if !has_error.swap(true, Ordering::Relaxed) {
+                            log!("error"; "{}: {:#}", path.display(), e);
+                        }
+                        return Err(anyhow!("Build failed"));
+                    }
+                    progress.inc(1);
+                    Ok(())
+                })
+            };
+
+            // Process content assets (non-.typ files in content dir)
+            let process_content_assets = || {
+                content_asset_files.par_iter().try_for_each(|path| {
+                    if has_error.load(Ordering::Relaxed) {
+                        return Err(anyhow!("Aborted"));
+                    }
+                    if let Err(e) = process_relative_asset(path, config, clean, false) {
+                        if !has_error.swap(true, Ordering::Relaxed) {
+                            log!("error"; "{}: {:#}", path.display(), e);
+                        }
+                        return Err(anyhow!("Build failed"));
+                    }
+                    progress.inc(1);
+                    Ok(())
+                })
+            };
+
+            rayon::join(process_assets, process_content_assets)
         },
     );
 
     progress.finish();
 
-    posts_result?;
-    assets_result?;
-
-    // Collect page metadata only when rss or sitemap is enabled
-    let pages = if config.build.rss.enable || config.build.sitemap.enable {
-        collect_pages(config, &typ_files)
-    } else {
-        Pages::default()
-    };
+    compile_result?;
+    let (assets_res, content_assets_res) = assets_result;
+    assets_res?;
+    content_assets_res?;
 
     log_build_result(output)?;
 

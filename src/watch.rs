@@ -136,7 +136,8 @@ fn handle_event(paths: &[std::path::PathBuf], config: &'static SiteConfig) -> bo
         log!("watch"; "{reason} changed, rebuilding...");
         // Full rebuild for template/utils/config changes, but no need to clean output
         if let Err(err) = crate::build::build_site(config) {
-            log!("watch"; "full rebuild failed: {err}");
+            log!("watch"; "full rebuild failed (triggered by {})", trigger_path.display());
+            log!("watch"; "{err}");
         }
         return true;
     }
@@ -145,6 +146,12 @@ fn handle_event(paths: &[std::path::PathBuf], config: &'static SiteConfig) -> bo
     if let Err(err) =
         process_watched_files(paths, config).context("Failed to process changed files")
     {
+        // Show which file triggered the error
+        let files_str = paths.iter()
+            .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(", ");
+        log!("watch"; "incremental build failed (triggered by {files_str})");
         log!("watch"; "{err}");
     }
     false
