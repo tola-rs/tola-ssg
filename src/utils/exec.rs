@@ -238,6 +238,43 @@ fn exec_no_pty(
     Ok(output)
 }
 
+/// Execute a command with PTY (pseudo-terminal) support.
+///
+/// PTY allows commands to behave as if running in a real terminal, which is
+/// necessary for programs that check `isatty()` or need terminal features
+/// (colored output, progress bars, credential prompts, etc.).
+///
+/// # PTY Architecture
+///
+/// A PTY consists of two ends:
+/// - **Master**: The controlling side (our program). Writes become the child's
+///   stdin; reads receive the child's stdout/stderr.
+/// - **Slave**: The terminal side (child process). The child reads/writes to
+///   this as if it were a real terminal.
+///
+/// ```text
+///   ┌─────────────┐                    ┌─────────────┐
+///   │   Master    │◄────── PTY ───────►│    Slave    │
+///   │ (our code)  │                    │  (child)    │
+///   │             │  write ──────────► │  stdin      │
+///   │             │  read  ◄────────── │  stdout     │
+///   └─────────────┘                    └─────────────┘
+/// ```
+///
+/// # Execution Flow
+///
+/// 1. Open PTY pair (master + slave)
+/// 2. Spawn child process attached to slave
+/// 3. Drop slave (we don't need it; child has its own handle)
+/// 4. Spawn reader thread to collect output from master
+/// 5. Wait for child to exit
+/// 6. Drop master to signal EOF to reader thread
+/// 7. Join reader thread to get collected output
+///
+/// The reader thread is necessary because `read_to_string()` blocks until EOF,
+/// and EOF only occurs when the master is dropped. Without threading, we'd
+/// deadlock: waiting for read to finish before dropping master, but read waits
+/// for master to drop.
 fn exec_with_pty(
     root: Option<&Path>,
     cmd: &[OsString],
@@ -254,16 +291,36 @@ fn exec_with_pty(
         pixel_height: 0,
     })?;
 
+    // Spawn child process attached to the slave end of PTY.
+    // The child sees the slave as its controlling terminal.
     let mut child = pair.slave.spawn_command(command_builder)?;
 
-    // Drop slave to close the handle on our end
+    // Drop our handle to slave. The child process has its own handle,
+    // so the slave remains open for the child to use.
     drop(pair.slave);
 
+    // Clone a reader from master to read child's output.
+    // This must run in a separate thread because `read_to_string()` blocks
+    // until EOF, which only happens when we drop the master.
     let mut reader = pair.master.try_clone_reader()?;
-    let mut output_str = String::new();
-    reader.read_to_string(&mut output_str)?;
+    let output_handle = std::thread::spawn(move || {
+        let mut output_str = String::new();
+        let _ = reader.read_to_string(&mut output_str);
+        output_str
+    });
 
+    // Wait for child process to complete.
+    // The child may still be writing output at this point.
     let status = child.wait()?;
+
+    // Drop master to close the PTY. This signals EOF to the reader thread,
+    // allowing `read_to_string()` to return.
+    drop(pair.master);
+
+    // Join the reader thread to collect all output.
+    let output_str = output_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Failed to join output reader thread"))?;
 
     if !status.success() {
         let msg = format!(

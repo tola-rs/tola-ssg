@@ -65,7 +65,7 @@ fn configure_origin_remote(root: &Path, repo: &Repository, url: &str) -> Result<
     } else {
         "add"
     };
-    exec!(pty=true; root; ["git"]; "remote", action, "origin", url)?;
+    exec!(root; ["git"]; "remote", action, "origin", url)?;
     Ok(())
 }
 
