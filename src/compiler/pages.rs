@@ -74,8 +74,8 @@ pub fn process_page(
         return Ok(None);
     }
 
-    // Compile and get HTML + metadata
-    let (html_content, content_meta) = compile_with_meta(path, config)?;
+    // Compile the page and get metadata
+    let (html_content, content_meta) = compile_meta(path, config)?;
 
     // Skip drafts
     if is_draft(&content_meta) {
@@ -134,10 +134,10 @@ fn write_page(
 }
 
 /// Compile a typst file and extract metadata (lib or CLI mode).
-pub fn compile_with_meta(path: &Path, config: &SiteConfig) -> Result<(Vec<u8>, Option<ContentMeta>)> {
+pub fn compile_meta(path: &Path, config: &SiteConfig) -> Result<(Vec<u8>, Option<ContentMeta>)> {
     if config.build.typst.use_lib {
         let root = config.get_root();
-        let result = typst_lib::compile_with_metadata(path, root, TOLA_META_LABEL)?;
+        let result = typst_lib::compile_meta(path, root, TOLA_META_LABEL)?;
         let meta = result.metadata.and_then(|json| serde_json::from_value(json).ok());
         Ok((result.html, meta))
     } else {
@@ -151,7 +151,7 @@ pub fn compile_with_meta(path: &Path, config: &SiteConfig) -> Result<(Vec<u8>, O
 pub fn query_meta(path: &Path, config: &SiteConfig) -> Option<ContentMeta> {
     if config.build.typst.use_lib {
         let root = config.get_root();
-        let result = typst_lib::compile_with_metadata(path, root, TOLA_META_LABEL).ok()?;
+        let result = typst_lib::compile_meta(path, root, TOLA_META_LABEL).ok()?;
         result.metadata.and_then(|json| serde_json::from_value(json).ok())
     } else {
         query_meta_cli(path, config)
@@ -236,7 +236,7 @@ pub fn collect_pages(config: &'static SiteConfig) -> Result<Pages> {
 
             let (html, content_meta) = if config.build.typst.use_lib {
                 // Lib mode: compile once, get both HTML and metadata (metadata may be None)
-                let result = compile_with_meta(path, config)?;
+                let result = compile_meta(path, config)?;
                 (Some(result.0), result.1)
             } else {
                 // CLI mode: only query metadata, compile later (metadata may be None)
@@ -312,7 +312,7 @@ mod tests {
     // Tests that use typst compilation
 
     #[test]
-    fn test_compile_with_meta_no_label() {
+    fn test_compile_meta_no_label() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.typ");
 
@@ -323,8 +323,8 @@ mod tests {
         config.build.typst.use_lib = true;
         config.set_root(dir.path());
 
-        let result = compile_with_meta(&file_path, &config);
-        assert!(result.is_ok(), "compile_with_meta should succeed: {:?}", result);
+        let result = compile_meta(&file_path, &config);
+        assert!(result.is_ok(), "compile_meta should succeed: {:?}", result);
 
         let (html, meta) = result.unwrap();
         assert!(!html.is_empty(), "HTML should not be empty");
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_with_meta_with_label() {
+    fn test_compile_meta_with_label() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.typ");
 
@@ -352,8 +352,8 @@ mod tests {
         config.build.typst.use_lib = true;
         config.set_root(dir.path());
 
-        let result = compile_with_meta(&file_path, &config);
-        assert!(result.is_ok(), "compile_with_meta should succeed: {:?}", result);
+        let result = compile_meta(&file_path, &config);
+        assert!(result.is_ok(), "compile_meta should succeed: {:?}", result);
 
         let (html, meta) = result.unwrap();
         assert!(!html.is_empty());
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compile_with_meta_draft_field() {
+    fn test_compile_meta_draft_field() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.typ");
 
@@ -385,7 +385,7 @@ mod tests {
         config.build.typst.use_lib = true;
         config.set_root(dir.path());
 
-        let result = compile_with_meta(&file_path, &config);
+        let result = compile_meta(&file_path, &config);
         assert!(result.is_ok());
 
         let (_, meta) = result.unwrap();
@@ -405,7 +405,7 @@ mod tests {
         config.build.typst.use_lib = true;
         config.set_root(dir.path());
 
-        let result = compile_with_meta(&file_path, &config);
+        let result = compile_meta(&file_path, &config);
 
         // Should return an error, not panic or silently skip
         assert!(result.is_err(), "Invalid typst should return Err");
