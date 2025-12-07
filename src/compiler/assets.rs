@@ -64,7 +64,7 @@ pub fn process_rel_asset(
     let rel_path = path
         .strip_prefix(content)?
         .to_str()
-        .ok_or(anyhow!("Invalid path"))?;
+        .ok_or_else(|| anyhow!("Invalid path"))?;
 
     let output_path = output.join(rel_path);
 

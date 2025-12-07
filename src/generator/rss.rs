@@ -94,13 +94,13 @@ impl<'a> RssFeed<'a> {
 // Helper Functions
 // ============================================================================
 
-/// Convert PageMeta to rss item.
+/// Convert `PageMeta` to rss item.
 /// Returns None if required fields (title, date) are missing.
 fn page_to_rss_item(page: &PageMeta, config: &SiteConfig) -> Option<rss::Item> {
     let content = page.content_meta.as_ref()?;
     let title = content.title.clone()?;
     let date = content.date.as_deref()?;
-    let pub_date = DateTimeUtc::parse(date).map(|dt| dt.to_rfc2822())?;
+    let pub_date = DateTimeUtc::parse(date).map(DateTimeUtc::to_rfc2822)?;
     let link = page.paths.full_url.clone();
     let author = normalize_rss_author(content.author.as_ref(), config);
 

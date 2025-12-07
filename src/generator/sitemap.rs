@@ -78,16 +78,19 @@ impl Sitemap {
     fn into_xml(self) -> String {
         let mut xml = String::with_capacity(4096);
 
-        xml.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
-        xml.push('\n');
-        xml.push_str(&format!(r#"<urlset xmlns="{SITEMAP_NS}">"#));
-        xml.push('\n');
+        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.push_str("<urlset xmlns=\"");
+        xml.push_str(SITEMAP_NS);
+        xml.push_str("\">\n");
 
         for entry in self.urls {
-            xml.push_str("  <url>\n");
-            xml.push_str(&format!("    <loc>{}</loc>\n", escape_xml(&entry.loc)));
+            xml.push_str("  <url>\n    <loc>");
+            xml.push_str(&escape_xml(&entry.loc));
+            xml.push_str("</loc>\n");
             if let Some(lastmod) = entry.lastmod {
-                xml.push_str(&format!("    <lastmod>{lastmod}</lastmod>\n"));
+                xml.push_str("    <lastmod>");
+                xml.push_str(&lastmod);
+                xml.push_str("</lastmod>\n");
             }
             xml.push_str("  </url>\n");
         }

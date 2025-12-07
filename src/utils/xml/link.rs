@@ -36,6 +36,7 @@ pub fn process_link_value(value: &[u8], config: &'static SiteConfig) -> Result<C
 /// | `/about` | `/about` |
 /// | `/about#team` | `/about#team` (fragment slugified) |
 /// | `//example.com` | `//example.com` (protocol-relative) |
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 pub fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result<String> {
     let path_prefix = &config.build.path_prefix;
 
@@ -57,6 +58,7 @@ pub fn process_absolute_link(value: &str, config: &'static SiteConfig) -> Result
 }
 
 /// Process fragment links (starting with `#`).
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 pub fn process_fragment_link(value: &str, config: &'static SiteConfig) -> Result<String> {
     Ok(format!("#{}", slugify_fragment(&value[1..], config)))
 }
@@ -74,6 +76,7 @@ pub fn process_fragment_link(value: &str, config: &'static SiteConfig) -> Result
 ///
 /// Note: Relative links get `../` prepended because content pages
 /// are at `/post/index.html`, so need to go up one level first.
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 pub fn process_relative_or_external_link(value: &str) -> Result<String> {
     Ok(if is_external_link(value) {
         value.to_string()

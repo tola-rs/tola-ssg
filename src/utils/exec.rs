@@ -152,10 +152,11 @@ macro_rules! exec_with_stdin_internal {
 // ============================================================================
 
 #[doc(hidden)]
+#[allow(clippy::wildcard_imports)] // Needed for macro internal module
 pub mod internal {
     use super::*;
 
-    /// Convert to OsString.
+    /// Convert to `OsString`.
     #[inline]
     pub fn to_os<S: Into<OsString>>(s: S) -> OsString {
         s.into()
@@ -324,8 +325,7 @@ fn exec_with_pty(
 
     if !status.success() {
         let msg = format!(
-            "Command `{name}` failed with exit code: {:?}\n{}",
-            status, output_str
+            "Command `{name}` failed with exit code: {status:?}\n{output_str}"
         );
         anyhow::bail!(msg);
     }
@@ -334,6 +334,7 @@ fn exec_with_pty(
 
     // Convert portable_pty::ExitStatus to std::process::ExitStatus
     #[cfg(unix)]
+    #[allow(clippy::cast_possible_wrap)] // exit_code is within i32 range
     let status = {
         use std::os::unix::process::ExitStatusExt;
         let code = status.exit_code() as i32;
@@ -401,7 +402,7 @@ pub struct RunningProcess {
 
 impl RunningProcess {
     /// Get a mutable reference to the child's stdin.
-    pub fn stdin(&mut self) -> Option<&mut ChildStdin> {
+    pub const fn stdin(&mut self) -> Option<&mut ChildStdin> {
         self.stdin.as_mut()
     }
 
@@ -457,7 +458,7 @@ fn prepare(root: Option<&Path>, cmd: &[OsString], args: &[OsString]) -> Result<(
     Ok((name, command))
 }
 
-/// Prepare a CommandBuilder from components.
+/// Prepare a `CommandBuilder` from components.
 fn prepare_pty(
     root: Option<&Path>,
     cmd: &[OsString],

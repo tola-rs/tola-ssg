@@ -47,12 +47,12 @@ pub enum FileCategory {
 
 impl FileCategory {
     /// Returns true if this category requires a full site rebuild
-    pub fn requires_full_rebuild(self) -> bool {
+    pub const fn requires_full_rebuild(self) -> bool {
         matches!(self, Self::Config | Self::Template | Self::Utils)
     }
 
     /// Get the short name for this category (used in logs)
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Content => "content",
             Self::Asset => "assets",
@@ -76,7 +76,7 @@ impl FileCategory {
     }
 
     /// Returns true if this category represents a directory (vs a single file)
-    pub fn is_directory(self) -> bool {
+    pub const fn is_directory(self) -> bool {
         matches!(
             self,
             Self::Content | Self::Asset | Self::Template | Self::Utils
@@ -118,8 +118,7 @@ pub fn normalize_path(path: &Path) -> PathBuf {
             path.to_path_buf()
         } else {
             env::current_dir()
-                .map(|cwd| cwd.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
+                .map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
         }
     })
 }
@@ -157,7 +156,7 @@ fn get_latest_mtime(path: &Path) -> Option<SystemTime> {
     if path.is_dir() {
         return WalkDir::new(path)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
             .filter(|e| e.file_type().is_file())
             .filter_map(|e| e.metadata().ok())
             .filter_map(|m| m.modified().ok())

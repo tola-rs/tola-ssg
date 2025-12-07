@@ -6,12 +6,12 @@
 // Common Defaults
 // ============================================================================
 
-pub fn r#true() -> bool {
+pub const fn r#true() -> bool {
     true
 }
 
 
-pub fn r#false() -> bool {
+pub const fn r#false() -> bool {
     false
 }
 
@@ -20,7 +20,7 @@ pub fn r#false() -> bool {
 // ============================================================================
 
 pub mod base {
-    pub fn url() -> Option<String> {
+    pub const fn url() -> Option<String> {
         None
     }
 
@@ -44,7 +44,7 @@ pub mod base {
 pub mod build {
     use std::path::PathBuf;
 
-    pub fn root() -> Option<PathBuf> {
+    pub const fn root() -> Option<PathBuf> {
         None
     }
 
@@ -96,15 +96,15 @@ pub mod build {
             SlugMode::default()
         }
 
-        pub fn no() -> SlugMode {
+        pub const fn no() -> SlugMode {
             SlugMode::No
         }
 
-        pub fn safe() -> SlugMode {
+        pub const fn safe() -> SlugMode {
             SlugMode::Safe
         }
 
-        pub fn full() -> SlugMode {
+        pub const fn full() -> SlugMode {
             SlugMode::Full
         }
 
@@ -135,7 +135,7 @@ pub mod build {
                 "20KB".into()
             }
 
-            pub fn dpi() -> f32 {
+            pub const fn dpi() -> f32 {
                 96.
             }
         }
@@ -144,7 +144,7 @@ pub mod build {
     pub mod tailwind {
         use std::path::PathBuf;
 
-        pub fn input() -> Option<PathBuf> {
+        pub const fn input() -> Option<PathBuf> {
             None
         }
 
@@ -163,7 +163,7 @@ pub mod serve {
         "127.0.0.1".into()
     }
 
-    pub fn port() -> u16 {
+    pub const fn port() -> u16 {
         5277
     }
 }
@@ -188,7 +188,7 @@ pub mod deploy {
             "main".into()
         }
 
-        pub fn token_path() -> Option<PathBuf> {
+        pub const fn token_path() -> Option<PathBuf> {
             None
         }
     }

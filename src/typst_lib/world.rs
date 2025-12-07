@@ -1,4 +1,4 @@
-//! SystemWorld implementation - the core World trait.
+//! `SystemWorld` implementation - the core World trait.
 //!
 //! This module implements Typst's `World` trait, which provides the compilation
 //! environment for Typst documents. The `SystemWorld` is a lightweight per-compilation
@@ -91,7 +91,7 @@ pub struct SystemWorld {
     root: PathBuf,
 
     /// The input path (main entry point).
-    /// This is the FileId of the file being compiled.
+    /// This is the `FileId` of the file being compiled.
     main: FileId,
 
     /// Reference to global fonts (initialized on first use).
@@ -125,8 +125,8 @@ impl SystemWorld {
     ///
     /// # Errors
     ///
-    /// Currently infallible, but returns `Result` for future compatibility.
-    pub fn new(entry_file: &Path, root_dir: &Path) -> Result<Self, anyhow::Error> {
+    /// Currently infallible, but kept as separate constructor for clarity.
+    pub fn new(entry_file: &Path, root_dir: &Path) -> Self {
         // Canonicalize root path for consistent path resolution
         let root = normalize_path(root_dir);
 
@@ -141,12 +141,12 @@ impl SystemWorld {
         // This allows projects to include custom fonts in their directory.
         let fonts = get_fonts(Some(&root));
 
-        Ok(Self {
+        Self {
             root,
             main,
             fonts,
             now: LazyNow(OnceLock::new()),
-        })
+        }
     }
 
     /// Access the canonical slot for the given file id from global cache.
@@ -158,6 +158,7 @@ impl SystemWorld {
     ///
     /// * `id` - The file ID to look up
     /// * `f` - Callback to execute with the file slot
+    #[allow(clippy::unused_self)] // self kept for API consistency
     fn slot<F, T>(&self, id: FileId, f: F) -> T
     where
         F: FnOnce(&mut FileSlot) -> T,
@@ -261,8 +262,8 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path());
-        assert!(world.is_ok());
+        let _world = SystemWorld::new(&file_path, dir.path());
+        // If we get here without panicking, the world was created successfully
     }
 
     #[test]
@@ -271,7 +272,7 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path()).unwrap();
+        let world = SystemWorld::new(&file_path, dir.path());
         let _lib = world.library();
         // Should not panic
     }
@@ -282,7 +283,7 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path()).unwrap();
+        let world = SystemWorld::new(&file_path, dir.path());
         let book = world.book();
         // Should have some fonts
         assert!(book.families().count() > 0);
@@ -294,7 +295,7 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path()).unwrap();
+        let world = SystemWorld::new(&file_path, dir.path());
         let main = world.main();
         // Main file should have the correct virtual path
         assert!(main.vpath().as_rootless_path().ends_with("test.typ"));
@@ -306,7 +307,7 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello World").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path()).unwrap();
+        let world = SystemWorld::new(&file_path, dir.path());
         let source = world.source(world.main());
         assert!(source.is_ok());
         assert!(source.unwrap().text().contains("Hello World"));
@@ -318,7 +319,7 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path()).unwrap();
+        let world = SystemWorld::new(&file_path, dir.path());
 
         // Test with local timezone
         let today = world.today(None);
@@ -335,7 +336,7 @@ mod tests {
         let file_path = dir.path().join("test.typ");
         fs::write(&file_path, "= Hello").unwrap();
 
-        let world = SystemWorld::new(&file_path, dir.path()).unwrap();
+        let world = SystemWorld::new(&file_path, dir.path());
 
         // Should be able to access at least one font
         let font = world.font(0);

@@ -150,7 +150,7 @@ impl Debouncer {
 // =============================================================================
 
 /// Process file changes. Returns true if full rebuild succeeded (for cooldown).
-fn handle_changes(paths: Vec<PathBuf>, config: &'static SiteConfig) -> bool {
+fn handle_changes(paths: &[PathBuf], config: &'static SiteConfig) -> bool {
     if paths.is_empty() {
         return false;
     }
@@ -171,7 +171,7 @@ fn handle_changes(paths: Vec<PathBuf>, config: &'static SiteConfig) -> bool {
     }
 
     // Incremental build (content/assets)
-    if let Err(e) = process_watched_files(&paths, config) {
+    if let Err(e) = process_watched_files(paths, config) {
         let files = paths.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ");
         log_build_error("incremental", &files, &e);
     }
@@ -242,7 +242,7 @@ fn setup_watchers(watcher: &mut impl Watcher, config: &SiteConfig) -> Result<()>
     Ok(())
 }
 
-fn is_relevant(event: &Event) -> bool {
+const fn is_relevant(event: &Event) -> bool {
     matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
 }
 
@@ -268,14 +268,13 @@ pub fn watch_for_changes_blocking(config: &'static SiteConfig) -> Result<()> {
                 debouncer.add(event);
             }
             Ok(Err(e)) => log!("watch"; "error: {e}"),
-            Ok(_) => {}
-
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if debouncer.ready() => {
-                if handle_changes(debouncer.take(), config) {
+                if handle_changes(&debouncer.take(), config) {
                     debouncer.mark_rebuild();
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            // Other cases: irrelevant events, timeout without ready, etc.
             _ => {}
         }
     }

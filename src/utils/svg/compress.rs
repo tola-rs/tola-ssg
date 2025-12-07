@@ -74,6 +74,7 @@ fn compress_svg(svg: &Svg, output_path: &Path, scale: f32, config: &SiteConfig) 
 }
 
 /// Compress using ImageMagick
+#[allow(clippy::doc_markdown)] // ImageMagick is a product name
 fn compress_magick(output: &Path, data: &[u8], scale: f32) -> Result<()> {
     let density = (scale * 96.0).to_string();
     let mut proc = exec_with_stdin!(
@@ -86,7 +87,7 @@ fn compress_magick(output: &Path, data: &[u8], scale: f32) -> Result<()> {
     proc.wait()
 }
 
-/// Compress using FFmpeg
+/// Compress using `FFmpeg`
 fn compress_ffmpeg(output: &Path, data: &[u8]) -> Result<()> {
     let mut proc = exec_with_stdin!(
         ["ffmpeg"];
@@ -112,6 +113,7 @@ fn compress_ffmpeg(output: &Path, data: &[u8]) -> Result<()> {
 }
 
 /// Compress using built-in ravif encoder
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // Dimensions are always positive
 fn compress_builtin(output: &Path, data: &[u8], size: (f32, f32), scale: f32) -> Result<()> {
     let (width, height) = ((size.0 * scale) as usize, (size.1 * scale) as usize);
     let pixel_count = width * height;

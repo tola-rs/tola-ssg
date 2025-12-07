@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 // ============================================================================
 
 /// URL slug generation mode for paths and anchors.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugMode {
     /// Full slugify: Unicode → ASCII, lowercase, use separator.
@@ -27,7 +27,7 @@ pub enum SlugMode {
 }
 
 /// Case transformation mode for slugs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugCase {
     /// Convert to lowercase (default).
@@ -42,7 +42,7 @@ pub enum SlugCase {
 }
 
 /// Separator character for slugs.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugSeparator {
     /// Dash separator (`-`) (default).
@@ -54,15 +54,16 @@ pub enum SlugSeparator {
 
 impl SlugSeparator {
     /// Get the character representation.
-    pub fn as_char(&self) -> char {
+    pub const fn as_char(&self) -> char {
         match self {
-            SlugSeparator::Dash => '-',
-            SlugSeparator::Underscore => '_',
+            Self::Dash => '-',
+            Self::Underscore => '_',
         }
     }
 }
 
 /// SVG image extraction method for embedded raster images.
+#[allow(clippy::doc_markdown)] // ImageMagick, FFmpeg are product names
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ExtractSvgType {
@@ -254,7 +255,7 @@ pub struct TypstConfig {
     #[educe(Default = true)]
     pub use_lib: bool,
 
-    /// Typst command and arguments (only used when use_lib = false)
+    /// Typst command and arguments (only used when `use_lib` = false)
     #[serde(default = "defaults::build::typst::command")]
     #[educe(Default = defaults::build::typst::command())]
     pub command: Vec<String>,
@@ -360,24 +361,23 @@ impl ScriptEntry {
     /// Get the path for this script entry
     pub fn path(&self) -> &Path {
         match self {
-            ScriptEntry::Simple(path) => path,
-            ScriptEntry::WithOptions { path, .. } => path,
+            Self::Simple(path) | Self::WithOptions { path, .. } => path,
         }
     }
 
     /// Check if defer attribute should be added
-    pub fn is_defer(&self) -> bool {
+    pub const fn is_defer(&self) -> bool {
         match self {
-            ScriptEntry::Simple(_) => false,
-            ScriptEntry::WithOptions { defer, .. } => *defer,
+            Self::Simple(_) => false,
+            Self::WithOptions { defer, .. } => *defer,
         }
     }
 
     /// Check if async attribute should be added
-    pub fn is_async(&self) -> bool {
+    pub const fn is_async(&self) -> bool {
         match self {
-            ScriptEntry::Simple(_) => false,
-            ScriptEntry::WithOptions { r#async, .. } => *r#async,
+            Self::Simple(_) => false,
+            Self::WithOptions { r#async, .. } => *r#async,
         }
     }
 }

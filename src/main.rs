@@ -34,7 +34,7 @@ fn main() -> Result<()> {
         Commands::Build { .. } => build_all(config).map(|_| ()),
         Commands::Deploy { .. } => {
             let repo = build_all(config)?;
-            deploy_site(repo, config)
+            deploy_site(&repo, config)
         }
         Commands::Serve { .. } => {
             build_all(config)?;
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 
 /// Load and validate configuration from CLI arguments
 fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
-    let root = cli.root.as_deref().unwrap_or(Path::new("./"));
+    let root = cli.root.as_deref().unwrap_or_else(|| Path::new("./"));
     let config_path = root.join(&cli.config);
 
     let mut config = if config_path.exists() {

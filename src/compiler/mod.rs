@@ -1,3 +1,21 @@
+//! Compilation and asset processing for static site generation.
+//!
+//! This module orchestrates the build pipeline:
+//!
+//! - **pages**: Compile `.typ` files to HTML
+//! - **meta**: Extract and process page metadata
+//! - **assets**: Copy and optimize static assets
+//! - **watch**: Incremental builds on file changes
+//!
+//! # Build Flow
+//!
+//! ```text
+//! collect_pages() ──► compile_pages() ──► process_asset()
+//!       │                   │                  │
+//!       ▼                   ▼                  ▼
+//!   PageMeta[]         HTML files        Asset files
+//! ```
+
 pub mod assets;
 pub mod meta;
 pub mod pages;
@@ -28,18 +46,18 @@ const IGNORED_FILES: &[&str] = &[".DS_Store"];
 pub fn collect_all_files(dir: &Path) -> Vec<PathBuf> {
     WalkDir::new(dir)
         .into_iter()
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| {
             let name = e.file_name().to_str().unwrap_or_default();
             !IGNORED_FILES.contains(&name)
         })
-        .map(|e| e.into_path())
+        .map(walkdir::DirEntry::into_path)
         .collect()
 }
 
 /// Check if destination is up-to-date compared to source and dependencies.
-pub(crate) fn is_up_to_date(src: &Path, dst: &Path, deps_mtime: Option<SystemTime>) -> bool {
+pub fn is_up_to_date(src: &Path, dst: &Path, deps_mtime: Option<SystemTime>) -> bool {
     let Ok(src_meta) = src.metadata() else {
         return false;
     };

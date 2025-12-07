@@ -81,7 +81,7 @@ fn parse_size_string(s: &str) -> usize {
         (1024 * 1024, 2)
     } else if s.ends_with("KB") {
         (1024, 2)
-    } else if s.ends_with("B") {
+    } else if s.ends_with('B') {
         (1, 1)
     } else {
         (1, 0)
@@ -131,7 +131,7 @@ pub struct SiteConfig {
 impl SiteConfig {
     /// Parse configuration from TOML string
     pub fn from_str(content: &str) -> Result<Self> {
-        let config: SiteConfig = toml::from_str(content)?;
+        let config: Self = toml::from_str(content)?;
         Ok(config)
     }
 
@@ -144,20 +144,20 @@ impl SiteConfig {
 
     /// Get the root directory path
     pub fn get_root(&self) -> &Path {
-        self.build.root.as_deref().unwrap_or(Path::new("./"))
+        self.build.root.as_deref().unwrap_or_else(|| Path::new("./"))
     }
 
     /// Set the root directory path
     pub fn set_root(&mut self, path: &Path) {
-        self.build.root = Some(path.to_path_buf())
+        self.build.root = Some(path.to_path_buf());
     }
 
     /// Get CLI arguments reference
-    pub fn get_cli(&self) -> &'static Cli {
+    pub const fn get_cli(&self) -> &'static Cli {
         self.cli.unwrap()
     }
 
-    /// Parse inline_max_size string to bytes.
+    /// Parse `inline_max_size` string to bytes.
     ///
     /// Supports suffixes: B (bytes), KB (kilobytes), MB (megabytes).
     ///
@@ -222,7 +222,7 @@ impl SiteConfig {
             }
             Commands::Serve { build_args, interface, port, watch, .. } => {
                 self.apply_build_args(build_args, true);
-                self.apply_serve_options(interface, port, watch);
+                self.apply_serve_options(interface.as_ref(), *port, *watch);
             }
             Commands::Deploy { force } => {
                 Self::update_option(&mut self.deploy.force, force.as_ref());
@@ -253,11 +253,11 @@ impl SiteConfig {
     /// Apply serve-specific options.
     fn apply_serve_options(
         &mut self,
-        interface: &Option<String>,
-        port: &Option<u16>,
-        watch: &Option<bool>,
+        interface: Option<&String>,
+        port: Option<u16>,
+        watch: Option<bool>,
     ) {
-        Self::update_option(&mut self.serve.interface, interface.as_ref());
+        Self::update_option(&mut self.serve.interface, interface);
         Self::update_option(&mut self.serve.port, port.as_ref());
         Self::update_option(&mut self.serve.watch, watch.as_ref());
 
@@ -337,8 +337,7 @@ impl SiteConfig {
                 path.to_path_buf()
             } else {
                 std::env::current_dir()
-                    .map(|cwd| cwd.join(path))
-                    .unwrap_or_else(|_| path.to_path_buf())
+                    .map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
             }
         })
     }

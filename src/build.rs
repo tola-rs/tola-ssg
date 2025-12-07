@@ -167,7 +167,7 @@ fn init_output_repo(output: &Path, clean: bool) -> Result<ThreadSafeRepository> 
 /// Log build result based on output directory contents
 fn log_build_result(output: &Path) -> Result<()> {
     let file_count = fs::read_dir(output)?
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| e.file_name() != OsStr::new(".git"))
         .count();
 
