@@ -78,7 +78,7 @@ pub fn process_page(
     let (html_content, content_meta) = compile_meta(path, config)?;
 
     // Skip drafts
-    if is_draft(&content_meta) {
+    if is_draft(content_meta.as_ref()) {
         return Ok(None);
     }
 
@@ -203,8 +203,8 @@ fn query_meta_cli(path: &Path, config: &SiteConfig) -> Option<ContentMeta> {
 
 /// Check if content metadata indicates a draft.
 #[inline]
-fn is_draft(meta: &Option<ContentMeta>) -> bool {
-    meta.as_ref().is_some_and(|c| c.draft)
+fn is_draft(meta: Option<&ContentMeta>) -> bool {
+    meta.is_some_and(|c| c.draft)
 }
 
 /// Collect all pages from content directory with metadata.
@@ -220,7 +220,7 @@ fn is_draft(meta: &Option<ContentMeta>) -> bool {
 ///   `PageMeta.compiled_html` will be `None`.
 ///
 /// Draft pages (with `draft: true` in metadata) are automatically filtered out.
-/// Pages without `<tola-meta>` are still built (content_meta = None).
+/// Pages without `<tola-meta>` are still built (`content_meta` = None).
 pub fn collect_pages(config: &'static SiteConfig) -> Result<Pages> {
     let content_files = collect_all_files(&config.build.content);
 
@@ -244,7 +244,7 @@ pub fn collect_pages(config: &'static SiteConfig) -> Result<Pages> {
             };
 
             // Skip drafts
-            if is_draft(&content_meta) {
+            if is_draft(content_meta.as_ref()) {
                 return Ok(None);
             }
 
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_is_draft_none() {
-        assert!(!is_draft(&None));
+        assert!(!is_draft(None));
     }
 
     #[test]
@@ -297,7 +297,7 @@ mod tests {
             draft: false,
             ..Default::default()
         };
-        assert!(!is_draft(&Some(meta)));
+        assert!(!is_draft(Some(&meta)));
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
             draft: true,
             ..Default::default()
         };
-        assert!(is_draft(&Some(meta)));
+        assert!(is_draft(Some(&meta)));
     }
 
     // Tests that use typst compilation
@@ -390,7 +390,7 @@ mod tests {
 
         let (_, meta) = result.unwrap();
         assert!(meta.is_some());
-        assert!(is_draft(&meta), "Should detect draft: true");
+        assert!(is_draft(meta.as_ref()), "Should detect draft: true");
     }
 
     #[test]

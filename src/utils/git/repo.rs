@@ -51,7 +51,7 @@ pub fn commit_all(repo: &ThreadSafeRepository, message: &str) -> Result<()> {
 }
 
 /// Get repository root path
-pub(crate) fn get_repo_root(repo: &Repository) -> Result<&Path> {
+pub fn get_repo_root(repo: &Repository) -> Result<&Path> {
     repo.path()
         .parent()
         .ok_or_else(|| anyhow!("Invalid repository path"))
@@ -68,14 +68,14 @@ fn read_gitignore(root: &Path) -> Result<Vec<u8>> {
 }
 
 /// Get parent commit IDs (empty for initial commit)
+#[allow(clippy::unnecessary_wraps)] // Result for API consistency
 fn get_parent_commit_ids(repo: &ThreadSafeRepository) -> Result<Vec<gix::ObjectId>> {
     let repo_local = repo.to_thread_local();
 
     let parent_ids = repo_local
         .find_reference("refs/heads/main")
         .ok()
-        .map(|refs| vec![refs.target().id().to_owned()])
-        .unwrap_or_else(|| NO_PARENT_IDS.to_vec());
+        .map_or_else(|| NO_PARENT_IDS.to_vec(), |refs| vec![refs.target().id().to_owned()]);
 
     Ok(parent_ids)
 }

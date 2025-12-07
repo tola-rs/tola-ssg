@@ -93,7 +93,7 @@ pub struct AssetPaths {
 }
 
 impl AssetMeta {
-    /// Create AssetMeta from a source path.
+    /// Create `AssetMeta` from a source path.
     pub fn from_source(source: PathBuf, config: &SiteConfig) -> Result<Self> {
         let assets_dir = &config.build.assets;
         let output_dir = config.build.output.join(&config.build.path_prefix);
@@ -137,7 +137,7 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
     let url = if path_str.starts_with('/') {
         path_str
     } else {
-        format!("/{}", path_str)
+        format!("/{path_str}")
     };
 
     Ok(url)
@@ -199,11 +199,11 @@ pub struct PagePaths {
     /// Source .typ file path
     #[allow(dead_code)] // Reserved for future use
     pub source: PathBuf,
-    /// Generated HTML file path (includes path_prefix)
+    /// Generated HTML file path (includes `path_prefix`)
     pub html: PathBuf,
     /// Relative path without extension (for logging)
     pub relative: String,
-    /// URL path component (includes path_prefix, e.g., `/prefix/posts/hello/`)
+    /// URL path component (includes `path_prefix`, e.g., `/prefix/posts/hello/`)
     #[allow(dead_code)] // Reserved for future use
     pub url_path: String,
     /// Full URL including base (e.g., `https://example.com/posts/hello/`)
@@ -211,7 +211,7 @@ pub struct PagePaths {
 }
 
 impl PageMeta {
-    /// Create PageMeta from a source .typ file path without querying metadata.
+    /// Create `PageMeta` from a source .typ file path without querying metadata.
     ///
     /// This is the lightweight version that only computes paths.
     /// Use `with_content` to set the content metadata later.
@@ -263,7 +263,7 @@ impl PageMeta {
             full_path_url
         };
 
-        let full_url = format!("{}{}", base_url, url_path);
+        let full_url = format!("{base_url}{url_path}");
         let lastmod = fs::metadata(&source).and_then(|m| m.modified()).ok();
 
         Ok(Self {
@@ -296,6 +296,7 @@ impl PageMeta {
     pub fn lastmod_ymd(&self) -> Option<String> {
         let modified = self.lastmod?;
         let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        #[allow(clippy::cast_possible_wrap)] // Safe: seconds/86400 fits in i64
         let days = duration.as_secs() as i64 / 86400;
         let (year, month, day) = days_to_ymd(days);
         Some(format!("{year:04}-{month:02}-{day:02}"))
@@ -320,7 +321,7 @@ impl Pages {
 
     /// Number of pages.
     #[allow(dead_code)]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.items.len()
     }
 }
@@ -339,14 +340,28 @@ where
     match value {
         Some(v) => {
             let elem: TypstElement = serde_json::from_value(v)
-                .map_err(|e| D::Error::custom(format!("Invalid summary format: {}", e)))?;
+                .map_err(|e| D::Error::custom(format!("Invalid summary format: {e}")))?;
             Ok(Some(elem.to_html()))
         }
         None => Ok(None),
     }
 }
 
-/// Represents parsed Typst content elements for summary field.
+/// Typst content element for summary field deserialization.
+///
+/// Parses JSON-serialized Typst content and converts to HTML.
+///
+/// # Supported Elements
+///
+/// | Element    | HTML Output               |
+/// |------------|---------------------------|
+/// | Space      | ` ` (space)               |
+/// | Linebreak  | `<br/>`                   |
+/// | Text       | Escaped text              |
+/// | Strike     | `<s>text</s>`             |
+/// | Link       | `<a href="...">text</a>`  |
+/// | Sequence   | Concatenated children     |
+/// | Unknown    | Empty string (ignored)    |
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "func", rename_all = "lowercase")]
 enum TypstElement {
@@ -354,8 +369,8 @@ enum TypstElement {
     Linebreak,
     Text { text: String },
     Strike { text: String },
-    Link { dest: String, body: Box<TypstElement> },
-    Sequence { children: Vec<TypstElement> },
+    Link { dest: String, body: Box<Self> },
+    Sequence { children: Vec<Self> },
     #[serde(other)]
     Unknown,
 }
@@ -369,10 +384,10 @@ impl TypstElement {
             Self::Text { text } => html_escape(text),
             Self::Strike { text } => format!("<s>{}</s>", html_escape(text)),
             Self::Link { dest, body } => {
-                format!("<a href=\"{}\">{}</a>", dest, body.to_html())
+                format!("<a href=\"{dest}\">{}</a>", body.to_html())
             }
             Self::Sequence { children } => {
-                children.iter().map(|c| c.to_html()).collect()
+                children.iter().map(Self::to_html).collect()
             }
             Self::Unknown => String::new(),
         }
@@ -403,18 +418,19 @@ fn html_escape(s: &str) -> String {
 ///
 /// Uses Howard Hinnant's date algorithms for efficient calendar calculations.
 /// See: <http://howardhinnant.github.io/date_algorithms.html>
-fn days_to_ymd(days: i64) -> (i32, u32, u32) {
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+const fn days_to_ymd(days: i64) -> (i32, u32, u32) {
     // Shift epoch from 1970-01-01 to 0000-03-01
-    let z = days + 719468;
+    let z = days + 719_468;
 
     // Calculate era (400-year period)
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
 
     // Day of era [0, 146096]
-    let doe = (z - era * 146097) as u32;
+    let doe = (z - era * 146_097) as u32;
 
     // Year of era [0, 399]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
 
     // Year
     let y = yoe as i64 + era * 400;

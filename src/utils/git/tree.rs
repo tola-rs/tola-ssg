@@ -67,7 +67,8 @@ impl<'a> TreeBuilder<'a> {
         Ok(Tree { entries })
     }
 
-    /// Get filename as BString
+    /// Get filename as `BString`
+    #[allow(clippy::unused_self)] // Method style for consistency
     fn get_filename(&self, entry: &fs::DirEntry) -> Result<BString> {
         entry
             .file_name()
@@ -82,12 +83,14 @@ impl<'a> TreeBuilder<'a> {
     }
 
     /// Write file contents as blob
+    #[allow(clippy::unused_self)] // Method style for consistency
     fn write_blob(&self, repo: &gix::Repository, path: &Path) -> Result<gix::ObjectId> {
         let contents = fs::read(path)?;
         Ok(repo.write_blob(contents)?.into())
     }
 
     /// Add file to index
+    #[allow(clippy::unused_self)] // Method style for consistency
     fn add_to_index(
         &self,
         index: &mut State,
@@ -101,6 +104,7 @@ impl<'a> TreeBuilder<'a> {
     }
 
     /// Create a tree entry for a subdirectory
+    #[allow(clippy::unused_self)] // Method style for consistency
     fn create_tree_entry(&self, filename: BString, oid: gix::ObjectId) -> tree::Entry {
         tree::Entry {
             mode: tree::EntryKind::Tree.into(),
@@ -110,6 +114,7 @@ impl<'a> TreeBuilder<'a> {
     }
 
     /// Create a tree entry for a file
+    #[allow(clippy::unused_self)] // Method style for consistency
     fn create_blob_entry(&self, filename: BString, oid: gix::ObjectId) -> tree::Entry {
         tree::Entry {
             mode: tree::EntryKind::Blob.into(),

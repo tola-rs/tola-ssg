@@ -1,3 +1,26 @@
+//! UTC datetime utilities without timezone dependencies.
+//!
+//! Provides a lightweight `DateTimeUtc` struct for date/time handling,
+//! optimized for static site generation use cases (RSS feeds, sitemaps).
+//!
+//! # Features
+//!
+//! - Zero external dependencies for date parsing
+//! - RFC 2822 and RFC 3339 formatting for feeds
+//! - Validation with clear error messages
+//! - Leap year handling
+//!
+//! # Examples
+//!
+//! ```ignore
+//! // Parse from ISO format
+//! let dt = DateTimeUtc::parse("2024-06-15").unwrap();
+//! let dt = DateTimeUtc::parse("2024-06-15T14:30:45Z").unwrap();
+//!
+//! // Format for RSS
+//! assert_eq!(dt.to_rfc2822(), "Sat, 15 Jun 2024 14:30:45 GMT");
+//! ```
+
 use anyhow::{Result, bail};
 
 /// UTC datetime without timezone complexity
@@ -70,6 +93,7 @@ impl DateTimeUtc {
         Some(dt)
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref)] // Method style is more idiomatic
     pub fn validate(&self) -> Result<()> {
         let Self {
             year,
@@ -102,12 +126,13 @@ impl DateTimeUtc {
     }
 
     #[inline]
-    fn is_leap_year(year: u16) -> bool {
-        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+    #[allow(clippy::manual_is_multiple_of)] // Manual impl for const fn
+    const fn is_leap_year(year: u16) -> bool {
+        year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
     }
 
     #[inline]
-    fn days_in_month(year: u16, month: u8) -> u8 {
+    const fn days_in_month(year: u16, month: u8) -> u8 {
         match month {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
@@ -139,13 +164,15 @@ impl DateTimeUtc {
     }
 
     #[inline]
+    #[allow(clippy::trivially_copy_pass_by_ref)] // Method style is more idiomatic
+    #[allow(clippy::cast_sign_loss)] // Result of % 7 is always 0-6
     fn weekday_index(&self) -> usize {
         let (y, m) = if self.month < 3 {
-            (self.year as i32 - 1, self.month as i32 + 12)
+            (i32::from(self.year) - 1, i32::from(self.month) + 12)
         } else {
-            (self.year as i32, self.month as i32)
+            (i32::from(self.year), i32::from(self.month))
         };
-        let d = self.day as i32;
+        let d = i32::from(self.day);
         ((d + (13 * (m + 1)) / 5 + y + y / 4 - y / 100 + y / 400) % 7) as usize
     }
 }
@@ -176,7 +203,7 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
         if d > 9 {
             return None;
         }
-        result = result * 10 + d as u16;
+        result = result * 10 + u16::from(d);
     }
     Some(result)
 }

@@ -79,7 +79,7 @@ pub struct SlotCell<T> {
 }
 
 impl<T: Clone> SlotCell<T> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             data: None,
             fingerprint: 0,
@@ -87,7 +87,7 @@ impl<T: Clone> SlotCell<T> {
         }
     }
 
-    pub fn reset_access(&mut self) {
+    pub const fn reset_access(&mut self) {
         self.accessed = false;
     }
 
@@ -223,7 +223,7 @@ pub struct FileSlot {
 }
 
 impl FileSlot {
-    pub fn new(id: FileId) -> Self {
+    pub const fn new(id: FileId) -> Self {
         Self {
             id,
             source: SlotCell::new(),
@@ -231,7 +231,7 @@ impl FileSlot {
         }
     }
 
-    pub fn reset_access(&mut self) {
+    pub const fn reset_access(&mut self) {
         self.source.reset_access();
         self.file.reset_access();
     }

@@ -13,20 +13,19 @@ static ASSET_TOP_LEVELS: OnceLock<HashSet<OsString>> = OnceLock::new();
 pub fn get_icon_mime_type(path: &Path) -> &'static str {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|ext| match ext.to_lowercase().as_str() {
-            "ico" => "image/x-icon",
+        .map_or("image/x-icon", |ext| match ext.to_lowercase().as_str() {
             "png" => "image/png",
             "svg" => "image/svg+xml",
             "avif" => "image/avif",
             "webp" => "image/webp",
             "gif" => "image/gif",
             "jpg" | "jpeg" => "image/jpeg",
+            // ico and other formats default to image/x-icon
             _ => "image/x-icon",
         })
-        .unwrap_or("image/x-icon")
 }
 
-/// Compute href for an asset path relative to path_prefix
+/// Compute href for an asset path relative to `path_prefix`
 pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<String> {
     let assets_dir = &config.build.assets;
     // Strip the leading "./" prefix if present

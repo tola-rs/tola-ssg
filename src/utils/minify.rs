@@ -11,6 +11,7 @@ use std::borrow::Cow;
 // ============================================================================
 
 /// Content type for minification.
+#[derive(Clone, Copy)]
 pub enum MinifyType<'a> {
     /// HTML content
     Html(&'a [u8]),
@@ -26,15 +27,15 @@ pub enum MinifyType<'a> {
 ///
 /// Returns `Cow::Borrowed` if minify disabled, `Cow::Owned` if minified.
 pub fn minify<'a>(content: MinifyType<'a>, config: &SiteConfig) -> Cow<'a, [u8]> {
-    if !config.build.minify {
-        match content {
-            MinifyType::Html(html) => Cow::Borrowed(html),
-            MinifyType::Xml(xml) => Cow::Borrowed(xml),
-        }
-    } else {
+    if config.build.minify {
         match content {
             MinifyType::Html(html) => Cow::Owned(minify_html_inner(html)),
             MinifyType::Xml(xml) => Cow::Owned(minify_xml_inner(xml)),
+        }
+    } else {
+        match content {
+            MinifyType::Html(html) => Cow::Borrowed(html),
+            MinifyType::Xml(xml) => Cow::Borrowed(xml),
         }
     }
 }
@@ -61,7 +62,7 @@ fn minify_xml_inner(xml: &[u8]) -> Vec<u8> {
     let xml_str = std::str::from_utf8(xml).unwrap_or("");
     xml_str
         .lines()
-        .map(|line| line.trim())
+        .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join("")

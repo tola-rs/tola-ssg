@@ -59,7 +59,7 @@ const MAX_BAR_WIDTH: usize = 40;
 
 /// Calculate total prefix length for a module name.
 ///
-/// Returns: `module.len() + 3` (for "[", "]", and trailing space)
+/// Returns: `module.len() + 3` (for `[`, `]`, and trailing space)
 #[inline]
 const fn calc_prefix_len(module_len: usize) -> usize {
     module_len + BRACKET_LEN + SPACE_AFTER_PREFIX
@@ -122,7 +122,7 @@ impl ProgressBars {
     /// Create progress bars for multiple modules.
     ///
     /// # Arguments
-    /// * `modules` - Slice of (module_name, total_count) tuples
+    /// * `modules` - Slice of (`module_name`, `total_count`) tuples
     ///
     /// # Returns
     /// A new `ProgressBars` instance. Use `inc(index)` to update bars.
@@ -200,11 +200,12 @@ impl ProgressBars {
 
         // Update the correct line using cursor movement
         let mut stdout = stdout().lock();
-        let lines_up = self.bars.len() - bar.row;
-        execute!(stdout, cursor::MoveUp(lines_up as u16)).ok();
+        #[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
+        let lines_up = (self.bars.len() - bar.row) as u16;
+        execute!(stdout, cursor::MoveUp(lines_up)).ok();
         execute!(stdout, Clear(ClearType::CurrentLine)).ok();
         write!(stdout, "{} [{}] {}", bar.prefix, progress_bar, progress_text).ok();
-        execute!(stdout, cursor::MoveDown(lines_up as u16)).ok();
+        execute!(stdout, cursor::MoveDown(lines_up)).ok();
         write!(stdout, "\r").ok();
         stdout.flush().ok();
     }
@@ -212,21 +213,23 @@ impl ProgressBars {
     /// Clear all progress bars from the terminal.
     ///
     /// Call this when processing is complete to clean up the display.
+    #[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
     pub fn finish(&self) {
         BAR_COUNT.store(0, Ordering::SeqCst);
         let _guard = self.lock.lock().ok();
 
         let mut stdout = stdout().lock();
+        let bars_len = self.bars.len() as u16;
 
         // Move to top of progress area and clear each line
-        execute!(stdout, cursor::MoveUp(self.bars.len() as u16)).ok();
+        execute!(stdout, cursor::MoveUp(bars_len)).ok();
         for _ in &self.bars {
             execute!(stdout, Clear(ClearType::CurrentLine)).ok();
             execute!(stdout, cursor::MoveDown(1)).ok();
         }
 
         // Return cursor to starting position
-        execute!(stdout, cursor::MoveUp(self.bars.len() as u16)).ok();
+        execute!(stdout, cursor::MoveUp(bars_len)).ok();
         stdout.flush().ok();
     }
 }
@@ -245,6 +248,7 @@ impl Drop for ProgressBars {
 ///
 /// Automatically truncates long messages to fit terminal width.
 #[inline]
+#[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
 pub fn log(module: &str, message: &str) {
     let module_lower = module.to_ascii_lowercase();
     let prefix = colorize_prefix(module, &module_lower);
@@ -300,7 +304,7 @@ fn colorize_prefix(module: &str, module_lower: &str) -> ColoredString {
     }
 }
 
-/// Truncate a string to fit within max_len bytes.
+/// Truncate a string to fit within `max_len` bytes.
 ///
 /// Ensures the result is valid UTF-8 by finding the nearest character boundary.
 #[inline]

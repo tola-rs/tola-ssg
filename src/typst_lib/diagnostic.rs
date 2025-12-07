@@ -13,8 +13,8 @@
 //! The module is organized into several layers:
 //! - **Theme**: Color styling for different diagnostic severities
 //! - **Gutter**: Box-drawing characters for source display
-//! - **SpanLocation**: Resolved source location information
-//! - **SnippetWriter**: Handles formatted output generation
+//! - **`SpanLocation`**: Resolved source location information
+//! - **`SnippetWriter`**: Handles formatted output generation
 //!
 //! # Example Output
 //!
@@ -75,7 +75,7 @@ impl DiagnosticTheme {
 
     /// Apply theme color to any text element.
     #[inline]
-    fn paint(&self, text: &str) -> ColoredString {
+    fn paint(self, text: &str) -> ColoredString {
         (self.colorize)(text)
     }
 }
@@ -145,13 +145,13 @@ impl SpanLocation {
 
     /// Check if this span covers multiple lines.
     #[inline]
-    fn is_multiline(&self) -> bool {
+    const fn is_multiline(&self) -> bool {
         self.lines.len() > 1
     }
 
     /// Get the last line number covered by this span.
     #[inline]
-    fn end_line(&self) -> usize {
+    const fn end_line(&self) -> usize {
         self.start_line + self.lines.len() - 1
     }
 
@@ -177,7 +177,7 @@ struct SnippetWriter<'a> {
 }
 
 impl<'a> SnippetWriter<'a> {
-    fn new(output: &'a mut String, theme: &'a DiagnosticTheme, line_num_width: usize) -> Self {
+    const fn new(output: &'a mut String, theme: &'a DiagnosticTheme, line_num_width: usize) -> Self {
         Self {
             output,
             theme,
@@ -187,7 +187,7 @@ impl<'a> SnippetWriter<'a> {
 
     /// Write the location header: "  ┌─ path:line:col"
     fn write_header(&mut self, path: &str, line: usize, col: usize) {
-        let _ = writeln!(
+        _ = writeln!(
             self.output,
             "{:>width$} {} {}:{}:{}",
             "",
@@ -201,7 +201,7 @@ impl<'a> SnippetWriter<'a> {
 
     /// Write an empty gutter line: "  │"
     fn write_empty_gutter(&mut self) {
-        let _ = writeln!(
+        _ = writeln!(
             self.output,
             "{:>width$} {}",
             "",
@@ -222,7 +222,7 @@ impl<'a> SnippetWriter<'a> {
 
         let formatted_line = match (box_char, highlight_range) {
             (Some(bc), Some((start, end))) => {
-                let (before, highlighted, after) = self.split_line(line_text, start, end);
+                let (before, highlighted, after) = Self::split_line(line_text, start, end);
                 format!(
                     "{} {} {} {}{}{}",
                     self.theme.paint(&line_num_str),
@@ -234,7 +234,7 @@ impl<'a> SnippetWriter<'a> {
                 )
             }
             (None, Some((start, end))) => {
-                let (before, highlighted, after) = self.split_line(line_text, start, end);
+                let (before, highlighted, after) = Self::split_line(line_text, start, end);
                 format!(
                     "{} {} {}{}{}",
                     self.theme.paint(&line_num_str),
@@ -254,14 +254,14 @@ impl<'a> SnippetWriter<'a> {
             }
         };
 
-        let _ = writeln!(self.output, "{}", formatted_line);
+        _ = writeln!(self.output, "{formatted_line}");
     }
 
     /// Write marker line for single-line spans: "  │   ^^^^"
     fn write_single_line_marker(&mut self, start_col: usize, span_len: usize) {
         let spaces = " ".repeat(start_col);
         let markers = gutter::MARKER.repeat(span_len.max(1));
-        let _ = writeln!(
+        _ = writeln!(
             self.output,
             "{:>width$} {} {}{}",
             "",
@@ -275,7 +275,7 @@ impl<'a> SnippetWriter<'a> {
     /// Write marker line for multi-line spans: "  │ ╰────^"
     fn write_multiline_end_marker(&mut self, end_col: usize) {
         let dashes = gutter::DASH.repeat(end_col);
-        let _ = writeln!(
+        _ = writeln!(
             self.output,
             "{:>width$} {} {}{}{}",
             "",
@@ -288,8 +288,8 @@ impl<'a> SnippetWriter<'a> {
     }
 
     /// Split a line into (before, highlighted, after) based on column range.
-    /// Both start_col and end_col are 0-indexed.
-    fn split_line(&self, line: &str, start_col: usize, end_col: usize) -> (String, String, String) {
+    /// Both `start_col` and `end_col` are 0-indexed.
+    fn split_line(line: &str, start_col: usize, end_col: usize) -> (String, String, String) {
         let chars: Vec<char> = line.chars().collect();
         let start_idx = start_col.min(chars.len());
         let end_idx = end_col.min(chars.len());
@@ -371,11 +371,11 @@ fn format_diagnostic<W: World>(output: &mut String, world: &W, diag: &SourceDiag
     };
 
     // Header: "error: message"
-    let _ = writeln!(output, "{}: {}", theme.paint(label), diag.message);
+    _ = writeln!(output, "{}: {}", theme.paint(label), diag.message);
 
     // Source snippet
     if let Some(location) = SpanLocation::from_span(world, diag.span) {
-        write_snippet(output, &location, &theme);
+        write_snippet(output, &location, theme);
     }
 
     // Trace information (call stack)
@@ -385,7 +385,7 @@ fn format_diagnostic<W: World>(output: &mut String, world: &W, diag: &SourceDiag
 
     // Hints
     for hint in &diag.hints {
-        let _ = writeln!(
+        _ = writeln!(
             output,
             "  {} hint: {}",
             DiagnosticTheme::HELP.paint("="),
@@ -395,8 +395,8 @@ fn format_diagnostic<W: World>(output: &mut String, world: &W, diag: &SourceDiag
 }
 
 /// Write a source code snippet with highlighting.
-fn write_snippet(output: &mut String, location: &SpanLocation, theme: &DiagnosticTheme) {
-    let mut writer = SnippetWriter::new(output, theme, location.line_num_width());
+fn write_snippet(output: &mut String, location: &SpanLocation, theme: DiagnosticTheme) {
+    let mut writer = SnippetWriter::new(output, &theme, location.line_num_width());
 
     writer.write_header(&location.path, location.start_line, location.start_col);
     writer.write_empty_gutter();
@@ -410,7 +410,7 @@ fn write_snippet(output: &mut String, location: &SpanLocation, theme: &Diagnosti
 
 /// Write a single-line source snippet.
 fn write_singleline_snippet(writer: &mut SnippetWriter, location: &SpanLocation) {
-    let line_text = location.lines.first().map(|s| s.as_str()).unwrap_or("");
+    let line_text = location.lines.first().map_or("", String::as_str);
     let span_len = location
         .highlight_end_col
         .saturating_sub(location.highlight_start_col)
@@ -458,14 +458,14 @@ fn write_trace<W: World>(
 
     let message = match tracepoint {
         Tracepoint::Call(Some(name)) => {
-            format!("error occurred in this call of function `{}`", name)
+            format!("error occurred in this call of function `{name}`")
         }
         Tracepoint::Call(None) => "error occurred in this function call".into(),
-        Tracepoint::Show(name) => format!("error occurred in this show rule for `{}`", name),
+        Tracepoint::Show(name) => format!("error occurred in this show rule for `{name}`"),
         Tracepoint::Import => "error occurred in this import".into(),
     };
 
-    let _ = writeln!(
+    _ = writeln!(
         output,
         "{}: {}",
         DiagnosticTheme::HELP.paint("help"),
@@ -473,7 +473,7 @@ fn write_trace<W: World>(
     );
 
     if let Some(location) = SpanLocation::from_span(world, span) {
-        write_snippet(output, &location, &DiagnosticTheme::HELP);
+        write_snippet(output, &location, DiagnosticTheme::HELP);
     }
 }
 
@@ -503,7 +503,7 @@ mod tests {
         };
 
         let mut output = String::new();
-        write_snippet(&mut output, &location, &DiagnosticTheme::ERROR);
+        write_snippet(&mut output, &location, DiagnosticTheme::ERROR);
 
         assert!(output.contains("content/index.typ:1:8"));
         assert!(output.contains("#import \"@tola:meta.typ\" as meta"));
@@ -529,7 +529,7 @@ mod tests {
         };
 
         let mut output = String::new();
-        write_snippet(&mut output, &location, &DiagnosticTheme::ERROR);
+        write_snippet(&mut output, &location, DiagnosticTheme::ERROR);
 
         assert!(output.contains("templates/normal.typ:32:2"));
         assert!(output.contains("meta(("));
@@ -551,7 +551,7 @@ mod tests {
         };
 
         let mut output = String::new();
-        write_snippet(&mut output, &location, &DiagnosticTheme::ERROR);
+        write_snippet(&mut output, &location, DiagnosticTheme::ERROR);
 
         assert!(output.contains("123 │"));
         assert!(output.contains("^^^^"));

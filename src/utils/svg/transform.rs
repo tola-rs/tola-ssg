@@ -1,6 +1,7 @@
 use anyhow::Result;
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::BytesStart;
+use quick_xml::name::QName;
 use crate::utils::svg::{SVG_PADDING_TOP, SVG_PADDING_BOTTOM};
 
 /// Transform SVG attributes (height, viewBox adjustments).
@@ -20,37 +21,37 @@ pub fn transform_svg_attrs<'a>(elem: &'a BytesStart<'_>) -> Result<Vec<Attribute
 }
 
 /// Adjust height attribute (add top padding)
-fn adjust_height(attr: Attribute<'_>) -> Result<Attribute<'_>> {
+#[allow(clippy::needless_pass_by_value)] // Returns new Attribute with different lifetime
+fn adjust_height(attr: Attribute<'_>) -> Result<Attribute<'static>> {
     let value = std::str::from_utf8(attr.value.as_ref())?;
     let height: f32 = value.trim_end_matches("pt").parse()?;
 
     Ok(Attribute {
-        key: attr.key,
+        key: QName(b"height"),
         value: format!("{}pt", height + SVG_PADDING_TOP)
             .into_bytes()
             .into(),
     })
 }
 
-/// Adjust viewBox attribute (expand for padding)
-fn adjust_viewbox(attr: Attribute<'_>) -> Result<Attribute<'_>> {
+/// Adjust `viewBox` attribute (expand for padding)
+#[allow(clippy::needless_pass_by_value)] // Returns new Attribute with different lifetime
+fn adjust_viewbox(attr: Attribute<'_>) -> Result<Attribute<'static>> {
     let value = std::str::from_utf8(attr.value.as_ref())?;
 
     // Parse 4 values without allocating a Vec
     let mut iter = value.split_whitespace();
-    let (v0, v1, v2, v3) = match (iter.next(), iter.next(), iter.next(), iter.next()) {
-        (Some(a), Some(b), Some(c), Some(d)) => (
-            a.parse::<f32>().ok(),
-            b.parse::<f32>().ok(),
-            c.parse::<f32>().ok(),
-            d.parse::<f32>().ok(),
-        ),
-        _ => anyhow::bail!("Invalid viewBox: expected 4 values"),
+    let (Some(s0), Some(s1), Some(s2), Some(s3)) = (iter.next(), iter.next(), iter.next(), iter.next()) else {
+        anyhow::bail!("Invalid viewBox: expected 4 values")
     };
 
-    let (v0, v1, v2, v3) = match (v0, v1, v2, v3) {
-        (Some(a), Some(b), Some(c), Some(d)) => (a, b, c, d),
-        _ => anyhow::bail!("Invalid viewBox: failed to parse values"),
+    let (Some(v0), Some(v1), Some(v2), Some(v3)) = (
+        s0.parse::<f32>().ok(),
+        s1.parse::<f32>().ok(),
+        s2.parse::<f32>().ok(),
+        s3.parse::<f32>().ok(),
+    ) else {
+        anyhow::bail!("Invalid viewBox: failed to parse values")
     };
 
     let new_viewbox = format!(
@@ -62,7 +63,7 @@ fn adjust_viewbox(attr: Attribute<'_>) -> Result<Attribute<'_>> {
     );
 
     Ok(Attribute {
-        key: attr.key,
+        key: QName(b"viewBox"),
         value: new_viewbox.into_bytes().into(),
     })
 }
@@ -70,7 +71,6 @@ fn adjust_viewbox(attr: Attribute<'_>) -> Result<Attribute<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use quick_xml::name::QName;
 
     #[test]
     fn test_adjust_viewbox_valid() {

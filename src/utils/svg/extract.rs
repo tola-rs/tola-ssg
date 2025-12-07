@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, Writer};
-use std::fmt::Write as FmtWrite;
 use std::io::Cursor;
 
 use crate::config::SiteConfig;
@@ -81,14 +80,10 @@ fn capture_svg_content(reader: &mut Reader<&[u8]>, attrs: &[Attribute<'_>]) -> R
                 content.push(b'>');
             }
             Event::End(e) => {
-                if e.name().as_ref() == b"svg" {
-                    depth -= 1;
-                    if depth == 0 {
-                        content.extend_from_slice(b"</svg>");
-                        break;
-                    }
-                } else {
-                    depth -= 1;
+                depth -= 1;
+                if e.name().as_ref() == b"svg" && depth == 0 {
+                    content.extend_from_slice(b"</svg>");
+                    break;
                 }
                 content.extend_from_slice(b"</");
                 content.extend_from_slice(e.name().as_ref());
@@ -134,7 +129,7 @@ fn capture_svg_content(reader: &mut Reader<&[u8]>, attrs: &[Attribute<'_>]) -> R
                 content.push(b'>');
             }
             Event::Eof => anyhow::bail!("Unexpected EOF while parsing SVG"),
-            _ => {}
+            Event::GeneralRef(_) => {} // Ignore general references
         }
     }
 
@@ -157,8 +152,7 @@ fn write_img_placeholder(
     // Build style attribute with scaled dimensions
     let scale = ctx.config.get_scale();
     let (w, h) = (svg.size.0 / scale, svg.size.1 / scale);
-    let mut style = String::with_capacity(40);
-    let _ = write!(style, "width:{w}px;height:{h}px;");
+    let style = format!("width:{w}px;height:{h}px;");
 
     // Write img element
     let mut img = BytesStart::new("img");

@@ -26,8 +26,9 @@ pub fn push(repo: &ThreadSafeRepository, config: &'static SiteConfig) -> Result<
     // Verify remote configuration
     if !config.deploy.force && !Remote::origin_matches(&repo_local, &remote_url)? {
         bail!(
-            "Remote origin URL in `{root:?}` doesn't match [deploy.git] config. \
-             Enable [deploy.force] or fix manually."
+            "Remote origin URL in `{}` doesn't match [deploy.git] config. \
+             Enable [deploy.force] or fix manually.",
+            root.display()
         );
     }
 
@@ -38,6 +39,7 @@ struct Remote;
 
 impl Remote {
     /// Check if origin remote exists with matching URL
+    #[allow(clippy::unnecessary_wraps)] // Result for API consistency
     fn origin_matches(repo: &Repository, expected_url: &str) -> Result<bool> {
         let matches = repo
             .find_remote("origin")
@@ -53,6 +55,7 @@ impl Remote {
     }
 
     /// Check if origin remote exists
+    #[allow(clippy::unnecessary_wraps)] // Result for API consistency
     fn origin_exists(repo: &Repository) -> Result<bool> {
         Ok(repo.find_remote("origin").is_ok())
     }
@@ -90,10 +93,10 @@ fn build_authenticated_url(url: &str, token_path: Option<&std::path::PathBuf>) -
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
 
-    match token {
-        Some(token) => Ok(format!("https://{token}@{base_url}")),
-        None => Ok(format!("https://{base_url}")),
-    }
+    Ok(token.map_or_else(
+        || format!("https://{base_url}"),
+        |token| format!("https://{token}@{base_url}"),
+    ))
 }
 
 #[cfg(test)]

@@ -1,3 +1,32 @@
+//! SVG extraction, optimization, and compression utilities.
+//!
+//! This module handles SVG processing for the static site generator:
+//!
+//! - **Extract**: Parse inline SVGs from HTML output
+//! - **Optimize**: Adjust viewBox, normalize dimensions
+//! - **Compress**: Parallel SVGZ compression for external files
+//!
+//! # Architecture
+//!
+//! ```text
+//! HTML with inline SVG
+//!         │
+//!         ▼
+//!    ┌─────────┐
+//!    │ extract │ ──► Parse <svg> from HTML
+//!    └────┬────┘
+//!         │
+//!         ▼
+//!    ┌──────────┐
+//!    │ optimize │ ──► Fix viewBox, adjust padding
+//!    └────┬─────┘
+//!         │
+//!         ▼
+//!    ┌──────────┐
+//!    │ compress │ ──► GZIP → .svgz (parallel)
+//!    └──────────┘
+//! ```
+
 mod compress;
 mod extract;
 mod optimize;
@@ -79,6 +108,7 @@ pub struct HtmlContext<'a> {
 }
 
 impl<'a> HtmlContext<'a> {
+    #[allow(clippy::missing_const_for_fn)] // matches! macro is not const
     pub fn new(config: &'static SiteConfig, html_path: &'a Path) -> Self {
         Self {
             config,

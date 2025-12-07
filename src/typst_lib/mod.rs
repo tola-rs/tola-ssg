@@ -100,7 +100,7 @@ fn acquire_test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(not(test))]
-fn acquire_test_lock() -> DummyGuard {
+const fn acquire_test_lock() -> DummyGuard {
     DummyGuard
 }
 
@@ -171,7 +171,7 @@ fn compile_base(
 ) -> anyhow::Result<(SystemWorld, typst_html::HtmlDocument)> {
     file::reset_access_flags();
 
-    let world = SystemWorld::new(path, root)?;
+    let world = SystemWorld::new(path, root);
     let result = typst::compile(&world);
 
     // Check for errors in warnings

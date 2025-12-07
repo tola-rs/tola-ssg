@@ -111,7 +111,7 @@ pub fn serve_site(config: &'static SiteConfig) -> Result<()> {
 fn handle_request(request: Request, serve_root: &Path) -> Result<()> {
     // Decode URL-encoded characters (e.g., %20 → space)
     let url_path = urlencoding::decode(request.url())
-        .map(|s| s.into_owned())
+        .map(std::borrow::Cow::into_owned)
         .unwrap_or_default();
 
     // Strip query string (e.g., ?t=123456) before resolving path
@@ -232,7 +232,7 @@ fn guess_content_type(path: &Path) -> &'static str {
 /// - Falls back to welcome page if directory is empty
 fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io::Result<String> {
     let entries: Vec<_> = fs::read_dir(dir_path)?
-        .filter_map(|entry| entry.ok())
+        .filter_map(Result::ok)
         .filter(|entry| {
             // Filter out hidden files (starting with '.')
             !entry.file_name().to_string_lossy().starts_with('.')
@@ -275,6 +275,7 @@ fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io
         )
     };
 
+    #[allow(clippy::literal_string_with_formatting_args)] // These are template placeholders, not format args
     Ok(DIRECTORY_TEMPLATE
         .replace("{path}", request_path)
         .replace("{parent_link}", &parent_link)

@@ -101,16 +101,16 @@ pub enum Commands {
 
 #[allow(unused)]
 impl Cli {
-    pub fn is_init(&self) -> bool {
+    pub const fn is_init(&self) -> bool {
         matches!(self.command, Commands::Init { .. })
     }
-    pub fn is_build(&self) -> bool {
+    pub const fn is_build(&self) -> bool {
         matches!(self.command, Commands::Build { .. })
     }
-    pub fn is_serve(&self) -> bool {
+    pub const fn is_serve(&self) -> bool {
         matches!(self.command, Commands::Serve { .. })
     }
-    pub fn is_deploy(&self) -> bool {
+    pub const fn is_deploy(&self) -> bool {
         matches!(self.command, Commands::Deploy { .. })
     }
 }

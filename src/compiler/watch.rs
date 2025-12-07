@@ -28,7 +28,9 @@ pub fn process_watched_files(files: &[PathBuf], config: &'static SiteConfig) -> 
     }
 
     // Collect errors from content file processing
-    let content_errors: Vec<_> = if !content_files.is_empty() {
+    let content_errors: Vec<_> = if content_files.is_empty() {
+        Vec::new()
+    } else {
         let errors: Vec<_> = content_files
             .par_iter()
             .filter_map(|path| {
@@ -43,8 +45,6 @@ pub fn process_watched_files(files: &[PathBuf], config: &'static SiteConfig) -> 
         }
 
         errors
-    } else {
-        Vec::new()
     };
 
     // Process asset files
@@ -63,7 +63,7 @@ pub fn process_watched_files(files: &[PathBuf], config: &'static SiteConfig) -> 
         // Join all error messages for comprehensive reporting
         let error_msg = content_errors
             .iter()
-            .map(|e| e.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
         bail!("{error_msg}");
