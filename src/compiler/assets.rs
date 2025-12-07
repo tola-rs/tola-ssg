@@ -61,12 +61,12 @@ pub fn process_rel_asset(
     let content = &config.build.content;
     let output = &config.build.output.join(&config.build.path_prefix);
 
-    let relative_path = path
+    let rel_path = path
         .strip_prefix(content)?
         .to_str()
         .ok_or(anyhow!("Invalid path"))?;
 
-    let output_path = output.join(relative_path);
+    let output_path = output.join(rel_path);
 
     // Relative assets don't depend on templates/config, just check source vs dest
     if !clean && is_up_to_date(path, &output_path, None) {
@@ -74,7 +74,7 @@ pub fn process_rel_asset(
     }
 
     if log_file {
-        log!("content"; "{}", relative_path);
+        log!("content"; "{}", rel_path);
     }
 
     if let Some(parent) = output_path.parent() {

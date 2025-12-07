@@ -32,11 +32,11 @@ pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<Stri
     // Strip the leading "./" prefix if present
     let without_dot_prefix = asset_path.strip_prefix("./").unwrap_or(asset_path);
     // Strip the "assets/" prefix if present to get relative path within assets
-    let relative_path = without_dot_prefix
+    let rel_path = without_dot_prefix
         .strip_prefix("assets/")
         .unwrap_or(without_dot_prefix);
 
-    let source = assets_dir.join(relative_path);
+    let source = assets_dir.join(rel_path);
     let meta = AssetMeta::from_source(source, config)?;
     Ok(meta.paths.url)
 }

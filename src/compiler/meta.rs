@@ -126,12 +126,12 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
     let output_root = &config.build.output;
 
     // Strip output root
-    let relative_to_output = path
+    let rel_to_output = path
         .strip_prefix(output_root)
         .map_err(|_| anyhow!("Path is not in output directory: {}", path.display()))?;
 
     // Convert to string and ensure forward slashes
-    let path_str = relative_to_output.to_string_lossy().replace('\\', "/");
+    let path_str = rel_to_output.to_string_lossy().replace('\\', "/");
 
     // Ensure it starts with /
     let url = if path_str.starts_with('/') {

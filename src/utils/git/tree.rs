@@ -40,11 +40,11 @@ impl<'a> TreeBuilder<'a> {
             let entry = entry?;
             let path = entry.path();
             let filename = self.get_filename(&entry)?;
-            let relative_path = path.strip_prefix(repo_root)?.to_string_lossy();
+            let rel_path = path.strip_prefix(repo_root)?.to_string_lossy();
             let is_dir = path.is_dir();
 
             // Skip ignored and .git directory
-            if self.should_ignore(&relative_path, &filename, is_dir) {
+            if self.should_ignore(&rel_path, &filename, is_dir) {
                 continue;
             }
 
@@ -77,8 +77,8 @@ impl<'a> TreeBuilder<'a> {
     }
 
     /// Check if path should be ignored
-    fn should_ignore(&self, relative_path: &str, filename: &BString, is_dir: bool) -> bool {
-        filename == ".git" || self.matcher.matches(relative_path, is_dir)
+    fn should_ignore(&self, rel_path: &str, filename: &BString, is_dir: bool) -> bool {
+        filename == ".git" || self.matcher.matches(rel_path, is_dir)
     }
 
     /// Write file contents as blob

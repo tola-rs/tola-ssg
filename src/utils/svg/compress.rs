@@ -37,11 +37,11 @@ pub fn compress_svgs_parallel(
 }
 
 fn get_log_prefix(html_path: &Path, config: &SiteConfig) -> String {
-    let relative_path = html_path
+    let rel_path = html_path
         .strip_prefix(&config.build.output)
         .map(|p| p.to_string_lossy())
         .unwrap_or_default();
-    relative_path.trim_end_matches("index.html").to_string()
+    rel_path.trim_end_matches("index.html").to_string()
 }
 
 fn should_skip_compression(output_path: &Path, html_mtime: Option<SystemTime>) -> bool {
