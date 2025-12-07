@@ -189,7 +189,7 @@ pub fn compile_to_html(path: &Path, root: &Path) -> anyhow::Result<String> {
 /// A `CompileResult` containing:
 /// - `html`: The compiled HTML as bytes
 /// - `metadata`: Optional metadata value (None if label not found)
-pub fn compile_with_metadata(
+pub fn compile_meta(
     path: &Path,
     root: &Path,
     label_name: &str,
@@ -224,13 +224,13 @@ pub fn compile_with_metadata(
         .into_bytes();
 
     // Try to extract metadata (optional - don't fail if not found)
-    let metadata = extract_metadata(&document, label_name);
+    let metadata = extract_meta(&document, label_name);
 
     Ok(CompileResult { html, metadata })
 }
 
 /// Extract metadata from a compiled document by label name.
-fn extract_metadata(document: &typst_html::HtmlDocument, label_name: &str) -> Option<serde_json::Value> {
+fn extract_meta(document: &typst_html::HtmlDocument, label_name: &str) -> Option<serde_json::Value> {
     let label = Label::new(PicoStr::intern(label_name))?;
     let selector = Selector::Label(label);
 
@@ -257,7 +257,7 @@ fn extract_metadata(document: &typst_html::HtmlDocument, label_name: &str) -> Op
 ///
 /// The metadata value if found, or an error if compilation fails or label not found.
 #[allow(dead_code)] // Used by tests
-pub fn query_metadata(path: &Path, root: &Path, label_name: &str) -> anyhow::Result<Value> {
+pub fn query_meta(path: &Path, root: &Path, label_name: &str) -> anyhow::Result<Value> {
     // Serialize compilations in tests to avoid comemo race conditions
     #[cfg(test)]
     let _guard = COMPILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_metadata_basic() {
+    fn test_query_meta_basic() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("post.typ");
 
@@ -435,7 +435,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = query_metadata(&file_path, dir.path(), "tola-meta");
+        let result = query_meta(&file_path, dir.path(), "tola-meta");
         assert!(result.is_ok(), "Query should succeed: {:?}", result);
 
         // The result should be a dictionary containing our metadata
@@ -449,14 +449,14 @@ mod tests {
     }
 
     #[test]
-    fn test_query_metadata_not_found() {
+    fn test_query_meta_not_found() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("post.typ");
 
         // Write a file without the expected label
         fs::write(&file_path, "= Hello World").unwrap();
 
-        let result = query_metadata(&file_path, dir.path(), "nonexistent-label");
+        let result = query_meta(&file_path, dir.path(), "nonexistent-label");
         assert!(result.is_err(), "Should fail for missing label");
     }
 }
