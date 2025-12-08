@@ -31,14 +31,13 @@
           mkPackage = targetPkgs:
             targetPkgs.rustPlatform.buildRustPackage {
               pname = "tola";
-              version = "0.5.18";
+              version = "0.6.0";
 
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
 
-              # buildInputs = with targetPkgs; [ libiconv ];
-              nativeBuildInputs = with pkgs; [ nasm libiconvReal ];
-
+              nativeBuildInputs = with pkgs; [ nasm libiconvReal perl pkg-config ];
+              buildInputs = [ targetPkgs.openssl ];
               env.LIBRARY_PATH = lib.makeLibraryPath [ pkgs.libiconvReal ];
 
               doCheck = false;

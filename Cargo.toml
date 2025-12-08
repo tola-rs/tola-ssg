@@ -1,6 +1,6 @@
 [package]
 name = "tola"
-version = "0.5.18"
+version = "0.6.0"
 edition = "2024"
 description = "static site generator for typst-based blog - keeping your focus on the content"
 documentation = "https://github.com/kawayww/tola-ssg"
@@ -17,10 +17,10 @@ exclude = [
 
 # Reduce the size of binary file
 [profile.release]
-opt-level = 3
+opt-level = 'z'
 lto = true
+codegen-units = 1
 panic = 'abort'
-incremental = true
 strip = true
 
 [profile.flamegraph]
@@ -33,30 +33,30 @@ anyhow = "1.0.98"
 which = "8.0.0"
 clap = { version = "4.5.40", features = ["derive", "string"] }
 colored = "3.0.0"
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", default-features = false }
 minify-html = "0.16.4"
 notify = "8.0.0"
 rayon = "1.10.0"
 regex = { version = "1.12.2", default-features = false, features = ["std", "perf"] }
-serde = { version = "1.0.219", default-features = false, features = ["derive", "std"] }
+serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 serde_json = "1.0.0"
 toml = "0.8.23"
 thiserror = "2.0.12"
-educe = "0.6.0"
+educe = { version = "0.6.0", default-features = false, features = ["Default"] }
 gix = { version = "0.72.1", default-features = false, features = [
     "basic",
     "parallel",
     "excludes",
 ] }
-shellexpand = { version = "3.1.1", features = ["path", "tilde"] }
-quick-xml = "0.38.0"
-usvg = "0.45.1"
+shellexpand = { version = "3.1.1", default-features = false, features = ["base-0", "tilde"] }
+quick-xml = { version = "0.38.0", default-features = false }
+usvg = { version = "0.45.1", default-features = false }
 ravif = { version = "0.12.0", default-features = false, features = [
     "asm",
     "threading",
 ] }
 urlencoding = "2.1.3"
-rss = { version = "2.0.12", default-features = false, features = ["validation", "builders"] }
+rss = { version = "2.0.12", default-features = false, features = ["builders", "validation"] }
 walkdir = "2.5"
 tiny_http = "0.12.0"
 ctrlc = "3.5.1"
@@ -67,7 +67,11 @@ portable-pty = "0.9.0"
 typst = "0.14.1"
 typst-kit = { version = "0.14.1", features = ["fonts", "packages"] }
 typst-html = "0.14.1"
-chrono = "0.4.41"
+chrono = { version = "0.4.41", default-features = false, features = ["clock", "std"] }
 parking_lot = "0.12.5"
 rustc-hash = "2.1.1"
 tempfile = "3"
+
+# Windows-specific: enable crossterm Windows support
+[target.'cfg(windows)'.dependencies]
+crossterm = { version = "0.29.0", default-features = false, features = ["windows"] }
