@@ -6,6 +6,7 @@
 //! - **meta**: Extract and process page metadata
 //! - **assets**: Copy and optimize static assets
 //! - **watch**: Incremental builds on file changes
+//! - **deps**: Dependency tracking for precise rebuilds
 //!
 //! # Build Flow
 //!
@@ -17,6 +18,7 @@
 //! ```
 
 pub mod assets;
+pub mod deps;
 pub mod meta;
 pub mod pages;
 pub mod watch;

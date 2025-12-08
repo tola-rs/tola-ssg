@@ -88,7 +88,7 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
     let (compile_result, assets_result) = rayon::join(
         || {
             // Compile all pages
-            if let Err(e) = compile_pages(&pages, config, clean, deps_mtime, || progress.inc(0)) {
+            if let Err(e) = compile_pages(&pages, config, clean, deps_mtime, || progress.inc_by_name("content")) {
                 if !has_error.swap(true, Ordering::Relaxed) {
                     log!("error"; "compile failed: {:#}", e);
                 }
@@ -109,7 +109,7 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
                         }
                         return Err(anyhow!("Build failed"));
                     }
-                    progress.inc(1);
+                    progress.inc_by_name("assets");
                     Ok(())
                 })
             };
@@ -126,7 +126,7 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
                         }
                         return Err(anyhow!("Build failed"));
                     }
-                    progress.inc(1);
+                    progress.inc_by_name("assets");
                     Ok(())
                 })
             };

@@ -103,9 +103,8 @@ pub enum ExtractSvgType {
 #[educe(Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct BuildConfig {
-    /// Project root directory (usually set via CLI `--root`).
-    #[serde(default = "defaults::build::root")]
-    #[educe(Default = defaults::build::root())]
+    /// Project root directory (internal use only, set during config loading)
+    #[serde(skip)]
     pub root: Option<PathBuf>,
 
     /// URL path prefix for subdirectory deployment (e.g., "blog" → `/blog/...`).

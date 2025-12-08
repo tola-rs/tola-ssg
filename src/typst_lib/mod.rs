@@ -56,7 +56,7 @@ mod library;
 mod package;
 mod world;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use typst::foundations::{Label, Selector, Value};
 use typst::introspection::MetadataElem;
@@ -76,6 +76,9 @@ pub struct CompileResult {
     pub html: Vec<u8>,
     /// Optional metadata value (None if label not found).
     pub metadata: Option<serde_json::Value>,
+    /// Files accessed during compilation (for dependency tracking).
+    /// This includes templates, utilities, and other imported files.
+    pub accessed_files: Vec<PathBuf>,
 }
 
 // =============================================================================
@@ -119,20 +122,6 @@ pub fn warmup_with_root(root: &Path) {
     let _ = &*file::GLOBAL_FILE_CACHE;
 }
 
-/// Compile a Typst file to HTML string.
-///
-/// # Arguments
-///
-/// * `path` - Path to the `.typ` file to compile
-/// * `root` - Project root directory for resolving imports
-#[allow(dead_code)]
-pub fn compile_to_html(path: &Path, root: &Path) -> anyhow::Result<String> {
-    let _guard = acquire_test_lock();
-    let (_world, document) = compile_base(path, root)?;
-
-    typst_html::html(&document).map_err(|e| anyhow::anyhow!("HTML export failed: {e:?}"))
-}
-
 /// Compile a Typst file and extract metadata in a single pass.
 ///
 /// This is the **recommended** entry point for building sites, avoiding
@@ -151,13 +140,20 @@ pub fn compile_meta(
     let _guard = acquire_test_lock();
     let (_world, document) = compile_base(path, root)?;
 
+    // Collect accessed files for dependency tracking
+    let accessed_files = collect_accessed_files(root);
+
     let html = typst_html::html(&document)
         .map_err(|e| anyhow::anyhow!("HTML export failed: {e:?}"))?
         .into_bytes();
 
     let metadata = extract_meta(&document, label_name);
 
-    Ok(CompileResult { html, metadata })
+    Ok(CompileResult {
+        html,
+        metadata,
+        accessed_files,
+    })
 }
 
 // =============================================================================
@@ -201,6 +197,18 @@ fn extract_meta(document: &typst_html::HtmlDocument, label_name: &str) -> Option
         .and_then(|meta| serde_json::to_value(&meta.value).ok())
 }
 
+/// Collect files accessed during the last compilation.
+///
+/// Returns paths of all local files (not packages) that were accessed.
+/// Used for dependency tracking in incremental builds.
+fn collect_accessed_files(root: &Path) -> Vec<std::path::PathBuf> {
+    file::get_accessed_files()
+        .into_iter()
+        .filter(|id| id.package().is_none()) // Skip package files
+        .filter_map(|id| id.vpath().resolve(root)) // Resolve to real path
+        .collect()
+}
+
 /// Query metadata from a Typst file by label name.
 ///
 /// Equivalent to `typst query <file> "<label>" --field value --one`.
@@ -222,9 +230,16 @@ pub fn query_meta(path: &Path, root: &Path, label_name: &str) -> anyhow::Result<
         .ok_or_else(|| anyhow::anyhow!("Element is not a metadata element"))
 }
 
+/// Disable ANSI color output for tests that check string content.
+#[cfg(test)]
+pub fn disable_colors() {
+    colored::control::set_override(false);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::meta::TOLA_META_LABEL;
     use std::fs;
     use tempfile::TempDir;
 
@@ -251,10 +266,11 @@ mod tests {
     fn test_compile_simple_document() {
         let (dir, file_path) = create_test_project();
 
-        let result = compile_to_html(&file_path, dir.path());
-        assert!(result.is_ok(), "Compilation should succeed");
+        let result = compile_meta(&file_path, dir.path(), TOLA_META_LABEL);
+        assert!(result.is_ok(), "Compilation should succeed: {:?}", result);
 
-        let html = result.unwrap();
+        let compiled = result.unwrap();
+        let html = String::from_utf8_lossy(&compiled.html);
         assert!(html.contains("Hello World"), "HTML should contain heading");
     }
 
@@ -263,7 +279,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let fake_path = dir.path().join("nonexistent.typ");
 
-        let result = compile_to_html(&fake_path, dir.path());
+        let result = compile_meta(&fake_path, dir.path(), TOLA_META_LABEL);
         assert!(result.is_err(), "Should fail for nonexistent file");
     }
 
@@ -286,7 +302,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = compile_to_html(&main_file, dir.path());
+        let result = compile_meta(&main_file, dir.path(), TOLA_META_LABEL);
         assert!(result.is_ok(), "Should compile with imports: {:?}", result);
     }
 
@@ -296,20 +312,22 @@ mod tests {
 
         // Multiple compilations should reuse global resources
         for _ in 0..3 {
-            let result = compile_to_html(&file_path, dir.path());
+            let result = compile_meta(&file_path, dir.path(), TOLA_META_LABEL);
             assert!(result.is_ok());
         }
     }
 
     #[test]
     fn test_compile_error_shows_formatted_message() {
+        super::disable_colors();
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("error.typ");
 
         // Write a file with a syntax error
         fs::write(&file_path, "#let x = \n= Hello").unwrap();
 
-        let result = compile_to_html(&file_path, dir.path());
+        let result = compile_meta(&file_path, dir.path(), TOLA_META_LABEL);
         assert!(result.is_err(), "Should fail for syntax error");
 
         let err_msg = result.unwrap_err().to_string();
@@ -328,13 +346,15 @@ mod tests {
 
     #[test]
     fn test_compile_error_shows_line_numbers() {
+        super::disable_colors();
+
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("error.typ");
 
         // Write a file with an undefined variable error
         fs::write(&file_path, "= Title\n\n#undefined_var").unwrap();
 
-        let result = compile_to_html(&file_path, dir.path());
+        let result = compile_meta(&file_path, dir.path(), TOLA_META_LABEL);
         assert!(result.is_err(), "Should fail for undefined variable");
 
         let err_msg = result.unwrap_err().to_string();
@@ -365,7 +385,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = query_meta(&file_path, dir.path(), "tola-meta");
+        let result = query_meta(&file_path, dir.path(), TOLA_META_LABEL);
         assert!(result.is_ok(), "Query should succeed: {:?}", result);
 
         // The result should be a dictionary containing our metadata

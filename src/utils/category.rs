@@ -46,11 +46,6 @@ pub enum FileCategory {
 }
 
 impl FileCategory {
-    /// Returns true if this category requires a full site rebuild
-    pub const fn requires_full_rebuild(self) -> bool {
-        matches!(self, Self::Config | Self::Template | Self::Utils)
-    }
-
     /// Get the short name for this category (used in logs)
     pub const fn name(self) -> &'static str {
         match self {
@@ -174,19 +169,6 @@ mod tests {
     // ========================================================================
     // FileCategory Tests
     // ========================================================================
-
-    #[test]
-    fn test_requires_full_rebuild() {
-        // Categories that require full rebuild
-        assert!(FileCategory::Config.requires_full_rebuild());
-        assert!(FileCategory::Template.requires_full_rebuild());
-        assert!(FileCategory::Utils.requires_full_rebuild());
-
-        // Categories that can be rebuilt incrementally
-        assert!(!FileCategory::Content.requires_full_rebuild());
-        assert!(!FileCategory::Asset.requires_full_rebuild());
-        assert!(!FileCategory::Unknown.requires_full_rebuild());
-    }
 
     #[test]
     fn test_category_name() {

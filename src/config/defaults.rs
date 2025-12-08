@@ -44,10 +44,6 @@ pub mod base {
 pub mod build {
     use std::path::PathBuf;
 
-    pub const fn root() -> Option<PathBuf> {
-        None
-    }
-
     pub fn path_prefix() -> PathBuf {
         "".into()
     }
