@@ -3,6 +3,11 @@
 //! Monitors content, asset, template directories and config file for changes
 //! and triggers rebuilds accordingly.
 //!
+//! # Relationship with `compiler/watch.rs`
+//!
+//! - **This module** (`src/watch.rs`): Event loop, debouncing, rebuild strategy
+//! - **`compiler/watch.rs`**: Actual file compilation via [`process_watched_files`]
+//!
 //! # Architecture
 //!
 //! ```text
@@ -67,7 +72,9 @@ fn is_temp_file(path: &Path) -> bool {
         || name.starts_with('.')
 }
 
-/// Format path as relative without extension: `/proj/content/index.typ` → `content/index`
+/// Format path as relative without extension for log display.
+///
+/// `/proj/content/index.typ` → `content/index`
 fn rel_path(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -78,10 +85,11 @@ fn rel_path(path: &Path, root: &Path) -> String {
 
 /// Log a build failure with error details.
 fn log_build_error(kind: &str, trigger: &str, err: &anyhow::Error) {
-    if trigger.is_empty() {
-        log!("watch"; "{kind} build failed");
-    } else {
-        log!("watch"; "{kind} build failed ({trigger})");
+    match (kind.is_empty(), trigger.is_empty()) {
+        (true, true) => log!("watch"; "build failed"),
+        (true, false) => log!("watch"; "build failed ({trigger})"),
+        (false, true) => log!("watch"; "{kind} build failed"),
+        (false, false) => log!("watch"; "{kind} build failed ({trigger})"),
     }
     log!("watch"; "{err}");
 }
@@ -149,6 +157,26 @@ impl Debouncer {
 // Event Handler
 // =============================================================================
 
+/// Attempt a full site rebuild, logging errors on failure.
+/// Clears the dependency graph before rebuilding to ensure fresh state.
+/// Returns true if successful (for cooldown tracking).
+fn try_full_rebuild(config: &'static SiteConfig, reason: &str) -> bool {
+    use crate::compiler::deps::DEPENDENCY_GRAPH;
+
+    log!("watch"; "{reason}");
+
+    // Clear dependency graph before full rebuild
+    DEPENDENCY_GRAPH.write().clear();
+
+    match crate::build::build_site(config) {
+        Ok(_) => true,
+        Err(e) => {
+            log_build_error("full", "", &e);
+            false
+        }
+    }
+}
+
 /// Process file changes. Returns true if full rebuild succeeded (for cooldown).
 fn handle_changes(paths: &[PathBuf], config: &'static SiteConfig) -> bool {
     if paths.is_empty() {
@@ -158,24 +186,91 @@ fn handle_changes(paths: &[PathBuf], config: &'static SiteConfig) -> bool {
     let root = config.get_root();
     let rel = |p: &Path| rel_path(p, root);
 
-    // Check for full rebuild trigger (template/utils/config)
-    if let Some(trigger) = paths.iter().find(|p| categorize_path(p, config).requires_full_rebuild()) {
-        log!("watch"; "{} changed, rebuilding...", rel(trigger));
-        return match crate::build::build_site(config) {
-            Ok(_) => true,
-            Err(e) => {
-                log_build_error("full", "", &e);
-                false
-            }
-        };
+    // Categorize changed files
+    let mut config_changed = false;
+    // Templates/utils: will query dependency graph, fallback to full rebuild if no deps cached
+    let mut dependency_triggers: Vec<&PathBuf> = Vec::new();
+    // Content/assets: always use incremental build
+    let mut incremental_targets: Vec<PathBuf> = Vec::new();
+
+    for path in paths {
+        match categorize_path(path, config) {
+            FileCategory::Config => config_changed = true,
+            FileCategory::Template | FileCategory::Utils => dependency_triggers.push(path),
+            FileCategory::Content | FileCategory::Asset => incremental_targets.push(path.clone()),
+            FileCategory::Unknown => {}
+        }
+    }
+
+    // Config changes always require full rebuild
+    if config_changed {
+        return try_full_rebuild(config, "config changed, rebuilding...");
+    }
+
+    // Template/utils changes: query dependency graph for precise rebuild
+    // Only falls back to full rebuild when no cached dependencies exist
+    if !dependency_triggers.is_empty() {
+        let affected = collect_affected_content(&dependency_triggers, config);
+
+        if affected.is_empty() {
+            // No known dependents - fall back to full rebuild
+            let trigger = rel(dependency_triggers[0]);
+            return try_full_rebuild(config, &format!("{trigger} changed (no deps cached), rebuilding..."));
+        }
+
+        // Log and add affected files to rebuild list
+        log!("watch"; "{} changed, rebuilding {} affected files",
+             dependency_triggers.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", "),
+             affected.len());
+        incremental_targets.extend(affected);
     }
 
     // Incremental build (content/assets)
-    if let Err(e) = process_watched_files(paths, config) {
-        let files = paths.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ");
-        log_build_error("incremental", &files, &e);
+    // Clean rebuild when triggered by dependency changes (templates/utils)
+    let clean = !dependency_triggers.is_empty();
+    if !incremental_targets.is_empty() {
+        match process_watched_files(&incremental_targets, config, clean) {
+            Ok(count) if count > 1 => {
+                log!("watch"; "rebuilt {} files", count);
+                eprintln!(); // Blank line to separate rebuild sessions
+            }
+            Ok(_) => {
+                eprintln!(); // Blank line after single file rebuild
+            }
+            Err(e) => {
+                // When triggered by dependencies, show the trigger file(s), not all affected files
+                let context = if clean {
+                    dependency_triggers.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ")
+                } else {
+                    incremental_targets.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ")
+                };
+                log_build_error("", &context, &e);
+                eprintln!(); // Blank line after error
+            }
+        }
     }
+
     false
+}
+
+/// Collect all content files affected by template/utils changes.
+fn collect_affected_content(changed_files: &[&PathBuf], config: &SiteConfig) -> Vec<PathBuf> {
+    use crate::compiler::deps::DEPENDENCY_GRAPH;
+
+    let graph = DEPENDENCY_GRAPH.read();
+    let mut affected = rustc_hash::FxHashSet::default();
+
+    for path in changed_files {
+        if let Some(dependents) = graph.get_dependents(path) {
+            for dep in dependents {
+                if categorize_path(dep, config) == FileCategory::Content {
+                    affected.insert(dep.clone());
+                }
+            }
+        }
+    }
+
+    affected.into_iter().collect()
 }
 
 // =============================================================================
@@ -194,8 +289,9 @@ fn log_watch_summary(config: &SiteConfig) {
     let root = config.get_root();
     let build = &config.build;
 
-    // Full rebuild triggers: templates, utils, config file
-    let full_paths: Vec<_> = [
+    // Dependency triggers: templates, utils, config file
+    // Changes here trigger rebuild of dependent content files
+    let dep_paths: Vec<_> = [
         (&build.templates, true),
         (&build.utils, true),
         (&config.config_path, false),
@@ -212,8 +308,8 @@ fn log_watch_summary(config: &SiteConfig) {
         .map(|(p, is_dir)| format_rel(p, root, is_dir))
         .collect();
 
-    if !full_paths.is_empty() {
-        log!("watch"; "full: {}", full_paths.join(", "));
+    if !dep_paths.is_empty() {
+        log!("watch"; "dependent: {}", dep_paths.join(", "));
     }
     if !incr_paths.is_empty() {
         log!("watch"; "incremental: {}", incr_paths.join(", "));

@@ -165,14 +165,45 @@ impl ProgressBars {
         }
     }
 
-    /// Increment progress for the bar at the given index.
+    /// Create progress bars, filtering out categories with zero count.
     ///
-    /// Thread-safe: can be called from multiple threads simultaneously.
+    /// Returns `None` if total count is <= 1 (no progress bar needed for single item).
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Only creates bars for non-empty categories
+    /// if let Some(progress) = ProgressBars::new_filtered(&[
+    ///     ("content", content_files.len()),
+    ///     ("assets", 0),  // will be filtered out
+    /// ]) {
+    ///     progress.inc("content");
+    /// }
+    /// ```
+    pub fn new_filtered(modules: &[(&'static str, usize)]) -> Option<Self> {
+        let filtered: Vec<_> = modules.iter().filter(|(_, count)| *count > 0).copied().collect();
+        let total: usize = filtered.iter().map(|(_, c)| c).sum();
+
+        if total <= 1 {
+            return None;
+        }
+
+        Some(Self::new(&filtered))
+    }
+
+    /// Increment progress for the bar with the given name.
+    ///
+    /// This is a convenience method that looks up the bar by name.
+    /// For high-frequency updates, prefer using `inc(index)` directly.
     #[inline]
-    pub fn inc(&self, index: usize) {
-        if let Some(bar) = self.bars.get(index) {
-            let current = bar.current.fetch_add(1, Ordering::Relaxed) + 1;
-            self.display(bar, current);
+    pub fn inc_by_name(&self, name: &str) {
+        for bar in &self.bars {
+            // Compare with the module name stored in prefix
+            // The prefix format is "[name]" so we check if it contains the name
+            if bar.prefix.to_string().contains(name) {
+                let current = bar.current.fetch_add(1, Ordering::Relaxed) + 1;
+                self.display(bar, current);
+                return;
+            }
         }
     }
 
@@ -236,7 +267,7 @@ impl ProgressBars {
 
 impl Drop for ProgressBars {
     fn drop(&mut self) {
-        BAR_COUNT.store(0, Ordering::SeqCst);
+        self.finish();
     }
 }
 

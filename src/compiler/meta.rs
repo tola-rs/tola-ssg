@@ -3,6 +3,10 @@
 //! `PageMeta` is the **primary metadata structure** for content pages,
 //! containing all path and URL information needed across the build pipeline.
 //!
+//! # Constants
+//!
+//! - [`TOLA_META_LABEL`]: The typst label name for metadata queries (`"tola-meta"`)
+//!
 //! # Architecture
 //!
 //! ```text
@@ -64,6 +68,15 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Label name for typst metadata queries.
+///
+/// Used to extract page metadata from `#metadata(...) <tola-meta>` in typst files.
+pub const TOLA_META_LABEL: &str = "tola-meta";
 
 // ============================================================================
 // Asset Metadata

@@ -448,6 +448,9 @@ fn write_multiline_snippet(writer: &mut SnippetWriter, location: &SpanLocation) 
 }
 
 /// Write trace information with help theme.
+///
+/// Skips Import traces since they just show which content file imported
+/// the failing template, which is usually not helpful context.
 fn write_trace<W: World>(
     output: &mut String,
     world: &W,
@@ -456,13 +459,18 @@ fn write_trace<W: World>(
 ) {
     use typst::diag::Tracepoint;
 
+    // Skip import traces - they just show content importing template
+    if matches!(tracepoint, Tracepoint::Import) {
+        return;
+    }
+
     let message = match tracepoint {
         Tracepoint::Call(Some(name)) => {
             format!("error occurred in this call of function `{name}`")
         }
         Tracepoint::Call(None) => "error occurred in this function call".into(),
         Tracepoint::Show(name) => format!("error occurred in this show rule for `{name}`"),
-        Tracepoint::Import => "error occurred in this import".into(),
+        Tracepoint::Import => unreachable!(), // Handled above
     };
 
     _ = writeln!(
@@ -485,13 +493,9 @@ fn write_trace<W: World>(
 mod tests {
     use super::*;
 
-    fn disable_colors() {
-        colored::control::set_override(false);
-    }
-
     #[test]
     fn test_format_source_snippet_single_line() {
-        disable_colors();
+        super::super::disable_colors();
 
         let location = SpanLocation {
             path: "content/index.typ".to_string(),
@@ -512,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_format_source_snippet_multiline() {
-        disable_colors();
+        super::super::disable_colors();
 
         let location = SpanLocation {
             path: "templates/normal.typ".to_string(),
@@ -539,7 +543,7 @@ mod tests {
 
     #[test]
     fn test_format_source_snippet_line_number_width() {
-        disable_colors();
+        super::super::disable_colors();
 
         let location = SpanLocation {
             path: "test.typ".to_string(),

@@ -1,4 +1,4 @@
-use crate::compiler::meta::{PageMeta, ContentMeta, Pages};
+use crate::compiler::meta::{PageMeta, ContentMeta, Pages, TOLA_META_LABEL};
 use crate::compiler::{collect_all_files, is_up_to_date};
 use crate::utils::minify::{minify, MinifyType};
 use crate::utils::xml::process_html;
@@ -22,8 +22,7 @@ const TYPST_FILTER: FilterRule = FilterRule::new(&[
     "warning: elem",
 ]);
 
-/// Label name for querying typst metadata
-const TOLA_META_LABEL: &str = "tola-meta";
+// TOLA_META_LABEL is imported from crate::compiler::meta
 
 // ============================================================================
 // Public API
@@ -134,11 +133,19 @@ fn write_page(
 }
 
 /// Compile a typst file and extract metadata (lib or CLI mode).
+///
+/// Also records dependencies for incremental rebuild tracking.
 pub fn compile_meta(path: &Path, config: &SiteConfig) -> Result<(Vec<u8>, Option<ContentMeta>)> {
     if config.build.typst.use_lib {
         let root = config.get_root();
         let result = typst_lib::compile_meta(path, root, TOLA_META_LABEL)?;
         let meta = result.metadata.and_then(|json| serde_json::from_value(json).ok());
+
+        // Record dependencies for incremental rebuild
+        super::deps::DEPENDENCY_GRAPH
+            .write()
+            .record_dependencies(path, &result.accessed_files);
+
         Ok((result.html, meta))
     } else {
         let meta = query_meta(path, config);
@@ -187,12 +194,15 @@ fn query_meta_cli(path: &Path, config: &SiteConfig) -> Option<ContentMeta> {
     use crate::utils::exec::SILENT_FILTER;
     let root = config.get_root();
 
+    // Format label with angle brackets for typst query selector
+    let label_selector = format!("<{TOLA_META_LABEL}>");
+
     let output = exec!(
         filter=&SILENT_FILTER;
         &config.build.typst.command;
         "query", "--features", "html", "--format", "json",
         "--font-path", root, "--root", root,
-        path, "<tola-meta>", "--field", "value", "--one"
+        path, &label_selector, "--field", "value", "--one"
     );
 
     output.ok().and_then(|out| {

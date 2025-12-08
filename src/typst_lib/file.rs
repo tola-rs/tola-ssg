@@ -58,13 +58,43 @@ const DEFAULT_TYPST_TOML: &[u8] =
 pub static GLOBAL_FILE_CACHE: LazyLock<RwLock<FxHashMap<FileId, FileSlot>>> =
     LazyLock::new(|| RwLock::new(FxHashMap::default()));
 
-/// Reset access flags for all cached files.
+// =============================================================================
+// Thread-Local Access Tracking
+// =============================================================================
+
+thread_local! {
+    /// Thread-local set of accessed file IDs for the current compilation.
+    /// This avoids race conditions when compiling files in parallel.
+    static ACCESSED_FILES: std::cell::RefCell<rustc_hash::FxHashSet<FileId>> =
+        std::cell::RefCell::new(rustc_hash::FxHashSet::default());
+}
+
+/// Clear the thread-local accessed files set and reset global cache access flags.
 ///
-/// Call at compilation start to enable fingerprint re-checking.
+/// Call at the start of each file compilation.
 pub fn reset_access_flags() {
+    // Reset thread-local tracking
+    ACCESSED_FILES.with(|files| files.borrow_mut().clear());
+
+    // Reset global cache access flags for fingerprint re-checking
     for slot in GLOBAL_FILE_CACHE.write().values_mut() {
         slot.reset_access();
     }
+}
+
+/// Record a file access in the thread-local set.
+pub fn record_file_access(id: FileId) {
+    ACCESSED_FILES.with(|files| {
+        files.borrow_mut().insert(id);
+    });
+}
+
+/// Get all files accessed during the current compilation.
+///
+/// Returns a list of `FileId`s that were accessed since last `reset_access_flags()`.
+/// Thread-safe: each thread has its own tracking.
+pub fn get_accessed_files() -> Vec<FileId> {
+    ACCESSED_FILES.with(|files| files.borrow().iter().copied().collect())
 }
 
 // =============================================================================
@@ -238,6 +268,7 @@ impl FileSlot {
 
     /// Retrieve parsed source for this file.
     pub fn source(&mut self, project_root: &Path) -> FileResult<Source> {
+        record_file_access(self.id);
         self.source.get_or_init(
             || read(self.id, project_root),
             |data, prev| {
@@ -255,6 +286,7 @@ impl FileSlot {
 
     /// Retrieve raw bytes for this file.
     pub fn file(&mut self, project_root: &Path) -> FileResult<Bytes> {
+        record_file_access(self.id);
         self.file
             .get_or_init(|| read(self.id, project_root), |data, _| Ok(Bytes::new(data)))
     }
