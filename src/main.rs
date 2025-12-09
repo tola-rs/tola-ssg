@@ -13,7 +13,7 @@ mod typst_lib;
 mod utils;
 mod watch;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use build::build_site;
 use clap::Parser;
 use cli::{Cli, Commands};
@@ -23,11 +23,10 @@ use generator::{rss::build_rss, sitemap::build_sitemap};
 use gix::ThreadSafeRepository;
 use init::new_site;
 use serve::serve_site;
-use std::path::Path;
 
 fn main() -> Result<()> {
     let cli: &'static Cli = Box::leak(Box::new(Cli::parse()));
-    let config: &'static SiteConfig = Box::leak(Box::new(load_config(cli)?));
+    let config: &'static SiteConfig = Box::leak(Box::new(SiteConfig::load(cli)?));
 
     match &cli.command {
         Commands::Init { .. } => new_site(config),
@@ -41,35 +40,6 @@ fn main() -> Result<()> {
             serve_site(config)
         }
     }
-}
-
-/// Load and validate configuration from CLI arguments
-fn load_config(cli: &'static Cli) -> Result<SiteConfig> {
-    let root = cli.root.as_deref().unwrap_or_else(|| Path::new("./"));
-    let config_path = root.join(&cli.config);
-
-    let mut config = if config_path.exists() {
-        SiteConfig::from_path(&config_path)?
-    } else {
-        SiteConfig::default()
-    };
-    config.update_with_cli(cli);
-
-    // Validate config state based on command
-    let config_exists = config.config_path.exists();
-    match (cli.is_init(), config_exists) {
-        (true, true) => {
-            bail!("Config file already exists. Remove it manually or init in a different path.")
-        }
-        (false, false) => bail!("Config file not found."),
-        _ => {}
-    }
-
-    if !cli.is_init() {
-        config.validate()?;
-    }
-
-    Ok(config)
 }
 
 /// Build site and optionally generate rss/sitemap in parallel.

@@ -90,6 +90,40 @@ fn parse_size_string(s: &str) -> usize {
     multiplier * value
 }
 
+/// Find config file by searching upward from current directory.
+///
+/// Starts from cwd and walks up parent directories until finding `config_name`.
+/// Returns the absolute path to the config file if found.
+///
+/// # Example
+/// ```text
+/// /home/user/site/content/posts/  ← cwd
+/// /home/user/site/tola.toml       ← found!
+/// ```
+pub fn find_config_file(config_name: &Path) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+
+    // First check if config_name is an absolute path or exists in cwd
+    if config_name.is_absolute() && config_name.exists() {
+        return Some(config_name.to_path_buf());
+    }
+
+    // Walk up from cwd looking for config file
+    let mut current = cwd.as_path();
+    loop {
+        let candidate = current.join(config_name);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+
+        // Move to parent directory
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return None, // Reached filesystem root
+        }
+    }
+}
+
 // ============================================================================
 // root configuration
 // ============================================================================
@@ -99,13 +133,17 @@ fn parse_size_string(s: &str) -> usize {
 #[educe(Default)]
 #[serde(deny_unknown_fields)]
 pub struct SiteConfig {
-    /// CLI arguments reference
+    /// CLI arguments reference (internal use only)
     #[serde(skip)]
     pub cli: Option<&'static Cli>,
 
-    /// Absolute path to the config file (set after loading)
+    /// Absolute path to the config file (internal use only)
     #[serde(skip)]
     pub config_path: PathBuf,
+
+    /// Project root directory - parent of config file (internal use only)
+    #[serde(skip)]
+    pub root: PathBuf,
 
     /// Basic site information
     #[serde(default)]
@@ -129,6 +167,83 @@ pub struct SiteConfig {
 }
 
 impl SiteConfig {
+    /// Load configuration from CLI arguments.
+    ///
+    /// For non-Init commands, searches upward from cwd to find config file.
+    /// The project root is determined by the config file's parent directory.
+    pub fn load(cli: &'static Cli) -> Result<Self> {
+        let (config_path, exists) = Self::resolve_config_path(cli)?;
+
+        // Validate config existence
+        match (cli.is_init(), exists) {
+            (true, true) => bail!("Config file already exists. Remove it manually or init in a different path."),
+            (false, false) => bail!("Config file '{}' not found. Run 'tola init' to create a new project.", cli.config.display()),
+            _ => {}
+        }
+
+        // Load or create default config
+        let mut config = if exists {
+            Self::from_path(&config_path)?
+        } else {
+            Self::default()
+        };
+
+        // Set paths and apply CLI options
+        config.config_path = config_path;
+        config.cli = Some(cli);
+        config.finalize(cli);
+
+        // Validate (skip for init)
+        if !cli.is_init() {
+            config.validate()?;
+        }
+
+        Ok(config)
+    }
+
+    /// Resolve config file path based on command.
+    fn resolve_config_path(cli: &Cli) -> Result<(PathBuf, bool)> {
+        let cwd = std::env::current_dir()?;
+
+        match &cli.command {
+            Commands::Init { name: Some(name) } => {
+                let path = cwd.join(name).join(&cli.config);
+                let exists = path.exists();
+                Ok((path, exists))
+            }
+            Commands::Init { name: None } => {
+                let path = cwd.join(&cli.config);
+                let exists = path.exists();
+                Ok((path, exists))
+            }
+            _ => {
+                // Search upward from cwd
+                match find_config_file(&cli.config) {
+                    Some(path) => Ok((path, true)),
+                    None => Ok((cwd.join(&cli.config), false)),
+                }
+            }
+        }
+    }
+
+    /// Finalize configuration after loading.
+    fn finalize(&mut self, cli: &Cli) {
+        // Resolve root path
+        let root = match &cli.command {
+            Commands::Init { name: Some(name) } => {
+                std::env::current_dir().unwrap_or_default().join(name)
+            }
+            Commands::Init { name: None } => {
+                std::env::current_dir().unwrap_or_default()
+            }
+            _ => self.config_path.parent().map(Path::to_path_buf).unwrap_or_default(),
+        };
+
+        self.set_root(&root);
+        self.normalize_paths(&root);
+        self.apply_command_options(cli);
+    }
+
     /// Parse configuration from TOML string
     pub fn from_str(content: &str) -> Result<Self> {
         let config: Self = toml::from_str(content)?;
@@ -136,7 +251,7 @@ impl SiteConfig {
     }
 
     /// Load configuration from file path
-    pub fn from_path(path: &Path) -> Result<Self> {
+    fn from_path(path: &Path) -> Result<Self> {
         let content =
             fs::read_to_string(path).map_err(|err| ConfigError::Io(path.to_path_buf(), err))?;
         Self::from_str(&content)
@@ -144,12 +259,12 @@ impl SiteConfig {
 
     /// Get the root directory path
     pub fn get_root(&self) -> &Path {
-        self.build.root.as_deref().unwrap_or_else(|| Path::new("./"))
+        &self.root
     }
 
     /// Set the root directory path
     pub fn set_root(&mut self, path: &Path) {
-        self.build.root = Some(path.to_path_buf());
+        self.root = path.to_path_buf();
     }
 
     /// Get CLI arguments reference
@@ -179,40 +294,6 @@ impl SiteConfig {
     // ========================================================================
     // cli configuration updates
     // ========================================================================
-
-    /// Update configuration with CLI arguments.
-    ///
-    /// Processing order:
-    /// 1. Store CLI reference
-    /// 2. Resolve root path
-    /// 3. Normalize all paths relative to root
-    /// 4. Apply command-specific options
-    pub fn update_with_cli(&mut self, cli: &'static Cli) {
-        self.cli = Some(cli);
-
-        // 1. Resolve root path (handles Init command specially)
-        let root = self.resolve_root_path(cli);
-        self.set_root(&root);
-
-        // 2. Normalize all paths relative to root
-        self.normalize_paths(&root);
-
-        // 3. Apply command-specific options
-        self.apply_command_options(cli);
-    }
-
-    /// Resolve the root directory path from CLI arguments.
-    fn resolve_root_path(&self, cli: &Cli) -> PathBuf {
-        match &cli.command {
-            // Init with name: root/name
-            Commands::Init { name: Some(name) } => {
-                let base = cli.root.clone().unwrap_or_else(|| self.get_root().to_owned());
-                base.join(name)
-            }
-            // Other commands: use CLI root or config root
-            _ => cli.root.clone().unwrap_or_else(|| self.get_root().to_owned()),
-        }
-    }
 
     /// Apply command-specific configuration options.
     fn apply_command_options(&mut self, cli: &Cli) {
@@ -292,8 +373,8 @@ impl SiteConfig {
         let root = Self::normalize_path(root);
         self.set_root(&root);
 
-        // Normalize config path
-        self.config_path = Self::normalize_path(&root.join(&cli.config));
+        // Normalize config path (already set in main.rs, just canonicalize)
+        self.config_path = Self::normalize_path(&self.config_path);
 
         // Normalize build directories
         self.build.content = Self::normalize_path(&root.join(&self.build.content));
@@ -582,7 +663,8 @@ mod tests {
     #[test]
     fn test_get_root_default() {
         let config = SiteConfig::default();
-        assert_eq!(config.get_root(), Path::new("./"));
+        // Default root is empty PathBuf, set during config loading
+        assert_eq!(config.get_root(), Path::new(""));
     }
 
     #[test]

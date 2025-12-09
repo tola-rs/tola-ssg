@@ -9,23 +9,19 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None, arg_required_else_help = true)]
 pub struct Cli {
-    /// root directory path
-    #[arg(short, long)]
-    pub root: Option<PathBuf>,
-
-    /// Output directory path related to `root`
+    /// Output directory path (relative to project root)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Content directory path related to `root`
+    /// Content directory path (relative to project root)
     #[arg(short, long)]
     pub content: Option<PathBuf>,
 
-    /// Assets directory path related to `root`
+    /// Assets directory path (relative to project root)
     #[arg(short, long)]
     pub assets: Option<PathBuf>,
 
-    /// Config file path related to `root`
+    /// Config file name (default: tola.toml)
     #[arg(short = 'C', long, default_value = "tola.toml")]
     pub config: PathBuf,
 
