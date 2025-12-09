@@ -61,64 +61,64 @@ jobs:
 
           # Generate categorized release notes from commits since last tag
           prev_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          
+
           if [ -n "$prev_tag" ]; then
             echo "## What's Changed" > notes.md
             echo "" >> notes.md
-            
+
             # Collect commits
             commits=$(git log --pretty=format:"%s" "$prev_tag"..HEAD)
-            
+
             # Features (feat:)
             features=$(echo "$commits" | grep -iE '^feat(\(.+\))?:' | sed 's/^feat\([^)]*\)\?: //' || true)
             if [ -n "$features" ]; then
-              echo "### ✨ Features" >> notes.md
+              echo "### ■ Features" >> notes.md
               echo "$features" | while read -r line; do
                 [ -n "$line" ] && echo "- $line" >> notes.md
               done
               echo "" >> notes.md
             fi
-            
+
             # Fixes (fix:)
             fixes=$(echo "$commits" | grep -iE '^fix(\(.+\))?:' | sed 's/^fix\([^)]*\)\?: //' || true)
             if [ -n "$fixes" ]; then
-              echo "### 🐛 Bug Fixes" >> notes.md
+              echo "### ■ Bug Fixes" >> notes.md
               echo "$fixes" | while read -r line; do
                 [ -n "$line" ] && echo "- $line" >> notes.md
               done
               echo "" >> notes.md
             fi
-            
+
             # Refactor (refactor:)
             refactors=$(echo "$commits" | grep -iE '^refactor(\(.+\))?:' | sed 's/^refactor\([^)]*\)\?: //' || true)
             if [ -n "$refactors" ]; then
-              echo "### 🔧 Refactor" >> notes.md
+              echo "### ■ Refactor" >> notes.md
               echo "$refactors" | while read -r line; do
                 [ -n "$line" ] && echo "- $line" >> notes.md
               done
               echo "" >> notes.md
             fi
-            
+
             # Performance (perf:)
             perfs=$(echo "$commits" | grep -iE '^perf(\(.+\))?:' | sed 's/^perf\([^)]*\)\?: //' || true)
             if [ -n "$perfs" ]; then
-              echo "### ⚡ Performance" >> notes.md
+              echo "### ■ Performance" >> notes.md
               echo "$perfs" | while read -r line; do
                 [ -n "$line" ] && echo "- $line" >> notes.md
               done
               echo "" >> notes.md
             fi
-            
-            # Other commits (everything else goes here)
-            others=$(echo "$commits" | grep -viE '^(feat|fix|refactor|perf)(\(.+\))?:' || true)
+
+            # Other commits (exclude release, ci, chore, docs, build, style, test)
+            others=$(echo "$commits" | grep -viE '^(feat|fix|refactor|perf|release|ci|chore|docs|build|style|test)(\(.+\))?:' | grep -viE '^release ' || true)
             if [ -n "$others" ]; then
-              echo "### 📦 Other Changes" >> notes.md
+              echo "### ■ Other Changes" >> notes.md
               echo "$others" | while read -r line; do
                 [ -n "$line" ] && echo "- $line" >> notes.md
               done
               echo "" >> notes.md
             fi
-            
+
             echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev_tag...${{ github.ref_name }}" >> notes.md
           else
             # Fallback to commit message if no previous tag
