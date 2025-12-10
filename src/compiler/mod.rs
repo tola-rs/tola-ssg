@@ -33,9 +33,15 @@ use walkdir::WalkDir;
 
 pub use assets::process_asset;
 pub use assets::process_rel_asset;
-pub use pages::collect_pages;
-pub use pages::compile_pages;
+pub use pages::collect_metadata;
+pub use pages::compile_pages_with_data;
 pub use watch::process_watched_files;
+
+// Legacy single-phase API (kept for potential future use)
+#[allow(unused_imports)]
+pub use pages::collect_pages;
+#[allow(unused_imports)]
+pub use pages::compile_pages;
 
 // ============================================================================
 // Shared utilities

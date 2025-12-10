@@ -175,6 +175,9 @@ pub struct ContentMeta {
     pub author: Option<String>,
     #[serde(default)]
     pub draft: bool,
+    /// Tags for categorizing the page.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// Primary metadata structure for a content page.

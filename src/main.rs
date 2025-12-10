@@ -4,6 +4,7 @@ mod build;
 mod cli;
 mod compiler;
 mod config;
+mod data;
 mod deploy;
 mod generator;
 mod init;

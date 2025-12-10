@@ -87,9 +87,8 @@ pub fn serve_site(config: &'static SiteConfig) -> Result<()> {
     }
 
     // Handle requests in main thread (blocks until Ctrl+C)
-    let serve_root = &config.build.output;
     for request in server.incoming_requests() {
-        if let Err(e) = handle_request(request, serve_root) {
+        if let Err(e) = handle_request(request, config) {
             log!("serve"; "request error: {e}");
         }
     }
@@ -108,7 +107,10 @@ pub fn serve_site(config: &'static SiteConfig) -> Result<()> {
 /// 2. Directory with index.html → serve index.html
 /// 3. Directory without index.html → generate listing
 /// 4. Nothing found → 404
-fn handle_request(request: Request, serve_root: &Path) -> Result<()> {
+fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
+    let serve_root = &config.build.output;
+    let data_dir_name = config.build.data.to_string_lossy();
+
     // Decode URL-encoded characters (e.g., %20 → space)
     let url_path = urlencoding::decode(request.url())
         .map(std::borrow::Cow::into_owned)
@@ -132,7 +134,7 @@ fn handle_request(request: Request, serve_root: &Path) -> Result<()> {
             return serve_file(request, &index_path);
         }
 
-        if let Ok(listing) = generate_directory_listing(&local_path, request_path) {
+        if let Ok(listing) = generate_directory_listing(&local_path, request_path, &data_dir_name) {
             return serve_html(request, listing);
         }
     }
@@ -228,18 +230,19 @@ fn guess_content_type(path: &Path) -> &'static str {
 /// Features:
 /// - Only shows directories and `.html` files
 /// - Filters out hidden files (starting with '.')
+/// - Filters out internal data directory
 /// - Shows folder/file icons
 /// - Provides parent directory navigation
 /// - Falls back to welcome page if directory is empty
-fn generate_directory_listing(dir_path: &PathBuf, request_path: &str) -> std::io::Result<String> {
+fn generate_directory_listing(dir_path: &PathBuf, request_path: &str, data_dir_name: &str) -> std::io::Result<String> {
     let entries: Vec<_> = fs::read_dir(dir_path)?
         .filter_map(Result::ok)
         .filter(|entry| {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
 
-            // Filter out hidden files (starting with '.')
-            let is_hidden = name_str.starts_with('.');
+            // Filter out hidden files (starting with '.') and internal data directory
+            let is_hidden = name_str.starts_with('.') || name_str == data_dir_name;
 
             // Allow directories
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);

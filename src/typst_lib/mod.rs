@@ -201,11 +201,23 @@ fn extract_meta(document: &typst_html::HtmlDocument, label_name: &str) -> Option
 ///
 /// Returns paths of all local files (not packages) that were accessed.
 /// Used for dependency tracking in incremental builds.
+/// Includes virtual data files (`/_data/*.json`) for proper dependency tracking.
 fn collect_accessed_files(root: &Path) -> Vec<std::path::PathBuf> {
     file::get_accessed_files()
         .into_iter()
         .filter(|id| id.package().is_none()) // Skip package files
-        .filter_map(|id| id.vpath().resolve(root)) // Resolve to real path
+        .filter_map(|id| {
+            // Try to resolve to real path first
+            id.vpath().resolve(root).or_else(|| {
+                // For virtual files (like /_data/*.json), use the vpath directly
+                let vpath = id.vpath().as_rooted_path();
+                if crate::data::is_virtual_data_path(vpath) {
+                    Some(vpath.to_path_buf())
+                } else {
+                    None
+                }
+            })
+        })
         .collect()
 }
 

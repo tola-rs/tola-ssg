@@ -68,6 +68,10 @@ pub mod build {
         "utils".into()
     }
 
+    pub fn data() -> PathBuf {
+        "_data".into()
+    }
+
     pub mod rss {
         use std::path::PathBuf;
 

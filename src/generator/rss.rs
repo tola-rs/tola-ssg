@@ -180,6 +180,7 @@ mod tests {
                 update: None,
                 author: author.map(String::from),
                 draft: false,
+                tags: vec![],
             }),
             compiled_html: None,
         }

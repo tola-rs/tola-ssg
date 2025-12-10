@@ -7,23 +7,27 @@
 //! ```text
 //! build_site()
 //!     │
-//!     ├── collect_pages()  ──► Pages (with metadata + optional pre-compiled HTML)
+//!     ├── collect_metadata()
 //!     │       │
-//!     │       ├── Lib mode: compile + extract metadata (HTML cached in PageMeta)
-//!     │       └── CLI mode: query metadata only (no HTML yet)
+//!     │       └── Compile all pages, extract metadata → GLOBAL_SITE_DATA
+//!     │           (HTML discarded - incomplete due to empty virtual JSON)
 //!     │
-//!     ├── compile_pages()  ──► Write HTML files
+//!     ├── compile_pages_with_data()
 //!     │       │
-//!     │       ├── Lib mode: use cached HTML from PageMeta
-//!     │       └── CLI mode: compile each page
+//!     │       └── Compile all pages again → Write HTML files
+//!     │           (Virtual JSON now returns complete data)
 //!     │
 //!     └── process_assets() ──► Copy/process asset files
 //! ```
 
 use crate::{
-    compiler::{collect_all_files, collect_pages, compile_pages, process_asset, process_rel_asset},
+    compiler::{
+        collect_all_files, collect_metadata, compile_pages_with_data,
+        process_asset, process_rel_asset,
+    },
     compiler::meta::Pages,
     config::SiteConfig,
+    data::virtual_fs,
     log,
     logger::ProgressBars,
     typst_lib,
@@ -44,6 +48,10 @@ use std::{
 
 /// Build the entire site, processing content and assets in parallel.
 ///
+/// Uses two-phase compilation to support virtual data files:
+/// 1. Phase 1: Collect metadata from all pages (virtual JSON returns empty)
+/// 2. Phase 2: Compile pages with complete data (virtual JSON returns full data)
+///
 /// Returns the collected page metadata for rss/sitemap generation.
 /// If `config.build.clean` is true, clears the entire output directory first.
 pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, Pages)> {
@@ -55,46 +63,59 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
         typst_lib::warmup_with_root(config.get_root());
     }
 
-    // Initialize output directory with git repo
-    let repo = init_output_repo(output, config.build.clean)?;
+    // Ensure output directory has git repo (for deploy)
+    let repo = ensure_output_repo(output, config.build.clean)?;
 
     // Calculate deps mtime once for all content files
     let deps_mtime = get_deps_mtime(config);
 
-    // Step 1: Collect pages (metadata + optional pre-compiled HTML)
-    log!("collect"; "scanning content files...");
-    let pages = collect_pages(config)?;
-    log!("pages"; "found {} pages", pages.items.len());
-
-    // Collect asset files
+    // Collect asset files early for progress bar
     let asset_files = collect_all_files(assets);
-
-    // Collect non-typ content files (images, etc. in content dir)
     let content_asset_files: Vec<_> = collect_all_files(&config.build.content)
         .into_iter()
         .filter(|p| p.extension().is_none_or(|ext| ext != "typ"))
         .collect();
 
-    // Create progress bars
+    // ========================================================================
+    // Collect metadata from all pages
+    // ========================================================================
+    // Virtual JSON files return empty data at this stage.
+    // Metadata extraction is static and unaffected.
+    // HTML output is discarded (incomplete due to empty JSON).
+    log!("metadata"; "collecting...");
+    let page_paths = collect_metadata(config, || {})?;
+    log!("metadata"; "found {} pages", page_paths.len());
+
+    // Create progress bars for Phase 2
     let progress = ProgressBars::new(&[
-        ("content", pages.items.len()),
+        ("content", page_paths.len()),
         ("assets", asset_files.len() + content_asset_files.len()),
     ]);
 
     let has_error = AtomicBool::new(false);
     let clean = config.build.clean;
 
-    // Step 2: Compile pages and process assets in parallel
+    // ========================================================================
+    // Compile pages with complete data + Process assets
+    // ========================================================================
+    // Virtual JSON files now return complete data from GLOBAL_SITE_DATA.
+    // HTML output is correct and written to disk.
+    log!("compile"; "building pages...");
+
     let (compile_result, assets_result) = rayon::join(
         || {
-            // Compile all pages
-            if let Err(e) = compile_pages(&pages, config, clean, deps_mtime, || progress.inc_by_name("content")) {
-                if !has_error.swap(true, Ordering::Relaxed) {
-                    log!("error"; "compile failed: {:#}", e);
+            // Compile all pages with complete data
+            match compile_pages_with_data(&page_paths, config, clean, deps_mtime, || {
+                progress.inc_by_name("content")
+            }) {
+                Ok(pages) => Ok(pages),
+                Err(e) => {
+                    if !has_error.swap(true, Ordering::Relaxed) {
+                        log!("error"; "compile failed: {:#}", e);
+                    }
+                    Err(anyhow!("Build failed"))
                 }
-                return Err(anyhow!("Build failed"));
             }
-            Ok(())
         },
         || {
             // Process asset files
@@ -137,18 +158,24 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
 
     progress.finish();
 
-    compile_result?;
+    let pages = compile_result?;
     let (assets_res, content_assets_res) = assets_result;
     assets_res?;
     content_assets_res?;
+
+    // Write virtual data files to disk for external tools
+    virtual_fs::write_to_disk(&config.build.output.join(&config.build.data))?;
 
     log_build_result(output)?;
 
     Ok((repo, pages))
 }
 
-/// Initialize output directory with git repository
-fn init_output_repo(output: &Path, clean: bool) -> Result<ThreadSafeRepository> {
+/// Ensure output directory exists with a git repository.
+///
+/// Creates the directory and repo if missing, opens existing repo otherwise.
+/// When `clean` is true, removes all existing content first.
+fn ensure_output_repo(output: &Path, clean: bool) -> Result<ThreadSafeRepository> {
     match (output.exists(), clean) {
         (true, true) => {
             fs::remove_dir_all(output).with_context(|| {

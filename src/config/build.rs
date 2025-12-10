@@ -133,6 +133,12 @@ pub struct BuildConfig {
     #[educe(Default = defaults::build::utils())]
     pub utils: PathBuf,
 
+    /// Virtual data files directory (relative to output).
+    /// Contains generated JSON files like `pages.json` and `tags.json`.
+    #[serde(default = "defaults::build::data")]
+    #[educe(Default = defaults::build::data())]
+    pub data: PathBuf,
+
     /// Minify HTML output (removes whitespace).
     #[serde(default = "defaults::r#true")]
     #[educe(Default = true)]

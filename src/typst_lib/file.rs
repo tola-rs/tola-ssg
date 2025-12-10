@@ -34,6 +34,7 @@ use typst::syntax::{FileId, Source, VirtualPath};
 use typst_kit::download::{DownloadState, Progress};
 
 use super::package::GLOBAL_PACKAGE_STORAGE;
+use crate::data::{is_virtual_data_path, read_virtual_data};
 
 // =============================================================================
 // Constants
@@ -162,6 +163,7 @@ impl<T: Clone> SlotCell<T> {
 /// Handles special cases:
 /// - `EMPTY_ID`: Returns empty bytes
 /// - `STDIN_ID`: Reads from stdin
+/// - Virtual data files (`/_data/*.json`): Returns dynamically generated JSON
 /// - Package files: Downloads package if needed
 /// - Missing `typst.toml`: Generates default
 pub fn read(id: FileId, project_root: &Path) -> FileResult<Vec<u8>> {
@@ -171,6 +173,16 @@ pub fn read(id: FileId, project_root: &Path) -> FileResult<Vec<u8>> {
     }
     if id == *STDIN_ID {
         return read_stdin();
+    }
+
+    // Handle virtual data files (/_data/*.json)
+    // These are generated dynamically from GLOBAL_SITE_DATA
+    // Record access for dependency tracking (so we know which pages use virtual data)
+    let vpath = id.vpath().as_rooted_path();
+    if is_virtual_data_path(vpath) {
+        record_file_access(id);
+        return read_virtual_data(vpath)
+            .ok_or_else(|| FileError::NotFound(vpath.to_path_buf()));
     }
 
     // Resolve path with typst.toml fallback

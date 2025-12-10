@@ -228,15 +228,21 @@ fn handle_changes(paths: &[PathBuf], config: &'static SiteConfig) -> bool {
     // Incremental build (content/assets)
     // Clean rebuild when triggered by dependency changes (templates/utils)
     let clean = !dependency_triggers.is_empty();
+    let mut processed_content: FxHashSet<PathBuf> = FxHashSet::default();
+
     if !incremental_targets.is_empty() {
+        // Track which content files we're about to process
+        for path in &incremental_targets {
+            if path.extension().is_some_and(|e| e == "typ") {
+                processed_content.insert(path.clone());
+            }
+        }
+
         match process_watched_files(&incremental_targets, config, clean) {
             Ok(count) if count > 1 => {
                 log!("watch"; "rebuilt {} files", count);
-                eprintln!(); // Blank line to separate rebuild sessions
             }
-            Ok(_) => {
-                eprintln!(); // Blank line after single file rebuild
-            }
+            Ok(_) => {}
             Err(e) => {
                 // When triggered by dependencies, show the trigger file(s), not all affected files
                 let context = if clean {
@@ -246,10 +252,29 @@ fn handle_changes(paths: &[PathBuf], config: &'static SiteConfig) -> bool {
                 };
                 log_build_error("", &context, &e);
                 eprintln!(); // Blank line after error
+                return false;
             }
         }
     }
 
+    // After content changes, rebuild pages that depend on virtual data files
+    // (e.g., pages using `json("/_data/tags.json")` for tag listings)
+    if !processed_content.is_empty() {
+        let virtual_dependents: Vec<PathBuf> = collect_virtual_data_dependents()
+            .into_iter()
+            .filter(|p| !processed_content.contains(p))
+            .collect();
+
+        if !virtual_dependents.is_empty() {
+            log!("watch"; "updating {} pages using site data", virtual_dependents.len());
+            // Use clean=false since templates haven't changed, only data
+            if let Err(e) = process_watched_files(&virtual_dependents, config, false) {
+                log_build_error("", "virtual data dependents", &e);
+            }
+        }
+    }
+
+    eprintln!(); // Blank line to separate rebuild sessions
     false
 }
 
@@ -265,6 +290,28 @@ fn collect_affected_content(changed_files: &[&PathBuf]) -> Vec<PathBuf> {
 
     for path in changed_files {
         if let Some(dependents) = graph.get_dependents(path) {
+            affected.extend(dependents.iter().cloned());
+        }
+    }
+
+    affected.into_iter().collect()
+}
+
+/// Collect all content files that depend on virtual data files.
+///
+/// Virtual data files (`/_data/tags.json`, `/_data/pages.json`) are updated
+/// when any content file changes. Pages that read these files need to be
+/// rebuilt to reflect the updated data.
+fn collect_virtual_data_dependents() -> Vec<PathBuf> {
+    use crate::compiler::deps::DEPENDENCY_GRAPH;
+    use crate::data::virtual_fs;
+
+    let graph = DEPENDENCY_GRAPH.read();
+    let mut affected = FxHashSet::default();
+
+    // Check for dependents of both virtual data files
+    for virtual_path in virtual_fs::virtual_data_paths() {
+        if let Some(dependents) = graph.get_dependents(&virtual_path) {
             affected.extend(dependents.iter().cloned());
         }
     }

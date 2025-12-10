@@ -1,5 +1,6 @@
 use crate::compiler::meta::{PageMeta, ContentMeta, Pages, TOLA_META_LABEL};
 use crate::compiler::{collect_all_files, is_up_to_date};
+use crate::data::{PageData, GLOBAL_SITE_DATA};
 use crate::utils::minify::{minify, MinifyType};
 use crate::utils::xml::process_html;
 use crate::utils::exec::FilterRule;
@@ -37,6 +38,10 @@ const TYPST_FILTER: FilterRule = FilterRule::new(&[
 ///
 /// Skips pages that are up-to-date (unless `clean` is true).
 /// Calls `on_progress` after each page is processed.
+///
+/// Note: This is the legacy single-phase compilation. For two-phase compilation
+/// with virtual data support, use `collect_metadata` + `compile_pages_with_data`.
+#[allow(dead_code)]
 pub fn compile_pages(
     pages: &Pages,
     config: &'static SiteConfig,
@@ -58,6 +63,7 @@ pub fn compile_pages(
 /// Process a single .typ file: compile and write HTML.
 ///
 /// Used by watch mode to compile individual files on change.
+/// Also updates `GLOBAL_SITE_DATA` with the page's metadata for virtual JSON files.
 /// Returns `Some(PageMeta)` if compiled, `None` if skipped (up-to-date or draft).
 pub fn process_page(
     path: &Path,
@@ -78,11 +84,16 @@ pub fn process_page(
 
     // Skip drafts
     if is_draft(content_meta.as_ref()) {
+        // Remove from global data if it was previously published
+        // (This handles the case where a page is marked as draft after being published)
         return Ok(None);
     }
 
     page.content_meta = content_meta;
     page.compiled_html = Some(html_content);
+
+    // Update global site data for virtual JSON files
+    GLOBAL_SITE_DATA.insert_page(page_meta_to_data(&page));
 
     // Write the page
     write_page(&page, config, true, None, log_file)?;
@@ -217,6 +228,138 @@ fn is_draft(meta: Option<&ContentMeta>) -> bool {
     meta.is_some_and(|c| c.draft)
 }
 
+// ============================================================================
+// Two-Phase Compilation Support
+// ============================================================================
+
+/// Convert a `PageMeta` to `PageData` for the global site data store.
+fn page_meta_to_data(page: &PageMeta) -> PageData {
+    let content = page.content_meta.as_ref();
+    PageData {
+        url: page.paths.url_path.clone(),
+        title: content
+            .and_then(|c| c.title.clone())
+            .unwrap_or_else(|| page.paths.relative.clone()),
+        summary: content.and_then(|c| c.summary.clone()),
+        date: content.and_then(|c| c.date.clone()),
+        update: content.and_then(|c| c.update.clone()),
+        author: content.and_then(|c| c.author.clone()),
+        tags: content
+            .map(|c| c.tags.clone())
+            .unwrap_or_default(),
+        draft: content.is_some_and(|c| c.draft),
+    }
+}
+
+/// Phase 1: Collect metadata from all pages.
+///
+/// Compiles all pages to extract metadata, populating `GLOBAL_SITE_DATA`.
+/// HTML output is discarded since it may be incomplete (virtual JSON returns empty).
+///
+/// After this phase, `GLOBAL_SITE_DATA` contains complete metadata from all pages.
+pub fn collect_metadata(
+    config: &'static SiteConfig,
+    on_progress: impl Fn() + Sync,
+) -> Result<Vec<std::path::PathBuf>> {
+    let content_files = collect_all_files(&config.build.content);
+
+    let typ_files: Vec<_> = content_files
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|ext| ext == "typ"))
+        .collect();
+
+    // Clear global data store for fresh collection
+    GLOBAL_SITE_DATA.clear();
+
+    let results: Vec<Result<Option<(std::path::PathBuf, PageMeta)>>> = typ_files
+        .par_iter()
+        .map(|path| {
+            let page = PageMeta::from_paths(path.clone(), config)?;
+
+            // Compile to extract metadata (HTML discarded)
+            let content_meta = if config.build.typst.use_lib {
+                let root = config.get_root();
+                let result = typst_lib::compile_meta(path, root, TOLA_META_LABEL)?;
+
+                // Record dependencies for incremental rebuild
+                super::deps::DEPENDENCY_GRAPH
+                    .write()
+                    .record_dependencies(path, &result.accessed_files);
+
+                result.metadata.and_then(|json| serde_json::from_value(json).ok())
+            } else {
+                query_meta(path, config)
+            };
+
+            // Skip drafts
+            if is_draft(content_meta.as_ref()) {
+                on_progress();
+                return Ok(None);
+            }
+
+            let mut page = page;
+            page.content_meta = content_meta;
+
+            // Store in global data
+            GLOBAL_SITE_DATA.insert_page(page_meta_to_data(&page));
+
+            on_progress();
+            Ok(Some((path.clone(), page)))
+        })
+        .collect();
+
+    // Collect paths of non-draft pages
+    let mut paths = Vec::with_capacity(results.len());
+    for result in results {
+        match result {
+            Ok(Some((path, _))) => paths.push(path),
+            Ok(None) => {} // Draft, skip
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(paths)
+}
+
+/// Phase 2: Compile pages with complete global data.
+///
+/// Compiles all pages again, this time with `GLOBAL_SITE_DATA` fully populated.
+/// Virtual JSON files now return complete data, so HTML output is correct.
+pub fn compile_pages_with_data(
+    paths: &[std::path::PathBuf],
+    config: &'static SiteConfig,
+    clean: bool,
+    deps_mtime: Option<SystemTime>,
+    on_progress: impl Fn() + Sync,
+) -> Result<Pages> {
+    let results: Vec<Result<PageMeta>> = paths
+        .par_iter()
+        .map(|path| {
+            let mut page = PageMeta::from_paths(path.clone(), config)?;
+
+            // Compile with complete data
+            let (html, content_meta) = compile_meta(path, config)?;
+
+            page.content_meta = content_meta;
+            page.compiled_html = Some(html);
+
+            // Write the page
+            write_page(&page, config, clean, deps_mtime, false)?;
+
+            on_progress();
+            Ok(page)
+        })
+        .collect();
+
+    // Collect successful pages
+    let mut items = Vec::with_capacity(results.len());
+    for result in results {
+        items.push(result?);
+    }
+
+    Ok(Pages { items })
+}
+
 /// Collect all pages from content directory with metadata.
 ///
 /// This function scans the content directory for `.typ` files and collects
@@ -231,6 +374,10 @@ fn is_draft(meta: Option<&ContentMeta>) -> bool {
 ///
 /// Draft pages (with `draft: true` in metadata) are automatically filtered out.
 /// Pages without `<tola-meta>` are still built (`content_meta` = None).
+///
+/// Note: This is the legacy single-phase collection. For two-phase compilation
+/// with virtual data support, use `collect_metadata` + `compile_pages_with_data`.
+#[allow(dead_code)]
 pub fn collect_pages(config: &'static SiteConfig) -> Result<Pages> {
     let content_files = collect_all_files(&config.build.content);
 

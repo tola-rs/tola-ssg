@@ -19,6 +19,7 @@
 use crate::compiler::assets::{process_asset, rebuild_tailwind};
 use crate::compiler::pages::process_page;
 use crate::config::SiteConfig;
+use crate::data::virtual_fs;
 use crate::logger::ProgressBars;
 use crate::utils::category::{categorize_path, normalize_path, FileCategory};
 use anyhow::{bail, Result};
@@ -53,6 +54,12 @@ pub fn process_watched_files(
 
     // Process content files
     let content_errors = compile_content(&content_files, config, clean, progress.as_ref())?;
+
+    // Update virtual data files on disk after content changes
+    // This ensures the latest tags/pages data is available for hot-reload
+    if !content_files.is_empty() {
+        let _ = virtual_fs::write_to_disk(&config.build.output.join(&config.build.data));
+    }
 
     // Process asset files
     process_assets(&asset_files, config, progress.as_ref())?;
