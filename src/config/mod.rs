@@ -317,7 +317,7 @@ impl SiteConfig {
     /// `is_serve`: If true, rss/sitemap default to disabled for faster local preview.
     fn apply_build_args(&mut self, args: &BuildArgs, is_serve: bool) {
         Self::update_option(&mut self.build.minify, args.minify.as_ref());
-        Self::update_option(&mut self.build.tailwind.enable, args.tailwind.as_ref());
+        Self::update_option(&mut self.build.css.tailwind.enable, args.tailwind.as_ref());
         self.build.clean = args.clean;
 
         if is_serve {
@@ -394,8 +394,8 @@ impl SiteConfig {
 
     /// Normalize optional paths (tailwind input, deploy token).
     fn normalize_optional_paths(&mut self, root: &Path) {
-        if let Some(input) = self.build.tailwind.input.take() {
-            self.build.tailwind.input = Some(Self::normalize_path(&root.join(input)));
+        if let Some(input) = self.build.css.tailwind.input.take() {
+            self.build.css.tailwind.input = Some(Self::normalize_path(&root.join(input)));
         }
 
         if let Some(token_path) = self.deploy.github.token_path.take() {
@@ -460,19 +460,19 @@ impl SiteConfig {
     }
 
     fn validate_tailwind(&self) -> Result<()> {
-        if !self.build.tailwind.enable {
+        if !self.build.css.tailwind.enable {
             return Ok(());
         }
 
-        Self::check_command_installed("[build.tailwind.command]", &self.build.tailwind.command)?;
+        Self::check_command_installed("[build.css.tailwind.command]", &self.build.css.tailwind.command)?;
 
-        match &self.build.tailwind.input {
-            None => bail!("[build.tailwind.enable] = true requires [build.tailwind.input] to be set"),
+        match &self.build.css.tailwind.input {
+            None => bail!("[build.css.tailwind.enable] = true requires [build.css.tailwind.input] to be set"),
             Some(path) if !path.exists() => {
-                bail!(ConfigError::Validation("[build.tailwind.input] not found".into()))
+                bail!(ConfigError::Validation("[build.css.tailwind.input] not found".into()))
             }
             Some(path) if !path.is_file() => {
-                bail!(ConfigError::Validation("[build.tailwind.input] is not a file".into()))
+                bail!(ConfigError::Validation("[build.css.tailwind.input] is not a file".into()))
             }
             _ => Ok(()),
         }
@@ -819,7 +819,7 @@ mod tests {
             inline_max_size = "50KB"
             dpi = 144.0
 
-            [build.tailwind]
+            [build.css.tailwind]
             enable = false
 
             [serve]

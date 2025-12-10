@@ -165,9 +165,9 @@ pub struct BuildConfig {
     #[serde(default)]
     pub typst: TypstConfig,
 
-    /// Tailwind CSS integration.
+    /// CSS processing configuration (auto-enhance, tailwind).
     #[serde(default)]
-    pub tailwind: TailwindConfig,
+    pub css: CssConfig,
 
     /// Custom `<head>` elements.
     #[serde(default)]
@@ -287,7 +287,35 @@ pub struct TypstSvgConfig {
     pub dpi: f32,
 }
 
-/// `[build.tailwind]` section
+/// `[build.css]` section - CSS processing configuration.
+///
+/// # Example
+/// ```toml
+/// [build.css]
+/// auto_enhance = true  # Generate CSS for theme/SVG enhancement
+///
+/// [build.css.tailwind]
+/// enable = true
+/// input = "assets/styles.css"
+/// ```
+#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
+#[educe(Default)]
+#[serde(deny_unknown_fields)]
+pub struct CssConfig {
+    /// Enable auto-generated CSS enhancement.
+    /// When enabled, generates a hidden CSS file (`.enhance-{hash}.css`) in the output directory
+    /// containing CSS rules for SVG theme adaptation, dark mode support, etc.
+    /// This file is automatically injected into the `<head>` of all pages.
+    #[serde(default = "defaults::r#true")]
+    #[educe(Default = true)]
+    pub auto_enhance: bool,
+
+    /// Tailwind CSS integration.
+    #[serde(default)]
+    pub tailwind: TailwindConfig,
+}
+
+/// `[build.css.tailwind]` section
 #[derive(Debug, Clone, Educe, Serialize, Deserialize)]
 #[educe(Default)]
 #[serde(deny_unknown_fields)]
@@ -298,13 +326,13 @@ pub struct TailwindConfig {
     pub enable: bool,
 
     /// Input CSS file path
-    #[serde(default = "defaults::build::tailwind::input")]
-    #[educe(Default = defaults::build::tailwind::input())]
+    #[serde(default = "defaults::build::css::tailwind::input")]
+    #[educe(Default = defaults::build::css::tailwind::input())]
     pub input: Option<PathBuf>,
 
     /// Tailwind command and arguments
-    #[serde(default = "defaults::build::tailwind::command")]
-    #[educe(Default = defaults::build::tailwind::command())]
+    #[serde(default = "defaults::build::css::tailwind::command")]
+    #[educe(Default = defaults::build::css::tailwind::command())]
     pub command: Vec<String>,
 }
 
@@ -549,20 +577,20 @@ mod tests {
             title = "Test"
             description = "Test blog"
 
-            [build.tailwind]
+            [build.css.tailwind]
             enable = true
             input = "assets/styles/main.css"
             command = ["tailwindcss-v4"]
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
-        assert!(config.build.tailwind.enable);
+        assert!(config.build.css.tailwind.enable);
         assert_eq!(
-            config.build.tailwind.input,
+            config.build.css.tailwind.input,
             Some(PathBuf::from("assets/styles/main.css"))
         );
         assert_eq!(
-            config.build.tailwind.command,
+            config.build.css.tailwind.command,
             vec!["tailwindcss-v4".to_string()]
         );
     }
@@ -913,10 +941,10 @@ mod tests {
             description = "Test"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
-        assert!(!config.build.tailwind.enable);
-        assert!(config.build.tailwind.input.is_none());
+        assert!(!config.build.css.tailwind.enable);
+        assert!(config.build.css.tailwind.input.is_none());
         assert_eq!(
-            config.build.tailwind.command,
+            config.build.css.tailwind.command,
             vec!["tailwindcss".to_string()]
         );
     }
@@ -927,7 +955,7 @@ mod tests {
             [base]
             title = "Test"
             description = "Test"
-            [build.tailwind]
+            [build.css.tailwind]
             unknown = "field"
         "#;
         let result: Result<SiteConfig, _> = toml::from_str(config);
@@ -1004,11 +1032,11 @@ mod tests {
             [base]
             title = "Test"
             description = "Test"
-            [build.tailwind]
+            [build.css.tailwind]
             command = ["npx", "tailwindcss"]
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
-        assert_eq!(config.build.tailwind.command, vec!["npx", "tailwindcss"]);
+        assert_eq!(config.build.css.tailwind.command, vec!["npx", "tailwindcss"]);
     }
 
     #[test]

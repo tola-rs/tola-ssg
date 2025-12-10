@@ -160,7 +160,7 @@ fn compile_parallel(
         .collect();
 
     // Rebuild tailwind if enabled
-    if config.build.tailwind.enable && !files.is_empty() {
+    if config.build.css.tailwind.enable && !files.is_empty() {
         rebuild_tailwind(config)?;
     }
 

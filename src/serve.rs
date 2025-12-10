@@ -43,10 +43,10 @@ use tiny_http::{Header, Request, Response, Server, StatusCode};
 // ============================================================================
 
 /// Directory listing HTML template (embedded at compile time)
-const DIRECTORY_TEMPLATE: &str = include_str!("../assets/serve/directory.html");
+const DIRECTORY_TEMPLATE: &str = include_str!("embed/serve/directory.html");
 
 /// Welcome page HTML template (shown when output directory is empty)
-const WELCOME_TEMPLATE: &str = include_str!("../assets/serve/welcome.html");
+const WELCOME_TEMPLATE: &str = include_str!("embed/serve/welcome.html");
 
 // ============================================================================
 // Server Entry Point

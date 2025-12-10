@@ -141,15 +141,17 @@ pub mod build {
         }
     }
 
-    pub mod tailwind {
-        use std::path::PathBuf;
+    pub mod css {
+        pub mod tailwind {
+            use std::path::PathBuf;
 
-        pub const fn input() -> Option<PathBuf> {
-            None
-        }
+            pub const fn input() -> Option<PathBuf> {
+                None
+            }
 
-        pub fn command() -> Vec<String> {
-            vec!["tailwindcss".into()]
+            pub fn command() -> Vec<String> {
+                vec!["tailwindcss".into()]
+            }
         }
     }
 }

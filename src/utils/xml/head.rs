@@ -1,4 +1,5 @@
 use crate::config::SiteConfig;
+use crate::utils::css;
 use anyhow::Result;
 use quick_xml::events::{BytesEnd, Event};
 use std::io::Write;
@@ -42,10 +43,16 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &'static SiteConfig) -
         write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 
-    if config.build.tailwind.enable
-        && let Some(input) = &config.build.tailwind.input
+    if config.build.css.tailwind.enable
+        && let Some(input) = &config.build.css.tailwind.input
     {
         let href = compute_stylesheet_href(input, config)?;
+        write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
+    }
+
+    // Auto-enhance CSS (SVG theme adaptation)
+    if config.build.css.auto_enhance {
+        let href = format!("/{}", css::enhance_css_filename());
         write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 

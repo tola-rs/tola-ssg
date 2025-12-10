@@ -44,6 +44,7 @@ Edit a utility used by 5 pages? Only those 5 pages rebuild, not the entire site.
 ### Content Processing
 
 - **SVG extraction & optimization** — Extract inline SVGs, adjust viewBox, compress to SVGZ
+- **dark mode SVG adaptation** — Auto-inject CSS for SVG theme adaptation (enabled by default)
 - **HTML/XML minification** — Optional minification for production builds
 - **URL slugification** — Configurable slug modes(full, safe, ascii, no) with case options
 - **Typst package support** — Uses standard Typst package registry with shared cache

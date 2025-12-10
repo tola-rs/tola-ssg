@@ -69,6 +69,9 @@ fn handle_start_element(
                 svgs.push(svg);
             }
         }
+        b"img" if ctx.config.build.css.auto_enhance => {
+            write_img_with_color_invert(elem, writer, ctx.config)?;
+        }
         _ => write_element_with_processed_links(elem, writer, ctx.config)?,
     }
     Ok(())
@@ -129,6 +132,63 @@ pub fn write_element_with_processed_links(
             Ok(value.into_owned().into())
         }
     })?;
+    writer.write_event(Event::Start(new_elem))?;
+    Ok(())
+}
+
+/// Write `<img>` element with `color-invert` class for SVG dark mode adaptation.
+///
+/// Only adds `color-invert` to SVG images (`.svg`, `.svgz`) for proper dark mode support.
+/// Non-SVG images (photos, etc.) are left unchanged to preserve their original colors.
+/// Also processes `src` attribute for path normalization.
+pub fn write_img_with_color_invert(
+    elem: &BytesStart<'_>,
+    writer: &mut XmlWriter,
+    config: &'static SiteConfig,
+) -> Result<()> {
+    // Check if this is an SVG image
+    let is_svg = elem.attributes().filter_map(|a| a.ok()).any(|attr| {
+        attr.key.as_ref() == b"src" && {
+            let src = str::from_utf8(attr.value.as_ref()).unwrap_or_default();
+            src.ends_with(".svg") || src.ends_with(".svgz")
+        }
+    });
+
+    // For non-SVG images, just process links normally
+    if !is_svg {
+        return write_element_with_processed_links(elem, writer, config);
+    }
+
+    // For SVG images, add color-invert class
+    let mut has_class = false;
+
+    let new_elem = rebuild_elem_try(elem, |key, value| {
+        match key {
+            b"src" => process_link_value(&value, config),
+            b"class" => {
+                has_class = true;
+                // Append color-invert to existing classes
+                let existing = str::from_utf8(value.as_ref()).unwrap_or_default();
+                if existing.split_whitespace().any(|c| c == "color-invert") {
+                    // Already has color-invert, keep as-is
+                    Ok(value.into_owned().into())
+                } else {
+                    Ok(format!("{} color-invert", existing).into_bytes().into())
+                }
+            }
+            _ => Ok(value.into_owned().into()),
+        }
+    })?;
+
+    // Add class attribute if not present
+    let new_elem = if has_class {
+        new_elem
+    } else {
+        let mut elem = new_elem;
+        elem.push_attribute(("class", "color-invert"));
+        elem
+    };
+
     writer.write_event(Event::Start(new_elem))?;
     Ok(())
 }

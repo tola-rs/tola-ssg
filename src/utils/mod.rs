@@ -1,6 +1,7 @@
 //! Utility modules for the static site generator.
 
 pub mod category;
+pub mod css;
 pub mod date;
 pub mod exec;
 pub mod git;

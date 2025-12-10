@@ -33,6 +33,7 @@ use crate::{
     typst_lib,
     utils::{
         category::get_deps_mtime,
+        css,
         git,
     },
 };
@@ -165,6 +166,12 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
 
     // Write virtual data files to disk for external tools
     virtual_fs::write_to_disk(&config.build.output.join(&config.build.data))?;
+
+    // Generate auto-enhance CSS if enabled
+    if config.build.css.auto_enhance {
+        css::cleanup_old_enhance_css(&config.build.output)?;
+        css::generate_enhance_css(&config.build.output)?;
+    }
 
     log_build_result(output)?;
 

@@ -154,10 +154,13 @@ fn write_img_placeholder(
     let (w, h) = (svg.size.0 / scale, svg.size.1 / scale);
     let style = format!("width:{w}px;height:{h}px;");
 
-    // Write img element
+    // Write img element with color-invert for dark mode adaptation
     let mut img = BytesStart::new("img");
     img.push_attribute(("src", src.as_str()));
     img.push_attribute(("style", style.as_str()));
+    if ctx.config.build.css.auto_enhance {
+        img.push_attribute(("class", "color-invert"));
+    }
     writer.write_event(Event::Start(img))?;
 
     Ok(())

@@ -1,14 +1,11 @@
 use crate::config::SiteConfig;
-use crate::utils::exec::FilterRule;
 use crate::compiler::meta::AssetMeta;
 use crate::compiler::is_up_to_date;
-use crate::{exec, log};
+use crate::utils::css;
+use crate::log;
 use anyhow::{Result, anyhow};
 use std::fs;
 use std::path::Path;
-
-/// Tailwind filter: skip version banner.
-const TAILWIND_FILTER: FilterRule = FilterRule::new(&["≈ tailwindcss"]);
 
 /// Process an asset file from the assets directory.
 pub fn process_asset(
@@ -38,12 +35,8 @@ pub fn process_asset(
         .unwrap_or_default();
 
     // Handle tailwind CSS specially
-    if ext == "css"
-        && config.build.tailwind.enable
-        && let Some(input) = &config.build.tailwind.input
-        && asset_path.canonicalize().ok().as_ref() == Some(input)
-    {
-        return run_tailwind(input, &meta.paths.dest, config);
+    if ext == "css" && css::is_tailwind_input(asset_path, config) {
+        return css::run_tailwind(asset_path, &meta.paths.dest, config);
     }
 
     // Default: copy file
@@ -85,31 +78,12 @@ pub fn process_rel_asset(
     Ok(())
 }
 
-/// Rebuild tailwind CSS
+/// Rebuild tailwind CSS.
+///
+/// Delegates to `utils::css::rebuild_tailwind` with asset path resolution.
 pub fn rebuild_tailwind(config: &'static SiteConfig) -> Result<()> {
-    let input = config
-        .build
-        .tailwind
-        .input
-        .as_ref()
-        .ok_or_else(|| anyhow!("Tailwind input path not configured"))?;
-
-    // We can use AssetMeta here if input is in assets dir
-    let meta = AssetMeta::from_source(input.clone(), config)?;
-
-    run_tailwind(input, &meta.paths.dest, config)?;
-
-    Ok(())
-}
-
-fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig) -> Result<()> {
-    exec!(
-        pty=true;
-        filter=&TAILWIND_FILTER;
-        config.get_root();
-        &config.build.tailwind.command;
-        "-i", input, "-o", output,
-        if config.build.minify { "--minify" } else { "" }
-    )?;
-    Ok(())
+    css::rebuild_tailwind(config, |input| {
+        let meta = AssetMeta::from_source(input.to_path_buf(), config)?;
+        Ok(meta.paths.dest)
+    })
 }
