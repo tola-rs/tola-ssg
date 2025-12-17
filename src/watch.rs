@@ -50,6 +50,10 @@ use std::{
 const DEBOUNCE_MS: u64 = 300;
 const REBUILD_COOLDOWN_MS: u64 = 800;
 
+/// Maximum age for comemo cache entries before eviction.
+/// Entries unused for this many compilations will be removed.
+const COMEMO_CACHE_MAX_AGE: usize = 30;
+
 const WATCH_CATEGORIES: &[FileCategory] = &[
     FileCategory::Content,
     FileCategory::Asset,
@@ -273,6 +277,10 @@ fn handle_changes(paths: &[PathBuf], config: &'static SiteConfig) -> bool {
             }
         }
     }
+
+    // Evict stale entries from typst's comemo memoization cache.
+    // This prevents unbounded memory growth in long-running watch mode.
+    typst::comemo::evict(COMEMO_CACHE_MAX_AGE);
 
     eprintln!(); // Blank line to separate rebuild sessions
     false

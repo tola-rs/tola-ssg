@@ -2,6 +2,11 @@
 //!
 //! Provides a thread-safe store for collecting and accessing page metadata
 //! across the two-phase compilation process.
+//!
+//! # Performance Optimization
+//!
+//! JSON serialization is cached to avoid redundant computation during Phase 2.
+//! When N pages all read `/_data/tags.json`, the JSON is generated once and reused.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -9,6 +14,15 @@ use std::sync::LazyLock;
 use parking_lot::RwLock;
 
 use super::types::{PageData, TaggedPage, TagsIndex};
+
+/// Cached JSON strings for virtual data files.
+///
+/// Generated once after Phase 1 completes, reused by all Phase 2 reads.
+#[derive(Debug, Default)]
+struct JsonCache {
+    pages: Option<String>,
+    tags: Option<String>,
+}
 
 /// Compare two date strings for sorting (newest first).
 ///
@@ -36,9 +50,16 @@ pub static GLOBAL_SITE_DATA: LazyLock<SiteDataStore> = LazyLock::new(SiteDataSto
 /// Uses `RwLock` to allow:
 /// - Multiple concurrent reads (during Phase 2 compilation)
 /// - Exclusive writes (during Phase 1 metadata collection)
+///
+/// # Caching
+///
+/// JSON is generated lazily on first read and cached until `clear()` or `insert_page()`.
+/// This avoids O(N²) serialization when N pages all read the same virtual data file.
 #[derive(Debug, Default)]
 pub struct SiteDataStore {
     pages: RwLock<BTreeMap<String, PageData>>,
+    /// Cached JSON output. Invalidated on any write operation.
+    json_cache: RwLock<JsonCache>,
 }
 
 impl SiteDataStore {
@@ -52,13 +73,17 @@ impl SiteDataStore {
     /// Call this at the start of each build to ensure fresh data.
     pub fn clear(&self) {
         self.pages.write().clear();
+        *self.json_cache.write() = JsonCache::default();
     }
 
     /// Insert or update a page's data.
     ///
     /// The URL is used as the key to avoid duplicates.
+    /// Invalidates the JSON cache since data has changed.
     pub fn insert_page(&self, page: PageData) {
         self.pages.write().insert(page.url.clone(), page);
+        // Invalidate cache - data has changed
+        *self.json_cache.write() = JsonCache::default();
     }
 
     /// Get all pages as a sorted vector.
@@ -105,16 +130,56 @@ impl SiteDataStore {
         tags
     }
 
-    /// Serialize pages to JSON.
+    /// Serialize pages to JSON with caching.
+    ///
+    /// First call generates JSON, subsequent calls return cached value.
+    /// Cache is invalidated by `insert_page()` or `clear()`.
     pub fn pages_to_json(&self) -> String {
+        // Fast path: check if cached (read lock only)
+        {
+            let cache = self.json_cache.read();
+            if let Some(ref json) = cache.pages {
+                return json.clone();
+            }
+        }
+
+        // Slow path: generate and cache (upgrade to write lock)
+        let mut cache = self.json_cache.write();
+        // Double-check after acquiring write lock
+        if let Some(ref json) = cache.pages {
+            return json.clone();
+        }
+
         let pages = self.get_pages();
-        serde_json::to_string_pretty(&pages).unwrap_or_else(|_| "[]".to_string())
+        let json = serde_json::to_string_pretty(&pages).unwrap_or_else(|_| "[]".to_string());
+        cache.pages = Some(json.clone());
+        json
     }
 
-    /// Serialize tags index to JSON.
+    /// Serialize tags index to JSON with caching.
+    ///
+    /// First call generates JSON, subsequent calls return cached value.
+    /// Cache is invalidated by `insert_page()` or `clear()`.
     pub fn tags_to_json(&self) -> String {
+        // Fast path: check if cached (read lock only)
+        {
+            let cache = self.json_cache.read();
+            if let Some(ref json) = cache.tags {
+                return json.clone();
+            }
+        }
+
+        // Slow path: generate and cache (upgrade to write lock)
+        let mut cache = self.json_cache.write();
+        // Double-check after acquiring write lock
+        if let Some(ref json) = cache.tags {
+            return json.clone();
+        }
+
         let tags = self.get_tags_index();
-        serde_json::to_string_pretty(&tags).unwrap_or_else(|_| "{}".to_string())
+        let json = serde_json::to_string_pretty(&tags).unwrap_or_else(|_| "{}".to_string());
+        cache.tags = Some(json.clone());
+        json
     }
 
     /// Check if the store has any data.
