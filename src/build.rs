@@ -83,8 +83,17 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
     // Virtual JSON files return empty data at this stage.
     // Metadata extraction is static and unaffected.
     // HTML output is discarded (incomplete due to empty JSON).
+
+    // First, count .typ files for progress bar
+    let typ_file_count = collect_all_files(&config.build.content)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|ext| ext == "typ"))
+        .count();
+
     log!("metadata"; "collecting...");
-    let page_paths = collect_metadata(config, || {})?;
+    let metadata_progress = ProgressBars::new(&[("metadata", typ_file_count)]);
+    let page_paths = collect_metadata(config, || metadata_progress.inc_by_name("metadata"))?;
+    metadata_progress.finish();
     log!("metadata"; "found {} pages", page_paths.len());
 
     // Create progress bars for Phase 2
