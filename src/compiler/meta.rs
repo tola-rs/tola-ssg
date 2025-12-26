@@ -650,6 +650,25 @@ mod tests {
     }
 
     #[test]
+    fn test_page_meta_absolute_output_path() {
+        // Issue #38: Test that absolute output paths with uppercase preserve casing
+        let mut config = SiteConfig::default();
+        config.build.output = PathBuf::from("/tmp/Personal/25FW/website");
+        config.build.content = PathBuf::from("/tmp/Personal/25FW/website/content");
+
+        let config: &'static SiteConfig = Box::leak(Box::new(config));
+
+        let source = PathBuf::from("/tmp/Personal/25FW/website/content/Posts/Hello.typ");
+        let page = PageMeta::from_paths(source, config).unwrap();
+
+        // Output path should preserve absolute path casing
+        assert_eq!(
+            page.paths.html,
+            PathBuf::from("/tmp/Personal/25FW/website/posts/hello/index.html")
+        );
+    }
+
+    #[test]
     fn test_pages_empty() {
         let pages = Pages::default();
         assert_eq!(pages.len(), 0);

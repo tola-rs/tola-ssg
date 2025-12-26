@@ -91,7 +91,8 @@ pub fn slugify_path(path: impl AsRef<Path>, config: &'static SiteConfig) -> Path
 
     match slug.path {
         SlugMode::No => path.as_ref().to_path_buf(),
-        SlugMode::Full => slugify_full(&path.as_ref().to_string_lossy(), sep).into(),
+        // Full mode: process each component with full slugification (ASCII + lowercase)
+        SlugMode::Full => transform_path_components_full(path.as_ref(), sep),
         SlugMode::Safe => transform_path_components(path.as_ref(), sep, &slug.case, false),
         SlugMode::Ascii => transform_path_components(path.as_ref(), sep, &slug.case, true),
     }
@@ -146,6 +147,16 @@ fn slugify_full(text: &str, sep: char) -> String {
 fn sanitize(text: &str, sep: char) -> String {
     let replaced = replace_special_chars(text.trim(), sep);
     collapse_consecutive_separators(&replaced, sep)
+}
+
+/// Transforms each component of a path with full slugification.
+///
+/// Applies `slugify_full` to each path component individually,
+/// preserving the directory structure while fully slugifying each part.
+fn transform_path_components_full(path: &Path, sep: char) -> PathBuf {
+    path.components()
+        .map(|component| slugify_full(&component.as_os_str().to_string_lossy(), sep))
+        .collect()
 }
 
 /// Transforms each component of a path independently.
@@ -718,4 +729,40 @@ mod tests {
             PathBuf::from("content/My Posts/Hello")
         );
     }
+
+    #[test]
+    fn test_slugify_path_full_mode_preserves_structure() {
+        let config = make_config("full", "safe", "lower", SEP_DASH);
+
+        // Test 1: Unicode paths - each component slugified separately
+        assert_eq!(
+            slugify_path("posts/北京/天安门", config),
+            PathBuf::from("posts/bei-jing/tian-an-men")
+        );
+
+        // Test 2: Deeply nested paths
+        assert_eq!(
+            slugify_path("a/b/c/d/e", config),
+            PathBuf::from("a/b/c/d/e")
+        );
+
+        // Test 3: Mixed case and spaces in multiple components
+        assert_eq!(
+            slugify_path("Blog Posts/2024/Hello World", config),
+            PathBuf::from("blog-posts/2024/hello-world")
+        );
+
+        // Test 4: Special characters in path components (note: + is preserved)
+        assert_eq!(
+            slugify_path("posts/C++ Guide/Part #1", config),
+            PathBuf::from("posts/c++-guide/part-1")
+        );
+
+        // Test 5: Single component (no path separators)
+        assert_eq!(
+            slugify_path("Hello World", config),
+            PathBuf::from("hello-world")
+        );
+    }
 }
+
