@@ -34,9 +34,9 @@ pub fn process_asset(
         .and_then(|e| e.to_str())
         .unwrap_or_default();
 
-    // Handle tailwind CSS specially
+    // Skip tailwind input CSS (handled centrally in watch.rs)
     if ext == "css" && css::is_tailwind_input(asset_path, config) {
-        return css::run_tailwind(asset_path, &meta.paths.dest, config);
+        return Ok(());
     }
 
     // Default: copy file

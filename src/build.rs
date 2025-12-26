@@ -176,6 +176,11 @@ pub fn build_site(config: &'static SiteConfig) -> Result<(ThreadSafeRepository, 
     // Write virtual data files to disk for external tools
     virtual_fs::write_to_disk(&config.build.output.join(&config.build.data))?;
 
+    // Build Tailwind CSS if enabled
+    if config.build.css.tailwind.enable {
+        crate::compiler::assets::rebuild_tailwind(config)?;
+    }
+
     // Generate auto-enhance CSS if enabled
     if config.build.css.auto_enhance {
         css::cleanup_old_enhance_css(&config.build.output)?;

@@ -56,13 +56,17 @@ pub fn process_watched_files(
     let content_errors = compile_content(&content_files, config, clean, progress.as_ref())?;
 
     // Update virtual data files on disk after content changes
-    // This ensures the latest tags/pages data is available for hot-reload
     if !content_files.is_empty() {
         let _ = virtual_fs::write_to_disk(&config.build.output.join(&config.build.data));
     }
 
-    // Process asset files
+    // Process asset files (tailwind input is handled specially inside)
     process_assets(&asset_files, config, progress.as_ref())?;
+
+    // Rebuild tailwind if enabled (centralized handling for all file changes)
+    if config.build.css.tailwind.enable && !files.is_empty() {
+        rebuild_tailwind(config)?;
+    }
 
     // Report errors (deduplicated)
     report_errors(content_errors)?;
@@ -158,11 +162,6 @@ fn compile_parallel(
             result.err()
         })
         .collect();
-
-    // Rebuild tailwind if enabled
-    if config.build.css.tailwind.enable && !files.is_empty() {
-        rebuild_tailwind(config)?;
-    }
 
     Ok(errors)
 }
