@@ -65,7 +65,7 @@ pub fn process_watched_files(
 
     // Rebuild tailwind if enabled (centralized handling for all file changes)
     if config.build.css.tailwind.enable && !files.is_empty() {
-        rebuild_tailwind(config)?;
+        rebuild_tailwind(config, true)?;
     }
 
     // Report errors (deduplicated)
@@ -111,7 +111,8 @@ fn compile_content(
         return Ok(Vec::new());
     }
 
-    let log_file = progress.is_none();
+    // Never log individual files - watch module handles output via WatchStatus
+    let log_file = false;
 
     // Validation-first: compile one file first when rebuilding dependencies
     let errors = if clean && files.len() > 1 {
@@ -176,7 +177,8 @@ fn process_assets(
         return Ok(());
     }
 
-    let log_file = progress.is_none();
+    // Never log individual files - watch module handles output via WatchStatus
+    let log_file = false;
 
     files
         .par_iter()

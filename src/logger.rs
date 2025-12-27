@@ -352,6 +352,117 @@ fn truncate_str(s: &str, max_len: usize) -> &str {
 }
 
 // ============================================================================
+// Watch Status (single-line status with overwrite)
+// ============================================================================
+
+/// Get current time formatted as HH:MM:SS
+fn now() -> String {
+    use std::time::SystemTime;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Convert to local time (UTC+8 for now, good enough for display)
+    let local_secs = secs + 8 * 3600;
+    let hours = (local_secs / 3600) % 24;
+    let minutes = (local_secs / 60) % 60;
+    let seconds = local_secs % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+/// Single-line status display for watch mode.
+///
+/// Displays status messages that overwrite the previous output,
+/// keeping the terminal clean. Supports timestamps and different
+/// status types (success, error, unchanged).
+///
+/// # Example
+///
+/// ```ignore
+/// let mut status = WatchStatus::new();
+/// status.success("rebuilt: content/index.typ");
+/// status.unchanged("content/about.typ");
+/// status.error("failed", "syntax error on line 5");
+/// ```
+pub struct WatchStatus {
+    /// Lines of previous output to clear
+    last_lines: usize,
+}
+
+impl WatchStatus {
+    /// Create a new watch status display.
+    pub const fn new() -> Self {
+        Self { last_lines: 0 }
+    }
+
+    /// Display success message (✓ prefix, green).
+    pub fn success(&mut self, message: &str) {
+        self.display("✓".green().to_string(), message);
+    }
+
+    /// Display unchanged message (dimmed).
+    pub fn unchanged(&mut self, path: &str) {
+        self.display("".to_string(), &format!("unchanged: {path}").dimmed().to_string());
+    }
+
+    /// Display error message (✗ prefix, red) with optional detail.
+    pub fn error(&mut self, summary: &str, detail: &str) {
+        let message = if detail.is_empty() {
+            summary.to_string()
+        } else {
+            format!("{summary}\n{detail}")
+        };
+        self.display("✗".red().to_string(), &message);
+    }
+
+    /// Internal display logic with line overwriting.
+    ///
+    /// ALL messages (success, unchanged, error) are tracked and can be
+    /// overwritten by the next message. This ensures a clean single-block
+    /// status display in watch mode.
+    fn display(&mut self, symbol: String, message: &str) {
+        let mut stdout = stdout().lock();
+
+        // Clear previous output by moving cursor up and clearing
+        if self.last_lines > 0 {
+            #[allow(clippy::cast_possible_truncation)]
+            let lines = self.last_lines as u16;
+            execute!(stdout, cursor::MoveUp(lines)).ok();
+            execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
+        }
+
+        // Format message with timestamp
+        let timestamp = format!("[{}]", now()).dimmed();
+        let line = if symbol.is_empty() {
+            format!("{timestamp} {message}")
+        } else {
+            format!("{timestamp} {symbol} {message}")
+        };
+
+        // Print and count lines
+        writeln!(stdout, "{line}").ok();
+        stdout.flush().ok();
+
+        // Track actual line count (including newlines in message)
+        self.last_lines = message.matches('\n').count() + 1;
+    }
+
+    /// Clear the status line.
+    #[allow(dead_code)]
+    pub fn clear(&mut self) {
+        if self.last_lines > 0 {
+            let mut stdout = stdout().lock();
+            #[allow(clippy::cast_possible_truncation)]
+            let lines = self.last_lines as u16;
+            execute!(stdout, cursor::MoveUp(lines)).ok();
+            execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
+            stdout.flush().ok();
+            self.last_lines = 0;
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -474,5 +585,41 @@ mod tests {
     fn test_bar_width_constraints() {
         // MIN should be less than MAX
         assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
+    }
+
+    // ------------------------------------------------------------------------
+    // WatchStatus tests
+    // ------------------------------------------------------------------------
+
+    #[test]
+    fn test_watch_status_new() {
+        let status = WatchStatus::new();
+        assert_eq!(status.last_lines, 0);
+    }
+
+    #[test]
+    fn test_watch_status_line_count_single() {
+        // Single line message should count as 1
+        let message = "rebuilt: content/index";
+        let count = message.matches('\n').count() + 1;
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_watch_status_line_count_multiline() {
+        // Multi-line error message
+        let message = "failed: content/index\nerror: unknown variable\n  --> line 5";
+        let count = message.matches('\n').count() + 1;
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_watch_status_line_count_error_with_detail() {
+        // Typical error format: summary + newline + detail
+        let summary = "failed: content/index";
+        let detail = "Typst compilation failed:\nerror: something\n  --> file:1:1";
+        let message = format!("{summary}\n{detail}");
+        let count = message.matches('\n').count() + 1;
+        assert_eq!(count, 4); // summary + 3 lines of detail
     }
 }

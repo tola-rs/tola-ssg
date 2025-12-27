@@ -53,9 +53,13 @@ use std::{
 /// 1. Phase 1: Collect metadata from all pages (virtual JSON returns empty)
 /// 2. Phase 2: Compile pages with complete data (virtual JSON returns full data)
 ///
+/// # Arguments
+/// * `config` - Site configuration
+/// * `quiet` - If true, suppresses progress output (for watch mode)
+///
 /// Returns the collected page metadata for rss/sitemap generation.
 /// If `config.build.clean` is true, clears the entire output directory first.
-pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> {
+pub fn build_site(config: &SiteConfig, quiet: bool) -> Result<(ThreadSafeRepository, Pages)> {
     let output = &config.build.output;
     let assets = &config.build.assets;
 
@@ -90,17 +94,35 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
         .filter(|p| p.extension().is_some_and(|ext| ext == "typ"))
         .count();
 
-    log!("metadata"; "collecting...");
-    let metadata_progress = ProgressBars::new(&[("metadata", typ_file_count)]);
-    let page_paths = collect_metadata(config, || metadata_progress.inc_by_name("metadata"))?;
-    metadata_progress.finish();
-    log!("metadata"; "found {} pages", page_paths.len());
+    if !quiet {
+        log!("metadata"; "collecting...");
+    }
+    let metadata_progress = if quiet {
+        None
+    } else {
+        Some(ProgressBars::new(&[("metadata", typ_file_count)]))
+    };
+    let page_paths = collect_metadata(config, || {
+        if let Some(ref p) = metadata_progress {
+            p.inc_by_name("metadata");
+        }
+    })?;
+    if let Some(p) = metadata_progress {
+        p.finish();
+    }
+    if !quiet {
+        log!("metadata"; "found {} pages", page_paths.len());
+    }
 
     // Create progress bars for Phase 2
-    let progress = ProgressBars::new(&[
-        ("content", page_paths.len()),
-        ("assets", asset_files.len() + content_asset_files.len()),
-    ]);
+    let progress = if quiet {
+        None
+    } else {
+        Some(ProgressBars::new(&[
+            ("content", page_paths.len()),
+            ("assets", asset_files.len() + content_asset_files.len()),
+        ]))
+    };
 
     let has_error = AtomicBool::new(false);
     let clean = config.build.clean;
@@ -110,13 +132,17 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
     // ========================================================================
     // Virtual JSON files now return complete data from GLOBAL_SITE_DATA.
     // HTML output is correct and written to disk.
-    log!("compile"; "building pages...");
+    if !quiet {
+        log!("compile"; "building pages...");
+    }
 
     let (compile_result, assets_result) = rayon::join(
         || {
             // Compile all pages with complete data
             match compile_pages_with_data(&page_paths, config, clean, deps_mtime, || {
-                progress.inc_by_name("content")
+                if let Some(ref p) = progress {
+                    p.inc_by_name("content");
+                }
             }) {
                 Ok(pages) => Ok(pages),
                 Err(e) => {
@@ -140,7 +166,9 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
                         }
                         return Err(anyhow!("Build failed"));
                     }
-                    progress.inc_by_name("assets");
+                    if let Some(ref p) = progress {
+                        p.inc_by_name("assets");
+                    }
                     Ok(())
                 })
             };
@@ -157,7 +185,9 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
                         }
                         return Err(anyhow!("Build failed"));
                     }
-                    progress.inc_by_name("assets");
+                    if let Some(ref p) = progress {
+                        p.inc_by_name("assets");
+                    }
                     Ok(())
                 })
             };
@@ -166,7 +196,9 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
         },
     );
 
-    progress.finish();
+    if let Some(p) = progress {
+        p.finish();
+    }
 
     let pages = compile_result?;
     let (assets_res, content_assets_res) = assets_result;
@@ -178,7 +210,7 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
 
     // Build Tailwind CSS if enabled
     if config.build.css.tailwind.enable {
-        crate::compiler::assets::rebuild_tailwind(config)?;
+        crate::compiler::assets::rebuild_tailwind(config, quiet)?;
     }
 
     // Generate auto-enhance CSS if enabled
@@ -187,7 +219,9 @@ pub fn build_site(config: &SiteConfig) -> Result<(ThreadSafeRepository, Pages)> 
         css::generate_enhance_css(&config.build.output)?;
     }
 
-    log_build_result(output)?;
+    if !quiet {
+        log_build_result(output)?;
+    }
 
     Ok((repo, pages))
 }
