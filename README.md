@@ -2,16 +2,21 @@
 
 A static site generator for Typst-based blogs.
 
-
 ## Table of Contents
 
+- [Showcase](#showcase)
 - [Features](#features)
 - [Philosophy](#philosophy)
-- [Examples](#examples)
 - [Installation](#installation)
 - [Usage](#usage)
-- [Documentation](#documentation)
 - [Note](#note)
+
+## Showcase
+
+> Yeah, my blog is alos built with `tola`.
+
+[My blog](https://kawayww.com):
+![home](/screenshots/home.avif)
 
 ## Features
 
@@ -20,11 +25,12 @@ A static site generator for Typst-based blogs.
 - **font caching** — Fonts loaded once at startup, shared across all compilations
 - **file caching** — Only re-read changed files, zero-cost for unchanged files
 - **parallel compilation** — Build pages and assets concurrently using rayon
-- **incremental rebuilds** — Dependency graph tracks which files need rebuilding (see below)
+- **incremental rebuilds** — Intelligent dependency tracking for sub-second hot reload
+  - **content**: Direct rebuild of changed file
+  - **templates/utils**: Reverse-lookup of dependencies to rebuild only affected pages
+  - **config**: Full rebuild to ensure consistency across the site
 
-### Incremental rebuilds
-
-When a template or shared file changes, `tola` tracks dependencies and rebuilds only affected pages:
+When a template or shared file changes, `tola` uses its in-memory dependency graph to determine the minimal rebuild set:
 
 ```text
 DependencyGraph
@@ -32,11 +38,14 @@ DependencyGraph
 └── reverse: template.typ → {page1.typ, page2.typ, ...}
 ```
 
-Edit a utility used by 5 pages? Only those 5 pages rebuild, not the entire site.
+This ensures that editing a utility function used by 5 pages only rebuilds those 5 pages, not the entire site.
 
 ### Development Experience
 
-- **auto reload** — Watch mode with automatic rebuild on file changes (300ms debounce)
+- **smart watch mode** — Robust file watching strategy:
+  - **debouncing (300ms)**: Batches rapid file events (e.g. "Save All") into single builds
+  - **cooldown**: Prevents build thrashing during compilation
+  - **error recovery**: Server stays alive on build failures; just fix and save to recover
 - **local server** — Built-in HTTP server with directory listing and clean URLs
 - **auto config discovery** — Run `tola` from any subdirectory; it finds `tola.toml` automatically
 - **graceful error handling** — Human-readable diagnostic messages from Typst
@@ -46,7 +55,7 @@ Edit a utility used by 5 pages? Only those 5 pages rebuild, not the entire site.
 - **svg extraction & optimization** — Extract inline SVGs, adjust viewBox, compress to SVGZ
 - **dark mode svg adaptation** — Auto-inject CSS for SVG theme adaptation (enabled by default)
 - **html/xml minification** — Optional minification for production builds
-- **url slugification** — Configurable slug modes(full, safe, ascii, no) with case options
+- **url slugification** — Configurable slug modes (full, safe, ascii, no) with case options
 - **typst package support** — Uses standard Typst package registry with shared cache
 
 ### Site Generation
@@ -54,7 +63,7 @@ Edit a utility used by 5 pages? Only those 5 pages rebuild, not the entire site.
 - **rss-2.0 support** — Auto-generate `feed.xml` from page metadata
 - **sitemap support** — Auto-generate `sitemap.xml` for search engines
 - **tailwind-css support** — Built-in support, out of the box
-- **github pages deployment** — One-command deploy(or use github action)
+- **github pages deployment** — One-command deploy (or use GitHub Actions)
 
 ## Philosophy
 
@@ -64,7 +73,7 @@ Edit a utility used by 5 pages? Only those 5 pages rebuild, not the entire site.
 
 ### Minimal Abstraction
 
-`tola` provides a thin layer over Typst — just enough to handle the boring stuff(routing, live reload, local server, incremental rebuild smartly) without locking you into a rigid framework. Your Typst code stays portable.
+`tola` provides a thin layer over Typst — just enough to handle the boring stuff (routing, live reload, local server, incremental rebuild smartly) without locking you into a rigid framework. Your Typst code stays portable.
 
 ### Typst First
 
@@ -77,89 +86,58 @@ If Typst can do something easily, use Typst. `tola` doesn't reinvent the wheel �
 - **escape hatches** — Full access to HTML/CSS/JS when you need it
 - **predictable output** — What you write is what you get
 
-## Documentation
-
-**Coming soon!**
-
-> *Academic pressure + writing docs is tedious... but it's on the roadmap!*
-
-In the meantime:
-- Check `tola --help` and `tola <command> --help` for CLI usage
-- See `resources/starter_example/` for a minimal project structure
-- Feel free to open an issue if you have questions
-
-## Note
-
-> ⚠️ **Early development & experimental HTML export**
-
-`tola` is usable but evolving — expect breaking changes and rough edges. Feedback and contributions are welcome!
-
-Meanwhile, Typst's HTML output is not yet as mature as its PDF output. Some features require workarounds:
-
-- **math rendering** — Equations are exported as inline SVGs, which may need CSS tweaks for proper sizing and alignment (see [issue #24](https://github.com/tola-ssg/tola-ssg/issues/24))
-- **whitespace handling** — Typst inserts `<span style="white-space: pre-wrap">` between inline elements (e.g., consecutive `html.a`, use block element like `html.div` to resolve it) to preserve spacing ([PR #6750](https://github.com/typst/typst/pull/6750)). This is intentional but can be surprising sometimes.
-- **layout** — Some Typst layout primitives don't translate perfectly to HTML semantics
-
-These are upstream limitations (or design decisions — some may not be "limitations" per se) in Typst itself, not `tola`. As Typst's HTML backend matures, these rough edges will smooth out.
-
-`tola` is designed for users who want to use Typst as a replacement for both LaTeX and Markdown for personal blogs, and who are open to embracing HTML/CSS/JS for convenience, simplicity, and aesthetics. It aims to offer maximum flexibility — almost everything can be customized(because typst/html combination), eliminating boilerplate so you can focus purely on your content.
-
-## Examples
-
-[My blog](https://kawayww.com):
-
-![home](/screenshots/home.avif)
-![figure1](/screenshots/figure1.avif)
-![figure2](/screenshots/figure2.avif)
-
 ## Installation
 
-- `cargo install tola`
-- Install the binary from the [release page](https://github.com/KawaYww/tola/releases).
-- For Nix users, a `flake.nix` already exists in the repo root, and you can use the binary cache at [tola.cachix.org](https://tola.cachix.org):
+### Cargo
+
+```sh
+cargo install tola
+```
+
+### Binary Release
+
+Download from the [release page](https://github.com/tola-ssg/tola-ssg/releases).
+
+### Nix Flake
+
+A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola.cachix.org](https://tola.cachix.org).
+
+**Step 1**: Add tola as an input in your `flake.nix`:
 
 ```nix
-# flake.nix
 {
   inputs = {
-    tola.url = "github:tola-ssg/tola-ssg/v0.6.1";
-    # ...
+    tola.url = "github:tola-ssg/tola-ssg/v0.6.2";
     # ...
   };
-  # ...
-  # ...
 }
 ```
 
+**Step 2**: Configure cachix in your `configuration.nix`:
+
 ```nix
-# configuration.nix
 { config, pkgs, inputs, ... }:
 
 {
   nix.settings = {
-    substituters = [
-      "https://tola.cachix.org"
-      # ...
-      # ...
-    ];
-    trusted-public-keys = [
-      "tola.cachix.org-1:5hMwVpNfWcOlq0MyYuU9QOoNr6bRcRzXBMt/Ua2NbgA="
-      # ...
-      # ...
-    ];
-    environment.systemPackages = with pkgs; [
-      # ...
-      # ...
-    ] ++ [
-      inputs.tola.packages.${pkgs.stdenv.hostPlatform.system}.default
-    ];
-  }
+    substituters = [ "https://tola.cachix.org" ];
+    trusted-public-keys = [ "tola.cachix.org-1:5hMwVpNfWcOlq0MyYuU9QOoNr6bRcRzXBMt/Ua2NbgA=" ];
+  };
+
+  environment.systemPackages = [
+    # Use cross-compiled binary from cachix (recommended)
+    inputs.tola.packages.${pkgs.stdenv.hostPlatform.system}.aarch64-darwin  # Apple Silicon
+    # inputs.tola.packages.${pkgs.stdenv.hostPlatform.system}.x86_64-linux  # x86_64 Linux
+
+    # Or build locally (does NOT use cachix):
+    # inputs.tola.packages.${pkgs.stdenv.hostPlatform.system}.default
+  ];
 }
 ```
 
-## Usage
+> **Note**: The `default` package builds natively and won't hit the cachix cache. Use explicitly named packages (e.g., `aarch64-darwin`, `x86_64-linux`) to use pre-built binaries.
 
-- `tola -h`:
+## Usage
 
 ```text
 A static site generator for typst-based blog
@@ -184,42 +162,73 @@ Options:
 
 You can run `tola` from any subdirectory — it will automatically find `tola.toml` by searching upward.
 
-Your project should follow the directory structure below:
+### Project Structure
 
 ```text
 .
-├── assets
-│   ├── fonts
-│   ├── iconfonts
-│   ├── images
-│   ├── scripts
-│   ├── styles
-├── content
-│   ├── posts/
-│   ├── categories/
-│   ├── index.typ
-│   ├── programming.typ
-├── templates
-│   └── tola-conf.typ
-├── utils
-│   └── main.typ
-└── utils
-    └── main.typ
+├── assets/
+│   ├── fonts/
+│   ├── images/
+│   ├── scripts/
+│   └── styles/
+├── content/
+│   ├── posts/
+│   ├── index.typ
+│   └── about.typ
+├── templates/
+│   └── base.typ
+├── utils/
+│   └── helpers.typ
+└── tola.toml
 ```
 
-Files under the `content/` directory are mapped to their respective routes:
-e.g., `content/posts/examples/aaa.typ` -> `http://127.0.0.1:5277/posts/examples/aaa`
-(`content/index.typ` will be specially compiled into `http://127.0.0.1:5277/index.html`)
+### Routing
 
-```text
-http://127.0.0.1:5277:
-├── assets
-│   ├── fonts
-│   ├── iconfonts
-│   ├── images
-│   ├── scripts
-│   └─ styles
-├── posts/
-├── categories/
-└── index.html
+Files under `content/` are mapped to their respective routes:
+
+| Source Path | URL |
+|-------------|-----|
+| `content/index.typ` | `/index.html` |
+| `content/about.typ` | `/about/` |
+| `content/posts/hello.typ` | `/posts/hello/` |
+
+### Quick Start
+
+```sh
+# Create a new site
+tola init my-blog
+cd my-blog
+
+# Build for production
+tola build
+
+# Start development server
+tola serve
 ```
+
+## Note
+
+> ⚠️ **Early development & experimental HTML export**
+
+`tola` is usable but evolving — expect breaking changes and rough edges. Feedback and contributions are welcome!
+
+Typst's HTML output is not yet as mature as its PDF output. Some features require workarounds:
+
+- **math rendering** — Equations are exported as inline SVGs, which may need CSS tweaks for proper sizing and alignment ([issue #24](https://github.com/tola-ssg/tola-ssg/issues/24))
+- **whitespace handling** — Typst inserts `<span style="white-space: pre-wrap">` between inline elements to preserve spacing ([PR #6750](https://github.com/typst/typst/pull/6750))
+- **layout** — Some Typst layout primitives don't translate perfectly to HTML semantics
+
+These are upstream limitations in Typst itself, not `tola`. As Typst's HTML backend matures, these rough edges will smooth out.
+
+## Documentation
+
+**Coming soon!**
+
+In the meantime:
+- Run `tola --help` and `tola <command> --help` for CLI usage
+- See `resources/starter_example/` for a minimal project structure
+- Open an issue if you have questions
+
+## License
+
+MIT
