@@ -15,14 +15,22 @@
 //! │  └──────┬──────┘     └──────┬──────┘     └──────┬──────┘    │
 //! │         │                   │                   │           │
 //! │         ▼                   ▼                   ▼           │
-//! │      config()            config()         reload_config()   │
+//! │       cfg()              cfg()           reload_config()    │
 //! │    (lock-free)         (lock-free)      (atomic replace)    │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Usage
+//!
+//! ```ignore
+//! use crate::config::cfg;
+//!
+//! let c = cfg();
+//! build_site(&c)?;  // Arc auto-derefs to &SiteConfig
+//! ```
 
 use super::SiteConfig;
-use crate::cli::Cli;
-use arc_swap::{ArcSwap, Guard};
+use arc_swap::ArcSwap;
 use std::sync::{Arc, LazyLock};
 
 // =============================================================================
@@ -37,33 +45,40 @@ pub static CONFIG: LazyLock<ArcSwap<SiteConfig>> =
     LazyLock::new(|| ArcSwap::from_pointee(SiteConfig::default()));
 
 // =============================================================================
-// Type Aliases
-// =============================================================================
-
-/// Reference to the current config.
-///
-/// This type auto-derefs to `&SiteConfig`, so functions accepting `&SiteConfig`
-/// work transparently with this type.
-pub type ConfigRef = Guard<Arc<SiteConfig>>;
-
-// =============================================================================
 // Public API
 // =============================================================================
 
-/// Get current config (lock-free read).
+/// Get current config as `Arc<SiteConfig>`.
 ///
-/// Returns a guard that keeps the config alive until dropped.
-/// Thread-safe and wait-free - suitable for use in rayon parallel contexts.
+/// Returns an `Arc` that keeps the config alive. Thread-safe and wait-free.
+/// The Arc auto-derefs to `&SiteConfig`, making it ergonomic to use:
+///
+/// ```ignore
+/// let c = cfg();
+/// some_function(&c);  // Works directly, no extra & needed
+/// ```
+///
+/// # Performance
+///
+/// Lock-free read via atomic load. Suitable for hot paths in rayon parallel contexts.
 #[inline]
-pub fn config() -> ConfigRef {
-    CONFIG.load()
+pub fn cfg() -> Arc<SiteConfig> {
+    CONFIG.load_full()
 }
 
 /// Replace config atomically (called when tola.toml changes).
 ///
+/// Reads CLI from current config to reload, ensuring consistent access.
 /// The old config remains valid for any readers that loaded it before this call.
 /// New readers will see the updated config.
-pub fn reload_config(cli: &'static Cli) -> anyhow::Result<()> {
+///
+/// # Errors
+///
+/// Returns error if tola.toml parsing fails.
+pub fn reload_config() -> anyhow::Result<()> {
+    let cli = cfg()
+        .cli
+        .expect("CLI should be set in config during initialization");
     let new_config = SiteConfig::load(cli)?;
     CONFIG.store(Arc::new(new_config));
     Ok(())
@@ -72,6 +87,8 @@ pub fn reload_config(cli: &'static Cli) -> anyhow::Result<()> {
 /// Initialize global config (called once at startup).
 ///
 /// This replaces the default config with the loaded one.
+#[inline]
 pub fn init_config(config: SiteConfig) {
     CONFIG.store(Arc::new(config));
 }
+

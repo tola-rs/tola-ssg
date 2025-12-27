@@ -11,7 +11,10 @@ use super::store::GLOBAL_SITE_DATA;
 pub const VIRTUAL_DATA_DIR: &str = "/_data";
 
 /// Known virtual files and their generators.
-const VIRTUAL_FILES: &[(&str, fn() -> String)] = &[
+/// Known virtual files and their generators.
+type VirtualFileGenerator = fn() -> String;
+
+const VIRTUAL_FILES: &[(&str, VirtualFileGenerator)] = &[
     ("pages.json", || GLOBAL_SITE_DATA.pages_to_json()),
     ("tags.json", || GLOBAL_SITE_DATA.tags_to_json()),
 ];

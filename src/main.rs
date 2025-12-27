@@ -18,7 +18,7 @@ use anyhow::Result;
 use build::build_site;
 use clap::Parser;
 use cli::{Cli, Commands};
-use config::{init_config, config, SiteConfig};
+use config::{cfg, init_config, SiteConfig};
 use deploy::deploy_site;
 use generator::{rss::build_rss, sitemap::build_sitemap};
 use gix::ThreadSafeRepository;
@@ -30,15 +30,15 @@ fn main() -> Result<()> {
     init_config(SiteConfig::load(cli)?);
 
     match &cli.command {
-        Commands::Init { name } => new_site(&config(), name.is_some()),
+        Commands::Init { name } => new_site(&cfg(), name.is_some()),
         Commands::Build { .. } => build_all().map(|_| ()),
         Commands::Deploy { .. } => {
             let repo = build_all()?;
-            deploy_site(&repo, &config())
+            deploy_site(&repo, &cfg())
         }
         Commands::Serve { .. } => {
             build_all()?;
-            serve_site(cli)
+            serve_site()
         }
     }
 }
@@ -49,17 +49,18 @@ fn main() -> Result<()> {
 /// Sitemap generation is controlled by `config.build.sitemap.enable`.
 /// Output cleanup is controlled by `config.build.clean`.
 fn build_all() -> Result<ThreadSafeRepository> {
-    let cfg = config();
+    let c = cfg();
     // Build site first, collecting page metadata
-    let (repo, pages) = build_site(&cfg)?;
+    let (repo, pages) = build_site(&c)?;
 
     // Generate rss and sitemap in parallel using collected pages
     let (rss_result, sitemap_result) = rayon::join(
-        || build_rss(&cfg, &pages),
-        || build_sitemap(&cfg, &pages),
+        || build_rss(&c, &pages),
+        || build_sitemap(&c, &pages),
     );
 
     rss_result?;
     sitemap_result?;
     Ok(repo)
 }
+

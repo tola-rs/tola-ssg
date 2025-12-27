@@ -30,9 +30,8 @@
 //! ```
 
 use crate::{
-    cli::Cli,
     compiler::process_watched_files,
-    config::{config, reload_config, SiteConfig},
+    config::{cfg, reload_config, SiteConfig},
     log,
     utils::category::{categorize_path, FileCategory},
 };
@@ -173,7 +172,7 @@ fn try_full_rebuild(reason: &str) -> bool {
     // Clear dependency graph before full rebuild
     DEPENDENCY_GRAPH.write().clear();
 
-    match crate::build::build_site(&config()) {
+    match crate::build::build_site(&cfg()) {
         Ok(_) => true,
         Err(e) => {
             log_build_error("full", "", &e);
@@ -183,13 +182,13 @@ fn try_full_rebuild(reason: &str) -> bool {
 }
 
 /// Process file changes. Returns true if full rebuild succeeded (for cooldown).
-fn handle_changes(paths: &[PathBuf], cli: &'static Cli) -> bool {
+fn handle_changes(paths: &[PathBuf]) -> bool {
     if paths.is_empty() {
         return false;
     }
 
-    let cfg = config();
-    let root = cfg.get_root().to_path_buf();
+    let c = cfg();
+    let root = c.get_root().to_path_buf();
     let rel = |p: &Path| rel_path(p, &root);
 
     // Categorize changed files
@@ -200,7 +199,7 @@ fn handle_changes(paths: &[PathBuf], cli: &'static Cli) -> bool {
     let mut incremental_targets: Vec<PathBuf> = Vec::new();
 
     for path in paths {
-        match categorize_path(path, &cfg) {
+        match categorize_path(path, &c) {
             FileCategory::Config => config_changed = true,
             FileCategory::Template | FileCategory::Utils => dependency_triggers.push(path),
             FileCategory::Content | FileCategory::Asset => incremental_targets.push(path.clone()),
@@ -210,7 +209,7 @@ fn handle_changes(paths: &[PathBuf], cli: &'static Cli) -> bool {
 
     // Config changes: reload config then full rebuild
     if config_changed {
-        if let Err(e) = reload_config(cli) {
+        if let Err(e) = reload_config() {
             log!("watch"; "config reload failed: {e}");
             return false;
         }
@@ -248,7 +247,7 @@ fn handle_changes(paths: &[PathBuf], cli: &'static Cli) -> bool {
             }
         }
 
-        match process_watched_files(&incremental_targets, &config(), clean) {
+        match process_watched_files(&incremental_targets, &cfg(), clean) {
             Ok(count) if count > 1 => {
                 log!("watch"; "rebuilt {} files", count);
             }
@@ -278,7 +277,7 @@ fn handle_changes(paths: &[PathBuf], cli: &'static Cli) -> bool {
         if !virtual_dependents.is_empty() {
             log!("watch"; "updating {} pages using site data", virtual_dependents.len());
             // Use clean=false since templates haven't changed, only data
-            if let Err(e) = process_watched_files(&virtual_dependents, &config(), false) {
+            if let Err(e) = process_watched_files(&virtual_dependents, &cfg(), false) {
                 log_build_error("", "virtual data dependents", &e);
             }
         }
@@ -407,15 +406,15 @@ const fn is_relevant(event: &Event) -> bool {
 // =============================================================================
 
 /// Start blocking file watcher with debouncing and live rebuild.
-pub fn watch_for_changes_blocking(cli: &'static Cli) -> Result<()> {
-    let cfg = config();
-    if !cfg.serve.watch {
+pub fn watch_for_changes_blocking() -> Result<()> {
+    let c = cfg();
+    if !c.serve.watch {
         return Ok(());
     }
 
     let (tx, rx) = std::sync::mpsc::channel();
     let mut watcher = notify::recommended_watcher(tx).context("Failed to create file watcher")?;
-    setup_watchers(&mut watcher, &cfg)?;
+    setup_watchers(&mut watcher, &c)?;
 
     let mut debouncer = Debouncer::new();
 
@@ -426,7 +425,7 @@ pub fn watch_for_changes_blocking(cli: &'static Cli) -> Result<()> {
             }
             Ok(Err(e)) => log!("watch"; "error: {e}"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if debouncer.ready() => {
-                if handle_changes(&debouncer.take(), cli) {
+                if handle_changes(&debouncer.take()) {
                     debouncer.mark_rebuild();
                 }
             }
