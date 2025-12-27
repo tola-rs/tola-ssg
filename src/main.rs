@@ -30,7 +30,7 @@ fn main() -> Result<()> {
     let config: &'static SiteConfig = Box::leak(Box::new(SiteConfig::load(cli)?));
 
     match &cli.command {
-        Commands::Init { .. } => new_site(config),
+        Commands::Init { name } => new_site(config, name.is_some()),
         Commands::Build { .. } => build_all(config).map(|_| ()),
         Commands::Deploy { .. } => {
             let repo = build_all(config)?;

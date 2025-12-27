@@ -25,8 +25,16 @@ const SITE_DIRS: &[&str] = &[
 ];
 
 /// Create a new site with default structure
-pub fn new_site(config: &'static SiteConfig) -> Result<()> {
+pub fn new_site(config: &'static SiteConfig, has_name: bool) -> Result<()> {
     let root = config.get_root();
+
+    // Safety check: if no name was provided (init in current dir),
+    // the directory must be completely empty
+    if !has_name && !is_dir_empty(root)? {
+        bail!(
+            "Current directory is not empty. Use `tola init <SITE_NAME>` to create in a subdirectory."
+        );
+    }
 
     let repo = git::create_repo(root)?;
     init_site_structure(root)?;
@@ -38,6 +46,14 @@ pub fn new_site(config: &'static SiteConfig) -> Result<()> {
     git::commit_all(&repo, "initial commit")?;
 
     Ok(())
+}
+
+/// Check if a directory is completely empty
+fn is_dir_empty(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    Ok(fs::read_dir(path)?.next().is_none())
 }
 
 /// Write default configuration file
