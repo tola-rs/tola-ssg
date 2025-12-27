@@ -81,9 +81,10 @@ pub fn process_rel_asset(
 /// Rebuild tailwind CSS.
 ///
 /// Delegates to `utils::css::rebuild_tailwind` with asset path resolution.
-pub fn rebuild_tailwind(config: &SiteConfig) -> Result<()> {
+/// When `quiet` is true, output is suppressed (for watch mode).
+pub fn rebuild_tailwind(config: &SiteConfig, quiet: bool) -> Result<()> {
     css::rebuild_tailwind(config, |input| {
         let meta = AssetMeta::from_source(input.to_path_buf(), config)?;
         Ok(meta.paths.dest)
-    })
+    }, quiet)
 }

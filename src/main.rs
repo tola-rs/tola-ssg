@@ -51,7 +51,7 @@ fn main() -> Result<()> {
 fn build_all() -> Result<ThreadSafeRepository> {
     let c = cfg();
     // Build site first, collecting page metadata
-    let (repo, pages) = build_site(&c)?;
+    let (repo, pages) = build_site(&c, false)?;
 
     // Generate rss and sitemap in parallel using collected pages
     let (rss_result, sitemap_result) = rayon::join(

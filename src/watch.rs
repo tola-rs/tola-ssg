@@ -1,7 +1,7 @@
 //! File system watcher for live reload.
 //!
-//! Monitors content, asset, template directories and config file for changes
-//! and triggers rebuilds accordingly.
+//! Monitors content, asset, template, utils directories and config file for
+//! changes, triggering rebuilds accordingly.
 //!
 //! # Relationship with `compiler/watch.rs`
 //!
@@ -11,28 +11,32 @@
 //! # Architecture
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────────────┐
-//! │                      Event Loop                              │
-//! │                                                              │
-//! │  ┌──────────┐    ┌──────────┐    ┌────────────────────────┐  │
-//! │  │ notify   │───▶│ Debouncer│───▶│    handle_changes()    │  │
-//! │  │ events   │    │ (300ms)  │    │                        │  │
-//! │  └──────────┘    └──────────┘    │  ┌──────────────────┐  │  │
-//! │                                  │  │ Full Rebuild     │  │  │
-//! │                                  │  │ (template/config)│  │  │
-//! │                                  │  └──────────────────┘  │  │
-//! │                                  │  ┌──────────────────┐  │  │
-//! │                                  │  │ Incremental      │  │  │
-//! │                                  │  │ (content/assets) │  │  │
-//! │                                  │  └──────────────────┘  │  │
-//! │                                  └────────────────────────┘  │
-//! └──────────────────────────────────────────────────────────────┘
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │                         Event Loop                                  │
+//! │                                                                     │
+//! │  ┌────────┐   ┌──────────┐   ┌──────────────┐   ┌───────────────┐   │
+//! │  │ notify │──▶│ Debouncer│──▶│ ContentCache │──▶│handle_changes │   │
+//! │  │ events │   │ (300ms)  │   │ (hash check) │   │               │   │
+//! │  └────────┘   └──────────┘   └──────────────┘   │ ┌───────────┐ │   │
+//! │                                                 │ │ Dependent │ │   │
+//! │                 unchanged ─────────────────────▶│ │ (template │ │   │
+//! │                    │                            │ │  utils    │ │   │
+//! │               WatchStatus                       │ │  config)  │ │   │
+//! │               "unchanged"                       │ └───────────┘ │   │
+//! │                                                 │ ┌───────────┐ │   │
+//! │                                                 │ │Incremental│ │   │
+//! │                                                 │ │ (content  │ │   │
+//! │                                                 │ │  assets)  │ │   │
+//! │                                                 │ └───────────┘ │   │
+//! │                                                 └───────────────┘   │
+//! └─────────────────────────────────────────────────────────────────────┘
 //! ```
 
 use crate::{
     compiler::process_watched_files,
     config::{cfg, reload_config, SiteConfig},
     log,
+    logger::WatchStatus,
     utils::category::{categorize_path, FileCategory},
 };
 use anyhow::{Context, Result};
@@ -76,30 +80,17 @@ fn is_temp_file(path: &Path) -> bool {
         || name.starts_with('.')
 }
 
-/// Format path as relative without extension for log display.
-///
-/// `/proj/content/index.typ` → `content/index`
-fn rel_path(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .with_extension("")
-        .display()
-        .to_string()
-}
-
-/// Log a build failure with error details.
-fn log_build_error(kind: &str, trigger: &str, err: &anyhow::Error) {
-    match (kind.is_empty(), trigger.is_empty()) {
-        (true, true) => log!("watch"; "build failed"),
-        (true, false) => log!("watch"; "build failed ({trigger})"),
-        (false, true) => log!("watch"; "{kind} build failed"),
-        (false, false) => log!("watch"; "{kind} build failed ({trigger})"),
-    }
-    log!("watch"; "{err}");
-}
 // =============================================================================
 // Content Cache (detects actual content changes via hashing)
 // =============================================================================
+
+/// Result of filtering paths through content cache.
+struct FilterResult {
+    /// Files with actual content changes
+    changed: Vec<PathBuf>,
+    /// Files touched but content unchanged
+    unchanged: Vec<PathBuf>,
+}
 
 /// Tracks file content hashes to skip rebuilds when files are touched but unchanged.
 ///
@@ -140,13 +131,14 @@ impl ContentCache {
         }
     }
 
-    /// Filter paths to only those with actual content changes.
+    /// Filter paths into changed and unchanged.
     ///
-    /// - Deleted files are always included (and removed from cache)
-    /// - New/modified files are hashed and compared against cached value
-    /// - Files with identical content are skipped
-    fn filter_changed(&mut self, paths: &[PathBuf]) -> Vec<PathBuf> {
-        let mut changed = Vec::with_capacity(paths.len());
+    /// - Deleted files go into `changed` (and removed from cache)
+    /// - Files with different content go into `changed`
+    /// - Files with identical content go into `unchanged`
+    fn filter(&mut self, paths: &[PathBuf]) -> FilterResult {
+        let mut changed = Vec::new();
+        let mut unchanged = Vec::new();
 
         for path in paths {
             if !path.exists() {
@@ -171,7 +163,8 @@ impl ContentCache {
 
             // Compare with cached hash
             if self.hashes.get(path) == Some(&hash) {
-                continue; // Content unchanged, skip
+                unchanged.push(path.clone());
+                continue;
             }
 
             // Update cache and include in changed list
@@ -179,7 +172,7 @@ impl ContentCache {
             changed.push(path.clone());
         }
 
-        changed
+        FilterResult { changed, unchanged }
     }
 }
 
@@ -242,45 +235,25 @@ impl Debouncer {
     }
 }
 
-// =============================================================================
-// Event Handler
-// =============================================================================
-
-/// Attempt a full site rebuild, logging errors on failure.
-/// Clears the dependency graph before rebuilding to ensure fresh state.
-/// Returns true if successful (for cooldown tracking).
-fn try_full_rebuild(reason: &str) -> bool {
-    use crate::compiler::deps::DEPENDENCY_GRAPH;
-
-    log!("watch"; "{reason}");
-
-    // Clear dependency graph before full rebuild
-    DEPENDENCY_GRAPH.write().clear();
-
-    match crate::build::build_site(&cfg()) {
-        Ok(_) => true,
-        Err(e) => {
-            log_build_error("full", "", &e);
-            false
-        }
-    }
-}
 
 /// Process file changes. Returns true if full rebuild succeeded (for cooldown).
-fn handle_changes(paths: &[PathBuf]) -> bool {
+fn handle_changes(paths: &[PathBuf], status: &mut WatchStatus, root: &Path) -> bool {
     if paths.is_empty() {
         return false;
     }
 
     let c = cfg();
-    let root = c.get_root().to_path_buf();
-    let rel = |p: &Path| rel_path(p, &root);
+    let rel = |p: &Path| {
+        p.strip_prefix(root)
+            .unwrap_or(p)
+            .with_extension("")
+            .display()
+            .to_string()
+    };
 
     // Categorize changed files
     let mut config_changed = false;
-    // templates/utils: will query dependency graph, fallback to full rebuild if no deps cached
     let mut dependency_triggers: Vec<&PathBuf> = Vec::new();
-    // content/assets: always use incremental build
     let mut incremental_targets: Vec<PathBuf> = Vec::new();
 
     for path in paths {
@@ -295,10 +268,10 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
     // Config changes: reload config then full rebuild
     if config_changed {
         if let Err(e) = reload_config() {
-            log!("watch"; "config reload failed: {e}");
+            status.error("config reload failed", &e.to_string());
             return false;
         }
-        return try_full_rebuild("config changed, rebuilding...");
+        return handle_full_rebuild("config changed", status);
     }
 
     // Template/utils changes: query dependency graph for precise rebuild
@@ -306,19 +279,10 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
         let affected = collect_affected_content(&dependency_triggers);
 
         if affected.is_empty() {
-            // No known dependents - fall back to full rebuild
             let trigger = rel(dependency_triggers[0]);
-            return try_full_rebuild(&format!("{trigger} changed (no deps cached), rebuilding..."));
+            return handle_full_rebuild(&format!("{trigger} (no deps cached)"), status);
         }
 
-        // Log and add affected files to rebuild list
-        // Note: For incremental builds, we don't print blank line before,
-        // as process_watched_files manages its own logging well enough,
-        // or we rely on the implementation details.
-        // But for consistency with previous behavior:
-        log!("watch"; "{} changed, rebuilding {} affected files",
-             dependency_triggers.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", "),
-             affected.len());
         incremental_targets.extend(affected);
     }
 
@@ -327,7 +291,6 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
     let mut processed_content: FxHashSet<PathBuf> = FxHashSet::default();
 
     if !incremental_targets.is_empty() {
-        // Track which content files we're about to process
         for path in &incremental_targets {
             if path.extension().is_some_and(|e| e == "typ") {
                 processed_content.insert(path.clone());
@@ -335,17 +298,21 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
         }
 
         match process_watched_files(&incremental_targets, &cfg(), clean) {
-            Ok(count) if count > 1 => {
-                log!("watch"; "rebuilt {} files", count);
+            Ok(count) => {
+                let msg = if count == 1 {
+                    format!("rebuilt: {}", rel(&incremental_targets[0]))
+                } else {
+                    format!("rebuilt {} files", count)
+                };
+                status.success(&msg);
             }
-            Ok(_) => {}
             Err(e) => {
                 let context = if clean {
                     dependency_triggers.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ")
                 } else {
                     incremental_targets.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ")
                 };
-                log_build_error("", &context, &e);
+                status.error(&format!("failed: {context}"), &e.to_string());
                 return false;
             }
         }
@@ -359,9 +326,8 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
             .collect();
 
         if !virtual_dependents.is_empty() {
-            log!("watch"; "updating {} pages using site data", virtual_dependents.len());
             if let Err(e) = process_watched_files(&virtual_dependents, &cfg(), false) {
-                log_build_error("", "virtual data dependents", &e);
+                status.error("failed: site data update", &e.to_string());
             }
         }
     }
@@ -369,8 +335,25 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
     // Evict stale entries from typst's comemo memoization cache
     typst::comemo::evict(COMEMO_CACHE_MAX_AGE);
 
-    eprintln!(); // Blank line to separate rebuild sessions
     false
+}
+
+/// Helper for full rebuild with status output.
+fn handle_full_rebuild(reason: &str, status: &mut WatchStatus) -> bool {
+    use crate::compiler::deps::DEPENDENCY_GRAPH;
+
+    DEPENDENCY_GRAPH.write().clear();
+
+    match crate::build::build_site(&cfg(), true) {
+        Ok(_) => {
+            status.success(&format!("full rebuild: {reason}"));
+            true
+        }
+        Err(e) => {
+            status.error(&format!("full rebuild failed: {reason}"), &e.to_string());
+            false
+        }
+    }
 }
 
 /// Collect all content files affected by template/utils changes.
@@ -501,7 +484,10 @@ pub fn watch_for_changes_blocking() -> Result<()> {
 
     let mut debouncer = Debouncer::new();
     let mut content_cache = ContentCache::new();
+    let mut status = WatchStatus::new();
     content_cache.populate(&c);
+
+    let root = c.get_root().to_path_buf();
 
     loop {
         match rx.recv_timeout(debouncer.timeout()) {
@@ -510,10 +496,19 @@ pub fn watch_for_changes_blocking() -> Result<()> {
             }
             Ok(Err(e)) => log!("watch"; "error: {e}"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if debouncer.ready() => {
-                // Filter to only files with actual content changes
-                let paths = content_cache.filter_changed(&debouncer.take());
-                if handle_changes(&paths) {
-                    debouncer.mark_rebuild();
+                let result = content_cache.filter(&debouncer.take());
+
+                // Show unchanged files
+                for path in &result.unchanged {
+                    let rel = path.strip_prefix(&root).unwrap_or(path);
+                    status.unchanged(&rel.display().to_string());
+                }
+
+                // Process changed files
+                if !result.changed.is_empty() {
+                    if handle_changes(&result.changed, &mut status, &root) {
+                        debouncer.mark_rebuild();
+                    }
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,

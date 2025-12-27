@@ -91,10 +91,12 @@ pub fn is_tailwind_input(path: &Path, config: &SiteConfig) -> bool {
 }
 
 /// Run Tailwind CSS build for the input file.
-pub fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig) -> Result<()> {
+pub fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig, quiet: bool) -> Result<()> {
+    use super::exec::{SILENT_FILTER, FilterRule};
+    let filter: &'static FilterRule = if quiet { &SILENT_FILTER } else { &TAILWIND_FILTER };
     exec!(
         pty=true;
-        filter=&TAILWIND_FILTER;
+        filter=filter;
         config.get_root();
         &config.build.css.tailwind.command;
         "-i", input, "-o", output,
@@ -106,9 +108,11 @@ pub fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig) -> Result<
 /// Rebuild Tailwind CSS using configured input path.
 ///
 /// Used by watch mode to rebuild when source files change.
+/// When `quiet` is true, output is suppressed (for watch mode).
 pub fn rebuild_tailwind(
     config: &SiteConfig,
     get_output_path: impl FnOnce(&Path) -> Result<PathBuf>,
+    quiet: bool,
 ) -> Result<()> {
     let input = config
         .build
@@ -119,7 +123,7 @@ pub fn rebuild_tailwind(
         .ok_or_else(|| anyhow!("Tailwind input path not configured"))?;
 
     let output = get_output_path(input)?;
-    run_tailwind(input, &output, config)
+    run_tailwind(input, &output, config, quiet)
 }
 
 #[cfg(test)]
