@@ -107,7 +107,7 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 ```nix
 {
   inputs = {
-    tola.url = "github:tola-ssg/tola-ssg/v0.6.4";
+    tola.url = "github:tola-ssg/tola-ssg/v0.6.5";
     # ...
   };
 }
