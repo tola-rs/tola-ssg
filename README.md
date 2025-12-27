@@ -233,7 +233,7 @@ These are upstream limitations in Typst itself, not `tola`. As Typst's HTML back
 
 In the meantime:
 - Run `tola --help` and `tola <command> --help` for CLI usage
-- See `resources/starter_example/` for a minimal project structure
+- See [tola-ssg/example-sites](https://github.com/tola-ssg/example-sites) for examples
 - Open an issue if you have questions
 
 ## License
