@@ -37,10 +37,8 @@ pub enum FileCategory {
     Asset,
     /// Site configuration (tola.toml) - requires full site rebuild
     Config,
-    /// Template file - requires full site rebuild
-    Template,
-    /// Shared utility file - requires full site rebuild
-    Utils,
+    /// Dependency file (templates, utils, etc.) - requires rebuilding dependent content
+    Deps,
     /// File outside watched directories
     Unknown,
 }
@@ -52,30 +50,26 @@ impl FileCategory {
             Self::Content => "content",
             Self::Asset => "assets",
             Self::Config => "config",
-            Self::Template => "templates",
-            Self::Utils => "utils",
+            Self::Deps => "deps",
             Self::Unknown => "unknown",
         }
     }
 
-    /// Get the directory path for this category from config
-    pub fn path(self, config: &SiteConfig) -> Option<PathBuf> {
+    /// Get the directory paths for this category from config.
+    /// Returns Vec to support multiple deps directories.
+    pub fn paths(self, config: &SiteConfig) -> Vec<PathBuf> {
         match self {
-            Self::Content => Some(config.build.content.clone()),
-            Self::Asset => Some(config.build.assets.clone()),
-            Self::Config => Some(config.config_path.clone()),
-            Self::Template => Some(config.build.templates.clone()),
-            Self::Utils => Some(config.build.utils.clone()),
-            Self::Unknown => None,
+            Self::Content => vec![config.build.content.clone()],
+            Self::Asset => vec![config.build.assets.clone()],
+            Self::Config => vec![config.config_path.clone()],
+            Self::Deps => config.build.deps.clone(),
+            Self::Unknown => vec![],
         }
     }
 
     /// Returns true if this category represents a directory (vs a single file)
     pub const fn is_directory(self) -> bool {
-        matches!(
-            self,
-            Self::Content | Self::Asset | Self::Template | Self::Utils
-        )
+        matches!(self, Self::Content | Self::Asset | Self::Deps)
     }
 }
 
@@ -83,17 +77,15 @@ impl FileCategory {
 ///
 /// Used by the file watcher to decide between incremental and full rebuilds:
 /// - `Content`/`Asset`: Process only the changed file
-/// - `Config`/`Template`/`Utils`: Trigger full site rebuild
+/// - `Config`/`Deps`: Trigger rebuild of dependent content files
 /// - `Unknown`: Ignored
 pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
     let path = normalize_path(path);
 
     if path == config.config_path {
         FileCategory::Config
-    } else if path.starts_with(&config.build.templates) {
-        FileCategory::Template
-    } else if path.starts_with(&config.build.utils) {
-        FileCategory::Utils
+    } else if config.build.deps.iter().any(|dep| path.starts_with(dep)) {
+        FileCategory::Deps
     } else if path.starts_with(&config.build.content) {
         FileCategory::Content
     } else if path.starts_with(&config.build.assets) {
@@ -122,22 +114,23 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 ///
 /// Shared dependencies include:
 /// - `tola.toml` (site configuration)
-/// - `templates/` directory (page templates)
-/// - `utils/` directory (shared Typst utilities)
+/// - All directories in `deps` array (templates, utils, etc.)
 ///
 /// If any of these are newer than a content file's output, that content
 /// needs to be recompiled even if the source `.typ` file hasn't changed.
 pub fn get_deps_mtime(config: &SiteConfig) -> Option<SystemTime> {
-    let deps = [
-        Some(config.config_path.clone()),
-        Some(config.build.templates.clone()),
-        Some(config.build.utils.clone()),
-    ];
+    // Config file mtime
+    let config_mtime = get_latest_mtime(&config.config_path);
 
-    deps.iter()
-        .filter_map(|p| p.as_ref())
+    // All deps directories mtime
+    let deps_mtime = config
+        .build
+        .deps
+        .iter()
         .filter_map(|p| get_latest_mtime(p))
-        .max()
+        .max();
+
+    [config_mtime, deps_mtime].into_iter().flatten().max()
 }
 
 /// Get the latest modification time of a file or directory.

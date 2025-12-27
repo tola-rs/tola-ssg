@@ -389,8 +389,12 @@ impl SiteConfig {
         self.build.content = Self::normalize_path(&root.join(&self.build.content));
         self.build.assets = Self::normalize_path(&root.join(&self.build.assets));
         self.build.output = Self::normalize_path(&root.join(&self.build.output));
-        self.build.templates = Self::normalize_path(&root.join(&self.build.templates));
-        self.build.utils = Self::normalize_path(&root.join(&self.build.utils));
+        self.build.deps = self
+            .build
+            .deps
+            .iter()
+            .map(|p| Self::normalize_path(&root.join(p)))
+            .collect();
         self.build.rss.path = self.build.output.join(&self.build.rss.path);
         self.build.sitemap.path = self.build.output.join(&self.build.sitemap.path);
 

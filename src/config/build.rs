@@ -123,15 +123,11 @@ pub struct BuildConfig {
     #[educe(Default = defaults::build::assets())]
     pub assets: PathBuf,
 
-    /// HTML template directory.
-    #[serde(default = "defaults::build::templates")]
-    #[educe(Default = defaults::build::templates())]
-    pub templates: PathBuf,
-
-    /// Shared Typst utilities directory.
-    #[serde(default = "defaults::build::utils")]
-    #[educe(Default = defaults::build::utils())]
-    pub utils: PathBuf,
+    /// Dependency directories (templates/, utilities/, ui/,  etc.).
+    /// Files in these directories trigger dependent content rebuilds when changed.
+    #[serde(default = "defaults::build::deps")]
+    #[educe(Default = defaults::build::deps())]
+    pub deps: Vec<PathBuf>,
 
     /// Virtual data files directory (relative to output).
     /// Contains generated JSON files like `pages.json` and `tags.json`.

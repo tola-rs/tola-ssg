@@ -60,12 +60,8 @@ pub mod build {
         "assets".into()
     }
 
-    pub fn templates() -> PathBuf {
-        "templates".into()
-    }
-
-    pub fn utils() -> PathBuf {
-        "utils".into()
+    pub fn deps() -> Vec<PathBuf> {
+        vec!["templates".into(), "utils".into()]
     }
 
     pub fn data() -> PathBuf {

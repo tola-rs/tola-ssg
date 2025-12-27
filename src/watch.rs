@@ -61,8 +61,7 @@ const COMEMO_CACHE_MAX_AGE: usize = 30;
 const WATCH_CATEGORIES: &[FileCategory] = &[
     FileCategory::Content,
     FileCategory::Asset,
-    FileCategory::Template,
-    FileCategory::Utils,
+    FileCategory::Deps,
     FileCategory::Config,
 ];
 
@@ -115,15 +114,16 @@ impl ContentCache {
         use walkdir::WalkDir;
 
         for &cat in WATCH_CATEGORIES {
-            let Some(path) = cat.path(config) else { continue };
-            if !path.exists() { continue; }
+            for path in cat.paths(config) {
+                if !path.exists() { continue; }
 
-            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_file() && !is_temp_file(path) {
-                    if let Ok(file) = std::fs::File::open(path) {
-                        if let Ok(hash) = crate::utils::hash::compute_reader(file) {
-                            self.hashes.insert(path.to_path_buf(), hash);
+                for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_file() && !is_temp_file(path) {
+                        if let Ok(file) = std::fs::File::open(path) {
+                            if let Ok(hash) = crate::utils::hash::compute_reader(file) {
+                                self.hashes.insert(path.to_path_buf(), hash);
+                            }
                         }
                     }
                 }
@@ -259,7 +259,7 @@ fn handle_changes(paths: &[PathBuf], status: &mut WatchStatus, root: &Path) -> b
     for path in paths {
         match categorize_path(path, &c) {
             FileCategory::Config => config_changed = true,
-            FileCategory::Template | FileCategory::Utils => dependency_triggers.push(path),
+            FileCategory::Deps => dependency_triggers.push(path),
             FileCategory::Content | FileCategory::Asset => incremental_targets.push(path.clone()),
             FileCategory::Unknown => {}
         }
@@ -413,17 +413,17 @@ fn log_watch_summary(config: &SiteConfig) {
     let root = config.get_root();
     let build = &config.build;
 
-    // Dependency triggers: templates, utils, config file
+    // Dependency triggers: deps directories + config file
     // Changes here trigger rebuild of dependent content files
-    let dep_paths: Vec<_> = [
-        (&build.templates, true),
-        (&build.utils, true),
-        (&config.config_path, false),
-    ]
-    .into_iter()
-    .filter(|(p, _)| p.exists())
-    .map(|(p, is_dir)| format_rel(p, root, is_dir))
-    .collect();
+    let mut dep_paths: Vec<_> = build
+        .deps
+        .iter()
+        .filter(|p| p.exists())
+        .map(|p| format_rel(p, root, true))
+        .collect();
+    if config.config_path.exists() {
+        dep_paths.push(format_rel(&config.config_path, root, false));
+    }
 
     // Incremental triggers: content, assets
     let incr_paths: Vec<_> = [(&build.content, true), (&build.assets, true)]
@@ -442,18 +442,18 @@ fn log_watch_summary(config: &SiteConfig) {
 
 fn setup_watchers(watcher: &mut impl Watcher, config: &SiteConfig) -> Result<()> {
     for &cat in WATCH_CATEGORIES {
-        if let Some(path) = cat.path(config)
-            && path.exists()
-        {
-            let mode = if cat.is_directory() {
-                RecursiveMode::Recursive
-            } else {
-                RecursiveMode::NonRecursive
-            };
+        let mode = if cat.is_directory() {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
 
-            watcher
-                .watch(&path, mode)
-                .with_context(|| format!("Failed to watch {}: {}", cat.name(), path.display()))?;
+        for path in cat.paths(config) {
+            if path.exists() {
+                watcher
+                    .watch(&path, mode)
+                    .with_context(|| format!("Failed to watch {}: {}", cat.name(), path.display()))?;
+            }
         }
     }
 
