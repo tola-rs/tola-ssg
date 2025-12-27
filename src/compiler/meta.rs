@@ -355,6 +355,12 @@ where
     let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
     match value {
         Some(v) => {
+            // Handle simple strings directly: e.g.: `summary: "hello world"`
+            if let Some(s) = v.as_str() {
+                return Ok(Some(html_escape(s)));
+            }
+
+            // Handle Typst content elements: e.g.: `summary: [hello world, _italic_, $x + y$]`
             let elem: TypstElement = serde_json::from_value(v)
                 .map_err(|e| D::Error::custom(format!("Invalid summary format: {e}")))?;
             Ok(Some(elem.to_html()))
