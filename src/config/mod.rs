@@ -322,6 +322,11 @@ impl SiteConfig {
         Self::update_option(&mut self.build.css.tailwind.enable, args.tailwind.as_ref());
         self.build.clean = args.clean;
 
+        // Override base URL if provided via CLI
+        if let Some(ref url) = args.base_url {
+            self.base.url = Some(url.clone());
+        }
+
         if is_serve {
             // Serve: disable rss/sitemap by default, enable only if explicitly requested
             self.build.rss.enable = args.rss.unwrap_or(false);
@@ -344,11 +349,13 @@ impl SiteConfig {
         Self::update_option(&mut self.serve.port, port.as_ref());
         Self::update_option(&mut self.serve.watch, watch.as_ref());
 
-        // Set base URL for local development
-        self.base.url = Some(format!(
-            "http://{}:{}",
-            self.serve.interface, self.serve.port
-        ));
+        // Set base URL for local development (only if not overridden via CLI --base-url)
+        if self.base.url.is_none() {
+            self.base.url = Some(format!(
+                "http://{}:{}",
+                self.serve.interface, self.serve.port
+            ));
+        }
     }
 
     /// Update config option if CLI value is provided.

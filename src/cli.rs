@@ -52,6 +52,16 @@ pub struct BuildArgs {
     /// enable sitemap generation
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub sitemap: Option<bool>,
+
+    /// Override base URL for the site.
+    ///
+    /// Useful for CI/CD deployments where the production URL differs from local development.
+    /// This avoids modifying tola.toml, keeping the source file clean.
+    ///
+    /// Example: Deploying to GitHub Pages project site (tola-ssg.github.io/example-sites/starter):
+    ///   tola build --base-url "https://tola-ssg.github.io/example-sites/starter"
+    #[arg(long = "base-url")]
+    pub base_url: Option<String>,
 }
 
 /// Available subcommands
