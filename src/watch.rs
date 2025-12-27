@@ -97,6 +97,91 @@ fn log_build_error(kind: &str, trigger: &str, err: &anyhow::Error) {
     }
     log!("watch"; "{err}");
 }
+// =============================================================================
+// Content Cache (detects actual content changes via hashing)
+// =============================================================================
+
+/// Tracks file content hashes to skip rebuilds when files are touched but unchanged.
+///
+/// Separate from `Debouncer` which handles time-based event batching.
+/// This handles content-based change detection.
+struct ContentCache {
+    hashes: rustc_hash::FxHashMap<PathBuf, u64>,
+}
+
+impl ContentCache {
+    fn new() -> Self {
+        Self {
+            hashes: rustc_hash::FxHashMap::default(),
+        }
+    }
+
+    /// Pre-populate hashes for all watched files.
+    ///
+    /// Called at startup to establish baseline, so first touch without
+    /// content change won't trigger rebuild.
+    fn populate(&mut self, config: &SiteConfig) {
+        use walkdir::WalkDir;
+
+        for &cat in WATCH_CATEGORIES {
+            let Some(path) = cat.path(config) else { continue };
+            if !path.exists() { continue; }
+
+            for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.is_file() && !is_temp_file(path) {
+                    if let Ok(file) = std::fs::File::open(path) {
+                        if let Ok(hash) = crate::utils::hash::compute_reader(file) {
+                            self.hashes.insert(path.to_path_buf(), hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Filter paths to only those with actual content changes.
+    ///
+    /// - Deleted files are always included (and removed from cache)
+    /// - New/modified files are hashed and compared against cached value
+    /// - Files with identical content are skipped
+    fn filter_changed(&mut self, paths: &[PathBuf]) -> Vec<PathBuf> {
+        let mut changed = Vec::with_capacity(paths.len());
+
+        for path in paths {
+            if !path.exists() {
+                // File deleted - always process, remove from cache
+                self.hashes.remove(path);
+                changed.push(path.clone());
+                continue;
+            }
+
+            // Compute current hash
+            let Ok(file) = std::fs::File::open(path) else {
+                // Can't open - assume changed to be safe
+                changed.push(path.clone());
+                continue;
+            };
+
+            let Ok(hash) = crate::utils::hash::compute_reader(file) else {
+                // Read failed - assume changed
+                changed.push(path.clone());
+                continue;
+            };
+
+            // Compare with cached hash
+            if self.hashes.get(path) == Some(&hash) {
+                continue; // Content unchanged, skip
+            }
+
+            // Update cache and include in changed list
+            self.hashes.insert(path.clone(), hash);
+            changed.push(path.clone());
+        }
+
+        changed
+    }
+}
 
 // =============================================================================
 // Debounce State
@@ -193,9 +278,9 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
 
     // Categorize changed files
     let mut config_changed = false;
-    // Templates/utils: will query dependency graph, fallback to full rebuild if no deps cached
+    // templates/utils: will query dependency graph, fallback to full rebuild if no deps cached
     let mut dependency_triggers: Vec<&PathBuf> = Vec::new();
-    // Content/assets: always use incremental build
+    // content/assets: always use incremental build
     let mut incremental_targets: Vec<PathBuf> = Vec::new();
 
     for path in paths {
@@ -217,7 +302,6 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
     }
 
     // Template/utils changes: query dependency graph for precise rebuild
-    // Only falls back to full rebuild when no cached dependencies exist
     if !dependency_triggers.is_empty() {
         let affected = collect_affected_content(&dependency_triggers);
 
@@ -228,6 +312,10 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
         }
 
         // Log and add affected files to rebuild list
+        // Note: For incremental builds, we don't print blank line before,
+        // as process_watched_files manages its own logging well enough,
+        // or we rely on the implementation details.
+        // But for consistency with previous behavior:
         log!("watch"; "{} changed, rebuilding {} affected files",
              dependency_triggers.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", "),
              affected.len());
@@ -235,7 +323,6 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
     }
 
     // Incremental build (content/assets)
-    // Clean rebuild when triggered by dependency changes (templates/utils)
     let clean = !dependency_triggers.is_empty();
     let mut processed_content: FxHashSet<PathBuf> = FxHashSet::default();
 
@@ -253,21 +340,18 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
             }
             Ok(_) => {}
             Err(e) => {
-                // When triggered by dependencies, show the trigger file(s), not all affected files
                 let context = if clean {
                     dependency_triggers.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ")
                 } else {
                     incremental_targets.iter().map(|p| rel(p)).collect::<Vec<_>>().join(", ")
                 };
                 log_build_error("", &context, &e);
-                eprintln!(); // Blank line after error
                 return false;
             }
         }
     }
 
-    // After content changes, rebuild pages that depend on virtual data files
-    // (e.g., pages using `json("/_data/tags.json")` for tag listings)
+    // Virtual data dependents
     if !processed_content.is_empty() {
         let virtual_dependents: Vec<PathBuf> = collect_virtual_data_dependents()
             .into_iter()
@@ -276,15 +360,13 @@ fn handle_changes(paths: &[PathBuf]) -> bool {
 
         if !virtual_dependents.is_empty() {
             log!("watch"; "updating {} pages using site data", virtual_dependents.len());
-            // Use clean=false since templates haven't changed, only data
             if let Err(e) = process_watched_files(&virtual_dependents, &cfg(), false) {
                 log_build_error("", "virtual data dependents", &e);
             }
         }
     }
 
-    // Evict stale entries from typst's comemo memoization cache.
-    // This prevents unbounded memory growth in long-running watch mode.
+    // Evict stale entries from typst's comemo memoization cache
     typst::comemo::evict(COMEMO_CACHE_MAX_AGE);
 
     eprintln!(); // Blank line to separate rebuild sessions
@@ -401,6 +483,7 @@ const fn is_relevant(event: &Event) -> bool {
     matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
 }
 
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -417,6 +500,8 @@ pub fn watch_for_changes_blocking() -> Result<()> {
     setup_watchers(&mut watcher, &c)?;
 
     let mut debouncer = Debouncer::new();
+    let mut content_cache = ContentCache::new();
+    content_cache.populate(&c);
 
     loop {
         match rx.recv_timeout(debouncer.timeout()) {
@@ -425,12 +510,13 @@ pub fn watch_for_changes_blocking() -> Result<()> {
             }
             Ok(Err(e)) => log!("watch"; "error: {e}"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if debouncer.ready() => {
-                if handle_changes(&debouncer.take()) {
+                // Filter to only files with actual content changes
+                let paths = content_cache.filter_changed(&debouncer.take());
+                if handle_changes(&paths) {
                     debouncer.mark_rebuild();
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            // Other cases: irrelevant events, timeout without ready, etc.
             _ => {}
         }
     }

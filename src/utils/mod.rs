@@ -5,6 +5,7 @@ pub mod css;
 pub mod date;
 pub mod exec;
 pub mod git;
+pub mod hash;
 pub mod minify;
 pub mod slug;
 pub mod svg;
