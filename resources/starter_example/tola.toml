@@ -1,13 +1,16 @@
+# ==============================================================================
+# Tola Configuration
+# ==============================================================================
+
 [base]
-title = ""
-author = "<YOUR_NAME>"
-email = "user@noreply.tola"
-description = ""
-language = "zh-Hans"
-copyright = ""
+title = "My Blog"
+author = "Your Name"
+email = "you@example.com"
+description = "A blog built with Typst and Tola"
+language = "en"
+# url = "https://yourdomain.com"  # Set for production
 
 [build]
-path_prefix = ""
 content = "content"
 output = "public"
 assets = "assets"
@@ -17,21 +20,38 @@ minify = true
 enable = false
 path = "feed.xml"
 
+[build.sitemap]
+enable = false
+path = "sitemap.xml"
+
 [build.slug]
 path = "safe"
 fragment = "full"
+separator = "dash"
+case = "lower"
 
 [build.typst]
-command = ["typst"]
+use_lib = true
 
 [build.typst.svg]
 extract_type = "embedded"
-inline_max_size = "20KB"
 dpi = 96.0
 
-[build.tailwind]
-enable = false
+[build.css]
+auto_enhance = true
+
+# Tailwind CSS - enabled by default in this template
+# Make sure tailwindcss is installed: npm install -g tailwindcss
+[build.css.tailwind]
+enable = true
+input = "assets/styles/tailwind.css"
 command = ["tailwindcss"]
+
+[build.head]
+# icon = "assets/images/favicon.ico"
+# styles = ["assets/styles/custom.css"]
+# scripts = [{ path = "assets/scripts/app.js", defer = true }]
+elements = ['<meta name="darkreader-lock">']
 
 [serve]
 interface = "127.0.0.1"
@@ -43,13 +63,8 @@ provider = "github"
 force = false
 
 [deploy.github]
-url = "https://github.com/alice/alice.github.io"
+url = "https://github.com/username/username.github.io"
 branch = "main"
 
-[deploy.cloudflare]
-provider = "github"
-
-[deploy.vercel]
-provider = "github"
-
 [extra]
+# Add custom data here

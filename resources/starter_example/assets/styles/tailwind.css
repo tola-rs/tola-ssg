@@ -1,0 +1,40 @@
+@import 'tailwindcss';
+
+/* Tailwind CSS v4 configuration */
+@theme {
+    /* Custom colors */
+    --color-primary: #3b82f6;
+    --color-accent: #06b6d4;
+    --color-bg: #0f172a;
+    --color-surface: #1e293b;
+    --color-text: #e2e8f0;
+    --color-muted: #94a3b8;
+}
+
+/* Base styles */
+@layer base {
+    html {
+        @apply scroll-smooth bg-bg text-text;
+        color-scheme: dark;
+    }
+
+    body {
+        @apply antialiased min-h-screen;
+    }
+
+    a {
+        @apply text-accent hover:text-primary transition-colors;
+    }
+
+    code {
+        @apply bg-surface px-1.5 py-0.5 rounded text-sm;
+    }
+
+    pre {
+        @apply bg-surface p-4 rounded-lg overflow-x-auto;
+    }
+
+    pre code {
+        @apply bg-transparent p-0;
+    }
+}
