@@ -24,10 +24,7 @@ const ENHANCE_CSS: &str = include_str!("../embed/css/enhance.css");
 
 /// Compute the hash for the enhance CSS content.
 fn compute_hash() -> String {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    ENHANCE_CSS.hash(&mut hasher);
-    format!("{:x}", hasher.finish())[..8].to_string()
+    crate::utils::hash::fingerprint(ENHANCE_CSS)
 }
 
 /// Get the enhance CSS filename (hidden file with hash).

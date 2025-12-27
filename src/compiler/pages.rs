@@ -9,7 +9,6 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 use std::time::SystemTime;
-use tempfile::Builder as TempFileBuilder;
 use rayon::prelude::*;
 
 /// Skip known HTML export warnings (used by `compile_cli`).
@@ -183,21 +182,17 @@ pub fn query_meta(path: &Path, config: &SiteConfig) -> Option<ContentMeta> {
 /// Compile using typst CLI.
 fn compile_cli(source: &Path, config: &SiteConfig) -> Result<Vec<u8>> {
     let root = config.get_root();
-    let temp_file = TempFileBuilder::new()
-        .prefix("tola_typst_")
-        .suffix(".html")
-        .tempfile()?;
 
-    exec!(
-        pty=true;
+    let output = exec!(
+        pty=false;
         filter=&TYPST_FILTER;
         &config.build.typst.command;
         "compile", "--features", "html", "--format", "html",
         "--font-path", root, "--root", root,
-        source, temp_file.path()
+        source, "-"
     )?;
 
-    Ok(fs::read(temp_file.path())?)
+    Ok(output.stdout)
 }
 
 /// Query metadata using typst CLI.
@@ -604,5 +599,41 @@ mod tests {
         assert!(page.is_ok());
         let page = page.unwrap();
         assert_eq!(page.paths.relative, "posts/hello");
+    }
+
+    #[test]
+    fn test_compile_cli_pipe() {
+        // Skip if typst not available
+        if std::process::Command::new("typst").arg("--version").output().is_err() {
+            eprintln!("Skipping test_compile_cli_pipe: typst not found");
+            return;
+        }
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test_pipe.typ");
+
+        fs::write(&file_path, "Hello Pipe").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.typst.use_lib = false; // Enable CLI mode
+        config.set_root(dir.path());
+
+        // compile_meta calls compile_cli internally when use_lib is false
+        let result = compile_meta(&file_path, &config);
+
+        match result {
+            Ok((html, _)) => {
+                let html_str = String::from_utf8_lossy(&html);
+                assert!(!html.is_empty(), "Captured stdout should not be empty");
+                // Typst HTML output usually contains the content
+                assert!(html_str.contains("Hello Pipe"), "Output should contain content. Got: {}", html_str);
+            }
+            Err(e) => {
+                 // Fail the test if Typst exists but compilation fails (e.g. pipe error)
+                 // Unless it's a version mismatch/feature missing issue.
+                 // We will panic to signal failure.
+                 panic!("CLI compilation failed: {}", e);
+            }
+        }
     }
 }

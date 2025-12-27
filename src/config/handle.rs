@@ -66,22 +66,50 @@ pub fn cfg() -> Arc<SiteConfig> {
     CONFIG.load_full()
 }
 
+/// Global hash of the current config file content.
+static CONFIG_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Replace config atomically (called when tola.toml changes).
 ///
 /// Reads CLI from current config to reload, ensuring consistent access.
 /// The old config remains valid for any readers that loaded it before this call.
 /// New readers will see the updated config.
 ///
+/// Returns `true` if config was actually updated, `false` if content matches last load.
+///
 /// # Errors
 ///
 /// Returns error if tola.toml parsing fails.
-pub fn reload_config() -> anyhow::Result<()> {
-    let cli = cfg()
-        .cli
-        .expect("CLI should be set in config during initialization");
+pub fn reload_config() -> anyhow::Result<bool> {
+    use std::fs;
+
+    let c = cfg();
+    let cli = c.cli.expect("CLI should be set in config during initialization");
+
+    // Read raw content to check for changes
+    // Using config_path form current config which is absolute path
+    // If reading fails, bubble up error (file might be deleted temporarily)
+    let content = fs::read_to_string(&c.config_path)?;
+
+    // Compute hash
+    let new_hash = crate::utils::hash::compute(content.as_bytes());
+
+    // Check against cached hash
+    let old_hash = CONFIG_HASH.load(std::sync::atomic::Ordering::Relaxed);
+    if new_hash == old_hash {
+        return Ok(false);
+    }
+
+    // Parse and update
+    // Note: SiteConfig::load internally reads the file again, which is acceptable
+    // given config size is small and reload is infrequent event.
+    // Optimizing to pass content would require changing SiteConfig::load API.
     let new_config = SiteConfig::load(cli)?;
+
     CONFIG.store(Arc::new(new_config));
-    Ok(())
+    CONFIG_HASH.store(new_hash, std::sync::atomic::Ordering::Relaxed);
+
+    Ok(true)
 }
 
 /// Initialize global config (called once at startup).
@@ -89,6 +117,16 @@ pub fn reload_config() -> anyhow::Result<()> {
 /// This replaces the default config with the loaded one.
 #[inline]
 pub fn init_config(config: SiteConfig) {
+    use std::fs;
+
+    // Initialize hash if file exists
+    if config.config_path.exists() {
+        if let Ok(content) = fs::read_to_string(&config.config_path) {
+            let hash = crate::utils::hash::compute(content.as_bytes());
+            CONFIG_HASH.store(hash, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     CONFIG.store(Arc::new(config));
 }
 
