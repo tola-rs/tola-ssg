@@ -68,18 +68,21 @@ pub struct BuildArgs {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Init a template site
+    #[command(visible_alias = "i")]
     Init {
         /// the name(path) of site directory, related to `root`
         name: Option<PathBuf>,
     },
 
     /// Deletes the output directory if there is one and rebuilds the site
+    #[command(visible_alias = "b")]
     Build {
         #[command(flatten)]
         build_args: BuildArgs,
     },
 
     /// Serve the site. Rebuild and reload on change automatically
+    #[command(visible_alias = "s")]
     Serve {
         #[command(flatten)]
         build_args: BuildArgs,
@@ -98,6 +101,7 @@ pub enum Commands {
     },
 
     /// Deletes the output directory if there is one and rebuilds the site
+    #[command(visible_alias = "d")]
     Deploy {
         /// enable watch
         #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
