@@ -798,16 +798,12 @@ mod tests {
             content = "posts"
             output = "dist"
             assets = "static"
-            templates = "layouts"
-            utils = "lib"
         "#;
         let config: SiteConfig = toml::from_str(config).unwrap();
 
         assert_eq!(config.build.content, PathBuf::from("posts"));
         assert_eq!(config.build.output, PathBuf::from("dist"));
         assert_eq!(config.build.assets, PathBuf::from("static"));
-        assert_eq!(config.build.templates, PathBuf::from("layouts"));
-        assert_eq!(config.build.utils, PathBuf::from("lib"));
     }
 
     #[test]

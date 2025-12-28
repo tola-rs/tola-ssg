@@ -92,6 +92,33 @@ fn parse_size_string(s: &str) -> usize {
     multiplier * value
 }
 
+/// Extract path component from a URL string.
+///
+/// Parses the URL and returns the path without leading/trailing slashes.
+/// Returns `None` if the URL is invalid.
+///
+/// # Examples
+/// ```ignore
+/// extract_url_path("https://example.github.io/my-project/") → Some("my-project")
+/// extract_url_path("https://example.github.io/a/b/c")       → Some("a/b/c")
+/// extract_url_path("https://example.com")                   → Some("")
+/// extract_url_path("invalid")                               → None
+/// ```
+fn extract_url_path(url: &str) -> Option<String> {
+    // Find the host part: after "://" and before the next "/"
+    let after_scheme = url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+
+    // Split at the first "/" to separate host from path
+    let path = match after_scheme.find('/') {
+        Some(idx) => &after_scheme[idx..],
+        None => return Some(String::new()), // No path, e.g., "https://example.com"
+    };
+
+    // Trim leading and trailing slashes
+    Some(path.trim_matches('/').to_string())
+}
+
 /// Find config file by searching upward from current directory.
 ///
 /// Starts from cwd and walks up parent directories until finding `config_name`.
@@ -325,6 +352,14 @@ impl SiteConfig {
         // Override base URL if provided via CLI
         if let Some(ref url) = args.base_url {
             self.base.url = Some(url.clone());
+
+            // Extract path from URL and set as path_prefix
+            // e.g., "https://example.github.io/my-project/foo" → "my-project/foo"
+            if let Some(path) = extract_url_path(url) {
+                if !path.is_empty() {
+                    self.build.path_prefix = PathBuf::from(path);
+                }
+            }
         }
 
         if is_serve {
@@ -571,6 +606,42 @@ mod tests {
         // Edge cases
         assert_eq!(parse_size_string("0KB"), 0);
         assert_eq!(parse_size_string("invalid"), 0);
+    }
+
+    #[test]
+    fn test_extract_url_path() {
+        // Standard GitHub Pages subpath
+        assert_eq!(
+            extract_url_path("https://example.github.io/my-project/"),
+            Some("my-project".to_string())
+        );
+
+        // Multiple path components
+        assert_eq!(
+            extract_url_path("https://example.github.io/a/b/c"),
+            Some("a/b/c".to_string())
+        );
+
+        // Root path (no subpath)
+        assert_eq!(
+            extract_url_path("https://example.com"),
+            Some(String::new())
+        );
+
+        // Root path with trailing slash
+        assert_eq!(
+            extract_url_path("https://example.com/"),
+            Some(String::new())
+        );
+
+        // HTTP scheme
+        assert_eq!(
+            extract_url_path("http://localhost/blog/posts"),
+            Some("blog/posts".to_string())
+        );
+
+        // Invalid URL (no scheme)
+        assert_eq!(extract_url_path("invalid-url"), None);
     }
 
     #[test]

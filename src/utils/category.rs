@@ -168,8 +168,7 @@ mod tests {
         assert_eq!(FileCategory::Content.name(), "content");
         assert_eq!(FileCategory::Asset.name(), "assets");
         assert_eq!(FileCategory::Config.name(), "config");
-        assert_eq!(FileCategory::Template.name(), "templates");
-        assert_eq!(FileCategory::Utils.name(), "utils");
+        assert_eq!(FileCategory::Deps.name(), "deps");
         assert_eq!(FileCategory::Unknown.name(), "unknown");
     }
 
@@ -178,8 +177,7 @@ mod tests {
         // Directory-based categories
         assert!(FileCategory::Content.is_directory());
         assert!(FileCategory::Asset.is_directory());
-        assert!(FileCategory::Template.is_directory());
-        assert!(FileCategory::Utils.is_directory());
+        assert!(FileCategory::Deps.is_directory());
 
         // Single file or unknown
         assert!(!FileCategory::Config.is_directory());

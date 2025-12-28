@@ -1,0 +1,11 @@
+[base]
+title = "Test Site"
+description = "Testing base URL"
+
+[build]
+content = "content"
+output = "public"
+assets = "assets"
+
+[build.css]
+auto_enhance = true

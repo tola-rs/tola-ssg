@@ -215,8 +215,9 @@ pub fn build_site(config: &SiteConfig, quiet: bool) -> Result<(ThreadSafeReposit
 
     // Generate auto-enhance CSS if enabled
     if config.build.css.auto_enhance {
-        css::cleanup_old_enhance_css(&config.build.output)?;
-        css::generate_enhance_css(&config.build.output)?;
+        let enhance_output_dir = config.build.output.join(&config.build.path_prefix);
+        css::cleanup_old_enhance_css(&enhance_output_dir)?;
+        css::generate_enhance_css(&enhance_output_dir)?;
     }
 
     if !quiet {
