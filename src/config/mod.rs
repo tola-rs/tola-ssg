@@ -39,7 +39,11 @@ pub mod defaults;
 mod deploy;
 mod error;
 pub mod handle;
+mod paths;
 mod serve;
+
+// Re-export PathResolver for external use
+pub use paths::PathResolver;
 
 // Re-export public types used by other modules
 pub use build::{BuildConfig, ExtractSvgType, SlugCase, SlugMode, SlugSeparator};
@@ -318,6 +322,21 @@ impl SiteConfig {
     /// Used for SVG rendering resolution calculation.
     pub fn get_scale(&self) -> f32 {
         self.build.typst.svg.dpi / 96.0
+    }
+
+    /// Get path resolver for consistent path/URL generation.
+    ///
+    /// This is the single source of truth for all path operations,
+    /// eliminating manual `path_prefix` handling throughout the codebase.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let paths = config.paths();
+    /// let output_dir = paths.output_dir();
+    /// let url = paths.url_for_filename("styles.css");
+    /// ```
+    pub fn paths(&self) -> PathResolver<'_> {
+        PathResolver::new(&self.build.output, &self.build.path_prefix)
     }
 
     // ========================================================================

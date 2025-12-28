@@ -38,18 +38,18 @@ pub fn process_link_value(value: &[u8], config: &SiteConfig) -> Result<Cow<'stat
 /// | `//example.com` | `//example.com` (protocol-relative) |
 #[allow(clippy::unnecessary_wraps)] // Result for API consistency
 pub fn process_absolute_link(value: &str, config: &SiteConfig) -> Result<String> {
-    let path_prefix = &config.build.path_prefix;
+    let paths = config.paths();
 
     if is_asset_link(value, config) {
         let value = value.trim_start_matches('/');
-        return Ok(format!("/{}", path_prefix.join(value).display()));
+        return Ok(paths.url_for_rel_path(value));
     }
 
     let (path, fragment) = value.split_once('#').unwrap_or((value, ""));
     let path = path.trim_start_matches('/');
     let slugified_path = slugify_path(path, config);
 
-    let mut result = format!("/{}", path_prefix.join(&slugified_path).display());
+    let mut result = paths.url_for_rel_path(&slugified_path);
     if !fragment.is_empty() {
         result.push('#');
         result.push_str(&slugify_fragment(fragment, config));

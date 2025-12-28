@@ -109,7 +109,7 @@ impl AssetMeta {
     /// Create `AssetMeta` from a source path.
     pub fn from_source(source: PathBuf, config: &SiteConfig) -> Result<Self> {
         let assets_dir = &config.build.assets;
-        let output_dir = config.build.output.join(&config.build.path_prefix);
+        let output_dir = config.paths().output_dir();
 
         let relative = source
             .strip_prefix(assets_dir)
@@ -239,8 +239,8 @@ impl PageMeta {
     /// - File is not a .typ file
     pub fn from_paths(source: PathBuf, config: &SiteConfig) -> Result<Self> {
         let content_dir = &config.build.content;
-        let path_prefix = &config.build.path_prefix;
-        let output_dir = config.build.output.join(path_prefix);
+        let paths = config.paths();
+        let output_dir = paths.output_dir();
         let base_url = config
             .base
             .url

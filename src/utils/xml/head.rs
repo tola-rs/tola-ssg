@@ -53,11 +53,7 @@ pub fn write_head_content(writer: &mut XmlWriter, config: &SiteConfig) -> Result
     // Auto-enhance CSS (SVG theme adaptation)
     if config.build.css.auto_enhance {
         let filename = css::enhance_css_filename();
-        let href = if config.build.path_prefix.as_os_str().is_empty() {
-            format!("/{}", filename)
-        } else {
-            format!("/{}/{}", config.build.path_prefix.display(), filename)
-        };
+        let href = config.paths().url_for_filename(&filename);
         write_empty_elem(writer, "link", &[("rel", "stylesheet"), ("href", &href)])?;
     }
 

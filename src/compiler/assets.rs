@@ -52,7 +52,7 @@ pub fn process_rel_asset(
     log_file: bool,
 ) -> Result<()> {
     let content = &config.build.content;
-    let output = &config.build.output.join(&config.build.path_prefix);
+    let output = config.paths().output_dir();
 
     let rel_path = path
         .strip_prefix(content)?
