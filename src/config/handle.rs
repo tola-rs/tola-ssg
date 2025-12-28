@@ -120,12 +120,11 @@ pub fn init_config(config: SiteConfig) {
     use std::fs;
 
     // Initialize hash if file exists
-    if config.config_path.exists() {
-        if let Ok(content) = fs::read_to_string(&config.config_path) {
+    if config.config_path.exists()
+        && let Ok(content) = fs::read_to_string(&config.config_path) {
             let hash = crate::utils::hash::compute(content.as_bytes());
             CONFIG_HASH.store(hash, std::sync::atomic::Ordering::Relaxed);
         }
-    }
 
     CONFIG.store(Arc::new(config));
 }

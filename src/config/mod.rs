@@ -374,11 +374,10 @@ impl SiteConfig {
 
             // Extract path from URL and set as path_prefix
             // e.g., "https://example.github.io/my-project/foo" → "my-project/foo"
-            if let Some(path) = extract_url_path(url) {
-                if !path.is_empty() {
+            if let Some(path) = extract_url_path(url)
+                && !path.is_empty() {
                     self.build.path_prefix = PathBuf::from(path);
                 }
-            }
         }
 
         if is_serve {

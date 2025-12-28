@@ -56,6 +56,7 @@ impl<'a> PathResolver<'a> {
     /// - Git repository initialization
     /// - Top-level files like `.gitignore`, `.ignore`
     #[inline]
+    #[allow(dead_code)] // Reserved API
     pub const fn output_root(&self) -> &Path {
         self.output
     }
@@ -77,6 +78,7 @@ impl<'a> PathResolver<'a> {
 
     /// Get the path prefix.
     #[inline]
+    #[allow(dead_code)] // Reserved API
     pub const fn prefix(&self) -> &Path {
         self.prefix
     }
@@ -127,6 +129,7 @@ impl<'a> PathResolver<'a> {
     /// // Output root: /home/user/public
     /// // Result: /my-project/css/app.css
     /// ```
+    #[allow(dead_code)] // Reserved API
     pub fn url_for_path(&self, path: &Path) -> Option<String> {
         let rel = path.strip_prefix(self.output).ok()?;
         let path_str = rel.to_string_lossy().replace('\\', "/");

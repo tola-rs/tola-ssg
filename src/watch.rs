@@ -119,13 +119,11 @@ impl ContentCache {
 
                 for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
                     let path = entry.path();
-                    if path.is_file() && !is_temp_file(path) {
-                        if let Ok(file) = std::fs::File::open(path) {
-                            if let Ok(hash) = crate::utils::hash::compute_reader(file) {
+                    if path.is_file() && !is_temp_file(path)
+                        && let Ok(file) = std::fs::File::open(path)
+                            && let Ok(hash) = crate::utils::hash::compute_reader(file) {
                                 self.hashes.insert(path.to_path_buf(), hash);
                             }
-                        }
-                    }
                 }
             }
         }
@@ -325,11 +323,10 @@ fn handle_changes(paths: &[PathBuf], status: &mut WatchStatus, root: &Path) -> b
             .filter(|p| !processed_content.contains(p))
             .collect();
 
-        if !virtual_dependents.is_empty() {
-            if let Err(e) = process_watched_files(&virtual_dependents, &cfg(), false) {
+        if !virtual_dependents.is_empty()
+            && let Err(e) = process_watched_files(&virtual_dependents, &cfg(), false) {
                 status.error("failed: site data update", &e.to_string());
             }
-        }
     }
 
     // Evict stale entries from typst's comemo memoization cache
@@ -505,11 +502,10 @@ pub fn watch_for_changes_blocking() -> Result<()> {
                 }
 
                 // Process changed files
-                if !result.changed.is_empty() {
-                    if handle_changes(&result.changed, &mut status, &root) {
+                if !result.changed.is_empty()
+                    && handle_changes(&result.changed, &mut status, &root) {
                         debouncer.mark_rebuild();
                     }
-                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             _ => {}
