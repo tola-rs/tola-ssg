@@ -105,11 +105,17 @@ pub struct HtmlContext<'a> {
     pub html_path: &'a Path,
     pub svg_count: usize,
     pub extract_svg: bool,
+    /// Whether the source file was named "index.typ".
+    ///
+    /// This affects relative path resolution:
+    /// - `index.typ` → `dir/index.html` (same level, no adjustment needed)
+    /// - `foo.typ` → `foo/index.html` (one level deeper, needs `../` prefix)
+    pub is_source_index: bool,
 }
 
 impl<'a> HtmlContext<'a> {
     #[allow(clippy::missing_const_for_fn)] // matches! macro is not const
-    pub fn new(config: &'a SiteConfig, html_path: &'a Path) -> Self {
+    pub fn new(config: &'a SiteConfig, html_path: &'a Path, is_source_index: bool) -> Self {
         Self {
             config,
             html_path,
@@ -118,6 +124,7 @@ impl<'a> HtmlContext<'a> {
                 config.build.typst.svg.extract_type,
                 ExtractSvgType::Embedded
             ),
+            is_source_index,
         }
     }
 }
@@ -171,7 +178,7 @@ mod tests {
         // Embedded mode: don't extract
         config.build.typst.svg.extract_type = ExtractSvgType::Embedded;
         let config = Box::leak(Box::new(config));
-        let ctx = HtmlContext::new(config, Path::new("/test.html"));
+        let ctx = HtmlContext::new(config, Path::new("/test.html"), true);
         assert!(!ctx.extract_svg);
     }
 }

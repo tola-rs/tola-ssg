@@ -20,8 +20,9 @@ pub fn process_html(
     html_path: &Path,
     content: &[u8],
     config: &SiteConfig,
+    is_source_index: bool,
 ) -> Result<Vec<u8>> {
-    let mut ctx = HtmlContext::new(config, html_path);
+    let mut ctx = HtmlContext::new(config, html_path, is_source_index);
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(content.len())));
     let mut reader = create_xml_reader(content);
     let mut svgs = Vec::new();
@@ -70,9 +71,9 @@ fn handle_start_element(
             }
         }
         b"img" if ctx.config.build.css.auto_enhance => {
-            write_img_with_color_invert(elem, writer, ctx.config)?;
+            write_img_with_color_invert(elem, writer, ctx)?;
         }
-        _ => write_element_with_processed_links(elem, writer, ctx.config)?,
+        _ => write_element_with_processed_links(elem, writer, ctx)?,
     }
     Ok(())
 }
@@ -123,11 +124,11 @@ pub fn write_heading_with_slugified_id(
 pub fn write_element_with_processed_links(
     elem: &BytesStart<'_>,
     writer: &mut XmlWriter,
-    config: &SiteConfig,
+    ctx: &HtmlContext<'_>,
 ) -> Result<()> {
     let new_elem = rebuild_elem_try(elem, |key, value| {
         if matches!(key, b"href" | b"src") {
-            process_link_value(&value, config)
+            process_link_value(&value, ctx.config, ctx.is_source_index)
         } else {
             Ok(value.into_owned().into())
         }
@@ -144,7 +145,7 @@ pub fn write_element_with_processed_links(
 pub fn write_img_with_color_invert(
     elem: &BytesStart<'_>,
     writer: &mut XmlWriter,
-    config: &SiteConfig,
+    ctx: &HtmlContext<'_>,
 ) -> Result<()> {
     // Check if this is an SVG image
     let is_svg = elem.attributes().filter_map(|a| a.ok()).any(|attr| {
@@ -156,7 +157,7 @@ pub fn write_img_with_color_invert(
 
     // For non-SVG images, just process links normally
     if !is_svg {
-        return write_element_with_processed_links(elem, writer, config);
+        return write_element_with_processed_links(elem, writer, ctx);
     }
 
     // For SVG images, add color-invert class
@@ -164,7 +165,7 @@ pub fn write_img_with_color_invert(
 
     let new_elem = rebuild_elem_try(elem, |key, value| {
         match key {
-            b"src" => process_link_value(&value, config),
+            b"src" => process_link_value(&value, ctx.config, ctx.is_source_index),
             b"class" => {
                 has_class = true;
                 // Append color-invert to existing classes

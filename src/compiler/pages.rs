@@ -135,7 +135,11 @@ fn write_page(
     };
 
     // Post-process and write
-    let html_content = process_html(&page.paths.html, &html_content, config)?;
+    // Check if the source file was named "index.typ" for relative path resolution
+    let is_source_index = page.paths.source
+        .file_stem()
+        .is_some_and(|stem| stem == "index");
+    let html_content = process_html(&page.paths.html, &html_content, config, is_source_index)?;
     let html_content = minify(MinifyType::Html(&html_content), config);
     fs::write(&page.paths.html, &*html_content)?;
 
