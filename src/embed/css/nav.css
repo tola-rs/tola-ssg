@@ -1,0 +1,23 @@
+/* View Transitions - site.nav.transition */
+::view-transition-old(root),
+::view-transition-new(root) {
+    animation-duration: __TRANSITION_TIME__ms;
+}
+
+::view-transition-old(root) {
+    animation-name: tola-fade-out;
+}
+
+::view-transition-new(root) {
+    animation-name: tola-fade-in;
+}
+
+@keyframes tola-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes tola-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}

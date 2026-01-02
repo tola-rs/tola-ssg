@@ -1,0 +1,38 @@
+/* Typst SVG Color Adaptation */
+
+.typst-text use[fill="#000000"] {
+    fill: currentColor;
+}
+
+.typst-group use[fill="#000000"] {
+    fill: currentColor;
+}
+
+path.typst-shape[fill="#000000"] {
+    fill: currentColor;
+}
+
+path.typst-shape[stroke="#000000"] {
+    stroke: currentColor;
+}
+
+/* Tola Math/Table Layout */
+
+.tola-block-math {
+    display: flex;
+    justify-content: center;
+    width: 100%;
+    margin: 1em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.tola-inline-math {
+    display: inline;
+}
+
+.tola-table {
+    margin: 1em 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
