@@ -1,196 +1,100 @@
-//! CSS utilities: auto-enhance generation and Tailwind integration.
+//! CSS utilities: CSS processor integration.
 //!
-//! This module provides:
-//! - Auto-enhanced CSS generation for SVG theme adaptation
-//! - Tailwind CSS build integration
+//! This module provides CSS processor (e.g., Tailwind) build integration.
+//! CSS processor is syntax sugar for a pre hook.
 
 use crate::config::SiteConfig;
-use crate::exec;
-use crate::utils::exec::FilterRule;
+use crate::config::section::build::{HookConfig, WatchMode};
+use crate::core::BuildMode;
 use anyhow::{Result, anyhow};
-use std::{
-    fs,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 // ============================================================================
-// Auto-enhance CSS
+// CSS Processor
 // ============================================================================
 
-/// CSS content for SVG theme adaptation and dark mode support.
-/// Loaded from `src/embed/css/enhance.css` at compile time.
-const ENHANCE_CSS: &str = include_str!("../embed/css/enhance.css");
-
-/// Compute the hash for the enhance CSS content.
-fn compute_hash() -> String {
-    crate::utils::hash::fingerprint(ENHANCE_CSS)
-}
-
-/// Get the enhance CSS filename (hidden file with hash).
-///
-/// Returns a filename like `.enhance-a1b2c3d4.css`.
-pub fn enhance_css_filename() -> String {
-    format!(".enhance-{}.css", compute_hash())
-}
-
-/// Generate and write the auto-enhance CSS file to the output directory.
-///
-/// Returns the relative path to the generated file.
-pub fn generate_enhance_css(output_dir: &Path) -> Result<PathBuf> {
-    let filename = enhance_css_filename();
-    let path = output_dir.join(&filename);
-
-    // Write CSS file
-    let mut file = fs::File::create(&path)?;
-    file.write_all(ENHANCE_CSS.as_bytes())?;
-
-    Ok(PathBuf::from(filename))
-}
-
-/// Clean up old enhance CSS files (files matching `.enhance-*.css` pattern).
-///
-/// Keeps only the current version based on hash.
-pub fn cleanup_old_enhance_css(output_dir: &Path) -> Result<()> {
-    let current_filename = enhance_css_filename();
-
-    for entry in fs::read_dir(output_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Match pattern: .enhance-{hash}.css but not current file
-        if name_str.starts_with(".enhance-")
-            && name_str.ends_with(".css")
-            && name_str != current_filename
-        {
-            fs::remove_file(entry.path())?;
-        }
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// Tailwind CSS
-// ============================================================================
-
-/// Tailwind filter: skip version banner in output.
-pub static TAILWIND_FILTER: FilterRule = FilterRule::new(&["≈ tailwindcss"]);
-
-/// Check if a path is the Tailwind input file.
-pub fn is_tailwind_input(path: &Path, config: &SiteConfig) -> bool {
-    config.build.css.tailwind.enable
+/// Check if a path is the CSS processor input file.
+pub fn is_css_processor_input(path: &Path, config: &SiteConfig) -> bool {
+    config.build.css.processor.enable
         && config
             .build
             .css
-            .tailwind
+            .processor
             .input
             .as_ref()
-            .is_some_and(|input| path.canonicalize().ok().as_ref() == Some(input))
+            .is_some_and(|input| {
+                // Compare normalized paths (input is already normalized in config)
+                crate::utils::path::normalize_path(path) == *input
+            })
 }
 
-/// Run Tailwind CSS build for the input file.
-pub fn run_tailwind(input: &Path, output: &Path, config: &SiteConfig, quiet: bool) -> Result<()> {
-    use super::exec::{FilterRule, SILENT_FILTER};
-    let filter: &'static FilterRule = if quiet {
-        &SILENT_FILTER
+/// Build a HookConfig from CSS processor configuration.
+pub fn build_css_processor_hook(config: &SiteConfig, output: &Path) -> Result<HookConfig> {
+    let processor = &config.build.css.processor;
+    let input = processor
+        .input
+        .as_ref()
+        .ok_or_else(|| anyhow!("CSS processor input not configured"))?;
+
+    // Build command: command + ["-i", input, "-o", output]
+    let mut command: Vec<String> = processor.command.clone();
+    command.extend([
+        "-i".into(),
+        input.display().to_string(),
+        "-o".into(),
+        output.display().to_string(),
+    ]);
+
+    // Build args: --minify (only in build mode)
+    let build_args = if config.build.minify {
+        vec!["--minify".into()]
     } else {
-        &TAILWIND_FILTER
+        vec![]
     };
-    exec!(
-        pty=true;
-        filter=filter;
-        config.get_root();
-        &config.build.css.tailwind.command;
-        "-i", input, "-o", output,
-        if config.build.minify { "--minify" } else { "" }
-    )?;
-    Ok(())
+
+    Ok(HookConfig {
+        enable: true,
+        name: Some("css".into()),
+        command,
+        watch: WatchMode::Bool(true),
+        build_args,
+        quiet: processor.quiet,
+    })
 }
 
-/// Rebuild Tailwind CSS using configured input path.
+/// Run CSS processor as a pre hook.
+pub fn run_css_processor(
+    config: &SiteConfig,
+    output: &Path,
+    mode: BuildMode,
+    with_build_args: bool,
+) -> Result<()> {
+    // Ensure output directory exists (CSS processor runs before assets are copied)
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let hook = build_css_processor_hook(config, output)?;
+    super::hooks::run_hook(&hook, config, mode, with_build_args, "pre")
+}
+
+/// Rebuild CSS using configured input path.
 ///
 /// Used by watch mode to rebuild when source files change.
-/// When `quiet` is true, output is suppressed (for watch mode).
-pub fn rebuild_tailwind(
+pub fn rebuild_css_processor(
     config: &SiteConfig,
     get_output_path: impl FnOnce(&Path) -> Result<PathBuf>,
-    quiet: bool,
+    mode: BuildMode,
+    with_build_args: bool,
 ) -> Result<()> {
     let input = config
         .build
         .css
-        .tailwind
+        .processor
         .input
         .as_ref()
-        .ok_or_else(|| anyhow!("Tailwind input path not configured"))?;
+        .ok_or_else(|| anyhow!("CSS processor input path not configured"))?;
 
     let output = get_output_path(input)?;
-    run_tailwind(input, &output, config, quiet)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_enhance_css_filename_format() {
-        let filename = enhance_css_filename();
-        assert!(filename.starts_with(".enhance-"));
-        assert!(filename.ends_with(".css"));
-        assert_eq!(filename.len(), ".enhance-12345678.css".len());
-    }
-
-    #[test]
-    fn test_enhance_css_filename_stable() {
-        // Same content should produce same hash
-        let f1 = enhance_css_filename();
-        let f2 = enhance_css_filename();
-        assert_eq!(f1, f2);
-    }
-
-    #[test]
-    fn test_generate_enhance_css() {
-        let dir = tempdir().unwrap();
-        let result = generate_enhance_css(dir.path()).unwrap();
-
-        // Check filename format
-        let filename = result.to_string_lossy();
-        assert!(filename.starts_with(".enhance-"));
-        assert!(filename.ends_with(".css"));
-
-        // Check file exists and has content
-        let content = fs::read_to_string(dir.path().join(&result)).unwrap();
-        assert!(content.contains("typst-text"));
-        assert!(content.contains("currentColor"));
-    }
-
-    #[test]
-    fn test_cleanup_old_enhance_css() {
-        let dir = tempdir().unwrap();
-
-        // Create some old files
-        fs::write(dir.path().join(".enhance-old1.css"), "old").unwrap();
-        fs::write(dir.path().join(".enhance-old2.css"), "old").unwrap();
-
-        // Generate current file
-        generate_enhance_css(dir.path()).unwrap();
-
-        // Cleanup
-        cleanup_old_enhance_css(dir.path()).unwrap();
-
-        // Only current file should remain
-        let files: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".enhance-"))
-            .collect();
-        assert_eq!(files.len(), 1);
-        assert_eq!(
-            files[0].file_name().to_string_lossy(),
-            enhance_css_filename()
-        );
-    }
+    run_css_processor(config, &output, mode, with_build_args)
 }

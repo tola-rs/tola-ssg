@@ -142,6 +142,16 @@ impl DateTimeUtc {
         }
     }
 
+    /// Format as RFC 3339 (ISO 8601) for Atom feeds.
+    ///
+    /// Returns: `YYYY-MM-DDTHH:MM:SSZ`
+    pub fn to_rfc3339(self) -> String {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
+
     pub fn to_rfc2822(self) -> String {
         const WEEKDAYS: [&str; 7] = ["Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri"];
         const MONTHS: [&str; 12] = [

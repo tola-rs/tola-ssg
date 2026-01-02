@@ -1,4 +1,3 @@
-use crate::{init::init_ignored_files, log};
 use anyhow::{Result, anyhow, bail};
 use gix::{Repository, ThreadSafeRepository, commit::NO_PARENT_IDS, index::State};
 use std::{fs, path::Path};
@@ -8,7 +7,6 @@ use super::tree::TreeBuilder;
 /// Create a new git repository at the given path
 pub fn create_repo(root: &Path) -> Result<ThreadSafeRepository> {
     let repo = gix::init(root)?;
-    init_ignored_files(root, &[Path::new(".DS_Store")])?;
     Ok(repo.into_sync())
 }
 
@@ -19,7 +17,7 @@ pub fn open_repo(root: &Path) -> Result<ThreadSafeRepository> {
 }
 
 /// Commit all changes in the repository
-pub fn commit_all(repo: &ThreadSafeRepository, message: &str) -> Result<()> {
+pub fn commit_all(repo: &ThreadSafeRepository, message: &str) -> Result<gix::ObjectId> {
     if message.trim().is_empty() {
         bail!("Commit message cannot be empty");
     }
@@ -42,8 +40,7 @@ pub fn commit_all(repo: &ThreadSafeRepository, message: &str) -> Result<()> {
     let parent_ids = get_parent_commit_ids(repo)?;
     let commit_id = repo_local.commit("HEAD", message, tree_id, parent_ids)?;
 
-    log!("git"; "commit {commit_id}");
-    Ok(())
+    Ok(commit_id.detach())
 }
 
 /// Get repository root path
@@ -100,7 +97,6 @@ mod tests {
     fn test_create_and_open_repo() {
         with_temp_repo(|dir, _repo| {
             assert!(dir.join(".git").exists());
-            assert!(dir.join(".gitignore").exists()); // Created by init_ignored_files
 
             let opened = open_repo(dir);
             assert!(opened.is_ok());
@@ -152,17 +148,6 @@ mod tests {
 
             let content = read_gitignore(dir).unwrap();
             assert_eq!(String::from_utf8_lossy(&content).trim(), "*.log");
-        });
-    }
-
-    #[test]
-    fn test_read_gitignore_missing() {
-        with_temp_repo(|dir, _repo| {
-            let gitignore_path = dir.join(".gitignore");
-            fs::remove_file(gitignore_path).unwrap();
-
-            let content = read_gitignore(dir).unwrap();
-            assert!(content.is_empty());
         });
     }
 }

@@ -1,0 +1,15 @@
+<svg style="display:none" aria-hidden="true">
+  <defs>
+    <filter id="tola-recolor" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values=".33 .33 .33 0 0
+                                           .33 .33 .33 0 0
+                                           .33 .33 .33 0 0
+                                            0   0   0  1 0"/>
+      <feComponentTransfer>
+        <feFuncR type="table" tableValues="0 1"/>
+        <feFuncG type="table" tableValues="0 1"/>
+        <feFuncB type="table" tableValues="0 1"/>
+      </feComponentTransfer>
+    </filter>
+  </defs>
+</svg>

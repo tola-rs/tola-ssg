@@ -1,53 +1,58 @@
-//! Compilation and asset processing for static site generation.
-//!
-//! This module orchestrates the build pipeline:
-//!
-//! - **pages**: Compile `.typ` files to HTML
-//! - **meta**: Extract and process page metadata
-//! - **assets**: Copy and optimize static assets
-//! - **watch**: Incremental builds on file changes
-//! - **deps**: Dependency tracking for precise rebuilds
-//!
-//! # Build Flow
-//!
-//! ```text
-//! collect_pages() ──► compile_pages() ──► process_asset()
-//!       │                   │                  │
-//!       ▼                   ▼                  ▼
-//!   PageMeta[]         HTML files        Asset files
-//! ```
+//! Compilation for static site generation.
 
-pub mod assets;
-pub mod deps;
-pub mod meta;
-pub mod pages;
-pub mod watch;
+pub mod dependency;
+pub mod family;
+pub mod page;
+pub mod scheduler;
 
+use jwalk::WalkDir;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
-use walkdir::WalkDir;
 
-// ============================================================================
-// Public API
-// ============================================================================
+use crate::config::SiteConfig;
+use crate::core::BuildMode;
+use page::PageRoute;
 
-pub use assets::process_asset;
-pub use assets::process_rel_asset;
-pub use pages::collect_metadata;
-pub use pages::compile_pages_with_data;
-pub use watch::process_watched_files;
+pub use page::drain_warnings;
 
-// Legacy single-phase API (kept for potential future use)
-#[allow(unused_imports)]
-pub use pages::collect_pages;
-#[allow(unused_imports)]
-pub use pages::compile_pages;
+/// Context for the compilation pipeline.
+pub struct CompileContext<'a> {
+    pub mode: BuildMode,
+    pub config: &'a SiteConfig,
+    pub route: Option<&'a PageRoute>,
+    /// Whether to inject global header content (styles, scripts, elements).
+    /// Default: `true`. Set to `false` for pages like 404 that need
+    /// self-contained styles to avoid relative path issues.
+    pub global_header: bool,
+}
 
-// ============================================================================
-// Shared utilities
-// ============================================================================
+impl<'a> CompileContext<'a> {
+    pub fn new(mode: BuildMode, config: &'a SiteConfig) -> Self {
+        Self {
+            mode,
+            config,
+            route: None,
+            global_header: true,
+        }
+    }
 
-/// Files to ignore during directory traversal
+    pub fn with_route(mut self, route: &'a PageRoute) -> Self {
+        self.route = Some(route);
+        self
+    }
+
+    /// Set whether to inject global header content.
+    #[allow(dead_code)]
+    pub fn with_global_header(mut self, global_header: bool) -> Self {
+        self.global_header = global_header;
+        self
+    }
+
+    /// Get the permalink for StableId seeding.
+    pub fn permalink(&self) -> Option<&str> {
+        self.route.map(|r| r.permalink.as_str())
+    }
+}
+
 const IGNORED_FILES: &[&str] = &[".DS_Store"];
 
 /// Collect all files from a directory recursively.
@@ -60,37 +65,6 @@ pub fn collect_all_files(dir: &Path) -> Vec<PathBuf> {
             let name = e.file_name().to_str().unwrap_or_default();
             !IGNORED_FILES.contains(&name)
         })
-        .map(walkdir::DirEntry::into_path)
+        .map(|e| e.path())
         .collect()
-}
-
-/// Check if destination is up-to-date compared to source and dependencies.
-pub fn is_up_to_date(src: &Path, dst: &Path, deps_mtime: Option<SystemTime>) -> bool {
-    let Ok(src_meta) = src.metadata() else {
-        return false;
-    };
-    let Ok(dst_meta) = dst.metadata() else {
-        return false;
-    };
-
-    let Ok(src_time) = src_meta.modified() else {
-        return false;
-    };
-    let Ok(dst_time) = dst_meta.modified() else {
-        return false;
-    };
-
-    // Check if source is newer than destination
-    if src_time > dst_time {
-        return false;
-    }
-
-    // Check if any dependency is newer than destination
-    if let Some(deps) = deps_mtime
-        && deps > dst_time
-    {
-        return false;
-    }
-
-    true
 }

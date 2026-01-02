@@ -1,171 +1,72 @@
 //! Site configuration management for `tola.toml`.
 //!
+//! # Module Structure
+//!
+//! ```text
+//! config/
+//! ├── section/       # Configuration section definitions
+//! │   ├── build/     # [build] and sub-sections
+//! │   ├── deploy     # [deploy]
+//! │   ├── serve      # [serve]
+//! │   ├── site       # [site]
+//! │   └── validate   # [validate]
+//! ├── types/         # Utility types
+//! │   ├── error      # ConfigError
+//! │   ├── handle     # Global config handle
+//! │   └── path       # PathResolver
+//! └── mod.rs         # SiteConfig (this file)
+//! ```
+//!
 //! # Sections
 //!
-//! | Section     | Purpose                                      |
-//! |-------------|----------------------------------------------|
-//! | `[base]`    | Site metadata (title, author, url)           |
-//! | `[build]`   | Build paths, typst, tailwind, rss, etc.      |
-//! | `[serve]`   | Development server (port, interface, watch)  |
-//! | `[deploy]`  | Deployment targets (GitHub, Cloudflare)      |
-//! | `[extra]`   | User-defined custom fields                   |
-//!
-//! # Example
-//!
-//! ```toml
-//! [base]
-//! title = "My Blog"
-//! description = "A personal blog"
-//! url = "https://example.com"
-//!
-//! [build]
-//! content = "content"
-//! output = "public"
-//! minify = true
-//!
-//! [build.rss]
-//! enable = true
-//!
-//! [serve]
-//! port = 5277
-//!
-//! [extra]
-//! analytics_id = "UA-12345"
-//! ```
+//! | Section            | Purpose                                      |
+//! |--------------------|----------------------------------------------|
+//! | `[site.info]`      | Site metadata (title, author, url, extra)    |
+//! | `[site.nav]`       | SPA navigation settings                      |
+//! | `[site.preload]`   | Link prefetch settings                       |
+//! | `[build]`          | Build paths, svg, css, feed, sitemap, etc.   |
+//! | `[serve]`          | Development server (port, interface, watch)  |
+//! | `[deploy]`         | Deployment targets (GitHub, Cloudflare)      |
+//! | `[validate]`       | Link and asset validation settings           |
 
-mod base;
-mod build;
-pub mod defaults;
-mod deploy;
-mod error;
-pub mod handle;
-mod paths;
-mod serve;
+pub mod section;
+pub mod types;
+mod util;
 
-// Re-export PathResolver for external use
-pub use paths::PathResolver;
+use util::{extract_url_path, find_config_file};
 
-// Re-export public types used by other modules
-pub use build::{BuildConfig, ExtractSvgType, SlugCase, SlugMode, SlugSeparator};
-pub use deploy::DeployConfig;
-pub use error::ConfigError;
-pub use handle::{cfg, init_config, reload_config};
+// Re-export from section/
+pub use section::{
+    AssetsConfig, BuildSectionConfig, DeployConfig, FeedFormat, SlugCase, SlugConfig, SlugMode,
+    SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
+};
 
-// Internal imports used in this module
-use base::BaseConfig;
-use serve::ServeConfig;
+// Re-export from types/
+pub use types::{
+    ConfigDiagnostics, ConfigError, FieldPath, PathResolver, cfg, clear_clean_flag, init_config,
+    reload_config,
+};
 
-use crate::cli::{BuildArgs, Cli, Commands};
+// Internal imports from section/
+use section::{ServeConfig, SiteSectionConfig, ThemeSectionConfig};
+
+use crate::{
+    cli::{BuildArgs, Cli, Commands, ValidateArgs},
+    log,
+};
 use anyhow::{Context, Result, bail};
-use educe::Educe;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
-
-// ============================================================================
-// helper functions
-// ============================================================================
-
-/// Parse a human-readable size string into bytes.
-///
-/// Supports suffixes: B (bytes), KB (kilobytes), MB (megabytes).
-/// Case-insensitive for the suffix.
-///
-/// # Examples
-/// ```ignore
-/// parse_size_string("20KB") // → 20480
-/// parse_size_string("5MB")  // → 5242880
-/// parse_size_string("100B") // → 100
-/// parse_size_string("100")  // → 100 (defaults to bytes)
-/// ```
-fn parse_size_string(s: &str) -> usize {
-    let s = s.to_uppercase();
-    let (multiplier, suffix_len) = if s.ends_with("MB") {
-        (1024 * 1024, 2)
-    } else if s.ends_with("KB") {
-        (1024, 2)
-    } else if s.ends_with('B') {
-        (1, 1)
-    } else {
-        (1, 0)
-    };
-    let value: usize = s[..s.len() - suffix_len].trim().parse().unwrap_or(0);
-    multiplier * value
-}
-
-/// Extract path component from a URL string.
-///
-/// Parses the URL and returns the path without leading/trailing slashes.
-/// Returns `None` if the URL is invalid.
-///
-/// # Examples
-/// ```ignore
-/// extract_url_path("https://example.github.io/my-project/") → Some("my-project")
-/// extract_url_path("https://example.github.io/a/b/c")       → Some("a/b/c")
-/// extract_url_path("https://example.com")                   → Some("")
-/// extract_url_path("file:///path/to/site")                  → Some("path/to/site")
-/// extract_url_path("invalid")                               → None
-/// ```
-fn extract_url_path(url: &str) -> Option<String> {
-    // Find the scheme separator "://"
-    let scheme_end = url.find("://")?;
-    let after_scheme = &url[scheme_end + 3..];
-
-    // Split at the first "/" to separate host from path
-    let path = match after_scheme.find('/') {
-        Some(idx) => &after_scheme[idx..],
-        None => return Some(String::new()), // No path, e.g., "https://example.com"
-    };
-
-    // Trim leading and trailing slashes
-    Some(path.trim_matches('/').to_string())
-}
-
-/// Find config file by searching upward from current directory.
-///
-/// Starts from cwd and walks up parent directories until finding `config_name`.
-/// Returns the absolute path to the config file if found.
-///
-/// # Example
-/// ```text
-/// /home/user/site/content/posts/  ← cwd
-/// /home/user/site/tola.toml       ← found!
-/// ```
-pub fn find_config_file(config_name: &Path) -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-
-    // First check if config_name is an absolute path or exists in cwd
-    if config_name.is_absolute() && config_name.exists() {
-        return Some(config_name.to_path_buf());
-    }
-
-    // Walk up from cwd looking for config file
-    let mut current = cwd.as_path();
-    loop {
-        let candidate = current.join(config_name);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-
-        // Move to parent directory
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return None, // Reached filesystem root
-        }
-    }
-}
 
 // ============================================================================
 // root configuration
 // ============================================================================
 
 /// Root configuration structure representing tola.toml
-#[derive(Debug, Clone, Educe, Serialize, Deserialize)]
-#[educe(Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteConfig {
     /// CLI arguments reference (internal use only)
     #[serde(skip)]
@@ -179,13 +80,17 @@ pub struct SiteConfig {
     #[serde(skip)]
     pub root: PathBuf,
 
-    /// Basic site information
+    /// Site configuration (info, nav, preload)
     #[serde(default)]
-    pub base: BaseConfig,
+    pub site: SiteSectionConfig,
+
+    /// Theme settings (recolor)
+    #[serde(default)]
+    pub theme: ThemeSectionConfig,
 
     /// Build settings
     #[serde(default)]
-    pub build: BuildConfig,
+    pub build: BuildSectionConfig,
 
     /// Development server settings
     #[serde(default)]
@@ -195,9 +100,25 @@ pub struct SiteConfig {
     #[serde(default)]
     pub deploy: DeployConfig,
 
-    /// User-defined extra fields
+    /// Validation settings
     #[serde(default)]
-    pub extra: HashMap<String, toml::Value>,
+    pub validate: ValidateConfig,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            cli: None,
+            config_path: PathBuf::new(),
+            root: PathBuf::new(),
+            site: SiteSectionConfig::default(),
+            theme: ThemeSectionConfig::default(),
+            build: BuildSectionConfig::default(),
+            serve: ServeConfig::default(),
+            deploy: DeployConfig::default(),
+            validate: ValidateConfig::default(),
+        }
+    }
 }
 
 impl SiteConfig {
@@ -208,33 +129,38 @@ impl SiteConfig {
     pub fn load(cli: &'static Cli) -> Result<Self> {
         let (config_path, exists) = Self::resolve_config_path(cli)?;
 
-        // Validate config existence
-        match (cli.is_init(), exists) {
-            (true, true) => {
-                bail!("Config file already exists. Remove it manually or init in a different path.")
-            }
-            (false, false) => bail!(
+        // Validate config existence (skip for init)
+        if !cli.is_init() && !exists {
+            log!(
+                "error";
                 "Config file '{}' not found. Run 'tola init' to create a new project.",
                 cli.config.display()
-            ),
-            _ => {}
+            );
+            std::process::exit(1);
         }
 
         // Load or create default config
-        let mut config = if exists {
+        let mut config = if exists && !cli.is_init() {
             Self::from_path(&config_path)?
         } else {
             Self::default()
         };
+
+        // Validate raw paths before normalization
+        if !cli.is_init() {
+            config.validate_paths()?;
+        }
 
         // Set paths and apply CLI options
         config.config_path = config_path;
         config.cli = Some(cli);
         config.finalize(cli);
 
-        // Validate (skip for init)
+        // Full validation (skip for init: no config file yet)
         if !cli.is_init() {
             config.validate()?;
+            // Filter out non-existent deps after validation warning
+            config.build.filter_existing_deps();
         }
 
         Ok(config)
@@ -242,7 +168,7 @@ impl SiteConfig {
 
     /// Resolve config file path based on command.
     fn resolve_config_path(cli: &Cli) -> Result<(PathBuf, bool)> {
-        let cwd = std::env::current_dir()?;
+        let cwd = std::env::current_dir().context("Failed to get current working directory")?;
 
         match &cli.command {
             Commands::Init { name: Some(name) } => {
@@ -284,31 +210,31 @@ impl SiteConfig {
         self.normalize_paths(&root);
         self.apply_command_options(cli);
 
-        // Extract path_prefix from base.url if not already set by CLI
+        // Extract path_prefix from site.url
         // This ensures path_prefix works for both:
-        // 1. CLI: --base-url "https://example.github.io/my-project"
-        // 2. Config: url = "https://example.github.io/my-project"
+        // - CLI: --site-url "https://example.github.io/my-project"
+        // - Config: [site.info] url = "https://example.github.io/my-project"
         self.sync_path_prefix_from_url();
+
+        // In serve mode, clear path_prefix unless respect_prefix is enabled
+        // This allows local development to access pages at / instead of /prefix/
+        if matches!(cli.command, Commands::Serve { .. }) && !self.serve.respect_prefix {
+            self.build.path_prefix = PathBuf::new();
+        }
     }
 
-    /// Sync path_prefix from base.url if not already set.
+    /// Derive path_prefix from site.info.url.
     ///
     /// This extracts the URL path component and sets it as path_prefix,
     /// enabling proper link generation for subdirectory deployments
     /// (e.g., GitHub Pages project sites).
     fn sync_path_prefix_from_url(&mut self) {
-        // Skip if path_prefix already set (e.g., from CLI --base-url)
-        if !self.build.path_prefix.as_os_str().is_empty() {
-            return;
-        }
-
-        // Extract path from base.url
-        if let Some(ref url) = self.base.url {
-            if let Some(path) = extract_url_path(url) {
-                if !path.is_empty() {
-                    self.build.path_prefix = PathBuf::from(path);
-                }
-            }
+        // Extract path from site.url
+        if let Some(ref url) = self.site.info.url
+            && let Some(path) = extract_url_path(url)
+            && !path.is_empty()
+        {
+            self.build.path_prefix = PathBuf::from(path);
         }
     }
 
@@ -318,11 +244,62 @@ impl SiteConfig {
         Ok(config)
     }
 
-    /// Load configuration from file path
+    /// Load configuration from file path with unknown field detection.
     fn from_path(path: &Path) -> Result<Self> {
         let content =
             fs::read_to_string(path).map_err(|err| ConfigError::Io(path.to_path_buf(), err))?;
-        Self::from_str(&content)
+
+        let (config, ignored) = Self::parse_with_ignored(&content)?;
+
+        if !ignored.is_empty() {
+            Self::print_unknown_fields_warning(&ignored, path);
+            if !Self::prompt_continue()? {
+                bail!("Aborted due to unknown config fields");
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Parse TOML content, collecting any unknown fields.
+    fn parse_with_ignored(content: &str) -> Result<(Self, Vec<String>)> {
+        let mut ignored = Vec::new();
+        let deserializer = toml::Deserializer::new(content);
+        let config = serde_ignored::deserialize(deserializer, |path: serde_ignored::Path| {
+            ignored.push(path.to_string());
+        })?;
+        Ok((config, ignored))
+    }
+
+    /// Print warning about unknown fields.
+    fn print_unknown_fields_warning(fields: &[String], path: &Path) {
+        // Show only filename (tola.toml) since it's always at site root
+        let display_path = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_else(|| path.to_string_lossy());
+        eprintln!();
+        log!("warning"; "unknown fields in {}:", display_path);
+        log!("warning"; "ignoring:");
+        for field in fields {
+            eprintln!("- {}", field);
+        }
+        eprintln!();
+    }
+
+    /// Prompt user to continue. Returns true only if user explicitly confirms.
+    fn prompt_continue() -> Result<bool> {
+        use std::io::{self, Write};
+
+        eprint!("Continue? [y/N] ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        let input = input.trim().to_lowercase();
+        // Default no (empty input), explicit "y" or "yes" to continue
+        Ok(input == "y" || input == "yes")
     }
 
     /// Get the root directory path
@@ -335,28 +312,24 @@ impl SiteConfig {
         self.root = path.to_path_buf();
     }
 
+    /// Join a path with the root directory.
+    ///
+    /// Shorthand for `config.get_root().join(path)`.
+    pub fn root_join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.root.join(path)
+    }
+
+    /// Get path relative to the site root
+    pub fn root_relative(&self, path: impl AsRef<Path>) -> PathBuf {
+        path.as_ref()
+            .strip_prefix(&self.root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| path.as_ref().to_path_buf())
+    }
+
     /// Get CLI arguments reference
     pub const fn get_cli(&self) -> &'static Cli {
         self.cli.unwrap()
-    }
-
-    /// Parse `inline_max_size` string to bytes.
-    ///
-    /// Supports suffixes: B (bytes), KB (kilobytes), MB (megabytes).
-    ///
-    /// # Examples
-    /// - "20KB" → 20480
-    /// - "5MB" → 5242880
-    /// - "100B" → 100
-    pub fn get_inline_max_size(&self) -> usize {
-        parse_size_string(&self.build.typst.svg.inline_max_size)
-    }
-
-    /// Get DPI scale factor (relative to standard 96 DPI).
-    ///
-    /// Used for SVG rendering resolution calculation.
-    pub fn get_scale(&self) -> f32 {
-        self.build.typst.svg.dpi / 96.0
     }
 
     /// Get path resolver for consistent path/URL generation.
@@ -392,12 +365,39 @@ impl SiteConfig {
                 ..
             } => {
                 self.apply_build_args(build_args, true);
-                self.apply_serve_options(interface.as_ref(), *port, *watch);
+                self.apply_serve_options(*interface, *port, *watch);
             }
             Commands::Deploy { force } => {
                 Self::update_option(&mut self.deploy.force, force.as_ref());
             }
             Commands::Init { .. } => {}
+            // Query command doesn't modify config
+            Commands::Query { .. } => {}
+            // Validate command: CLI args override config
+            Commands::Validate { args } => {
+                self.apply_validate_args(args);
+            }
+        }
+    }
+
+    /// Apply validate arguments from CLI.
+    fn apply_validate_args(&mut self, args: &ValidateArgs) {
+        // CLI flags override config enable settings
+        Self::update_option(
+            &mut self.validate.link.internal.enable,
+            args.internal.as_ref(),
+        );
+        Self::update_option(
+            &mut self.validate.link.external.enable,
+            args.external.as_ref(),
+        );
+        Self::update_option(&mut self.validate.assets.enable, args.assets.as_ref());
+
+        // --warn-only sets all levels to Warn
+        if args.warn_only {
+            self.validate.link.external.level = ValidateLevel::Warn;
+            self.validate.link.internal.level = ValidateLevel::Warn;
+            self.validate.assets.level = ValidateLevel::Warn;
         }
     }
 
@@ -405,30 +405,30 @@ impl SiteConfig {
     ///
     /// `is_serve`: If true, rss/sitemap default to disabled for faster local preview.
     fn apply_build_args(&mut self, args: &BuildArgs, is_serve: bool) {
+        // Set verbose mode globally
+        crate::logger::set_verbose(args.verbose);
+
         Self::update_option(&mut self.build.minify, args.minify.as_ref());
-        Self::update_option(&mut self.build.css.tailwind.enable, args.tailwind.as_ref());
+        Self::update_option(
+            &mut self.build.css.processor.enable,
+            args.css_processor.as_ref(),
+        );
         self.build.clean = args.clean;
+        self.build.skip_drafts = args.skip_drafts;
 
-        // Override base URL if provided via CLI
-        if let Some(ref url) = args.base_url {
-            self.base.url = Some(url.clone());
-
-            // Extract path from URL and set as path_prefix
-            // e.g., "https://example.github.io/my-project/foo" → "my-project/foo"
-            if let Some(path) = extract_url_path(url)
-                && !path.is_empty()
-            {
-                self.build.path_prefix = PathBuf::from(path);
-            }
+        // Override site URL if provided via CLI
+        // path_prefix will be derived from it in sync_path_prefix_from_url()
+        if let Some(ref url) = args.site_url {
+            self.site.info.url = Some(url.clone());
         }
 
         if is_serve {
-            // Serve: disable rss/sitemap by default, enable only if explicitly requested
-            self.build.rss.enable = args.rss.unwrap_or(false);
+            // Serve: disable feed/sitemap by default, enable only if explicitly requested
+            self.build.feed.enable = args.rss.unwrap_or(false);
             self.build.sitemap.enable = args.sitemap.unwrap_or(false);
         } else {
             // Build/Deploy: respect config, override only if CLI flag provided
-            Self::update_option(&mut self.build.rss.enable, args.rss.as_ref());
+            Self::update_option(&mut self.build.feed.enable, args.rss.as_ref());
             Self::update_option(&mut self.build.sitemap.enable, args.sitemap.as_ref());
         }
     }
@@ -436,17 +436,17 @@ impl SiteConfig {
     /// Apply serve-specific options.
     fn apply_serve_options(
         &mut self,
-        interface: Option<&String>,
+        interface: Option<std::net::IpAddr>,
         port: Option<u16>,
         watch: Option<bool>,
     ) {
-        Self::update_option(&mut self.serve.interface, interface);
+        Self::update_option(&mut self.serve.interface, interface.as_ref());
         Self::update_option(&mut self.serve.port, port.as_ref());
         Self::update_option(&mut self.serve.watch, watch.as_ref());
 
         // Set base URL for local development (only if not overridden via CLI --base-url)
-        if self.base.url.is_none() {
-            self.base.url = Some(format!(
+        if self.site.info.url.is_none() {
+            self.site.info.url = Some(format!(
                 "http://{}:{}",
                 self.serve.interface, self.serve.port
             ));
@@ -470,40 +470,38 @@ impl SiteConfig {
 
         // Apply CLI path overrides first
         Self::update_option(&mut self.build.content, cli.content.as_ref());
-        Self::update_option(&mut self.build.assets, cli.assets.as_ref());
         Self::update_option(&mut self.build.output, cli.output.as_ref());
 
         // Normalize root to absolute path
-        let root = Self::normalize_path(root);
+        let root = crate::utils::path::normalize_path(root);
         self.set_root(&root);
 
         // Normalize config path (already set in main.rs, just canonicalize)
-        self.config_path = Self::normalize_path(&self.config_path);
+        self.config_path = crate::utils::path::normalize_path(&self.config_path);
 
         // Normalize build directories
-        self.build.content = Self::normalize_path(&root.join(&self.build.content));
-        self.build.assets = Self::normalize_path(&root.join(&self.build.assets));
-        self.build.output = Self::normalize_path(&root.join(&self.build.output));
+        self.build.content = crate::utils::path::normalize_path(&root.join(&self.build.content));
+        // Normalize assets paths
+        self.build.assets.normalize(&root);
+        self.build.output = crate::utils::path::normalize_path(&root.join(&self.build.output));
         self.build.deps = self
             .build
             .deps
             .iter()
-            .map(|p| Self::normalize_path(&root.join(p)))
+            .map(|p| crate::utils::path::normalize_path(&root.join(p)))
             .collect();
-        // Note: rss.path and sitemap.path are kept as relative filenames.
+        // Note: feed.path and sitemap.path are kept as relative filenames.
         // They are resolved to output_dir() at write time to include path_prefix.
 
         // Normalize optional paths
         self.normalize_optional_paths(&root);
-
-        // Normalize misc settings
-        self.build.typst.svg.inline_max_size = self.build.typst.svg.inline_max_size.to_uppercase();
     }
 
-    /// Normalize optional paths (tailwind input, deploy token).
+    /// Normalize optional paths (CSS processor input, deploy token).
     fn normalize_optional_paths(&mut self, root: &Path) {
-        if let Some(input) = self.build.css.tailwind.input.take() {
-            self.build.css.tailwind.input = Some(Self::normalize_path(&root.join(input)));
+        if let Some(input) = self.build.css.processor.input.take() {
+            self.build.css.processor.input =
+                Some(crate::utils::path::normalize_path(&root.join(input)));
         }
 
         if let Some(token_path) = self.deploy.github.token_path.take() {
@@ -520,145 +518,89 @@ impl SiteConfig {
         } else {
             path
         };
-        Self::normalize_path(&full_path)
-    }
-
-    /// Normalize a path to absolute, using canonicalize if the path exists.
-    fn normalize_path(path: &Path) -> PathBuf {
-        path.canonicalize().unwrap_or_else(|_| {
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-            }
-        })
+        crate::utils::path::normalize_path(&full_path)
     }
 
     // ========================================================================
     // validation
     // ========================================================================
 
+    /// Pre-validate paths before normalization.
+    ///
+    /// This must be called before `finalize()` because path normalization
+    /// converts relative paths to absolute paths, making it impossible to
+    /// detect if the user specified an absolute path in the config.
+    fn validate_paths(&self) -> Result<()> {
+        let mut diag = ConfigDiagnostics::new();
+
+        // Validate assets paths (must be relative)
+        self.build.assets.validate_paths(&mut diag);
+
+        diag.into_result()
+            .map_err(|e| ConfigError::Diagnostics(e).into())
+    }
+
     /// Validate configuration for the current command.
+    ///
+    /// Collects all validation errors and returns them at once.
     pub fn validate(&self) -> Result<()> {
+        let mut diag = ConfigDiagnostics::with_allow_experimental(self.build.allow_experimental);
+
         if !self.config_path.exists() {
-            bail!("Config file not found");
+            bail!(ConfigError::Validation("config file not found".into()));
         }
-        self.validate_base()?;
-        self.validate_build()?;
-        self.validate_command_specific()?;
-        Ok(())
+
+        // Validate field status (experimental, deprecated, not_implemented)
+        self.site.validate_field_status(&mut diag);
+        self.deploy.validate_field_status(&mut diag);
+        self.build.svg.validate_field_status(&mut diag);
+
+        // Validate each section
+        self.site.info.validate(self.build.feed.enable, &mut diag);
+        self.build.validate(&mut diag);
+        self.build.css.validate(&mut diag);
+        self.build.svg.validate(&mut diag);
+        self.build.assets.validate(&mut diag);
+        self.build
+            .header
+            .validate(&self.build.assets, self.get_root(), &mut diag);
+
+        // Command-specific validation
+        self.validate_command_specific(&mut diag)?;
+
+        // Print collected hints and warnings (grouped display)
+        diag.print_hints_and_warnings();
+
+        // Return all collected errors
+        diag.into_result()
+            .map_err(|e| ConfigError::Diagnostics(e).into())
     }
 
-    fn validate_base(&self) -> Result<()> {
-        if self.build.rss.enable && self.base.url.is_none() {
-            bail!("[base.url] is required for rss generation");
-        }
-
-        if let Some(base_url) = &self.base.url
-            && !base_url.contains("://")
-        {
-            bail!(ConfigError::Validation(
-                "[base.url] must be a valid URL with scheme (e.g., https://example.com)".into()
-            ));
-        }
-        Ok(())
-    }
-
-    fn validate_build(&self) -> Result<()> {
-        self.validate_typst()?;
-        self.validate_tailwind()?;
-        self.validate_inline_max_size()?;
-        Ok(())
-    }
-
-    fn validate_typst(&self) -> Result<()> {
-        if self.build.typst.use_lib {
-            return Ok(());
-        }
-        Self::check_command_installed("[build.typst.command]", &self.build.typst.command)
-    }
-
-    fn validate_tailwind(&self) -> Result<()> {
-        if !self.build.css.tailwind.enable {
-            return Ok(());
-        }
-
-        Self::check_command_installed(
-            "[build.css.tailwind.command]",
-            &self.build.css.tailwind.command,
-        )?;
-
-        match &self.build.css.tailwind.input {
-            None => bail!(
-                "[build.css.tailwind.enable] = true requires [build.css.tailwind.input] to be set"
-            ),
-            Some(path) if !path.exists() => {
-                bail!(ConfigError::Validation(
-                    "[build.css.tailwind.input] not found".into()
-                ))
-            }
-            Some(path) if !path.is_file() => {
-                bail!(ConfigError::Validation(
-                    "[build.css.tailwind.input] is not a file".into()
-                ))
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn validate_inline_max_size(&self) -> Result<()> {
-        const VALID_SUFFIXES: [&str; 3] = ["B", "KB", "MB"];
-        if !VALID_SUFFIXES
-            .iter()
-            .any(|s| self.build.typst.svg.inline_max_size.ends_with(s))
-        {
-            bail!(ConfigError::Validation(
-                "[build.typst.svg.inline_max_size] must end with B, KB, or MB".into()
-            ));
+    /// Validate command-specific requirements.
+    fn validate_command_specific(&self, diag: &mut ConfigDiagnostics) -> Result<()> {
+        if let Commands::Deploy { .. } = &self.get_cli().command {
+            self.deploy.validate(diag);
         }
         Ok(())
     }
+}
 
-    fn validate_command_specific(&self) -> Result<()> {
-        match &self.get_cli().command {
-            Commands::Init { .. } if self.get_root().exists() => {
-                bail!("Path already exists");
-            }
-            Commands::Deploy { .. } => self.validate_deploy()?,
-            _ => {}
-        }
-        Ok(())
-    }
+// ============================================================================
+// Test Helpers (available to all modules via `use crate::config::test_*`)
+// ============================================================================
 
-    fn validate_deploy(&self) -> Result<()> {
-        if let Some(path) = &self.deploy.github.token_path {
-            if !path.exists() {
-                bail!(ConfigError::Validation(
-                    "[deploy.github.token_path] not found".into()
-                ));
-            }
-            if !path.is_file() {
-                bail!(ConfigError::Validation(
-                    "[deploy.github.token_path] is not a file".into()
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Check if a command is installed and available.
-    fn check_command_installed(field: &str, command: &[String]) -> Result<()> {
-        if command.is_empty() {
-            bail!(ConfigError::Validation(format!(
-                "{field} must have at least one element"
-            )));
-        }
-
-        let cmd = &command[0];
-        which::which(cmd)
-            .with_context(|| format!("`{cmd}` not found. Please install it first."))?;
-        Ok(())
-    }
+/// Parse config with minimal required `[site.info]` fields.
+/// Panics if there are unknown fields (to catch config typos in tests).
+#[cfg(test)]
+pub fn test_parse_config(extra: &str) -> SiteConfig {
+    let config = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}");
+    let (parsed, ignored) = SiteConfig::parse_with_ignored(&config).unwrap();
+    assert!(
+        ignored.is_empty(),
+        "test config has unknown fields: {:?}",
+        ignored
+    );
+    parsed
 }
 
 // ============================================================================
@@ -670,170 +612,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_size_string() {
-        // KB suffix
-        assert_eq!(parse_size_string("20KB"), 20 * 1024);
-        assert_eq!(parse_size_string("20kb"), 20 * 1024); // case insensitive
-
-        // MB suffix
-        assert_eq!(parse_size_string("5MB"), 5 * 1024 * 1024);
-        assert_eq!(parse_size_string("1mb"), 1024 * 1024);
-
-        // B suffix
-        assert_eq!(parse_size_string("100B"), 100);
-        assert_eq!(parse_size_string("256b"), 256);
-
-        // No suffix (defaults to bytes)
-        assert_eq!(parse_size_string("100"), 100);
-
-        // Edge cases
-        assert_eq!(parse_size_string("0KB"), 0);
-        assert_eq!(parse_size_string("invalid"), 0);
-    }
-
-    #[test]
-    fn test_extract_url_path() {
-        // Standard GitHub Pages subpath
-        assert_eq!(
-            extract_url_path("https://example.github.io/my-project/"),
-            Some("my-project".to_string())
-        );
-
-        // Multiple path components
-        assert_eq!(
-            extract_url_path("https://example.github.io/a/b/c"),
-            Some("a/b/c".to_string())
-        );
-
-        // Root path (no subpath)
-        assert_eq!(extract_url_path("https://example.com"), Some(String::new()));
-
-        // Root path with trailing slash
-        assert_eq!(
-            extract_url_path("https://example.com/"),
-            Some(String::new())
-        );
-
-        // HTTP scheme
-        assert_eq!(
-            extract_url_path("http://localhost/blog/posts"),
-            Some("blog/posts".to_string())
-        );
-
-        // Invalid URL (no scheme)
-        assert_eq!(extract_url_path("invalid-url"), None);
-
-        // file:// scheme
-        assert_eq!(
-            extract_url_path("file:///path/to/site"),
-            Some("path/to/site".to_string())
-        );
-    }
-
-    #[test]
-    fn test_get_inline_max_size_kb() {
-        let config: SiteConfig = toml::from_str(
-            r#"
-            [base]
-            title = "Test"
-            description = "Test"
-            [build.typst.svg]
-            inline_max_size = "20KB"
-        "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.get_inline_max_size(), 20 * 1024);
-    }
-
-    #[test]
-    fn test_get_inline_max_size_mb() {
-        let config: SiteConfig = toml::from_str(
-            r#"
-            [base]
-            title = "Test"
-            description = "Test"
-            [build.typst.svg]
-            inline_max_size = "5MB"
-        "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.get_inline_max_size(), 5 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_get_inline_max_size_bytes() {
-        let config: SiteConfig = toml::from_str(
-            r#"
-            [base]
-            title = "Test"
-            description = "Test"
-            [build.typst.svg]
-            inline_max_size = "100B"
-        "#,
-        )
-        .unwrap();
-
-        assert_eq!(config.get_inline_max_size(), 100);
-    }
-
-    #[test]
-    fn test_get_scale_default_dpi() {
-        let config: SiteConfig = toml::from_str(
-            r#"
-            [base]
-            title = "Test"
-            description = "Test"
-        "#,
-        )
-        .unwrap();
-
-        // Default DPI is 96, so scale should be 1.0
-        assert_eq!(config.get_scale(), 1.0);
-    }
-
-    #[test]
-    fn test_get_scale_custom_dpi() {
-        let config: SiteConfig = toml::from_str(
-            r#"
-            [base]
-            title = "Test"
-            description = "Test"
-            [build.typst.svg]
-            dpi = 192.0
-        "#,
-        )
-        .unwrap();
-
-        // 192 / 96 = 2.0
-        assert_eq!(config.get_scale(), 2.0);
-    }
-
-    #[test]
-    fn test_from_str() {
-        let config_str = r#"
-            [base]
-            title = "My Blog"
-            description = "A test blog"
-            author = "Test Author"
-        "#;
-        let result = SiteConfig::from_str(config_str);
-
-        assert!(result.is_ok());
-        let config = result.unwrap();
-        assert_eq!(config.base.title, "My Blog");
-        assert_eq!(config.base.author, "Test Author");
-    }
-
-    #[test]
     fn test_from_str_invalid_toml() {
-        let invalid_config = r#"
-            [base
-            title = "My Blog"
-        "#;
-        let result = SiteConfig::from_str(invalid_config);
-
+        // Invalid TOML syntax - unclosed bracket
+        let result: Result<SiteConfig, _> = toml::from_str("[base\ntitle = \"My Blog\"");
         assert!(result.is_err());
     }
 
@@ -852,191 +633,34 @@ mod tests {
     }
 
     #[test]
-    fn test_extra_fields() {
-        let config = r#"
-            [base]
-            title = "Test"
-            description = "Test blog"
-
-            [extra]
-            custom_field = "custom_value"
-            number_field = 42
-            nested = { key = "value" }
-        "#;
-        let config: SiteConfig = toml::from_str(config).unwrap();
-
-        assert_eq!(
-            config.extra.get("custom_field").and_then(|v| v.as_str()),
-            Some("custom_value")
-        );
-        assert_eq!(
-            config
-                .extra
-                .get("number_field")
-                .and_then(|v| v.as_integer()),
-            Some(42)
-        );
-    }
-
-    #[test]
-    fn test_extra_fields_nested() {
-        let config = r#"
-            [base]
-            title = "Test"
-            description = "Test"
-
-            [extra]
-            [extra.social]
-            twitter = "@user"
-            github = "username"
-        "#;
-        let config: SiteConfig = toml::from_str(config).unwrap();
-
-        let social = config.extra.get("social").and_then(|v| v.as_table());
-        assert!(social.is_some());
-        let social = social.unwrap();
-        assert_eq!(
-            social.get("twitter").and_then(|v| v.as_str()),
-            Some("@user")
-        );
-        assert_eq!(
-            social.get("github").and_then(|v| v.as_str()),
-            Some("username")
-        );
-    }
-
-    #[test]
-    fn test_extra_fields_array() {
-        let config = r#"
-            [base]
-            title = "Test"
-            description = "Test"
-
-            [extra]
-            tags = ["rust", "typst", "blog"]
-        "#;
-        let config: SiteConfig = toml::from_str(config).unwrap();
-
-        let tags = config.extra.get("tags").and_then(|v| v.as_array());
-        assert!(tags.is_some());
-        let tags: Vec<&str> = tags.unwrap().iter().filter_map(|v| v.as_str()).collect();
-        assert_eq!(tags, vec!["rust", "typst", "blog"]);
-    }
-
-    #[test]
-    fn test_extra_fields_bool_and_float() {
-        let config = r#"
-            [base]
-            title = "Test"
-            description = "Test"
-
-            [extra]
-            show_comments = true
-            version = 1.5
-        "#;
-        let config: SiteConfig = toml::from_str(config).unwrap();
-
-        assert_eq!(
-            config.extra.get("show_comments").and_then(|v| v.as_bool()),
-            Some(true)
-        );
-        assert_eq!(
-            config.extra.get("version").and_then(|v| v.as_float()),
-            Some(1.5)
-        );
-    }
-
-    #[test]
     fn test_site_config_default() {
         let config = SiteConfig::default();
 
         assert!(config.cli.is_none());
         assert_eq!(config.config_path, PathBuf::new());
-        assert_eq!(config.base.title, "");
+        assert_eq!(config.site.info.title, "");
         assert!(config.build.minify);
         assert_eq!(config.serve.port, 5277);
         assert_eq!(config.deploy.provider, "github");
     }
 
     #[test]
-    fn test_parse_size_string_with_spaces() {
-        assert_eq!(parse_size_string(" 20 KB"), 20 * 1024);
-        assert_eq!(parse_size_string("5 MB"), 5 * 1024 * 1024);
+    fn test_unknown_fields_detected() {
+        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[unknown_section]\nfield = \"value\"";
+        let (config, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+
+        // Config should parse successfully
+        assert_eq!(config.site.info.title, "Test");
+
+        // Unknown fields should be collected
+        assert!(!ignored.is_empty());
+        assert!(ignored.iter().any(|f| f.contains("unknown_section")));
     }
 
     #[test]
-    fn test_full_config_all_sections() {
-        let config = r#"
-            [base]
-            title = "My Blog"
-            description = "A personal blog"
-            author = "Alice"
-            email = "alice@example.com"
-            url = "https://myblog.com"
-            language = "en-US"
-            copyright = "2025 Alice"
-
-            [build]
-            content = "posts"
-            output = "dist"
-            minify = true
-
-            [build.rss]
-            enable = true
-            path = "rss.xml"
-
-            [build.slug]
-            path = "full"
-            fragment = "safe"
-
-            [build.typst]
-            command = ["typst"]
-            [build.typst.svg]
-            extract_type = "embedded"
-            inline_max_size = "50KB"
-            dpi = 144.0
-
-            [build.css.tailwind]
-            enable = false
-
-            [serve]
-            interface = "127.0.0.1"
-            port = 3000
-            watch = true
-
-            [deploy]
-            provider = "github"
-            force = false
-            [deploy.github]
-            url = "https://github.com/alice/blog"
-            branch = "main"
-
-            [extra]
-            analytics_id = "UA-12345"
-        "#;
-        let config: SiteConfig = toml::from_str(config).unwrap();
-
-        // Verify all sections loaded correctly
-        assert_eq!(config.base.title, "My Blog");
-        assert_eq!(config.base.author, "Alice");
-        assert_eq!(config.build.content, PathBuf::from("posts"));
-        assert!(config.build.rss.enable);
-        assert_eq!(config.serve.port, 3000);
-        assert_eq!(config.deploy.github.url, "https://github.com/alice/blog");
-        assert!(config.extra.contains_key("analytics_id"));
-    }
-
-    #[test]
-    fn test_unknown_top_level_field_rejection() {
-        let config = r#"
-            [base]
-            title = "Test"
-            description = "Test"
-
-            [unknown_section]
-            field = "value"
-        "#;
-        let result: Result<SiteConfig, _> = toml::from_str(config);
-        assert!(result.is_err());
+    fn test_no_unknown_fields() {
+        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"";
+        let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+        assert!(ignored.is_empty());
     }
 }

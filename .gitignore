@@ -1,9 +1,7 @@
 .DS_Store
 /target
-/public
-/content
-/templates
-/utils
-/release
-/result
 /example-sites
+/__test_site
+/__test_site/public
+/tola-vdom
+/typst-batch
