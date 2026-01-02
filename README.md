@@ -1,6 +1,7 @@
 # tola-ssg
 
-A static site generator for Typst-based blogs.
+A static site generator for Typst-based blogs.  \
+There would be huge change in v0.7.x: vdom diff, live reloading, custom search function, interactive and useful cli
 
 ## Table of Contents
 
@@ -14,14 +15,46 @@ A static site generator for Typst-based blogs.
 
 ## Showcase
 
-> Yeah, my blog is alos built with `tola`.
+> Yeah, my blog is also built with `tola`.  \
+> There are example site collection: https://tola-ssg.github.io/example-sites
 
-[My blog](https://kawayww.com):
+[my blog](https://kawayww.com):
 ![home](/screenshots/home.avif)
+
+[example site collection](https://tola-ssg.github.io/example-sites/):
+![example](/screenshots/example.avif)
+
+Thanks to `typst`, `tola` offers writing flexibility.  \
+e.g.: Implement `Recent Posts` easily and customizable (as shown in the image above):
+
+```typst
+// Data Architecture: Tola provides virtual JSON files for site metadata.
+// Why? This gives you full control over how to list and filter content.
+// Available virtual files:
+// - "/_data/pages.json": List of all pages with their metadata (url, title, date, etc.)
+// - "/_data/tags.json": Map of tags to the pages that use them
+// - ...more in the future!
+
+#import "/utils/helpers.typ" as utils
+
+#let pages = json("/_data/pages.json")
+#let posts = (pages
+  .filter(p => "/posts/" in p.url)
+  .filter(p => p.at("draft", default: false) == false)
+  .sorted(key: p => p.date)
+  .rev())
+
+#html.div(class: "space-y-6")[
+  #for post in posts.slice(0, calc.min(posts.len(), 5)) {
+    utils.post-card(post)
+  }
+]
+```
 
 ## Features
 
 ### Performance
+(There would be a huge change/refactor in future v0.7.x)
 
 - **font caching** — Fonts loaded once at startup, shared across all compilations
 - **file caching** — Only re-read changed files, zero-cost for unchanged files
