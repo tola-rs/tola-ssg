@@ -1,0 +1,8 @@
+/* Tola Recolor - Image color adaptation */
+
+__STATIC_VARS__
+
+/* Apply filter only to img elements (SVG uses currentColor via separate CSS) */
+img.tola-recolor:not(.tola-no-recolor) {
+  filter: __FILTER_VALUE__;
+}

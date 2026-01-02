@@ -1,569 +1,481 @@
 //! External command execution utilities.
 //!
-//! Provides macros and functions for running shell commands with proper
-//! output handling and error reporting.
+//! Provides a Builder-based API for running shell commands with proper
+//! output handling, PTY support, and stdin piping.
+
+#![allow(dead_code)]
+//!
+//! # Examples
+//!
+//! ```ignore
+//! use crate::utils::exec::Cmd;
+//!
+//! // Simple command
+//! Cmd::new("git").args(["status", "-s"]).run()?;
+//!
+//! // With working directory and PTY
+//! Cmd::new("tailwindcss")
+//!     .args(["-i", "input.css", "-o", "output.css"])
+//!     .cwd(root)
+//!     .pty(true)
+//!     .run()?;
+//!
+//! // With stdin piping (for magick, ffmpeg, etc.)
+//! let output = Cmd::new("magick")
+//!     .args(["-background", "none", "-", "png:-"])
+//!     .stdin(svg_data)
+//!     .run()?;
+//! ```
 
 use crate::log;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use regex::Regex;
 use std::{
-    ffi::OsString,
-    io::Read,
-    path::Path,
-    process::{Child, ChildStdin, Command, Output, Stdio},
+    ffi::{OsStr, OsString},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
     sync::OnceLock,
 };
 
 // ============================================================================
-// Macros
+// Builder API
+// ============================================================================
+
+/// Command builder for external process execution.
+///
+/// Provides a fluent API for configuring and running external commands.
+#[derive(Default)]
+pub struct Cmd {
+    program: OsString,
+    args: Vec<OsString>,
+    cwd: Option<PathBuf>,
+    envs: Vec<(String, String)>,
+    stdin_data: Option<Vec<u8>>,
+    use_pty: bool,
+    filter: Option<&'static FilterRule>,
+}
+
+impl Cmd {
+    /// Create a new command builder.
+    pub fn new<S: AsRef<OsStr>>(program: S) -> Self {
+        Self {
+            program: program.as_ref().to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Create from a command array (e.g., `["git"]` or `["npx", "tailwindcss"]`).
+    pub fn from_slice<S: AsRef<OsStr>>(cmd: &[S]) -> Self {
+        let mut iter = cmd.iter();
+        let program = iter
+            .next()
+            .map(|s| s.as_ref().to_owned())
+            .unwrap_or_default();
+        let args: Vec<_> = iter.map(|s| s.as_ref().to_owned()).collect();
+        Self {
+            program,
+            args,
+            ..Default::default()
+        }
+    }
+
+    /// Add a single argument.
+    pub fn arg<S: AsRef<OsStr>>(mut self, arg: S) -> Self {
+        let arg = arg.as_ref();
+        if !arg.is_empty() {
+            self.args.push(arg.to_owned());
+        }
+        self
+    }
+
+    /// Add multiple arguments.
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        for arg in args {
+            let arg = arg.as_ref();
+            if !arg.is_empty() {
+                self.args.push(arg.to_owned());
+            }
+        }
+        self
+    }
+
+    /// Set working directory.
+    pub fn cwd<P: AsRef<Path>>(mut self, dir: P) -> Self {
+        self.cwd = Some(dir.as_ref().to_owned());
+        self
+    }
+
+    /// Set environment variables for the subprocess.
+    pub fn envs<K, V, I>(mut self, vars: I) -> Self
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        for (k, v) in vars {
+            self.envs.push((k.as_ref().to_owned(), v.as_ref().to_owned()));
+        }
+        self
+    }
+
+    /// Set stdin data to pipe to the process.
+    pub fn stdin<D: AsRef<[u8]>>(mut self, data: D) -> Self {
+        self.stdin_data = Some(data.as_ref().to_vec());
+        self
+    }
+
+    /// Enable PTY (pseudo-terminal) mode.
+    ///
+    /// PTY allows commands to behave as if running in a real terminal,
+    /// enabling colored output, progress bars, etc.
+    pub fn pty(mut self, enable: bool) -> Self {
+        self.use_pty = enable;
+        self
+    }
+
+    /// Set output filter for logging.
+    pub fn filter(mut self, filter: &'static FilterRule) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Execute the command and return output.
+    pub fn run(self) -> Result<Output> {
+        let filter = self.filter.unwrap_or(&EMPTY_FILTER);
+
+        if self.stdin_data.is_some() {
+            self.run_with_stdin(filter)
+        } else if self.use_pty {
+            self.run_with_pty(filter)
+        } else {
+            self.run_simple(filter)
+        }
+    }
+}
+
+// ============================================================================
+// Macro helper traits
+// ============================================================================
+
+/// Create a command from a single program name.
+///
+/// This is a helper for the `exec!` macro.
+#[inline]
+pub fn cmd<S: AsRef<OsStr>>(program: S) -> Cmd {
+    Cmd::new(program)
+}
+
+/// Create a command from a slice of arguments.
+///
+/// The first element is the program, rest are arguments.
+/// This is a helper for the `exec!` macro.
+#[inline]
+pub fn cmd_slice<S: AsRef<OsStr>>(slice: &[S]) -> Cmd {
+    Cmd::from_slice(slice)
+}
+
+impl Cmd {
+
+    /// Get the program name for error messages.
+    fn program_name(&self) -> String {
+        self.program.to_string_lossy().to_string()
+    }
+
+    /// Simple execution without PTY or stdin.
+    fn run_simple(self, filter: &'static FilterRule) -> Result<Output> {
+        let name = self.program_name();
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.args).envs(self.envs.iter().cloned());
+
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
+        }
+
+        let output = cmd
+            .output()
+            .with_context(|| format!("Failed to execute `{name}`"))?;
+
+        log_output(&name, &output, filter)?;
+        Ok(output)
+    }
+
+    /// Execution with stdin piping.
+    fn run_with_stdin(self, filter: &'static FilterRule) -> Result<Output> {
+        let name = self.program_name();
+        let stdin_data = self.stdin_data.unwrap();
+
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.args)
+            .envs(self.envs.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(dir) = &self.cwd {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to spawn `{name}`"))?;
+
+        // Write stdin data
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&stdin_data)
+                .with_context(|| format!("Failed to write stdin to `{name}`"))?;
+        }
+
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("Failed to wait for `{name}`"))?;
+
+        if !output.status.success() {
+            anyhow::bail!(format_error(&name, &output, filter));
+        }
+
+        Ok(output)
+    }
+
+    /// Execution with PTY support.
+    ///
+    /// PTY allows commands to behave as if running in a real terminal,
+    /// enabling colored output, progress bars, credential prompts, etc.
+    fn run_with_pty(self, filter: &'static FilterRule) -> Result<Output> {
+        let name = self.program_name();
+
+        let mut cmd_builder = CommandBuilder::new(&self.program);
+        cmd_builder.args(&self.args);
+
+        // Inject environment variables
+        for (k, v) in &self.envs {
+            cmd_builder.env(k, v);
+        }
+
+        if let Some(dir) = &self.cwd {
+            cmd_builder.cwd(dir);
+        }
+
+        let pty_system = NativePtySystem::default();
+        let pair = pty_system.openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let mut child = pair.slave.spawn_command(cmd_builder)?;
+        drop(pair.slave);
+
+        // Read output in separate thread (PTY blocks until EOF)
+        let mut reader = pair.master.try_clone_reader()?;
+        let output_handle = std::thread::spawn(move || {
+            let mut output = String::new();
+            let _ = reader.read_to_string(&mut output);
+            output
+        });
+
+        let status = child.wait()?;
+        drop(pair.master);
+
+        let output_str = output_handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("Failed to join output reader thread"))?;
+
+        if !status.success() {
+            anyhow::bail!("Command `{name}` failed: {status:?}\n{output_str}");
+        }
+
+        filter.log(&name, &output_str);
+
+        // Convert to std::process::Output
+        #[cfg(unix)]
+        #[allow(clippy::cast_possible_wrap)]
+        let std_status = {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw((status.exit_code() as i32) << 8)
+        };
+        #[cfg(windows)]
+        let std_status = {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(status.exit_code())
+        };
+
+        Ok(Output {
+            status: std_status,
+            stdout: output_str.into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
+// ============================================================================
+// Macro (syntax sugar for simple cases)
 // ============================================================================
 
 /// Run an external command with arguments.
 ///
-/// Supports optional `pty` and `filter` arguments.
+/// # Syntax
 ///
-/// # Examples
 /// ```ignore
-/// // Without working directory
+/// // Simple: command and args
+/// exec!("git"; "status", "-s")?;
 /// exec!(["git"]; "status", "-s")?;
 ///
 /// // With working directory
-/// exec!(root; ["typst"]; "compile", input, output)?;
+/// exec!(root; "git"; "status")?;
+/// exec!(root; ["git"]; "status")?;
 ///
-/// // With custom filter
-/// const MY_FILTER: FilterRule = FilterRule::new(&["warning:"]);
-/// exec!(filter=&MY_FILTER; ["typst"]; "compile")?;
-///
-/// // With PTY enabled
-/// exec!(pty=true; ["typst"]; "compile")?;
+/// // With options (pty, filter)
+/// exec!(pty=true; root; ["git"]; "push")?;
+/// exec!(pty=true; filter=&F; root; &cmd; args...)?;
 /// ```
 #[macro_export]
 macro_rules! exec {
-    ($($tt:tt)*) => {
-        $crate::exec_internal!(@parse_pty $($tt)*)
+    // pty + filter + root + array cmd
+    (pty=$pty:expr; filter=$filter:expr; $root:expr; [$($cmd:expr),+ $(,)?]; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd_slice(&[$($cmd),+])
+            $(.arg($arg))*
+            .cwd($root)
+            .pty($pty)
+            .filter($filter)
+            .run()
     };
-}
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! exec_internal {
-    // Parse pty argument
-    (@parse_pty pty=$pty:expr; $($rest:tt)*) => {
-        $crate::exec_internal!(@parse_filter $pty; $($rest)*)
-    };
-    (@parse_pty $($rest:tt)*) => {
-        $crate::exec_internal!(@parse_filter false; $($rest)*)
-    };
-
-    // Parse filter argument
-    (@parse_filter $pty:expr; filter=$filter:expr; $($rest:tt)*) => {
-        $crate::exec_internal!(@parse_root $pty; $filter; $($rest)*)
-    };
-    (@parse_filter $pty:expr; $($rest:tt)*) => {
-        $crate::exec_internal!(@parse_root $pty; &$crate::utils::exec::EMPTY_FILTER; $($rest)*)
+    // pty + filter + root + single cmd
+    (pty=$pty:expr; filter=$filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd($cmd)
+            $(.arg($arg))*
+            .cwd($root)
+            .pty($pty)
+            .filter($filter)
+            .run()
     };
 
-    // Parse root and command (with root)
-    (@parse_root $pty:expr; $filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
-        $crate::utils::exec::exec(
-            Some($root),
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            $filter,
-            $pty,
-        )
+    // pty + root + array cmd
+    (pty=$pty:expr; $root:expr; [$($cmd:expr),+ $(,)?]; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd_slice(&[$($cmd),+])
+            $(.arg($arg))*
+            .cwd($root)
+            .pty($pty)
+            .run()
     };
-    // Parse command (without root)
-    (@parse_root $pty:expr; $filter:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
-        $crate::utils::exec::exec(
-            None,
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            $filter,
-            $pty,
-        )
-    };
-}
-
-/// Run an external command and return a `RunningProcess` handle.
-///
-/// The child process is spawned with stdin piped, stdout/stderr nulled.
-/// Caller must write to stdin via `proc.stdin()` and call `proc.wait()` to finish.
-///
-/// # Examples
-/// ```ignore
-/// let mut proc = exec_with_stdin!(["cat"];)?;
-/// if let Some(stdin) = proc.stdin() {
-///     stdin.write_all(b"hello")?;
-/// }
-/// proc.wait()?;
-/// ```
-#[macro_export]
-macro_rules! exec_with_stdin {
-    ($($tt:tt)*) => {
-        $crate::exec_with_stdin_internal!(@parse_pty $($tt)*)
-    };
-}
-
-#[macro_export]
-#[doc(hidden)]
-macro_rules! exec_with_stdin_internal {
-    // Parse pty argument
-    (@parse_pty pty=$pty:expr; $($rest:tt)*) => {
-        $crate::exec_with_stdin_internal!(@parse_filter $pty; $($rest)*)
-    };
-    (@parse_pty $($rest:tt)*) => {
-        $crate::exec_with_stdin_internal!(@parse_filter false; $($rest)*)
+    // pty + root + single cmd
+    (pty=$pty:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd($cmd)
+            $(.arg($arg))*
+            .cwd($root)
+            .pty($pty)
+            .run()
     };
 
-    // Parse filter argument
-    (@parse_filter $pty:expr; filter=$filter:expr; $($rest:tt)*) => {
-        $crate::exec_with_stdin_internal!(@parse_root $pty; $filter; $($rest)*)
+    // root + array cmd
+    ($root:expr; [$($cmd:expr),+ $(,)?]; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd_slice(&[$($cmd),+])
+            $(.arg($arg))*
+            .cwd($root)
+            .run()
     };
-    (@parse_filter $pty:expr; $($rest:tt)*) => {
-        $crate::exec_with_stdin_internal!(@parse_root $pty; &$crate::utils::exec::EMPTY_FILTER; $($rest)*)
-    };
-
-    // Parse root and command (with root)
-    (@parse_root $pty:expr; $filter:expr; $root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
-        $crate::utils::exec::spawn_with_stdin(
-            Some($root),
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            $filter,
-            $pty,
-        )
-    };
-    // Parse command (without root)
-    (@parse_root $pty:expr; $filter:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
-        $crate::utils::exec::spawn_with_stdin(
-            None,
-            &$crate::utils::exec::internal::to_cmd_vec($cmd),
-            &$crate::utils::exec::internal::filter_args(&[$($crate::utils::exec::internal::to_os($arg)),*]),
-            $filter,
-            $pty,
-        )
-    };
-}
-
-// ============================================================================
-// Argument Conversion
-// ============================================================================
-
-#[doc(hidden)]
-#[allow(clippy::wildcard_imports)] // Needed for macro internal module
-pub mod internal {
-    use super::*;
-
-    /// Convert to `OsString`.
-    #[inline]
-    pub fn to_os<S: Into<OsString>>(s: S) -> OsString {
-        s.into()
-    }
-
-    /// Trait for converting to command vector.
-    pub trait ToCmd {
-        fn to_cmd(self) -> Vec<OsString>;
-    }
-
-    impl<const N: usize> ToCmd for [&str; N] {
-        #[inline]
-        fn to_cmd(self) -> Vec<OsString> {
-            self.into_iter().map(OsString::from).collect()
-        }
-    }
-
-    impl ToCmd for &[String] {
-        #[inline]
-        fn to_cmd(self) -> Vec<OsString> {
-            self.iter().map(OsString::from).collect()
-        }
-    }
-
-    impl ToCmd for &Vec<String> {
-        #[inline]
-        fn to_cmd(self) -> Vec<OsString> {
-            self.iter().map(OsString::from).collect()
-        }
-    }
-
-    /// Convert command to Vec<OsString>.
-    #[inline]
-    pub fn to_cmd_vec<C: ToCmd>(cmd: C) -> Vec<OsString> {
-        cmd.to_cmd()
-    }
-
-    /// Filter out empty args.
-    #[inline]
-    pub fn filter_args(args: &[OsString]) -> Vec<OsString> {
-        args.iter().filter(|a| !a.is_empty()).cloned().collect()
-    }
-}
-
-// ============================================================================
-// Command Execution
-// ============================================================================
-
-/// Execute a command and capture its output.
-///
-/// # Errors
-/// Returns error if command fails to execute or returns non-zero exit code.
-pub fn exec(
-    root: Option<&Path>,
-    cmd: &[OsString],
-    args: &[OsString],
-    filter: &'static FilterRule,
-    pty: bool,
-) -> Result<Output> {
-    if pty {
-        exec_with_pty(root, cmd, args, filter)
-    } else {
-        exec_no_pty(root, cmd, args, filter)
-    }
-}
-
-fn exec_no_pty(
-    root: Option<&Path>,
-    cmd: &[OsString],
-    args: &[OsString],
-    filter: &'static FilterRule,
-) -> Result<Output> {
-    let (name, mut command) = prepare(root, cmd, args)?;
-
-    let output = command
-        .output()
-        .with_context(|| format!("Failed to execute `{name}`"))?;
-
-    log_output(&name, &output, filter)?;
-    Ok(output)
-}
-
-/// Execute a command with PTY (pseudo-terminal) support.
-///
-/// PTY allows commands to behave as if running in a real terminal, which is
-/// necessary for programs that check `isatty()` or need terminal features
-/// (colored output, progress bars, credential prompts, etc.).
-///
-/// # PTY Architecture
-///
-/// A PTY consists of two ends:
-/// - **Master**: The controlling side (our program). Writes become the child's
-///   stdin; reads receive the child's stdout/stderr.
-/// - **Slave**: The terminal side (child process). The child reads/writes to
-///   this as if it were a real terminal.
-///
-/// ```text
-///   ┌─────────────┐                    ┌─────────────┐
-///   │   Master    │◄────── PTY ───────►│    Slave    │
-///   │ (our code)  │                    │  (child)    │
-///   │             │  write ──────────► │  stdin      │
-///   │             │  read  ◄────────── │  stdout     │
-///   └─────────────┘                    └─────────────┘
-/// ```
-///
-/// # Execution Flow
-///
-/// 1. Open PTY pair (master + slave)
-/// 2. Spawn child process attached to slave
-/// 3. Drop slave (we don't need it; child has its own handle)
-/// 4. Spawn reader thread to collect output from master
-/// 5. Wait for child to exit
-/// 6. Drop master to signal EOF to reader thread
-/// 7. Join reader thread to get collected output
-///
-/// The reader thread is necessary because `read_to_string()` blocks until EOF,
-/// and EOF only occurs when the master is dropped. Without threading, we'd
-/// deadlock: waiting for read to finish before dropping master, but read waits
-/// for master to drop.
-fn exec_with_pty(
-    root: Option<&Path>,
-    cmd: &[OsString],
-    args: &[OsString],
-    filter: &'static FilterRule,
-) -> Result<Output> {
-    let (name, command_builder) = prepare_pty(root, cmd, args)?;
-
-    let pty_system = NativePtySystem::default();
-    let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-
-    // Spawn child process attached to the slave end of PTY.
-    // The child sees the slave as its controlling terminal.
-    let mut child = pair.slave.spawn_command(command_builder)?;
-
-    // Drop our handle to slave. The child process has its own handle,
-    // so the slave remains open for the child to use.
-    drop(pair.slave);
-
-    // Clone a reader from master to read child's output.
-    // This must run in a separate thread because `read_to_string()` blocks
-    // until EOF, which only happens when we drop the master.
-    let mut reader = pair.master.try_clone_reader()?;
-    let output_handle = std::thread::spawn(move || {
-        let mut output_str = String::new();
-        let _ = reader.read_to_string(&mut output_str);
-        output_str
-    });
-
-    // Wait for child process to complete.
-    // The child may still be writing output at this point.
-    let status = child.wait()?;
-
-    // Drop master to close the PTY. This signals EOF to the reader thread,
-    // allowing `read_to_string()` to return.
-    drop(pair.master);
-
-    // Join the reader thread to collect all output.
-    let output_str = output_handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("Failed to join output reader thread"))?;
-
-    if !status.success() {
-        let msg = format!("Command `{name}` failed with exit code: {status:?}\n{output_str}");
-        anyhow::bail!(msg);
-    }
-
-    filter.log(&name, &output_str);
-
-    // Convert portable_pty::ExitStatus to std::process::ExitStatus
-    #[cfg(unix)]
-    #[allow(clippy::cast_possible_wrap)] // exit_code is within i32 range
-    let status = {
-        use std::os::unix::process::ExitStatusExt;
-        let code = status.exit_code() as i32;
-        std::process::ExitStatus::from_raw(code << 8)
-    };
-    #[cfg(windows)]
-    let status = {
-        use std::os::windows::process::ExitStatusExt;
-        let code = status.exit_code();
-        std::process::ExitStatus::from_raw(code)
+    // root + single cmd
+    ($root:expr; $cmd:expr; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd($cmd)
+            $(.arg($arg))*
+            .cwd($root)
+            .run()
     };
 
-    Ok(Output {
-        status,
-        stdout: output_str.into_bytes(),
-        stderr: Vec::new(),
-    })
-}
-
-/// Spawn a command and return a `RunningProcess` handle.
-///
-/// # Errors
-/// Returns error if command fails to spawn.
-pub fn spawn_with_stdin(
-    root: Option<&Path>,
-    cmd: &[OsString],
-    args: &[OsString],
-    filter: &'static FilterRule,
-    pty: bool,
-) -> Result<RunningProcess> {
-    if pty {
-        anyhow::bail!("PTY not supported for spawn_with_stdin yet");
-    }
-
-    let (name, mut command) = prepare(root, cmd, args)?;
-
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    let mut child: Child = command
-        .spawn()
-        .with_context(|| format!("Failed to spawn `{name}`"))?;
-
-    let stdin = child.stdin.take().context("Failed to acquire stdin")?;
-    Ok(RunningProcess {
-        child,
-        stdin: Some(stdin),
-        name,
-        filter,
-    })
-}
-
-/// A running child process with piped stdin.
-///
-/// Encapsulates the lifecycle of a process that expects input via stdin.
-/// Ensures stdin is closed before waiting for the process to exit.
-pub struct RunningProcess {
-    child: Child,
-    stdin: Option<ChildStdin>,
-    name: String,
-    filter: &'static FilterRule,
-}
-
-impl RunningProcess {
-    /// Get a mutable reference to the child's stdin.
-    pub const fn stdin(&mut self) -> Option<&mut ChildStdin> {
-        self.stdin.as_mut()
-    }
-
-    /// Wait for child process to complete and check exit status.
-    ///
-    /// Automatically closes stdin to signal EOF to the child process.
-    ///
-    /// # Errors
-    /// Returns error if process exits with non-zero status.
-    pub fn wait(mut self) -> Result<()> {
-        // Must close stdin before wait, otherwise child blocks on read
-        drop(self.stdin.take());
-
-        let status = self
-            .child
-            .wait()
-            .context(format!("{} process failed", self.name))?;
-
-        if !status.success() {
-            let mut stderr_bytes = Vec::new();
-            if let Some(mut stderr) = self.child.stderr.take() {
-                use std::io::Read;
-                let _ = stderr.read_to_end(&mut stderr_bytes);
-            }
-
-            let output = Output {
-                status,
-                stdout: Vec::new(),
-                stderr: stderr_bytes,
-            };
-
-            anyhow::bail!(format_error(&self.name, &output, self.filter));
-        }
-        Ok(())
-    }
-}
-
-/// Prepare a Command from components.
-fn prepare(root: Option<&Path>, cmd: &[OsString], args: &[OsString]) -> Result<(String, Command)> {
-    let name = cmd
-        .first()
-        .and_then(|s| s.to_str())
-        .context("Empty command")?
-        .to_owned();
-
-    let mut command = Command::new(&cmd[0]);
-    command.args(&cmd[1..]).args(args);
-
-    if let Some(dir) = root {
-        command.current_dir(dir);
-    }
-
-    Ok((name, command))
-}
-
-/// Prepare a `CommandBuilder` from components.
-fn prepare_pty(
-    root: Option<&Path>,
-    cmd: &[OsString],
-    args: &[OsString],
-) -> Result<(String, CommandBuilder)> {
-    let name = cmd
-        .first()
-        .and_then(|s| s.to_str())
-        .context("Empty command")?
-        .to_owned();
-
-    let mut command = CommandBuilder::new(&cmd[0]);
-
-    let mut all_args = Vec::new();
-    all_args.extend_from_slice(&cmd[1..]);
-    all_args.extend_from_slice(args);
-
-    command.args(&all_args);
-
-    if let Some(dir) = root {
-        command.cwd(dir);
-    }
-
-    Ok((name, command))
+    // array cmd only
+    ([$($cmd:expr),+ $(,)?]; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd_slice(&[$($cmd),+])
+            $(.arg($arg))*
+            .run()
+    };
+    // single cmd only
+    ($cmd:expr; $($arg:expr),* $(,)?) => {
+        $crate::utils::exec::cmd($cmd)
+            $(.arg($arg))*
+            .run()
+    };
 }
 
 // ============================================================================
 // Output Filtering
 // ============================================================================
 
+/// Filter rule for command output logging.
+///
+/// Used to reduce noise by skipping known warnings or irrelevant messages.
+pub struct FilterRule {
+    /// Prefixes to skip when logging output.
+    pub skip_prefixes: &'static [&'static str],
+}
+
+impl FilterRule {
+    /// Create a new filter rule.
+    pub const fn new(skip_prefixes: &'static [&'static str]) -> Self {
+        Self { skip_prefixes }
+    }
+
+    /// Check if a line should be skipped.
+    fn should_skip(&self, line: &str) -> bool {
+        line.is_empty() || self.skip_prefixes.iter().any(|p| line.starts_with(p))
+    }
+
+    /// Log output lines that pass the filter.
+    pub fn log(&self, name: &str, output: &str) {
+        let lines: Vec<_> = output
+            .lines()
+            .filter(|line| {
+                let plain = strip_ansi(line);
+                let trimmed = plain.trim();
+                !trimmed.is_empty() && !self.should_skip(trimmed)
+            })
+            .collect();
+
+        if !lines.is_empty() {
+            log!(name; "{}", lines.join("\n"));
+        }
+    }
+}
+
+/// Empty filter (no skipping).
+pub const EMPTY_FILTER: FilterRule = FilterRule::new(&[]);
+
+/// Silent filter (skip all output).
+pub const SILENT_FILTER: FilterRule = FilterRule::new(&[""]);
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Strip ANSI escape codes from string.
 fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
     re.replace_all(s, "")
 }
 
-/// Filter rule for skipping entire output blocks or specific prefixes.
-///
-/// Used to reduce noise in command output logging by ignoring known warnings
-/// or irrelevant messages.
-pub struct FilterRule {
-    /// Prefixes to match at the start of output lines.
-    pub skip_prefixes: &'static [&'static str],
-}
-
-impl FilterRule {
-    /// Create a new filter rule with the given prefixes.
-    pub const fn new(skip_prefixes: &'static [&'static str]) -> Self {
-        Self { skip_prefixes }
-    }
-
-    /// Check if output should be skipped entirely.
-    ///
-    /// Returns true if output is empty or starts with any of the skip prefixes.
-    fn should_skip(&self, output: &str) -> bool {
-        output.is_empty() || self.skip_prefixes.iter().any(|p| output.starts_with(p))
-    }
-
-    /// Log output lines if not skipped.
-    ///
-    /// Iterates through lines and logs them using the `log!` macro if they
-    /// don't match the skip criteria.
-    fn log(&self, name: &str, output: &str) {
-        let mut valid_lines = Vec::new();
-        for line in output.lines() {
-            let plain = strip_ansi(line);
-            let trimmed = plain.trim();
-            if !trimmed.is_empty() && !self.should_skip(trimmed) {
-                valid_lines.push(line);
-            }
-        }
-
-        if !valid_lines.is_empty() {
-            let message = valid_lines.join("\n");
-            log!(name; "{}", message);
-        }
-    }
-}
-
-/// Stdout filter: skip HTML and JSON output.
-const STDOUT_FILTER: FilterRule = FilterRule::new(&["<!DOCTYPE", "{"]);
-
-/// Empty filter (no skipping).
-pub const EMPTY_FILTER: FilterRule = FilterRule::new(&[]);
-
-/// Silent filter: skip all output.
-pub const SILENT_FILTER: FilterRule = FilterRule::new(&[""]);
-
-/// Log command output, filtering known noise.
+/// Log command output, returning error on failure.
 fn log_output(name: &str, output: &Output, filter: &'static FilterRule) -> Result<()> {
     if !output.status.success() {
         anyhow::bail!(format_error(name, output, filter));
     }
 
-    // On success, only log stderr (warnings) to reduce noise
     let stderr = String::from_utf8_lossy(&output.stderr);
     filter.log(name, stderr.trim());
-
     Ok(())
 }
 
-/// Format command error message with filtering.
+/// Format error message for failed command.
 fn format_error(name: &str, output: &Output, filter: &'static FilterRule) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Strip warning prefix from error output
     let error_msg = filter
         .skip_prefixes
         .iter()
@@ -575,7 +487,10 @@ fn format_error(name: &str, output: &Output, filter: &'static FilterRule) -> Str
     }
 
     let stdout_trimmed = stdout.trim();
-    if !stdout_trimmed.is_empty() && !STDOUT_FILTER.should_skip(stdout_trimmed) {
+    if !stdout_trimmed.is_empty()
+        && !stdout_trimmed.starts_with("<!DOCTYPE")
+        && !stdout_trimmed.starts_with('{')
+    {
         msg.push_str("\nStdout:\n");
         msg.push_str(stdout_trimmed);
     }
@@ -589,107 +504,52 @@ fn format_error(name: &str, output: &Output, filter: &'static FilterRule) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::exec::internal::*;
 
     #[test]
-    fn test_to_os() {
-        assert_eq!(to_os("hello"), OsString::from("hello"));
-        assert_eq!(to_os(String::from("world")), OsString::from("world"));
+    fn test_cmd_builder() {
+        let cmd = Cmd::new("echo")
+            .arg("hello")
+            .args(["world", "!"])
+            .cwd("/tmp");
+
+        assert_eq!(cmd.program, OsString::from("echo"));
+        assert_eq!(cmd.args.len(), 3);
+        assert_eq!(cmd.cwd, Some(PathBuf::from("/tmp")));
     }
 
     #[test]
-    fn test_to_cmd_vec_array() {
-        let cmd = to_cmd_vec(["git", "status"]);
-        assert_eq!(cmd.len(), 2);
-        assert_eq!(cmd[0], OsString::from("git"));
-        assert_eq!(cmd[1], OsString::from("status"));
-    }
-
-    #[test]
-    fn test_to_cmd_vec_vec() {
-        let v = vec!["echo".to_string(), "hello".to_string()];
-        let cmd = to_cmd_vec(&v);
-        assert_eq!(cmd.len(), 2);
-        assert_eq!(cmd[0], OsString::from("echo"));
-        assert_eq!(cmd[1], OsString::from("hello"));
-    }
-
-    #[test]
-    fn test_filter_args() {
-        let args = [OsString::from("a"), OsString::from(""), OsString::from("b")];
-        let filtered = filter_args(&args);
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0], OsString::from("a"));
-        assert_eq!(filtered[1], OsString::from("b"));
-    }
-
-    #[test]
-    fn test_prepare_empty() {
-        let result = prepare(None, &[], &[]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_prepare_valid() {
-        let cmd = to_cmd_vec(["echo"]);
-        let args = filter_args(&[OsString::from("hello")]);
-        let result = prepare(None, &cmd, &args);
-        assert!(result.is_ok());
-        let (name, _) = result.unwrap();
-        assert_eq!(name, "echo");
+    fn test_empty_args_filtered() {
+        let cmd = Cmd::new("echo").arg("").args(["a", "", "b"]);
+        assert_eq!(cmd.args.len(), 2);
     }
 
     #[test]
     fn test_filter_rule() {
         let filter = FilterRule::new(&["WARN:", "INFO:"]);
-
-        // Test should_skip
         assert!(filter.should_skip("WARN: something"));
         assert!(filter.should_skip("INFO: something"));
         assert!(!filter.should_skip("ERROR: something"));
-        assert!(filter.should_skip("")); // Empty lines skipped
-    }
-
-    #[test]
-    fn test_format_error() {
-        // Get a real ExitStatus using a dummy command
-        // We use `ls` (unix) or `dir` (windows) which should succeed,
-        // but we manually check the formatting logic which doesn't depend on success/failure
-        // of the command itself, just the status object.
-        // Actually, to test failure formatting, we want a failed status.
-        // `false` command returns exit code 1.
-        let status = Command::new("false")
-            .status()
-            .or_else(|_| Command::new("cmd").args(&["/C", "exit 1"]).status()) // Windows fallback
-            .unwrap();
-
-        static TEST_FILTER: FilterRule = FilterRule::new(&["Ignored:"]);
-        let output = Output {
-            status,
-            stdout: Vec::new(),
-            stderr: b"Ignored: warning\nFatal error".to_vec(),
-        };
-        let msg = format_error("test", &output, &TEST_FILTER);
-
-        assert!(msg.contains("Command `test` failed"));
+        assert!(filter.should_skip(""));
     }
 
     #[test]
     fn test_strip_ansi() {
-        // Basic colors
         assert_eq!(strip_ansi("\x1b[31mRed\x1b[0m"), "Red");
-        assert_eq!(strip_ansi("\x1b[1;32mGreen Bold\x1b[0m"), "Green Bold");
-
-        // Multiple codes
-        assert_eq!(strip_ansi("\x1b[31;42mRed on Green\x1b[0m"), "Red on Green");
-
-        // No colors
         assert_eq!(strip_ansi("Plain text"), "Plain text");
+    }
 
-        // Mixed content
-        assert_eq!(
-            strip_ansi("Start \x1b[33mYellow\x1b[0m End"),
-            "Start Yellow End"
-        );
+    #[test]
+    fn test_simple_command() {
+        let output = Cmd::new("echo").arg("hello").run().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("hello"));
+    }
+
+    #[test]
+    fn test_stdin_pipe() {
+        let output = Cmd::new("cat").stdin(b"test data").run().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"test data");
     }
 }

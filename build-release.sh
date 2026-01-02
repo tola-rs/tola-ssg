@@ -56,9 +56,9 @@ done
 
 echo ""
 if [[ $FAILED -eq 0 ]]; then
-    echo "🎉 All builds completed successfully!"
+    echo "All builds completed successfully!"
 else
-    echo "⚠️  $FAILED build(s) failed"
+    echo "$FAILED build(s) failed"
 fi
 
 echo ""

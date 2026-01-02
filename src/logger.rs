@@ -1,8 +1,9 @@
-//! Logging utilities with colored output and progress bars.
+//! Logging utilities with colored output and progress display.
 //!
 //! This module provides:
 //! - `log!` macro for formatted terminal output with colored prefixes
-//! - `ProgressBars` for displaying multiple progress bars simultaneously
+//! - `ProgressLine` for single-line progress display with multiple counters
+//! - `WatchStatus` for watch mode status messages
 //!
 //! # Example
 //!
@@ -10,66 +11,39 @@
 //! // Simple logging
 //! log!("build"; "compiling {} files", count);
 //!
-//! // Progress bars for parallel tasks
-//! let progress = ProgressBars::new(&[("content", 100), ("assets", 50)]);
-//! progress.inc(0); // increment content bar
-//! progress.inc(1); // increment assets bar
-//! progress.finish(); // clear progress bars
+//! // Progress line for build
+//! let progress = ProgressLine::new(&[("typst", 69), ("markdown", 10)]);
+//! progress.inc("typst");
+//! progress.finish();
 //! ```
 
-use colored::{ColoredString, Colorize};
+use owo_colors::OwoColorize;
 use crossterm::{
     cursor, execute,
-    terminal::{Clear, ClearType, size},
+    terminal::{Clear, ClearType},
 };
 use std::{
     io::{Write, stdout},
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use parking_lot::Mutex;
 
-/// Cached terminal width (fetched once on first use)
-static TERMINAL_WIDTH: OnceLock<u16> = OnceLock::new();
+/// Global verbose flag (set by --verbose CLI argument)
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+
+/// Set verbose mode globally
+pub fn set_verbose(v: bool) {
+    VERBOSE.store(v, Ordering::SeqCst);
+}
+
+/// Check if verbose mode is enabled
+#[allow(dead_code)] // Used by debug! macro
+pub fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::SeqCst)
+}
 
 /// Active progress bar count (for log coordination)
 static BAR_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-// ============================================================================
-// Layout Constants
-// ============================================================================
-//
-// Progress bar format: "[module] [████░░░░] 42/100"
-//                       ^------^ ^-------^ ^----^
-//                       prefix   bar       count
-
-/// Length of brackets around module name: "[]"
-const BRACKET_LEN: usize = 2;
-/// Space after prefix: "[module] " <- this space
-const SPACE_AFTER_PREFIX: usize = 1;
-/// Bar wrapper: " []" (space + brackets around progress bar)
-const BAR_WRAPPER_LEN: usize = 3;
-/// Space before count: "...] 42/100" <- this space
-const SPACE_BEFORE_COUNT: usize = 1;
-/// Minimum progress bar width in characters
-const MIN_BAR_WIDTH: usize = 10;
-/// Maximum progress bar width in characters
-const MAX_BAR_WIDTH: usize = 40;
-
-/// Calculate total prefix length for a module name.
-///
-/// Returns: `module.len() + 3` (for `[`, `]`, and trailing space)
-#[inline]
-const fn calc_prefix_len(module_len: usize) -> usize {
-    module_len + BRACKET_LEN + SPACE_AFTER_PREFIX
-}
-
-/// Get terminal width, cached after first call.
-/// Falls back to 120 columns if detection fails.
-fn get_terminal_width() -> u16 {
-    *TERMINAL_WIDTH.get_or_init(|| size().map(|(w, _)| w).unwrap_or(120))
-}
 
 // ============================================================================
 // Log Macro
@@ -88,196 +62,19 @@ macro_rules! log {
     }};
 }
 
-// ============================================================================
-// Progress Bars
-// ============================================================================
-
-/// Manages multiple progress bars displayed on separate terminal lines.
+/// Log a debug message (only shown when --verbose is enabled).
 ///
-/// Each bar occupies one line and updates in place using ANSI cursor control.
-/// Bars are indexed by their creation order (0, 1, 2, ...).
-///
-/// # Thread Safety
-/// Uses a mutex to synchronize terminal updates from multiple threads.
-pub struct ProgressBars {
-    bars: Vec<ProgressBar>,
-    lock: Mutex<()>,
-}
-
-/// Internal state for a single progress bar.
-struct ProgressBar {
-    /// Colored prefix string (e.g., "[content]" in yellow)
-    prefix: ColoredString,
-    /// Pre-calculated display length of prefix
-    prefix_len: usize,
-    /// Total number of items to process
-    total: usize,
-    /// Current progress counter (atomic for thread-safe updates)
-    current: AtomicUsize,
-    /// Row index within the progress area (0 = first bar)
-    row: usize,
-}
-
-impl ProgressBars {
-    /// Create progress bars for multiple modules.
-    ///
-    /// # Arguments
-    /// * `modules` - Slice of (`module_name`, `total_count`) tuples
-    ///
-    /// # Returns
-    /// A new `ProgressBars` instance. Use `inc(index)` to update bars.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let progress = ProgressBars::new(&[
-    ///     ("content", content_files.len()),
-    ///     ("assets", asset_files.len()),
-    /// ]);
-    /// ```
-    pub fn new(modules: &[(&'static str, usize)]) -> Self {
-        // Reserve terminal lines for progress bars
-        let mut stdout = stdout().lock();
-        for _ in 0..modules.len() {
-            writeln!(stdout).ok();
+/// # Usage
+/// ```ignore
+/// debug!("module"; "debug info: {}", value);
+/// ```
+#[macro_export]
+macro_rules! debug {
+    ($module:expr; $($arg:tt)*) => {{
+        if $crate::logger::is_verbose() {
+            $crate::logger::log($module, &format!($($arg)*))
         }
-        stdout.flush().ok();
-
-        BAR_COUNT.store(modules.len(), Ordering::SeqCst);
-
-        let bars = modules
-            .iter()
-            .enumerate()
-            .map(|(row, (module, total))| {
-                let prefix = colorize_prefix(module, &module.to_ascii_lowercase());
-                ProgressBar {
-                    prefix,
-                    prefix_len: calc_prefix_len(module.len()),
-                    total: *total,
-                    current: AtomicUsize::new(0),
-                    row,
-                }
-            })
-            .collect();
-
-        Self {
-            bars,
-            lock: Mutex::new(()),
-        }
-    }
-
-    /// Create progress bars, filtering out categories with zero count.
-    ///
-    /// Returns `None` if total count is <= 1 (no progress bar needed for single item).
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Only creates bars for non-empty categories
-    /// if let Some(progress) = ProgressBars::new_filtered(&[
-    ///     ("content", content_files.len()),
-    ///     ("assets", 0),  // will be filtered out
-    /// ]) {
-    ///     progress.inc("content");
-    /// }
-    /// ```
-    pub fn new_filtered(modules: &[(&'static str, usize)]) -> Option<Self> {
-        let filtered: Vec<_> = modules
-            .iter()
-            .filter(|(_, count)| *count > 0)
-            .copied()
-            .collect();
-        let total: usize = filtered.iter().map(|(_, c)| c).sum();
-
-        if total <= 1 {
-            return None;
-        }
-
-        Some(Self::new(&filtered))
-    }
-
-    /// Increment progress for the bar with the given name.
-    ///
-    /// This is a convenience method that looks up the bar by name.
-    /// For high-frequency updates, prefer using `inc(index)` directly.
-    #[inline]
-    pub fn inc_by_name(&self, name: &str) {
-        for bar in &self.bars {
-            // Compare with the module name stored in prefix
-            // The prefix format is "[name]" so we check if it contains the name
-            if bar.prefix.to_string().contains(name) {
-                let current = bar.current.fetch_add(1, Ordering::Relaxed) + 1;
-                self.display(bar, current);
-                return;
-            }
-        }
-    }
-
-    /// Render a progress bar at its designated row.
-    fn display(&self, bar: &ProgressBar, current: usize) {
-        let _guard = self.lock.lock().ok();
-
-        let width = get_terminal_width() as usize;
-
-        // Calculate available width for the bar
-        let progress_text = format!("{}/{}", current, bar.total);
-        let overhead = bar.prefix_len + BAR_WRAPPER_LEN + SPACE_BEFORE_COUNT + progress_text.len();
-        let available = width.saturating_sub(overhead);
-        let bar_width = available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH);
-
-        // Calculate filled/empty portions
-        let filled = if bar.total > 0 {
-            (current * bar_width) / bar.total
-        } else {
-            0
-        };
-        let empty = bar_width.saturating_sub(filled);
-
-        let progress_bar: String = "█".repeat(filled) + &"░".repeat(empty);
-
-        // Update the correct line using cursor movement
-        let mut stdout = stdout().lock();
-        #[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
-        let lines_up = (self.bars.len() - bar.row) as u16;
-        execute!(stdout, cursor::MoveUp(lines_up)).ok();
-        execute!(stdout, Clear(ClearType::CurrentLine)).ok();
-        write!(
-            stdout,
-            "{} [{}] {}",
-            bar.prefix, progress_bar, progress_text
-        )
-        .ok();
-        execute!(stdout, cursor::MoveDown(lines_up)).ok();
-        write!(stdout, "\r").ok();
-        stdout.flush().ok();
-    }
-
-    /// Clear all progress bars from the terminal.
-    ///
-    /// Call this when processing is complete to clean up the display.
-    #[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
-    pub fn finish(&self) {
-        BAR_COUNT.store(0, Ordering::SeqCst);
-        let _guard = self.lock.lock().ok();
-
-        let mut stdout = stdout().lock();
-        let bars_len = self.bars.len() as u16;
-
-        // Move to top of progress area and clear each line
-        execute!(stdout, cursor::MoveUp(bars_len)).ok();
-        for _ in &self.bars {
-            execute!(stdout, Clear(ClearType::CurrentLine)).ok();
-            execute!(stdout, cursor::MoveDown(1)).ok();
-        }
-
-        // Return cursor to starting position
-        execute!(stdout, cursor::MoveUp(bars_len)).ok();
-        stdout.flush().ok();
-    }
-}
-
-impl Drop for ProgressBars {
-    fn drop(&mut self) {
-        self.finish();
-    }
+    }};
 }
 
 // ============================================================================
@@ -285,14 +82,11 @@ impl Drop for ProgressBars {
 // ============================================================================
 
 /// Log a message with a colored module prefix.
-///
-/// Automatically truncates long messages to fit terminal width.
 #[inline]
 #[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
 pub fn log(module: &str, message: &str) {
     let module_lower = module.to_ascii_lowercase();
     let prefix = colorize_prefix(module, &module_lower);
-    let width = get_terminal_width() as usize;
 
     let mut stdout = stdout().lock();
 
@@ -304,24 +98,7 @@ pub fn log(module: &str, message: &str) {
         execute!(stdout, Clear(ClearType::UntilNewLine)).ok();
     }
 
-    // Check for multiline
-    if message.contains('\n') {
-        // For multiline, we print the prefix with the first line,
-        // and then the rest of the lines. We don't truncate.
-        writeln!(stdout, "{prefix} {message}").ok();
-    } else {
-        // Truncate message if it exceeds available width
-        let prefix_len = calc_prefix_len(module.len());
-        let max_msg_len = width.saturating_sub(prefix_len);
-
-        let message = if message.len() > max_msg_len {
-            truncate_str(message, max_msg_len)
-        } else {
-            message
-        };
-
-        writeln!(stdout, "{prefix} {message}").ok();
-    }
+    writeln!(stdout, "{prefix} {message}").ok();
 
     if bar_count > 0 {
         for _ in 0..bar_count {
@@ -334,30 +111,14 @@ pub fn log(module: &str, message: &str) {
 
 /// Apply color to a module prefix based on module type.
 #[inline]
-fn colorize_prefix(module: &str, module_lower: &str) -> ColoredString {
+fn colorize_prefix(module: &str, module_lower: &str) -> String {
     let prefix = format!("[{module}]");
     match module_lower {
-        "serve" => prefix.bright_blue().bold(),
-        "watch" => prefix.bright_green().bold(),
-        "error" => prefix.bright_red().bold(),
-        _ => prefix.bright_yellow().bold(),
+        "serve" => prefix.bright_blue().bold().to_string(),
+        "watch" => prefix.bright_green().bold().to_string(),
+        "error" => prefix.bright_red().bold().to_string(),
+        _ => prefix.bright_yellow().bold().to_string(),
     }
-}
-
-/// Truncate a string to fit within `max_len` bytes.
-///
-/// Ensures the result is valid UTF-8 by finding the nearest character boundary.
-#[inline]
-fn truncate_str(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    // Find the last valid UTF-8 boundary within max_len
-    let mut end = max_len;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 // ============================================================================
@@ -406,15 +167,12 @@ impl WatchStatus {
 
     /// Display success message (✓ prefix, green).
     pub fn success(&mut self, message: &str) {
-        self.display("✓".green().to_string(), message);
+        self.display(format!("{}", "✓".green()), message);
     }
 
-    /// Display unchanged message (dimmed).
-    pub fn unchanged(&mut self, path: &str) {
-        self.display(
-            "".to_string(),
-            &format!("unchanged: {path}").dimmed().to_string(),
-        );
+    /// Display unchanged message (dimmed, no symbol).
+    pub fn unchanged(&mut self, message: &str) {
+        self.display(String::new(), &format!("{}", message.dimmed()));
     }
 
     /// Display error message (✗ prefix, red) with optional detail.
@@ -424,7 +182,12 @@ impl WatchStatus {
         } else {
             format!("{summary}\n{detail}")
         };
-        self.display("✗".red().to_string(), &message);
+        self.display(format!("{}", "✗".red()), &message);
+    }
+
+    /// Display warning message (⚠ prefix, yellow) with detail.
+    pub fn warning(&mut self, detail: &str) {
+        self.display(format!("{}", "⚠".yellow()), detail);
     }
 
     /// Internal display logic with line overwriting.
@@ -444,7 +207,7 @@ impl WatchStatus {
         }
 
         // Format message with timestamp
-        let timestamp = format!("[{}]", now()).dimmed();
+        let timestamp = format!("[{}]", now()).dimmed().to_string();
         let line = if symbol.is_empty() {
             format!("{timestamp} {message}")
         } else {
@@ -475,129 +238,144 @@ impl WatchStatus {
 }
 
 // ============================================================================
+// Progress Line (single-line counters)
+// ============================================================================
+
+/// Single-line progress display with multiple counters.
+///
+/// Displays: `[build] typst(42/69) markdown(5/10) assets(120/371)`
+///
+/// All counters update in place on the same line. Uses `try_lock` to avoid
+/// blocking worker threads - if display is busy, the update is skipped.
+///
+/// # Example
+///
+/// ```ignore
+/// let progress = ProgressLine::new(&[
+///     ("typst", 69),
+///     ("markdown", 10),
+///     ("assets", 371),
+/// ]);
+/// progress.inc("typst");
+/// progress.inc("assets");
+/// progress.finish(); // keeps the line, moves cursor down
+/// ```
+pub struct ProgressLine {
+    counters: Vec<Counter>,
+    lock: Mutex<()>,
+}
+
+struct Counter {
+    name: &'static str,
+    total: usize,
+    current: AtomicUsize,
+}
+
+impl ProgressLine {
+    /// Create a new build progress display.
+    ///
+    /// Only includes counters with total > 0.
+    pub fn new(items: &[(&'static str, usize)]) -> Self {
+        let counters: Vec<_> = items
+            .iter()
+            .filter(|(_, total)| *total > 0)
+            .map(|(name, total)| Counter {
+                name,
+                total: *total,
+                current: AtomicUsize::new(0),
+            })
+            .collect();
+
+        BAR_COUNT.store(1, Ordering::SeqCst);
+
+        let progress = Self {
+            counters,
+            lock: Mutex::new(()),
+        };
+        progress.display();
+        progress
+    }
+
+    /// Increment the counter with the given name.
+    ///
+    /// Non-blocking: if display lock is held, skips refresh.
+    #[inline]
+    pub fn inc(&self, name: &str) {
+        for counter in &self.counters {
+            if counter.name == name {
+                counter.current.fetch_add(1, Ordering::Relaxed);
+                // Non-blocking: skip display if lock is held
+                if self.lock.try_lock().is_some() {
+                    self.display();
+                }
+                return;
+            }
+        }
+    }
+
+    /// Display the current progress line (overwrites current line with \r).
+    fn display(&self) {
+        let mut parts = Vec::with_capacity(self.counters.len());
+        for counter in &self.counters {
+            let current = counter.current.load(Ordering::Relaxed);
+            parts.push(format!("{}({}/{})", counter.name, current, counter.total));
+        }
+
+        let line = parts.join(" ");
+        let prefix = colorize_prefix("build", "build");
+
+        let mut stdout = stdout().lock();
+        // Clear line and write progress (no newline - stays on same line)
+        execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+        write!(stdout, "{} {}", prefix, line).ok();
+        stdout.flush().ok();
+    }
+
+    /// Finish progress display, preserve line and move to next line.
+    pub fn finish(self) {
+        BAR_COUNT.store(0, Ordering::SeqCst);
+
+        {
+            let _guard = self.lock.lock(); // Wait for any pending display
+
+            // Final display with correct counts
+            let mut parts = Vec::with_capacity(self.counters.len());
+            for counter in &self.counters {
+                let current = counter.current.load(Ordering::Relaxed);
+                parts.push(format!("{}({}/{})", counter.name, current, counter.total));
+            }
+            let line = parts.join(" ");
+            let prefix = colorize_prefix("build", "build");
+
+            let mut stdout = stdout().lock();
+            // Final line with newline to preserve it
+            execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+            writeln!(stdout, "{} {}", prefix, line).ok();
+            stdout.flush().ok();
+        }
+
+        std::mem::forget(self); // Prevent Drop from clearing
+    }
+}
+
+impl Drop for ProgressLine {
+    fn drop(&mut self) {
+        BAR_COUNT.store(0, Ordering::SeqCst);
+
+        // Clear the line on drop (if not finished properly)
+        let mut stdout = stdout().lock();
+        execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+        stdout.flush().ok();
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ------------------------------------------------------------------------
-    // calc_prefix_len tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_calc_prefix_len_short_module() {
-        // "a" -> "[a] " = 1 + 2 + 1 = 4
-        assert_eq!(calc_prefix_len(1), 4);
-    }
-
-    #[test]
-    fn test_calc_prefix_len_typical_module() {
-        // "content" -> "[content] " = 7 + 2 + 1 = 10
-        assert_eq!(calc_prefix_len(7), 10);
-    }
-
-    #[test]
-    fn test_calc_prefix_len_empty() {
-        // "" -> "[] " = 0 + 2 + 1 = 3
-        assert_eq!(calc_prefix_len(0), 3);
-    }
-
-    #[test]
-    fn test_calc_prefix_len_long_module() {
-        // "verification" (12 chars) -> "[verification] " = 12 + 2 + 1 = 15
-        assert_eq!(calc_prefix_len(12), 15);
-    }
-
-    // ------------------------------------------------------------------------
-    // truncate_str tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_truncate_str_short_string() {
-        // String fits within limit, return as-is
-        let s = "hello";
-        assert_eq!(truncate_str(s, 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_exact_length() {
-        // String length equals limit
-        let s = "hello";
-        assert_eq!(truncate_str(s, 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_needs_truncation() {
-        // String exceeds limit
-        let s = "hello world";
-        assert_eq!(truncate_str(s, 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_unicode_boundary() {
-        // UTF-8 multibyte: "€€" is 6 bytes (3 bytes per char)
-        // Truncating at byte 4 should find boundary at byte 3
-        let s = "€€";
-        assert_eq!(truncate_str(s, 4), "€"); // Only first char fits
-    }
-
-    #[test]
-    fn test_truncate_str_unicode_exact() {
-        // "€" is exactly 3 bytes
-        let s = "€€";
-        assert_eq!(truncate_str(s, 3), "€");
-    }
-
-    #[test]
-    fn test_truncate_str_unicode_full() {
-        // Both chars fit (6 bytes)
-        let s = "€€";
-        assert_eq!(truncate_str(s, 6), "€€");
-    }
-
-    #[test]
-    fn test_truncate_str_empty() {
-        let s = "";
-        assert_eq!(truncate_str(s, 10), "");
-    }
-
-    #[test]
-    fn test_truncate_str_zero_limit() {
-        let s = "hello";
-        assert_eq!(truncate_str(s, 0), "");
-    }
-
-    #[test]
-    fn test_truncate_str_mixed_unicode() {
-        // "a€b" = 1 + 3 + 1 = 5 bytes
-        let s = "a€b";
-        assert_eq!(truncate_str(s, 4), "a€"); // "a" + "€" = 4 bytes
-        assert_eq!(truncate_str(s, 3), "a"); // Can't fit "€" (needs 3 bytes starting at position 1)
-        assert_eq!(truncate_str(s, 2), "a"); // Only ASCII fits
-    }
-
-    // ------------------------------------------------------------------------
-    // Layout constants tests
-    // ------------------------------------------------------------------------
-
-    #[test]
-    fn test_constants_values() {
-        // Verify constants have expected values
-        assert_eq!(BRACKET_LEN, 2); // "[" and "]"
-        assert_eq!(SPACE_AFTER_PREFIX, 1); // " "
-        assert_eq!(BAR_WRAPPER_LEN, 3); // " []"
-        assert_eq!(SPACE_BEFORE_COUNT, 1); // " "
-        assert_eq!(MIN_BAR_WIDTH, 10);
-        assert_eq!(MAX_BAR_WIDTH, 40);
-    }
-
-    #[test]
-    fn test_bar_width_constraints() {
-        // MIN should be less than MAX
-        assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
-    }
 
     // ------------------------------------------------------------------------
     // WatchStatus tests

@@ -14,73 +14,56 @@
 //! </urlset>
 //! ```
 
-use crate::{
-    compiler::meta::Pages,
-    config::SiteConfig,
-    log,
-    utils::minify::{MinifyType, minify},
-};
+use crate::{config::SiteConfig, generator::minify_xml, log, page::STORED_PAGES};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-/// XML namespace for sitemap
 const SITEMAP_NS: &str = "http://www.sitemaps.org/schemas/sitemap/0.9";
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Build sitemap if enabled in config.
-///
-/// Uses pre-collected page metadata instead of re-scanning the filesystem.
-pub fn build_sitemap(config: &SiteConfig, pages: &Pages) -> Result<()> {
+/// Build sitemap if enabled.
+pub fn build_sitemap(config: &SiteConfig) -> Result<()> {
     if config.build.sitemap.enable {
-        let sitemap = Sitemap::from_pages(pages);
+        let sitemap = Sitemap::build(config);
         sitemap.write(config)?;
     }
     Ok(())
 }
 
-// ============================================================================
-// Sitemap Implementation
-// ============================================================================
-
-/// Sitemap data structure
 struct Sitemap {
-    /// List of URL entries
     urls: Vec<UrlEntry>,
 }
 
-/// Single URL entry in the sitemap
 struct UrlEntry {
-    /// Full URL location
     loc: String,
-    /// Last modification date (optional, YYYY-MM-DD format)
     lastmod: Option<String>,
 }
 
 impl Sitemap {
-    /// Build sitemap from pre-collected page metadata.
-    fn from_pages(pages: &Pages) -> Self {
-        // log!("sitemap"; "generating from {} pages", pages.len());
+    fn build(config: &SiteConfig) -> Self {
+        let pages = STORED_PAGES.get_pages();
+        let base_url = config
+            .site
+            .info
+            .url
+            .as_deref()
+            .unwrap_or_default()
+            .trim_end_matches('/');
 
         let urls: Vec<UrlEntry> = pages
             .iter()
-            .map(|page| UrlEntry {
-                loc: page.paths.full_url.clone(),
-                lastmod: page.lastmod_ymd(),
+            .map(|page| {
+                let full_url = format!("{}{}", base_url, page.permalink.as_str());
+                UrlEntry {
+                    loc: full_url,
+                    lastmod: page.meta.date.clone(),
+                }
             })
             .collect();
 
         Self { urls }
     }
 
-    /// Generate sitemap XML string.
     fn into_xml(self) -> String {
         let mut xml = String::with_capacity(4096);
 
@@ -105,12 +88,11 @@ impl Sitemap {
         xml
     }
 
-    /// Write sitemap to output file.
     fn write(self, config: &SiteConfig) -> Result<()> {
         // Resolve sitemap path relative to output_dir (with path_prefix)
         let sitemap_path = config.paths().output_dir().join(&config.build.sitemap.path);
         let xml = self.into_xml();
-        let xml = minify(MinifyType::Xml(xml.as_bytes()), config);
+        let xml = minify_xml(xml.as_bytes(), config.build.minify);
 
         fs::write(&sitemap_path, &*xml)
             .with_context(|| format!("Failed to write sitemap to {}", sitemap_path.display()))?;
@@ -120,13 +102,7 @@ impl Sitemap {
     }
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
 /// Escape special XML characters.
-///
-/// Uses `Cow` to avoid allocation when no escaping is needed.
 fn escape_xml(s: &str) -> Cow<'_, str> {
     // Fast path: check if escaping is needed
     if !s.contains(['&', '<', '>', '"', '\'']) {
@@ -142,31 +118,9 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
     )
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::meta::{PageMeta, PagePaths};
-    use std::path::PathBuf;
-    use std::time::{Duration, UNIX_EPOCH};
-
-    fn make_page(full_url: &str, lastmod_days: Option<u64>) -> PageMeta {
-        PageMeta {
-            paths: PagePaths {
-                source: PathBuf::from("test.typ"),
-                html: PathBuf::from("public/test/index.html"),
-                relative: "test".to_string(),
-                url_path: "/test/".to_string(),
-                full_url: full_url.to_string(),
-            },
-            lastmod: lastmod_days.map(|days| UNIX_EPOCH + Duration::from_secs(days * 86400)),
-            content_meta: None,
-            compiled_html: None,
-        }
-    }
 
     #[test]
     fn test_escape_xml() {
@@ -187,8 +141,7 @@ mod tests {
 
     #[test]
     fn test_sitemap_empty() {
-        let pages = Pages::default();
-        let sitemap = Sitemap::from_pages(&pages);
+        let sitemap = Sitemap { urls: vec![] };
         let xml = sitemap.into_xml();
 
         assert!(xml.contains(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
@@ -199,10 +152,12 @@ mod tests {
 
     #[test]
     fn test_sitemap_single_page() {
-        let pages = Pages {
-            items: vec![make_page("https://example.com/", Some(20089))], // 2025-01-01
+        let sitemap = Sitemap {
+            urls: vec![UrlEntry {
+                loc: "https://example.com/".to_string(),
+                lastmod: Some("2025-01-01".to_string()),
+            }],
         };
-        let sitemap = Sitemap::from_pages(&pages);
         let xml = sitemap.into_xml();
 
         assert!(xml.contains("<url>"));
@@ -213,14 +168,22 @@ mod tests {
 
     #[test]
     fn test_sitemap_multiple_pages() {
-        let pages = Pages {
-            items: vec![
-                make_page("https://example.com/", Some(20089)),
-                make_page("https://example.com/posts/hello/", Some(20090)),
-                make_page("https://example.com/about/", None),
+        let sitemap = Sitemap {
+            urls: vec![
+                UrlEntry {
+                    loc: "https://example.com/".to_string(),
+                    lastmod: Some("2025-01-01".to_string()),
+                },
+                UrlEntry {
+                    loc: "https://example.com/posts/hello/".to_string(),
+                    lastmod: Some("2025-01-02".to_string()),
+                },
+                UrlEntry {
+                    loc: "https://example.com/about/".to_string(),
+                    lastmod: None,
+                },
             ],
         };
-        let sitemap = Sitemap::from_pages(&pages);
         let xml = sitemap.into_xml();
 
         assert!(xml.contains("<loc>https://example.com/</loc>"));
@@ -232,10 +195,12 @@ mod tests {
 
     #[test]
     fn test_sitemap_without_lastmod() {
-        let pages = Pages {
-            items: vec![make_page("https://example.com/", None)],
+        let sitemap = Sitemap {
+            urls: vec![UrlEntry {
+                loc: "https://example.com/".to_string(),
+                lastmod: None,
+            }],
         };
-        let sitemap = Sitemap::from_pages(&pages);
         let xml = sitemap.into_xml();
 
         assert!(xml.contains("<loc>https://example.com/</loc>"));
@@ -244,10 +209,12 @@ mod tests {
 
     #[test]
     fn test_sitemap_escapes_special_chars() {
-        let pages = Pages {
-            items: vec![make_page("https://example.com/search?q=a&b=c", None)],
+        let sitemap = Sitemap {
+            urls: vec![UrlEntry {
+                loc: "https://example.com/search?q=a&b=c".to_string(),
+                lastmod: None,
+            }],
         };
-        let sitemap = Sitemap::from_pages(&pages);
         let xml = sitemap.into_xml();
 
         assert!(xml.contains("<loc>https://example.com/search?q=a&amp;b=c</loc>"));
@@ -255,10 +222,12 @@ mod tests {
 
     #[test]
     fn test_sitemap_xml_structure() {
-        let pages = Pages {
-            items: vec![make_page("https://example.com/", Some(20089))],
+        let sitemap = Sitemap {
+            urls: vec![UrlEntry {
+                loc: "https://example.com/".to_string(),
+                lastmod: Some("2025-01-01".to_string()),
+            }],
         };
-        let sitemap = Sitemap::from_pages(&pages);
         let xml = sitemap.into_xml();
 
         // Verify proper XML structure
