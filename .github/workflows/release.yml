@@ -1,0 +1,141 @@
+# Build and release tola binaries for all platforms
+# Triggered on version tags (v*)
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
+
+      # Install Nix and configure Cachix for binary caching
+      - uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - uses: cachix/cachix-action@v15
+        with:
+          name: tola
+          signingKey: '${{ secrets.CACHIX_SIGNING_KEY }}'
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      # Build Linux/macOS targets - logs are captured by Cachix for upload
+      - name: Build and push to Cachix (Linux/macOS)
+        run: |
+          set -e
+          mkdir -p artifacts
+
+          for target in x86_64-linux x86_64-linux-static aarch64-linux aarch64-linux-static aarch64-darwin; do
+            echo "Building $target..."
+            outpath=$(nix build -j auto --no-link --print-out-paths ./#$target)
+            tar -czvf "artifacts/tola-$target.tar.gz" -C "$outpath/bin" tola
+          done
+
+      # Build Windows separately - silence logs to skip Cachix upload
+      - name: Build Windows (no Cachix)
+        run: |
+          set -e
+          echo "Building x86_64-windows..."
+          outpath=$(nix build -j auto --no-link --print-out-paths ./#x86_64-windows 2>/dev/null)
+          (cd "$outpath/bin" && zip -9 "$OLDPWD/artifacts/tola-x86_64-windows.zip" tola.exe)
+
+          ls -la artifacts/
+
+      # Upload all artifacts to GitHub Release
+      - name: Create Release
+        run: |
+          # Generate SHA256 checksums
+          cd artifacts
+          shasum -a 256 * > checksums.txt
+          cd ..
+
+          # Generate categorized release notes from commits since last tag
+          prev_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$prev_tag" ]; then
+            echo "## What's Changed" > notes.md
+            echo "" >> notes.md
+
+            # Collect commits
+            commits=$(git log --pretty=format:"%s" "$prev_tag"..HEAD)
+
+            # Features (feat:)
+            features=$(echo "$commits" | grep -iE '^feat(\(.+\))?:' | sed 's/^feat\([^)]*\)\?: //' || true)
+            if [ -n "$features" ]; then
+              echo "### ■ Features" >> notes.md
+              echo "$features" | while read -r line; do
+                [ -n "$line" ] && echo "- $line" >> notes.md
+              done
+              echo "" >> notes.md
+            fi
+
+            # Fixes (fix:)
+            fixes=$(echo "$commits" | grep -iE '^fix(\(.+\))?:' | sed 's/^fix\([^)]*\)\?: //' || true)
+            if [ -n "$fixes" ]; then
+              echo "### ■ Bug Fixes" >> notes.md
+              echo "$fixes" | while read -r line; do
+                [ -n "$line" ] && echo "- $line" >> notes.md
+              done
+              echo "" >> notes.md
+            fi
+
+            # Refactor (refactor:)
+            refactors=$(echo "$commits" | grep -iE '^refactor(\(.+\))?:' | sed 's/^refactor\([^)]*\)\?: //' || true)
+            if [ -n "$refactors" ]; then
+              echo "### ■ Refactor" >> notes.md
+              echo "$refactors" | while read -r line; do
+                [ -n "$line" ] && echo "- $line" >> notes.md
+              done
+              echo "" >> notes.md
+            fi
+
+            # Performance (perf:)
+            perfs=$(echo "$commits" | grep -iE '^perf(\(.+\))?:' | sed 's/^perf\([^)]*\)\?: //' || true)
+            if [ -n "$perfs" ]; then
+              echo "### ■ Performance" >> notes.md
+              echo "$perfs" | while read -r line; do
+                [ -n "$line" ] && echo "- $line" >> notes.md
+              done
+              echo "" >> notes.md
+            fi
+
+            # Other commits (exclude release, ci, chore, docs, build, style, test)
+            others=$(echo "$commits" | grep -viE '^(feat|fix|refactor|perf|release|ci|chore|docs|build|style|test)(\(.+\))?:' | grep -viE '^release ' || true)
+            if [ -n "$others" ]; then
+              echo "### ■ Other Changes" >> notes.md
+              echo "$others" | while read -r line; do
+                [ -n "$line" ] && echo "- $line" >> notes.md
+              done
+              echo "" >> notes.md
+            fi
+
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev_tag...${{ github.ref_name }}" >> notes.md
+          else
+            # Fallback to commit message if no previous tag
+            git log -1 --format="%B" > notes.md
+          fi
+
+          # Check if this is a prerelease (contains -alpha, -beta, -rc, etc.)
+          prerelease_flag=""
+          if echo "${{ github.ref_name }}" | grep -qE '\-(alpha|beta|rc|dev)'; then
+            prerelease_flag="--prerelease"
+          fi
+
+          # Delete existing release if it exists, then create new one
+          gh release delete ${{ github.ref_name }} --yes || true
+          gh release create ${{ github.ref_name }} artifacts/* \
+            --title "${{ github.ref_name }}" \
+            --notes-file notes.md \
+            $prerelease_flag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

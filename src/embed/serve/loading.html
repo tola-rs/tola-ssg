@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Building... - tola</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #1a1a1a;
+            color: #e4e4e7;
+            font-family: system-ui, -apple-system, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid #333;
+            border-top-color: #60a5fa;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .text {
+            color: #71717a;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="spinner"></div>
+        <span class="text">Building site...</span>
+    </div>
+    <script>
+        // Poll for build completion
+        // Note: fetch ignores fragment, but we need to preserve it for navigation
+        const fullUrl = window.location.href;
+        const urlWithoutFragment = window.location.origin + window.location.pathname + window.location.search;
+
+        const poll = () => {
+            fetch(urlWithoutFragment, { method: 'HEAD' })
+                .then(r => {
+                    if (r.headers.get('X-Tola-Ready') === 'true') {
+                        // Force reload - can't use href assignment when URL is identical
+                        window.location.reload();
+                    }
+                })
+                .catch(() => {});
+        };
+        // Poll immediately, then every second
+        poll();
+        setInterval(poll, 1000);
+    </script>
+</body>
+</html>
