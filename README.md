@@ -16,7 +16,7 @@ There would be huge change in v0.7.x: vdom diff, live reloading, custom search f
 ## Showcase
 
 > Yeah, my blog is also built with `tola`.  \
-> There are example site collection: https://tola-ssg.github.io/example-sites
+> There are example site collection: https://tola-rs.github.io/example-sites
 
 [my blog](https://kawayww.com):
 ![home](/screenshots/home.avif)
