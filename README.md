@@ -3,8 +3,8 @@
 A static site generator for Typst-based blogs.  \
 
 **NOTE:**  \
-**There would be huge change in v0.7.x: vdom diff, live reloading, custom search function, interactive and useful cli**  \
-**See showcase videos in [issue #24](https://github.com/tola-ssg/tola-ssg/issues/24), for coming semless hot reloading**
+**There would be huge change in v0.7.x: vdom diff, live reloading, interactive cli, more useful local server**  \
+**See showcase videos in [issue #41](https://github.com/tola-ssg/tola-ssg/issues/41), for coming semless hot reloading**
 
 
 ## Table of Contents
