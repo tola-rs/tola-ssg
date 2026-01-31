@@ -1,7 +1,11 @@
 # tola-ssg
 
 A static site generator for Typst-based blogs.  \
-There would be huge change in v0.7.x: vdom diff, live reloading, custom search function, interactive and useful cli
+
+**NOTE:**  \
+**There would be huge change in v0.7.x: vdom diff, live reloading, custom search function, interactive and useful cli**  \
+**See showcase videos in [issue #24](https://github.com/tola-ssg/tola-ssg/issues/24), for coming semless hot reloading**
+
 
 ## Table of Contents
 
@@ -14,7 +18,6 @@ There would be huge change in v0.7.x: vdom diff, live reloading, custom search f
 - [Note](#note)
 
 ## Showcase
-
 > Yeah, my blog is also built with `tola`.  \
 > There are example site collection: https://tola-rs.github.io/example-sites
 
