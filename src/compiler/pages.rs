@@ -71,24 +71,22 @@ pub fn process_page(
     deps_mtime: Option<SystemTime>,
     log_file: bool,
 ) -> Result<Option<PageMeta>> {
-    let mut page = PageMeta::from_paths(path.to_path_buf(), config)?;
+    // Compile the page and get metadata
+    let (html_content, content_meta) = compile_meta(path, config)?;
+    let mut page = PageMeta::from_paths(path.to_path_buf(), config, content_meta)?;
 
     // Check if up-to-date
     if !clean && is_up_to_date(path, &page.paths.html, deps_mtime) {
         return Ok(None);
     }
 
-    // Compile the page and get metadata
-    let (html_content, content_meta) = compile_meta(path, config)?;
-
     // Skip drafts
-    if is_draft(content_meta.as_ref()) {
+    if is_draft(page.content_meta.as_ref()) {
         // Remove from global data if it was previously published
         // (This handles the case where a page is marked as draft after being published)
         return Ok(None);
     }
 
-    page.content_meta = content_meta;
     page.compiled_html = Some(html_content);
 
     // Update global site data for virtual JSON files
@@ -241,6 +239,7 @@ fn is_draft(meta: Option<&ContentMeta>) -> bool {
 fn page_meta_to_data(page: &PageMeta) -> PageData {
     let content = page.content_meta.as_ref();
     PageData {
+        source: page.paths.source.clone(),
         url: page.paths.url_path.clone(),
         title: content
             .and_then(|c| c.title.clone())
@@ -277,8 +276,6 @@ pub fn collect_metadata(
     let results: Vec<Result<Option<(std::path::PathBuf, PageMeta)>>> = typ_files
         .par_iter()
         .map(|path| {
-            let page = PageMeta::from_paths(path.clone(), config)?;
-
             // Compile to extract metadata (HTML discarded)
             let content_meta = if config.build.typst.use_lib {
                 let root = config.get_root();
@@ -295,15 +292,13 @@ pub fn collect_metadata(
             } else {
                 query_meta(path, config)
             };
+            let page = PageMeta::from_paths(path.clone(), config, content_meta)?;
 
             // Skip drafts
-            if is_draft(content_meta.as_ref()) {
+            if page.content_meta.as_ref().is_some_and(|meta| meta.draft) {
                 on_progress();
                 return Ok(None);
             }
-
-            let mut page = page;
-            page.content_meta = content_meta;
 
             // Store in global data
             GLOBAL_SITE_DATA.insert_page(page_meta_to_data(&page));
@@ -340,12 +335,10 @@ pub fn compile_pages_with_data(
     let results: Vec<Result<PageMeta>> = paths
         .par_iter()
         .map(|path| {
-            let mut page = PageMeta::from_paths(path.clone(), config)?;
-
             // Compile with complete data
             let (html, content_meta) = compile_meta(path, config)?;
 
-            page.content_meta = content_meta;
+            let mut page = PageMeta::from_paths(path.clone(), config, content_meta)?;
             page.compiled_html = Some(html);
 
             // Write the page
@@ -394,8 +387,6 @@ pub fn collect_pages(config: &SiteConfig) -> Result<Pages> {
     let results: Vec<Result<Option<PageMeta>>> = typ_files
         .par_iter()
         .map(|path| {
-            let mut page = PageMeta::from_paths(path.clone(), config)?;
-
             let (html, content_meta) = if config.build.typst.use_lib {
                 // Lib mode: compile once, get both HTML and metadata (metadata may be None)
                 let result = compile_meta(path, config)?;
@@ -404,13 +395,13 @@ pub fn collect_pages(config: &SiteConfig) -> Result<Pages> {
                 // CLI mode: only query metadata, compile later (metadata may be None)
                 (None, query_meta(path, config))
             };
+            let mut page = PageMeta::from_paths(path.clone(), config, content_meta)?;
 
             // Skip drafts
-            if is_draft(content_meta.as_ref()) {
+            if is_draft(page.content_meta.as_ref()) {
                 return Ok(None);
             }
 
-            page.content_meta = content_meta;
             page.compiled_html = html;
             Ok(Some(page))
         })
@@ -559,6 +550,36 @@ mod tests {
     }
 
     #[test]
+    fn compile_meta_custom_html_path() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.typ");
+
+        fs::write(
+            &file_path,
+            r#"#metadata((
+      html_path: "my_post.html"
+    )) <tola-meta>"#,
+        )
+        .unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.typst.use_lib = true;
+        config.set_root(dir.path());
+
+        assert_eq!(
+            compile_meta(&file_path, &config)
+                .unwrap()
+                .1
+                .unwrap()
+                .url
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "my_post.html"
+        );
+    }
+
+    #[test]
     fn test_compile_error_returns_err() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("invalid.typ");
@@ -588,7 +609,7 @@ mod tests {
         fs::write(&file_path, "= Test").unwrap();
 
         let config = make_test_config(content_dir.clone(), output_dir);
-        let page = PageMeta::from_paths(file_path, &config);
+        let page = PageMeta::from_paths(file_path, &config, None);
 
         assert!(page.is_ok());
         let page = page.unwrap();
@@ -607,7 +628,7 @@ mod tests {
         fs::write(&file_path, "= Hello").unwrap();
 
         let config = make_test_config(content_dir.clone(), output_dir);
-        let page = PageMeta::from_paths(file_path, &config);
+        let page = PageMeta::from_paths(file_path, &config, None);
 
         assert!(page.is_ok());
         let page = page.unwrap();

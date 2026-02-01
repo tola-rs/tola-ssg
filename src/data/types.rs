@@ -2,6 +2,8 @@
 //!
 //! These types are serialized to JSON and exposed to Typst templates.
 
+use std::path::PathBuf;
+
 use serde::Serialize;
 
 /// Metadata for a single page, exposed in `/_data/pages.json`.
@@ -9,6 +11,9 @@ use serde::Serialize;
 /// This is the data available to Typst templates when reading the pages index.
 #[derive(Debug, Clone, Serialize)]
 pub struct PageData {
+    /// Path to the original .typ file
+    pub source: PathBuf,
+
     /// Page URL path (e.g., "/posts/hello-world/")
     pub url: String,
 

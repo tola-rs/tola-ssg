@@ -172,6 +172,7 @@ mod tests {
             },
             lastmod: None,
             content_meta: Some(ContentMeta {
+                url: None,
                 title: Some(title.to_string()),
                 summary: summary.map(String::from),
                 date: Some(date.to_string()),

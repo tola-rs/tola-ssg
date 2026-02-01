@@ -167,6 +167,9 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ContentMeta {
     pub title: Option<String>,
+    /// Custom output URL
+    #[serde(default)]
+    pub url: Option<PathBuf>,
     /// Summary content (converted to HTML from Typst elements)
     #[serde(default, deserialize_with = "deserialize_summary")]
     pub summary: Option<String>,
@@ -214,7 +217,6 @@ pub struct PageMeta {
 #[derive(Debug, Clone)]
 pub struct PagePaths {
     /// Source .typ file path
-    #[allow(dead_code)] // Reserved for future use
     pub source: PathBuf,
     /// Generated HTML file path (includes `path_prefix`)
     pub html: PathBuf,
@@ -238,7 +240,11 @@ impl PageMeta {
     /// Returns error if:
     /// - File is not in content directory
     /// - File is not a .typ file
-    pub fn from_paths(source: PathBuf, config: &SiteConfig) -> Result<Self> {
+    pub fn from_paths(
+        source: PathBuf,
+        config: &SiteConfig,
+        content_meta: Option<ContentMeta>,
+    ) -> Result<Self> {
         let content_dir = &config.build.content;
         let paths = config.paths();
         let output_dir = paths.output_dir();
@@ -263,12 +269,16 @@ impl PageMeta {
 
         // Compute HTML output path
         // Only slugify the relative path part to preserve output dir and index.html
-        let html = if is_root_index {
-            output_dir.join("index.html")
+        let html = if let Some(url) = content_meta.as_ref().and_then(|meta| meta.url.clone()) {
+            let slugified_relative = slugify_path(Path::new(&url), config);
+            output_dir.join(slugified_relative)
+        } else if is_root_index {
+            output_dir
         } else {
             let slugified_relative = slugify_path(Path::new(&relative), config);
-            output_dir.join(slugified_relative).join("index.html")
+            output_dir.join(slugified_relative)
         };
+        let html = html.join("index.html");
 
         // Compute URL path from the final HTML path to ensure consistency
         let full_path_url = url_from_output_path(&html, config)?;
@@ -292,7 +302,7 @@ impl PageMeta {
                 full_url,
             },
             lastmod,
-            content_meta: None,
+            content_meta,
             compiled_html: None,
         })
     }
@@ -658,7 +668,7 @@ mod tests {
         let config: &SiteConfig = Box::leak(Box::new(config));
 
         let source = PathBuf::from("content/Posts/Hello.typ");
-        let page = PageMeta::from_paths(source, config).unwrap();
+        let page = PageMeta::from_paths(source, config, None).unwrap();
 
         // Output path: "Public" (preserved) + "posts/hello" (slugified) + "index.html"
         assert_eq!(
@@ -680,7 +690,7 @@ mod tests {
         let config: &SiteConfig = Box::leak(Box::new(config));
 
         let source = PathBuf::from("/tmp/Personal/25FW/website/content/Posts/Hello.typ");
-        let page = PageMeta::from_paths(source, config).unwrap();
+        let page = PageMeta::from_paths(source, config, None).unwrap();
 
         // Output path should preserve absolute path casing
         assert_eq!(
