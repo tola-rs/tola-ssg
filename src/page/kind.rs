@@ -37,7 +37,8 @@ impl PageKind {
     ///
     /// Returns `Iterative` if any package requires iteration (e.g., `@tola/pages`, `@tola/current`).
     pub fn from_packages(packages: &[typst_batch::PackageId]) -> Self {
-        if packages.iter()
+        if packages
+            .iter()
             .filter_map(TolaPackage::from_id)
             .any(|p| p.requires_iteration())
         {

@@ -14,8 +14,6 @@ use crate::utils::css;
 
 use super::meta::{relative_path, route_from_source};
 
-
-
 /// Process an asset file from the assets directory.
 ///
 /// Copies the asset to the output directory, respecting freshness checks.
@@ -52,12 +50,15 @@ pub fn process_asset(
     }
 
     // Minify JS/CSS (skip already minified .min.js/.min.css)
-    let stem = asset_path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let stem = asset_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     let is_minified = stem.ends_with(".min");
     if !is_minified && (ext == "js" || ext == "css") {
         let source = fs::read_to_string(&route.source)?;
-        let minified = super::minify::minify_by_ext(&route.source, &source)
-            .unwrap_or_else(|| source.clone());
+        let minified =
+            super::minify::minify_by_ext(&route.source, &source).unwrap_or_else(|| source.clone());
         fs::write(&route.output, minified)?;
     } else {
         fs::copy(&route.source, &route.output)?;
@@ -100,8 +101,6 @@ pub fn process_rel_asset(
     fs::copy(path, output_path)?;
     Ok(())
 }
-
-
 
 /// Copy colocated assets from source directory to output directory.
 ///
@@ -181,8 +180,6 @@ fn copy_dir_recursive(
     Ok(())
 }
 
-
-
 /// Rebuild CSS using processor (as a pre hook).
 ///
 /// Delegates to `utils::css::rebuild_css_processor` with asset path resolution.
@@ -201,8 +198,6 @@ pub fn rebuild_css_processor(
         with_build_args,
     )
 }
-
-
 
 /// Process flatten assets (files that go to output root).
 ///
@@ -232,8 +227,6 @@ pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) 
     Ok(count)
 }
 
-
-
 /// Generate CNAME file if needed.
 ///
 /// Auto-generates CNAME from `site.url` domain when:
@@ -258,8 +251,6 @@ pub fn process_cname(config: &SiteConfig) -> Result<bool> {
         Ok(false)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

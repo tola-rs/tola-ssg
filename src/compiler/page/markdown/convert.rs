@@ -175,9 +175,7 @@ impl MarkdownConverter {
                 let mut attrs = Attrs::new();
                 for (key, value) in tag_attrs.iter() {
                     let key_str: &str = key.as_ref();
-                    let value_str = value
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
+                    let value_str = value.map(|v| v.to_string()).unwrap_or_default();
                     attrs.set(key_str, &value_str);
                 }
 
@@ -471,10 +469,7 @@ impl MarkdownMetaExtractor {
     /// Extract frontmatter and return (metadata, body).
     ///
     /// This is the unified API for pre-compile metadata extraction.
-    pub fn extract_frontmatter<'a>(
-        &self,
-        content: &'a str,
-    ) -> Result<Option<(PageMeta, &'a str)>> {
+    pub fn extract_frontmatter<'a>(&self, content: &'a str) -> Result<Option<(PageMeta, &'a str)>> {
         match Self::detect_frontmatter(content) {
             Some((fm, body, is_toml)) => {
                 let meta = if is_toml {

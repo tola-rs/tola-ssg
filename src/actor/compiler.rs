@@ -12,11 +12,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::messages::{CompilerMsg, VdomMsg};
-use crate::address::{PermalinkUpdate, GLOBAL_ADDRESS_SPACE};
+use crate::address::{GLOBAL_ADDRESS_SPACE, PermalinkUpdate};
 use crate::config::SiteConfig;
 use crate::page::STORED_PAGES;
 use crate::reload::classify::{collect_dependents, url_to_content_path};
-use crate::reload::compile::{compile_page, CompileOutcome};
+use crate::reload::compile::{CompileOutcome, compile_page};
 
 /// Result of background compilation
 struct BatchResult {
@@ -38,7 +38,11 @@ impl CompilerActor {
         vdom_tx: mpsc::Sender<VdomMsg>,
         config: Arc<SiteConfig>,
     ) -> Self {
-        Self { rx, vdom_tx, config }
+        Self {
+            rx,
+            vdom_tx,
+            config,
+        }
     }
 
     /// Main event loop with interruptible background compilation
@@ -201,7 +205,7 @@ impl CompilerActor {
         use crate::asset::version;
         use crate::compiler::dependency::clear_graph;
         use crate::config::{clear_clean_flag, reload_config};
-        use crate::core::{begin_update, end_update, set_healthy, BuildMode};
+        use crate::core::{BuildMode, begin_update, end_update, set_healthy};
         use crate::reload::active::ACTIVE_PAGE;
 
         crate::debug!("compile"; "full rebuild triggered");
@@ -299,36 +303,51 @@ impl CompilerActor {
 
         if !all_dependents.is_empty() {
             crate::log!("compile"; "recompiling {} virtual package users", all_dependents.len());
-            self.compile_batch_blocking(all_dependents.into_iter().collect()).await;
+            self.compile_batch_blocking(all_dependents.into_iter().collect())
+                .await;
         }
     }
 
     /// Route compilation outcome to VdomActor
     async fn route(&mut self, outcome: CompileOutcome) {
         let msg = match outcome {
-            CompileOutcome::Vdom { path, url_path, vdom } => {
+            CompileOutcome::Vdom {
+                path,
+                url_path,
+                vdom,
+            } => {
                 let permalink_change = update_address_space(&path, &url_path);
-                VdomMsg::Process { path, url_path, vdom, permalink_change }
+                VdomMsg::Process {
+                    path,
+                    url_path,
+                    vdom,
+                    permalink_change,
+                }
             }
             CompileOutcome::Reload { reason } => VdomMsg::Reload { reason },
             CompileOutcome::Skipped => VdomMsg::Skip,
-            CompileOutcome::Error { path, url_path, error } => {
-                VdomMsg::Error { path, url_path: url_path.unwrap_or_default(), error }
-            }
+            CompileOutcome::Error {
+                path,
+                url_path,
+                error,
+            } => VdomMsg::Error {
+                path,
+                url_path: url_path.unwrap_or_default(),
+                error,
+            },
         };
         let _ = self.vdom_tx.send(msg).await;
     }
 }
 
 /// Spawn background compilation task
-fn spawn_batch(
-    paths: Vec<PathBuf>,
-    config: Arc<SiteConfig>,
-    pages_hash: u64,
-) -> BackgroundTask {
+fn spawn_batch(paths: Vec<PathBuf>, config: Arc<SiteConfig>, pages_hash: u64) -> BackgroundTask {
     tokio::spawn(async move {
         let outcomes = compile_batch(paths, config).await;
-        BatchResult { outcomes, pages_hash }
+        BatchResult {
+            outcomes,
+            pages_hash,
+        }
     })
 }
 
@@ -405,7 +424,11 @@ fn format_asset_reason(total: usize, error_count: usize) -> String {
     if error_count == 0 {
         format!("{} assets updated", total)
     } else {
-        format!("{} assets updated, {} errors", total - error_count, error_count)
+        format!(
+            "{} assets updated, {} errors",
+            total - error_count,
+            error_count
+        )
     }
 }
 
@@ -415,7 +438,9 @@ mod tests {
 
     #[test]
     fn test_compile_outcome_variants() {
-        let _ = CompileOutcome::Reload { reason: "test".into() };
+        let _ = CompileOutcome::Reload {
+            reason: "test".into(),
+        };
         let _ = CompileOutcome::Skipped;
         let _ = CompileOutcome::Error {
             path: PathBuf::from("/test.typ"),

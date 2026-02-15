@@ -115,7 +115,7 @@ impl<'a> HeadInjector<'a> {
 
         // Auto-enhance CSS (SVG theme adaptation + View Transitions)
         {
-            use crate::embed::css::{enhance_vars, ENHANCE_CSS};
+            use crate::embed::css::{ENHANCE_CSS, enhance_vars};
             let href = ENHANCE_CSS.url_path_with_vars(&enhance_vars(config));
             let mut link = TolaSite::element("link", Attrs::new());
             link.set_attr("rel", "stylesheet");

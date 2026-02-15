@@ -2,11 +2,7 @@
 
 #![allow(dead_code)]
 
-use std::{
-    fs,
-    path::Path,
-    time::SystemTime,
-};
+use std::{fs, path::Path, time::SystemTime};
 
 use anyhow::{Result, anyhow};
 
@@ -16,8 +12,6 @@ use crate::core::UrlPath;
 use crate::utils::path::slug::slugify_path;
 
 use super::{PageMeta, PageRoute};
-
-
 
 /// Convert days since Unix epoch to (year, month, day).
 ///
@@ -44,8 +38,6 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 
     (y, m, d)
 }
-
-
 
 /// Primary metadata structure for a compiled content page.
 ///
@@ -102,7 +94,8 @@ impl CompiledPage {
         let content_dir = crate::utils::path::normalize_path(&config.build.content);
         let paths = config.paths();
         let output_root = paths.output_dir();
-        let base_url = config.site
+        let base_url = config
+            .site
             .info
             .url
             .as_deref()
@@ -231,7 +224,8 @@ impl CompiledPage {
         // Update output paths based on new permalink
         let paths = config.paths();
         let output_root = paths.output_dir();
-        let base_url = config.site
+        let base_url = config
+            .site
             .info
             .url
             .as_deref()
@@ -270,8 +264,6 @@ impl CompiledPage {
     }
 }
 
-
-
 /// Collection of all compiled pages in the site.
 #[derive(Debug, Default)]
 pub struct Pages {
@@ -290,8 +282,6 @@ impl Pages {
         self.items.len()
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -711,7 +701,10 @@ mod tests {
     #[test]
     fn test_urlpath_normalization() {
         use crate::core::UrlPath;
-        assert_eq!(UrlPath::from_page("/custom/path/").as_str(), "/custom/path/");
+        assert_eq!(
+            UrlPath::from_page("/custom/path/").as_str(),
+            "/custom/path/"
+        );
         assert_eq!(UrlPath::from_page("custom/path").as_str(), "/custom/path/");
         assert_eq!(UrlPath::from_page("/custom/path").as_str(), "/custom/path/");
         assert_eq!(UrlPath::from_page("custom/path/").as_str(), "/custom/path/");

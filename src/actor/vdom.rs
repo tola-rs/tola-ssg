@@ -23,12 +23,15 @@ use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 
 use super::messages::{VdomMsg, WsMsg};
-use crate::cache::{persist_cache, persist_errors, restore_cache, restore_dependency_graph, restore_errors, PersistedError, PersistedErrorState};
+use crate::cache::{
+    PersistedError, PersistedErrorState, persist_cache, persist_errors, restore_cache,
+    restore_dependency_graph, restore_errors,
+};
 use crate::compiler::family::{CacheEntry, Indexed};
 use crate::compiler::page::BUILD_CACHE;
-use crate::core::{UrlPath, GLOBAL_ADDRESS_SPACE};
-use crate::reload::diff::{compute_diff_shared, DiffOutcome};
+use crate::core::{GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::logger::WatchStatus;
+use crate::reload::diff::{DiffOutcome, compute_diff_shared};
 use tola_vdom::prelude::*;
 
 /// Batch entry status.
@@ -360,7 +363,10 @@ impl VdomActor {
                     url_path,
                     vdom,
                     permalink_change,
-                } => self.handle_process(path, url_path, *vdom, permalink_change).await,
+                } => {
+                    self.handle_process(path, url_path, *vdom, permalink_change)
+                        .await
+                }
 
                 VdomMsg::Reload { reason } => self.forward_reload(reason).await,
 
@@ -460,8 +466,13 @@ impl VdomActor {
         use crate::address::PermalinkUpdate;
 
         // Handle permalink conflict early (detected by CompilerActor)
-        if let Some(PermalinkUpdate::Conflict { url, existing_source }) = &permalink_change {
-            self.handle_permalink_conflict(&path, url, existing_source).await;
+        if let Some(PermalinkUpdate::Conflict {
+            url,
+            existing_source,
+        }) = &permalink_change
+        {
+            self.handle_permalink_conflict(&path, url, existing_source)
+                .await;
             return;
         }
 
@@ -486,7 +497,8 @@ impl VdomActor {
         // Compute diff (now using new_url as key, which has the renamed cache entry)
         let key = CacheKey::new(url_path.as_str());
         let result =
-            tokio::task::spawn_blocking(move || compute_diff_shared(&BUILD_CACHE, key, new_vdom)).await;
+            tokio::task::spawn_blocking(move || compute_diff_shared(&BUILD_CACHE, key, new_vdom))
+                .await;
 
         let outcome = match result {
             Ok(outcome) => outcome,
@@ -508,7 +520,8 @@ impl VdomActor {
             PermalinkHandler::cleanup_old_output(old);
             // Record permalink change for batch output
             let rel_path = self.to_relative(&path);
-            self.batch.push_permalink_change(rel_path, old.clone(), url_path.clone());
+            self.batch
+                .push_permalink_change(rel_path, old.clone(), url_path.clone());
         }
 
         self.route_outcome(&path, url_path, outcome, old_url).await;
@@ -518,7 +531,8 @@ impl VdomActor {
         let rel_path = self.to_relative(path);
         let existing_rel = self.to_relative(existing);
 
-        self.batch.push_conflict(url, rel_path.clone(), existing_rel.clone());
+        self.batch
+            .push_conflict(url, rel_path.clone(), existing_rel.clone());
 
         let error = format!(
             "Permalink conflict: '{}' is already used by '{}'",
@@ -590,7 +604,8 @@ impl VdomActor {
     ) {
         crate::debug!("vdom"; "reload: {} ({} ops): {:?}", rel_path.display(), ops.len(), ops);
 
-        self.batch.push_reload(rel_path.display().to_string(), priority);
+        self.batch
+            .push_reload(rel_path.display().to_string(), priority);
 
         let config = RenderConfig::default();
         let patches = render_patches(&ops, &config);
@@ -617,7 +632,8 @@ impl VdomActor {
         url_change: Option<crate::core::UrlChange>,
     ) {
         crate::debug!("vdom"; "initial {}", rel_path.display());
-        self.batch.push_reload(rel_path.display().to_string(), priority);
+        self.batch
+            .push_reload(rel_path.display().to_string(), priority);
         let _ = self
             .ws_tx
             .send(WsMsg::Reload {
@@ -647,7 +663,8 @@ impl VdomActor {
                 .await;
         } else {
             // No change, no need to notify client
-            self.batch.push_unchanged(rel_path.display().to_string(), priority);
+            self.batch
+                .push_unchanged(rel_path.display().to_string(), priority);
         }
     }
 
@@ -659,7 +676,8 @@ impl VdomActor {
         url_change: Option<crate::core::UrlChange>,
     ) {
         crate::debug!("vdom"; "reload: {}: {}", rel_path.display(), reason);
-        self.batch.push_reload(rel_path.display().to_string(), priority);
+        self.batch
+            .push_reload(rel_path.display().to_string(), priority);
         let _ = self.ws_tx.send(WsMsg::Reload { reason, url_change }).await;
     }
 

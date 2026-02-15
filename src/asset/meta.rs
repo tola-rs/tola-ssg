@@ -9,8 +9,6 @@ use crate::core::UrlPath;
 
 use super::{AssetKind, AssetRoute};
 
-
-
 /// Create an `AssetRoute` from a source path in a nested assets directory.
 ///
 /// This is for global assets only. Use `scan::scan_colocated_assets` for colocated assets.
@@ -56,8 +54,6 @@ pub fn relative_path(source: &Path, config: &SiteConfig) -> String {
     source.display().to_string()
 }
 
-
-
 /// Generate a URL path from an output file path.
 ///
 /// Handles path prefix stripping and cross-platform separators.
@@ -85,8 +81,6 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
 
     Ok(url)
 }
-
-
 
 /// Compute href for an asset path (relative to site root).
 ///
@@ -149,16 +143,32 @@ pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<Stri
          Path should be relative to site root. \
          Configured nested: {:?}, flatten: {:?}",
         asset_path.display(),
-        config.build.assets.nested.iter()
-            .map(|e| e.source().strip_prefix(root).unwrap_or(e.source()).display().to_string())
+        config
+            .build
+            .assets
+            .nested
+            .iter()
+            .map(|e| e
+                .source()
+                .strip_prefix(root)
+                .unwrap_or(e.source())
+                .display()
+                .to_string())
             .collect::<Vec<_>>(),
-        config.build.assets.flatten.iter()
-            .map(|e| e.source().strip_prefix(root).unwrap_or(e.source()).display().to_string())
+        config
+            .build
+            .assets
+            .flatten
+            .iter()
+            .map(|e| e
+                .source()
+                .strip_prefix(root)
+                .unwrap_or(e.source())
+                .display()
+                .to_string())
             .collect::<Vec<_>>()
     ))
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -178,16 +188,20 @@ mod tests {
         fs::write(&source, "fake png").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(assets_dir),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir,
+            )];
         config.build.output = dir.path().join("public");
 
         let route = route_from_source(source.clone(), &config).unwrap();
 
         assert_eq!(route.source, source);
         assert_eq!(route.url.as_str(), "/assets/images/logo.png");
-        assert_eq!(route.output, dir.path().join("public/assets/images/logo.png"));
+        assert_eq!(
+            route.output,
+            dir.path().join("public/assets/images/logo.png")
+        );
         assert_eq!(route.kind, AssetKind::Global);
     }
 
@@ -196,9 +210,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(dir.path().join("assets")),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                dir.path().join("assets"),
+            )];
 
         let source = dir.path().join("other/file.txt");
         let result = route_from_source(source, &config);
@@ -231,9 +246,10 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(&root);
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(assets_dir),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir,
+            )];
         config.build.output = root.join("public");
 
         // Path relative to site root
@@ -254,12 +270,11 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(&root);
         // dir = "vendor/static", as = "lib"
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Full {
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Full {
                 dir: vendor_dir,
                 output_as: Some("lib".to_string()),
-            },
-        ];
+            }];
         config.build.output = root.join("public");
 
         // Full physical path relative to site root
@@ -283,12 +298,11 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(&root);
-        config.build.assets.flatten = vec![
-            crate::config::section::build::assets::FlattenEntry::Full {
+        config.build.assets.flatten =
+            vec![crate::config::section::build::assets::FlattenEntry::Full {
                 file: icons_dir.join("fav.ico"),
                 output_as: Some("favicon.ico".to_string()),
-            },
-        ];
+            }];
         config.build.output = root.join("public");
 
         // Full physical path relative to site root

@@ -8,8 +8,6 @@ use crate::page::PageRoute;
 
 use super::{AssetKind, AssetRoute};
 
-
-
 /// Scan global assets directory.
 ///
 /// Returns all assets found in the configured nested asset directories
@@ -91,8 +89,6 @@ fn scan_global_recursive(
     }
 }
 
-
-
 /// Scan flatten assets (individual files copied to output root).
 ///
 /// Returns all flatten assets with their computed URLs and output paths.
@@ -136,8 +132,6 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 
     results
 }
-
-
 
 /// Scan colocated assets for a single page.
 ///
@@ -199,8 +193,12 @@ fn scan_colocated_recursive(
             // e.g., content/test_colocated/ is skipped if content/test_colocated.typ exists
             let dir_name = path.file_name().unwrap_or_default();
             let parent = path.parent().unwrap_or(Path::new(""));
-            let has_typ = parent.join(format!("{}.typ", dir_name.to_string_lossy())).exists();
-            let has_md = parent.join(format!("{}.md", dir_name.to_string_lossy())).exists();
+            let has_typ = parent
+                .join(format!("{}.typ", dir_name.to_string_lossy()))
+                .exists();
+            let has_md = parent
+                .join(format!("{}.md", dir_name.to_string_lossy()))
+                .exists();
             if has_typ || has_md {
                 continue;
             }
@@ -244,8 +242,6 @@ fn scan_colocated_recursive(
     }
 }
 
-
-
 /// Scan all assets for a collection of pages.
 ///
 /// This combines global assets, flatten assets, and colocated assets from all pages
@@ -275,8 +271,6 @@ pub fn scan_all_assets(
 
     results
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -325,7 +319,12 @@ mod tests {
         fs::write(colocated.join("style.css"), "body {}").unwrap();
 
         let output_dir = dir.path().join("public/posts/hello");
-        let route = make_route(Some(colocated.clone()), output_dir.clone(), "/posts/hello/", false);
+        let route = make_route(
+            Some(colocated.clone()),
+            output_dir.clone(),
+            "/posts/hello/",
+            false,
+        );
 
         let assets = scan_colocated_assets(&colocated, &route);
 
@@ -347,13 +346,22 @@ mod tests {
         fs::write(nested.join("logo.svg"), "<svg></svg>").unwrap();
 
         let output_dir = dir.path().join("public/posts/hello");
-        let route = make_route(Some(colocated.clone()), output_dir.clone(), "/posts/hello/", false);
+        let route = make_route(
+            Some(colocated.clone()),
+            output_dir.clone(),
+            "/posts/hello/",
+            false,
+        );
 
         let assets = scan_colocated_assets(&colocated, &route);
 
         assert_eq!(assets.len(), 2);
         assert!(assets.iter().any(|a| a.url == "/posts/hello/image.png"));
-        assert!(assets.iter().any(|a| a.url == "/posts/hello/assets/logo.svg"));
+        assert!(
+            assets
+                .iter()
+                .any(|a| a.url == "/posts/hello/assets/logo.svg")
+        );
     }
 
     #[test]
@@ -375,7 +383,12 @@ mod tests {
         assert_eq!(assets[0].url, "/posts/image.png");
 
         // Test with is_index = false - should still skip content files
-        let route = make_route(Some(colocated.clone()), output_dir.clone(), "/posts/", false);
+        let route = make_route(
+            Some(colocated.clone()),
+            output_dir.clone(),
+            "/posts/",
+            false,
+        );
         let assets = scan_colocated_assets(&colocated, &route);
         assert_eq!(assets.len(), 1);
         assert_eq!(assets[0].url, "/posts/image.png");
@@ -385,9 +398,10 @@ mod tests {
     fn test_scan_global_empty() {
         let dir = TempDir::new().unwrap();
         let mut config = SiteConfig::default();
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(dir.path().join("nonexistent")),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                dir.path().join("nonexistent"),
+            )];
 
         let assets = scan_global_assets(&config);
         assert!(assets.is_empty());
@@ -404,9 +418,10 @@ mod tests {
         fs::write(assets_dir.join("style.css"), "body {}").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(assets_dir),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir,
+            )];
         config.build.output = dir.path().join("public");
 
         let assets = scan_global_assets(&config);
@@ -429,9 +444,10 @@ mod tests {
         fs::write(images_dir.join("photo.jpg"), "fake jpg").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(assets_dir),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir,
+            )];
         config.build.output = dir.path().join("public");
 
         let assets = scan_global_assets(&config);
@@ -440,8 +456,6 @@ mod tests {
         assert!(assets.iter().any(|a| a.url == "/assets/logo.png"));
         assert!(assets.iter().any(|a| a.url == "/assets/images/photo.jpg"));
     }
-
-
 
     #[test]
     fn test_scan_flatten_empty() {
@@ -466,7 +480,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.build.assets.flatten = vec![
             crate::config::section::build::assets::FlattenEntry::Simple(dir.path().join("CNAME")),
-            crate::config::section::build::assets::FlattenEntry::Simple(dir.path().join("robots.txt")),
+            crate::config::section::build::assets::FlattenEntry::Simple(
+                dir.path().join("robots.txt"),
+            ),
         ];
         config.build.output = dir.path().join("public");
 
@@ -475,7 +491,11 @@ mod tests {
         assert_eq!(assets.len(), 2);
         assert!(assets.iter().any(|a| a.url == "/CNAME"));
         assert!(assets.iter().any(|a| a.url == "/robots.txt"));
-        assert!(assets.iter().all(|a| a.output.parent().unwrap() == dir.path().join("public")));
+        assert!(
+            assets
+                .iter()
+                .all(|a| a.output.parent().unwrap() == dir.path().join("public"))
+        );
     }
 
     #[test]
@@ -488,12 +508,11 @@ mod tests {
         fs::write(icons_dir.join("fav.ico"), "icon data").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.flatten = vec![
-            crate::config::section::build::assets::FlattenEntry::Full {
+        config.build.assets.flatten =
+            vec![crate::config::section::build::assets::FlattenEntry::Full {
                 file: icons_dir.join("fav.ico"),
                 output_as: Some("favicon.ico".to_string()),
-            },
-        ];
+            }];
         config.build.output = dir.path().join("public");
 
         let assets = scan_flatten_assets(&config);
@@ -508,16 +527,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.flatten = vec![
-            crate::config::section::build::assets::FlattenEntry::Simple(dir.path().join("does_not_exist.txt")),
-        ];
+        config.build.assets.flatten =
+            vec![crate::config::section::build::assets::FlattenEntry::Simple(
+                dir.path().join("does_not_exist.txt"),
+            )];
         config.build.output = dir.path().join("public");
 
         let assets = scan_flatten_assets(&config);
         assert!(assets.is_empty()); // Nonexistent files are skipped
     }
-
-
 
     #[test]
     fn test_scan_global_skips_flatten_files() {
@@ -532,13 +550,15 @@ mod tests {
 
         let mut config = SiteConfig::default();
         // Configure nested to scan the assets directory
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(assets_dir.clone()),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir.clone(),
+            )];
         // Configure flatten for CNAME (should be skipped in nested scan)
-        config.build.assets.flatten = vec![
-            crate::config::section::build::assets::FlattenEntry::Simple(assets_dir.join("CNAME")),
-        ];
+        config.build.assets.flatten =
+            vec![crate::config::section::build::assets::FlattenEntry::Simple(
+                assets_dir.join("CNAME"),
+            )];
         config.build.output = dir.path().join("public");
 
         // Scan global assets - should NOT include CNAME
@@ -565,12 +585,14 @@ mod tests {
         fs::write(assets_dir.join("CNAME"), "example.com").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested = vec![
-            crate::config::section::build::assets::NestedEntry::Simple(assets_dir.clone()),
-        ];
-        config.build.assets.flatten = vec![
-            crate::config::section::build::assets::FlattenEntry::Simple(assets_dir.join("CNAME")),
-        ];
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir.clone(),
+            )];
+        config.build.assets.flatten =
+            vec![crate::config::section::build::assets::FlattenEntry::Simple(
+                assets_dir.join("CNAME"),
+            )];
         config.build.output = dir.path().join("public");
 
         // scan_all_assets should have no duplicates
@@ -578,7 +600,8 @@ mod tests {
 
         // Count occurrences of the CNAME source file
         let cname_source = assets_dir.join("CNAME");
-        let cname_count = all_assets.iter()
+        let cname_count = all_assets
+            .iter()
             .filter(|a| a.source == cname_source)
             .count();
 
@@ -586,7 +609,10 @@ mod tests {
         assert_eq!(cname_count, 1);
 
         // And it should be at the flatten URL
-        let cname_asset = all_assets.iter().find(|a| a.source == cname_source).unwrap();
+        let cname_asset = all_assets
+            .iter()
+            .find(|a| a.source == cname_source)
+            .unwrap();
         assert_eq!(cname_asset.url, "/CNAME");
     }
 }

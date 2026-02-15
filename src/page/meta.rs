@@ -4,8 +4,6 @@ use serde::Deserialize;
 
 use super::JsonMap;
 
-
-
 /// Deserialize tags, treating `null` as empty vec.
 fn deserialize_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
@@ -101,8 +99,6 @@ impl Default for PageMeta {
         }
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

@@ -36,8 +36,8 @@ mod convert;
 mod extract;
 mod optimize;
 
-pub use extract::{extract_svg_to_file, ExtractContext};
-pub use optimize::{optimize_svg, OptimizeOptions};
+pub use extract::{ExtractContext, extract_svg_to_file};
+pub use optimize::{OptimizeOptions, optimize_svg};
 
 // Re-export types from config
 

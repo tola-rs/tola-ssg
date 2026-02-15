@@ -27,7 +27,7 @@ use crate::compiler::family::{Indexed, TolaSite::FamilyKind};
 use crate::compiler::page::PageRoute;
 use crate::config::SiteConfig;
 use crate::core::BuildMode;
-use crate::image::svg::{ExtractContext, extract_svg_to_file, optimize_svg, OptimizeOptions};
+use crate::image::svg::{ExtractContext, OptimizeOptions, extract_svg_to_file, optimize_svg};
 
 /// Processes SVG elements in Indexed VDOM.
 ///
@@ -41,7 +41,11 @@ pub struct SvgTransform<'a> {
 
 impl<'a> SvgTransform<'a> {
     pub fn new(config: &'a SiteConfig, route: &'a PageRoute, mode: BuildMode) -> Self {
-        Self { config, route, mode }
+        Self {
+            config,
+            route,
+            mode,
+        }
     }
 
     /// Check if SVG should be extracted to external file.

@@ -31,7 +31,10 @@ impl ValidationReport {
         self.internal
             .entry(source)
             .or_default()
-            .push(ValidationError { target: link, reason });
+            .push(ValidationError {
+                target: link,
+                reason,
+            });
     }
 
     /// Add an asset error.
@@ -39,7 +42,10 @@ impl ValidationReport {
         self.assets
             .entry(source)
             .or_default()
-            .push(ValidationError { target: path, reason });
+            .push(ValidationError {
+                target: path,
+                reason,
+            });
     }
 
     /// Count of files with internal link errors.
@@ -82,8 +88,12 @@ impl ValidationReport {
         eprintln!(
             "{} {}",
             name.red().bold(),
-            format!("({file_count} file{}, {error_count} error{})",
-                plural_s(file_count), plural_s(error_count)).dimmed()
+            format!(
+                "({file_count} file{}, {error_count} error{})",
+                plural_s(file_count),
+                plural_s(error_count)
+            )
+            .dimmed()
         );
 
         for (path, errs) in errors {

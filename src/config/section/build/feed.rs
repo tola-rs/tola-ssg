@@ -1,8 +1,8 @@
 //! Feed (RSS/Atom) generation configuration.
 
+use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use macros::Config;
 
 /// Feed output format.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,9 +54,8 @@ mod tests {
 
     #[test]
     fn test_custom_config() {
-        let config = test_parse_config(
-            "[build.feed]\nenable = true\npath = \"rss.xml\"\nformat = \"atom\"",
-        );
+        let config =
+            test_parse_config("[build.feed]\nenable = true\npath = \"rss.xml\"\nformat = \"atom\"");
         assert!(config.build.feed.enable);
         assert_eq!(config.build.feed.path, PathBuf::from("rss.xml"));
         assert_eq!(config.build.feed.format, FeedFormat::Atom);

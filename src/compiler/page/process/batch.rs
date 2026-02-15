@@ -2,18 +2,18 @@
 
 use typst_batch::prelude::*;
 
-use crate::asset::{scan_colocated_assets, scan_global_assets, copy_colocated_assets};
-use crate::compiler::page::{compile, process_typst_result, PageCompileOutput};
+use crate::asset::{copy_colocated_assets, scan_colocated_assets, scan_global_assets};
+use crate::compiler::CompileContext;
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
-    collect_warnings, filter_typst_drafts, filter_markdown_drafts, DraftFilterResult, ScannedPage,
-    BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, TypstBatcher,
+    BatchCompileResult, CompileStats, DraftFilterResult, FileSnapshot, MetadataResult, ScannedPage,
+    TypstBatcher, collect_warnings, filter_markdown_drafts, filter_typst_drafts,
 };
-use crate::compiler::CompileContext;
+use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;
-use crate::core::{BuildMode, ContentKind, UrlPath, GLOBAL_ADDRESS_SPACE};
-use crate::page::CompiledPage;
+use crate::core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::freshness::ContentHash;
+use crate::page::CompiledPage;
 use crate::page::{PAGE_LINKS, STORED_PAGES};
 use crate::utils::path::slug::slugify_path;
 use anyhow::Result;
@@ -29,7 +29,12 @@ struct BuildContext<'a> {
 }
 
 impl<'a> BuildContext<'a> {
-    fn new(mode: BuildMode, config: &'a SiteConfig, clean: bool, deps_hash: Option<ContentHash>) -> Self {
+    fn new(
+        mode: BuildMode,
+        config: &'a SiteConfig,
+        clean: bool,
+        deps_hash: Option<ContentHash>,
+    ) -> Self {
         Self {
             mode,
             config,
@@ -107,7 +112,12 @@ pub fn build_static_pages(
         (batch, results)
     } else {
         // No iterative pages: use batch_compile_each with shared inputs
-        let batch = create_batch_compiler_with_inputs(config.get_root(), &typst_paths, snapshot, Some(inputs))?;
+        let batch = create_batch_compiler_with_inputs(
+            config.get_root(),
+            &typst_paths,
+            snapshot,
+            Some(inputs),
+        )?;
         let results = compile_typst_batch(&batch, &typst_paths, progress)?;
         (batch, results)
     };
@@ -136,7 +146,13 @@ pub fn build_static_pages(
     }
 
     // Write non-iterative pages only (iterative pages will be written by rebuild_iterative_pages)
-    write_static_pages(&pages, &iterative_paths, clean, deps_hash, &config.build.output)?;
+    write_static_pages(
+        &pages,
+        &iterative_paths,
+        clean,
+        deps_hash,
+        &config.build.output,
+    )?;
 
     // Skip rebuilding address space if scan already populated it
     if !skip_global_state {
@@ -183,7 +199,8 @@ pub fn rebuild_iterative_pages(
     let path_to_url: rustc_hash::FxHashMap<&Path, UrlPath> = typst_paths
         .iter()
         .filter_map(|path| {
-            STORED_PAGES.get_permalink_by_source(path)
+            STORED_PAGES
+                .get_permalink_by_source(path)
                 .map(|url| (path.as_path(), url))
         })
         .collect();
@@ -358,7 +375,9 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
 
     for page in scanned {
         let Some(meta) = &page.meta else { continue };
-        let Ok(mut compiled) = CompiledPage::from_paths(&page.path, config) else { continue };
+        let Ok(mut compiled) = CompiledPage::from_paths(&page.path, config) else {
+            continue;
+        };
 
         compiled.content_meta = Some(meta.clone());
         compiled.apply_custom_permalink(config);
@@ -410,14 +429,14 @@ fn create_batch_with_inputs<'a>(
         return Ok(None);
     }
 
-    let batch = Compiler::new(root)
-        .into_batch()
-        .with_inputs_obj(inputs);
+    let batch = Compiler::new(root).into_batch().with_inputs_obj(inputs);
 
     Ok(Some(if let Some(snap) = snapshot {
         batch.with_snapshot(snap)
     } else {
-        batch.with_snapshot_from(paths).map_err(|e| anyhow::anyhow!("{}", e))?
+        batch
+            .with_snapshot_from(paths)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
     }))
 }
 
@@ -601,11 +620,12 @@ fn finalize_static_page(
 
     // Update source mapping if permalink changed (e.g., permalink uses pages())
     if let Some(old_permalink) = STORED_PAGES.get_permalink_by_source(&path)
-        && old_permalink != page.route.permalink {
-            // Remove old permalink entry and update source mapping
-            STORED_PAGES.remove_page(&old_permalink);
-            STORED_PAGES.insert_source_mapping(path.clone(), page.route.permalink.clone());
-        }
+        && old_permalink != page.route.permalink
+    {
+        // Remove old permalink entry and update source mapping
+        STORED_PAGES.remove_page(&old_permalink);
+        STORED_PAGES.insert_source_mapping(path.clone(), page.route.permalink.clone());
+    }
 
     // Cache VDOM with the CORRECT permalink (after apply_custom_permalink)
     if let Some(vdom) = result.indexed_vdom {
@@ -673,7 +693,10 @@ fn write_static_pages(
 }
 
 /// Filter pages to exclude iterative ones.
-fn filter_direct_pages<'a>(pages: &'a [CompiledPage], iterative_paths: &[PathBuf]) -> Vec<&'a CompiledPage> {
+fn filter_direct_pages<'a>(
+    pages: &'a [CompiledPage],
+    iterative_paths: &[PathBuf],
+) -> Vec<&'a CompiledPage> {
     use rustc_hash::FxHashSet;
 
     let iterative_set: FxHashSet<&Path> = iterative_paths.iter().map(|p| p.as_path()).collect();

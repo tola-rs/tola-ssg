@@ -7,7 +7,7 @@ use crate::compiler::page::compile;
 use crate::compiler::page::{PageResult, collect_warnings};
 use crate::config::SiteConfig;
 use crate::core::BuildMode;
-use crate::page::{STORED_PAGES, PageMeta, CompiledPage};
+use crate::page::{CompiledPage, PageMeta, STORED_PAGES};
 use anyhow::Result;
 use std::path::Path;
 
@@ -202,7 +202,10 @@ mod tests {
 
         let (_, meta, _indexed_vdom) = result.unwrap();
         assert!(meta.is_some());
-        assert!(meta.as_ref().is_some_and(|m| m.draft), "Should detect draft: true");
+        assert!(
+            meta.as_ref().is_some_and(|m| m.draft),
+            "Should detect draft: true"
+        );
     }
 
     #[test]

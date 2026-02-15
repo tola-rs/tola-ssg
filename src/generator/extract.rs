@@ -182,7 +182,8 @@ mod tests {
 
         #[test]
         fn html_elem_void() {
-            let json = json!({"func": "elem", "tag": "br", "body": {"func": "sequence", "children": []}});
+            let json =
+                json!({"func": "elem", "tag": "br", "body": {"func": "sequence", "children": []}});
             assert_eq!(extract(&json), "<br/>");
         }
 
@@ -278,7 +279,10 @@ mod tests {
   summary: [This is *bold* text],
 )) <tola-meta>
 "#;
-            assert_eq!(compile_and_extract(source), Some("This is bold text".into()));
+            assert_eq!(
+                compile_and_extract(source),
+                Some("This is bold text".into())
+            );
         }
 
         #[test]
@@ -290,7 +294,10 @@ mod tests {
   summary: [This is _italic_ text],
 )) <tola-meta>
 "#;
-            assert_eq!(compile_and_extract(source), Some("This is italic text".into()));
+            assert_eq!(
+                compile_and_extract(source),
+                Some("This is italic text".into())
+            );
         }
 
         #[test]

@@ -21,8 +21,8 @@
 //! - `external = true, format = "svg"` → Extract as SVG file (no conversion)
 //! - `external = true, format = "avif"` → Convert to AVIF using `converter`
 
-use serde::{Deserialize, Serialize};
 use macros::Config;
+use serde::{Deserialize, Serialize};
 
 /// SVG output format.
 #[allow(clippy::upper_case_acronyms)]
@@ -166,7 +166,10 @@ impl SvgConfig {
                     diag.error_with_hint(
                         Self::FIELDS.converter,
                         "`magick` command not found",
-                        format!("install ImageMagick or set {} = \"builtin\"", Self::FIELDS.converter),
+                        format!(
+                            "install ImageMagick or set {} = \"builtin\"",
+                            Self::FIELDS.converter
+                        ),
                     );
                 }
             }
@@ -175,7 +178,10 @@ impl SvgConfig {
                     diag.error_with_hint(
                         Self::FIELDS.converter,
                         "`ffmpeg` command not found",
-                        format!("install FFmpeg or set {} = \"builtin\"", Self::FIELDS.converter),
+                        format!(
+                            "install FFmpeg or set {} = \"builtin\"",
+                            Self::FIELDS.converter
+                        ),
                     );
                 }
             }

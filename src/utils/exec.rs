@@ -119,7 +119,8 @@ impl Cmd {
         I: IntoIterator<Item = (K, V)>,
     {
         for (k, v) in vars {
-            self.envs.push((k.as_ref().to_owned(), v.as_ref().to_owned()));
+            self.envs
+                .push((k.as_ref().to_owned(), v.as_ref().to_owned()));
         }
         self
     }
@@ -181,7 +182,6 @@ pub fn cmd_slice<S: AsRef<OsStr>>(slice: &[S]) -> Cmd {
 }
 
 impl Cmd {
-
     /// Get the program name for error messages.
     fn program_name(&self) -> String {
         self.program.to_string_lossy().to_string()

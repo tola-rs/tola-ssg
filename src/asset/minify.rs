@@ -41,10 +41,12 @@ pub fn minify_js(source: &str) -> Option<String> {
 /// Minify CSS source code.
 pub fn minify_css(source: &str) -> Option<String> {
     let stylesheet = StyleSheet::parse(source, ParserOptions::default()).ok()?;
-    let result = stylesheet.to_css(PrinterOptions {
-        minify: true,
-        ..PrinterOptions::default()
-    }).ok()?;
+    let result = stylesheet
+        .to_css(PrinterOptions {
+            minify: true,
+            ..PrinterOptions::default()
+        })
+        .ok()?;
     Some(result.code)
 }
 

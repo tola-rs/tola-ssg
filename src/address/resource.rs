@@ -54,7 +54,6 @@ impl Resource {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

@@ -50,10 +50,7 @@ impl PageLinkGraph {
         }
 
         // Build target set (exclude self-links)
-        let target_set: UrlSet = targets
-            .into_iter()
-            .filter(|t| t != from)
-            .collect();
+        let target_set: UrlSet = targets.into_iter().filter(|t| t != from).collect();
 
         // Update reverse mapping (linked_by)
         {

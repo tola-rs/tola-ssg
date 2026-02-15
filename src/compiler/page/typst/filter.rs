@@ -6,8 +6,8 @@ use typst_batch::prelude::*;
 
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::{Typst, TypstBatcher};
-use crate::page::{PageKind, PageMeta};
 use crate::package::Phase;
+use crate::page::{PageKind, PageMeta};
 
 /// Result of Typst draft filtering, includes batcher for reuse.
 pub struct TypstFilterResult<'a> {
@@ -25,7 +25,11 @@ impl<'a> TypstFilterResult<'a> {
         batcher: Option<TypstBatcher<'a>>,
         scanned: Vec<ScannedPage>,
     ) -> Self {
-        Self { draft_count, batcher, scanned }
+        Self {
+            draft_count,
+            batcher,
+            scanned,
+        }
     }
 
     fn empty(draft_count: usize, batcher: Option<TypstBatcher<'a>>) -> Self {
@@ -39,11 +43,7 @@ impl<'a> TypstFilterResult<'a> {
 /// for pre-scan optimization.
 ///
 /// Returns batcher for reuse in subsequent compilation phases.
-pub fn filter_drafts<'a>(
-    files: &[&PathBuf],
-    root: &'a Path,
-    label: &str,
-) -> TypstFilterResult<'a> {
+pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> TypstFilterResult<'a> {
     if files.is_empty() {
         return TypstFilterResult::empty(0, None);
     }
@@ -148,7 +148,9 @@ impl DraftFilter for Typst {
     ) -> FilterResult<'a, Self::Extra> {
         let result = filter_drafts(&files, root, label);
         // Note: batcher is discarded here. Use filter_drafts() directly to get batcher.
-        let non_draft_files: Vec<_> = result.scanned.iter()
+        let non_draft_files: Vec<_> = result
+            .scanned
+            .iter()
             .filter_map(|s| files.iter().find(|f| ***f == s.path).copied())
             .collect();
         FilterResult::new(non_draft_files, result.draft_count)

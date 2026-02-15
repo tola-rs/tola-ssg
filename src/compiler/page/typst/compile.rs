@@ -55,7 +55,10 @@ pub fn process_result(
     // Filter warnings
     let warnings = result.diagnostics().filter_out(&[
         DiagnosticFilter::new(DiagnosticSeverity::Warning, FilterType::HtmlExport),
-        DiagnosticFilter::new(DiagnosticSeverity::Warning, FilterType::Package(PackageKind::AllPreview)),
+        DiagnosticFilter::new(
+            DiagnosticSeverity::Warning,
+            FilterType::Package(PackageKind::AllPreview),
+        ),
     ]);
 
     // Extract parts

@@ -95,10 +95,9 @@ impl EmbeddedAsset<()> {
                 r#"<link rel="stylesheet" href="{}" {}>"#,
                 url, GENERATED_ATTR
             ),
-            AssetKind::JavaScript => format!(
-                r#"<script src="{}" {}></script>"#,
-                url, GENERATED_ATTR
-            ),
+            AssetKind::JavaScript => {
+                format!(r#"<script src="{}" {}></script>"#, url, GENERATED_ATTR)
+            }
         }
     }
 }
@@ -144,10 +143,9 @@ impl<V: TemplateVars> EmbeddedAsset<V> {
                 r#"<link rel="stylesheet" href="{}" {}>"#,
                 url, GENERATED_ATTR
             ),
-            AssetKind::JavaScript => format!(
-                r#"<script src="{}" {}></script>"#,
-                url, GENERATED_ATTR
-            ),
+            AssetKind::JavaScript => {
+                format!(r#"<script src="{}" {}></script>"#, url, GENERATED_ATTR)
+            }
         }
     }
 }

@@ -56,9 +56,10 @@ pub fn optimize_svg(content: &[u8], options: &OptimizeOptions) -> Result<Optimiz
 
     // Expand viewBox to include stroke boundaries if enabled
     if options.expand_viewbox
-        && let Some(bounds) = calculate_stroke_bounds(&tree) {
-            optimized = expand_viewbox_to_bounds(&optimized, bounds);
-        }
+        && let Some(bounds) = calculate_stroke_bounds(&tree)
+    {
+        optimized = expand_viewbox_to_bounds(&optimized, bounds);
+    }
 
     let size = parse_dimensions(&optimized).unwrap_or((0.0, 0.0));
 

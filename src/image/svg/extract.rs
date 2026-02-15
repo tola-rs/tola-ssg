@@ -9,8 +9,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use super::convert::convert_svg;
-use super::optimize::{optimize_svg, OptimizeOptions};
 use super::filename_hash;
+use super::optimize::{OptimizeOptions, optimize_svg};
 use crate::config::{SvgConverter, SvgFormat};
 
 /// Context for SVG extraction.
@@ -94,8 +94,7 @@ pub fn extract_svg_to_file(svg_content: &[u8], ctx: &ExtractContext) -> Result<E
         dpi: ctx.dpi,
         expand_viewbox: ctx.expand_viewbox,
     };
-    let optimized = optimize_svg(svg_content, &optimize_opts)
-        .context("Failed to optimize SVG")?;
+    let optimized = optimize_svg(svg_content, &optimize_opts).context("Failed to optimize SVG")?;
 
     let converted = convert_svg(
         &optimized.data,
@@ -142,11 +141,7 @@ pub fn check_extracted_exists(svg_content: &[u8], ctx: &ExtractContext) -> Optio
     let filename = format!("svg-{}.{}", hash, ctx.format.extension());
     let path = ctx.tola_dir().join(&filename);
 
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 #[cfg(test)]
@@ -177,7 +172,7 @@ mod tests {
             true,
         );
 
-        assert!(ctx.should_inline(5 * 1024));  // 5KB < 10KB
+        assert!(ctx.should_inline(5 * 1024)); // 5KB < 10KB
         assert!(!ctx.should_inline(15 * 1024)); // 15KB > 10KB
 
         // No threshold = never inline

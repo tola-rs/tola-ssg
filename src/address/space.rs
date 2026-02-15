@@ -110,7 +110,11 @@ impl AddressSpace {
     }
 
     /// Register heading IDs for a page.
-    pub fn register_headings(&mut self, permalink: &UrlPath, ids: impl IntoIterator<Item = String>) {
+    pub fn register_headings(
+        &mut self,
+        permalink: &UrlPath,
+        ids: impl IntoIterator<Item = String>,
+    ) {
         self.headings
             .entry(permalink.clone())
             .or_default()
@@ -168,9 +172,10 @@ impl AddressSpace {
 
         // Check if permalink actually changed
         if let Some(ref old) = old_url
-            && old == new_url {
-                return PermalinkUpdate::Unchanged;
-            }
+            && old == new_url
+        {
+            return PermalinkUpdate::Unchanged;
+        }
 
         // Check for conflict: new URL already owned by a different source
         if let Some(resource) = self.by_url.get(new_url) {
@@ -205,11 +210,12 @@ impl AddressSpace {
         let old_url = self.by_source.get(source).cloned();
 
         if let Some(ref old) = old_url
-            && old != new_url {
-                // Permalink changed - clean up old entries
-                self.remove_url(old);
-                return Some(old.clone());
-            }
+            && old != new_url
+        {
+            // Permalink changed - clean up old entries
+            self.remove_url(old);
+            return Some(old.clone());
+        }
 
         None
     }
@@ -347,9 +353,10 @@ impl AddressSpace {
     fn resolve_fragment(&self, current_url: &str, fragment: &str) -> ResolveResult {
         // Empty fragment is technically valid (links to top of page)
         if fragment.is_empty()
-            && let Some(resource) = self.by_url.get(current_url) {
-                return ResolveResult::Found(resource.clone());
-            }
+            && let Some(resource) = self.by_url.get(current_url)
+        {
+            return ResolveResult::Found(resource.clone());
+        }
 
         // Check if the fragment exists on the current page
         if let Some(headings) = self.headings.get(current_url) {
@@ -488,25 +495,27 @@ impl AddressSpace {
 
             // Check if asset is registered
             if let Some(url) = self.by_source.get(&asset_path)
-                && let Some(resource) = self.by_url.get(url) {
-                    if !fragment.is_empty() {
-                        return ResolveResult::Warning {
-                            resolved: Some(url.to_string()),
-                            message: format!(
-                                "Fragment '{}' specified on asset. Assets don't have fragments.",
-                                fragment
-                            ),
-                        };
-                    }
-                    return ResolveResult::Found(resource.clone());
+                && let Some(resource) = self.by_url.get(url)
+            {
+                if !fragment.is_empty() {
+                    return ResolveResult::Warning {
+                        resolved: Some(url.to_string()),
+                        message: format!(
+                            "Fragment '{}' specified on asset. Assets don't have fragments.",
+                            fragment
+                        ),
+                    };
                 }
+                return ResolveResult::Found(resource.clone());
+            }
         }
 
         // Check physical path directly
         if let Some(url) = self.by_source.get(&physical_path)
-            && let Some(resource) = self.by_url.get(url) {
-                return ResolveResult::Found(resource.clone());
-            }
+            && let Some(resource) = self.by_url.get(url)
+        {
+            return ResolveResult::Found(resource.clone());
+        }
 
         // Asset not found in address space - this might be OK if it exists on disk
         // The caller should verify file existence
@@ -554,7 +563,11 @@ impl AddressSpace {
                     if self.source_matches_physical(&physical_target, &route.source) {
                         // Perfect: both URL and physical path agree
                         if !fragment.is_empty() {
-                            return self.check_fragment_on_resource(resource, &url_target, fragment);
+                            return self.check_fragment_on_resource(
+                                resource,
+                                &url_target,
+                                fragment,
+                            );
                         }
                         return ResolveResult::Found(resource.clone());
                     }
@@ -624,9 +637,10 @@ impl AddressSpace {
         for candidate in &candidates {
             if let Some(url) = self.by_source.get(candidate)
                 && let Some(resource) = self.by_url.get(url)
-                    && resource.is_page() {
-                        return Some((url, resource));
-                    }
+                && resource.is_page()
+            {
+                return Some((url, resource));
+            }
         }
         None
     }
@@ -667,7 +681,14 @@ impl AddressSpace {
                     AssetKind::Global => "global",
                     AssetKind::Colocated => "colocated",
                 };
-                writeln!(output, "  {} ← {} ({})", route.url, route.source.display(), kind_str).unwrap();
+                writeln!(
+                    output,
+                    "  {} ← {} ({})",
+                    route.url,
+                    route.source.display(),
+                    kind_str
+                )
+                .unwrap();
             }
         }
 
@@ -733,7 +754,11 @@ mod tests {
     #[test]
     fn test_register_asset() {
         let mut space = AddressSpace::new().with_assets_prefix("assets");
-        let route = test_asset_route("assets/logo.png", "/assets/logo.png", "public/assets/logo.png");
+        let route = test_asset_route(
+            "assets/logo.png",
+            "/assets/logo.png",
+            "public/assets/logo.png",
+        );
         let url = route.url.clone();
         space.register_asset(route);
 
@@ -830,12 +855,13 @@ mod tests {
         space.register_page(route_b, None);
 
         // Try to change page B's URL to /hello/ (conflict with page A)
-        let result = space.update_source_url(
-            Path::new("content/b.typ"),
-            &UrlPath::from_page("/hello/"),
-        );
+        let result =
+            space.update_source_url(Path::new("content/b.typ"), &UrlPath::from_page("/hello/"));
         match result {
-            PermalinkUpdate::Conflict { url, existing_source } => {
+            PermalinkUpdate::Conflict {
+                url,
+                existing_source,
+            } => {
                 assert_eq!(url, "/hello/");
                 assert_eq!(existing_source, PathBuf::from("content/a.typ"));
             }

@@ -142,7 +142,11 @@ pub fn from_extension(ext: Option<&str>) -> &'static str {
 /// This is a specialized version that defaults to `image/x-icon` for unknown types,
 /// which is appropriate for favicon files.
 pub fn for_icon(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()) {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+    {
         Some(ext) => match ext.as_str() {
             "png" => types::PNG,
             "svg" => types::SVG,
@@ -192,7 +196,10 @@ mod tests {
         assert_eq!(from_path(&PathBuf::from("icon.svg")), types::SVG);
         assert_eq!(from_path(&PathBuf::from("video.mp4")), types::MP4);
         assert_eq!(from_path(&PathBuf::from("audio.mp3")), types::MP3);
-        assert_eq!(from_path(&PathBuf::from("unknown.xyz")), types::OCTET_STREAM);
+        assert_eq!(
+            from_path(&PathBuf::from("unknown.xyz")),
+            types::OCTET_STREAM
+        );
     }
 
     #[test]

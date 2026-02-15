@@ -119,9 +119,7 @@ pub fn respond_not_found(
         return send_head(request, 404, mime);
     }
 
-    if has_custom
-        && let Ok(body) = fs::read(&custom_404)
-    {
+    if has_custom && let Ok(body) = fs::read(&custom_404) {
         let body = maybe_inject_hotreload(body, HTML, ws_port);
         return send_body(request, 404, HTML, body);
     }
@@ -146,13 +144,13 @@ pub fn respond_unavailable(request: Request) -> Result<()> {
 /// Includes a polling script that auto-refreshes when content is created.
 /// Note: HEAD requests return without X-Tola-Ready to prevent infinite refresh loop.
 pub fn respond_welcome(request: Request) -> Result<()> {
-    use crate::embed::serve::{WelcomeVars, WELCOME_HTML};
+    use crate::embed::serve::{WELCOME_HTML, WelcomeVars};
     use crate::utils::mime::types::HTML;
 
     // HEAD request: return without X-Tola-Ready (polling checks this header)
     if is_head_request(&request) {
-        let response = Response::empty(StatusCode(200))
-            .with_header(make_header("Content-Type", HTML));
+        let response =
+            Response::empty(StatusCode(200)).with_header(make_header("Content-Type", HTML));
         return request.respond(response).map_err(Into::into);
     }
 
@@ -227,16 +225,14 @@ pub fn respond_compile_error(
 
     let error_str = format!("{error:#}");
     let msg = crate::utils::html::escape(&error_str);
-    let body = format!(
-        "<html><body><h1>Compilation Error</h1><pre>{msg}</pre></body></html>",
-    );
+    let body = format!("<html><body><h1>Compilation Error</h1><pre>{msg}</pre></body></html>",);
     let body = maybe_inject_hotreload(body.into_bytes(), HTML, ws_port);
     send_body(request, 500, HTML, body)
 }
 
 /// Respond with hotreload.js from memory.
 pub fn respond_hotreload_js(request: Request, ws_port: u16) -> Result<()> {
-    use crate::embed::serve::{HotreloadVars, HOTRELOAD_JS};
+    use crate::embed::serve::{HOTRELOAD_JS, HotreloadVars};
     use crate::utils::mime::types::JAVASCRIPT;
 
     let vars = HotreloadVars { ws_port };

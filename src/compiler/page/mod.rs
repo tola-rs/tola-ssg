@@ -32,15 +32,17 @@ use crate::compiler::CompileContext;
 use crate::core::ContentKind;
 
 // Re-export types
-pub use cache::{IndexedDocument, BUILD_CACHE, cache_vdom};
+pub use cache::{BUILD_CACHE, IndexedDocument, cache_vdom};
 pub use format::{DraftFilterResult, PageFormat, ScannedHeading, ScannedPage};
-pub use markdown::{filter_markdown_drafts, Markdown};
+pub use markdown::{Markdown, filter_markdown_drafts};
 pub use output::{PageCompileOutput, PageScanOutput};
-pub use process::{build_address_space, build_static_pages, populate_pages, rebuild_iterative_pages};
-pub use process::process_page;
 pub use process::collect_content_files;
+pub use process::process_page;
+pub use process::{
+    build_address_space, build_static_pages, populate_pages, rebuild_iterative_pages,
+};
 pub use typst::process_result as process_typst_result;
-pub use typst::{filter_drafts as filter_typst_drafts, Typst};
+pub use typst::{Typst, filter_drafts as filter_typst_drafts};
 pub use warning::{collect_warnings, drain_warnings};
 pub use write::{write_page_html, write_redirects};
 
@@ -96,7 +98,8 @@ pub type TypstBatcher<'a> = typst_batch::Batcher<'a>;
 pub type FileSnapshot = std::sync::Arc<typst_batch::FileSnapshot>;
 
 /// Result of batch compilation for a single file.
-pub type BatchCompileResult = std::result::Result<typst_batch::CompileResult, typst_batch::CompileError>;
+pub type BatchCompileResult =
+    std::result::Result<typst_batch::CompileResult, typst_batch::CompileError>;
 
 /// Compilation statistics: counts of direct, iterative, and skipped draft pages.
 #[derive(Debug, Clone, Copy, Default)]
@@ -114,7 +117,11 @@ impl CompileStats {
     /// Create new stats with the given counts.
     #[inline]
     pub fn new(direct_pages: usize, iterative_pages: usize, drafts_skipped: usize) -> Self {
-        Self { direct_pages, iterative_pages, drafts_skipped }
+        Self {
+            direct_pages,
+            iterative_pages,
+            drafts_skipped,
+        }
     }
 
     /// Check if any drafts were skipped.

@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 use super::CACHE_DIR;
+use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 use crate::core::UrlPath;
 
 /// Result of modified files detection.
@@ -31,7 +31,9 @@ pub fn get_modified_files(root: &Path) -> ModifiedFilesResult {
             continue;
         };
 
-        result.source_paths.insert(UrlPath::from_page(url), source_path.clone());
+        result
+            .source_paths
+            .insert(UrlPath::from_page(url), source_path.clone());
 
         if is_file_modified(root, info) {
             result.modified.push(source_path);
@@ -80,7 +82,9 @@ fn resolve_source_path(root: &Path, info: &CacheFileInfo) -> Option<PathBuf> {
     if info.source_path.is_empty() {
         return None;
     }
-    Some(crate::utils::path::normalize_path(&root.join(&info.source_path)))
+    Some(crate::utils::path::normalize_path(
+        &root.join(&info.source_path),
+    ))
 }
 
 /// Check if a cached file has been modified (source or deps changed).
@@ -103,4 +107,3 @@ fn is_file_modified(root: &Path, info: &CacheFileInfo) -> bool {
 
     false
 }
-

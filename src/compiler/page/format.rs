@@ -95,14 +95,22 @@ pub struct FilterResult<'a, T = ()> {
 impl<'a> FilterResult<'a, ()> {
     /// Create a filter result without extra data.
     pub fn new(files: Vec<&'a PathBuf>, draft_count: usize) -> Self {
-        Self { files, draft_count, extra: () }
+        Self {
+            files,
+            draft_count,
+            extra: (),
+        }
     }
 }
 
 impl<'a, T> FilterResult<'a, T> {
     /// Create a filter result with extra data.
     pub fn with_extra(files: Vec<&'a PathBuf>, draft_count: usize, extra: T) -> Self {
-        Self { files, draft_count, extra }
+        Self {
+            files,
+            draft_count,
+            extra,
+        }
     }
 }
 

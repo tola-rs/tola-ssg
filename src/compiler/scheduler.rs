@@ -8,12 +8,12 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use crossbeam::channel::{self, Sender};
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use parking_lot::{Condvar, Mutex};
 
 use crate::core::{BuildMode, Priority};
@@ -144,11 +144,17 @@ impl CompileScheduler {
             if self.is_known(&path) {
                 continue;
             }
-            self.pending.insert(path.clone(), PendingState {
+            self.pending.insert(
+                path.clone(),
+                PendingState {
+                    priority: Priority::Background,
+                    waiters: vec![],
+                },
+            );
+            queue.push(Task {
+                path,
                 priority: Priority::Background,
-                waiters: vec![],
             });
-            queue.push(Task { path, priority: Priority::Background });
         }
         self.notify.notify_all();
     }
@@ -210,7 +216,10 @@ impl CompileScheduler {
                 }
             }
             Entry::Vacant(e) => {
-                e.insert(PendingState { priority, waiters: vec![tx] });
+                e.insert(PendingState {
+                    priority,
+                    waiters: vec![tx],
+                });
                 true // new task
             }
         }
@@ -228,7 +237,8 @@ impl CompileScheduler {
     }
 
     fn recv(rx: channel::Receiver<CompileResult>) -> CompileResult {
-        rx.recv().unwrap_or(CompileResult::Failed("channel closed".into()))
+        rx.recv()
+            .unwrap_or(CompileResult::Failed("channel closed".into()))
     }
 }
 
@@ -296,12 +306,13 @@ impl CompileScheduler {
         self.active.insert(path.clone(), waiters);
 
         // Catch panics to ensure waiters always receive a result
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.do_compile(&path)
-        }))
-        .unwrap_or_else(|_| CompileResult::Failed("compilation panicked".into()));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.do_compile(&path)))
+                .unwrap_or_else(|_| CompileResult::Failed("compilation panicked".into()));
 
-        let waiters = self.active.remove(&path)
+        let waiters = self
+            .active
+            .remove(&path)
             .map(|(_, w)| w)
             .unwrap_or_default();
 
@@ -344,7 +355,11 @@ impl CompileScheduler {
         if let Some(mut space) = crate::core::GLOBAL_ADDRESS_SPACE.try_write() {
             space.update_page(
                 result.page.route.clone(),
-                result.page.content_meta.as_ref().and_then(|m| m.title.clone()),
+                result
+                    .page
+                    .content_meta
+                    .as_ref()
+                    .and_then(|m| m.title.clone()),
             );
         }
 

@@ -12,18 +12,18 @@
 
 use crate::{
     asset::{process_asset, process_rel_asset},
-    compiler::page::typst,
     compiler::page::Pages,
+    compiler::page::typst,
     compiler::{collect_all_files, drain_warnings},
     config::SiteConfig,
-    core::{is_shutdown, BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE},
+    core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, is_shutdown},
     freshness::{self, ContentHash},
     log,
     logger::ProgressLine,
     package::generate_lsp_stubs,
     utils::{git, hooks, plural_count},
 };
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use gix::ThreadSafeRepository;
 use rayon::prelude::*;
 use std::{
@@ -109,9 +109,10 @@ fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
     let repo = ensure_output_repo(&config.build.output, config.build.clean)?;
 
     if config.build.clean
-        && let Err(e) = crate::cache::clear_cache_dir(config.get_root()) {
-            crate::debug!("build"; "failed to clear vdom cache: {}", e);
-        }
+        && let Err(e) = crate::cache::clear_cache_dir(config.get_root())
+    {
+        crate::debug!("build"; "failed to clear vdom cache: {}", e);
+    }
 
     // Write enhance.css with config variables
     crate::embed::write_embedded_assets(config, &config.paths().output_dir())?;
@@ -338,7 +339,13 @@ fn print_warnings(
     let (printed, lines_truncated) = print_with_line_limits(&filtered, config);
 
     // Print truncation summary
-    print_truncation_summary(filtered.len(), printed, per_file_truncated, total_truncated, lines_truncated);
+    print_truncation_summary(
+        filtered.len(),
+        printed,
+        per_file_truncated,
+        total_truncated,
+        lines_truncated,
+    );
 }
 
 /// Filter warnings by per-file limit.
@@ -410,13 +417,14 @@ fn print_with_line_limits(
 
         // Check total lines limit
         if let Some(max_lines) = config.max_lines
-            && total_lines + line_count > max_lines {
-                let remaining = max_lines.saturating_sub(total_lines);
-                if remaining > 0 {
-                    eprintln!("{}", truncate_lines(&output, remaining));
-                }
-                return (printed, true);
+            && total_lines + line_count > max_lines
+        {
+            let remaining = max_lines.saturating_sub(total_lines);
+            if remaining > 0 {
+                eprintln!("{}", truncate_lines(&output, remaining));
             }
+            return (printed, true);
+        }
 
         eprintln!("{output}");
         total_lines += line_count;

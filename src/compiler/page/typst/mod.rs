@@ -17,8 +17,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::compiler::CompileContext;
 use super::{PageCompileOutput, PageFormat, PageScanOutput};
+use crate::compiler::CompileContext;
 
 // Re-export utilities
 pub use compile::process_result;

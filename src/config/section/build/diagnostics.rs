@@ -32,7 +32,6 @@ pub struct DiagnosticsConfig {
     pub max_lines_per_warning: Option<usize>,
 }
 
-
 impl DiagnosticsConfig {
     /// Effective max warnings considering both total and per-file limits.
     /// Given file_count, returns the effective max.
@@ -91,7 +90,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.effective_max_warnings(5), Some(10)); // min(10, 15)
-        assert_eq!(config.effective_max_warnings(2), Some(6));  // min(10, 6)
+        assert_eq!(config.effective_max_warnings(2), Some(6)); // min(10, 6)
     }
 
     #[test]
@@ -101,7 +100,7 @@ mod tests {
             max_lines_per_warning: Some(10),
             ..Default::default()
         };
-        assert_eq!(config.effective_max_lines(5), Some(50));  // min(100, 50)
+        assert_eq!(config.effective_max_lines(5), Some(50)); // min(100, 50)
         assert_eq!(config.effective_max_lines(20), Some(100)); // min(100, 200)
     }
 }

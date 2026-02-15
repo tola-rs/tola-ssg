@@ -83,7 +83,7 @@ impl UrlPath {
 
     /// Encode for browser (percent-encode non-ASCII and special characters).
     pub fn to_encoded(&self) -> String {
-        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+        use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
         self.0
             .split('/')
             .map(|segment| utf8_percent_encode(segment, NON_ALPHANUMERIC).to_string())

@@ -17,4 +17,4 @@ mod phase;
 mod tola;
 
 pub use phase::Phase;
-pub use tola::{generate_lsp_stubs, package_sentinel, read_package, TolaPackage};
+pub use tola::{TolaPackage, generate_lsp_stubs, package_sentinel, read_package};

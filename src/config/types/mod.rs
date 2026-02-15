@@ -17,4 +17,4 @@ pub use error::{ConfigDiagnostics, ConfigError};
 pub use field::FieldPath;
 pub use handle::{cfg, clear_clean_flag, init_config, reload_config};
 pub use path::PathResolver;
-pub use status::{check_section_status, FieldStatus};
+pub use status::{FieldStatus, check_section_status};

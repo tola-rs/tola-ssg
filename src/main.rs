@@ -15,11 +15,11 @@ mod freshness;
 mod generator;
 mod image;
 mod logger;
+mod package;
 mod page;
 mod pipeline;
 mod reload;
 mod utils;
-mod package;
 
 use anyhow::Result;
 use clap::{ColorChoice, Parser};
@@ -220,7 +220,11 @@ fn handle_modified_files(files: &[std::path::PathBuf], config: &SiteConfig) {
 fn persist_compile_errors(errors: &[(String, String)], config: &SiteConfig) {
     let mut state = cache::PersistedErrorState::new();
     for (path, error) in errors {
-        state.push(cache::PersistedError::new(path.clone(), String::new(), error.clone()));
+        state.push(cache::PersistedError::new(
+            path.clone(),
+            String::new(),
+            error.clone(),
+        ));
     }
     let _ = cache::persist_errors(&state, config.get_root());
 }
@@ -234,10 +238,7 @@ fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<ThreadSafeRepositor
     let (repo, _pages) = build_site(mode, config, false)?;
 
     // Generate rss and sitemap in parallel
-    let (rss_result, sitemap_result) = rayon::join(
-        || build_feed(config),
-        || build_sitemap(config),
-    );
+    let (rss_result, sitemap_result) = rayon::join(|| build_feed(config), || build_sitemap(config));
 
     rss_result?;
     sitemap_result?;

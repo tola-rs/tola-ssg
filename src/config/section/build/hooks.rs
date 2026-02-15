@@ -127,7 +127,9 @@ impl WatchMode {
                 let rel_path = path.strip_prefix(root).unwrap_or(path);
                 let rel_str = rel_path.to_string_lossy();
 
-                patterns.iter().any(|pattern| rel_str == *pattern || rel_str.ends_with(pattern))
+                patterns
+                    .iter()
+                    .any(|pattern| rel_str == *pattern || rel_str.ends_with(pattern))
             }
         }
     }

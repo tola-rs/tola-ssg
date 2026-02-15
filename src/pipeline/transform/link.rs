@@ -254,8 +254,8 @@ fn get_asset_top_levels(config: &SiteConfig) -> &'static FxHashSet<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use crate::core::UrlPath;
+    use std::path::PathBuf;
 
     fn test_route(is_index: bool) -> PageRoute {
         PageRoute {

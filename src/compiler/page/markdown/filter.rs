@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use super::convert::MarkdownMetaExtractor;
-use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::Markdown;
+use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::page::{PageKind, PageMeta};
 
 /// Result of Markdown draft filtering with scanned data.
@@ -49,7 +49,10 @@ pub fn filter_drafts(files: &[&PathBuf], _root: &Path, _label: &str) -> Markdown
         }
     }
 
-    MarkdownFilterResult { scanned, draft_count }
+    MarkdownFilterResult {
+        scanned,
+        draft_count,
+    }
 }
 
 /// Extract PageMeta from Markdown content.
@@ -109,7 +112,11 @@ fn extract_headings(content: &str) -> Vec<ScannedHeading> {
             }
             Event::End(TagEnd::Heading(_)) => {
                 if let Some((level, text)) = current_heading.take() {
-                    headings.push(ScannedHeading { level, text, supplement: None });
+                    headings.push(ScannedHeading {
+                        level,
+                        text,
+                        supplement: None,
+                    });
                 }
             }
             _ => {}
@@ -128,7 +135,9 @@ impl DraftFilter for Markdown {
         label: &str,
     ) -> FilterResult<'a, Self::Extra> {
         let result = filter_drafts(&files, root, label);
-        let non_draft_files: Vec<_> = result.scanned.iter()
+        let non_draft_files: Vec<_> = result
+            .scanned
+            .iter()
             .filter_map(|s| files.iter().find(|f| ***f == s.path).copied())
             .collect();
         FilterResult::new(non_draft_files, result.draft_count)

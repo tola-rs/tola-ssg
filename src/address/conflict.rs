@@ -44,18 +44,12 @@ pub fn collect_url_sources(pages: &[CompiledPage], config: &SiteConfig) -> UrlSo
 /// Collect global asset URLs into the map.
 fn collect_global_assets(url_sources: &mut UrlSourceMap, config: &SiteConfig) {
     for asset in scan_global_assets(config) {
-        url_sources
-            .entry(asset.url)
-            .or_default()
-            .push(asset.source);
+        url_sources.entry(asset.url).or_default().push(asset.source);
     }
 
     // Also collect flatten assets
     for asset in crate::asset::scan_flatten_assets(config) {
-        url_sources
-            .entry(asset.url)
-            .or_default()
-            .push(asset.source);
+        url_sources.entry(asset.url).or_default().push(asset.source);
     }
 }
 
@@ -88,10 +82,7 @@ fn collect_page_urls(url_sources: &mut UrlSourceMap, page: &CompiledPage) {
     // Colocated assets
     if let Some(dir) = &page.route.colocated_dir {
         for asset in scan_colocated_assets(dir, &page.route) {
-            url_sources
-                .entry(asset.url)
-                .or_default()
-                .push(asset.source);
+            url_sources.entry(asset.url).or_default().push(asset.source);
         }
     }
 }

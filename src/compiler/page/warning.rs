@@ -5,12 +5,11 @@
 
 use parking_lot::Mutex;
 use std::sync::LazyLock;
-use typst_batch::{Diagnostics, DiagnosticInfo};
+use typst_batch::{DiagnosticInfo, Diagnostics};
 
 /// Global warnings collector for compilation warnings.
 /// Uses Vec to preserve all warnings (deduplication happens at display time if needed).
-static WARNINGS: LazyLock<Mutex<Vec<DiagnosticInfo>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
+static WARNINGS: LazyLock<Mutex<Vec<DiagnosticInfo>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 /// Add warnings from a Diagnostics collection.
 pub fn collect_warnings(diagnostics: &Diagnostics) {

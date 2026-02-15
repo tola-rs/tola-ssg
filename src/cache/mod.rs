@@ -9,10 +9,12 @@ mod vdom;
 pub(crate) const CACHE_DIR: &str = ".tola/cache";
 
 // VDOM cache
-pub use vdom::{clear_cache_dir, has_cache, persist_cache, restore_cache, restore_dependency_graph};
+pub use vdom::{
+    clear_cache_dir, has_cache, persist_cache, restore_cache, restore_dependency_graph,
+};
 
 // Failure state
-pub use failure::{persist_errors, restore_errors, PersistedError, PersistedErrorState};
+pub use failure::{PersistedError, PersistedErrorState, persist_errors, restore_errors};
 
 // Modified file detection
 pub use modified::{get_modified_files, get_source_paths};

@@ -12,12 +12,15 @@ use rayon::prelude::*;
 use serde::Serialize;
 use serde_json::{Map, Value as JsonValue};
 
-use super::common::{batch_scan_typst_metadata_iterative, calculate_url_path, collect_content_files, populate_stored_pages, scan_markdown_file, ParallelCollector};
+use super::common::{
+    ParallelCollector, batch_scan_typst_metadata_iterative, calculate_url_path,
+    collect_content_files, populate_stored_pages, scan_markdown_file,
+};
 use crate::cli::args::QueryArgs;
 use crate::config::SiteConfig;
-use crate::page::PageMeta;
 use crate::core::ContentKind;
 use crate::log;
+use crate::page::PageMeta;
 use crate::utils::plural_count;
 
 /// Metadata that can be either normalized or raw.
@@ -116,10 +119,13 @@ fn query_files(files: &[PathBuf], args: &QueryArgs, config: &SiteConfig) -> Resu
     }
 
     // Process Markdown files in parallel
-    markdown_files.par_iter().for_each(|file| {
-        match query_markdown_vdom(file, config) {
+    markdown_files
+        .par_iter()
+        .for_each(|file| match query_markdown_vdom(file, config) {
             Ok(raw_meta) => {
-                if let Some(result) = process_query_result(file, raw_meta, &root, &content_dir, raw_mode) {
+                if let Some(result) =
+                    process_query_result(file, raw_meta, &root, &content_dir, raw_mode)
+                {
                     if result.meta.is_draft() && !include_drafts {
                         return;
                     }
@@ -129,8 +135,7 @@ fn query_files(files: &[PathBuf], args: &QueryArgs, config: &SiteConfig) -> Resu
             Err(e) => {
                 eprintln!("Warning: Failed to query {}: {}", file.display(), e);
             }
-        }
-    });
+        });
 
     let pages = collector.drain_with_capacity(file_count);
     Ok(QueryResult { pages })

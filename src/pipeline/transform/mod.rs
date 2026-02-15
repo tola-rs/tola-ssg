@@ -19,5 +19,5 @@ mod svg;
 pub use body::BodyInjector;
 pub use head::HeadInjector;
 pub use link::LinkTransform;
-pub use media::{cleanup_nobg_originals, MediaTransform};
+pub use media::{MediaTransform, cleanup_nobg_originals};
 pub use svg::SvgTransform;

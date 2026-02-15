@@ -21,10 +21,7 @@ pub fn build_tola_vars(config: &SiteConfig, mode: BuildMode) -> FxHashMap<String
         "TOLA_OUTPUT_DIR".into(),
         config.paths().output_dir().display().to_string(),
     );
-    vars.insert(
-        "TOLA_ROOT".into(),
-        config.get_root().display().to_string(),
-    );
+    vars.insert("TOLA_ROOT".into(), config.get_root().display().to_string());
 
     // Mode variables
     let mode_str = if mode == BuildMode::PRODUCTION {
@@ -33,10 +30,7 @@ pub fn build_tola_vars(config: &SiteConfig, mode: BuildMode) -> FxHashMap<String
         "serve"
     };
     vars.insert("TOLA_MODE".into(), mode_str.into());
-    vars.insert(
-        "TOLA_MINIFY".into(),
-        config.build.minify.to_string(),
-    );
+    vars.insert("TOLA_MINIFY".into(), config.build.minify.to_string());
 
     vars
 }
@@ -212,7 +206,9 @@ fn should_run_hook_for_changes(hook: &HookConfig, changed_paths: &[&Path], root:
         return false;
     }
 
-    changed_paths.iter().any(|path| hook.watch.matches(path, root))
+    changed_paths
+        .iter()
+        .any(|path| hook.watch.matches(path, root))
 }
 
 // ============================================================================

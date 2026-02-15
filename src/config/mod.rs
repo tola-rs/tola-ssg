@@ -43,8 +43,8 @@ pub use section::{
 
 // Re-export from types/
 pub use types::{
-    cfg, clear_clean_flag, init_config, reload_config, ConfigDiagnostics, ConfigError, FieldPath,
-    PathResolver,
+    ConfigDiagnostics, ConfigError, FieldPath, PathResolver, cfg, clear_clean_flag, init_config,
+    reload_config,
 };
 
 // Internal imports from section/
@@ -54,7 +54,7 @@ use crate::{
     cli::{BuildArgs, Cli, Commands, ValidateArgs},
     log,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -274,7 +274,10 @@ impl SiteConfig {
     /// Print warning about unknown fields.
     fn print_unknown_fields_warning(fields: &[String], path: &Path) {
         // Show only filename (tola.toml) since it's always at site root
-        let display_path = path.file_name().map(|n| n.to_string_lossy()).unwrap_or_else(|| path.to_string_lossy());
+        let display_path = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_else(|| path.to_string_lossy());
         eprintln!();
         log!("warning"; "unknown fields in {}:", display_path);
         log!("warning"; "ignoring:");
@@ -380,8 +383,14 @@ impl SiteConfig {
     /// Apply validate arguments from CLI.
     fn apply_validate_args(&mut self, args: &ValidateArgs) {
         // CLI flags override config enable settings
-        Self::update_option(&mut self.validate.link.internal.enable, args.internal.as_ref());
-        Self::update_option(&mut self.validate.link.external.enable, args.external.as_ref());
+        Self::update_option(
+            &mut self.validate.link.internal.enable,
+            args.internal.as_ref(),
+        );
+        Self::update_option(
+            &mut self.validate.link.external.enable,
+            args.external.as_ref(),
+        );
         Self::update_option(&mut self.validate.assets.enable, args.assets.as_ref());
 
         // --warn-only sets all levels to Warn
@@ -400,7 +409,10 @@ impl SiteConfig {
         crate::logger::set_verbose(args.verbose);
 
         Self::update_option(&mut self.build.minify, args.minify.as_ref());
-        Self::update_option(&mut self.build.css.processor.enable, args.css_processor.as_ref());
+        Self::update_option(
+            &mut self.build.css.processor.enable,
+            args.css_processor.as_ref(),
+        );
         self.build.clean = args.clean;
         self.build.skip_drafts = args.skip_drafts;
 
@@ -549,7 +561,9 @@ impl SiteConfig {
         self.build.css.validate(&mut diag);
         self.build.svg.validate(&mut diag);
         self.build.assets.validate(&mut diag);
-        self.build.header.validate(&self.build.assets, self.get_root(), &mut diag);
+        self.build
+            .header
+            .validate(&self.build.assets, self.get_root(), &mut diag);
 
         // Command-specific validation
         self.validate_command_specific(&mut diag)?;
@@ -579,9 +593,7 @@ impl SiteConfig {
 /// Panics if there are unknown fields (to catch config typos in tests).
 #[cfg(test)]
 pub fn test_parse_config(extra: &str) -> SiteConfig {
-    let config = format!(
-        "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}"
-    );
+    let config = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}");
     let (parsed, ignored) = SiteConfig::parse_with_ignored(&config).unwrap();
     assert!(
         ignored.is_empty(),

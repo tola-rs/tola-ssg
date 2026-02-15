@@ -15,8 +15,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::compiler::CompileContext;
 use super::{PageCompileOutput, PageFormat, PageScanOutput};
+use crate::compiler::CompileContext;
 
 // Re-export utilities
 pub use convert::{MarkdownMetaExtractor, MarkdownOptions, from_markdown};

@@ -9,8 +9,8 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHasher};
 use serde::Serialize;
 
-use super::links::PAGE_LINKS;
 use super::PageMeta;
+use super::links::PAGE_LINKS;
 use crate::compiler::page::ScannedHeading;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
@@ -51,8 +51,6 @@ impl StoredPage {
             .unwrap_or_else(|| self.permalink.as_str())
     }
 }
-
-
 
 /// Thread-safe storage for site-wide page data.
 ///
@@ -173,7 +171,10 @@ impl StoredPageMap {
         let mut combined = serde_json::Map::new();
         combined.insert(TolaPackage::Site.input_key(), site_info_json);
         combined.insert(TolaPackage::Pages.input_key(), pages_json);
-        combined.insert(Phase::input_key().to_string(), serde_json::json!(Phase::Visible.as_str()));
+        combined.insert(
+            Phase::input_key().to_string(),
+            serde_json::json!(Phase::Visible.as_str()),
+        );
 
         typst_batch::Inputs::from_json_with_content(
             &serde_json::Value::Object(combined),
@@ -195,14 +196,10 @@ impl StoredPageMap {
         let links_to_urls = PAGE_LINKS.links_to(url);
         let linked_by_urls = PAGE_LINKS.linked_by(url);
 
-        let links_to: Vec<&StoredPage> = links_to_urls
-            .iter()
-            .filter_map(|u| pages.get(u))
-            .collect();
-        let linked_by: Vec<&StoredPage> = linked_by_urls
-            .iter()
-            .filter_map(|u| pages.get(u))
-            .collect();
+        let links_to: Vec<&StoredPage> =
+            links_to_urls.iter().filter_map(|u| pages.get(u)).collect();
+        let linked_by: Vec<&StoredPage> =
+            linked_by_urls.iter().filter_map(|u| pages.get(u)).collect();
 
         // Get headings for this page
         let headings = self.get_headings(url);
@@ -229,8 +226,6 @@ impl StoredPageMap {
         self.pages.read().len()
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

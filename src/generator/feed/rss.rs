@@ -3,12 +3,7 @@
 //! Generates RSS feeds from page metadata stored in GLOBAL_SITE_DATA.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{
-    config::SiteConfig,
-    generator::minify_xml,
-    log,
-    utils::date::DateTimeUtc,
-};
+use crate::{config::SiteConfig, generator::minify_xml, log, utils::date::DateTimeUtc};
 use anyhow::{Ok, Result, anyhow};
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
@@ -27,7 +22,10 @@ struct RssFeed {
 impl RssFeed {
     fn build(config: &SiteConfig) -> Self {
         let pages = get_feed_pages();
-        Self { config: config.clone(), pages }
+        Self {
+            config: config.clone(),
+            pages,
+        }
     }
 
     fn into_xml(self) -> Result<String> {
@@ -75,7 +73,13 @@ fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
     let pub_date = DateTimeUtc::parse(&page.date).map(DateTimeUtc::to_rfc2822)?;
 
     // Build full URL from base URL + permalink
-    let base_url = config.site.info.url.as_deref().unwrap_or_default().trim_end_matches('/');
+    let base_url = config
+        .site
+        .info
+        .url
+        .as_deref()
+        .unwrap_or_default()
+        .trim_end_matches('/');
     let link = format!("{}{}", base_url, page.permalink);
 
     let author = normalize_rss_author(page.author.as_ref(), config);
@@ -144,10 +148,7 @@ mod tests {
         let config = make_config("site@example.com (Site Author)", "unused@example.com");
         let author = "Just a name".to_string();
         let result = normalize_rss_author(Some(&author), &config);
-        assert_eq!(
-            result,
-            Some("site@example.com (Site Author)".to_string())
-        );
+        assert_eq!(result, Some("site@example.com (Site Author)".to_string()));
     }
 
     #[test]

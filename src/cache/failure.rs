@@ -19,7 +19,11 @@ pub struct PersistedError {
 }
 
 impl PersistedError {
-    pub fn new(path: impl Into<String>, url_path: impl Into<String>, error: impl Into<String>) -> Self {
+    pub fn new(
+        path: impl Into<String>,
+        url_path: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
         Self {
             path: path.into(),
             url_path: url_path.into(),
@@ -80,8 +84,6 @@ impl PersistedErrorState {
         self.errors.is_empty()
     }
 }
-
-
 
 /// Check if file content is the same as new content.
 fn file_content_matches(path: &Path, content: &str) -> bool {

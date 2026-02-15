@@ -10,7 +10,7 @@ use anyhow::Result;
 
 use crate::compiler::page::CompiledPage;
 use crate::core::UrlPath;
-use crate::embed::build::{RedirectVars, REDIRECT_HTML};
+use crate::embed::build::{REDIRECT_HTML, RedirectVars};
 use crate::freshness::{self, ContentHash, is_fresh};
 use crate::log;
 
@@ -73,7 +73,9 @@ fn build_final_html(
 
 fn build_redirect_html(canonical_url: &UrlPath) -> String {
     let url_str = canonical_url.to_string();
-    REDIRECT_HTML.render(&RedirectVars { canonical_url: &url_str })
+    REDIRECT_HTML.render(&RedirectVars {
+        canonical_url: &url_str,
+    })
 }
 
 /// `/old-url/` → `{output_dir}/old-url/index.html`
@@ -115,7 +117,11 @@ pub(super) fn write_page(
     Ok(())
 }
 
-fn write_redirect_file(alias_url: &UrlPath, canonical_url: &UrlPath, output_dir: &Path) -> Result<()> {
+fn write_redirect_file(
+    alias_url: &UrlPath,
+    canonical_url: &UrlPath,
+    output_dir: &Path,
+) -> Result<()> {
     let output_file = compute_redirect_output_path(alias_url, output_dir);
 
     if let Some(parent) = output_file.parent() {

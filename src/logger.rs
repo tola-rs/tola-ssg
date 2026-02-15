@@ -17,16 +17,16 @@
 //! progress.finish();
 //! ```
 
-use owo_colors::OwoColorize;
 use crossterm::{
     cursor, execute,
     terminal::{Clear, ClearType},
 };
+use owo_colors::OwoColorize;
+use parking_lot::Mutex;
 use std::{
     io::{Write, stdout},
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use parking_lot::Mutex;
 
 /// Global verbose flag (set by --verbose CLI argument)
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -326,7 +326,12 @@ impl ProgressLine {
 
         let mut stdout = stdout().lock();
         // Clear line and write progress (no newline - stays on same line)
-        execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+        execute!(
+            stdout,
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )
+        .ok();
         write!(stdout, "{} {}", prefix, line).ok();
         stdout.flush().ok();
     }
@@ -349,7 +354,12 @@ impl ProgressLine {
 
             let mut stdout = stdout().lock();
             // Final line with newline to preserve it
-            execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+            execute!(
+                stdout,
+                cursor::MoveToColumn(0),
+                Clear(ClearType::CurrentLine)
+            )
+            .ok();
             writeln!(stdout, "{} {}", prefix, line).ok();
             stdout.flush().ok();
         }
@@ -364,7 +374,12 @@ impl Drop for ProgressLine {
 
         // Clear the line on drop (if not finished properly)
         let mut stdout = stdout().lock();
-        execute!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+        execute!(
+            stdout,
+            cursor::MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )
+        .ok();
         stdout.flush().ok();
     }
 }

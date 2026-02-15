@@ -29,11 +29,7 @@ impl FieldStatus {
 ///
 /// Called by generated `validate_field_status` methods when a field
 /// with special status differs from its default value.
-pub fn check_field_status(
-    field_path: &str,
-    status: FieldStatus,
-    diag: &mut ConfigDiagnostics,
-) {
+pub fn check_field_status(field_path: &str, status: FieldStatus, diag: &mut ConfigDiagnostics) {
     // Skip experimental hints if allowed
     if status == FieldStatus::Experimental && diag.allow_experimental {
         return;
@@ -65,11 +61,7 @@ pub fn check_field_status(
 ///
 /// Called when a section (struct) has experimental/deprecated/not_implemented status
 /// and any of its fields are set to non-default values.
-pub fn check_section_status(
-    section: &str,
-    status: FieldStatus,
-    diag: &mut ConfigDiagnostics,
-) {
+pub fn check_section_status(section: &str, status: FieldStatus, diag: &mut ConfigDiagnostics) {
     // Skip experimental hints if allowed
     if status == FieldStatus::Experimental && diag.allow_experimental {
         return;

@@ -60,7 +60,13 @@ impl ConfigDiagnostic {
 impl fmt::Display for ConfigDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Field path in cyan brackets
-        writeln!(f, "{}{}{}", "[".dimmed(), self.field.as_str().cyan(), "]".dimmed())?;
+        writeln!(
+            f,
+            "{}{}{}",
+            "[".dimmed(),
+            self.field.as_str().cyan(),
+            "]".dimmed()
+        )?;
         // Error message with red bullet
         write!(f, "{} {}", "→".red(), self.message)?;
         // Hint in yellow

@@ -71,26 +71,39 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-
-
     #[test]
     fn test_extract_domain_strips_port() {
         // Port should be stripped
-        assert_eq!(extract_domain("https://example.com:8080"), Some("example.com".to_string()));
-        assert_eq!(extract_domain("https://example.com:443/path"), Some("example.com".to_string()));
+        assert_eq!(
+            extract_domain("https://example.com:8080"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_domain("https://example.com:443/path"),
+            Some("example.com".to_string())
+        );
     }
 
     #[test]
     fn test_extract_domain_strips_auth() {
         // Auth info should be stripped
-        assert_eq!(extract_domain("https://user:pass@example.com"), Some("example.com".to_string()));
-        assert_eq!(extract_domain("https://user@example.com"), Some("example.com".to_string()));
+        assert_eq!(
+            extract_domain("https://user:pass@example.com"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_domain("https://user@example.com"),
+            Some("example.com".to_string())
+        );
     }
 
     #[test]
     fn test_extract_domain_strips_path() {
         // Path should be stripped
-        assert_eq!(extract_domain("https://example.com/path/to/page"), Some("example.com".to_string()));
+        assert_eq!(
+            extract_domain("https://example.com/path/to/page"),
+            Some("example.com".to_string())
+        );
     }
 
     #[test]
@@ -120,8 +133,6 @@ mod tests {
         assert_eq!(extract_domain("http://10.0.0.1:8080"), None);
     }
 
-
-
     #[test]
     fn test_should_generate_cname_no_url() {
         let flatten: Vec<FlattenEntry> = vec![];
@@ -141,7 +152,9 @@ mod tests {
     fn test_should_generate_cname_localhost_skipped() {
         let flatten: Vec<FlattenEntry> = vec![];
         let tmp = TempDir::new().unwrap();
-        assert!(should_generate_cname(Some("http://localhost:3000"), &flatten, tmp.path()).is_none());
+        assert!(
+            should_generate_cname(Some("http://localhost:3000"), &flatten, tmp.path()).is_none()
+        );
     }
 
     #[test]

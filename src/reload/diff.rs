@@ -8,7 +8,7 @@
 //! - `compute_diff()` - Effectful, updates cache (used by VdomActor)
 //! - `compute_diff_shared()` - Thread-safe version using `SharedCache`
 
-use crate::compiler::family::{CacheEntry, Indexed, PatchOp, SharedCache, Cache};
+use crate::compiler::family::{Cache, CacheEntry, Indexed, PatchOp, SharedCache};
 use tola_vdom::algo::{DiffResult, diff};
 use tola_vdom::{CacheKey, Document};
 
@@ -70,11 +70,7 @@ pub fn diff_vdom(old_vdom: &Document<Indexed>, new_vdom: &Document<Indexed>) -> 
 /// # Note
 /// Caller must create `CacheKey` explicitly to ensure URL normalization.
 #[allow(dead_code)]
-pub fn compute_diff(
-    cache: &mut Cache,
-    key: CacheKey,
-    new_vdom: Document<Indexed>,
-) -> DiffOutcome {
+pub fn compute_diff(cache: &mut Cache, key: CacheKey, new_vdom: Document<Indexed>) -> DiffOutcome {
     if let Some(old_entry) = cache.get(&key) {
         let outcome = diff_vdom(&old_entry.doc, &new_vdom);
 

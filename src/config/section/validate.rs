@@ -22,8 +22,8 @@
 //! level = "error"             # Failure level: error | warn
 //! ```
 
-use serde::{Deserialize, Serialize};
 use macros::Config;
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Main ValidateConfig
@@ -40,7 +40,6 @@ pub struct ValidateConfig {
     pub assets: AssetsValidateConfig,
 }
 
-
 // ============================================================================
 // Link Validation
 // ============================================================================
@@ -55,7 +54,6 @@ pub struct LinkValidateConfig {
     /// Internal link validation (site pages).
     pub internal: InternalLinkConfig,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
@@ -150,8 +148,8 @@ pub enum ValidateLevel {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{test_parse_config, SiteConfig};
     use super::*;
+    use crate::config::{SiteConfig, test_parse_config};
 
     #[test]
     fn test_validate_config_defaults() {

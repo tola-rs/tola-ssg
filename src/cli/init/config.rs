@@ -22,7 +22,10 @@ fn generate_config_template() -> String {
     let mut out = String::new();
 
     // Header
-    out.push_str(&format!("# Tola configuration file (v{})\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!(
+        "# Tola configuration file (v{})\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     out.push_str("# https://github.com/tola-rs/tola-ssg\n\n");
 
     // [site.info] section

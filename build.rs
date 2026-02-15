@@ -16,7 +16,10 @@ fn main() {
     let out_path = Path::new(&out_dir);
 
     minify_js_file("src/embed/build/spa.js", &out_path.join("spa.min.js"));
-    minify_js_file("src/embed/serve/hotreload.js", &out_path.join("hotreload.min.js"));
+    minify_js_file(
+        "src/embed/serve/hotreload.js",
+        &out_path.join("hotreload.min.js"),
+    );
     compile_welcome_typ(&out_path.join("welcome.html"));
 
     println!("cargo:rerun-if-changed=src/embed/build/spa.js");
@@ -58,7 +61,8 @@ fn minify_js_file(input: &str, output: &Path) {
 }
 
 fn minify_css(source: &str) -> String {
-    let stylesheet = StyleSheet::parse(source, ParserOptions::default()).expect("Failed to parse CSS");
+    let stylesheet =
+        StyleSheet::parse(source, ParserOptions::default()).expect("Failed to parse CSS");
     stylesheet
         .to_css(PrinterOptions {
             minify: true,
@@ -77,7 +81,8 @@ fn minify_css_file(input: &str, output: &Path) {
 
 fn compile_welcome_typ(output: &Path) {
     let root = Path::new("src/embed/serve");
-    let css_source = fs::read_to_string("src/embed/serve/welcome.css").expect("Failed to read welcome.css");
+    let css_source =
+        fs::read_to_string("src/embed/serve/welcome.css").expect("Failed to read welcome.css");
     let css = minify_css(&css_source);
     let result = Compiler::new(root)
         .with_inputs([("css", css.as_str())])

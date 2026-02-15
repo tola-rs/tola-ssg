@@ -103,7 +103,10 @@ mod tests {
                 "[build.slug]\npath = \"{input}\"\nfragment = \"{input}\""
             ));
             assert_eq!(config.build.slug.path, expected, "path failed for {input}");
-            assert_eq!(config.build.slug.fragment, expected, "fragment failed for {input}");
+            assert_eq!(
+                config.build.slug.fragment, expected,
+                "fragment failed for {input}"
+            );
         }
     }
 

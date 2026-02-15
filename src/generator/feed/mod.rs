@@ -8,8 +8,8 @@
 use crate::config::{FeedFormat, SiteConfig};
 use anyhow::Result;
 
-mod common;
 pub mod atom;
+mod common;
 pub mod rss;
 
 /// Build feed if enabled in config (RSS or Atom based on format setting).

@@ -231,8 +231,7 @@ pub mod parallel {
             rayon::broadcast(|_| LOCAL.with(|deps| std::mem::take(&mut *deps.borrow_mut())));
 
         // Collect from main thread (may not be a rayon worker)
-        let main_deps: Vec<DepEntry> =
-            LOCAL.with(|deps| std::mem::take(&mut *deps.borrow_mut()));
+        let main_deps: Vec<DepEntry> = LOCAL.with(|deps| std::mem::take(&mut *deps.borrow_mut()));
 
         // Stats for debugging
         let rayon_count: usize = rayon_deps.iter().map(|v| v.len()).sum();
@@ -252,7 +251,9 @@ pub mod parallel {
 // =============================================================================
 
 pub use global::{clear as clear_graph, used_by as get_dependents};
-pub use parallel::{flush_to_global as flush_thread_local_deps, record_local as record_dependencies_local};
+pub use parallel::{
+    flush_to_global as flush_thread_local_deps, record_local as record_dependencies_local,
+};
 
 // =============================================================================
 // Tests

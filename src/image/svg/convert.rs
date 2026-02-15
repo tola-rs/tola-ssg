@@ -77,9 +77,7 @@ fn convert_builtin(
             // Try to render and encode
             render_and_encode_avif(&tree, width, height, scale, quality)
         }
-        SvgFormat::PNG => {
-            render_and_encode_png(&tree, width, height, scale)
-        }
+        SvgFormat::PNG => render_and_encode_png(&tree, width, height, scale),
         _ => {
             anyhow::bail!(
                 "Builtin converter does not support {} format yet. Use magick or ffmpeg.",
@@ -158,7 +156,14 @@ fn convert_magick(svg_data: &[u8], format: &SvgFormat, dpi: f32) -> Result<Vec<u
     let format_arg = format!("{}:-", format.extension());
 
     let output = Cmd::new("magick")
-        .args(["-background", "none", "-density", &density, "-", &format_arg])
+        .args([
+            "-background",
+            "none",
+            "-density",
+            &density,
+            "-",
+            &format_arg,
+        ])
         .stdin(svg_data)
         .run()
         .context("ImageMagick conversion failed")?;
@@ -169,11 +174,7 @@ fn convert_magick(svg_data: &[u8], format: &SvgFormat, dpi: f32) -> Result<Vec<u
 /// Convert using FFmpeg.
 fn convert_ffmpeg(svg_data: &[u8], format: &SvgFormat) -> Result<Vec<u8>> {
     let format_args: &[&str] = match format {
-        SvgFormat::AVIF => &[
-            "-c:v", "libsvtav1",
-            "-pix_fmt", "yuva420p",
-            "-f", "avif",
-        ],
+        SvgFormat::AVIF => &["-c:v", "libsvtav1", "-pix_fmt", "yuva420p", "-f", "avif"],
         SvgFormat::PNG => &["-f", "image2pipe", "-c:v", "png"],
         SvgFormat::WEBP => &["-c:v", "libwebp", "-f", "webp"],
         SvgFormat::JPG => &["-c:v", "mjpeg", "-f", "image2pipe"],

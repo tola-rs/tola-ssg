@@ -15,8 +15,8 @@ use super::link::process_link_value;
 use crate::address::resolve_physical_path;
 use crate::compiler::family::{Indexed, TolaSite::FamilyKind};
 use crate::compiler::page::PageRoute;
-use crate::config::section::theme::RecolorTarget;
 use crate::config::SiteConfig;
+use crate::config::section::theme::RecolorTarget;
 use crate::core::LinkKind;
 use crate::image::background;
 
@@ -84,7 +84,10 @@ impl<'a> MediaTransform<'a> {
         };
 
         // Skip non-bitmap formats
-        let ext = source_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = source_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
         if !NOBG_FORMATS.contains(&ext.to_lowercase().as_str()) {
             return;
         }
@@ -114,14 +117,22 @@ impl<'a> MediaTransform<'a> {
     ///
     /// Returns (nobg_output_path, new_src, original_output_path).
     fn generate_nobg_paths(&self, src: &str, source: &Path) -> (PathBuf, String, PathBuf) {
-        let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+        let stem = source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
 
         match LinkKind::parse(src) {
             LinkKind::SiteRoot(path) => {
                 // /images/xxx.png -> public/images/xxx.nobg.png, /images/xxx.nobg.png
                 let trimmed = path.trim_start_matches('/');
                 let parent = Path::new(trimmed).parent().unwrap_or(Path::new(""));
-                let output_path = self.config.build.output.join(parent).join(format!("{}.nobg.png", stem));
+                let output_path = self
+                    .config
+                    .build
+                    .output
+                    .join(parent)
+                    .join(format!("{}.nobg.png", stem));
                 let new_src = format!("/{}/{}.nobg.png", parent.display(), stem);
                 // Use src path for consistency with compute_output_path
                 let original_output = self.config.build.output.join(trimmed);
@@ -160,12 +171,13 @@ impl<'a> MediaTransform<'a> {
                     }
                     // Prefix with slash: /assets/xxx -> output_name "assets", rest "xxx"
                     if let Some(rest) = trimmed.strip_prefix(output_name)
-                        && let Some(file_path) = rest.strip_prefix('/') {
-                            let source_path = self.config.root.join(entry.source()).join(file_path);
-                            if source_path.exists() {
-                                return Some(source_path);
-                            }
+                        && let Some(file_path) = rest.strip_prefix('/')
+                    {
+                        let source_path = self.config.root.join(entry.source()).join(file_path);
+                        if source_path.exists() {
+                            return Some(source_path);
                         }
+                    }
                 }
                 None
             }
@@ -197,10 +209,11 @@ impl<'a> MediaTransform<'a> {
         // Skip if output is newer than source
         if output.exists()
             && let (Ok(src_meta), Ok(out_meta)) = (source.metadata(), output.metadata())
-                && let (Ok(src_time), Ok(out_time)) = (src_meta.modified(), out_meta.modified())
-                    && out_time >= src_time {
-                        return Ok(());
-                    }
+            && let (Ok(src_time), Ok(out_time)) = (src_meta.modified(), out_meta.modified())
+            && out_time >= src_time
+        {
+            return Ok(());
+        }
 
         // Ensure output directory exists
         if let Some(parent) = output.parent() {
@@ -290,7 +303,15 @@ fn process_classes(
 
     // Process img/svg elements
     if RECOLOR_TARGETS.contains(&elem.tag.as_str()) {
-        apply_recolor_class(elem, has_recolor, has_no_recolor, has_nobg, current.nobg, current.recolor, auto_inject);
+        apply_recolor_class(
+            elem,
+            has_recolor,
+            has_no_recolor,
+            has_nobg,
+            current.nobg,
+            current.recolor,
+            auto_inject,
+        );
         apply_nobg_processing(elem, has_nobg, inherited.nobg, transform);
     }
 
@@ -342,8 +363,9 @@ fn apply_nobg_processing(
     } else if transform.track_refs {
         // Track normal reference for cleanup decision
         if let Some(src) = elem.get_attr("src")
-            && let Some(output_path) = transform.compute_output_path(src) {
-                NORMAL_REFS.insert(output_path);
-            }
+            && let Some(output_path) = transform.compute_output_path(src)
+        {
+            NORMAL_REFS.insert(output_path);
+        }
     }
 }

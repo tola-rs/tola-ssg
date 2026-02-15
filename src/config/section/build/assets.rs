@@ -21,8 +21,8 @@
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use macros::Config;
+use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigDiagnostics, FieldPath};
 
@@ -37,7 +37,9 @@ struct OutputNameTracker<'a> {
 
 impl<'a> OutputNameTracker<'a> {
     fn new() -> Self {
-        Self { seen: FxHashMap::default() }
+        Self {
+            seen: FxHashMap::default(),
+        }
     }
 
     /// Check for conflict and insert. Reports error if conflict found.
@@ -142,15 +144,13 @@ impl AssetsConfig {
         let nested_count = self.nested.len();
         let flatten_count = self.flatten.len();
 
-        self.nested
-            .iter()
-            .enumerate()
-            .for_each(|(i, e)| Self::validate_path_safety(e.source(), i, nested_count, Self::FIELDS.nested, diag));
+        self.nested.iter().enumerate().for_each(|(i, e)| {
+            Self::validate_path_safety(e.source(), i, nested_count, Self::FIELDS.nested, diag)
+        });
 
-        self.flatten
-            .iter()
-            .enumerate()
-            .for_each(|(i, e)| Self::validate_path_safety(e.source(), i, flatten_count, Self::FIELDS.flatten, diag));
+        self.flatten.iter().enumerate().for_each(|(i, e)| {
+            Self::validate_path_safety(e.source(), i, flatten_count, Self::FIELDS.flatten, diag)
+        });
     }
 
     /// Check a single path for unsafe components (`.."` or absolute).
@@ -171,8 +171,15 @@ impl AssetsConfig {
             };
             if let Some(reason) = msg {
                 // Only show index if there are multiple entries
-                let prefix = if total > 1 { format!("[{idx}] ") } else { String::new() };
-                diag.error(field, format!("{prefix}path '{}': {reason}", path.display()));
+                let prefix = if total > 1 {
+                    format!("[{idx}] ")
+                } else {
+                    String::new()
+                };
+                diag.error(
+                    field,
+                    format!("{prefix}path '{}': {reason}", path.display()),
+                );
             }
         }
     }
@@ -215,7 +222,14 @@ impl AssetsConfig {
         }
 
         // Check output name conflict
-        outputs.check_and_insert(entry.output_name(), "nested", path, idx, Self::FIELDS.nested, diag);
+        outputs.check_and_insert(
+            entry.output_name(),
+            "nested",
+            path,
+            idx,
+            Self::FIELDS.nested,
+            diag,
+        );
     }
 
     fn validate_flatten_entry<'a>(
@@ -235,7 +249,14 @@ impl AssetsConfig {
         }
 
         // Check output name conflict
-        outputs.check_and_insert(entry.output_name(), "flatten", path, idx, Self::FIELDS.flatten, diag);
+        outputs.check_and_insert(
+            entry.output_name(),
+            "flatten",
+            path,
+            idx,
+            Self::FIELDS.flatten,
+            diag,
+        );
     }
 }
 
@@ -270,10 +291,7 @@ impl NestedEntry {
     /// Get output directory name.
     pub fn output_name(&self) -> &str {
         match self {
-            Self::Simple(p) => p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("assets"),
+            Self::Simple(p) => p.file_name().and_then(|n| n.to_str()).unwrap_or("assets"),
             Self::Full { dir, output_as } => output_as
                 .as_deref()
                 .unwrap_or_else(|| dir.file_name().and_then(|n| n.to_str()).unwrap_or("assets")),
@@ -340,9 +358,11 @@ impl FlattenEntry {
     pub fn output_name(&self) -> &str {
         match self {
             Self::Simple(p) => p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
-            Self::Full { file, output_as } => output_as
-                .as_deref()
-                .unwrap_or_else(|| file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")),
+            Self::Full { file, output_as } => output_as.as_deref().unwrap_or_else(|| {
+                file.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+            }),
         }
     }
 
@@ -412,12 +432,10 @@ mod tests {
 
     #[test]
     fn test_has_cname_in_flatten() {
-        let config: AssetsConfig =
-            toml::from_str(r#"flatten = ["assets/CNAME"]"#).unwrap();
+        let config: AssetsConfig = toml::from_str(r#"flatten = ["assets/CNAME"]"#).unwrap();
         assert!(config.has_cname_in_flatten());
 
-        let config2: AssetsConfig =
-            toml::from_str(r#"flatten = ["assets/robots.txt"]"#).unwrap();
+        let config2: AssetsConfig = toml::from_str(r#"flatten = ["assets/robots.txt"]"#).unwrap();
         assert!(!config2.has_cname_in_flatten());
     }
 

@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
-use image::{DynamicImage, ImageBuffer, Rgba, RgbaImage, ImageFormat};
+use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba, RgbaImage};
 use lab::{Lab, rgb_bytes_to_labs};
 
 /// Default threshold for color distance in LAB space (ΔE).
@@ -140,9 +140,9 @@ fn detect_background_color(img: &RgbaImage) -> Lab {
 
     // Sample from corners (5x5 area each)
     let corners = [
-        (0, 0),                           // top-left
-        (width.saturating_sub(5), 0),     // top-right
-        (0, height.saturating_sub(5)),    // bottom-left
+        (0, 0),                                              // top-left
+        (width.saturating_sub(5), 0),                        // top-right
+        (0, height.saturating_sub(5)),                       // bottom-left
         (width.saturating_sub(5), height.saturating_sub(5)), // bottom-right
     ];
 
@@ -162,12 +162,20 @@ fn detect_background_color(img: &RgbaImage) -> Lab {
 
     // If no valid samples, default to white
     if samples.is_empty() {
-        return Lab { l: 100.0, a: 0.0, b: 0.0 };
+        return Lab {
+            l: 100.0,
+            a: 0.0,
+            b: 0.0,
+        };
     }
 
     // Find most common color (simple: use average)
     let sum: (u32, u32, u32) = samples.iter().fold((0, 0, 0), |acc, rgb| {
-        (acc.0 + rgb[0] as u32, acc.1 + rgb[1] as u32, acc.2 + rgb[2] as u32)
+        (
+            acc.0 + rgb[0] as u32,
+            acc.1 + rgb[1] as u32,
+            acc.2 + rgb[2] as u32,
+        )
     });
     let n = samples.len() as u32;
     let avg_rgb = [(sum.0 / n) as u8, (sum.1 / n) as u8, (sum.2 / n) as u8];
@@ -179,9 +187,7 @@ fn detect_background_color(img: &RgbaImage) -> Lab {
 ///
 /// Uses SIMD-accelerated batch conversion for performance.
 fn preconvert_to_lab(img: &RgbaImage) -> Vec<Lab> {
-    let rgb_bytes: Vec<u8> = img.pixels()
-        .flat_map(|p| [p[0], p[1], p[2]])
-        .collect();
+    let rgb_bytes: Vec<u8> = img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
 
     rgb_bytes_to_labs(&rgb_bytes)
 }

@@ -19,9 +19,11 @@ const TOLA_VERSION: PackageVersion = PackageVersion::new(0, 0, 0);
 // Template Constants
 // =============================================================================
 
-const SITE_INFO_TYP: Template<SiteInfoTypVars<'static>> = Template::new(include_str!("embed/site.typ"));
+const SITE_INFO_TYP: Template<SiteInfoTypVars<'static>> =
+    Template::new(include_str!("embed/site.typ"));
 const PAGES_TYP: Template<PagesTypVars<'static>> = Template::new(include_str!("embed/pages.typ"));
-const CURRENT_TYP: Template<CurrentTypVars<'static>> = Template::new(include_str!("embed/current.typ"));
+const CURRENT_TYP: Template<CurrentTypVars<'static>> =
+    Template::new(include_str!("embed/current.typ"));
 
 // =============================================================================
 // Template Variables

@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use super::common::{batch_scan_typst_metadata, collect_content_files};
 use crate::compiler::page::CompiledPage;
 use crate::config::SiteConfig;
-use crate::core::{ContentKind, LinkKind, ResolveContext, ResolveResult, GLOBAL_ADDRESS_SPACE};
+use crate::core::{ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, ResolveContext, ResolveResult};
 use crate::log;
 use crate::utils::{plural_count, plural_s};
 
@@ -89,10 +89,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     report.print();
 
     // Final summary (internal -> assets)
-    print_summary(
-        report.internal_file_count(),
-        report.asset_file_count(),
-    )
+    print_summary(report.internal_file_count(), report.asset_file_count())
 }
 
 /// Scan all content files in parallel, collecting validation data.
@@ -133,14 +130,30 @@ fn scan_all_files(
     // Process Typst results
     for (file, result) in typst_files.iter().zip(typst_results) {
         if let Some(result) = result {
-            collect_scan_result(result, file, validate_config, all_pages, report, &nested_assets, &flatten_outputs);
+            collect_scan_result(
+                result,
+                file,
+                validate_config,
+                all_pages,
+                report,
+                &nested_assets,
+                &flatten_outputs,
+            );
         }
     }
 
     // Process Markdown files in parallel
     markdown_files.par_iter().for_each(|file| {
         if let Ok(result) = scan_markdown(file, root, config) {
-            collect_scan_result(result, file, validate_config, all_pages, report, &nested_assets, &flatten_outputs);
+            collect_scan_result(
+                result,
+                file,
+                validate_config,
+                all_pages,
+                report,
+                &nested_assets,
+                &flatten_outputs,
+            );
         }
     });
 }
@@ -161,7 +174,10 @@ fn collect_scan_result(
 
     for link in &result.links {
         // Determine if this is an asset attribute (src, poster, data)
-        let is_asset_attr = matches!(link.attr.as_str(), "src" | "poster" | "data" | "Src" | "Poster" | "Data");
+        let is_asset_attr = matches!(
+            link.attr.as_str(),
+            "src" | "poster" | "data" | "Src" | "Poster" | "Data"
+        );
 
         match link.kind() {
             // External links: skip (no HTTP validation)
@@ -290,26 +306,40 @@ fn handle_resolve_result(
             }
         }
 
-        ResolveResult::FragmentNotFound { fragment, available, .. } => {
+        ResolveResult::FragmentNotFound {
+            fragment,
+            available,
+            ..
+        } => {
             if validate_config.link.internal.enable {
                 let msg = if available.is_empty() {
                     format!("fragment '{}' not found", fragment)
                 } else {
-                    format!("fragment '{}' not found (available: {})", fragment, available.join(", "))
+                    format!(
+                        "fragment '{}' not found (available: {})",
+                        fragment,
+                        available.join(", ")
+                    )
                 };
-                report.write().add_internal(source.to_string(), link.to_string(), msg);
+                report
+                    .write()
+                    .add_internal(source.to_string(), link.to_string(), msg);
             }
         }
 
         ResolveResult::Warning { message, .. } => {
             if validate_config.link.internal.enable {
-                report.write().add_internal(source.to_string(), link.to_string(), message);
+                report
+                    .write()
+                    .add_internal(source.to_string(), link.to_string(), message);
             }
         }
 
         ResolveResult::Error { message } => {
             if validate_config.link.internal.enable {
-                report.write().add_internal(source.to_string(), link.to_string(), message);
+                report
+                    .write()
+                    .add_internal(source.to_string(), link.to_string(), message);
             }
         }
     }
@@ -375,10 +405,7 @@ fn build_address_space(config: &SiteConfig) -> Result<Vec<CompiledPage>> {
 }
 
 /// Print final summary and return error if validation failed.
-fn print_summary(
-    internal_errors: usize,
-    asset_errors: usize,
-) -> Result<()> {
+fn print_summary(internal_errors: usize, asset_errors: usize) -> Result<()> {
     if internal_errors > 0 || asset_errors > 0 {
         let mut parts = Vec::new();
         if internal_errors > 0 {

@@ -22,8 +22,8 @@ use tokio::sync::mpsc;
 use super::messages::CompilerMsg;
 use crate::config::SiteConfig;
 use crate::reload::classify::{ClassifyResult, classify_changes};
-use crate::utils::path::normalize_path;
 use crate::utils::hooks;
+use crate::utils::path::normalize_path;
 
 /// Debounce configuration
 const DEBOUNCE_MS: u64 = 300;
@@ -99,21 +99,27 @@ impl FsActor {
         let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(64);
 
         // Spawn a thread to poll notify events and send to async channel
-        std::thread::spawn(move || while let Ok(result) = notify_rx.recv() {
-            match result {
-                Ok(event) => if async_tx.blocking_send(event).is_err() {
-                    break; // Receiver dropped
+        std::thread::spawn(move || {
+            while let Ok(result) = notify_rx.recv() {
+                match result {
+                    Ok(event) => {
+                        if async_tx.blocking_send(event).is_err() {
+                            break; // Receiver dropped
+                        }
+                    }
+                    Err(e) => crate::log!("watch"; "notify error: {}", e),
                 }
-                Err(e) => crate::log!("watch"; "notify error: {}", e)
             }
         });
 
-        loop { tokio::select! {
-            Some(event) = async_rx.recv() => debouncer.add_event(&event),
-            _ = tokio::time::sleep(Duration::from_millis(50)) => if process_changes(&mut debouncer, &compiler_tx, &config).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                Some(event) = async_rx.recv() => debouncer.add_event(&event),
+                _ = tokio::time::sleep(Duration::from_millis(50)) => if process_changes(&mut debouncer, &compiler_tx, &config).await.is_err() {
+                    break;
+                }
             }
-        }}
+        }
     }
 }
 
@@ -132,7 +138,10 @@ async fn process_changes(
     // If initial build failed, trigger full rebuild on any file change
     if !crate::core::is_healthy() {
         crate::log!("watch"; "retrying full build after change: {:?}", paths);
-        compiler_tx.send(CompilerMsg::FullRebuild).await.map_err(|_| ())?;
+        compiler_tx
+            .send(CompilerMsg::FullRebuild)
+            .await
+            .map_err(|_| ())?;
         return Ok(());
     }
 

@@ -38,6 +38,9 @@ pub fn compile_on_demand(source: &Path, config: &SiteConfig) -> Result<PathBuf> 
     match SCHEDULER.compile(source.to_path_buf(), Priority::Active) {
         CompileResult::Success(output) => Ok(output),
         CompileResult::Failed(error) => Err(anyhow::anyhow!("{}", error)),
-        CompileResult::Skipped => Err(anyhow::anyhow!("page skipped (draft?): {}", source.display())),
+        CompileResult::Skipped => Err(anyhow::anyhow!(
+            "page skipped (draft?): {}",
+            source.display()
+        )),
     }
 }

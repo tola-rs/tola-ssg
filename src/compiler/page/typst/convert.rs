@@ -119,7 +119,9 @@ impl<'a> Converter<'a> {
                 } else {
                     f64::NAN // Will be skipped by is_finite() check
                 };
-                self.svg_cache.get(id).map(|svg| svg_string_to_node(svg, vertical_align_em))
+                self.svg_cache
+                    .get(id)
+                    .map(|svg| svg_string_to_node(svg, vertical_align_em))
             }
         }
     }
@@ -136,12 +138,15 @@ fn svg_string_to_node(svg: &str, vertical_align_em: f64) -> Node<TolaSite::Raw> 
     // Add vertical-align to style attribute for baseline alignment
     // Only add if the value is finite (not NaN or Infinity from division by zero)
     if vertical_align_em.is_finite() {
-        let existing_style = attrs.iter()
+        let existing_style = attrs
+            .iter()
             .find(|(k, _)| k == "style")
             .map(|(_, v)| v.clone());
 
         let new_style = match existing_style {
-            Some(s) if !s.is_empty() => format!("{}; vertical-align: {:.4}em", s, vertical_align_em),
+            Some(s) if !s.is_empty() => {
+                format!("{}; vertical-align: {:.4}em", s, vertical_align_em)
+            }
             _ => format!("vertical-align: {:.4}em", vertical_align_em),
         };
 

@@ -60,11 +60,13 @@ mod tests {
 
     #[test]
     fn test_serve_config() {
-        let config = test_parse_config(
-            "[serve]\ninterface = \"0.0.0.0\"\nport = 8080\nwatch = false",
-        );
+        let config =
+            test_parse_config("[serve]\ninterface = \"0.0.0.0\"\nport = 8080\nwatch = false");
 
-        assert_eq!(config.serve.interface, IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
+        assert_eq!(
+            config.serve.interface,
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
+        );
         assert_eq!(config.serve.port, 8080);
         assert!(!config.serve.watch);
     }
@@ -73,7 +75,10 @@ mod tests {
     fn test_serve_config_defaults() {
         let config = test_parse_config("");
 
-        assert_eq!(config.serve.interface, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(
+            config.serve.interface,
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
         assert_eq!(config.serve.port, 5277);
         assert!(config.serve.watch);
     }
@@ -82,11 +87,17 @@ mod tests {
     fn test_serve_config_interface_variants() {
         // Test IPv4 any
         let config = test_parse_config("[serve]\ninterface = \"0.0.0.0\"");
-        assert_eq!(config.serve.interface, IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
+        assert_eq!(
+            config.serve.interface,
+            IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0))
+        );
 
         // Test IPv6 localhost
         let config = test_parse_config("[serve]\ninterface = \"::1\"");
-        assert_eq!(config.serve.interface, IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
+        assert_eq!(
+            config.serve.interface,
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1))
+        );
     }
 
     #[test]
@@ -113,7 +124,10 @@ mod tests {
         // port is overridden
         assert_eq!(config.serve.port, 3000);
         // interface uses default
-        assert_eq!(config.serve.interface, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(
+            config.serve.interface,
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
+        );
         // watch uses default
         assert!(config.serve.watch);
     }

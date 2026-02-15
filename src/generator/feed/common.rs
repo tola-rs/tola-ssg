@@ -3,7 +3,7 @@
 use crate::{
     generator::extract::extract,
     log,
-    page::{StoredPage, STORED_PAGES},
+    page::{STORED_PAGES, StoredPage},
 };
 
 /// A page validated for feed inclusion (requires title and date).
@@ -33,10 +33,7 @@ pub fn get_feed_pages() -> Vec<FeedPage> {
     let all_pages = STORED_PAGES.get_pages();
     let total = all_pages.len();
 
-    let feed_pages: Vec<FeedPage> = all_pages
-        .iter()
-        .filter_map(FeedPage::from_stored)
-        .collect();
+    let feed_pages: Vec<FeedPage> = all_pages.iter().filter_map(FeedPage::from_stored).collect();
 
     // Log excluded pages count (Zola-style strict filtering)
     let excluded = total - feed_pages.len();

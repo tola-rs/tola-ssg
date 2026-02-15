@@ -205,7 +205,10 @@ mod tests {
         // assets is now AssetsConfig with default nested = ["assets"]
         assert_eq!(config.build.assets.nested.len(), 1);
         assert_eq!(config.build.assets.nested[0].source(), Path::new("assets"));
-        assert_eq!(config.build.deps, vec![PathBuf::from("templates"), PathBuf::from("utils")]);
+        assert_eq!(
+            config.build.deps,
+            vec![PathBuf::from("templates"), PathBuf::from("utils")]
+        );
         assert_eq!(config.build.data, PathBuf::from("_data"));
         assert!(config.build.minify);
         assert!(config.build.path_prefix.as_os_str().is_empty());

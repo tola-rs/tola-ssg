@@ -9,9 +9,8 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::{
-    asset, compiler, config::SiteConfig, core::ContentKind, debug, embed, freshness, generator, log, utils::git,
-    utils::hooks,
-    core::BuildMode,
+    asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
+    freshness, generator, log, utils::git, utils::hooks,
 };
 
 /// Initialize serve build environment.

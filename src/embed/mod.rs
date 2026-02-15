@@ -59,8 +59,14 @@ pub mod build {
     impl TemplateVars for SpaVars {
         fn apply(&self, content: &str) -> String {
             content
-                .replace("__TOLA_TRANSITION__", if self.transition { "true" } else { "false" })
-                .replace("__TOLA_PRELOAD__", if self.preload { "true" } else { "false" })
+                .replace(
+                    "__TOLA_TRANSITION__",
+                    if self.transition { "true" } else { "false" },
+                )
+                .replace(
+                    "__TOLA_PRELOAD__",
+                    if self.preload { "true" } else { "false" },
+                )
                 .replace("__TOLA_PRELOAD_DELAY__", &self.preload_delay.to_string())
         }
 
@@ -70,8 +76,11 @@ pub mod build {
     }
 
     /// SPA navigation JavaScript with configuration injection.
-    pub const SPA_JS: EmbeddedAsset<SpaVars> =
-        EmbeddedAsset::new(AssetKind::JavaScript, "spa", include_str!(concat!(env!("OUT_DIR"), "/spa.min.js")));
+    pub const SPA_JS: EmbeddedAsset<SpaVars> = EmbeddedAsset::new(
+        AssetKind::JavaScript,
+        "spa",
+        include_str!(concat!(env!("OUT_DIR"), "/spa.min.js")),
+    );
 }
 
 pub mod serve {
@@ -114,8 +123,11 @@ pub mod serve {
         Template::new(include_str!(concat!(env!("OUT_DIR"), "/welcome.html")));
 
     /// Hot reload JavaScript with WebSocket port injection.
-    pub const HOTRELOAD_JS: EmbeddedAsset<HotreloadVars> =
-        EmbeddedAsset::new(AssetKind::JavaScript, "hotreload", include_str!(concat!(env!("OUT_DIR"), "/hotreload.min.js")));
+    pub const HOTRELOAD_JS: EmbeddedAsset<HotreloadVars> = EmbeddedAsset::new(
+        AssetKind::JavaScript,
+        "hotreload",
+        include_str!(concat!(env!("OUT_DIR"), "/hotreload.min.js")),
+    );
 }
 
 pub mod css {
@@ -372,7 +384,7 @@ pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<(
 
     // enhance.css (always written)
     {
-        use css::{enhance_vars, ENHANCE_CSS};
+        use css::{ENHANCE_CSS, enhance_vars};
         let vars = enhance_vars(config);
         ENHANCE_CSS.cleanup_old(output_dir)?;
         ENHANCE_CSS.write_with_vars(output_dir, &vars)?;
@@ -380,7 +392,7 @@ pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<(
 
     // spa.js (if nav enabled)
     if config.site.nav.enable {
-        use build::{SpaVars, SPA_JS};
+        use build::{SPA_JS, SpaVars};
 
         let nav = &config.site.nav;
         let vars = SpaVars {
@@ -395,7 +407,7 @@ pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<(
 
     // recolor assets (if enabled)
     if config.theme.recolor.enable {
-        use recolor::{css_vars, js_vars, RECOLOR_CSS, RECOLOR_JS};
+        use recolor::{RECOLOR_CSS, RECOLOR_JS, css_vars, js_vars};
         let recolor_config = &config.theme.recolor;
 
         RECOLOR_CSS.cleanup_old(output_dir)?;
@@ -421,7 +433,10 @@ mod tests {
     #[test]
     fn test_css_asset() {
         let vars = css::EnhanceVars {
-            nav: css::NavVars { enabled: true, transition_time: 200 },
+            nav: css::NavVars {
+                enabled: true,
+                transition_time: 200,
+            },
         };
         let rendered = css::ENHANCE_CSS.render(&vars);
         assert!(rendered.contains("200ms"));
@@ -436,7 +451,10 @@ mod tests {
     #[test]
     fn test_css_asset_nav_disabled() {
         let vars = css::EnhanceVars {
-            nav: css::NavVars { enabled: false, transition_time: 200 },
+            nav: css::NavVars {
+                enabled: false,
+                transition_time: 200,
+            },
         };
         let rendered = css::ENHANCE_CSS.render(&vars);
         // Nav disabled → no view-transition CSS
@@ -500,7 +518,9 @@ mod tests {
 
     #[test]
     fn test_recolor_js_vars() {
-        let vars = recolor::RecolorJsVars { source: "auto".to_string() };
+        let vars = recolor::RecolorJsVars {
+            source: "auto".to_string(),
+        };
         let rendered = recolor::RECOLOR_JS.render(&vars);
         assert!(rendered.contains("\"auto\""));
         assert!(!rendered.contains("__TOLA_RECOLOR_SOURCE__"));

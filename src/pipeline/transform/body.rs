@@ -7,7 +7,7 @@ use tola_vdom::prelude::*;
 
 use crate::compiler::family::Indexed;
 use crate::config::SiteConfig;
-use crate::embed::build::{SpaVars, SPA_JS};
+use crate::embed::build::{SPA_JS, SpaVars};
 
 /// Injects body scripts based on site configuration.
 pub struct BodyInjector<'a> {

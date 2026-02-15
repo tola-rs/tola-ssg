@@ -8,10 +8,10 @@ use crossbeam::queue::SegQueue;
 use serde_json::Value as JsonValue;
 use typst_batch::prelude::*;
 
+use crate::compiler::CompileContext;
 use crate::compiler::collect_all_files;
 use crate::compiler::family::Indexed;
 use crate::compiler::page::scan;
-use crate::compiler::CompileContext;
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
 use crate::page::{PageKind, PageMeta, STORED_PAGES};
@@ -178,10 +178,7 @@ pub fn scan_markdown_file(file: &Path, config: &SiteConfig) -> Result<MarkdownSc
 ///
 /// Does NOT set Phase - defaults to `filter`, so `pages()` in content body
 /// returns empty array silently. Used for link extraction in validate.
-pub fn batch_scan_typst(
-    files: &[&PathBuf],
-    root: &Path,
-) -> Vec<Option<typst_batch::ScanResult>> {
+pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_batch::ScanResult>> {
     if files.is_empty() {
         return vec![];
     }
@@ -287,9 +284,10 @@ pub fn batch_scan_typst_metadata_iterative(
                 // Update STORED_PAGES with new metadata
                 if let Some(ref meta_json) = meta
                     && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone())
-                        && let Some(permalink) = STORED_PAGES.get_permalink_by_source(file) {
-                            STORED_PAGES.insert_page(permalink, page_meta);
-                        }
+                    && let Some(permalink) = STORED_PAGES.get_permalink_by_source(file)
+                {
+                    STORED_PAGES.insert_page(permalink, page_meta);
+                }
 
                 if kind.is_iterative() {
                     iterative_indices.push(i);
@@ -333,9 +331,10 @@ pub fn batch_scan_typst_metadata_iterative(
                     // Update STORED_PAGES with new metadata
                     if let Some(ref meta_json) = meta
                         && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone())
-                            && let Some(permalink) = STORED_PAGES.get_permalink_by_source(file) {
-                                STORED_PAGES.insert_page(permalink, page_meta);
-                            }
+                        && let Some(permalink) = STORED_PAGES.get_permalink_by_source(file)
+                    {
+                        STORED_PAGES.insert_page(permalink, page_meta);
+                    }
 
                     metas[idx] = meta;
                 }
@@ -368,8 +367,8 @@ pub fn batch_scan_typst_metadata_iterative(
 /// Scans all Typst and Markdown files to build the global page store.
 /// Must be called before `batch_scan_typst_metadata_iterative`.
 pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
-    use crate::compiler::page::CompiledPage;
     use crate::compiler::collect_all_files;
+    use crate::compiler::page::CompiledPage;
 
     let root = crate::utils::path::normalize_path(config.get_root());
     let content_dir = root.join(&config.build.content);
@@ -386,27 +385,29 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     for (file, meta_json) in typst_files.iter().zip(typst_metas) {
         if let Some(meta_json) = meta_json
             && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json)
-                && let Ok(mut compiled) = CompiledPage::from_paths(file, config) {
-                    compiled.content_meta = Some(page_meta.clone());
-                    compiled.apply_custom_permalink(config);
-                    let permalink = compiled.route.permalink.clone();
-                    STORED_PAGES.insert_page(permalink.clone(), page_meta);
-                    STORED_PAGES.insert_source_mapping((*file).clone(), permalink);
-                }
+            && let Ok(mut compiled) = CompiledPage::from_paths(file, config)
+        {
+            compiled.content_meta = Some(page_meta.clone());
+            compiled.apply_custom_permalink(config);
+            let permalink = compiled.route.permalink.clone();
+            STORED_PAGES.insert_page(permalink.clone(), page_meta);
+            STORED_PAGES.insert_source_mapping((*file).clone(), permalink);
+        }
     }
 
     // Scan Markdown files
     for file in &markdown_files {
         if let Ok(result) = scan_markdown_file(file, config)
             && let Some(meta_json) = result.raw_meta
-                && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json)
-                    && let Ok(mut compiled) = CompiledPage::from_paths(file, config) {
-                        compiled.content_meta = Some(page_meta.clone());
-                        compiled.apply_custom_permalink(config);
-                        let permalink = compiled.route.permalink.clone();
-                        STORED_PAGES.insert_page(permalink.clone(), page_meta);
-                        STORED_PAGES.insert_source_mapping((*file).clone(), permalink);
-                    }
+            && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json)
+            && let Ok(mut compiled) = CompiledPage::from_paths(file, config)
+        {
+            compiled.content_meta = Some(page_meta.clone());
+            compiled.apply_custom_permalink(config);
+            let permalink = compiled.route.permalink.clone();
+            STORED_PAGES.insert_page(permalink.clone(), page_meta);
+            STORED_PAGES.insert_source_mapping((*file).clone(), permalink);
+        }
     }
 
     Ok(())

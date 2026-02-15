@@ -507,4 +507,3 @@ mod tests {
         assert_eq!(attrs[3], ("disabled".to_string(), "".to_string()));
     }
 }
-

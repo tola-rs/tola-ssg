@@ -15,9 +15,9 @@
 //! token_path = "~/.github-token"                   # Optional: PAT file path
 //! ```
 
+use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use macros::Config;
 
 /// Deploy configuration (experimental).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Config)]
@@ -65,12 +65,20 @@ impl DeployConfig {
             if !path.exists() {
                 diag.error(
                     GithubDeployConfig::FIELDS.token_path,
-                    format!("{} file not found: {}", GithubDeployConfig::FIELDS.token_path, path.display()),
+                    format!(
+                        "{} file not found: {}",
+                        GithubDeployConfig::FIELDS.token_path,
+                        path.display()
+                    ),
                 );
             } else if !path.is_file() {
                 diag.error(
                     GithubDeployConfig::FIELDS.token_path,
-                    format!("{} is not a file: {}", GithubDeployConfig::FIELDS.token_path, path.display()),
+                    format!(
+                        "{} is not a file: {}",
+                        GithubDeployConfig::FIELDS.token_path,
+                        path.display()
+                    ),
                 );
             }
         }
@@ -139,7 +147,7 @@ impl Default for VercelDeployConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{test_parse_config, SiteConfig};
+    use crate::config::{SiteConfig, test_parse_config};
     use std::path::PathBuf;
 
     #[test]
@@ -204,15 +212,15 @@ token_path = "~/.github-token""#,
 
     #[test]
     fn test_deploy_unknown_field_detected() {
-        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy]\nunknown = \"field\"";
+        let content =
+            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy]\nunknown = \"field\"";
         let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
         assert!(ignored.iter().any(|f| f.contains("unknown")));
     }
 
     #[test]
     fn test_deploy_github_unknown_field_detected() {
-        let content =
-            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy.github]\nunknown = \"field\"";
+        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy.github]\nunknown = \"field\"";
         let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
         assert!(ignored.iter().any(|f| f.contains("unknown")));
     }

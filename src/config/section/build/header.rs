@@ -1,8 +1,8 @@
 //! Custom HTML header configuration.
 
+use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use macros::Config;
 
 use super::assets::AssetsConfig;
 use crate::config::ConfigDiagnostics;
@@ -56,16 +56,14 @@ impl<'a> AssetPathChecker<'a> {
     }
 
     /// Validate a path is within configured assets, report error if not.
-    fn validate(
-        &self,
-        path: &Path,
-        field: crate::config::FieldPath,
-        diag: &mut ConfigDiagnostics,
-    ) {
+    fn validate(&self, path: &Path, field: crate::config::FieldPath, diag: &mut ConfigDiagnostics) {
         if !self.is_in_assets(path) {
             diag.error(
                 field,
-                format!("path '{}' not in any configured asset entry", path.display()),
+                format!(
+                    "path '{}' not in any configured asset entry",
+                    path.display()
+                ),
             );
         }
     }
@@ -77,7 +75,11 @@ impl<'a> AssetPathChecker<'a> {
 
         // Check flatten (exact match) first, then nested (prefix match)
         self.assets.flatten.iter().any(|e| abs_path == e.source())
-            || self.assets.nested.iter().any(|e| abs_path.starts_with(e.source()))
+            || self
+                .assets
+                .nested
+                .iter()
+                .any(|e| abs_path.starts_with(e.source()))
     }
 }
 
@@ -142,7 +144,10 @@ mod tests {
     #[test]
     fn test_icon() {
         let config = test_parse_config("[build.header]\nicon = \"images/favicon.avif\"");
-        assert_eq!(config.build.header.icon, Some(PathBuf::from("images/favicon.avif")));
+        assert_eq!(
+            config.build.header.icon,
+            Some(PathBuf::from("images/favicon.avif"))
+        );
     }
 
     #[test]
@@ -151,17 +156,25 @@ mod tests {
             "[build.header]\nstyles = [\"fonts/font.css\", \"styles/highlight.css\"]",
         );
         assert_eq!(config.build.header.styles.len(), 2);
-        assert_eq!(config.build.header.styles[0], PathBuf::from("fonts/font.css"));
-        assert_eq!(config.build.header.styles[1], PathBuf::from("styles/highlight.css"));
+        assert_eq!(
+            config.build.header.styles[0],
+            PathBuf::from("fonts/font.css")
+        );
+        assert_eq!(
+            config.build.header.styles[1],
+            PathBuf::from("styles/highlight.css")
+        );
     }
 
     #[test]
     fn test_scripts_simple() {
-        let config = test_parse_config(
-            "[build.header]\nscripts = [\"scripts/a.js\", \"scripts/b.js\"]",
-        );
+        let config =
+            test_parse_config("[build.header]\nscripts = [\"scripts/a.js\", \"scripts/b.js\"]");
         assert_eq!(config.build.header.scripts.len(), 2);
-        assert_eq!(config.build.header.scripts[0].path(), Path::new("scripts/a.js"));
+        assert_eq!(
+            config.build.header.scripts[0].path(),
+            Path::new("scripts/a.js")
+        );
         assert!(!config.build.header.scripts[0].is_defer());
         assert!(!config.build.header.scripts[0].is_async());
     }
@@ -198,7 +211,10 @@ scripts = [
 elements = ['<meta name="darkreader-lock">', '<meta name="theme-color" content="#fff">']"###,
         );
         assert_eq!(config.build.header.elements.len(), 2);
-        assert_eq!(config.build.header.elements[0], "<meta name=\"darkreader-lock\">");
+        assert_eq!(
+            config.build.header.elements[0],
+            "<meta name=\"darkreader-lock\">"
+        );
     }
 
     #[test]

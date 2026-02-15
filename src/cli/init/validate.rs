@@ -2,7 +2,7 @@
 //!
 //! Validates target directory state before site creation.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{fs, path::Path};
 
 /// Initialization mode determines validation rules.

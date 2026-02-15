@@ -11,8 +11,8 @@ use crate::core::UrlPath;
 use tola_vdom::CacheKey;
 use tola_vdom::serialize::{from_bytes_to_indexed, to_bytes};
 
-use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 use super::CACHE_DIR;
+use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 
 /// Entry ready to be persisted to disk.
 struct PersistEntry {
@@ -111,8 +111,6 @@ pub fn clear_cache_dir(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-
-
 /// Collect cache entries ready for persistence.
 ///
 /// Acquires read locks on cache and dependency graph, extracts all data needed,
@@ -127,7 +125,9 @@ fn collect_entries_to_persist(
     cache.with_read(|c| {
         crate::compiler::dependency::global::with_read(|dep_graph| {
             for (key, cache_entry) in c.iter() {
-                if let Some(entry) = build_persist_entry(key.as_str(), cache_entry, source_paths, dep_graph, root) {
+                if let Some(entry) =
+                    build_persist_entry(key.as_str(), cache_entry, source_paths, dep_graph, root)
+                {
                     entries.push(entry);
                 }
             }
@@ -231,8 +231,6 @@ fn collect_dependency_entries(index: &CacheIndex, root: &Path) -> Vec<(PathBuf, 
         })
         .collect()
 }
-
-
 
 /// Write a single cache entry to disk.
 fn write_entry(cache_dir: &Path, entry: &PersistEntry) -> std::io::Result<()> {
