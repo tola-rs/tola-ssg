@@ -1,10 +1,14 @@
 # tola-ssg
 
-A static site generator for Typst-based blogs.
+A static site generator for Typst-based blogs.  \
+
+**NOTE:**  \
+**There would be huge change in v0.7.x: vdom diff, live reloading, interactive cli, more useful local server**  \
+**See showcase videos in [issue #41](https://github.com/tola-ssg/tola-ssg/issues/41), for coming semless hot reloading**
+
 
 ## Table of Contents
 
-- [Ecosystem](#ecosystem)
 - [Showcase](#showcase)
 - [Features](#features)
 - [Philosophy](#philosophy)
@@ -13,26 +17,47 @@ A static site generator for Typst-based blogs.
 - [Roadmap](#roadmap-v070)
 - [Note](#note)
 
-## Ecosystem
-
-tola-ssg is part of the [tola-rs](https://github.com/tola-rs) organization:
-
-| Crate | Description |
-|-------|-------------|
-| **[tola-vdom](https://github.com/tola-rs/tola-vdom)** | Type-safe, multi-phase virtual DOM library with diffing |
-| **[tola-caps](https://github.com/tola-rs/tola-caps)** | Type-level capability system for Rust — typestate, trait detection, stable specialization |
-| **[typst-batch](https://github.com/tola-rs/typst-batch)** | Typst → HTML batch compilation with shared fonts, virtual file system, and metadata extraction |
-
 ## Showcase
+> Yeah, my blog is also built with `tola`.  \
+> There are example site collection: https://tola-rs.github.io/example-sites
 
-> Yeah, my blog is alos built with `tola`.
-
-[My blog](https://kawayww.com):
+[my blog](https://kawayww.com):
 ![home](/screenshots/home.avif)
+
+[example site collection](https://tola-rs.github.io/example-sites/):
+![example](/screenshots/example.avif)
+
+Thanks to `typst`, `tola` offers writing flexibility.  \
+e.g.: Implement `Recent Posts` easily and customizable (as shown in the image above):
+
+```typst
+// Data Architecture: Tola provides virtual JSON files for site metadata.
+// Why? This gives you full control over how to list and filter content.
+// Available virtual files:
+// - "/_data/pages.json": List of all pages with their metadata (url, title, date, etc.)
+// - "/_data/tags.json": Map of tags to the pages that use them
+// - ...more in the future!
+
+#import "/utils/helpers.typ" as utils
+
+#let pages = json("/_data/pages.json")
+#let posts = (pages
+  .filter(p => "/posts/" in p.url)
+  .filter(p => p.at("draft", default: false) == false)
+  .sorted(key: p => p.date)
+  .rev())
+
+#html.div(class: "space-y-6")[
+  #for post in posts.slice(0, calc.min(posts.len(), 5)) {
+    utils.post-card(post)
+  }
+]
+```
 
 ## Features
 
 ### Performance
+(There would be a huge change/refactor in future v0.7.x)
 
 - **font caching** — Fonts loaded once at startup, shared across all compilations
 - **file caching** — Only re-read changed files, zero-cost for unchanged files
@@ -235,27 +260,26 @@ tola serve
 
 ## Roadmap (v0.7.0)
 
-> **In Progress**: Polish & Stabilization
+> **Coming Soon**: Incremental Rendering & VDOM Architecture
 
-The VDOM-based incremental hot reload architecture is now implemented:
+The next major release focuses on **instant hot-reloading** with sub-second refresh times:
 
-- **VDOM Core** — Type-safe virtual DOM with multi-phase pipeline (`tola-vdom`)
-- **Stable Identity** — Content-hash based `StableId` for precise diffing
-- **Patch Protocol** — Incremental DOM patches via WebSocket
-- **Actor Concurrency** — `FsActor` → `CompilerActor` → `VdomActor` → `WsActor`
+- **VDOM Core** — Type-safe virtual DOM with TTG (Trees that Grow) pattern
+- **Stable Identity** — Span-based node IDs for precise diffing across compilations
+- **Binary Patch Protocol** — `rkyv` zero-copy serialization for efficient updates
+- **Actor Concurrency** — Non-blocking `FsActor` / `CompilerActor` / `WsActor` via `tokio`
 
-Current focus: *Testing, edge cases, and API stabilization*
+Goal: *"Local refresh feels like a web app"*
 
 ## Note
 
-> **Early development & experimental HTML export**
+> ⚠️ **Early development & experimental HTML export**
 
 `tola` is usable but evolving — expect breaking changes and rough edges. Feedback and contributions are welcome!
 
 Typst's HTML output is not yet as mature as its PDF output. Some features require workarounds:
 
 - **math rendering** — Equations are exported as inline SVGs, which may need CSS tweaks for proper sizing and alignment ([issue #24](https://github.com/tola-ssg/tola-ssg/issues/24))
-- **font & SVG rendering** — Font loading and SVG generation may produce inconsistent results; deterministic font ordering is enforced internally to ensure reproducible hash builds
 - **whitespace handling** — Typst inserts `<span style="white-space: pre-wrap">` between inline elements to preserve spacing ([PR #6750](https://github.com/typst/typst/pull/6750))
 - **layout** — Some Typst layout primitives don't translate perfectly to HTML semantics
 
