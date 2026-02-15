@@ -63,6 +63,8 @@ pub fn build_css_processor_hook(config: &SiteConfig, output: &Path) -> Result<Ho
 }
 
 /// Run CSS processor as a pre hook.
+///
+/// On success, also updates the asset version cache for hot reload.
 pub fn run_css_processor(
     config: &SiteConfig,
     output: &Path,
@@ -75,7 +77,12 @@ pub fn run_css_processor(
     }
 
     let hook = build_css_processor_hook(config, output)?;
-    super::hooks::run_hook(&hook, config, mode, with_build_args, "pre")
+    super::hooks::run_hook(&hook, config, mode, with_build_args, "pre")?;
+
+    // Update version cache so VDOM diff detects the change
+    crate::asset::version::update_version(output);
+
+    Ok(())
 }
 
 /// Rebuild CSS using configured input path.

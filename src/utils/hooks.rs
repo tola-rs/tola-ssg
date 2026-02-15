@@ -168,16 +168,16 @@ fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
 
 /// Execute CSS processor on any file change.
 fn run_watched_css_processor(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
-    if !config.build.css.processor.enable || changed_paths.is_empty() {
-        return 0;
-    }
-
-    if config.build.css.processor.input.is_none() {
+    if !config.build.css.processor.enable
+        || config.build.css.processor.input.is_none()
+        || changed_paths.is_empty()
+    {
         return 0;
     }
 
     if let Err(e) = crate::asset::rebuild_css_processor(config, BuildMode::DEVELOPMENT, false) {
         crate::log!("css"; "rebuild failed: {}", e);
+        return 0;
     }
 
     1
