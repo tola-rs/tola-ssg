@@ -61,7 +61,7 @@ tiny_http = "0.12.0"
 ctrlc = "3.5.1"
 deunicode = "1.6.2"
 portable-pty = "0.9.0"
-macros = { package = "tola-ssg-macros", version = "0.1.0" }
+macros = { package = "tola-ssg-macros", path = "macros" }
 
 # Typst integration (via typst-batch crate)
 # typst-batch = { version = "0.1.1", features = ["svg", "batch"] }

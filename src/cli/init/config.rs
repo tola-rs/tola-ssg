@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
 use crate::config::section::{
-    build::{FeedConfig, SvgConfig},
+    AssetsConfig, FeedConfig, ServeConfig, ValidateConfig,
+    build::SitemapConfig,
     site::SiteInfoConfig,
 };
 use crate::embed::typst::TOLA_TYP;
@@ -30,14 +31,26 @@ fn generate_config_template() -> String {
 
     // [site.info] section
     out.push_str(&SiteInfoConfig::template_with_header());
-    out.push_str("\n\n");
+    out.push('\n');
+
+    // [build.assets] section
+    out.push_str(&AssetsConfig::template_with_header());
+    out.push('\n');
 
     // [build.feed] section
     out.push_str(&FeedConfig::template_with_header());
-    out.push_str("\n\n");
+    out.push('\n');
 
-    // [build.svg] section
-    out.push_str(&SvgConfig::template_with_header());
+    // [build.sitemap] section
+    out.push_str(&SitemapConfig::template_with_header());
+    out.push('\n');
+
+    // [serve] section
+    out.push_str(&ServeConfig::template_with_header());
+    out.push('\n');
+
+    // [validate] section
+    out.push_str(&ValidateConfig::template_with_header());
 
     out
 }

@@ -18,26 +18,30 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use macros::Config;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Development server settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
+#[config(section = "serve")]
 pub struct ServeConfig {
     /// Network interface to bind.
     /// - `127.0.0.1` (default): localhost only
     /// - `0.0.0.0`: all interfaces (LAN accessible)
     pub interface: IpAddr,
 
-    /// HTTP port number (default: 5277).
+    /// HTTP port number.
+    #[config(inline_doc)]
     pub port: u16,
 
-    /// Enable file watcher for live reload on changes.
+    /// Enable file watcher for live reload.
+    #[config(inline_doc)]
     pub watch: bool,
 
     /// Respect path_prefix from site.url during local development.
-    ///
     /// - `false` (default): Ignore prefix, access pages at `/`
-    /// - `true`: Keep prefix, access pages at `/my-project/` (for testing deployment paths)
+    /// - `true`: Keep prefix, access at `/my-project/`
     pub respect_prefix: bool,
 }
 
