@@ -1,16 +1,16 @@
 //! `[site.info]` configuration (formerly `[site]`).
 //!
 //! Contains basic site information like title, author, description, etc.
-//! These values are automatically injected into Typst's `sys.inputs`.
+//! These values are accessible in Typst via `@tola/site` virtual package.
 
 use crate::config::section::FeedConfig;
 use macros::Config;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-/// Site metadata for feed generation and Typst `sys.inputs`.
-/// Access in Typst via `sys.inputs.title`, `sys.inputs.author`, etc.
-/// For custom fields, use `[site.info.extra]` and access via `sys.inputs.extra.xxx`.
+/// Site metadata for feed generation and Typst templates.
+/// Access in Typst via `#import "@tola/site:0.0.0": info`.
+/// For custom fields, use `[site.info.extra]` and access via `info.extra.xxx`.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site.info")]
