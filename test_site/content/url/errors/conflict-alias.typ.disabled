@@ -1,0 +1,14 @@
+// ERROR TEST: This file intentionally creates a permalink conflict
+// Expected: Build should fail with "permalink conflicts" error
+//
+// To test: Uncomment chain-c.typ and this file together
+
+#metadata((
+  title: "Chain Middle B (Conflict)",
+  permalink: "/middle-stop/",
+  aliases: ("/final-destination/",),  // Conflicts with chain-c.typ
+)) <tola-meta>
+
+= Conflict Test
+
+This alias `/final-destination/` conflicts with chain-c.typ's permalink.
