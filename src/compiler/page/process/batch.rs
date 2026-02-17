@@ -207,7 +207,8 @@ pub fn rebuild_iterative_pages(
 
     // Iterative compilation loop
     let mut prev_hash = STORED_PAGES.pages_hash();
-    let mut prev_prev_hash = prev_hash; // Initialize to prev_hash to avoid false oscillation detection
+    let mut seen_hashes = rustc_hash::FxHashSet::default();
+    seen_hashes.insert(prev_hash); // Record initial state for cycle detection
     let mut pages: Vec<CompiledPage> = Vec::new();
 
     for iteration in 0..MAX_ITERATIONS {
@@ -264,9 +265,9 @@ pub fn rebuild_iterative_pages(
             break;
         }
 
-        // Check oscillation (S(n) == S(n-2)), only valid from iteration >= 2
-        if iteration >= 2 && new_hash == prev_prev_hash {
-            crate::log!("warn"; "metadata oscillating between two states, stopping iteration");
+        // Check oscillation: detect cycles of any length
+        if seen_hashes.contains(&new_hash) {
+            crate::log!("warn"; "metadata oscillating (cycle detected), stopping after {} iterations", iteration + 1);
             break;
         }
 
@@ -274,7 +275,7 @@ pub fn rebuild_iterative_pages(
             crate::log!("warn"; "metadata did not converge after {} iterations", MAX_ITERATIONS);
         }
 
-        prev_prev_hash = prev_hash;
+        seen_hashes.insert(new_hash);
         prev_hash = new_hash;
     }
 
