@@ -137,14 +137,14 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
 fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     use crate::core::GLOBAL_ADDRESS_SPACE;
 
-    // Print compiler warnings
+    // Print compiler warnings with configured limits
     let warnings = compiler::drain_warnings();
     if !warnings.is_empty() {
-        // Simple warning output for serve mode
-        for item in warnings.iter().take(10) {
+        let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
+        for item in warnings.iter().take(max) {
             eprintln!("{}", item);
         }
-        let remaining = warnings.len().saturating_sub(10);
+        let remaining = warnings.len().saturating_sub(max);
         if remaining > 0 {
             eprintln!("... and {} more warning(s)", remaining);
         }
