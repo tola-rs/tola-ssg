@@ -25,7 +25,7 @@ pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
     let result = Compiler::new(root)
         .with_path(path)
         .compile()
-        .map_err(|e| format_compile_error(e, max_errors))?;
+        .map_err(|e| format_compile_error(&e, max_errors))?;
 
     let (document, _, _) = result.into_parts();
 
