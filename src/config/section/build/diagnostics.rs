@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct DiagnosticsConfig {
     /// Maximum errors to display per file.
-    /// Default is 3 to avoid cascading error spam from syntax errors.
+    /// Default is 5 to avoid cascading error spam from syntax errors.
     pub max_errors: usize,
 
     /// Maximum total warnings to display.
@@ -40,8 +40,8 @@ impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
             max_errors: 3,
-            max_warnings: None,
-            max_warnings_per_file: None,
+            max_warnings: Some(3),
+            max_warnings_per_file: Some(3),
             max_lines: None,
             max_lines_per_warning: None,
         }
@@ -79,8 +79,8 @@ mod tests {
     #[test]
     fn test_defaults() {
         let config = DiagnosticsConfig::default();
-        assert!(config.max_warnings.is_none());
-        assert!(config.effective_max_warnings(10).is_none());
+        assert_eq!(config.max_warnings, Some(3));
+        assert_eq!(config.max_warnings_per_file, Some(3));
     }
 
     #[test]
@@ -88,12 +88,14 @@ mod tests {
         // Only total
         let config = DiagnosticsConfig {
             max_warnings: Some(20),
+            max_warnings_per_file: None,
             ..Default::default()
         };
         assert_eq!(config.effective_max_warnings(5), Some(20));
 
         // Only per-file
         let config = DiagnosticsConfig {
+            max_warnings: None,
             max_warnings_per_file: Some(3),
             ..Default::default()
         };

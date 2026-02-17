@@ -132,7 +132,7 @@ mod tests {
 
         let content = fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("[site.info]"));
-        assert!(content.contains("[build.feed]"));
+        assert!(content.contains("[site.feed]"));
     }
 
     #[test]

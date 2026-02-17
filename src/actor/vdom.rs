@@ -201,10 +201,21 @@ impl BatchLogger {
             let summary = format!("compile error in {}", primary_error.path());
             self.status.error(&summary, detail);
         } else {
-            // Show warnings only when no errors
+            // Show warnings only when no errors (with configured limit)
             let warnings = crate::compiler::drain_warnings();
             if !warnings.is_empty() {
-                self.status.warning(&warnings.to_string());
+                let max = crate::config::cfg()
+                    .build
+                    .diagnostics
+                    .max_warnings
+                    .unwrap_or(usize::MAX);
+                let truncated: String = warnings
+                    .iter()
+                    .take(max)
+                    .map(|w| w.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.status.warning(&truncated);
             }
 
             if let Some(primary) = primary_reload {
