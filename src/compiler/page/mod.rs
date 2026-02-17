@@ -101,6 +101,20 @@ pub type FileSnapshot = std::sync::Arc<typst_batch::FileSnapshot>;
 pub type BatchCompileResult =
     std::result::Result<typst_batch::CompileResult, typst_batch::CompileError>;
 
+/// Format a CompileError with max_errors limit from config.
+///
+/// This limits the number of errors displayed to avoid cascading error spam
+/// from a single syntax error.
+pub fn format_compile_error(
+    error: typst_batch::CompileError,
+    max_errors: usize,
+) -> anyhow::Error {
+    match error.diagnostics() {
+        Some(diags) => anyhow::anyhow!("{}", diags.with_max_errors(max_errors)),
+        None => anyhow::anyhow!("{}", error),
+    }
+}
+
 /// Compilation statistics: counts of direct, iterative, and skipped draft pages.
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(dead_code)]
