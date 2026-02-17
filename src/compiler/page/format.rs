@@ -145,6 +145,8 @@ pub struct DraftFilterResult<'a> {
     pub scanned: Vec<ScannedPage>,
     /// Total number of draft files filtered out.
     pub drafts_skipped: usize,
+    /// Errors encountered during scan phase.
+    pub errors: Vec<(std::path::PathBuf, typst_batch::CompileError)>,
 }
 
 impl<'a> DraftFilterResult<'a> {
@@ -154,11 +156,69 @@ impl<'a> DraftFilterResult<'a> {
             batcher: None,
             scanned: vec![],
             drafts_skipped: 0,
+            errors: vec![],
         }
     }
 
     /// Take the batcher for Typst compilation.
     pub(super) fn take_batcher(&mut self) -> Option<super::TypstBatcher<'a>> {
         self.batcher.take()
+    }
+
+    /// Check if there are any errors.
+    pub fn has_errors(&self) -> bool {
+        !self.errors.is_empty()
+    }
+
+    /// Report errors and return an error if any exist.
+    ///
+    /// This centralizes error reporting logic for scan phase errors.
+    pub fn report_errors(&self, max_errors: usize) -> anyhow::Result<()> {
+        if self.errors.is_empty() {
+            return Ok(());
+        }
+
+        for (_path, error) in self.errors.iter().take(max_errors) {
+            let err = super::format_compile_error(error, max_errors);
+            eprintln!("{}", err);
+        }
+
+        let total_errors = self.errors.len();
+        if total_errors > max_errors {
+            eprintln!("... and {} more errors", total_errors - max_errors);
+        }
+
+        Err(anyhow::anyhow!("Scan failed with {} error(s)", total_errors))
+    }
+}
+
+// =============================================================================
+// Unified Draft Filtering
+// =============================================================================
+
+use crate::config::SiteConfig;
+
+/// Filter draft files from both Typst and Markdown content.
+///
+/// This is the unified entry point for draft filtering, used by both
+/// `build` and `serve` modes. Returns a `DraftFilterResult` which can
+/// report errors via `report_errors()`.
+pub fn filter_drafts<'a>(
+    config: &'a SiteConfig,
+    typst_files: &[&PathBuf],
+    markdown_files: &[&PathBuf],
+) -> DraftFilterResult<'a> {
+    let root = config.get_root();
+    let label = &config.build.meta.label;
+
+    let typst_result = super::filter_typst_drafts(typst_files, root, label);
+    let md_result = super::filter_markdown_drafts(markdown_files, root, label);
+    let drafts_skipped = typst_result.draft_count + md_result.draft_count;
+
+    DraftFilterResult {
+        batcher: typst_result.batcher,
+        scanned: [typst_result.scanned, md_result.scanned].concat(),
+        drafts_skipped,
+        errors: typst_result.errors,
     }
 }

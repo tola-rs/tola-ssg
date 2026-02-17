@@ -36,7 +36,7 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
         .with_inputs_obj(inputs)
         .with_path(path)
         .compile()
-        .map_err(|e| format_compile_error(e, max_errors))?;
+        .map_err(|e| format_compile_error(&e, max_errors))?;
 
     process_result(result, label, ctx)
 }

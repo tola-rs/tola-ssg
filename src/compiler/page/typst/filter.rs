@@ -17,6 +17,8 @@ pub struct TypstFilterResult<'a> {
     pub batcher: Option<TypstBatcher<'a>>,
     /// Pre-scanned page data (metadata + kind) for non-draft files.
     pub scanned: Vec<ScannedPage>,
+    /// Errors encountered during scan phase.
+    pub errors: Vec<(PathBuf, typst_batch::CompileError)>,
 }
 
 impl<'a> TypstFilterResult<'a> {
@@ -24,16 +26,18 @@ impl<'a> TypstFilterResult<'a> {
         draft_count: usize,
         batcher: Option<TypstBatcher<'a>>,
         scanned: Vec<ScannedPage>,
+        errors: Vec<(PathBuf, typst_batch::CompileError)>,
     ) -> Self {
         Self {
             draft_count,
             batcher,
             scanned,
+            errors,
         }
     }
 
     fn empty(draft_count: usize, batcher: Option<TypstBatcher<'a>>) -> Self {
-        Self::new(draft_count, batcher, vec![])
+        Self::new(draft_count, batcher, vec![], vec![])
     }
 }
 
@@ -63,6 +67,7 @@ pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> Typ
     };
 
     let mut scanned = Vec::new();
+    let mut errors = Vec::new();
     let mut draft_count = 0;
 
     for (path, result) in files.iter().zip(scan_results) {
@@ -110,20 +115,14 @@ pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> Typ
                     headings,
                 });
             }
-            Err(_) => {
-                // On error, include file (will fail during compile with proper error message)
-                scanned.push(ScannedPage {
-                    path: (*path).clone(),
-                    meta: None,
-                    kind: PageKind::Direct,
-                    links: vec![],
-                    headings: vec![],
-                });
+            Err(e) => {
+                // Collect error for reporting
+                errors.push(((*path).clone(), e));
             }
         }
     }
 
-    TypstFilterResult::new(draft_count, Some(batcher), scanned)
+    TypstFilterResult::new(draft_count, Some(batcher), scanned, errors)
 }
 
 /// Check if a Typst scan result indicates a draft page.

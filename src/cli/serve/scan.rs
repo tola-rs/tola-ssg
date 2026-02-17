@@ -6,7 +6,7 @@
 use anyhow::Result;
 
 use crate::compiler::page::{
-    build_address_space, collect_content_files, filter_markdown_drafts, filter_typst_drafts,
+    build_address_space, collect_content_files, filter_drafts,
 };
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
@@ -28,15 +28,14 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
-    let root = config.get_root();
-    let label = &config.build.meta.label;
+    // Scan files to extract metadata (unified filter_drafts)
+    let scan_result = filter_drafts(config, &typst_files, &markdown_files);
 
-    // Scan files to extract metadata (reuses filter_drafts logic)
-    let typst_result = filter_typst_drafts(&typst_files, root, label);
-    let md_result = filter_markdown_drafts(&markdown_files, root, label);
+    // Report scan phase errors
+    scan_result.report_errors(config.build.diagnostics.max_errors)?;
 
-    let scanned = [typst_result.scanned, md_result.scanned].concat();
-    let drafts_skipped = typst_result.draft_count + md_result.draft_count;
+    let scanned = scan_result.scanned;
+    let drafts_skipped = scan_result.drafts_skipped;
 
     // Build CompiledPage list with correct permalinks
     let pages: Vec<CompiledPage> = scanned

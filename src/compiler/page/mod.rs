@@ -33,7 +33,7 @@ use crate::core::ContentKind;
 
 // Re-export types
 pub use cache::{BUILD_CACHE, IndexedDocument, cache_vdom};
-pub use format::{DraftFilterResult, PageFormat, ScannedHeading, ScannedPage};
+pub use format::{DraftFilterResult, PageFormat, ScannedHeading, ScannedPage, filter_drafts};
 pub use markdown::{Markdown, filter_markdown_drafts};
 pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;
@@ -106,7 +106,7 @@ pub type BatchCompileResult =
 /// This limits the number of errors displayed to avoid cascading error spam
 /// from a single syntax error.
 pub fn format_compile_error(
-    error: typst_batch::CompileError,
+    error: &typst_batch::CompileError,
     max_errors: usize,
 ) -> anyhow::Error {
     match error.diagnostics() {

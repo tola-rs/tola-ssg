@@ -6,9 +6,8 @@ use crate::asset::{copy_colocated_assets, scan_colocated_assets, scan_global_ass
 use crate::compiler::CompileContext;
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
-    BatchCompileResult, CompileStats, DraftFilterResult, FileSnapshot, MetadataResult, ScannedPage,
-    TypstBatcher, collect_warnings, filter_markdown_drafts, filter_typst_drafts,
-    format_compile_error,
+    BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, ScannedPage,
+    TypstBatcher, collect_warnings, filter_drafts, format_compile_error,
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;
@@ -87,6 +86,9 @@ pub fn build_static_pages(
     // Always pre-scan to collect metadata and identify iterative pages
     let scan_result = filter_drafts(config, &typst_files, &markdown_files);
     let drafts_skipped = scan_result.drafts_skipped;
+
+    // Report scan phase errors immediately
+    scan_result.report_errors(ctx.max_errors())?;
 
     // Get paths and identify iterative pages from scan results
     let (scanned_typst, scanned_md) = ScannedPage::partition_by_kind(&scan_result.scanned);
@@ -241,7 +243,7 @@ pub fn rebuild_iterative_pages(
             .par_iter()
             .zip(typst_results.into_par_iter())
             .map(|(path, result)| {
-                let result = result.map_err(|e| format_compile_error(e, max_errors))?;
+                let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
                 let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
                 let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
@@ -332,26 +334,6 @@ pub fn collect_content_files(content_dir: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter(|p| ContentKind::from_path(p).is_some())
         .collect()
-}
-
-/// Pre-filter draft files using Batcher.batch_scan() (Eval-only, skips expensive Layout phase).
-fn filter_drafts<'a>(
-    config: &'a SiteConfig,
-    typst_files: &[&PathBuf],
-    markdown_files: &[&PathBuf],
-) -> DraftFilterResult<'a> {
-    let root = config.get_root();
-    let label = &config.build.meta.label;
-
-    let typst_result = filter_typst_drafts(typst_files, root, label);
-    let md_result = filter_markdown_drafts(markdown_files, root, label);
-    let drafts_skipped = typst_result.draft_count + md_result.draft_count;
-
-    DraftFilterResult {
-        batcher: typst_result.batcher,
-        scanned: [typst_result.scanned, md_result.scanned].concat(),
-        drafts_skipped,
-    }
 }
 
 // ============================================================================
@@ -565,7 +547,7 @@ fn process_typst_files(
         .par_iter()
         .zip(results.into_par_iter())
         .map(|(path, result)| {
-            let result = result.map_err(|e| format_compile_error(e, max_errors))?;
+            let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
             let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
             let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
