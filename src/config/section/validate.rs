@@ -5,13 +5,6 @@
 //! # Example
 //!
 //! ```toml
-//! [validate.link.external]
-//! enable = true               # Check external HTTP/HTTPS links
-//! timeout = 10                # HTTP request timeout in seconds
-//! concurrency = 20            # Max concurrent HTTP requests
-//! skip_prefixes = ["http://localhost"]  # URLs to skip
-//! level = "error"             # Failure level: error | warn
-//!
 //! [validate.link.internal]
 //! enable = true               # Check internal site links
 //! fragments = false           # Also validate anchor fragments
@@ -33,7 +26,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 #[config(section = "validate")]
 pub struct ValidateConfig {
-    /// Link validation settings (internal and external).
+    /// Link validation settings (internal).
     #[config(sub_config)]
     pub link: LinkValidateConfig,
 
@@ -50,43 +43,8 @@ pub struct ValidateConfig {
 #[serde(default)]
 #[config(section = "validate.link")]
 pub struct LinkValidateConfig {
-    /// External link validation (HTTP/HTTPS).
-    pub external: ExternalLinkConfig,
-
     /// Internal link validation (site pages).
     pub internal: InternalLinkConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Config)]
-#[serde(default)]
-#[config(section = "validate.link.external")]
-pub struct ExternalLinkConfig {
-    /// Enable external link validation.
-    pub enable: bool,
-
-    /// Timeout for HTTP requests in seconds.
-    pub timeout: u64,
-
-    /// Maximum number of concurrent HTTP requests.
-    pub concurrency: usize,
-
-    /// URL prefixes to skip during validation.
-    pub skip_prefixes: Vec<String>,
-
-    /// How to treat validation failures: "error" or "warn".
-    pub level: ValidateLevel,
-}
-
-impl Default for ExternalLinkConfig {
-    fn default() -> Self {
-        Self {
-            enable: false,
-            timeout: 10,
-            concurrency: 20,
-            skip_prefixes: Vec::new(),
-            level: ValidateLevel::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
@@ -156,8 +114,6 @@ mod tests {
     #[test]
     fn test_validate_config_defaults() {
         let config = test_parse_config("");
-        // external is disabled by default
-        assert!(!config.validate.link.external.enable);
         // internal and assets are enabled by default
         assert!(config.validate.link.internal.enable);
         assert!(config.validate.assets.enable);
@@ -166,14 +122,7 @@ mod tests {
     #[test]
     fn test_validate_config_custom() {
         let config = test_parse_config(
-            r#"[validate.link.external]
-enable = true
-timeout = 30
-concurrency = 10
-skip_prefixes = ["http://localhost"]
-level = "warn"
-
-[validate.link.internal]
+            r#"[validate.link.internal]
 enable = true
 level = "warn"
 fragments = true
@@ -182,14 +131,10 @@ fragments = true
 enable = false
 level = "warn""#,
         );
-        assert!(config.validate.link.external.enable);
         assert!(config.validate.link.internal.enable);
         assert!(!config.validate.assets.enable);
-        assert_eq!(config.validate.link.external.timeout, 30);
-        assert_eq!(config.validate.link.external.concurrency, 10);
-        assert_eq!(config.validate.link.external.skip_prefixes.len(), 1);
         assert!(matches!(
-            config.validate.link.external.level,
+            config.validate.link.internal.level,
             ValidateLevel::Warn
         ));
         assert!(config.validate.link.internal.fragments);
