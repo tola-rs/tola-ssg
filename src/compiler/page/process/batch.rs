@@ -23,7 +23,6 @@ use std::path::{Path, PathBuf};
 struct BuildContext<'a> {
     mode: BuildMode,
     config: &'a SiteConfig,
-    label: String,
     clean: bool,
     deps_hash: Option<ContentHash>,
 }
@@ -38,10 +37,13 @@ impl<'a> BuildContext<'a> {
         Self {
             mode,
             config,
-            label: config.build.meta.label.clone(),
             clean,
             deps_hash,
         }
+    }
+
+    fn label(&self) -> &str {
+        &self.config.build.meta.label
     }
 }
 
@@ -236,7 +238,7 @@ pub fn rebuild_iterative_pages(
                 let result = result.map_err(|e| anyhow::anyhow!("{}", e))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
                 let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
-                let content = process_typst_result(result, &ctx.label, &compile_ctx)?;
+                let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
             .collect();
@@ -559,7 +561,7 @@ fn process_typst_files(
             let result = result.map_err(|e| anyhow::anyhow!("{}", e))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
             let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
-            let content = process_typst_result(result, &ctx.label, &compile_ctx)?;
+            let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
             finalize_static_page(ctx, page, content)
         })
         .collect()

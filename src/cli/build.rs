@@ -133,15 +133,10 @@ fn collect_build_files(config: &SiteConfig) -> BuildFiles {
         .flat_map(collect_all_files)
         .collect();
 
-    let content_assets: Vec<_> = collect_all_files(&config.build.content)
-        .into_iter()
-        .filter(|p| !ContentKind::is_content_file(p))
-        .collect();
-
-    let content_files: Vec<_> = collect_all_files(&config.build.content)
-        .into_iter()
-        .filter(|p| ContentKind::is_content_file(p))
-        .collect();
+    // Scan content directory once, then partition
+    let all_content = collect_all_files(&config.build.content);
+    let (content_files, content_assets): (Vec<_>, Vec<_>) =
+        all_content.into_iter().partition(|p| ContentKind::is_content_file(p));
 
     let typst_count = content_files
         .iter()
