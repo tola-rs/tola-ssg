@@ -196,12 +196,24 @@ pub fn is_fresh(source: &Path, output: &Path, deps_hash: Option<ContentHash>) ->
 
 /// Build hash marker: `<!-- tola:hash:SOURCEHASH:DEPSHASH -->`
 pub fn build_hash_marker(source_hash: &ContentHash, deps_hash: Option<&ContentHash>) -> String {
-    let deps = deps_hash.map_or_else(|| "0".to_string(), |h| h.to_hex()[..16].to_string());
-    format!(
-        "<!-- tola:hash:{}:{} -->",
-        &source_hash.to_hex()[..16],
-        deps
-    )
+    use std::fmt::Write;
+    // "<!-- tola:hash:" (16) + 16 + ":" (1) + 16 or "0" + " -->" (4)
+    let mut result = String::with_capacity(53);
+    result.push_str("<!-- tola:hash:");
+    // Write first 8 bytes as 16 hex chars directly
+    for &byte in &source_hash.as_bytes()[..8] {
+        write!(&mut result, "{:02x}", byte).unwrap();
+    }
+    result.push(':');
+    if let Some(deps) = deps_hash {
+        for &byte in &deps.as_bytes()[..8] {
+            write!(&mut result, "{:02x}", byte).unwrap();
+        }
+    } else {
+        result.push('0');
+    }
+    result.push_str(" -->");
+    result
 }
 
 #[cfg(test)]

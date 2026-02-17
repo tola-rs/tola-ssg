@@ -167,7 +167,7 @@ impl<'a> HeadInjector<'a> {
         for raw in &head_config.elements {
             // Raw HTML is injected as a Text node with TextKind::Raw
             // This allows custom script tags, meta tags, etc. to be rendered unescaped
-            head.push(Node::Text(Text::raw(raw.clone())));
+            head.push(Node::Text(Text::raw(raw.as_str())));
         }
     }
 }
