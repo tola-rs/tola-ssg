@@ -6,7 +6,7 @@ use anyhow::Result;
 use typst_batch::prelude::*;
 
 use crate::compiler::CompileContext;
-use crate::compiler::page::PageScanOutput;
+use crate::compiler::page::{PageScanOutput, format_compile_error};
 use crate::pipeline::compile_for_scan;
 
 use super::from_typst_html;
@@ -19,12 +19,13 @@ use super::from_typst_html;
 pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
     let root = ctx.config.get_root();
     let label = &ctx.config.build.meta.label;
+    let max_errors = ctx.config.build.diagnostics.max_errors;
 
     // Compile Typst to HtmlDocument using Builder API
     let result = Compiler::new(root)
         .with_path(path)
         .compile()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        .map_err(|e| format_compile_error(e, max_errors))?;
 
     let (document, _, _) = result.into_parts();
 

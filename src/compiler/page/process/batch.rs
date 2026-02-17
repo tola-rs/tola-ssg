@@ -8,6 +8,7 @@ use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
     BatchCompileResult, CompileStats, DraftFilterResult, FileSnapshot, MetadataResult, ScannedPage,
     TypstBatcher, collect_warnings, filter_markdown_drafts, filter_typst_drafts,
+    format_compile_error,
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;
@@ -44,6 +45,10 @@ impl<'a> BuildContext<'a> {
 
     fn label(&self) -> &str {
         &self.config.build.meta.label
+    }
+
+    fn max_errors(&self) -> usize {
+        self.config.build.diagnostics.max_errors
     }
 }
 
@@ -231,11 +236,12 @@ pub fn rebuild_iterative_pages(
         })?;
 
         // Process results (updates STORED_PAGES)
+        let max_errors = ctx.max_errors();
         let typst_pages: Vec<Result<CompiledPage>> = typst_paths
             .par_iter()
             .zip(typst_results.into_par_iter())
             .map(|(path, result)| {
-                let result = result.map_err(|e| anyhow::anyhow!("{}", e))?;
+                let result = result.map_err(|e| format_compile_error(e, max_errors))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
                 let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
                 let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
@@ -554,11 +560,12 @@ fn process_typst_files(
     files: &[&PathBuf],
     results: Vec<BatchCompileResult>,
 ) -> Vec<Result<Option<BuildPageResult>>> {
+    let max_errors = ctx.max_errors();
     files
         .par_iter()
         .zip(results.into_par_iter())
         .map(|(path, result)| {
-            let result = result.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let result = result.map_err(|e| format_compile_error(e, max_errors))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
             let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
             let content = process_typst_result(result, ctx.label(), &compile_ctx)?;

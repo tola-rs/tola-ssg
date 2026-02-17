@@ -6,10 +6,11 @@
 //!
 //! ```toml
 //! [build.diagnostics]
-//! max_warnings = 20              # Total max warnings
-//! max_warnings_per_file = 3      # Max warnings per file
-//! max_lines = 100                # Total max lines
-//! max_lines_per_warning = 10     # Max lines per warning
+//! max_errors = 1                  # Max errors to display (default: 1)
+//! max_warnings = 20               # Total max warnings
+//! max_warnings_per_file = 3       # Max warnings per file
+//! max_lines = 100                 # Total max lines
+//! max_lines_per_warning = 10      # Max lines per warning
 //! ```
 
 use serde::{Deserialize, Serialize};
@@ -17,8 +18,11 @@ use serde::{Deserialize, Serialize};
 /// Diagnostics display configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct DiagnosticsConfig {
+    /// Maximum errors to display per file.
+    /// Default is 3 to avoid cascading error spam from syntax errors.
+    pub max_errors: usize,
+
     /// Maximum total warnings to display.
     pub max_warnings: Option<usize>,
 
@@ -30,6 +34,18 @@ pub struct DiagnosticsConfig {
 
     /// Maximum lines per individual warning.
     pub max_lines_per_warning: Option<usize>,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            max_errors: 3,
+            max_warnings: None,
+            max_warnings_per_file: None,
+            max_lines: None,
+            max_lines_per_warning: None,
+        }
+    }
 }
 
 impl DiagnosticsConfig {

@@ -6,7 +6,7 @@ use anyhow::Result;
 use typst_batch::prelude::*;
 
 use crate::compiler::CompileContext;
-use crate::compiler::page::PageCompileOutput;
+use crate::compiler::page::{PageCompileOutput, format_compile_error};
 use crate::page::{PageMeta, STORED_PAGES};
 use crate::pipeline::compile as pipeline_compile;
 
@@ -20,6 +20,7 @@ use super::from_typst_html;
 pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutput> {
     let root = ctx.config.get_root();
     let label = &ctx.config.build.meta.label;
+    let max_errors = ctx.config.build.diagnostics.max_errors;
 
     // Build inputs with site config and pages data for @tola/* virtual packages
     let mut inputs = STORED_PAGES.build_inputs(ctx.config)?;
@@ -35,7 +36,7 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
         .with_inputs_obj(inputs)
         .with_path(path)
         .compile()
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        .map_err(|e| format_compile_error(e, max_errors))?;
 
     process_result(result, label, ctx)
 }

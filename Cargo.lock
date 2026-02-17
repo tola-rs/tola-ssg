@@ -6105,8 +6105,6 @@ checksum = "5613cb719a6222fe9b74027c3625d107767ec187bff26b8fc931cf58942c834f"
 [[package]]
 name = "typst-batch"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93cb2b6e79c38868878f4bc18878285cc0f8da2681487cf16162e8e92a4c8053"
 dependencies = [
  "chrono",
  "owo-colors",
