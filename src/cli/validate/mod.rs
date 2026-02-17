@@ -438,7 +438,6 @@ fn get_validate_args() -> crate::cli::ValidateArgs {
             paths: vec![],
             warn_only: false,
             internal: None,
-            external: None,
             assets: None,
         },
     }

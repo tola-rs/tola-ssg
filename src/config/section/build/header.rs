@@ -7,10 +7,13 @@ use std::path::{Path, PathBuf};
 use super::assets::AssetsConfig;
 use crate::config::ConfigDiagnostics;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
+#[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build.header")]
 pub struct HeaderConfig {
+    /// Inject a dummy script to prevent FOUC (Flash of Unstyled Content).
+    /// The script blocks rendering briefly, giving CSS time to load.
+    pub no_fouc: bool,
     /// Favicon path (relative to site root).
     pub icon: Option<PathBuf>,
     /// CSS stylesheet paths (relative to site root).
@@ -19,6 +22,18 @@ pub struct HeaderConfig {
     pub scripts: Vec<ScriptEntry>,
     /// Raw HTML elements to insert into head.
     pub elements: Vec<String>,
+}
+
+impl Default for HeaderConfig {
+    fn default() -> Self {
+        Self {
+            no_fouc: true,
+            icon: None,
+            styles: Vec::new(),
+            scripts: Vec::new(),
+            elements: Vec::new(),
+        }
+    }
 }
 
 impl HeaderConfig {
@@ -135,10 +150,17 @@ mod tests {
     #[test]
     fn test_defaults() {
         let config = test_parse_config("");
+        assert!(config.build.header.no_fouc);
         assert!(config.build.header.icon.is_none());
         assert!(config.build.header.styles.is_empty());
         assert!(config.build.header.scripts.is_empty());
         assert!(config.build.header.elements.is_empty());
+    }
+
+    #[test]
+    fn test_no_fouc_disabled() {
+        let config = test_parse_config("[build.header]\nno_fouc = false");
+        assert!(!config.build.header.no_fouc);
     }
 
     #[test]

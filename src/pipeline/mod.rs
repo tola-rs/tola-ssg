@@ -30,7 +30,7 @@ use crate::compiler::CompileContext;
 use crate::compiler::family::{IndexedDocument, Raw, TolaSite};
 use crate::compiler::page::PageRoute;
 
-pub use transform::{BodyInjector, HeadInjector, LinkTransform, MediaTransform, SvgTransform};
+pub use transform::{BodyInjector, HeaderInjector, LinkTransform, MediaTransform, SvgTransform};
 
 // =============================================================================
 // Types
@@ -76,7 +76,7 @@ pub fn compile(doc: Document<Raw>, ctx: &CompileContext<'_>) -> CompileOutput {
 
     // Build pipeline (sync transforms only, no validation)
     let indexed = Pipeline::new(doc)
-        .pipe(HeadInjector::new(ctx.config).with_global_header(ctx.global_header))
+        .pipe(HeaderInjector::new(ctx.config).with_global_header(ctx.global_header))
         .pipe(indexer)
         .pipe(LinkTransform::new(ctx.config, route))
         .pipe(MediaTransform::new(ctx.config, route))
@@ -126,7 +126,7 @@ pub fn compile_for_scan(doc: Document<Raw>, ctx: &CompileContext<'_>) -> Indexed
     };
 
     Pipeline::new(doc)
-        .pipe(HeadInjector::new(ctx.config).with_global_header(ctx.global_header))
+        .pipe(HeaderInjector::new(ctx.config).with_global_header(ctx.global_header))
         .pipe(indexer)
         .into_inner()
 }

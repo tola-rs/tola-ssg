@@ -100,10 +100,6 @@ pub struct ValidateArgs {
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub internal: Option<bool>,
 
-    /// Validate external links (HTTP/HTTPS)
-    #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
-    pub external: Option<bool>,
-
     /// Validate asset references
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub assets: Option<bool>,

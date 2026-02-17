@@ -387,15 +387,10 @@ impl SiteConfig {
             &mut self.validate.link.internal.enable,
             args.internal.as_ref(),
         );
-        Self::update_option(
-            &mut self.validate.link.external.enable,
-            args.external.as_ref(),
-        );
         Self::update_option(&mut self.validate.assets.enable, args.assets.as_ref());
 
         // --warn-only sets all levels to Warn
         if args.warn_only {
-            self.validate.link.external.level = ValidateLevel::Warn;
             self.validate.link.internal.level = ValidateLevel::Warn;
             self.validate.assets.level = ValidateLevel::Warn;
         }

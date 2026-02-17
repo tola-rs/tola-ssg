@@ -16,7 +16,7 @@ use crate::config::SiteConfig;
 use crate::utils::mime;
 
 /// Injects site-wide `<head>` content into Raw VDOM.
-pub struct HeadInjector<'a> {
+pub struct HeaderInjector<'a> {
     config: &'a SiteConfig,
     /// Whether to inject global header content (styles, scripts, elements).
     /// Default: `true`. Set to `false` for pages like 404 that need
@@ -31,7 +31,7 @@ fn versioned_href(path: &Path, config: &SiteConfig) -> Option<String> {
     Some(version::versioned_url(&href, &abs_path))
 }
 
-impl<'a> HeadInjector<'a> {
+impl<'a> HeaderInjector<'a> {
     pub fn new(config: &'a SiteConfig) -> Self {
         Self {
             config,
@@ -63,6 +63,13 @@ impl<'a> HeadInjector<'a> {
     fn populate_head(&self, head: &mut Element<Raw>) {
         let config = self.config;
         let head_config = &config.build.header;
+
+        // Anti-FOUC dummy script (must be first to block rendering)
+        if head_config.no_fouc {
+            let mut script = TolaSite::element("script", Attrs::new());
+            script.push_text(" ");
+            head.push_elem(script);
+        }
 
         // Title
         if !config.site.info.title.is_empty() {
@@ -172,7 +179,7 @@ impl<'a> HeadInjector<'a> {
     }
 }
 
-impl<'a> Transform<Raw> for HeadInjector<'a> {
+impl<'a> Transform<Raw> for HeaderInjector<'a> {
     type To = Raw;
 
     fn transform(self, mut doc: Document<Raw>) -> Document<Raw> {
@@ -211,7 +218,7 @@ mod tests {
         config.site.info.title = "Test Site".to_string();
 
         let doc = make_html_doc();
-        let doc = HeadInjector::new(&config).transform(doc);
+        let doc = HeaderInjector::new(&config).transform(doc);
 
         // Find head
         let head = doc

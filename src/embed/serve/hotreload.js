@@ -295,25 +295,8 @@
           // Replace inner HTML (for mixed content structure changes)
           const el = this.getById(op.target);
           if (el) {
-            if (op.is_svg) {
-              // SVG content needs proper namespace parsing
-              const wrapper = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${op.html}</svg>`;
-              const doc = new DOMParser().parseFromString(wrapper, 'image/svg+xml');
-              // Check for parse errors
-              const parseError = doc.querySelector('parsererror');
-              if (parseError) {
-                console.error('[tola] SVG parse error:', parseError.textContent);
-                el.innerHTML = op.html; // Fallback
-              } else {
-                el.innerHTML = '';
-                const svgRoot = doc.documentElement;
-                while (svgRoot.firstChild) {
-                  el.appendChild(document.importNode(svgRoot.firstChild, true));
-                }
-              }
-            } else {
-              el.innerHTML = op.html;
-            }
+            // SVG and non-SVG: just use innerHTML directly
+            el.innerHTML = op.html;
           }
           break;
         }
