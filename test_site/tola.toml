@@ -1,0 +1,54 @@
+# Tola configuration file (v0.6.5)
+# https://github.com/tola-rs/tola-ssg
+
+# Site metadata for feed generation and Typst templates.
+# Access in Typst via `#import "@tola/site:0.0.0": info`.
+# For custom fields, use `[site.info.extra]` and access via `info.extra.xxx`.
+[site.info]
+title = ""  # Site title.
+author = ""  # Author name.
+email = ""  # Author email.
+description = ""  # Site description.
+# url = ""  # Site URL, path used as prefix (e.g., "https://example.com/blog/docs").
+language = "en"  # Language code (e.g., "en", "zh-Hans").
+copyright = ""  # Copyright notice.
+
+[build.assets]
+# Nested directories (preserve structure).
+# Each directory is copied to `output/{name}/`.
+nested = []
+# Flatten files (copy to output root).
+# Each file is copied to `output/{name}`.
+flatten = []
+
+[build.feed]
+# Enable feed generation.
+enable = false
+# Output path for feed file.
+path = "feed.xml"
+# Feed format (RSS 2.0 or Atom 1.0).
+format = "rss"
+
+# Sitemap generation settings.
+[build.sitemap]
+enable = false  # Enable sitemap generation.
+path = "sitemap.xml"  # Output path for sitemap file.
+
+# Development server settings.
+[serve]
+# Network interface to bind.
+# - `127.0.0.1` (default): localhost only
+# - `0.0.0.0`: all interfaces (LAN accessible)
+interface = "127.0.0.1"
+port = 5277  # HTTP port number.
+watch = true  # Enable file watcher for live reload.
+# Respect path_prefix from site.url during local development.
+# - `false` (default): Ignore prefix, access pages at `/`
+# - `true`: Keep prefix, access at `/my-project/`
+respect_prefix = false
+
+[validate]
+# Link validation settings (internal and external).
+# see [validate.link] section
+# Asset validation settings.
+# see [validate.assets] section

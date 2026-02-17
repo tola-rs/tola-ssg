@@ -10,7 +10,6 @@ use crate::config::attr::{
 pub use crate::config::attr::FieldStatus;
 
 /// Parsed field information.
-#[derive(Debug)]
 pub struct FieldInfo {
     pub name: syn::Ident,
     pub toml_name: String,

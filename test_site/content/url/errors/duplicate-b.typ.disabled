@@ -1,0 +1,11 @@
+// ERROR TEST: Two pages with same permalink
+// Expected: Build should fail with "permalink conflicts" error
+
+#metadata((
+  title: "Duplicate Permalink B",
+  permalink: "/same-url/",
+)) <tola-meta>
+
+= Duplicate B
+
+This page has the same permalink as duplicate-a.typ.

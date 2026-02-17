@@ -135,8 +135,9 @@ fn collect_build_files(config: &SiteConfig) -> BuildFiles {
 
     // Scan content directory once, then partition
     let all_content = collect_all_files(&config.build.content);
-    let (content_files, content_assets): (Vec<_>, Vec<_>) =
-        all_content.into_iter().partition(|p| ContentKind::is_content_file(p));
+    let (content_files, content_assets): (Vec<_>, Vec<_>) = all_content
+        .into_iter()
+        .partition(|p| ContentKind::is_content_file(p));
 
     let typst_count = content_files
         .iter()

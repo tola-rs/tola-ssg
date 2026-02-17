@@ -1,0 +1,13 @@
+// ERROR TEST: This file's permalink is targeted by conflict-alias.typ
+// Expected: Build should fail with "permalink conflicts" error
+//
+// To test: Uncomment this file and conflict-alias.typ together
+
+#metadata((
+  title: "Chain Target C",
+  permalink: "/final-destination/",
+)) <tola-meta>
+
+= Chain Target
+
+This permalink conflicts with conflict-alias.typ's alias.
