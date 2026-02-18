@@ -21,8 +21,8 @@ use tokio::sync::mpsc;
 
 use super::messages::CompilerMsg;
 use crate::config::SiteConfig;
+use crate::hooks;
 use crate::reload::classify::{ClassifyResult, classify_changes};
-use crate::utils::hooks;
 use crate::utils::path::normalize_path;
 
 /// Debounce configuration

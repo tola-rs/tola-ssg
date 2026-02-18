@@ -23,10 +23,9 @@
 //! dpi = 144.0                 # Rendering DPI (default: 96.0)
 //! ```
 //!
-//! See submodules for detailed options: [`slug`], [`svg`], [`css`].
+//! See submodules for detailed options: [`slug`], [`svg`], [`hooks`].
 
 pub mod assets;
-mod css;
 mod diagnostics;
 mod hooks;
 mod meta;
@@ -34,9 +33,8 @@ mod slug;
 mod svg;
 
 pub use assets::AssetsConfig;
-pub use css::CssConfig;
 pub use diagnostics::DiagnosticsConfig;
-pub use hooks::{HookConfig, HooksConfig, WatchMode};
+pub use hooks::{CssFormat, CssProcessorConfig, HookConfig, HooksConfig, WatchMode};
 pub use meta::MetaConfig;
 pub use slug::{SlugCase, SlugConfig, SlugMode};
 pub use svg::{SvgConfig, SvgConverter, SvgFormat};
@@ -85,10 +83,7 @@ pub struct BuildSectionConfig {
     /// SVG processing settings.
     pub svg: SvgConfig,
 
-    /// CSS processing settings.
-    pub css: CssConfig,
-
-    /// Build hooks (pre/post commands).
+    /// Build hooks (pre/post commands, tailwind).
     pub hooks: HooksConfig,
 
     /// Metadata extraction settings.
@@ -119,7 +114,6 @@ impl Default for BuildSectionConfig {
             skip_drafts: false,
             slug: SlugConfig::default(),
             svg: SvgConfig::default(),
-            css: CssConfig::default(),
             hooks: HooksConfig::default(),
             meta: MetaConfig::default(),
             diagnostics: DiagnosticsConfig::default(),

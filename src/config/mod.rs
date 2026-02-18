@@ -405,7 +405,7 @@ impl SiteConfig {
 
         Self::update_option(&mut self.build.minify, args.minify.as_ref());
         Self::update_option(
-            &mut self.build.css.processor.enable,
+            &mut self.build.hooks.css.enable,
             args.css_processor.as_ref(),
         );
         self.build.clean = args.clean;
@@ -494,8 +494,8 @@ impl SiteConfig {
 
     /// Normalize optional paths (CSS processor input, deploy token).
     fn normalize_optional_paths(&mut self, root: &Path) {
-        if let Some(input) = self.build.css.processor.input.take() {
-            self.build.css.processor.input =
+        if let Some(input) = self.build.hooks.css.input.take() {
+            self.build.hooks.css.input =
                 Some(crate::utils::path::normalize_path(&root.join(input)));
         }
 
@@ -553,7 +553,7 @@ impl SiteConfig {
         // Validate each section
         self.site.info.validate(self.site.feed.enable, &mut diag);
         self.build.validate(&mut diag);
-        self.build.css.validate(&mut diag);
+        self.build.hooks.validate(&mut diag);
         self.build.svg.validate(&mut diag);
         self.build.assets.validate(&mut diag);
         self.site

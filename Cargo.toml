@@ -64,7 +64,6 @@ portable-pty = "0.9.0"
 macros = { package = "tola-ssg-macros", version = "0.1.1" }
 
 # Typst integration (via typst-batch crate)
-# typst-batch = { version = "0.2.0", features = ["svg", "batch"] }
 # typst-batch = { version = "0.2.1", features = ["svg"] }
 typst-batch = { path = "typst-batch", features = ["svg"] }
 tola-vdom = { version = "0.2.0", features = ["parallel"] }

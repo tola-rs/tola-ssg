@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::{
     asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
-    freshness, generator, log, utils::git, utils::hooks,
+    freshness, generator, hooks, log, utils::git,
 };
 
 /// Initialize serve build environment.

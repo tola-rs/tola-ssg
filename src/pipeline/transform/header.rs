@@ -107,15 +107,15 @@ impl<'a> HeaderInjector<'a> {
             }
         }
 
-        // CSS Processor output
-        if config.build.css.processor.enable
-            && let Some(input) = &config.build.css.processor.input
+        // CSS processor output (Tailwind/UnoCSS)
+        if config.build.hooks.css.enable
+            && let Some(input) = &config.build.hooks.css.input
             && let Ok(route) = crate::asset::route_from_source(input.clone(), config)
         {
             let mut link = TolaSite::element("link", Attrs::new());
             link.set_attr("rel", "stylesheet");
-            // CSS processor output uses versioned URL based on OUTPUT file
-            // (not input, since Tailwind generates different output based on scanned classes)
+            // CSS output uses versioned URL based on OUTPUT file
+            // (not input, since CSS processor generates different output based on scanned classes)
             let href = version::versioned_url(route.url.as_ref(), &route.output);
             link.set_attr("href", href);
             head.push_elem(link);

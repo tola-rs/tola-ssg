@@ -5,22 +5,18 @@
 //!
 //! # Modules
 //!
-//! - [`css`]: CSS processing (minification)
 //! - [`date`]: Date/time formatting (RFC 2822, etc.)
 //! - [`exec`]: External command execution
 //! - [`git`]: Git repository operations
 //! - [`hash`]: Content hashing (BLAKE3)
-//! - [`hooks`]: Build hook execution
 //! - [`path`]: Path and URL utilities
 //! - [`platform`]: Platform-specific helpers
 //! - [`plural`]: Pluralization utilities
 
-pub mod css;
 pub mod date;
 pub mod exec;
 pub mod git;
 pub mod hash;
-pub mod hooks;
 pub mod html;
 pub mod mime;
 pub mod path;
