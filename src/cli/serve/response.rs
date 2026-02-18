@@ -115,7 +115,7 @@ pub fn respond_not_found(
     use crate::utils::mime::types::{HTML, PLAIN};
 
     // Try to find 404 page: source HTML or compiled output
-    let (body, found) = if let Some(not_found) = &config.build.not_found {
+    let (body, found) = if let Some(not_found) = &config.site.not_found {
         // Check if it's an HTML file (read from source for hot reload)
         if not_found.extension().and_then(|e| e.to_str()) == Some("html") {
             let source = config.root_join(not_found);

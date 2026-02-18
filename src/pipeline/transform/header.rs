@@ -62,7 +62,7 @@ impl<'a> HeaderInjector<'a> {
     /// Populate `<head>` with site configuration content.
     fn populate_head(&self, head: &mut Element<Raw>) {
         let config = self.config;
-        let head_config = &config.build.header;
+        let head_config = &config.site.header;
 
         // Anti-FOUC dummy script (must be first to block rendering)
         if head_config.no_fouc {

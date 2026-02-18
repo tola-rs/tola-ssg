@@ -4,12 +4,12 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use super::assets::AssetsConfig;
+use crate::config::section::build::AssetsConfig;
 use crate::config::ConfigDiagnostics;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "build.header")]
+#[config(section = "site.header")]
 pub struct HeaderConfig {
     /// Inject a dummy script to prevent FOUC (Flash of Unstyled Content).
     /// The script blocks rendering briefly, giving CSS time to load.
@@ -150,24 +150,24 @@ mod tests {
     #[test]
     fn test_defaults() {
         let config = test_parse_config("");
-        assert!(config.build.header.no_fouc);
-        assert!(config.build.header.icon.is_none());
-        assert!(config.build.header.styles.is_empty());
-        assert!(config.build.header.scripts.is_empty());
-        assert!(config.build.header.elements.is_empty());
+        assert!(config.site.header.no_fouc);
+        assert!(config.site.header.icon.is_none());
+        assert!(config.site.header.styles.is_empty());
+        assert!(config.site.header.scripts.is_empty());
+        assert!(config.site.header.elements.is_empty());
     }
 
     #[test]
     fn test_no_fouc_disabled() {
-        let config = test_parse_config("[build.header]\nno_fouc = false");
-        assert!(!config.build.header.no_fouc);
+        let config = test_parse_config("[site.header]\nno_fouc = false");
+        assert!(!config.site.header.no_fouc);
     }
 
     #[test]
     fn test_icon() {
-        let config = test_parse_config("[build.header]\nicon = \"images/favicon.avif\"");
+        let config = test_parse_config("[site.header]\nicon = \"images/favicon.avif\"");
         assert_eq!(
-            config.build.header.icon,
+            config.site.header.icon,
             Some(PathBuf::from("images/favicon.avif"))
         );
     }
@@ -175,15 +175,15 @@ mod tests {
     #[test]
     fn test_styles() {
         let config = test_parse_config(
-            "[build.header]\nstyles = [\"fonts/font.css\", \"styles/highlight.css\"]",
+            "[site.header]\nstyles = [\"fonts/font.css\", \"styles/highlight.css\"]",
         );
-        assert_eq!(config.build.header.styles.len(), 2);
+        assert_eq!(config.site.header.styles.len(), 2);
         assert_eq!(
-            config.build.header.styles[0],
+            config.site.header.styles[0],
             PathBuf::from("fonts/font.css")
         );
         assert_eq!(
-            config.build.header.styles[1],
+            config.site.header.styles[1],
             PathBuf::from("styles/highlight.css")
         );
     }
@@ -191,50 +191,50 @@ mod tests {
     #[test]
     fn test_scripts_simple() {
         let config =
-            test_parse_config("[build.header]\nscripts = [\"scripts/a.js\", \"scripts/b.js\"]");
-        assert_eq!(config.build.header.scripts.len(), 2);
+            test_parse_config("[site.header]\nscripts = [\"scripts/a.js\", \"scripts/b.js\"]");
+        assert_eq!(config.site.header.scripts.len(), 2);
         assert_eq!(
-            config.build.header.scripts[0].path(),
+            config.site.header.scripts[0].path(),
             Path::new("scripts/a.js")
         );
-        assert!(!config.build.header.scripts[0].is_defer());
-        assert!(!config.build.header.scripts[0].is_async());
+        assert!(!config.site.header.scripts[0].is_defer());
+        assert!(!config.site.header.scripts[0].is_async());
     }
 
     #[test]
     fn test_scripts_with_options() {
         let config = test_parse_config(
-            r#"[build.header]
+            r#"[site.header]
 scripts = [
     { path = "a.js", defer = true },
     "b.js",
     { path = "c.js", async = true }
 ]"#,
         );
-        assert_eq!(config.build.header.scripts.len(), 3);
+        assert_eq!(config.site.header.scripts.len(), 3);
 
         // defer script
-        assert!(config.build.header.scripts[0].is_defer());
-        assert!(!config.build.header.scripts[0].is_async());
+        assert!(config.site.header.scripts[0].is_defer());
+        assert!(!config.site.header.scripts[0].is_async());
 
         // simple script
-        assert!(!config.build.header.scripts[1].is_defer());
-        assert!(!config.build.header.scripts[1].is_async());
+        assert!(!config.site.header.scripts[1].is_defer());
+        assert!(!config.site.header.scripts[1].is_async());
 
         // async script
-        assert!(!config.build.header.scripts[2].is_defer());
-        assert!(config.build.header.scripts[2].is_async());
+        assert!(!config.site.header.scripts[2].is_defer());
+        assert!(config.site.header.scripts[2].is_async());
     }
 
     #[test]
     fn test_elements() {
         let config = test_parse_config(
-            r###"[build.header]
+            r###"[site.header]
 elements = ['<meta name="darkreader-lock">', '<meta name="theme-color" content="#fff">']"###,
         );
-        assert_eq!(config.build.header.elements.len(), 2);
+        assert_eq!(config.site.header.elements.len(), 2);
         assert_eq!(
-            config.build.header.elements[0],
+            config.site.header.elements[0],
             "<meta name=\"darkreader-lock\">"
         );
     }

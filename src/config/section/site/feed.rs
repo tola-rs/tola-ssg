@@ -47,17 +47,17 @@ mod tests {
     #[test]
     fn test_defaults() {
         let config = test_parse_config("");
-        assert!(!config.build.feed.enable);
-        assert_eq!(config.build.feed.path, PathBuf::from("feed.xml"));
-        assert_eq!(config.build.feed.format, FeedFormat::Rss);
+        assert!(!config.site.feed.enable);
+        assert_eq!(config.site.feed.path, PathBuf::from("feed.xml"));
+        assert_eq!(config.site.feed.format, FeedFormat::Rss);
     }
 
     #[test]
     fn test_custom_config() {
         let config =
-            test_parse_config("[build.feed]\nenable = true\npath = \"rss.xml\"\nformat = \"atom\"");
-        assert!(config.build.feed.enable);
-        assert_eq!(config.build.feed.path, PathBuf::from("rss.xml"));
-        assert_eq!(config.build.feed.format, FeedFormat::Atom);
+            test_parse_config("[site.feed]\nenable = true\npath = \"rss.xml\"\nformat = \"atom\"");
+        assert!(config.site.feed.enable);
+        assert_eq!(config.site.feed.path, PathBuf::from("rss.xml"));
+        assert_eq!(config.site.feed.format, FeedFormat::Atom);
     }
 }

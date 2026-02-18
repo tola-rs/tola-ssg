@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
 use crate::config::section::{
-    AssetsConfig, FeedConfig, ServeConfig, ValidateConfig, build::SitemapConfig,
-    site::SiteInfoConfig,
+    AssetsConfig, FeedConfig, ServeConfig, ValidateConfig,
+    site::{SiteInfoConfig, SitemapConfig},
 };
 use crate::embed::typst::TOLA_TYP;
 

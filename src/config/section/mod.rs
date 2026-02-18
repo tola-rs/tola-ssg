@@ -7,7 +7,7 @@
 //! | `build`    | `[build]`      | Build paths, assets, svg, css     |
 //! | `deploy`   | `[deploy]`     | Deployment settings               |
 //! | `serve`    | `[serve]`      | Development server                |
-//! | `site`     | `[site]`       | Site info, nav, preload           |
+//! | `site`     | `[site]`       | Site info, nav, header, feed      |
 //! | `theme`    | `[theme]`      | Theme settings (recolor)          |
 //! | `validate` | `[validate]`   | Link/asset validation             |
 
@@ -19,12 +19,9 @@ pub mod theme;
 mod validate;
 
 // Re-export section configs
-pub use build::{
-    AssetsConfig, BuildSectionConfig, FeedConfig, FeedFormat, SlugCase, SlugConfig, SlugMode,
-    SvgConverter, SvgFormat,
-};
+pub use build::{AssetsConfig, BuildSectionConfig, SlugCase, SlugConfig, SlugMode, SvgConverter, SvgFormat};
 pub use deploy::DeployConfig;
 pub use serve::ServeConfig;
-pub use site::SiteSectionConfig;
+pub use site::{FeedConfig, FeedFormat, SiteSectionConfig};
 pub use theme::ThemeSectionConfig;
 pub use validate::{ValidateConfig, ValidateLevel};
