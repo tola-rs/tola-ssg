@@ -271,11 +271,18 @@ impl CssFormat {
 /// # Example
 ///
 /// ```toml
+/// # Tailwind CSS
 /// [build.hooks.css]
 /// enable = true
-/// input = "assets/css/main.css"
+/// path = "assets/css/main.css"
 /// command = ["tailwindcss"]
-/// # format = "auto"  # default, inferred from command
+///
+/// # UnoCSS with scan patterns
+/// [build.hooks.css]
+/// enable = true
+/// path = "assets/css/uno.css"
+/// command = ["unocss"]
+/// scan = ["content/**/*", "templates/**/*"]
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
@@ -283,12 +290,15 @@ impl CssFormat {
 pub struct CssProcessorConfig {
     /// Enable CSS processor hook.
     pub enable: bool,
-    /// Input CSS file path.
-    pub input: Option<PathBuf>,
-    /// Command to execute (e.g., `["tailwindcss"]` or `["npx", "unocss"]`).
+    /// Output asset path (also used as Tailwind input file location).
+    pub path: Option<PathBuf>,
+    /// Command to execute (e.g., `["tailwindcss"]` or `["unocss"]`).
     pub command: Vec<String>,
     /// CSS processor format (auto, tailwind, uno). Default: auto (inferred from command).
     pub format: CssFormat,
+    /// Glob patterns for scanning source files (UnoCSS only).
+    #[serde(default)]
+    pub scan: Vec<String>,
     /// Suppress output (default: true).
     pub quiet: bool,
 }
@@ -297,9 +307,10 @@ impl Default for CssProcessorConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            input: None,
+            path: None,
             command: vec!["tailwindcss".into()],
             format: CssFormat::Auto,
+            scan: Vec::new(),
             quiet: true,
         }
     }
@@ -355,30 +366,33 @@ impl CssProcessorConfig {
             }
         }
 
-        // Input must be configured
-        let Some(input) = &self.input else {
+        // Path must be configured
+        let Some(path) = &self.path else {
             diag.error(
-                Self::FIELDS.input,
+                Self::FIELDS.path,
                 format!(
                     "{} is true but {} is not configured",
                     Self::FIELDS.enable,
-                    Self::FIELDS.input
+                    Self::FIELDS.path
                 ),
             );
             return;
         };
 
-        // Input must exist and be a file
-        if !input.exists() {
-            diag.error(
-                Self::FIELDS.input,
-                format!("{} file not found: {}", Self::FIELDS.input, input.display()),
-            );
-        } else if !input.is_file() {
-            diag.error(
-                Self::FIELDS.input,
-                format!("{} is not a file: {}", Self::FIELDS.input, input.display()),
-            );
+        // For Tailwind, path must exist as input file
+        // For UnoCSS, path is just output location (file doesn't need to exist)
+        if self.resolved_format() == CssFormat::Tailwind {
+            if !path.exists() {
+                diag.error(
+                    Self::FIELDS.path,
+                    format!("{} file not found: {}", Self::FIELDS.path, path.display()),
+                );
+            } else if !path.is_file() {
+                diag.error(
+                    Self::FIELDS.path,
+                    format!("{} is not a file: {}", Self::FIELDS.path, path.display()),
+                );
+            }
         }
     }
 }

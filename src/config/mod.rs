@@ -492,11 +492,11 @@ impl SiteConfig {
         self.normalize_optional_paths(&root);
     }
 
-    /// Normalize optional paths (CSS processor input, deploy token).
+    /// Normalize optional paths (CSS processor path, deploy token).
     fn normalize_optional_paths(&mut self, root: &Path) {
-        if let Some(input) = self.build.hooks.css.input.take() {
-            self.build.hooks.css.input =
-                Some(crate::utils::path::normalize_path(&root.join(input)));
+        if let Some(path) = self.build.hooks.css.path.take() {
+            self.build.hooks.css.path =
+                Some(crate::utils::path::normalize_path(&root.join(path)));
         }
 
         if let Some(token_path) = self.deploy.github.token_path.take() {
