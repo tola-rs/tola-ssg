@@ -1,26 +1,22 @@
-//! Tailwind CSS specific hook builder.
+//! UnoCSS specific hook builder.
 //!
-//! Tailwind CLI arguments: `command -i input -o output [--minify]`
+//! UnoCSS CLI arguments: `command [scan_patterns...] -o output [--minify]`
 
 use crate::config::section::build::{CssProcessorConfig, HookConfig, WatchMode};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::path::Path;
 
-/// Build a HookConfig for Tailwind CSS.
+/// Build a HookConfig for UnoCSS.
 pub fn build_hook(css: &CssProcessorConfig, output: &Path, minify: bool) -> Result<HookConfig> {
-    let input = css
-        .path
-        .as_ref()
-        .ok_or_else(|| anyhow!("CSS path not configured"))?;
-
-    // Build command: command + ["-i", input, "-o", output]
     let mut command: Vec<String> = css.command.clone();
-    command.extend([
-        "-i".into(),
-        input.display().to_string(),
-        "-o".into(),
-        output.display().to_string(),
-    ]);
+
+    // Add scan patterns if configured
+    for pattern in &css.scan {
+        command.push(pattern.clone());
+    }
+
+    // Add output: -o output
+    command.extend(["-o".into(), output.display().to_string()]);
 
     // Build args: --minify (only in build mode)
     let build_args = if minify {

@@ -2,9 +2,10 @@
 //!
 //! Supported processors:
 //! - `tailwind`: Tailwind CSS
-//! - `uno`: UnoCSS (planned)
+//! - `uno`: UnoCSS
 
 mod tailwind;
+mod uno;
 
 use crate::config::SiteConfig;
 use crate::config::section::build::{CssFormat, HookConfig};
@@ -12,18 +13,16 @@ use crate::core::BuildMode;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// Check if a path is the CSS processor input file.
+/// Check if a path is the CSS processor path file.
 pub fn is_css_input(path: &Path, config: &SiteConfig) -> bool {
     config.build.hooks.css.enable
         && config
             .build
             .hooks
             .css
-            .input
+            .path
             .as_ref()
-            .is_some_and(|input| {
-                crate::utils::path::normalize_path(path) == *input
-            })
+            .is_some_and(|p| crate::utils::path::normalize_path(path) == *p)
 }
 
 /// Build a HookConfig from CSS processor configuration.
@@ -33,7 +32,7 @@ pub fn build_css_hook(config: &SiteConfig, output: &Path) -> Result<HookConfig> 
 
     match css.resolved_format() {
         CssFormat::Tailwind => tailwind::build_hook(css, output, minify),
-        CssFormat::Uno => tailwind::build_hook(css, output, minify), // TODO: uno::build_hook
+        CssFormat::Uno => uno::build_hook(css, output, minify),
         CssFormat::Auto => unreachable!("resolved_format() should never return Auto"),
     }
 }
@@ -56,20 +55,20 @@ pub fn run_css(
     Ok(())
 }
 
-/// Rebuild CSS using configured input path.
+/// Rebuild CSS using configured path.
 pub fn rebuild_css(
     config: &SiteConfig,
     mode: BuildMode,
     with_build_args: bool,
 ) -> Result<()> {
-    let input = config
+    let path = config
         .build
         .hooks
         .css
-        .input
+        .path
         .as_ref()
-        .ok_or_else(|| anyhow!("CSS processor input path not configured"))?;
+        .ok_or_else(|| anyhow!("CSS processor path not configured"))?;
 
-    let route = crate::asset::route_from_source(input.to_path_buf(), config)?;
+    let route = crate::asset::route_from_source(path.to_path_buf(), config)?;
     run_css(config, &route.output, mode, with_build_args)
 }
