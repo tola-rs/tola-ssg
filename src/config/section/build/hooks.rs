@@ -261,45 +261,27 @@ impl CssFormat {
     }
 }
 
-/// CSS processor hook configuration (syntax sugar for pre hook)
-///
-/// When enabled, this is internally compiled to a pre hook with:
-/// - Auto-expanded command with format-specific arguments
-/// - `watch = true` (any file change triggers rebuild)
-/// - `build_args` for minification
-///
-/// # Example
-///
-/// ```toml
-/// # Tailwind CSS
-/// [build.hooks.css]
-/// enable = true
-/// path = "assets/css/main.css"
-/// command = ["tailwindcss"]
-///
-/// # UnoCSS with scan patterns
-/// [build.hooks.css]
-/// enable = true
-/// path = "assets/css/uno.css"
-/// command = ["unocss"]
-/// scan = ["content/**/*", "templates/**/*"]
-/// ```
+/// CSS processor hook (Only tailwind now)
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build.hooks.css")]
 pub struct CssProcessorConfig {
-    /// Enable CSS processor hook.
+    #[config(inline_doc = "Enable Tailwind CSS processing")]
     pub enable: bool,
-    /// Output asset path (also used as Tailwind input file location).
+    /// Output asset path (also used as Tailwind input file location)
+    #[config(inline_doc = "e.g. \"assets/style/tailwind.css\"")]
     pub path: Option<PathBuf>,
-    /// Command to execute (e.g., `["tailwindcss"]` or `["unocss"]`).
+    #[config(inline_doc = "e.g. [\"npx\", \"tailwindcss\"] if you want")]
     pub command: Vec<String>,
-    /// CSS processor format (auto, tailwind, uno). Default: auto (inferred from command).
+    /// CSS processor format (auto, tailwind, uno). Default: auto (inferred from command)
+    #[config(status = hidden)]
     pub format: CssFormat,
-    /// Glob patterns for scanning source files (UnoCSS only).
+    /// Glob patterns for scanning source files (UnoCSS only)
     #[serde(default)]
+    #[config(status = hidden)]
     pub scan: Vec<String>,
-    /// Suppress output (default: true).
+    /// Suppress output (default: true)
+    #[config(status = hidden)]
     pub quiet: bool,
 }
 

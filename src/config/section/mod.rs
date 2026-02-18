@@ -24,4 +24,4 @@ pub use deploy::DeployConfig;
 pub use serve::ServeConfig;
 pub use site::{FeedConfig, FeedFormat, SiteSectionConfig};
 pub use theme::ThemeSectionConfig;
-pub use validate::{ValidateConfig, ValidateLevel};
+pub use validate::{AssetsValidateConfig, PagesValidateConfig, ValidateConfig, ValidateLevel};
