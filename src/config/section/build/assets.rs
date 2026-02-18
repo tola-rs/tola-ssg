@@ -76,11 +76,19 @@ impl<'a> OutputNameTracker<'a> {
 #[config(section = "build.assets")]
 pub struct AssetsConfig {
     /// Nested directories (preserve structure).
-    /// Each directory is copied to `output/{name}/`.
+    /// Each directory is copied to `output/{basename}/`.
+    /// Files inside can be referenced as `/{basename}/path/to/file`.
+    /// Examples:
+    /// - `"assets"` → `/assets/xxx`
+    /// - `"assets/styles"` → `/styles/xxx`
+    /// - `{ dir = "vendor", as = "lib" }` → `/lib/xxx`
     pub nested: Vec<NestedEntry>,
 
     /// Flatten files (copy to output root).
-    /// Each file is copied to `output/{name}`.
+    /// Each file is copied directly to `output/{basename}`.
+    /// Examples:
+    /// - `"assets/CNAME"` → `/CNAME`
+    /// - `{ file = "icons/fav.ico", as = "favicon.ico" }` → `/favicon.ico`
     pub flatten: Vec<FlattenEntry>,
 }
 

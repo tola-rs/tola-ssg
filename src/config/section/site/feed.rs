@@ -19,13 +19,11 @@ pub enum FeedFormat {
 #[serde(default)]
 #[config(section = "build.feed")]
 pub struct FeedConfig {
-    /// Enable feed generation.
+    #[config(inline_doc = "Enable feed generation.")]
     pub enable: bool,
-    /// Output path for feed file.
-    #[config(default = "feed.xml")]
+    #[config(default = "feed.xml", inline_doc = "Output path for feed file.")]
     pub path: PathBuf,
-    /// Feed format (RSS 2.0 or Atom 1.0).
-    #[config(default = "rss")]
+    #[config(default = "rss", inline_doc = "Feed format: rss | atom.")]
     pub format: FeedFormat,
 }
 

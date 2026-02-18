@@ -9,7 +9,7 @@
 //! | `serve`    | `[serve]`      | Development server                |
 //! | `site`     | `[site]`       | Site info, nav, header, feed      |
 //! | `theme`    | `[theme]`      | Theme settings (recolor)          |
-//! | `validate` | `[validate]`   | Link/asset validation             |
+//! | `validate` | `[validate]`   | Validation for pages/assets       |
 
 pub mod build;
 mod deploy;

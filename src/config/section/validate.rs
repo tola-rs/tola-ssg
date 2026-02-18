@@ -5,9 +5,8 @@
 //! # Example
 //!
 //! ```toml
-//! [validate.link.internal]
-//! enable = true               # Check internal site links
-//! fragments = false           # Also validate anchor fragments
+//! [validate.pages]
+//! enable = true               # Check internal page links
 //! level = "error"             # Failure level: error | warn
 //!
 //! [validate.assets]
@@ -26,9 +25,9 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 #[config(section = "validate")]
 pub struct ValidateConfig {
-    /// Link validation settings (internal).
+    /// Page link validation settings.
     #[config(sub)]
-    pub link: LinkValidateConfig,
+    pub pages: PagesValidateConfig,
 
     /// Asset validation settings.
     #[config(sub)]
@@ -36,40 +35,32 @@ pub struct ValidateConfig {
 }
 
 // ============================================================================
-// Link Validation
+// Pages Validation
 // ============================================================================
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
-#[serde(default)]
-#[config(section = "validate.link")]
-pub struct LinkValidateConfig {
-    /// Internal link validation (site pages).
-    pub internal: InternalLinkConfig,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "validate.link.internal")]
-pub struct InternalLinkConfig {
-    /// Enable internal link validation.
+#[config(section = "validate.pages")]
+pub struct PagesValidateConfig {
+    /// Enable page link validation.
     pub enable: bool,
 
     /// How to treat validation failures: "error" or "warn".
     pub level: ValidateLevel,
-
-    /// Validate fragment anchors (requires heading index).
-    pub fragments: bool,
 }
 
-impl Default for InternalLinkConfig {
+impl Default for PagesValidateConfig {
     fn default() -> Self {
         Self {
             enable: true,
             level: ValidateLevel::default(),
-            fragments: false,
         }
     }
 }
+
+// ============================================================================
+// Assets Validation
+// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
@@ -114,30 +105,28 @@ mod tests {
     #[test]
     fn test_validate_config_defaults() {
         let config = test_parse_config("");
-        // internal and assets are enabled by default
-        assert!(config.validate.link.internal.enable);
+        // pages and assets are enabled by default
+        assert!(config.validate.pages.enable);
         assert!(config.validate.assets.enable);
     }
 
     #[test]
     fn test_validate_config_custom() {
         let config = test_parse_config(
-            r#"[validate.link.internal]
+            r#"[validate.pages]
 enable = true
 level = "warn"
-fragments = true
 
 [validate.assets]
 enable = false
 level = "warn""#,
         );
-        assert!(config.validate.link.internal.enable);
+        assert!(config.validate.pages.enable);
         assert!(!config.validate.assets.enable);
         assert!(matches!(
-            config.validate.link.internal.level,
+            config.validate.pages.level,
             ValidateLevel::Warn
         ));
-        assert!(config.validate.link.internal.fragments);
     }
 
     #[test]

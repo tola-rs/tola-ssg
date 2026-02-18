@@ -43,6 +43,10 @@ fn get_string_attr(attrs: &[Attribute], key: &str) -> Option<String> {
             if meta.path.is_ident(key) {
                 let lit: syn::LitStr = meta.value()?.parse()?;
                 value = Some(lit.value());
+            } else if meta.input.peek(syn::Token![=]) {
+                // Skip other key = value attributes
+                let _ = meta.value();
+                let _: Option<syn::Lit> = meta.input.parse().ok();
             }
             Ok(())
         });
