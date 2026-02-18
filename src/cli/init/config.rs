@@ -6,8 +6,9 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
 use crate::config::section::{
-    AssetsConfig, FeedConfig, ServeConfig, ValidateConfig,
-    site::{SiteInfoConfig, SitemapConfig},
+    AssetsConfig, AssetsValidateConfig, FeedConfig, PagesValidateConfig, ServeConfig,
+    build::CssProcessorConfig,
+    site::{HeaderConfig, SiteInfoConfig, SitemapConfig},
 };
 use crate::embed::typst::TOLA_TYP;
 
@@ -40,16 +41,28 @@ pub fn generate_config_template() -> String {
     out.push_str(&SitemapConfig::template_with_header());
     out.push('\n');
 
+    // [site.header] section
+    out.push_str(&HeaderConfig::template_with_header());
+    out.push('\n');
+
     // [build.assets] section
     out.push_str(&AssetsConfig::template_with_header());
+    out.push('\n');
+
+    // [build.hooks.css] section
+    out.push_str(&CssProcessorConfig::template_with_header());
     out.push('\n');
 
     // [serve] section
     out.push_str(&ServeConfig::template_with_header());
     out.push('\n');
 
-    // [validate] section
-    out.push_str(&ValidateConfig::template_with_header());
+    // [validate.pages] section
+    out.push_str(&PagesValidateConfig::template_with_header());
+    out.push('\n');
+
+    // [validate.assets] section
+    out.push_str(&AssetsValidateConfig::template_with_header());
 
     out
 }

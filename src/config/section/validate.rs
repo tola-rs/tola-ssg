@@ -42,10 +42,10 @@ pub struct ValidateConfig {
 #[serde(default)]
 #[config(section = "validate.pages")]
 pub struct PagesValidateConfig {
-    /// Enable page link validation.
+    #[config(inline_doc = "Enable page link validation")]
     pub enable: bool,
 
-    /// How to treat validation failures: "error" or "warn".
+    #[config(default = "error", inline_doc = "Failure level: error | warn")]
     pub level: ValidateLevel,
 }
 
@@ -66,10 +66,10 @@ impl Default for PagesValidateConfig {
 #[serde(default)]
 #[config(section = "validate.assets")]
 pub struct AssetsValidateConfig {
-    /// Enable asset validation.
+    #[config(inline_doc = "Enable asset validation")]
     pub enable: bool,
 
-    /// How to treat validation failures: "error" or "warn".
+    #[config(default = "error", inline_doc = "Failure level: error | warn")]
     pub level: ValidateLevel,
 }
 
