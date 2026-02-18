@@ -71,7 +71,7 @@ impl<'a> OutputNameTracker<'a> {
 // Main Config
 // ============================================================================
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
+#[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build.assets")]
 pub struct AssetsConfig {
@@ -82,6 +82,15 @@ pub struct AssetsConfig {
     /// Flatten files (copy to output root).
     /// Each file is copied to `output/{name}`.
     pub flatten: Vec<FlattenEntry>,
+}
+
+impl Default for AssetsConfig {
+    fn default() -> Self {
+        Self {
+            nested: vec![NestedEntry::Simple("assets".into())],
+            flatten: vec![],
+        }
+    }
 }
 
 impl AssetsConfig {

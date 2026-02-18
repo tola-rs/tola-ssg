@@ -57,23 +57,23 @@ use std::path::PathBuf;
 #[config(section = "site")]
 pub struct SiteSectionConfig {
     /// Site metadata (title, author, description, etc.)
-    #[config(sub_config)]
+    #[config(sub)]
     pub info: SiteInfoConfig,
 
     /// SPA navigation settings (includes transition and preload).
-    #[config(sub_config)]
+    #[config(sub)]
     pub nav: NavConfig,
 
     /// Custom `<head>` elements (favicon, styles, scripts).
-    #[config(sub_config)]
+    #[config(sub)]
     pub header: HeaderConfig,
 
     /// Feed generation settings (RSS/Atom).
-    #[config(sub_config)]
+    #[config(sub)]
     pub feed: FeedConfig,
 
     /// Sitemap generation settings.
-    #[config(sub_config)]
+    #[config(sub)]
     pub sitemap: SitemapConfig,
 
     /// Custom 404 page source file (relative to site root).

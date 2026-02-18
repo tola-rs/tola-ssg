@@ -32,11 +32,11 @@ pub struct ServeConfig {
     pub interface: IpAddr,
 
     /// HTTP port number.
-    #[config(inline_doc)]
+    #[config(inline_doc = "HTTP port number.")]
     pub port: u16,
 
     /// Enable file watcher for live reload.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Enable file watcher for live reload.")]
     pub watch: bool,
 
     /// Respect path_prefix from site.url during local development.

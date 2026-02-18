@@ -103,10 +103,7 @@ impl Default for BuildSectionConfig {
             path_prefix: PathBuf::new(),
             content: "content".into(),
             output: "public".into(),
-            assets: AssetsConfig {
-                nested: vec![assets::NestedEntry::Simple("assets".into())],
-                flatten: vec![],
-            },
+            assets: AssetsConfig::default(),
             deps: vec!["templates".into(), "utils".into()],
             data: "_data".into(),
             minify: true,

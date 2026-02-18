@@ -31,15 +31,15 @@ pub struct DeployConfig {
     pub force: bool,
 
     /// GitHub Pages deployment settings.
-    #[config(sub_config)]
+    #[config(sub)]
     pub github: GithubDeployConfig,
 
     /// Cloudflare Pages settings (not yet implemented).
-    #[config(sub_config)]
+    #[config(sub)]
     pub cloudflare: CloudflareDeployConfig,
 
     /// Vercel settings (not yet implemented).
-    #[config(sub_config)]
+    #[config(sub)]
     pub vercel: VercelDeployConfig,
 }
 

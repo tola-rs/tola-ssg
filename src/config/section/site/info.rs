@@ -16,31 +16,31 @@ use serde::{Deserialize, Serialize};
 #[config(section = "site.info")]
 pub struct SiteInfoConfig {
     /// Site title.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Site title.")]
     pub title: String,
 
     /// Author name.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Author name.")]
     pub author: String,
 
     /// Author email.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Author email.")]
     pub email: String,
 
     /// Site description.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Site description.")]
     pub description: String,
 
     /// Site URL, path used as prefix (e.g., "https://example.com/blog/docs").
-    #[config(inline_doc)]
+    #[config(inline_doc = "Site URL, path used as prefix (e.g., \"https://example.com/blog/docs\").")]
     pub url: Option<String>,
 
     /// Language code (e.g., "en", "zh-Hans").
-    #[config(default = "en", inline_doc)]
+    #[config(default = "en", inline_doc = "Language code (e.g., \"en\", \"zh-Hans\").")]
     pub language: String,
 
     /// Copyright notice.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Copyright notice.")]
     pub copyright: String,
 
     /// Custom fields accessible via `sys.inputs.extra.xxx` in Typst.
