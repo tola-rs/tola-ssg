@@ -104,6 +104,9 @@ fn get_range_header(request: &Request) -> Option<String> {
 }
 
 /// Respond with 404 page (custom or default).
+///
+/// For HTML 404 pages, reads directly from source for hot reload support.
+/// For compiled 404 pages (typst), reads from output directory.
 pub fn respond_not_found(
     request: Request,
     config: &SiteConfig,
@@ -111,15 +114,31 @@ pub fn respond_not_found(
 ) -> Result<()> {
     use crate::utils::mime::types::{HTML, PLAIN};
 
-    let custom_404 = config.build.output.join("404.html");
-    let has_custom = custom_404.is_file();
+    // Try to find 404 page: source HTML or compiled output
+    let (body, found) = if let Some(not_found) = &config.build.not_found {
+        // Check if it's an HTML file (read from source for hot reload)
+        if not_found.extension().and_then(|e| e.to_str()) == Some("html") {
+            let source = config.root_join(not_found);
+            if source.is_file() {
+                (fs::read(&source).ok(), true)
+            } else {
+                (None, false)
+            }
+        } else {
+            // Compiled file (typst) - read from output
+            let output = config.build.output.join("404.html");
+            (fs::read(&output).ok(), output.is_file())
+        }
+    } else {
+        (None, false)
+    };
 
     if is_head_request(&request) {
-        let mime = if has_custom { HTML } else { PLAIN };
+        let mime = if found { HTML } else { PLAIN };
         return send_head(request, 404, mime);
     }
 
-    if has_custom && let Ok(body) = fs::read(&custom_404) {
+    if let Some(body) = body {
         let body = maybe_inject_hotreload(body, HTML, ws_port);
         return send_body(request, 404, HTML, body);
     }

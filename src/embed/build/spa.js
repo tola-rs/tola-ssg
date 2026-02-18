@@ -154,8 +154,18 @@
       headers: { 'X-Tola-SPA': 'true' }
     })
     .then(function(response) {
+      if (response.status === 404) {
+        // Fetch 404 page for seamless transition
+        return fetch('/404.html', { signal: currentController.signal })
+          .then(function(r) {
+            if (r.ok) return r.text();
+            // 404 page not found, fallback
+            location.href = url;
+            return null;
+          });
+      }
       if (!response.ok) {
-        // Fallback to normal navigation on error
+        // Other errors - fallback to normal navigation
         location.href = url;
         return;
       }
