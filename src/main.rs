@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     let config = init_config(SiteConfig::load(cli)?);
 
     match &cli.command {
-        Commands::Init { name } => cli::init::new_site(&config, name.is_some()),
+        Commands::Init { name, dry } => cli::init::new_site(&config, name.is_some(), *dry),
         Commands::Build { .. } => build_all(&config, BuildMode::PRODUCTION).map(|_| ()),
         Commands::Deploy { .. } => {
             let repo = build_all(&config, BuildMode::PRODUCTION)?;

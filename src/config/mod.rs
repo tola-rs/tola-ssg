@@ -171,12 +171,12 @@ impl SiteConfig {
         let cwd = std::env::current_dir().context("Failed to get current working directory")?;
 
         match &cli.command {
-            Commands::Init { name: Some(name) } => {
+            Commands::Init { name: Some(name), .. } => {
                 let path = cwd.join(name).join(&cli.config);
                 let exists = path.exists();
                 Ok((path, exists))
             }
-            Commands::Init { name: None } => {
+            Commands::Init { name: None, .. } => {
                 let path = cwd.join(&cli.config);
                 let exists = path.exists();
                 Ok((path, exists))
@@ -195,10 +195,10 @@ impl SiteConfig {
     fn finalize(&mut self, cli: &Cli) {
         // Resolve root path
         let root = match &cli.command {
-            Commands::Init { name: Some(name) } => {
+            Commands::Init { name: Some(name), .. } => {
                 std::env::current_dir().unwrap_or_default().join(name)
             }
-            Commands::Init { name: None } => std::env::current_dir().unwrap_or_default(),
+            Commands::Init { name: None, .. } => std::env::current_dir().unwrap_or_default(),
             _ => self
                 .config_path
                 .parent()

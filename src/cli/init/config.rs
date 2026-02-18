@@ -18,7 +18,7 @@ const CONFIG_FILE: &str = "tola.toml";
 const IGNORE_FILES: &[&str] = &[".gitignore", ".ignore"];
 
 /// Generate tola.toml content with comments.
-fn generate_config_template() -> String {
+pub fn generate_config_template() -> String {
     let mut out = String::new();
 
     // Header
