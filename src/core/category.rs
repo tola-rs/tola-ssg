@@ -70,6 +70,8 @@ pub enum FileCategory {
     Config,
     /// Dependency (templates, utils) - rebuild dependents
     Deps,
+    /// Output file - trigger hot reload (from hooks)
+    Output,
     /// Outside watched dirs - ignored
     Unknown,
 }
@@ -81,6 +83,7 @@ impl FileCategory {
             Self::Asset => "asset",
             Self::Config => "config",
             Self::Deps => "deps",
+            Self::Output => "output",
             Self::Unknown => "unknown",
         }
     }
