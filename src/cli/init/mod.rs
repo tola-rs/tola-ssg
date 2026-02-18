@@ -27,7 +27,14 @@ pub use validate::InitMode;
 /// 4. Write configuration files
 /// 5. Generate LSP stubs
 /// 6. Create initial commit
-pub fn new_site(site_config: &SiteConfig, has_name: bool) -> Result<()> {
+///
+/// If `dry_run` is true, only prints the config template to stdout.
+pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        print!("{}", config::generate_config_template());
+        return Ok(());
+    }
+
     let root = site_config.get_root();
     let mode = if has_name {
         InitMode::NewDir

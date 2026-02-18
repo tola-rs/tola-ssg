@@ -37,6 +37,10 @@ pub enum Commands {
         /// Site directory name/path (relative to current directory)
         #[arg(value_hint = clap::ValueHint::DirPath)]
         name: Option<PathBuf>,
+
+        /// Print generated config to stdout without creating files
+        #[arg(long)]
+        dry: bool,
     },
 
     /// Build the site for production
