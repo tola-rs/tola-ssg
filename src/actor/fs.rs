@@ -145,13 +145,20 @@ async fn process_changes(
         return Ok(());
     }
 
-    // Execute watched hooks (before classification)
-    let path_refs: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
-    hooks::run_watched_hooks(config, &path_refs);
-
     // Classify and log
     let result = classify_changes(&paths, config);
     log_changes(&result);
+
+    // Execute watched hooks only for non-output files (prevent infinite loops)
+    let non_output_paths: Vec<&Path> = result
+        .classified
+        .iter()
+        .filter(|(_, cat)| *cat != crate::core::FileCategory::Output)
+        .map(|(p, _)| p.as_path())
+        .collect();
+    if !non_output_paths.is_empty() {
+        hooks::run_watched_hooks(config, &non_output_paths);
+    }
 
     // Route to CompilerActor
     for msg in result_to_messages(result) {
@@ -175,6 +182,7 @@ fn log_changes(result: &ClassifyResult) {
 ///
 /// May return multiple messages:
 /// - AssetChange for asset files
+/// - OutputChange for output files (from hooks)
 /// - Compile for content files
 /// - FullRebuild for config changes (overrides everything)
 fn result_to_messages(result: ClassifyResult) -> Vec<CompilerMsg> {
@@ -187,6 +195,11 @@ fn result_to_messages(result: ClassifyResult) -> Vec<CompilerMsg> {
     // Asset changes
     if !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
+    }
+
+    // Output changes (from hooks)
+    if !result.output_changed.is_empty() {
+        messages.push(CompilerMsg::OutputChange(result.output_changed));
     }
 
     // Content compilation

@@ -25,6 +25,10 @@ use super::queue::{CompileQueue, Priority};
 /// Note: The path should already be normalized before calling this function.
 /// Use `normalize_path()` on watcher paths before classification.
 pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
+    // Check output directory first (hook-generated files)
+    if path.starts_with(config.paths().output_dir()) {
+        return FileCategory::Output;
+    }
     if path == config.config_path {
         FileCategory::Config
     } else if config.build.deps.iter().any(|dep| path.starts_with(dep)) {
@@ -54,6 +58,8 @@ pub struct ClassifyResult {
     pub compile_queue: CompileQueue,
     /// Asset files that changed (need copy, not compile)
     pub asset_changed: Vec<PathBuf>,
+    /// Output files that changed (from hooks, trigger hot reload)
+    pub output_changed: Vec<PathBuf>,
     /// Optional note (e.g., "deps changed but no dependents")
     pub note: Option<String>,
 }
@@ -78,6 +84,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
     let mut deps_changed = Vec::new();
     let mut content_changed = Vec::new();
     let mut asset_changed = Vec::new();
+    let mut output_changed = Vec::new();
 
     // Categorize each path
     for path in paths {
@@ -93,6 +100,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
             FileCategory::Deps => deps_changed.push(normalized),
             FileCategory::Content(_) => content_changed.push(normalized),
             FileCategory::Asset => asset_changed.push(normalized),
+            FileCategory::Output => output_changed.push(normalized),
             FileCategory::Unknown => {}
         }
     }
@@ -139,6 +147,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
         config_changed,
         compile_queue: queue,
         asset_changed,
+        output_changed,
         note,
     }
 }

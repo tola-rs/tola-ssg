@@ -127,6 +127,11 @@ impl Coordinator {
         if self.config.config_path.exists() {
             paths.push(self.config.config_path.clone());
         }
+        // Watch output directory for hook-generated files (only if exists)
+        let output_dir = self.config.paths().output_dir().to_path_buf();
+        if output_dir.exists() {
+            paths.push(output_dir);
+        }
         paths
     }
 }
