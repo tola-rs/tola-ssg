@@ -23,6 +23,6 @@ use serde::{Deserialize, Serialize};
 #[config(section = "theme")]
 pub struct ThemeSectionConfig {
     /// Image recolor settings.
-    #[config(sub_config)]
+    #[config(sub)]
     pub recolor: RecolorConfig,
 }

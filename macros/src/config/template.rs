@@ -23,19 +23,14 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
     let field_name = &info.name;
     let toml_name = &info.toml_name;
 
-    // Check if doc is single line and inline_doc is enabled
-    let is_single_line_doc = info.doc.as_ref().map_or(false, |d| !d.contains('\n'));
-    let use_inline = info.inline_doc && is_single_line_doc;
+    // Check if inline_doc is specified
+    let has_inline = info.inline_doc.is_some();
 
-    // Doc comment code (only if not using inline style)
-    let doc_code = if !use_inline {
-        if let Some(ref doc) = info.doc {
-            let doc_lines: Vec<_> = doc.lines().map(|l| format!("# {}\n", l.trim())).collect();
-            let doc_str = doc_lines.join("");
-            quote! { out.push_str(#doc_str); }
-        } else {
-            quote! {}
-        }
+    // Doc comment code (always output if present)
+    let doc_code = if let Some(ref doc) = info.doc {
+        let doc_lines: Vec<_> = doc.lines().map(|l| format!("# {}\n", l.trim())).collect();
+        let doc_str = doc_lines.join("");
+        quote! { out.push_str(#doc_str); }
     } else {
         quote! {}
     };
@@ -65,8 +60,8 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
     let ty_str = type_to_string(&info.ty);
     let is_optional = ty_str.starts_with("Option<");
 
-    // For sub_config fields - use the field type's TEMPLATE_SECTION
-    if info.sub_config {
+    // For sub fields - use the field type's TEMPLATE_SECTION
+    if info.sub {
         let field_ty = &info.ty;
         return quote! {
             #doc_code
@@ -76,14 +71,11 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
 
     // For optional fields without explicit default - comment out
     if is_optional && info.default.is_none() {
-        let inline_doc = info.doc.as_ref().map(|d| d.trim().to_string());
-        if use_inline {
-            let line = format!(
-                "# {} = \"\"  # {}\n",
-                toml_name,
-                inline_doc.unwrap_or_default()
-            );
+        if has_inline {
+            let inline_comment = info.inline_doc.as_ref().unwrap();
+            let line = format!("# {} = \"\"  # {}\n", toml_name, inline_comment);
             return quote! {
+                #doc_code
                 out.push_str(#line);
             };
         } else {
@@ -100,14 +92,11 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
         let formatted = format_default_for_type(default_val, &ty_str);
         let prefix = if is_commented { "# " } else { "" };
 
-        if use_inline {
-            let inline_doc = info
-                .doc
-                .as_ref()
-                .map(|d| d.trim().to_string())
-                .unwrap_or_default();
-            let line = format!("{}{} = {}  # {}\n", prefix, toml_name, formatted, inline_doc);
+        if has_inline {
+            let inline_comment = info.inline_doc.as_ref().unwrap();
+            let line = format!("{}{} = {}  # {}\n", prefix, toml_name, formatted, inline_comment);
             return quote! {
+                #doc_code
                 #status_code
                 out.push_str(#line);
             };
@@ -123,11 +112,11 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
 
     // For fields using Default::default() - runtime value
     let prefix = if is_commented { "# " } else { "" };
-    let inline_doc = info.doc.as_ref().map(|d| d.trim().to_string());
 
-    if use_inline {
-        let inline_comment = inline_doc.unwrap_or_default();
+    if has_inline {
+        let inline_comment = info.inline_doc.as_ref().unwrap();
         quote! {
+            #doc_code
             #status_code
             out.push_str(#prefix);
             out.push_str(#toml_name);

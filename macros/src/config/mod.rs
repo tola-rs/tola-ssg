@@ -71,10 +71,10 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
 
     let template_code = generate_template_code(&template_fields);
 
-    // Collect own fields (non-sub_config, non-skip) for status checks
+    // Collect own fields (non-sub, non-skip) for status checks
     let own_fields: Vec<_> = field_infos
         .iter()
-        .filter(|f| !f.skip && !f.sub_config)
+        .filter(|f| !f.skip && !f.sub)
         .collect();
 
     // Check if we need `default` variable (for section or field status checks)
@@ -84,7 +84,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
     );
     let has_field_status = field_infos.iter().any(|f| {
         !f.skip
-            && !f.sub_config
+            && !f.sub
             && matches!(
                 f.status,
                 FieldStatus::NotImplemented | FieldStatus::Deprecated | FieldStatus::Experimental
@@ -97,7 +97,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
         .iter()
         .filter(|f| {
             !f.skip
-                && !f.sub_config
+                && !f.sub
                 && matches!(
                     f.status,
                     FieldStatus::NotImplemented | FieldStatus::Deprecated | FieldStatus::Experimental
@@ -137,7 +137,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
     // Generate recursive calls for nested Config types
     let nested_calls: Vec<_> = field_infos
         .iter()
-        .filter(|f| !f.skip && f.sub_config)
+        .filter(|f| !f.skip && f.sub)
         .map(|f| {
             let field_name = &f.name;
             quote! {

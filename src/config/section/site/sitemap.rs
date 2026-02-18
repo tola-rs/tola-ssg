@@ -10,10 +10,10 @@ use std::path::PathBuf;
 #[config(section = "build.sitemap")]
 pub struct SitemapConfig {
     /// Enable sitemap generation.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Enable sitemap generation.")]
     pub enable: bool,
     /// Output path for sitemap file.
-    #[config(inline_doc)]
+    #[config(inline_doc = "Output path for sitemap file.")]
     pub path: PathBuf,
 }
 

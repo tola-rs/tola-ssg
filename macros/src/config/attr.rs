@@ -27,6 +27,11 @@ pub fn get_default_value(attrs: &[Attribute]) -> Option<String> {
     get_string_attr(attrs, "default")
 }
 
+/// Get inline doc from #[config(inline_doc = "xxx")].
+pub fn get_inline_doc(attrs: &[Attribute]) -> Option<String> {
+    get_string_attr(attrs, "inline_doc")
+}
+
 /// Get string value from #[config(key = "value")].
 fn get_string_attr(attrs: &[Attribute], key: &str) -> Option<String> {
     for attr in attrs {

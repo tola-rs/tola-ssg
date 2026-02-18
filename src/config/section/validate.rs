@@ -27,11 +27,11 @@ use serde::{Deserialize, Serialize};
 #[config(section = "validate")]
 pub struct ValidateConfig {
     /// Link validation settings (internal).
-    #[config(sub_config)]
+    #[config(sub)]
     pub link: LinkValidateConfig,
 
     /// Asset validation settings.
-    #[config(sub_config)]
+    #[config(sub)]
     pub assets: AssetsValidateConfig,
 }
 
