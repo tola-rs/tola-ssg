@@ -126,8 +126,8 @@ impl<'a> TreeBuilder<'a> {
 
 /// Sort entries according to git tree ordering (directories get trailing slash for comparison)
 ///
-/// Git sorts tree entries by name, but treats directories as if they end with a slash.
-/// This ensures that "foo" (file) comes before "foo-bar" (file), but "foo-bar" comes before "foo" (directory).
+/// Git sorts tree entries by name, but treats directories as if they end with a slash
+/// This ensures that "foo" (file) comes before "foo-bar" (file), but "foo-bar" comes before "foo" (directory)
 fn sort_tree_entries(entries: &mut [tree::Entry]) {
     let tree_mode: tree::EntryMode = tree::EntryKind::Tree.into();
     entries.sort_by(|a, b| {

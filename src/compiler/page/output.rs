@@ -12,10 +12,10 @@ use typst_batch::Diagnostics;
 // PageCompileOutput
 // =============================================================================
 
-/// Output from page compilation.
+/// Output from page compilation
 ///
 /// All content types (Typst, Markdown) produce this same output structure,
-/// enabling uniform handling regardless of source format.
+/// enabling uniform handling regardless of source format
 pub struct PageCompileOutput {
     /// Generated HTML bytes
     pub html: Vec<u8>,
@@ -46,10 +46,10 @@ impl PageCompileOutput {
 // PageScanOutput
 // =============================================================================
 
-/// Output from lightweight page scanning.
+/// Output from lightweight page scanning
 ///
-/// Used for validation and query scenarios where full HTML rendering is not needed.
-/// This is a pure data carrier - business logic (like draft checking) belongs in CLI layer.
+/// Used for validation and query scenarios where full HTML rendering is not needed
+/// This is a pure data carrier - business logic (like draft checking) belongs in CLI layer
 pub struct PageScanOutput {
     /// Indexed VDOM for link/asset extraction
     pub indexed_vdom: tola_vdom::Document<Indexed>,

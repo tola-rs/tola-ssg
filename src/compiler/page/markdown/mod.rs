@@ -3,7 +3,7 @@
 //! This module contains all Markdown-specific functionality:
 //!
 //! - [`Markdown`] - PageFormat implementation
-//! - [`convert`] - Markdown → tola-vdom VDOM conversion via `pulldown-cmark`
+//! - [`convert`] - Markdown -> tola-vdom VDOM conversion via `pulldown-cmark`
 //! - [`filter`] - Draft filtering
 
 mod compile;
@@ -26,7 +26,7 @@ pub use filter::filter_drafts as filter_markdown_drafts;
 // Markdown Format
 // =============================================================================
 
-/// Markdown format adapter.
+/// Markdown format adapter
 pub struct Markdown;
 
 impl PageFormat for Markdown {

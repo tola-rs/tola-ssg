@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::core::UrlPath;
 
-/// Source → output path mapping for a page.
+/// Source -> output path mapping for a page
 ///
 /// Contains all path information needed for:
 /// - Link resolution (knowing where the page lives)
@@ -35,12 +35,12 @@ use crate::core::UrlPath;
 ///
 /// ```text
 /// content/posts/
-/// ├── hello.typ           → public/posts/hello/index.html
-/// └── hello/              → colocated_dir (copied to public/posts/hello/)
-///     └── image.png       → public/posts/hello/image.png
+/// ├── hello.typ           -> public/posts/hello/index.html
+/// └── hello/              -> colocated_dir (copied to public/posts/hello/)
+///     └── image.png       -> public/posts/hello/image.png
 /// ```
 ///
-/// For index files, the source directory itself is the colocated directory.
+/// For index files, the source directory itself is the colocated directory
 #[derive(Debug, Clone, Default)]
 pub struct PageRoute {
     // === Source ===

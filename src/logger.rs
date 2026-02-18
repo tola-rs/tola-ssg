@@ -49,7 +49,7 @@ static BAR_COUNT: AtomicUsize = AtomicUsize::new(0);
 // Log Macro
 // ============================================================================
 
-/// Log a message with a colored module prefix.
+/// Log a message with a colored module prefix
 ///
 /// # Usage
 /// ```ignore
@@ -62,7 +62,7 @@ macro_rules! log {
     }};
 }
 
-/// Log a debug message (only shown when --verbose is enabled).
+/// Log a debug message (only shown when --verbose is enabled)
 ///
 /// # Usage
 /// ```ignore
@@ -81,7 +81,7 @@ macro_rules! debug {
 // Helper Functions
 // ============================================================================
 
-/// Log a message with a colored module prefix.
+/// Log a message with a colored module prefix
 #[inline]
 #[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
 pub fn log(module: &str, message: &str) {
@@ -109,7 +109,7 @@ pub fn log(module: &str, message: &str) {
     stdout.flush().ok();
 }
 
-/// Apply color to a module prefix based on module type.
+/// Apply color to a module prefix based on module type
 #[inline]
 fn colorize_prefix(module: &str, module_lower: &str) -> String {
     let prefix = format!("[{module}]");
@@ -140,11 +140,11 @@ fn now() -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-/// Single-line status display for watch mode.
+/// Single-line status display for watch mode
 ///
 /// Displays status messages that overwrite the previous output,
 /// keeping the terminal clean. Supports timestamps and different
-/// status types (success, error, unchanged).
+/// status types (success, error, unchanged)
 ///
 /// # Example
 ///
@@ -241,12 +241,12 @@ impl WatchStatus {
 // Progress Line (single-line counters)
 // ============================================================================
 
-/// Single-line progress display with multiple counters.
+/// Single-line progress display with multiple counters
 ///
 /// Displays: `[build] typst(42/69) markdown(5/10) assets(120/371)`
 ///
 /// All counters update in place on the same line. Uses `try_lock` to avoid
-/// blocking worker threads - if display is busy, the update is skipped.
+/// blocking worker threads - if display is busy, the update is skipped
 ///
 /// # Example
 ///

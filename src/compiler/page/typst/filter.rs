@@ -9,7 +9,7 @@ use crate::compiler::page::{Typst, TypstBatcher};
 use crate::package::Phase;
 use crate::page::{PageKind, PageMeta};
 
-/// Result of Typst draft filtering, includes batcher for reuse.
+/// Result of Typst draft filtering, includes batcher for reuse
 pub struct TypstFilterResult<'a> {
     /// Number of draft files filtered out.
     pub draft_count: usize,
@@ -41,12 +41,12 @@ impl<'a> TypstFilterResult<'a> {
     }
 }
 
-/// Filter Typst files, removing drafts.
+/// Filter Typst files, removing drafts
 ///
 /// Also collects metadata and detects iterative pages (importing @tola/pages or @tola/current)
-/// for pre-scan optimization.
+/// for pre-scan optimization
 ///
-/// Returns batcher for reuse in subsequent compilation phases.
+/// Returns batcher for reuse in subsequent compilation phases
 pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> TypstFilterResult<'a> {
     if files.is_empty() {
         return TypstFilterResult::empty(0, None);
@@ -125,7 +125,7 @@ pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> Typ
     TypstFilterResult::new(draft_count, Some(batcher), scanned, errors)
 }
 
-/// Check if a Typst scan result indicates a draft page.
+/// Check if a Typst scan result indicates a draft page
 #[allow(dead_code)]
 #[inline]
 fn is_draft(scan: &typst_batch::ScanResult, label: &str) -> bool {

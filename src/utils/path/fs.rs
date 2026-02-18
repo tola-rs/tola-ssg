@@ -6,9 +6,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// Normalize a file system path to absolute form.
+/// Normalize a file system path to absolute form
 ///
-/// Tries `canonicalize()` first (resolves symlinks, `.`, `..`).
+/// Tries `canonicalize()` first (resolves symlinks, `.`, `..`)
 /// Falls back to:
 /// - Return as-is if already absolute
 /// - Join with current directory if relative
@@ -29,9 +29,9 @@ pub fn normalize_path(path: &Path) -> PathBuf {
     })
 }
 
-/// Resolve a path that may be relative to cwd or a fallback directory.
+/// Resolve a path that may be relative to cwd or a fallback directory
 ///
-/// Always returns an absolute path.
+/// Always returns an absolute path
 ///
 /// Tries in order:
 /// 1. If absolute, use as-is

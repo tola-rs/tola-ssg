@@ -15,14 +15,14 @@ use std::path::Path;
 // Single Page Processing (watch mode)
 // ============================================================================
 
-/// Process a single content file (Typst or Markdown).
+/// Process a single content file (Typst or Markdown)
 ///
 /// The mode controls:
 /// - `emit_ids`: Whether to output `data-tola-id` attributes
 /// - `cache_vdom`: Whether to return indexed VDOM for hot reload
 ///
-/// Note: This function does NOT write the HTML file to disk.
-/// The caller should decide whether to write based on diff results.
+/// Note: This function does NOT write the HTML file to disk
+/// The caller should decide whether to write based on diff results
 pub fn process_page(
     mode: BuildMode,
     path: &Path,
@@ -79,13 +79,13 @@ pub fn process_page(
 // Metadata Extraction
 // ============================================================================
 
-/// Compile a content file (Typst or Markdown) and extract metadata.
+/// Compile a content file (Typst or Markdown) and extract metadata
 ///
-/// Also records dependencies for incremental rebuild tracking.
-/// Uses the VDOM pipeline for HTML generation.
+/// Also records dependencies for incremental rebuild tracking
+/// Uses the VDOM pipeline for HTML generation
 ///
 /// When using `DEVELOPMENT` mode, emits `data-tola-id` attributes
-/// and returns indexed VDOM for caller to cache (decoupled from hotreload).
+/// and returns indexed VDOM for caller to cache (decoupled from hotreload)
 #[allow(dead_code)]
 pub fn compile_meta(
     mode: BuildMode,

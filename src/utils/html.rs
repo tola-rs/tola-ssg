@@ -15,10 +15,10 @@ use std::borrow::Cow;
 // HTML Escaping
 // =============================================================================
 
-/// Characters that require HTML escaping.
+/// Characters that require HTML escaping
 const ESCAPE_CHARS: [char; 5] = ['<', '>', '&', '"', '\''];
 
-/// Get the HTML entity for a special character.
+/// Get the HTML entity for a special character
 #[inline]
 fn escape_char(c: char) -> Option<&'static str> {
     match c {
@@ -31,9 +31,9 @@ fn escape_char(c: char) -> Option<&'static str> {
     }
 }
 
-/// Escape HTML special characters in text content.
+/// Escape HTML special characters in text content
 ///
-/// Uses `Cow` to avoid allocation when no escaping is needed.
+/// Uses `Cow` to avoid allocation when no escaping is needed
 ///
 /// # Example
 /// ```ignore
@@ -45,16 +45,16 @@ pub fn escape(s: &str) -> Cow<'_, str> {
     escape_with(s, &ESCAPE_CHARS)
 }
 
-/// Escape HTML attribute values.
+/// Escape HTML attribute values
 ///
-/// Escapes characters that are special in attribute contexts.
-/// Identical to `escape()` but semantically indicates attribute context.
+/// Escapes characters that are special in attribute contexts
+/// Identical to `escape()` but semantically indicates attribute context
 #[inline]
 pub fn escape_attr(s: &str) -> Cow<'_, str> {
     escape_with(s, &ESCAPE_CHARS)
 }
 
-/// Internal: escape with specified character set.
+/// Internal: escape with specified character set
 #[inline]
 fn escape_with<'a>(s: &'a str, chars: &[char]) -> Cow<'a, str> {
     if !s.contains(chars) {
@@ -71,9 +71,9 @@ fn escape_with<'a>(s: &'a str, chars: &[char]) -> Cow<'a, str> {
     Cow::Owned(result)
 }
 
-/// Unescape HTML entities back to characters.
+/// Unescape HTML entities back to characters
 ///
-/// Handles common named entities and numeric character references.
+/// Handles common named entities and numeric character references
 pub fn unescape(s: &str) -> Cow<'_, str> {
     if !s.contains('&') {
         return Cow::Borrowed(s);
@@ -146,9 +146,9 @@ pub fn unescape(s: &str) -> Cow<'_, str> {
 // Element Classification
 // =============================================================================
 
-/// Check if an HTML tag is a void element (self-closing).
+/// Check if an HTML tag is a void element (self-closing)
 ///
-/// Void elements cannot have children and should be rendered as `<tag/>`.
+/// Void elements cannot have children and should be rendered as `<tag/>`
 #[inline]
 pub fn is_void_element(tag: &str) -> bool {
     matches!(
@@ -169,25 +169,25 @@ pub fn is_void_element(tag: &str) -> bool {
     )
 }
 
-/// Check if tag is a raw text element (content should not be HTML-escaped).
+/// Check if tag is a raw text element (content should not be HTML-escaped)
 ///
-/// Per HTML spec: script and style content is "raw text".
+/// Per HTML spec: script and style content is "raw text"
 #[inline]
 pub fn is_raw_text_element(tag: &str) -> bool {
     matches!(tag, "script" | "style")
 }
 
-/// Check if tag is an escapable raw text element.
+/// Check if tag is an escapable raw text element
 ///
-/// Per HTML spec: textarea and title are "escapable raw text".
+/// Per HTML spec: textarea and title are "escapable raw text"
 #[inline]
 pub fn is_escapable_raw_text_element(tag: &str) -> bool {
     matches!(tag, "textarea" | "title")
 }
 
-/// Check if tag is a block-level element.
+/// Check if tag is a block-level element
 ///
-/// Block elements create line breaks and take full width by default.
+/// Block elements create line breaks and take full width by default
 #[inline]
 pub fn is_block_element(tag: &str) -> bool {
     matches!(
@@ -230,7 +230,7 @@ pub fn is_block_element(tag: &str) -> bool {
     )
 }
 
-/// Check if tag is an inline element.
+/// Check if tag is an inline element
 #[inline]
 pub fn is_inline_element(tag: &str) -> bool {
     !is_block_element(tag) && !is_void_element(tag)
@@ -240,7 +240,7 @@ pub fn is_inline_element(tag: &str) -> bool {
 // Attribute Parsing
 // =============================================================================
 
-/// Parse HTML-style attributes from a string.
+/// Parse HTML-style attributes from a string
 ///
 /// Input: `viewBox="0 0 100 100" class="foo" disabled`
 /// Output: `vec![("viewBox", "0 0 100 100"), ("class", "foo"), ("disabled", "")]`
@@ -314,10 +314,10 @@ pub fn parse_attributes(s: &str) -> Vec<(String, String)> {
 // ANSI to HTML Conversion
 // =============================================================================
 
-/// Convert ANSI escape sequences to HTML spans.
+/// Convert ANSI escape sequences to HTML spans
 ///
-/// Converts color codes like `\x1b[31m` (red) to `<span style="color:...">`.
-/// Used for displaying error messages with syntax highlighting in browser overlays.
+/// Converts color codes like `\x1b[31m` (red) to `<span style="color:...">`
+/// Used for displaying error messages with syntax highlighting in browser overlays
 pub fn ansi_to_html(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 2);
     let mut chars = s.chars().peekable();

@@ -7,7 +7,7 @@
 //! The reload system is built on the Actor model:
 //!
 //! ```text
-//! FsActor → CompilerActor → VdomActor → WsActor → Browser
+//! FsActor -> CompilerActor -> VdomActor -> WsActor -> Browser
 //!   (watch)    (typst)       (diff)    (broadcast)
 //! ```
 //!

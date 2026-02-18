@@ -59,6 +59,6 @@ pub use resolve::{ResolveContext, ResolveResult, resolve_physical_path};
 pub use resource::Resource;
 pub use space::{AddressSpace, PermalinkUpdate};
 
-/// Global site address space.
+/// Global site address space
 pub static GLOBAL_ADDRESS_SPACE: LazyLock<RwLock<AddressSpace>> =
     LazyLock::new(|| RwLock::new(AddressSpace::new()));

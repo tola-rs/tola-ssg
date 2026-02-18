@@ -12,7 +12,7 @@ use crate::pipeline::compile as pipeline_compile;
 
 use super::from_typst_html;
 
-/// Compile a Typst file to HTML.
+/// Compile a Typst file to HTML
 ///
 /// For single-page compilation (watch mode), this injects both:
 /// - `@tola/site` and `@tola/pages` via `build_inputs()`
@@ -41,9 +41,9 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
     process_result(result, label, ctx)
 }
 
-/// Process a pre-compiled Typst result through the VDOM pipeline.
+/// Process a pre-compiled Typst result through the VDOM pipeline
 ///
-/// This is used by batch compilation to process `Batcher` results.
+/// This is used by batch compilation to process `Batcher` results
 /// The Typst compilation has already been done; this handles:
 /// - Warning filtering
 /// - Metadata extraction

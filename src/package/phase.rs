@@ -1,9 +1,9 @@
 //! Compilation phase for virtual package behavior.
 
-/// Compilation phase, determines virtual package behavior.
+/// Compilation phase, determines virtual package behavior
 ///
-/// - `Filter`: Internal filtering (draft detection). Deferred packages return empty data.
-/// - `Visible`: User-visible operations (build/query/validate). Deferred packages panic if misused.
+/// - `Filter`: Internal filtering (draft detection). Deferred packages return empty data
+/// - `Visible`: User-visible operations (build/query/validate). Deferred packages panic if misused
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
     #[default]

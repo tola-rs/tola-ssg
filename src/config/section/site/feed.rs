@@ -4,7 +4,7 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Feed output format.
+/// Feed output format
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FeedFormat {
@@ -17,13 +17,13 @@ pub enum FeedFormat {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "build.feed")]
+#[config(section = "site.feed")]
 pub struct FeedConfig {
-    #[config(inline_doc = "Enable feed generation.")]
+    #[config(inline_doc = "Enable feed generation")]
     pub enable: bool,
-    #[config(default = "feed.xml", inline_doc = "Output path for feed file.")]
+    #[config(default = "feed.xml", inline_doc = "Output path for feed file")]
     pub path: PathBuf,
-    #[config(default = "rss", inline_doc = "Feed format: rss | atom.")]
+    #[config(default = "rss", inline_doc = "Feed format: rss | atom")]
     pub format: FeedFormat,
 }
 

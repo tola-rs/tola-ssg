@@ -5,10 +5,10 @@
 
 use usvg::{Node, Rect, Tree};
 
-/// Calculate the stroke-inclusive bounding box of all elements in the SVG tree.
+/// Calculate the stroke-inclusive bounding box of all elements in the SVG tree
 ///
-/// This iterates through all nodes and computes the union of their stroke bounding boxes.
-/// The result includes the full stroke width, preventing clipping at edges.
+/// This iterates through all nodes and computes the union of their stroke bounding boxes
+/// The result includes the full stroke width, preventing clipping at edges
 ///
 /// # Returns
 /// - `Some(Rect)` - The combined bounding box of all visible elements
@@ -22,7 +22,7 @@ pub fn calculate_stroke_bounds(tree: &Tree) -> Option<Rect> {
     bounds
 }
 
-/// Recursively traverse a group and its children, accumulating bounds.
+/// Recursively traverse a group and its children, accumulating bounds
 fn traverse_group(group: &usvg::Group, bounds: &mut Option<Rect>) {
     for node in group.children() {
         let node_bounds = node.stroke_bounding_box();
@@ -35,7 +35,7 @@ fn traverse_group(group: &usvg::Group, bounds: &mut Option<Rect>) {
     }
 }
 
-/// Merge two optional bounding boxes into one.
+/// Merge two optional bounding boxes into one
 fn merge_bounds(a: Option<Rect>, b: Rect) -> Option<Rect> {
     match a {
         Some(existing) => {
@@ -51,14 +51,14 @@ fn merge_bounds(a: Option<Rect>, b: Rect) -> Option<Rect> {
     }
 }
 
-/// Expand the viewBox of an SVG string to match the given bounds.
+/// Expand the viewBox of an SVG string to match the given bounds
 ///
 /// # Arguments
 /// * `svg` - The SVG string to modify
 /// * `bounds` - The new bounding box to use as viewBox
 ///
 /// # Returns
-/// The SVG string with updated viewBox attribute.
+/// The SVG string with updated viewBox attribute
 pub fn expand_viewbox_to_bounds(svg: &str, bounds: Rect) -> String {
     let new_viewbox = format!(
         "{} {} {} {}",
@@ -71,7 +71,7 @@ pub fn expand_viewbox_to_bounds(svg: &str, bounds: Rect) -> String {
     replace_viewbox(svg, &new_viewbox)
 }
 
-/// Replace the viewBox attribute in an SVG string.
+/// Replace the viewBox attribute in an SVG string
 fn replace_viewbox(svg: &str, new_viewbox: &str) -> String {
     if let Some(start) = svg.find("viewBox=\"") {
         let attr_start = start + 9; // len of 'viewBox="'

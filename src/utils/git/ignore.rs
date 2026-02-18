@@ -8,7 +8,7 @@ const MODE_MUST_MATCH_DIR: u32 = 1 << 2; // Pattern ends with slash (must match 
 const MODE_NEGATIVE: u32 = 1 << 3; // Pattern starts with ! (negation)
 const MODE_ABSOLUTE: u32 = 1 << 4; // Pattern starts with / (rooted at gitignore location)
 
-/// Matches paths against .gitignore patterns.
+/// Matches paths against .gitignore patterns
 ///
 /// This struct handles the complexity of gitignore rules, including:
 /// - Pattern negation (!)

@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
-/// Standard site directory structure.
+/// Standard site directory structure
 const SITE_DIRS: &[&str] = &[
     "content",
     "assets/images",
@@ -17,10 +17,10 @@ const SITE_DIRS: &[&str] = &[
     "utils",
 ];
 
-/// Create site directory structure at the given root.
+/// Create site directory structure at the given root
 ///
 /// Creates all standard directories. The root directory
-/// is created if it doesn't exist.
+/// is created if it doesn't exist
 pub fn create_structure(root: &Path) -> Result<()> {
     // Ensure root exists
     if !root.exists() {

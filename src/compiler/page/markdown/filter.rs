@@ -9,7 +9,7 @@ use crate::compiler::page::Markdown;
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::page::{PageKind, PageMeta};
 
-/// Result of Markdown draft filtering with scanned data.
+/// Result of Markdown draft filtering with scanned data
 pub struct MarkdownFilterResult {
     /// Pre-scanned page data for non-draft files.
     pub scanned: Vec<ScannedPage>,
@@ -17,9 +17,9 @@ pub struct MarkdownFilterResult {
     pub draft_count: usize,
 }
 
-/// Filter Markdown files, removing drafts.
+/// Filter Markdown files, removing drafts
 ///
-/// Also collects metadata and extracts links for pre-scan optimization.
+/// Also collects metadata and extracts links for pre-scan optimization
 pub fn filter_drafts(files: &[&PathBuf], _root: &Path, _label: &str) -> MarkdownFilterResult {
     let results: Vec<_> = files
         .par_iter()
@@ -55,7 +55,7 @@ pub fn filter_drafts(files: &[&PathBuf], _root: &Path, _label: &str) -> Markdown
     }
 }
 
-/// Extract PageMeta from Markdown content.
+/// Extract PageMeta from Markdown content
 fn extract_meta(content: &str) -> Option<PageMeta> {
     MarkdownMetaExtractor
         .extract_frontmatter(content)
@@ -64,7 +64,7 @@ fn extract_meta(content: &str) -> Option<PageMeta> {
         .map(|(meta, _)| meta)
 }
 
-/// Extract internal page links from Markdown content.
+/// Extract internal page links from Markdown content
 fn extract_links(content: &str) -> Vec<String> {
     use pulldown_cmark::{Event, Parser, Tag};
 
@@ -84,7 +84,7 @@ fn extract_links(content: &str) -> Vec<String> {
     links
 }
 
-/// Extract headings from Markdown content.
+/// Extract headings from Markdown content
 fn extract_headings(content: &str) -> Vec<ScannedHeading> {
     use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 

@@ -13,17 +13,17 @@ use crate::core::UrlPath;
 type UrlSet = FxHashSet<UrlPath>;
 type UrlSetMap = FxHashMap<UrlPath, UrlSet>;
 
-/// Global page link graph.
+/// Global page link graph
 pub static PAGE_LINKS: LazyLock<PageLinkGraph> = LazyLock::new(PageLinkGraph::new);
 
-/// Bidirectional page link graph.
+/// Bidirectional page link graph
 ///
-/// Tracks which pages link to which other pages.
+/// Tracks which pages link to which other pages
 #[derive(Debug, Default)]
 pub struct PageLinkGraph {
-    /// Forward: page → pages it links to (outgoing links)
+    /// Forward: page -> pages it links to (outgoing links)
     links_to: RwLock<UrlSetMap>,
-    /// Reverse: page → pages that link to it (backlinks)
+    /// Reverse: page -> pages that link to it (backlinks)
     linked_by: RwLock<UrlSetMap>,
 }
 

@@ -3,10 +3,10 @@
 use owo_colors::OwoColorize;
 use std::fmt;
 
-/// A type-safe wrapper for config field paths.
+/// A type-safe wrapper for config field paths
 ///
 /// Used with `#[derive(Config)]` to generate compile-time checked
-/// field path accessors.
+/// field path accessors
 ///
 /// # Example
 ///

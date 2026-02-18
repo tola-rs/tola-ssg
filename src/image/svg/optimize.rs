@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use super::bounds::{calculate_stroke_bounds, expand_viewbox_to_bounds};
 
-/// Options for SVG optimization.
+/// Options for SVG optimization
 #[derive(Debug, Clone)]
 pub struct OptimizeOptions {
     /// DPI for rendering calculations.
@@ -25,7 +25,7 @@ impl Default for OptimizeOptions {
     }
 }
 
-/// Optimized SVG result.
+/// Optimized SVG result
 pub struct OptimizedSvg {
     /// Optimized SVG content as bytes.
     pub data: Vec<u8>,
@@ -33,12 +33,12 @@ pub struct OptimizedSvg {
     pub size: (f32, f32),
 }
 
-/// Optimize SVG using usvg.
+/// Optimize SVG using usvg
 ///
-/// Returns optimized SVG bytes and dimensions.
+/// Returns optimized SVG bytes and dimensions
 ///
 /// When `expand_viewbox` is enabled, calculates the stroke-inclusive bounding box
-/// and expands the viewBox to prevent content clipping.
+/// and expands the viewBox to prevent content clipping
 pub fn optimize_svg(content: &[u8], options: &OptimizeOptions) -> Result<OptimizedSvg> {
     let usvg_options = usvg::Options {
         dpi: options.dpi,
@@ -69,14 +69,14 @@ pub fn optimize_svg(content: &[u8], options: &OptimizeOptions) -> Result<Optimiz
     })
 }
 
-/// Parse width and height from SVG string.
+/// Parse width and height from SVG string
 fn parse_dimensions(svg: &str) -> Option<(f32, f32)> {
     let width = extract_attr(svg, r#"width=""#)?.parse().ok()?;
     let height = extract_attr(svg, r#"height=""#)?.parse().ok()?;
     Some((width, height))
 }
 
-/// Extract attribute value between prefix and closing quote.
+/// Extract attribute value between prefix and closing quote
 #[inline]
 fn extract_attr<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let start = s.find(prefix)? + prefix.len();

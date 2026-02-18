@@ -53,9 +53,9 @@ pub use crate::page::{CompiledPage, PageRoute, Pages};
 // Unified Compilation API
 // ============================================================================
 
-/// Compile any content file to HTML using the VDOM pipeline.
+/// Compile any content file to HTML using the VDOM pipeline
 ///
-/// Dispatches to the appropriate format adapter based on file extension.
+/// Dispatches to the appropriate format adapter based on file extension
 pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutput> {
     let kind = ContentKind::from_path(path)
         .ok_or_else(|| anyhow::anyhow!("unsupported content type: {:?}", path))?;
@@ -66,9 +66,9 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
     }
 }
 
-/// Scan any content file to Indexed VDOM (lightweight, no HTML rendering).
+/// Scan any content file to Indexed VDOM (lightweight, no HTML rendering)
 ///
-/// Faster than `compile()` for validation/query use cases.
+/// Faster than `compile()` for validation/query use cases
 pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
     let kind = ContentKind::from_path(path)
         .ok_or_else(|| anyhow::anyhow!("unsupported content type: {:?}", path))?;
@@ -91,20 +91,20 @@ pub type CompileMetaResult = (
     Option<IndexedDocument>,
 );
 
-/// Typst batch compiler (reusable for lock-free snapshot).
+/// Typst batch compiler (reusable for lock-free snapshot)
 pub type TypstBatcher<'a> = typst_batch::Batcher<'a>;
 
-/// Typst file snapshot for reuse across compilation phases.
+/// Typst file snapshot for reuse across compilation phases
 pub type FileSnapshot = std::sync::Arc<typst_batch::FileSnapshot>;
 
-/// Result of batch compilation for a single file.
+/// Result of batch compilation for a single file
 pub type BatchCompileResult =
     std::result::Result<typst_batch::CompileResult, typst_batch::CompileError>;
 
-/// Format a CompileError with max_errors limit from config.
+/// Format a CompileError with max_errors limit from config
 ///
 /// This limits the number of errors displayed to avoid cascading error spam
-/// from a single syntax error.
+/// from a single syntax error
 pub fn format_compile_error(
     error: &typst_batch::CompileError,
     max_errors: usize,
@@ -115,7 +115,7 @@ pub fn format_compile_error(
     }
 }
 
-/// Compilation statistics: counts of direct, iterative, and skipped draft pages.
+/// Compilation statistics: counts of direct, iterative, and skipped draft pages
 #[derive(Debug, Clone, Copy, Default)]
 #[allow(dead_code)]
 pub struct CompileStats {
@@ -152,9 +152,9 @@ impl CompileStats {
     }
 }
 
-/// Result of collect_metadata: paths of iterative pages, stats, and reusable snapshot.
+/// Result of collect_metadata: paths of iterative pages, stats, and reusable snapshot
 ///
-/// The snapshot can be passed to `rebuild_iterative_pages` for lock-free reuse.
+/// The snapshot can be passed to `rebuild_iterative_pages` for lock-free reuse
 pub struct MetadataResult {
     /// Paths of pages requiring iterative compilation (use @tola/pages or @tola/current).
     pub iterative_paths: Vec<std::path::PathBuf>,

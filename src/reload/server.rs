@@ -16,10 +16,10 @@ const MAX_PORT_RETRIES: u16 = 10;
 // Actor Mode WebSocket Server
 // =============================================================================
 
-/// Start WebSocket server that sends clients to WsActor via channel.
+/// Start WebSocket server that sends clients to WsActor via channel
 ///
-/// This is the primary API for actor-based hot reload.
-/// Clients are sent through the channel for WsActor to handle.
+/// This is the primary API for actor-based hot reload
+/// Clients are sent through the channel for WsActor to handle
 pub fn start_ws_server_with_channel(
     base_port: u16,
     ws_tx: tokio::sync::mpsc::Sender<WsMsg>,

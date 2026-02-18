@@ -9,7 +9,7 @@ use crate::asset::AssetRoute;
 use crate::core::UrlPath;
 use crate::page::PageRoute;
 
-/// A resource in the site's address space.
+/// A resource in the site's address space
 #[derive(Debug, Clone)]
 pub enum Resource {
     /// A page with HTML output.

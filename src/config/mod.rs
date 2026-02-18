@@ -581,8 +581,8 @@ impl SiteConfig {
 // Test Helpers (available to all modules via `use crate::config::test_*`)
 // ============================================================================
 
-/// Parse config with minimal required `[site.info]` fields.
-/// Panics if there are unknown fields (to catch config typos in tests).
+/// Parse config with minimal required `[site.info]` fields
+/// Panics if there are unknown fields (to catch config typos in tests)
 #[cfg(test)]
 pub fn test_parse_config(extra: &str) -> SiteConfig {
     let config = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}");

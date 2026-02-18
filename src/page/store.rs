@@ -16,13 +16,13 @@ use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::package::{Phase, TolaPackage};
 
-/// Global page data store.
+/// Global page data store
 pub static STORED_PAGES: LazyLock<StoredPageMap> = LazyLock::new(StoredPageMap::new);
 
-/// A page entry stored in the global page data.
+/// A page entry stored in the global page data
 ///
-/// Combines the computed permalink with page metadata.
-/// Serializes with `permalink` as top-level field and PageMeta flattened.
+/// Combines the computed permalink with page metadata
+/// Serializes with `permalink` as top-level field and PageMeta flattened
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredPage {
     /// The page's permalink (URL path).
@@ -52,10 +52,10 @@ impl StoredPage {
     }
 }
 
-/// Thread-safe storage for site-wide page data.
+/// Thread-safe storage for site-wide page data
 ///
-/// Maps permalink (`UrlPath`) to `StoredPage`.
-/// Also stores page headings separately for @tola/current injection.
+/// Maps permalink (`UrlPath`) to `StoredPage`
+/// Also stores page headings separately for @tola/current injection
 #[derive(Debug, Default)]
 pub struct StoredPageMap {
     /// Pages keyed by permalink.

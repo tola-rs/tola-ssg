@@ -6,7 +6,7 @@
 use super::FieldPath;
 use crate::config::ConfigDiagnostics;
 
-/// Field status for validation.
+/// Field status for validation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldStatus {
     Experimental,
@@ -25,10 +25,10 @@ impl FieldStatus {
     }
 }
 
-/// Check field status and report diagnostics.
+/// Check field status and report diagnostics
 ///
 /// Called by generated `validate_field_status` methods when a field
-/// with special status differs from its default value.
+/// with special status differs from its default value
 pub fn check_field_status(field_path: &str, status: FieldStatus, diag: &mut ConfigDiagnostics) {
     // Skip experimental hints if allowed
     if status == FieldStatus::Experimental && diag.allow_experimental {
@@ -57,10 +57,10 @@ pub fn check_field_status(field_path: &str, status: FieldStatus, diag: &mut Conf
     }
 }
 
-/// Check section-level status and report diagnostics.
+/// Check section-level status and report diagnostics
 ///
 /// Called when a section (struct) has experimental/deprecated/not_implemented status
-/// and any of its fields are set to non-default values.
+/// and any of its fields are set to non-default values
 pub fn check_section_status(section: &str, status: FieldStatus, diag: &mut ConfigDiagnostics) {
     // Skip experimental hints if allowed
     if status == FieldStatus::Experimental && diag.allow_experimental {

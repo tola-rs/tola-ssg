@@ -11,13 +11,13 @@ use crate::config::section::{
 };
 use crate::embed::typst::TOLA_TYP;
 
-/// Default config filename.
+/// Default config filename
 const CONFIG_FILE: &str = "tola.toml";
 
-/// Files to write ignore patterns to.
+/// Files to write ignore patterns to
 const IGNORE_FILES: &[&str] = &[".gitignore", ".ignore"];
 
-/// Generate tola.toml content with comments.
+/// Generate tola.toml content with comments
 pub fn generate_config_template() -> String {
     let mut out = String::new();
 
@@ -32,16 +32,16 @@ pub fn generate_config_template() -> String {
     out.push_str(&SiteInfoConfig::template_with_header());
     out.push('\n');
 
-    // [build.assets] section
-    out.push_str(&AssetsConfig::template_with_header());
-    out.push('\n');
-
-    // [build.feed] section
+    // [site.feed] section
     out.push_str(&FeedConfig::template_with_header());
     out.push('\n');
 
-    // [build.sitemap] section
+    // [site.sitemap] section
     out.push_str(&SitemapConfig::template_with_header());
+    out.push('\n');
+
+    // [build.assets] section
+    out.push_str(&AssetsConfig::template_with_header());
     out.push('\n');
 
     // [serve] section
@@ -54,7 +54,7 @@ pub fn generate_config_template() -> String {
     out
 }
 
-/// Write default tola.toml configuration.
+/// Write default tola.toml configuration
 pub fn write_config(root: &Path) -> Result<()> {
     let content = generate_config_template();
 
@@ -65,7 +65,7 @@ pub fn write_config(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write .gitignore and .ignore files with standard patterns.
+/// Write .gitignore and .ignore files with standard patterns
 ///
 /// Patterns include:
 /// - Output directory (e.g., `/dist/`)
@@ -93,7 +93,7 @@ pub fn write_ignore_files(root: &Path, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write templates/tola.typ with default show rules for HTML export.
+/// Write templates/tola.typ with default show rules for HTML export
 pub fn write_tola_template(root: &Path) -> Result<()> {
     let path = root.join("templates/tola.typ");
     // Only create if doesn't exist

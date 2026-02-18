@@ -11,10 +11,10 @@ use crate::log;
 use crate::page::CompiledPage;
 use crate::utils::plural_s;
 
-/// URL sources map: URL -> list of source files claiming that URL.
+/// URL sources map: URL -> list of source files claiming that URL
 pub type UrlSourceMap = FxHashMap<UrlPath, Vec<PathBuf>>;
 
-/// A URL conflict: multiple resources claim the same URL.
+/// A URL conflict: multiple resources claim the same URL
 #[derive(Debug, Clone)]
 pub struct UrlConflict {
     /// The conflicting URL
@@ -23,10 +23,10 @@ pub struct UrlConflict {
     pub sources: Vec<PathBuf>,
 }
 
-/// Collect all URL -> sources mappings from pages and assets.
+/// Collect all URL -> sources mappings from pages and assets
 ///
 /// This is the first phase of conflict detection. It gathers all URLs
-/// that will be used by pages and assets, without checking for conflicts yet.
+/// that will be used by pages and assets, without checking for conflicts yet
 pub fn collect_url_sources(pages: &[CompiledPage], config: &SiteConfig) -> UrlSourceMap {
     let mut url_sources = UrlSourceMap::default();
 
@@ -41,7 +41,7 @@ pub fn collect_url_sources(pages: &[CompiledPage], config: &SiteConfig) -> UrlSo
     url_sources
 }
 
-/// Collect global asset URLs into the map.
+/// Collect global asset URLs into the map
 fn collect_global_assets(url_sources: &mut UrlSourceMap, config: &SiteConfig) {
     for asset in scan_global_assets(config) {
         url_sources.entry(asset.url).or_default().push(asset.source);
@@ -53,7 +53,7 @@ fn collect_global_assets(url_sources: &mut UrlSourceMap, config: &SiteConfig) {
     }
 }
 
-/// Collect all URLs from a single page: permalink, aliases, and colocated assets.
+/// Collect all URLs from a single page: permalink, aliases, and colocated assets
 fn collect_page_urls(url_sources: &mut UrlSourceMap, page: &CompiledPage) {
     // Skip 404 page (it's a fallback file, not a route target)
     if page.route.is_404 {
@@ -87,12 +87,12 @@ fn collect_page_urls(url_sources: &mut UrlSourceMap, page: &CompiledPage) {
     }
 }
 
-/// Detect URL conflicts (URLs claimed by multiple resources).
+/// Detect URL conflicts (URLs claimed by multiple resources)
 ///
 /// This is the second phase of conflict detection. It finds all URLs
-/// that have more than one source, which indicates a conflict.
+/// that have more than one source, which indicates a conflict
 ///
-/// Paths are converted to relative paths using the provided root.
+/// Paths are converted to relative paths using the provided root
 pub fn detect_conflicts(url_sources: &UrlSourceMap, root: &Path) -> Vec<UrlConflict> {
     url_sources
         .iter()
@@ -104,7 +104,7 @@ pub fn detect_conflicts(url_sources: &UrlSourceMap, root: &Path) -> Vec<UrlConfl
         .collect()
 }
 
-/// Convert absolute paths to relative paths.
+/// Convert absolute paths to relative paths
 fn relativize_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
     paths
         .iter()
@@ -112,7 +112,7 @@ fn relativize_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Print conflicts using the standard log format.
+/// Print conflicts using the standard log format
 ///
 /// Output format:
 /// ```text
@@ -140,7 +140,7 @@ pub fn print_conflicts(conflicts: &[UrlConflict]) {
     }
 }
 
-/// Format conflicts as a string (for error messages).
+/// Format conflicts as a string (for error messages)
 pub fn format_conflicts(conflicts: &[UrlConflict]) -> String {
     conflicts
         .iter()
@@ -149,7 +149,7 @@ pub fn format_conflicts(conflicts: &[UrlConflict]) -> String {
         .join("\n")
 }
 
-/// Format a single conflict for display.
+/// Format a single conflict for display
 fn format_single_conflict(conflict: &UrlConflict) -> String {
     let mut lines = vec![format!("{} ({})", conflict.url, conflict.sources.len())];
     for source in &conflict.sources {

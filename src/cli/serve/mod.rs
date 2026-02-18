@@ -22,24 +22,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use tiny_http::{Request, Server};
 
-/// Default WebSocket port for hot reload.
+/// Default WebSocket port for hot reload
 pub const DEFAULT_WS_PORT: u16 = 35729;
 
-/// Actual WebSocket port (may differ from DEFAULT_WS_PORT if port was in use).
-/// Updated by coordinator after WebSocket server binds successfully.
+/// Actual WebSocket port (may differ from DEFAULT_WS_PORT if port was in use)
+/// Updated by coordinator after WebSocket server binds successfully
 static ACTUAL_WS_PORT: AtomicU16 = AtomicU16::new(DEFAULT_WS_PORT);
 
-/// Update the actual WebSocket port (called by coordinator after binding).
+/// Update the actual WebSocket port (called by coordinator after binding)
 pub fn set_actual_ws_port(port: u16) {
     ACTUAL_WS_PORT.store(port, Ordering::Relaxed);
 }
 
-/// Get the actual WebSocket port.
+/// Get the actual WebSocket port
 fn get_actual_ws_port() -> u16 {
     ACTUAL_WS_PORT.load(Ordering::Relaxed)
 }
 
-/// Bound server ready to accept requests.
+/// Bound server ready to accept requests
 pub struct BoundServer {
     server: Arc<Server>,
     addr: SocketAddr,
@@ -47,11 +47,11 @@ pub struct BoundServer {
     shutdown_rx: channel::Receiver<()>,
 }
 
-/// Bind the HTTP server without starting the request loop.
+/// Bind the HTTP server without starting the request loop
 ///
 /// This allows the caller to start background tasks (like scan) before
 /// entering the request loop, while still being able to respond to requests
-/// with a loading page.
+/// with a loading page
 pub fn bind_server() -> Result<BoundServer> {
     let config = cfg();
     let (server, addr) = lifecycle::bind_with_retry(config.serve.interface, config.serve.port)?;
@@ -115,7 +115,7 @@ fn run_request_loop(server: &Server) {
     }
 }
 
-/// Handle a single HTTP request.
+/// Handle a single HTTP request
 fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
     // Early exit if shutdown requested
     if crate::core::is_shutdown() {

@@ -9,16 +9,16 @@ use super::CACHE_DIR;
 use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 use crate::core::UrlPath;
 
-/// Result of modified files detection.
+/// Result of modified files detection
 #[derive(Debug, Default)]
 pub struct ModifiedFilesResult {
     /// Files that were modified since they were cached
     pub modified: Vec<PathBuf>,
-    /// Source paths mapping (url → source path) for reuse
+    /// Source paths mapping (url -> source path) for reuse
     pub source_paths: FxHashMap<UrlPath, PathBuf>,
 }
 
-/// Detect content files that were modified since they were cached.
+/// Detect content files that were modified since they were cached
 pub fn get_modified_files(root: &Path) -> ModifiedFilesResult {
     let Some(index) = load_index(root) else {
         return ModifiedFilesResult::default();
@@ -47,7 +47,7 @@ pub fn get_modified_files(root: &Path) -> ModifiedFilesResult {
     result
 }
 
-/// Load all source paths from cache index.
+/// Load all source paths from cache index
 pub fn get_source_paths(root: &Path) -> FxHashMap<UrlPath, PathBuf> {
     let Some(index) = load_index(root) else {
         return FxHashMap::default();
@@ -65,19 +65,19 @@ pub fn get_source_paths(root: &Path) -> FxHashMap<UrlPath, PathBuf> {
     paths
 }
 
-/// Load cache index from disk.
+/// Load cache index from disk
 fn load_index(root: &Path) -> Option<CacheIndex> {
     let index_path = root.join(CACHE_DIR).join(INDEX_FILE);
     let json = fs::read_to_string(&index_path).ok()?;
     serde_json::from_str(&json).ok()
 }
 
-/// Compute file content hash (blake3 hex).
+/// Compute file content hash (blake3 hex)
 fn compute_hash(path: &Path) -> String {
     crate::freshness::compute_file_hash(path).to_hex()
 }
 
-/// Resolve source path from cache info (returns None if empty/invalid).
+/// Resolve source path from cache info (returns None if empty/invalid)
 fn resolve_source_path(root: &Path, info: &CacheFileInfo) -> Option<PathBuf> {
     if info.source_path.is_empty() {
         return None;
@@ -87,7 +87,7 @@ fn resolve_source_path(root: &Path, info: &CacheFileInfo) -> Option<PathBuf> {
     ))
 }
 
-/// Check if a cached file has been modified (source or deps changed).
+/// Check if a cached file has been modified (source or deps changed)
 fn is_file_modified(root: &Path, info: &CacheFileInfo) -> bool {
     // Check source hash
     let source_path = root.join(&info.source_path);

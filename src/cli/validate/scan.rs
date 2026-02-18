@@ -10,7 +10,7 @@ use crate::config::SiteConfig;
 use crate::core::LinkKind;
 use tola_vdom::Document;
 
-/// A link extracted from a content file.
+/// A link extracted from a content file
 #[derive(Debug, Clone)]
 pub struct ScannedLink {
     /// Link destination.
@@ -48,7 +48,7 @@ impl ScannedLink {
     }
 }
 
-/// Result of scanning a single file.
+/// Result of scanning a single file
 pub struct ScanResult {
     /// Source file path (relative to root).
     pub source: String,
@@ -58,8 +58,8 @@ pub struct ScanResult {
     pub indexed_vdom: Option<Document<Indexed>>,
 }
 
-/// Scan Typst files in batch (for link extraction, not metadata).
-/// Uses default Phase::Filter so pages() in content body returns empty silently.
+/// Scan Typst files in batch (for link extraction, not metadata)
+/// Uses default Phase::Filter so pages() in content body returns empty silently
 pub fn scan_typst_batch(files: &[&PathBuf], root: &Path) -> Vec<Option<ScanResult>> {
     let scans = batch_scan_typst(files, root);
 
@@ -87,7 +87,7 @@ pub fn scan_typst_batch(files: &[&PathBuf], root: &Path) -> Vec<Option<ScanResul
         .collect()
 }
 
-/// Convert typst-batch Link to ScannedLink.
+/// Convert typst-batch Link to ScannedLink
 fn typst_link_to_scanned(link: &typst_batch::Link) -> ScannedLink {
     ScannedLink {
         dest: link.dest.clone(),
@@ -95,7 +95,7 @@ fn typst_link_to_scanned(link: &typst_batch::Link) -> ScannedLink {
     }
 }
 
-/// Scan a Markdown file for links.
+/// Scan a Markdown file for links
 pub fn scan_markdown(file: &Path, root: &Path, config: &SiteConfig) -> Result<ScanResult> {
     let result = scan_markdown_file(file, config)?;
 
@@ -114,7 +114,7 @@ pub fn scan_markdown(file: &Path, root: &Path, config: &SiteConfig) -> Result<Sc
     })
 }
 
-/// Extract all links from an indexed VDOM document.
+/// Extract all links from an indexed VDOM document
 fn extract_links_from_vdom(doc: &Document<Indexed>) -> Vec<ScannedLink> {
     const URL_ATTRS: [&str; 4] = ["href", "src", "poster", "data"];
 

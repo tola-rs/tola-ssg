@@ -1,11 +1,11 @@
-//! Typst Content → HTML extraction.
+//! Typst Content -> HTML extraction.
 //!
 //! Converts Typst's serialized content JSON to HTML strings for RSS feeds.
 
 use crate::utils::html::{escape, escape_attr, is_void_element};
 use serde_json::{Map, Value};
 
-/// Extract HTML from Typst content JSON.
+/// Extract HTML from Typst content JSON
 pub fn extract(value: &Value) -> String {
     Extractor::new(value).run()
 }
@@ -231,13 +231,13 @@ mod tests {
 
         #[test]
         fn unknown_element_returns_empty() {
-            // Unknown element with no text/body/child/children → empty string
+            // Unknown element with no text/body/child/children -> empty string
             let json = json!({"func": "unknown_element", "data": 123});
             assert_eq!(extract(&json), "");
         }
     }
 
-    /// End-to-end tests: Typst source → compile → query → JSON → extract → HTML
+    /// End-to-end tests: Typst source -> compile -> query -> JSON -> extract -> HTML
     mod e2e {
         use super::*;
         use tempfile::TempDir;

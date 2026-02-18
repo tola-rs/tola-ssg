@@ -1,4 +1,4 @@
-//! Media processor (Indexed → Indexed).
+//! Media processor (Indexed -> Indexed).
 //!
 //! Processes media elements (img, video, audio, etc.):
 //! - URL processing for `src` attribute
@@ -24,16 +24,16 @@ use crate::image::background;
 // nobg reference tracking (minify mode only)
 // =============================================================================
 
-/// Original output paths of images referenced with nobg class.
+/// Original output paths of images referenced with nobg class
 static NOBG_REFS: LazyLock<DashSet<PathBuf>> = LazyLock::new(DashSet::new);
 
-/// Output paths of images referenced without nobg class.
+/// Output paths of images referenced without nobg class
 static NORMAL_REFS: LazyLock<DashSet<PathBuf>> = LazyLock::new(DashSet::new);
 
-/// Clean up original images that are only referenced with nobg.
+/// Clean up original images that are only referenced with nobg
 ///
 /// Called after build completes. Removes original images that have no normal
-/// references (only nobg references), keeping only the .nobg.png version.
+/// references (only nobg references), keeping only the .nobg.png version
 pub fn cleanup_nobg_originals() {
     for path in NOBG_REFS.iter() {
         if !NORMAL_REFS.contains(&*path) && path.exists() {
@@ -50,7 +50,7 @@ const CLASS_NOBG: &str = "tola-nobg";
 const RECOLOR_TARGETS: &[&str] = &["img"];
 const NOBG_FORMATS: &[&str] = &["png", "jpg", "jpeg", "webp"];
 
-/// Processes media element src attributes in Indexed VDOM.
+/// Processes media element src attributes in Indexed VDOM
 pub struct MediaTransform<'a> {
     config: &'a SiteConfig,
     route: &'a PageRoute,
@@ -153,8 +153,8 @@ impl<'a> MediaTransform<'a> {
     /// Resolve source file path from src attribute.
     ///
     /// Supports:
-    /// - File-relative paths: `./image.png` → colocated_dir or source parent
-    /// - Site-root paths: `/images/xxx` → config.build.assets.nested mapping
+    /// - File-relative paths: `./image.png` -> colocated_dir or source parent
+    /// - Site-root paths: `/images/xxx` -> config.build.assets.nested mapping
     fn resolve_source_path(&self, src: &str) -> Option<PathBuf> {
         match LinkKind::parse(src) {
             LinkKind::SiteRoot(path) => {
@@ -268,7 +268,7 @@ impl Transform<Indexed> for MediaTransform<'_> {
     }
 }
 
-/// Inherited class state for recursive processing.
+/// Inherited class state for recursive processing
 #[derive(Default, Clone, Copy)]
 struct ClassState {
     /// Inherited recolor state: None = no inheritance, Some(true) = recolor, Some(false) = no-recolor
@@ -277,7 +277,7 @@ struct ClassState {
     nobg: bool,
 }
 
-/// Recursively process recolor/nobg classes with inheritance.
+/// Recursively process recolor/nobg classes with inheritance
 fn process_classes(
     elem: &mut Element<Indexed>,
     transform: &MediaTransform<'_>,
@@ -323,7 +323,7 @@ fn process_classes(
     }
 }
 
-/// Apply recolor class based on inheritance rules.
+/// Apply recolor class based on inheritance rules
 fn apply_recolor_class(
     elem: &mut Element<Indexed>,
     has_recolor: bool,
@@ -346,7 +346,7 @@ fn apply_recolor_class(
     }
 }
 
-/// Apply nobg processing (server-side background removal).
+/// Apply nobg processing (server-side background removal)
 fn apply_nobg_processing(
     elem: &mut Element<Indexed>,
     has_nobg: bool,

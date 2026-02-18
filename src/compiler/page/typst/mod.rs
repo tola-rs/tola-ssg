@@ -4,7 +4,7 @@
 //!
 //! - [`init`] - Tola-specific setup (VirtualFS, warmup)
 //! - [`Typst`] - PageFormat implementation
-//! - [`convert`] - `HtmlDocument` → tola-vdom VDOM conversion
+//! - [`convert`] - `HtmlDocument` -> tola-vdom VDOM conversion
 //! - [`filter`] - Draft filtering
 
 mod compile;
@@ -30,7 +30,7 @@ pub use init::init_typst;
 // Typst Format
 // =============================================================================
 
-/// Typst format adapter.
+/// Typst format adapter
 pub struct Typst;
 
 impl PageFormat for Typst {

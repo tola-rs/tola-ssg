@@ -6,7 +6,7 @@ use crate::config::section::build::{CssProcessorConfig, HookConfig, WatchMode};
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// Build a HookConfig for Tailwind CSS.
+/// Build a HookConfig for Tailwind CSS
 pub fn build_hook(css: &CssProcessorConfig, output: &Path, minify: bool) -> Result<HookConfig> {
     let input = css
         .path

@@ -18,7 +18,7 @@ use crate::page::{PageKind, PageMeta, STORED_PAGES};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
 
-/// Lock-free parallel result collector using `SegQueue`.
+/// Lock-free parallel result collector using `SegQueue`
 pub struct ParallelCollector<T> {
     queue: SegQueue<T>,
 }
@@ -64,7 +64,7 @@ impl<T> Default for ParallelCollector<T> {
     }
 }
 
-/// Collect content files based on CLI paths.
+/// Collect content files based on CLI paths
 pub fn collect_content_files(paths: &[PathBuf], content_dir: &Path) -> Result<Vec<PathBuf>> {
     // Handle stdin case: read paths from stdin when `-` is passed
     let paths: Vec<PathBuf> = if paths.len() == 1 && paths[0].as_os_str() == "-" {
@@ -108,7 +108,7 @@ pub fn collect_content_files(paths: &[PathBuf], content_dir: &Path) -> Result<Ve
     Ok(all_files)
 }
 
-/// Read file paths from stdin, one per line.
+/// Read file paths from stdin, one per line
 pub fn read_paths_from_stdin() -> Result<Vec<PathBuf>> {
     let stdin = io::stdin();
     let mut paths = Vec::new();
@@ -124,7 +124,7 @@ pub fn read_paths_from_stdin() -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// Filter a list of paths to only include supported content files.
+/// Filter a list of paths to only include supported content files
 pub fn filter_content_files(files: Vec<PathBuf>) -> Vec<PathBuf> {
     files
         .into_iter()
@@ -132,7 +132,7 @@ pub fn filter_content_files(files: Vec<PathBuf>) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Calculate URL path from file path relative to content directory.
+/// Calculate URL path from file path relative to content directory
 pub fn calculate_url_path(file: &Path, content_dir: &Path) -> String {
     let rel = file.strip_prefix(content_dir).unwrap_or(file);
     let stem = rel.with_extension("");
@@ -155,7 +155,7 @@ pub fn calculate_url_path(file: &Path, content_dir: &Path) -> String {
     url
 }
 
-/// Result of scanning a Markdown file via VDOM pipeline.
+/// Result of scanning a Markdown file via VDOM pipeline
 pub struct MarkdownScanResult {
     /// Indexed VDOM for link/asset extraction.
     pub indexed_vdom: Document<Indexed>,
@@ -163,7 +163,7 @@ pub struct MarkdownScanResult {
     pub raw_meta: Option<JsonValue>,
 }
 
-/// Scan a Markdown file using the VDOM pipeline.
+/// Scan a Markdown file using the VDOM pipeline
 pub fn scan_markdown_file(file: &Path, config: &SiteConfig) -> Result<MarkdownScanResult> {
     let ctx = CompileContext::new(BuildMode::PRODUCTION, config);
     let result = scan(file, &ctx)?;
@@ -174,10 +174,10 @@ pub fn scan_markdown_file(file: &Path, config: &SiteConfig) -> Result<MarkdownSc
     })
 }
 
-/// Batch scan Typst files using `Batcher::for_scan()`.
+/// Batch scan Typst files using `Batcher::for_scan()`
 ///
 /// Does NOT set Phase - defaults to `filter`, so `pages()` in content body
-/// returns empty array silently. Used for link extraction in validate.
+/// returns empty array silently. Used for link extraction in validate
 pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_batch::ScanResult>> {
     if files.is_empty() {
         return vec![];
@@ -210,13 +210,13 @@ pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_bat
     }
 }
 
-/// Maximum iterations for metadata convergence.
+/// Maximum iterations for metadata convergence
 const MAX_SCAN_ITERATIONS: usize = 5;
 
-/// Batch scan Typst files for metadata, failing on first error.
+/// Batch scan Typst files for metadata, failing on first error
 ///
 /// Simple scan without iterative support. Use for validate or when
-/// STORED_PAGES is already populated.
+/// STORED_PAGES is already populated
 pub fn batch_scan_typst_metadata(
     files: &[&PathBuf],
     root: &Path,
@@ -250,10 +250,10 @@ pub fn batch_scan_typst_metadata(
     }
 }
 
-/// Batch scan Typst files for metadata with iterative support.
+/// Batch scan Typst files for metadata with iterative support
 ///
-/// Requires STORED_PAGES to be pre-populated with all site pages.
-/// Iteratively re-scans pages that use `@tola/pages` until convergence.
+/// Requires STORED_PAGES to be pre-populated with all site pages
+/// Iteratively re-scans pages that use `@tola/pages` until convergence
 pub fn batch_scan_typst_metadata_iterative(
     files: &[&PathBuf],
     root: &Path,
@@ -362,10 +362,10 @@ pub fn batch_scan_typst_metadata_iterative(
     Ok(metas)
 }
 
-/// Populate STORED_PAGES from all content files.
+/// Populate STORED_PAGES from all content files
 ///
-/// Scans all Typst and Markdown files to build the global page store.
-/// Must be called before `batch_scan_typst_metadata_iterative`.
+/// Scans all Typst and Markdown files to build the global page store
+/// Must be called before `batch_scan_typst_metadata_iterative`
 pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     use crate::compiler::collect_all_files;
     use crate::compiler::page::CompiledPage;

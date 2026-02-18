@@ -68,7 +68,7 @@ impl TemplateVars for CurrentTypVars<'_> {
 // TolaPackage Enum
 // =============================================================================
 
-/// Tola virtual package type.
+/// Tola virtual package type
 ///
 /// Injected to Typst via `sys.inputs`:
 /// - `Site`: Static config from `tola.toml`, always available
@@ -168,9 +168,9 @@ entrypoint = "lib.typ"
 // Public API
 // =============================================================================
 
-/// Read a file from the virtual package.
+/// Read a file from the virtual package
 ///
-/// Returns `None` if the package is not a tola package or the path is unknown.
+/// Returns `None` if the package is not a tola package or the path is unknown
 pub fn read_package(pkg: &PackageId, path: &str) -> Option<Vec<u8>> {
     let tola_pkg = TolaPackage::from_id(pkg)?;
     match path {
@@ -180,16 +180,16 @@ pub fn read_package(pkg: &PackageId, path: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Get the sentinel path for a tola virtual package.
+/// Get the sentinel path for a tola virtual package
 ///
-/// Used as a dependency key in the dependency graph.
+/// Used as a dependency key in the dependency graph
 pub fn package_sentinel(pkg: &PackageId) -> Option<PathBuf> {
     TolaPackage::from_id(pkg).map(|p| p.sentinel())
 }
 
-/// Generate LSP stub packages in `.tola/packages/`.
+/// Generate LSP stub packages in `.tola/packages/`
 ///
-/// Creates stub files for tinymist LSP completion support.
+/// Creates stub files for tinymist LSP completion support
 /// Configure tinymist with: `--package-path .tola/packages`
 pub fn generate_lsp_stubs(root: &Path) -> std::io::Result<()> {
     let packages_dir = root.join(".tola/packages/tola");

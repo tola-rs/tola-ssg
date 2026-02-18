@@ -1,8 +1,8 @@
 //! Priority levels for compilation and task ordering.
 
-/// Priority level for task ordering.
+/// Priority level for task ordering
 ///
-/// Higher value = higher priority (processed first in BinaryHeap).
+/// Higher value = higher priority (processed first in BinaryHeap)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Priority {
     /// Background pre-compilation - lowest priority

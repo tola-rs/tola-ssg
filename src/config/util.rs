@@ -2,22 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// Extract path component from a URL string.
+/// Extract path component from a URL string
 ///
 /// Uses `url` crate for proper parsing, handling edge cases like:
-/// - Port numbers: `https://example.com:8080/path` → `path`
-/// - Auth info: `https://user:pass@example.com/path` → `path`
-/// - Query strings: `https://example.com/path?query` → `path`
+/// - Port numbers: `https://example.com:8080/path` -> `path`
+/// - Auth info: `https://user:pass@example.com/path` -> `path`
+/// - Query strings: `https://example.com/path?query` -> `path`
 ///
-/// Returns `None` if the URL is invalid.
+/// Returns `None` if the URL is invalid
 ///
 /// # Examples
 /// ```ignore
-/// extract_url_path("https://example.github.io/my-project/") → Some("my-project")
-/// extract_url_path("https://example.github.io/a/b/c")       → Some("a/b/c")
-/// extract_url_path("https://example.com")                   → Some("")
-/// extract_url_path("https://example.com:8080/path")         → Some("path")
-/// extract_url_path("invalid")                               → None
+/// extract_url_path("https://example.github.io/my-project/") -> Some("my-project")
+/// extract_url_path("https://example.github.io/a/b/c")       -> Some("a/b/c")
+/// extract_url_path("https://example.com")                   -> Some("")
+/// extract_url_path("https://example.com:8080/path")         -> Some("path")
+/// extract_url_path("invalid")                               -> None
 /// ```
 pub fn extract_url_path(url_str: &str) -> Option<String> {
     let parsed = url::Url::parse(url_str).ok()?;
@@ -28,10 +28,10 @@ pub fn extract_url_path(url_str: &str) -> Option<String> {
     Some(path.to_string())
 }
 
-/// Find config file by searching upward from current directory.
+/// Find config file by searching upward from current directory
 ///
-/// Starts from cwd and walks up parent directories until finding `config_name`.
-/// Returns the absolute path to the config file if found.
+/// Starts from cwd and walks up parent directories until finding `config_name`
+/// Returns the absolute path to the config file if found
 ///
 /// # Example
 /// ```text

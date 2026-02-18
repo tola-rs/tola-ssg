@@ -6,7 +6,7 @@ use crate::{
     page::{STORED_PAGES, StoredPage},
 };
 
-/// A page validated for feed inclusion (requires title and date).
+/// A page validated for feed inclusion (requires title and date)
 #[derive(Debug, Clone)]
 pub struct FeedPage {
     pub title: String,
@@ -28,7 +28,7 @@ impl FeedPage {
     }
 }
 
-/// Get all pages valid for feed inclusion (only pages with date).
+/// Get all pages valid for feed inclusion (only pages with date)
 pub fn get_feed_pages() -> Vec<FeedPage> {
     let all_pages = STORED_PAGES.get_pages();
     let total = all_pages.len();

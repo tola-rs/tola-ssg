@@ -31,10 +31,10 @@ pub enum DiffOutcome {
 // Pure Function (no side effects)
 // =============================================================================
 
-/// Compute diff between old and new VDOM (pure function).
+/// Compute diff between old and new VDOM (pure function)
 ///
-/// Returns diff result without modifying any state.
-/// Use this when you want to check what would change.
+/// Returns diff result without modifying any state
+/// Use this when you want to check what would change
 pub fn diff_vdom(old_vdom: &Document<Indexed>, new_vdom: &Document<Indexed>) -> DiffOutcome {
     let diff_result: DiffResult<Indexed> = diff(old_vdom, new_vdom);
 
@@ -55,7 +55,7 @@ pub fn diff_vdom(old_vdom: &Document<Indexed>, new_vdom: &Document<Indexed>) -> 
 // Effectful Function (modifies cache)
 // =============================================================================
 
-/// Compute diff and update cache appropriately.
+/// Compute diff and update cache appropriately
 ///
 /// # Side Effects
 /// - Reads from cache
@@ -68,7 +68,7 @@ pub fn diff_vdom(old_vdom: &Document<Indexed>, new_vdom: &Document<Indexed>) -> 
 /// - Patches: DON'T update cache here - caller updates after successful broadcast
 ///
 /// # Note
-/// Caller must create `CacheKey` explicitly to ensure URL normalization.
+/// Caller must create `CacheKey` explicitly to ensure URL normalization
 #[allow(dead_code)]
 pub fn compute_diff(cache: &mut Cache, key: CacheKey, new_vdom: Document<Indexed>) -> DiffOutcome {
     if let Some(old_entry) = cache.get(&key) {
@@ -94,10 +94,10 @@ pub fn compute_diff(cache: &mut Cache, key: CacheKey, new_vdom: Document<Indexed
     }
 }
 
-/// Thread-safe version of `compute_diff` using `SharedCache`.
+/// Thread-safe version of `compute_diff` using `SharedCache`
 ///
-/// This version is suitable for concurrent access from multiple threads.
-/// Uses `RwLock` internally for better read performance.
+/// This version is suitable for concurrent access from multiple threads
+/// Uses `RwLock` internally for better read performance
 ///
 /// # Cache Update Strategy
 /// Same as `compute_diff`:

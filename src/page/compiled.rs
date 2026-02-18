@@ -13,10 +13,10 @@ use crate::utils::path::slug::slugify_path;
 
 use super::{PageMeta, PageRoute};
 
-/// Convert days since Unix epoch to (year, month, day).
+/// Convert days since Unix epoch to (year, month, day)
 ///
 /// Uses a simplified leap year calculation that's accurate for dates
-/// from 1970 to ~2100.
+/// from 1970 to ~2100
 fn days_to_ymd(days: i64) -> (i64, u32, u32) {
     // Days from year 0 to 1970-01-01 (approximate, but works for our range)
     const DAYS_TO_1970: i64 = 719_468;
@@ -39,10 +39,10 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// Primary metadata structure for a compiled content page.
+/// Primary metadata structure for a compiled content page
 ///
-/// Contains all path and URL information needed by build, rss and sitemap.
-/// This is the **single source of truth** for page paths and content metadata.
+/// Contains all path and URL information needed by build, rss and sitemap
+/// This is the **single source of truth** for page paths and content metadata
 ///
 /// # Fields
 ///
@@ -55,10 +55,10 @@ fn days_to_ymd(days: i64) -> (i64, u32, u32) {
 /// | `content_meta` | `PageMeta` | rss (title/summary/date) |
 /// | `compiled_html` | `Vec<u8>` | Lib mode pre-compiled HTML |
 ///
-/// Note: Previously named `PageMeta`. Renamed to avoid confusion with `page::PageMeta`.
+/// Note: Previously named `PageMeta`. Renamed to avoid confusion with `page::PageMeta`
 #[derive(Debug, Clone)]
 pub struct CompiledPage {
-    /// Route information (source → output mapping)
+    /// Route information (source -> output mapping)
     pub route: PageRoute,
     /// Last modification time of the HTML file
     pub lastmod: Option<SystemTime>,
@@ -234,7 +234,7 @@ impl CompiledPage {
             .trim_end_matches('/');
 
         // Build output file path from permalink
-        // /custom/path/ → output_root/custom/path/index.html
+        // /custom/path/ -> output_root/custom/path/index.html
         let rel_path = permalink
             .as_str()
             .trim_start_matches('/')
@@ -265,7 +265,7 @@ impl CompiledPage {
     }
 }
 
-/// Collection of all compiled pages in the site.
+/// Collection of all compiled pages in the site
 #[derive(Debug, Default)]
 pub struct Pages {
     pub items: Vec<CompiledPage>,

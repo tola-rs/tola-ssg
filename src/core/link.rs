@@ -2,7 +2,7 @@
 
 use crate::utils::path::route::is_external_link;
 
-/// Syntactic classification of links.
+/// Syntactic classification of links
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind<'a> {
     /// External link with URL scheme (https://, mailto:, tel:, etc.)

@@ -12,7 +12,7 @@
 use macros::Config;
 use serde::{Deserialize, Serialize};
 
-/// SPA navigation configuration.
+/// SPA navigation configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site.nav")]
@@ -39,7 +39,7 @@ impl Default for NavConfig {
     }
 }
 
-/// View Transitions API configuration.
+/// View Transitions API configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site.nav.transition")]
@@ -69,7 +69,7 @@ impl TransitionConfig {
     }
 }
 
-/// Transition style for page navigation.
+/// Transition style for page navigation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransitionStyle {
@@ -81,7 +81,7 @@ pub enum TransitionStyle {
     Fade,
 }
 
-/// Preload/prefetch configuration.
+/// Preload/prefetch configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site.nav.preload")]

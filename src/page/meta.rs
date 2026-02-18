@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use super::JsonMap;
 
-/// Deserialize tags, treating `null` as empty vec.
+/// Deserialize tags, treating `null` as empty vec
 fn deserialize_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -14,7 +14,7 @@ where
 }
 
 /// Page metadata from `#metadata(...) <tola-meta>` in Typst files
-/// or frontmatter in Markdown files.
+/// or frontmatter in Markdown files
 ///
 /// # Standard Fields
 ///
@@ -32,9 +32,9 @@ where
 ///
 /// # Custom Fields (`extra`)
 ///
-/// Any additional fields are captured in `extra` as raw JSON.
+/// Any additional fields are captured in `extra` as raw JSON
 /// Content values (objects with `func` field) are preserved for
-/// injection via `Inputs::from_json_with_content()`.
+/// injection via `Inputs::from_json_with_content()`
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct PageMeta {

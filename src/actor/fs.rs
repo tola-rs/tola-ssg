@@ -29,7 +29,7 @@ use crate::utils::path::normalize_path;
 const DEBOUNCE_MS: u64 = 300;
 const REBUILD_COOLDOWN_MS: u64 = 800;
 
-/// Check if path is a temp/backup file (editor artifacts).
+/// Check if path is a temp/backup file (editor artifacts)
 fn is_temp_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -123,9 +123,9 @@ impl FsActor {
     }
 }
 
-/// Process debounced file changes.
+/// Process debounced file changes
 ///
-/// Returns `Err(())` if CompilerActor shut down.
+/// Returns `Err(())` if CompilerActor shut down
 async fn process_changes(
     debouncer: &mut Debouncer,
     compiler_tx: &mpsc::Sender<CompilerMsg>,
@@ -168,7 +168,7 @@ async fn process_changes(
     Ok(())
 }
 
-/// Log file changes in verbose mode.
+/// Log file changes in verbose mode
 fn log_changes(result: &ClassifyResult) {
     for (path, category) in &result.classified {
         crate::debug!("watch"; "{} changed: {}", category.name(), path.display());

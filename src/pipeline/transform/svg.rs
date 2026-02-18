@@ -1,4 +1,4 @@
-//! SVG processor (Indexed → Indexed).
+//! SVG processor (Indexed -> Indexed).
 //!
 //! Processes SVG elements based on build mode:
 //! - **serve mode**: Optimize inline SVG (viewBox adjustment)
@@ -29,10 +29,10 @@ use crate::config::SiteConfig;
 use crate::core::BuildMode;
 use crate::image::svg::{ExtractContext, OptimizeOptions, extract_svg_to_file, optimize_svg};
 
-/// Processes SVG elements in Indexed VDOM.
+/// Processes SVG elements in Indexed VDOM
 ///
-/// In serve mode, SVGs are optimized but kept inline for hot reload compatibility.
-/// In build mode with `external = true`, SVGs are extracted to `.tola/` subdirectory.
+/// In serve mode, SVGs are optimized but kept inline for hot reload compatibility
+/// In build mode with `external = true`, SVGs are extracted to `.tola/` subdirectory
 pub struct SvgTransform<'a> {
     config: &'a SiteConfig,
     route: &'a PageRoute,
@@ -198,7 +198,7 @@ impl Transform<Indexed> for SvgTransform<'_> {
     }
 }
 
-/// Extract viewBox attribute value from SVG bytes.
+/// Extract viewBox attribute value from SVG bytes
 fn extract_viewbox_from_bytes(svg: &[u8]) -> Option<String> {
     let svg_str = std::str::from_utf8(svg).ok()?;
     let start = svg_str.find("viewBox=\"")? + 9;

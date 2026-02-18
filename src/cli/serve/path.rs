@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolve URL to filesystem path, handling index.html for directories.
+/// Resolve URL to filesystem path, handling index.html for directories
 pub fn resolve_path(url: &str, serve_root: &Path) -> Option<PathBuf> {
     let clean = normalize_url(url);
 
@@ -37,7 +37,7 @@ pub fn resolve_path(url: &str, serve_root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Normalize URL: decode, strip query string, trim slashes.
+/// Normalize URL: decode, strip query string, trim slashes
 fn normalize_url(url: &str) -> String {
     use percent_encoding::percent_decode_str;
     let decoded = percent_decode_str(url)

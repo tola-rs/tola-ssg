@@ -11,7 +11,7 @@ use atom_syndication::{
 };
 use std::fs;
 
-/// Build Atom 1.0 feed.
+/// Build Atom 1.0 feed
 pub fn build_atom(config: &SiteConfig) -> Result<()> {
     AtomFeed::build(config).write()
 }

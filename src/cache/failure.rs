@@ -10,7 +10,7 @@ use super::CACHE_DIR;
 /// Error state file name
 const ERRORS_FILE: &str = "errors.json";
 
-/// A single persisted compile error.
+/// A single persisted compile error
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedError {
     pub path: String,
@@ -37,7 +37,7 @@ impl PersistedError {
     }
 }
 
-/// Collection of persisted compile errors.
+/// Collection of persisted compile errors
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PersistedErrorState {
     errors: Vec<PersistedError>,
@@ -85,14 +85,14 @@ impl PersistedErrorState {
     }
 }
 
-/// Check if file content is the same as new content.
+/// Check if file content is the same as new content
 fn file_content_matches(path: &Path, content: &str) -> bool {
     path.exists() && fs::read_to_string(path).is_ok_and(|existing| existing == content)
 }
 
-/// Persist compile errors to disk.
+/// Persist compile errors to disk
 ///
-/// Only writes if the content has actually changed to avoid unnecessary mtime updates.
+/// Only writes if the content has actually changed to avoid unnecessary mtime updates
 pub fn persist_errors(state: &PersistedErrorState, root: &Path) -> std::io::Result<()> {
     let cache_dir = root.join(CACHE_DIR);
     let errors_path = cache_dir.join(ERRORS_FILE);
@@ -111,7 +111,7 @@ pub fn persist_errors(state: &PersistedErrorState, root: &Path) -> std::io::Resu
     Ok(())
 }
 
-/// Restore compile errors from disk.
+/// Restore compile errors from disk
 pub fn restore_errors(root: &Path) -> std::io::Result<PersistedErrorState> {
     let errors_path = root.join(CACHE_DIR).join(ERRORS_FILE);
 
@@ -127,7 +127,7 @@ pub fn restore_errors(root: &Path) -> std::io::Result<PersistedErrorState> {
     Ok(state)
 }
 
-/// Clear persisted errors.
+/// Clear persisted errors
 #[allow(dead_code)]
 pub fn clear_errors(root: &Path) -> std::io::Result<()> {
     let errors_path = root.join(CACHE_DIR).join(ERRORS_FILE);

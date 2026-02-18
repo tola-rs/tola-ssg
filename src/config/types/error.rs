@@ -31,7 +31,7 @@ pub enum ConfigError {
 // ConfigDiagnostic
 // ============================================================================
 
-/// A single configuration diagnostic.
+/// A single configuration diagnostic
 #[derive(Debug, Clone)]
 pub struct ConfigDiagnostic {
     /// Config field path (e.g., "build.css.processor.input")

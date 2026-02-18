@@ -20,10 +20,10 @@ use super::queue::{CompileQueue, Priority};
 // Classification
 // =============================================================================
 
-/// Categorize a path based on config directories.
+/// Categorize a path based on config directories
 ///
-/// Note: The path should already be normalized before calling this function.
-/// Use `normalize_path()` on watcher paths before classification.
+/// Note: The path should already be normalized before calling this function
+/// Use `normalize_path()` on watcher paths before classification
 pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
     // Check output directory first (hook-generated files)
     if path.starts_with(config.paths().output_dir()) {
@@ -47,7 +47,7 @@ pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
     }
 }
 
-/// Result of classifying changed files.
+/// Result of classifying changed files
 #[derive(Debug)]
 pub struct ClassifyResult {
     /// Files grouped by category (for logging)
@@ -72,7 +72,7 @@ impl ClassifyResult {
     }
 }
 
-/// Classify changed files and determine rebuild strategy.
+/// Classify changed files and determine rebuild strategy
 ///
 /// This is a pure function that:
 /// - Categorizes each file
@@ -152,10 +152,10 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
     }
 }
 
-/// Convert a URL path to content file path using AddressSpace.
+/// Convert a URL path to content file path using AddressSpace
 ///
 /// Uses the same path source as the dependency graph (PageRoute.source),
-/// ensuring consistent path matching in set_active().
+/// ensuring consistent path matching in set_active()
 pub fn url_to_content_path(url: &str, _config: &SiteConfig) -> Option<PathBuf> {
     use crate::address::GLOBAL_ADDRESS_SPACE;
     use crate::core::UrlPath;
@@ -168,7 +168,7 @@ pub fn url_to_content_path(url: &str, _config: &SiteConfig) -> Option<PathBuf> {
         .map(|resource| resource.source().to_path_buf())
 }
 
-/// Collect all content files that depend on the changed files.
+/// Collect all content files that depend on the changed files
 pub fn collect_dependents(changed_files: &[PathBuf]) -> Vec<PathBuf> {
     let mut affected = FxHashSet::default();
 

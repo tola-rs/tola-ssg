@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 /// Compile-time architecture fingerprint (zero runtime overhead)
 ///
-/// Used to ensure rkyv cache files are only loaded on compatible architectures.
-/// The fingerprint is embedded in cache filenames to prevent accidental cross-arch use.
+/// Used to ensure rkyv cache files are only loaded on compatible architectures
+/// The fingerprint is embedded in cache filenames to prevent accidental cross-arch use
 ///
 /// # Examples
 ///
@@ -90,8 +90,8 @@ pub fn cache_path(base: &str, name: &str) -> PathBuf {
 
 /// Check if a cache path has a valid architecture fingerprint
 ///
-/// Returns `true` if the filename contains the current architecture fingerprint.
-/// This is used to determine if a cache file can be safely loaded.
+/// Returns `true` if the filename contains the current architecture fingerprint
+/// This is used to determine if a cache file can be safely loaded
 #[allow(dead_code)]
 pub fn is_cache_valid_for_arch(path: &std::path::Path) -> bool {
     path.file_name()
@@ -102,7 +102,7 @@ pub fn is_cache_valid_for_arch(path: &std::path::Path) -> bool {
 
 /// Generate a hash-based cache key from a path
 ///
-/// Uses the path's string representation for consistent hashing.
+/// Uses the path's string representation for consistent hashing
 #[allow(dead_code)]
 pub fn path_to_cache_hash(path: &std::path::Path) -> u64 {
     // Use our deterministic hash module

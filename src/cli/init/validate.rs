@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use std::{fs, path::Path};
 
-/// Initialization mode determines validation rules.
+/// Initialization mode determines validation rules
 #[derive(Debug, Clone, Copy)]
 pub enum InitMode {
     /// `tola init` - initialize in current directory (must be empty)
@@ -14,7 +14,7 @@ pub enum InitMode {
     NewDir,
 }
 
-/// Validate target directory for initialization.
+/// Validate target directory for initialization
 ///
 /// # Rules
 /// - `CurrentDir`: directory must be empty (or not exist)
@@ -42,7 +42,7 @@ pub fn validate_target(root: &Path, mode: InitMode) -> Result<()> {
     Ok(())
 }
 
-/// Check if directory is empty or doesn't exist.
+/// Check if directory is empty or doesn't exist
 fn is_empty(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(true);

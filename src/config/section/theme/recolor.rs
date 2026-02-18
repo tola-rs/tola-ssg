@@ -18,7 +18,7 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Recolor configuration for image color adaptation.
+/// Recolor configuration for image color adaptation
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "theme.recolor")]
@@ -54,7 +54,7 @@ impl Default for RecolorConfig {
     }
 }
 
-/// Recolor target selection.
+/// Recolor target selection
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RecolorTarget {
@@ -65,11 +65,11 @@ pub enum RecolorTarget {
     Auto,
 }
 
-/// Recolor color source.
+/// Recolor color source
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RecolorSource {
-    /// Auto-detect: `--tola-recolor-value` → `body { color }`.
+    /// Auto-detect: `--tola-recolor-value` -> `body { color }`.
     #[default]
     Auto,
     /// Use static colors from `list`.

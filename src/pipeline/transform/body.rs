@@ -1,4 +1,4 @@
-//! Body content injector (Indexed → Indexed).
+//! Body content injector (Indexed -> Indexed).
 //!
 //! Injects scripts before `</body>` based on site configuration.
 //! Currently handles SPA navigation script injection and recolor filter/JS.
@@ -9,7 +9,7 @@ use crate::compiler::family::Indexed;
 use crate::config::SiteConfig;
 use crate::embed::build::{SPA_JS, SpaVars};
 
-/// Injects body scripts based on site configuration.
+/// Injects body scripts based on site configuration
 pub struct BodyInjector<'a> {
     config: &'a SiteConfig,
 }

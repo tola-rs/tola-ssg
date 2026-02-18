@@ -10,7 +10,7 @@ use crate::pipeline::compile_for_scan;
 
 use super::{MarkdownMetaExtractor, MarkdownOptions, from_markdown};
 
-/// Scan a Markdown file to Indexed VDOM (no HTML rendering).
+/// Scan a Markdown file to Indexed VDOM (no HTML rendering)
 pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
     // Read source file
     let source = std::fs::read_to_string(path)?;

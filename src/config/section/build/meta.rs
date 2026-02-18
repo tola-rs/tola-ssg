@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default metadata label for Typst files.
+/// Default metadata label for Typst files
 pub const TOLA_META_LABEL: &str = "tola-meta";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

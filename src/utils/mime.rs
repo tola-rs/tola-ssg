@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-/// Common MIME type constants.
+/// Common MIME type constants
 pub mod types {
     // Text
     pub const HTML: &str = "text/html; charset=utf-8";
@@ -68,14 +68,14 @@ pub mod types {
     pub const EOT: &str = "application/vnd.ms-fontobject";
 }
 
-/// Guess MIME type from file extension.
+/// Guess MIME type from file extension
 ///
-/// Returns a full MIME type string suitable for HTTP Content-Type header.
+/// Returns a full MIME type string suitable for HTTP Content-Type header
 pub fn from_path(path: &Path) -> &'static str {
     from_extension(path.extension().and_then(|e| e.to_str()))
 }
 
-/// Guess MIME type from file extension string.
+/// Guess MIME type from file extension string
 pub fn from_extension(ext: Option<&str>) -> &'static str {
     match ext {
         // Web / Text
@@ -137,10 +137,10 @@ pub fn from_extension(ext: Option<&str>) -> &'static str {
     }
 }
 
-/// Get MIME type for favicon/icon files.
+/// Get MIME type for favicon/icon files
 ///
 /// This is a specialized version that defaults to `image/x-icon` for unknown types,
-/// which is appropriate for favicon files.
+/// which is appropriate for favicon files
 pub fn for_icon(path: &Path) -> &'static str {
     match path
         .extension()
@@ -160,22 +160,22 @@ pub fn for_icon(path: &Path) -> &'static str {
     }
 }
 
-/// Check if the MIME type represents text content.
+/// Check if the MIME type represents text content
 pub fn is_text(mime: &str) -> bool {
     mime.starts_with("text/") || mime == types::JSON || mime == types::XML
 }
 
-/// Check if the MIME type represents an image.
+/// Check if the MIME type represents an image
 pub fn is_image(mime: &str) -> bool {
     mime.starts_with("image/")
 }
 
-/// Check if the MIME type represents audio.
+/// Check if the MIME type represents audio
 pub fn is_audio(mime: &str) -> bool {
     mime.starts_with("audio/")
 }
 
-/// Check if the MIME type represents video.
+/// Check if the MIME type represents video
 pub fn is_video(mime: &str) -> bool {
     mime.starts_with("video/")
 }

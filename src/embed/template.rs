@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-/// Trait for template variable sets.
+/// Trait for template variable sets
 pub trait TemplateVars {
     fn apply(&self, content: &str) -> String;
 
@@ -13,7 +13,7 @@ pub trait TemplateVars {
     }
 }
 
-/// Template with typed variable injection.
+/// Template with typed variable injection
 #[derive(Debug, Clone, Copy)]
 pub struct Template<V> {
     content: &'static str,

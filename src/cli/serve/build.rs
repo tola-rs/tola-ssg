@@ -13,9 +13,9 @@ use crate::{
     freshness, generator, hooks, log, utils::git,
 };
 
-/// Initialize serve build environment.
+/// Initialize serve build environment
 ///
-/// IMPORTANT: This must be called BEFORE `set_serving()` to avoid race conditions.
+/// IMPORTANT: This must be called BEFORE `set_serving()` to avoid race conditions
 /// It handles:
 /// 1. Clean output directory (if --clean flag)
 /// 2. Initialize fonts and embedded assets
@@ -55,7 +55,7 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
     Ok(())
 }
 
-/// Process all assets for serve mode.
+/// Process all assets for serve mode
 fn process_assets(config: &SiteConfig) -> Result<()> {
     let clean = config.build.clean;
 
@@ -88,11 +88,11 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
     Ok(())
 }
 
-/// Build pages using scheduler for serve mode.
+/// Build pages using scheduler for serve mode
 ///
-/// Unlike `build_all()` which uses rayon, this uses the scheduler's priority queue.
+/// Unlike `build_all()` which uses rayon, this uses the scheduler's priority queue
 /// This allows on-demand requests (Active priority) to be processed before
-/// background compilation (Background priority).
+/// background compilation (Background priority)
 pub fn serve_build(config: &SiteConfig) -> Result<()> {
     use compiler::scheduler::SCHEDULER;
 
@@ -133,7 +133,7 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
     Ok(())
 }
 
-/// Finalize serve build: print warnings and persist cache.
+/// Finalize serve build: print warnings and persist cache
 fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     use crate::core::GLOBAL_ADDRESS_SPACE;
 

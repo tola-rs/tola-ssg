@@ -12,7 +12,7 @@ use crate::config::SiteConfig;
 use crate::core::ContentKind;
 use crate::page::{CompiledPage, PAGE_LINKS, STORED_PAGES};
 
-/// Scan all content files and populate global state.
+/// Scan all content files and populate global state
 ///
 /// This extracts metadata from all pages (via Typst batch_scan for .typ,
 /// frontmatter parsing for .md) and populates:
@@ -20,7 +20,7 @@ use crate::page::{CompiledPage, PAGE_LINKS, STORED_PAGES};
 /// - `STORED_PAGES`: Page metadata for `@tola/pages` virtual package
 /// - `PAGE_LINKS`: Internal link graph
 ///
-/// Requires Typst to be initialized before calling.
+/// Requires Typst to be initialized before calling
 pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     STORED_PAGES.clear();
     PAGE_LINKS.clear();

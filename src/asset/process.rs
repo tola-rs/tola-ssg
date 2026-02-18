@@ -14,10 +14,10 @@ use crate::page::PageRoute;
 
 use super::meta::{relative_path, route_from_source};
 
-/// Process an asset file from the assets directory.
+/// Process an asset file from the assets directory
 ///
-/// Copies the asset to the output directory, respecting freshness checks.
-/// Skips CSS processor input (handled centrally).
+/// Copies the asset to the output directory, respecting freshness checks
+/// Skips CSS processor input (handled centrally)
 pub fn process_asset(
     asset_path: &Path,
     config: &SiteConfig,
@@ -66,9 +66,9 @@ pub fn process_asset(
     Ok(())
 }
 
-/// Process an asset file from the content directory (non-.typ files).
+/// Process an asset file from the content directory (non-.typ files)
 ///
-/// These are files in the content directory that aren't pages.
+/// These are files in the content directory that aren't pages
 pub fn process_rel_asset(
     path: &Path,
     config: &SiteConfig,
@@ -102,21 +102,21 @@ pub fn process_rel_asset(
     Ok(())
 }
 
-/// Copy colocated assets from source directory to output directory.
+/// Copy colocated assets from source directory to output directory
 ///
 /// Colocated assets are files that live alongside a content file:
 /// ```text
 /// content/posts/
-/// ├── hello.typ           → public/posts/hello/index.html
-/// └── hello/              → colocated_dir
-///     ├── image.png       → public/posts/hello/image.png
+/// ├── hello.typ           -> public/posts/hello/index.html
+/// └── hello/              -> colocated_dir
+///     ├── image.png       -> public/posts/hello/image.png
 ///     └── assets/
-///         └── logo.svg    → public/posts/hello/assets/logo.svg
+///         └── logo.svg    -> public/posts/hello/assets/logo.svg
 /// ```
 ///
-/// For index files, all non-content files in the same directory are colocated assets.
+/// For index files, all non-content files in the same directory are colocated assets
 ///
-/// Returns the number of files copied.
+/// Returns the number of files copied
 pub fn copy_colocated_assets(route: &PageRoute, clean: bool) -> Result<usize> {
     let colocated_dir = match &route.colocated_dir {
         Some(dir) => dir,
@@ -138,7 +138,7 @@ pub fn copy_colocated_assets(route: &PageRoute, clean: bool) -> Result<usize> {
     Ok(count)
 }
 
-/// Recursively copy directory contents, skipping content files for index pages.
+/// Recursively copy directory contents, skipping content files for index pages
 fn copy_dir_recursive(
     src_dir: &Path,
     dest_dir: &Path,
@@ -180,9 +180,9 @@ fn copy_dir_recursive(
     Ok(())
 }
 
-/// Process flatten assets (files that go to output root).
+/// Process flatten assets (files that go to output root)
 ///
-/// Returns the number of files processed.
+/// Returns the number of files processed
 pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) -> Result<usize> {
     let assets = super::scan_flatten_assets(config);
     let mut count = 0;
@@ -208,7 +208,7 @@ pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) 
     Ok(count)
 }
 
-/// Generate CNAME file if needed.
+/// Generate CNAME file if needed
 ///
 /// Auto-generates CNAME from `site.url` domain when:
 /// 1. `site.url` is defined with a custom domain

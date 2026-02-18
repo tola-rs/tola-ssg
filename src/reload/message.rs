@@ -51,13 +51,13 @@ pub enum HotReloadMessage {
         content: String,
     },
 
-    /// Keep-alive ping (server → client)
+    /// Keep-alive ping (server -> client)
     Ping {
         /// Timestamp for latency measurement
         ts: u64,
     },
 
-    /// Keep-alive pong (client → server)
+    /// Keep-alive pong (client -> server)
     Pong {
         /// Echo back the timestamp
         ts: u64,

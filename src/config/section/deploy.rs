@@ -19,7 +19,7 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Deploy configuration (experimental).
+/// Deploy configuration (experimental)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "deploy", status = experimental)]

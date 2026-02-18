@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-/// Kind of content file, determines compilation strategy.
+/// Kind of content file, determines compilation strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentKind {
     /// Typst file (.typ) - compile with typst-batch
@@ -59,7 +59,7 @@ impl ContentKind {
     }
 }
 
-/// Category of a file, determines rebuild strategy.
+/// Category of a file, determines rebuild strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileCategory {
     /// Content file - compile based on kind

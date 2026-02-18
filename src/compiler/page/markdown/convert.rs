@@ -462,7 +462,7 @@ mod tests {
 
 use anyhow::Result;
 
-/// Markdown metadata extractor from YAML (`---`) or TOML (`+++`) frontmatter.
+/// Markdown metadata extractor from YAML (`---`) or TOML (`+++`) frontmatter
 pub struct MarkdownMetaExtractor;
 
 impl MarkdownMetaExtractor {
@@ -514,7 +514,7 @@ impl MarkdownMetaExtractor {
                             .collect();
                     }
                     _ => {
-                        // Custom field → extra (preserve original key case)
+                        // Custom field -> extra (preserve original key case)
                         let key = key.trim().to_string();
                         let json_value = parse_yaml_value(value);
                         meta.extra.insert(key, json_value);
@@ -558,12 +558,12 @@ impl MarkdownMetaExtractor {
     }
 }
 
-/// Parse a YAML-like value string to JSON value.
+/// Parse a YAML-like value string to JSON value
 ///
 /// Supports:
 /// - Booleans: `true`, `false`
 /// - Numbers: `123`, `3.14`
-/// - Arrays: `a, b, c` → `["a", "b", "c"]`
+/// - Arrays: `a, b, c` -> `["a", "b", "c"]`
 /// - Strings: everything else
 fn parse_yaml_value(s: &str) -> serde_json::Value {
     use serde_json::Value;

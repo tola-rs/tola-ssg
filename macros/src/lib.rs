@@ -48,15 +48,15 @@
 //! # Section inference
 //!
 //! Without `section` attribute, inferred from struct name:
-//! - `SiteInfoConfig` → `site_info`
-//! - `CssConfig` → `css`
+//! - `SiteInfoConfig` -> `site_info`
+//! - `CssConfig` -> `css`
 
 mod config;
 
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};
 
-/// Derive macro that generates FIELDS and template().
+/// Derive macro that generates FIELDS and template()
 #[proc_macro_derive(Config, attributes(config))]
 pub fn derive_config(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

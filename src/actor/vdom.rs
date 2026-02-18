@@ -34,7 +34,7 @@ use crate::logger::WatchStatus;
 use crate::reload::diff::{DiffOutcome, compute_diff_shared};
 use tola_vdom::prelude::*;
 
-/// Batch entry status.
+/// Batch entry status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchStatus {
     Reload,
@@ -42,7 +42,7 @@ enum BatchStatus {
     Error,
 }
 
-/// Entry for batch log output.
+/// Entry for batch log output
 #[derive(Debug, Clone)]
 struct BatchEntry {
     path: String,
@@ -104,7 +104,7 @@ impl BatchEntry {
     }
 }
 
-/// Aggregates batch results and conflicts for unified output.
+/// Aggregates batch results and conflicts for unified output
 struct BatchLogger {
     results: Vec<BatchEntry>,
     conflicts: FxHashMap<UrlPath, Vec<PathBuf>>,
@@ -237,10 +237,10 @@ impl BatchLogger {
     }
 }
 
-/// Handles permalink change side effects (old file cleanup).
+/// Handles permalink change side effects (old file cleanup)
 ///
-/// Note: Permalink change detection is now done in CompilerActor.
-/// This handler only processes the side effects.
+/// Note: Permalink change detection is now done in CompilerActor
+/// This handler only processes the side effects
 struct PermalinkHandler;
 
 impl PermalinkHandler {
@@ -277,14 +277,14 @@ impl PermalinkHandler {
     }
 }
 
-/// VDOM Actor - converts AST to VDOM and computes diffs.
+/// VDOM Actor - converts AST to VDOM and computes diffs
 ///
 /// This is a thin wrapper that delegates to helper structures:
 /// - `BatchLogger` for aggregated output
 /// - `PermalinkHandler` for permalink changes
 ///
-/// Uses the global `BUILD_CACHE` for VDOM storage, shared with the scheduler.
-/// This ensures on-demand compiled pages are available for hot reload diffing.
+/// Uses the global `BUILD_CACHE` for VDOM storage, shared with the scheduler
+/// This ensures on-demand compiled pages are available for hot reload diffing
 pub struct VdomActor {
     rx: mpsc::Receiver<VdomMsg>,
     ws_tx: mpsc::Sender<WsMsg>,

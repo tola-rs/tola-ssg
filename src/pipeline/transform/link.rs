@@ -1,4 +1,4 @@
-//! Link and URL processor (Indexed → Indexed).
+//! Link and URL processor (Indexed -> Indexed).
 //!
 //! Processes all URL-related attributes:
 //! - Link family: href/src attributes (absolute, relative, fragment, external)
@@ -33,7 +33,7 @@ use crate::utils::path::slug::{slugify_fragment, slugify_path};
 // VDOM Transform
 // =============================================================================
 
-/// Processes link href/src and heading id attributes in Indexed VDOM.
+/// Processes link href/src and heading id attributes in Indexed VDOM
 pub struct LinkTransform<'a> {
     config: &'a SiteConfig,
     route: &'a PageRoute,
@@ -83,17 +83,17 @@ impl Transform<Indexed> for LinkTransform<'_> {
 // Link Processing Logic
 // =============================================================================
 
-/// Resolve a link to its final URL string.
+/// Resolve a link to its final URL string
 ///
 /// This is the main entry point for link resolution. It classifies the link
-/// syntactically using [`LinkKind`], then resolves it based on context.
+/// syntactically using [`LinkKind`], then resolves it based on context
 ///
 /// # Link Types
 ///
-/// - External URLs (https://, mailto:, etc.) → preserved as-is
-/// - Fragment anchors (#section) → slugified
-/// - Site-root links (/about) → prefixed and slugified
-/// - File-relative (./image.png) → adjusted for output structure
+/// - External URLs (https://, mailto:, etc.) -> preserved as-is
+/// - Fragment anchors (#section) -> slugified
+/// - Site-root links (/about) -> prefixed and slugified
+/// - File-relative (./image.png) -> adjusted for output structure
 pub fn resolve_link(value: &str, config: &SiteConfig, route: &PageRoute) -> Result<String> {
     if value.is_empty() {
         anyhow::bail!("empty link URL found");
@@ -114,15 +114,15 @@ pub fn resolve_link(value: &str, config: &SiteConfig, route: &PageRoute) -> Resu
     Ok(url)
 }
 
-/// Process a link value (href or src attribute).
+/// Process a link value (href or src attribute)
 ///
-/// Alias for [`resolve_link`] for clarity at call sites.
+/// Alias for [`resolve_link`] for clarity at call sites
 #[inline]
 pub fn process_link_value(value: &str, config: &SiteConfig, route: &PageRoute) -> Result<String> {
     resolve_link(value, config, route)
 }
 
-/// Resolve site-root-relative links (/about, /posts/hello).
+/// Resolve site-root-relative links (/about, /posts/hello)
 fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
     let paths = config.paths();
 
@@ -148,10 +148,10 @@ fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
     Ok(url)
 }
 
-/// Resolve file-relative links (./image.png, ../other).
+/// Resolve file-relative links (./image.png, ../other)
 ///
 /// For non-index files, relative paths are adjusted because
-/// `foo.typ` becomes `foo/index.html` (one directory deeper).
+/// `foo.typ` becomes `foo/index.html` (one directory deeper)
 fn resolve_file_relative(value: &str, route: &PageRoute) -> String {
     // External links (https://, mailto:) are already handled by LinkKind::External,
     // but bare domains without scheme (example.com) fall through here
@@ -172,7 +172,7 @@ fn resolve_file_relative(value: &str, route: &PageRoute) -> String {
     }
 
     // For non-index files without colocated assets:
-    // ./image.png → ../image.png (go up one level because foo.typ → foo/index.html)
+    // ./image.png -> ../image.png (go up one level because foo.typ -> foo/index.html)
     format!("../{value}")
 }
 
@@ -180,7 +180,7 @@ fn resolve_file_relative(value: &str, route: &PageRoute) -> String {
 // Path Prefix Handling
 // =============================================================================
 
-/// Build a URL with path_prefix, avoiding double-prefixing.
+/// Build a URL with path_prefix, avoiding double-prefixing
 fn build_prefixed_url(path: &str, config: &SiteConfig) -> String {
     let paths = config.paths();
     let slugified = slugify_path(path, &config.build.slug);
@@ -193,7 +193,7 @@ fn build_prefixed_url(path: &str, config: &SiteConfig) -> String {
     }
 }
 
-/// Check if a path already contains the configured path_prefix.
+/// Check if a path already contains the configured path_prefix
 fn has_path_prefix(path: &str, config: &SiteConfig) -> bool {
     let paths = config.paths();
 
@@ -207,7 +207,7 @@ fn has_path_prefix(path: &str, config: &SiteConfig) -> bool {
     path_starts_with_segment(path, &prefix_str)
 }
 
-/// Check if path starts with a given segment (not just string prefix).
+/// Check if path starts with a given segment (not just string prefix)
 fn path_starts_with_segment(path: &str, segment: &str) -> bool {
     if path == segment {
         return true;
@@ -222,7 +222,7 @@ fn path_starts_with_segment(path: &str, segment: &str) -> bool {
 
 static ASSET_TOP_LEVELS: OnceLock<FxHashSet<OsString>> = OnceLock::new();
 
-/// Check if a path is an asset link.
+/// Check if a path is an asset link
 fn is_asset_link(path: &str, config: &SiteConfig) -> bool {
     let asset_top_levels = get_asset_top_levels(config);
 
@@ -235,7 +235,7 @@ fn is_asset_link(path: &str, config: &SiteConfig) -> bool {
     asset_top_levels.contains(first_component.as_ref() as &std::ffi::OsStr)
 }
 
-/// Get top-level asset directory names from all nested directories.
+/// Get top-level asset directory names from all nested directories
 fn get_asset_top_levels(config: &SiteConfig) -> &'static FxHashSet<OsString> {
     ASSET_TOP_LEVELS.get_or_init(|| {
         let mut set = FxHashSet::default();

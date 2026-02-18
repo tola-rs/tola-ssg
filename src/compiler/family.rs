@@ -31,7 +31,7 @@ pub struct MathProcessed {
     pub html: String,
 }
 
-/// Math element family for LaTeX math expressions.
+/// Math element family for LaTeX math expressions
 #[family(processed = MathProcessed)]
 pub struct Math {
     /// The raw LaTeX formula
@@ -69,7 +69,7 @@ pub struct CodeProcessed {
     pub html: String,
 }
 
-/// Code element family for inline code and code blocks.
+/// Code element family for inline code and code blocks
 #[family(processed = CodeProcessed)]
 pub struct Code {
     /// The raw code content
@@ -104,7 +104,7 @@ impl Code {
 // Site Phase Definition
 // =============================================================================
 
-/// Tola site phase with all families (built-in + custom).
+/// Tola site phase with all families (built-in + custom)
 ///
 /// Generates:
 /// - `TolaSite::Raw`, `TolaSite::Indexed`, `TolaSite::Processed` phase types

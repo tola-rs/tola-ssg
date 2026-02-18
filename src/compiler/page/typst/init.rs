@@ -14,7 +14,7 @@ use crate::package;
 // Virtual File System
 // =============================================================================
 
-/// Tola's virtual file system for `@tola/site:0.0.0` and `@tola/current:0.0.0` packages.
+/// Tola's virtual file system for `@tola/site:0.0.0` and `@tola/current:0.0.0` packages
 pub struct TolaVirtualFS;
 
 impl typst_batch::VirtualFileSystem for TolaVirtualFS {
@@ -32,7 +32,7 @@ impl typst_batch::VirtualFileSystem for TolaVirtualFS {
 // Public API
 // =============================================================================
 
-/// Initialize Typst compilation environment.
+/// Initialize Typst compilation environment
 ///
 /// Call once at startup. This:
 /// - Registers the virtual file system for `/_data/*.json` files
@@ -42,9 +42,9 @@ pub fn init_typst(font_dirs: &[&Path]) {
     typst_batch::warmup(font_dirs);
 }
 
-/// Register only the virtual file system (no font warmup).
+/// Register only the virtual file system (no font warmup)
 ///
-/// Use for lightweight operations like query/validate that don't need fonts.
+/// Use for lightweight operations like query/validate that don't need fonts
 pub fn init_vfs() {
     typst_batch::set_virtual_fs(TolaVirtualFS);
 }
