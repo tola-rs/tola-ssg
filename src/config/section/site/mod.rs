@@ -1,6 +1,6 @@
 //! `[site]` section configuration.
 //!
-//! Contains site metadata and navigation settings.
+//! Contains site metadata, navigation, and site-level features.
 //!
 //! # Example
 //!
@@ -18,18 +18,40 @@
 //! enable = true
 //! transition = { style = "fade", time = 200 }
 //! preload = { enable = true, delay = 100 }
+//!
+//! [site.header]
+//! icon = "favicon.ico"
+//! styles = ["styles/custom.css"]
+//! scripts = ["scripts/app.js"]
+//!
+//! [site.feed]
+//! enable = true
+//! path = "feed.xml"
+//!
+//! [site.sitemap]
+//! enable = true
+//!
+//! [site]
+//! not_found = "404.html"
 //! ```
 
+mod feed;
+mod header;
 mod info;
 mod nav;
+mod sitemap;
 
+pub use feed::{FeedConfig, FeedFormat};
+pub use header::HeaderConfig;
 pub use info::SiteInfoConfig;
 pub use nav::NavConfig;
+pub use sitemap::SitemapConfig;
 
 use macros::Config;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-/// Site section configuration containing info and nav.
+/// Site section configuration containing info, nav, and site-level features.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site")]
@@ -41,4 +63,19 @@ pub struct SiteSectionConfig {
     /// SPA navigation settings (includes transition and preload).
     #[config(sub_config)]
     pub nav: NavConfig,
+
+    /// Custom `<head>` elements (favicon, styles, scripts).
+    #[config(sub_config)]
+    pub header: HeaderConfig,
+
+    /// Feed generation settings (RSS/Atom).
+    #[config(sub_config)]
+    pub feed: FeedConfig,
+
+    /// Sitemap generation settings.
+    #[config(sub_config)]
+    pub sitemap: SitemapConfig,
+
+    /// Custom 404 page source file (relative to site root).
+    pub not_found: Option<PathBuf>,
 }

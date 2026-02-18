@@ -301,7 +301,7 @@ fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
 
 /// Copy HTML 404 page to output directory if configured.
 fn copy_html_404(config: &SiteConfig) -> Result<()> {
-    let Some(not_found) = &config.build.not_found else {
+    let Some(not_found) = &config.site.not_found else {
         return Ok(());
     };
 

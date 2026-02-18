@@ -123,10 +123,10 @@ impl CompiledPage {
             .strip_prefix(&content_dir)
             .map_err(|_| anyhow!("File is not in content directory: {}", source.display()))?;
 
-        // Check if this is the 404 page (compare source path with config.build.not_found)
+        // Check if this is the 404 page (compare source path with config.site.not_found)
         // not_found is relative to site root, so we compare with source relative to root
         let is_404 = config
-            .build
+            .site
             .not_found
             .as_ref()
             .is_some_and(|nf| config.root_relative(&source) == *nf);

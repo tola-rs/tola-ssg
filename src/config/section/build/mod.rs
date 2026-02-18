@@ -11,14 +11,6 @@
 //! assets = "assets"           # Static assets directory (relative to site root)
 //! deps = ["templates"]        # Dependency dirs (relative to site root)
 //! minify = true               # Minify HTML output
-//! not_found = "404.html"      # Custom 404 page (relative to site root, supports .typ/.html)
-//!
-//! [build.feed]
-//! enable = true               # Generate RSS/Atom feed
-//! path = "feed.xml"           # Feed output path
-//!
-//! [build.sitemap]
-//! enable = true               # Generate sitemap.xml
 //!
 //! [build.slug]
 //! path = "safe"               # URL path slugification: full | safe | ascii
@@ -29,34 +21,23 @@
 //! converter = "builtin"       # Conversion tool: builtin | magick | ffmpeg | none
 //! format = "avif"             # Output format: avif | png | jpg | webp
 //! dpi = 144.0                 # Rendering DPI (default: 96.0)
-//!
-//! [build.header]
-//! icon = "favicon.ico"        # Favicon path (relative to `[build.assets]`)
-//! styles = ["styles/custom.css"]     # CSS files (relative to `[build.assets]`)
-//! scripts = ["scripts/app.js"]        # JS files (relative to `[build.assets]`)
 //! ```
 //!
-//! See submodules for detailed options: [`feed`], [`sitemap`], [`slug`], [`svg`], [`css`], [`header`].
+//! See submodules for detailed options: [`slug`], [`svg`], [`css`].
 
 pub mod assets;
 mod css;
 mod diagnostics;
-mod feed;
-mod header;
 mod hooks;
 mod meta;
-mod sitemap;
 mod slug;
 mod svg;
 
 pub use assets::AssetsConfig;
 pub use css::CssConfig;
 pub use diagnostics::DiagnosticsConfig;
-pub use feed::{FeedConfig, FeedFormat};
-pub use header::HeaderConfig;
 pub use hooks::{HookConfig, HooksConfig, WatchMode};
 pub use meta::MetaConfig;
-pub use sitemap::SitemapConfig;
 pub use slug::{SlugCase, SlugConfig, SlugMode};
 pub use svg::{SvgConfig, SvgConverter, SvgFormat};
 
@@ -98,15 +79,6 @@ pub struct BuildSectionConfig {
     #[serde(skip)]
     pub skip_drafts: bool,
 
-    /// Custom 404 page source file.
-    pub not_found: Option<PathBuf>,
-
-    /// Feed generation settings.
-    pub feed: FeedConfig,
-
-    /// Sitemap generation settings.
-    pub sitemap: SitemapConfig,
-
     /// URL slugification settings.
     pub slug: SlugConfig,
 
@@ -121,9 +93,6 @@ pub struct BuildSectionConfig {
 
     /// Metadata extraction settings.
     pub meta: MetaConfig,
-
-    /// Custom `<head>` elements.
-    pub header: HeaderConfig,
 
     /// Diagnostics display settings (warnings/errors).
     pub diagnostics: DiagnosticsConfig,
@@ -148,15 +117,11 @@ impl Default for BuildSectionConfig {
             minify: true,
             clean: false,
             skip_drafts: false,
-            not_found: None,
-            feed: FeedConfig::default(),
-            sitemap: SitemapConfig::default(),
             slug: SlugConfig::default(),
             svg: SvgConfig::default(),
             css: CssConfig::default(),
             hooks: HooksConfig::default(),
             meta: MetaConfig::default(),
-            header: HeaderConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             allow_experimental: false,
         }

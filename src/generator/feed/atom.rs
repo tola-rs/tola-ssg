@@ -70,7 +70,7 @@ impl AtomFeed {
             .href(format!(
                 "{}/{}",
                 base_url,
-                self.config.build.feed.path.display()
+                self.config.site.feed.path.display()
             ))
             .rel("self".to_string())
             .mime_type(Some("application/atom+xml".to_string()))
@@ -105,7 +105,7 @@ impl AtomFeed {
     fn write(self) -> Result<()> {
         let minify = self.config.build.minify;
         let output_dir = self.config.paths().output_dir();
-        let feed_path = self.config.build.feed.path.clone();
+        let feed_path = self.config.site.feed.path.clone();
         let xml = self.into_xml()?;
         let xml = minify_xml(xml.as_bytes(), minify);
         // Resolve feed path relative to output_dir (with path_prefix)

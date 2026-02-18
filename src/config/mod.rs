@@ -419,12 +419,12 @@ impl SiteConfig {
 
         if is_serve {
             // Serve: disable feed/sitemap by default, enable only if explicitly requested
-            self.build.feed.enable = args.rss.unwrap_or(false);
-            self.build.sitemap.enable = args.sitemap.unwrap_or(false);
+            self.site.feed.enable = args.rss.unwrap_or(false);
+            self.site.sitemap.enable = args.sitemap.unwrap_or(false);
         } else {
             // Build/Deploy: respect config, override only if CLI flag provided
-            Self::update_option(&mut self.build.feed.enable, args.rss.as_ref());
-            Self::update_option(&mut self.build.sitemap.enable, args.sitemap.as_ref());
+            Self::update_option(&mut self.site.feed.enable, args.rss.as_ref());
+            Self::update_option(&mut self.site.sitemap.enable, args.sitemap.as_ref());
         }
     }
 
@@ -551,12 +551,12 @@ impl SiteConfig {
         self.build.svg.validate_field_status(&mut diag);
 
         // Validate each section
-        self.site.info.validate(self.build.feed.enable, &mut diag);
+        self.site.info.validate(self.site.feed.enable, &mut diag);
         self.build.validate(&mut diag);
         self.build.css.validate(&mut diag);
         self.build.svg.validate(&mut diag);
         self.build.assets.validate(&mut diag);
-        self.build
+        self.site
             .header
             .validate(&self.build.assets, self.get_root(), &mut diag);
 

@@ -23,7 +23,7 @@ const SITEMAP_NS: &str = "http://www.sitemaps.org/schemas/sitemap/0.9";
 
 /// Build sitemap if enabled.
 pub fn build_sitemap(config: &SiteConfig) -> Result<()> {
-    if config.build.sitemap.enable {
+    if config.site.sitemap.enable {
         let sitemap = Sitemap::build(config);
         sitemap.write(config)?;
     }
@@ -90,7 +90,7 @@ impl Sitemap {
 
     fn write(self, config: &SiteConfig) -> Result<()> {
         // Resolve sitemap path relative to output_dir (with path_prefix)
-        let sitemap_path = config.paths().output_dir().join(&config.build.sitemap.path);
+        let sitemap_path = config.paths().output_dir().join(&config.site.sitemap.path);
         let xml = self.into_xml();
         let xml = minify_xml(xml.as_bytes(), config.build.minify);
 
