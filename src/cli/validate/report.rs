@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 
 use crate::utils::plural_s;
 
-/// A single validation error.
+/// A single validation error
 #[derive(Debug, Clone)]
 pub struct ValidationError {
     /// The link/path that failed.
@@ -16,7 +16,7 @@ pub struct ValidationError {
     pub reason: String,
 }
 
-/// Unified validation report for all error types.
+/// Unified validation report for all error types
 #[derive(Debug, Default)]
 pub struct ValidationReport {
     /// Internal link errors (broken page links), grouped by source file.

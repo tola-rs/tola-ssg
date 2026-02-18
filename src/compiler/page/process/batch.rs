@@ -57,14 +57,14 @@ struct BuildPageResult {
     kind: crate::page::PageKind,
 }
 
-/// Compile all pages. Static pages are written after conflict detection passes.
+/// Compile all pages. Static pages are written after conflict detection passes
 ///
 /// Uses pre-scan optimization: always scans first to collect metadata and
-/// identify iterative pages, then compiles with complete STORED_PAGES data.
+/// identify iterative pages, then compiles with complete STORED_PAGES data
 ///
 /// If `is_scan_completed()` is true (progressive serving mode), skips
 /// clearing/repopulating STORED_PAGES and GLOBAL_ADDRESS_SPACE since
-/// scan_pages() already did this.
+/// scan_pages() already did this
 pub fn build_static_pages(
     mode: BuildMode,
     config: &SiteConfig,
@@ -179,10 +179,10 @@ pub fn build_static_pages(
     })
 }
 
-/// Maximum iterations for metadata convergence.
+/// Maximum iterations for metadata convergence
 const MAX_ITERATIONS: usize = 5;
 
-/// Recompile iterative pages with complete virtual data.
+/// Recompile iterative pages with complete virtual data
 ///
 /// Uses iterative compilation to handle self-referencing metadata:
 /// - Compile with current STORED_PAGES data
@@ -301,7 +301,7 @@ pub fn rebuild_iterative_pages(
     Ok(pages)
 }
 
-/// Process iterative page without writing (for iteration loop).
+/// Process iterative page without writing (for iteration loop)
 fn process_iterative_page(
     ctx: &BuildContext,
     mut page: CompiledPage,
@@ -354,12 +354,12 @@ fn create_batch_compiler<'a>(
         .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// Build inputs with site config and pages data.
+/// Build inputs with site config and pages data
 fn build_site_inputs(config: &SiteConfig) -> Result<typst_batch::Inputs> {
     STORED_PAGES.build_inputs(config)
 }
 
-/// Populate STORED_PAGES and PAGE_LINKS from pre-scan results.
+/// Populate STORED_PAGES and PAGE_LINKS from pre-scan results
 pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
     // First pass: collect all page permalinks and metadata
     let mut page_permalinks: Vec<(UrlPath, &ScannedPage)> = Vec::new();
@@ -409,7 +409,7 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
     }
 }
 
-/// Create batcher with inputs, optionally reusing snapshot.
+/// Create batcher with inputs, optionally reusing snapshot
 fn create_batch_with_inputs<'a>(
     root: &'a Path,
     paths: &[&'a PathBuf],
@@ -431,7 +431,7 @@ fn create_batch_with_inputs<'a>(
     }))
 }
 
-/// Compile with per-file context for @tola/current.
+/// Compile with per-file context for @tola/current
 fn compile_typst_batch_with_context<'a>(
     batch: &Option<TypstBatcher<'a>>,
     files: &[&PathBuf],
@@ -464,7 +464,7 @@ fn compile_typst_batch_with_context<'a>(
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// Compile with custom context closure (for rebuild_iterative_pages).
+/// Compile with custom context closure (for rebuild_iterative_pages)
 fn compile_typst_batch_with_closure<'a, F>(
     batch: &Option<TypstBatcher<'a>>,
     files: &[&PathBuf],
@@ -579,7 +579,7 @@ fn process_markdown_files(
 // Page Finalization
 // ============================================================================
 
-/// Finalize a page during static build. Does NOT write - deferred until conflict check.
+/// Finalize a page during static build. Does NOT write - deferred until conflict check
 fn finalize_static_page(
     ctx: &BuildContext,
     mut page: CompiledPage,
@@ -664,10 +664,10 @@ fn collect_results(
 // Page Writing
 // ============================================================================
 
-/// Write all static pages to disk.
+/// Write all static pages to disk
 ///
 /// This is called after conflict detection passes. It writes all non-iterative
-/// pages, copies their colocated assets, and generates redirect HTML for aliases.
+/// pages, copies their colocated assets, and generates redirect HTML for aliases
 fn write_static_pages(
     pages: &[CompiledPage],
     iterative_paths: &[PathBuf],
@@ -684,7 +684,7 @@ fn write_static_pages(
         .try_for_each(|page| write_single_page(page, clean, deps_hash, output_dir))
 }
 
-/// Filter pages to exclude iterative ones.
+/// Filter pages to exclude iterative ones
 fn filter_direct_pages<'a>(
     pages: &'a [CompiledPage],
     iterative_paths: &[PathBuf],
@@ -698,7 +698,7 @@ fn filter_direct_pages<'a>(
         .collect()
 }
 
-/// Write a single page: HTML file, colocated assets, and redirects.
+/// Write a single page: HTML file, colocated assets, and redirects
 fn write_single_page(
     page: &CompiledPage,
     clean: bool,
@@ -717,12 +717,12 @@ fn write_single_page(
 // Address Space
 // ============================================================================
 
-/// Build the global address space from page metadata.
+/// Build the global address space from page metadata
 ///
 /// This populates `GLOBAL_ADDRESS_SPACE` with all pages and assets,
-/// enabling internal link validation.
+/// enabling internal link validation
 ///
-/// Uses the pure `asset::scan` module for directory traversal.
+/// Uses the pure `asset::scan` module for directory traversal
 pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
     let mut space = GLOBAL_ADDRESS_SPACE.write();
     space.clear();

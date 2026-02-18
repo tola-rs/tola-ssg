@@ -4,11 +4,11 @@ use std::path::Path;
 
 use crate::config::section::build::assets::FlattenEntry;
 
-/// Extract domain from URL string.
+/// Extract domain from URL string
 ///
 /// Uses `url` crate for proper parsing to handle edge cases:
-/// - Strips port numbers: `example.com:8080` → `example.com`
-/// - Handles auth info: `user:pass@example.com` → `example.com`
+/// - Strips port numbers: `example.com:8080` -> `example.com`
+/// - Handles auth info: `user:pass@example.com` -> `example.com`
 /// - Rejects localhost and IP addresses
 ///
 /// # Returns
@@ -38,9 +38,9 @@ fn extract_domain(url_str: &str) -> Option<String> {
     Some(host.to_string())
 }
 
-/// Check if CNAME should be auto-generated.
+/// Check if CNAME should be auto-generated
 ///
-/// Returns the domain name if CNAME should be generated, None otherwise.
+/// Returns the domain name if CNAME should be generated, None otherwise
 ///
 /// # Rules
 /// 1. `site.url` must be defined

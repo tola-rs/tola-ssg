@@ -9,13 +9,13 @@ use crate::core::UrlPath;
 
 use super::{AssetKind, AssetRoute};
 
-/// Create an `AssetRoute` from a source path in a nested assets directory.
+/// Create an `AssetRoute` from a source path in a nested assets directory
 ///
-/// This is for global assets only. Use `scan::scan_colocated_assets` for colocated assets.
+/// This is for global assets only. Use `scan::scan_colocated_assets` for colocated assets
 ///
 /// # Errors
 ///
-/// Returns an error if the source path is not within any configured assets directory.
+/// Returns an error if the source path is not within any configured assets directory
 pub fn route_from_source(source: PathBuf, config: &SiteConfig) -> Result<AssetRoute> {
     let output_dir = config.paths().output_dir();
 
@@ -42,7 +42,7 @@ pub fn route_from_source(source: PathBuf, config: &SiteConfig) -> Result<AssetRo
     ))
 }
 
-/// Get relative path from assets directory (for logging).
+/// Get relative path from assets directory (for logging)
 pub fn relative_path(source: &Path, config: &SiteConfig) -> String {
     // Try each nested directory
     for entry in &config.build.assets.nested {
@@ -54,13 +54,13 @@ pub fn relative_path(source: &Path, config: &SiteConfig) -> String {
     source.display().to_string()
 }
 
-/// Generate a URL path from an output file path.
+/// Generate a URL path from an output file path
 ///
-/// Handles path prefix stripping and cross-platform separators.
+/// Handles path prefix stripping and cross-platform separators
 ///
 /// # Errors
 ///
-/// Returns an error if the path is not within the output directory.
+/// Returns an error if the path is not within the output directory
 pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> {
     let output_root = &config.build.output;
 
@@ -82,10 +82,10 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
     Ok(url)
 }
 
-/// Compute href for an asset path (relative to site root).
+/// Compute href for an asset path (relative to site root)
 ///
 /// The path in config (e.g., `build.header.styles`) should be the **full physical path**
-/// relative to site root, like `"vendor/static/style.css"`.
+/// relative to site root, like `"vendor/static/style.css"`
 ///
 /// # Example
 ///
@@ -103,7 +103,7 @@ pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> 
 ///
 /// # Errors
 ///
-/// Returns an error if the asset path is not within any configured asset entry.
+/// Returns an error if the asset path is not within any configured asset entry
 pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<String> {
     // Strip common prefixes: "./"
     let normalized = asset_path.strip_prefix("./").unwrap_or(asset_path);

@@ -10,10 +10,10 @@ use std::{
 };
 use tiny_http::Server;
 
-/// Maximum number of port binding attempts.
+/// Maximum number of port binding attempts
 const MAX_PORT_RETRIES: u16 = 10;
 
-/// Bind to the specified interface and port, with automatic port retry.
+/// Bind to the specified interface and port, with automatic port retry
 pub fn bind_with_retry(
     interface: std::net::IpAddr,
     base_port: u16,
@@ -44,15 +44,15 @@ pub fn bind_with_retry(
     unreachable!()
 }
 
-/// Register server for graceful shutdown.
+/// Register server for graceful shutdown
 ///
-/// This registers the server with the global shutdown handler set up in main().
-/// When Ctrl+C is pressed, the handler will unblock the server and notify actors.
+/// This registers the server with the global shutdown handler set up in main()
+/// When Ctrl+C is pressed, the handler will unblock the server and notify actors
 pub fn register_server_for_shutdown(server: Arc<Server>, shutdown_tx: Sender<()>) {
     register_server(server, shutdown_tx);
 }
 
-/// Spawn the actor system for file watching and hot reload.
+/// Spawn the actor system for file watching and hot reload
 pub fn spawn_actors(
     config: Arc<SiteConfig>,
     watch_enabled: bool,
@@ -86,7 +86,7 @@ fn run_actor_system(config: Arc<SiteConfig>, ws_port: Option<u16>, shutdown_rx: 
     });
 }
 
-/// Wait for actor system to shutdown gracefully (max 2 seconds).
+/// Wait for actor system to shutdown gracefully (max 2 seconds)
 pub fn wait_for_shutdown(handle: Option<JoinHandle<()>>) {
     let Some(handle) = handle else { return };
 

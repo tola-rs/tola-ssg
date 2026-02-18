@@ -8,22 +8,22 @@ use crate::page::PageRoute;
 
 use super::{AssetKind, AssetRoute};
 
-/// Scan global assets directory.
+/// Scan global assets directory
 ///
 /// Returns all assets found in the configured nested asset directories
-/// with their computed URLs and output paths.
+/// with their computed URLs and output paths
 ///
 /// # Move-type Flatten Files
 ///
 /// Files configured as flatten with `type = "move"` (the default) are
 /// **skipped** during nested scanning. They will only be output to the
 /// flatten location. Files with `type = "copy"` are included here and
-/// also in `scan_flatten_assets`.
+/// also in `scan_flatten_assets`
 ///
 /// # Pure Function
 ///
-/// This function only reads the filesystem and returns data.
-/// It does not modify any state.
+/// This function only reads the filesystem and returns data
+/// It does not modify any state
 pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
     let output_root = config.paths().output_dir();
     let assets_config = &config.build.assets;
@@ -50,9 +50,9 @@ pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
     results
 }
 
-/// Recursive helper for scanning global assets.
+/// Recursive helper for scanning global assets
 ///
-/// Skips move-type flatten files to avoid duplicate output.
+/// Skips move-type flatten files to avoid duplicate output
 fn scan_global_recursive(
     results: &mut Vec<AssetRoute>,
     dir: &Path,
@@ -89,24 +89,24 @@ fn scan_global_recursive(
     }
 }
 
-/// Scan flatten assets (individual files copied to output root).
+/// Scan flatten assets (individual files copied to output root)
 ///
-/// Returns all flatten assets with their computed URLs and output paths.
-/// Flatten files are copied directly to the output root directory.
+/// Returns all flatten assets with their computed URLs and output paths
+/// Flatten files are copied directly to the output root directory
 ///
 /// # Example
 ///
 /// ```toml
 /// [build.assets]
 /// flatten = [
-///     "CNAME",                                    # → output/CNAME
-///     { file = "icons/fav.ico", as = "favicon.ico" }, # → output/favicon.ico
+///     "CNAME",                                    # -> output/CNAME
+///     { file = "icons/fav.ico", as = "favicon.ico" }, # -> output/favicon.ico
 /// ]
 /// ```
 ///
 /// # Pure Function
 ///
-/// This function only reads the filesystem and returns data.
+/// This function only reads the filesystem and returns data
 pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
     let output_root = config.paths().output_dir();
     let mut results = Vec::new();
@@ -133,16 +133,16 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
     results
 }
 
-/// Scan colocated assets for a single page.
+/// Scan colocated assets for a single page
 ///
 /// Colocated assets are files that live alongside a content file:
 /// ```text
 /// content/posts/
-/// ├── hello.typ           → page
-/// └── hello/              → colocated_dir
-///     ├── image.png       → colocated asset
+/// ├── hello.typ           -> page
+/// └── hello/              -> colocated_dir
+///     ├── image.png       -> colocated asset
 ///     └── assets/
-///         └── logo.svg    → nested colocated asset
+///         └── logo.svg    -> nested colocated asset
 /// ```
 ///
 /// # Arguments
@@ -152,7 +152,7 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 ///
 /// # Pure Function
 ///
-/// This function only reads the filesystem and returns data.
+/// This function only reads the filesystem and returns data
 pub fn scan_colocated_assets(colocated_dir: &Path, route: &PageRoute) -> Vec<AssetRoute> {
     if !colocated_dir.exists() {
         return vec![];
@@ -170,7 +170,7 @@ pub fn scan_colocated_assets(colocated_dir: &Path, route: &PageRoute) -> Vec<Ass
     results
 }
 
-/// Recursive helper for scanning colocated assets.
+/// Recursive helper for scanning colocated assets
 fn scan_colocated_recursive(
     results: &mut Vec<AssetRoute>,
     dir: &Path,
@@ -242,10 +242,10 @@ fn scan_colocated_recursive(
     }
 }
 
-/// Scan all assets for a collection of pages.
+/// Scan all assets for a collection of pages
 ///
 /// This combines global assets, flatten assets, and colocated assets from all pages
-/// into a single list. Useful for conflict detection and address space building.
+/// into a single list. Useful for conflict detection and address space building
 ///
 /// # Arguments
 ///
@@ -254,7 +254,7 @@ fn scan_colocated_recursive(
 ///
 /// # Pure Function
 ///
-/// This function only reads the filesystem and returns data.
+/// This function only reads the filesystem and returns data
 #[allow(dead_code)]
 pub fn scan_all_assets(
     pages: &[crate::page::CompiledPage],

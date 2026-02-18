@@ -8,21 +8,21 @@ use std::path::{Path, PathBuf};
 use dashmap::DashMap;
 use std::sync::LazyLock;
 
-/// Asset path → version hash mapping.
+/// Asset path -> version hash mapping
 ///
-/// Thread-safe global storage for asset versions.
+/// Thread-safe global storage for asset versions
 pub static ASSET_VERSIONS: LazyLock<DashMap<PathBuf, String>> = LazyLock::new(DashMap::new);
 
-/// Compute version hash from file content (first 8 hex chars).
+/// Compute version hash from file content (first 8 hex chars)
 pub fn compute_version(path: &Path) -> String {
     let content = std::fs::read(path).unwrap_or_default();
     let hash = crate::utils::hash::compute(&content);
     format!("{:016x}", hash).chars().take(8).collect()
 }
 
-/// Get versioned URL for an asset.
+/// Get versioned URL for an asset
 ///
-/// Returns `base_url?v=abc12345` format.
+/// Returns `base_url?v=abc12345` format
 pub fn versioned_url(base_url: &str, path: &Path) -> String {
     let version = ASSET_VERSIONS
         .get(path)
@@ -35,7 +35,7 @@ pub fn versioned_url(base_url: &str, path: &Path) -> String {
     format!("{}?v={}", base_url, version)
 }
 
-/// Update asset version and return whether it changed.
+/// Update asset version and return whether it changed
 pub fn update_version(path: &Path) -> bool {
     let new_version = compute_version(path);
     let changed = ASSET_VERSIONS
@@ -49,7 +49,7 @@ pub fn update_version(path: &Path) -> bool {
     changed
 }
 
-/// Clear all cached versions.
+/// Clear all cached versions
 pub fn clear() {
     ASSET_VERSIONS.clear();
 }

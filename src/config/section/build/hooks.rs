@@ -28,7 +28,7 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Hooks configuration containing pre and post build hooks.
+/// Hooks configuration containing pre and post build hooks
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HooksConfig {
@@ -47,7 +47,7 @@ impl HooksConfig {
     }
 }
 
-/// Configuration for a single build hook.
+/// Configuration for a single build hook
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HookConfig {
@@ -107,7 +107,7 @@ impl HookConfig {
     }
 }
 
-/// Watch mode for hooks in serve mode.
+/// Watch mode for hooks in serve mode
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WatchMode {
@@ -228,7 +228,7 @@ build_args = ["--minify", "--sourcemap"]
 // CSS Processor Config
 // ============================================================================
 
-/// CSS processor format (determines CLI arguments).
+/// CSS processor format (determines CLI arguments)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CssFormat {
@@ -261,7 +261,7 @@ impl CssFormat {
     }
 }
 
-/// CSS processor hook configuration (syntax sugar for pre hook).
+/// CSS processor hook configuration (syntax sugar for pre hook)
 ///
 /// When enabled, this is internally compiled to a pre hook with:
 /// - Auto-expanded command with format-specific arguments
@@ -317,7 +317,7 @@ impl Default for CssProcessorConfig {
 }
 
 impl CssProcessorConfig {
-    /// Get the resolved format (auto → concrete).
+    /// Get the resolved format (auto -> concrete).
     pub fn resolved_format(&self) -> CssFormat {
         self.format.resolve(&self.command)
     }

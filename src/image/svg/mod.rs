@@ -6,7 +6,7 @@
 //! # Modules
 //!
 //! - [`optimize`]: SVG optimization using usvg (viewBox adjustment, minification)
-//! - [`convert`]: Format conversion (SVG → AVIF/PNG/WebP/JPG)
+//! - [`convert`]: Format conversion (SVG -> AVIF/PNG/WebP/JPG)
 //! - [`extract`]: File extraction logic (content-hash based naming)
 //! - [`bounds`]: Stroke-inclusive bounding box calculation
 //!
@@ -41,9 +41,9 @@ pub use optimize::{OptimizeOptions, optimize_svg};
 
 // Re-export types from config
 
-/// Compute blake3 hash of SVG content (for diff comparison).
+/// Compute blake3 hash of SVG content (for diff comparison)
 ///
-/// Used in `SvgIndexed.content_hash` to quickly skip unchanged SVGs during diff.
+/// Used in `SvgIndexed.content_hash` to quickly skip unchanged SVGs during diff
 #[allow(dead_code)]
 pub fn content_hash(svg_content: &[u8]) -> u64 {
     let hash = blake3::hash(svg_content);
@@ -53,9 +53,9 @@ pub fn content_hash(svg_content: &[u8]) -> u64 {
     ])
 }
 
-/// Compute blake3 hash for filename (12 hex chars).
+/// Compute blake3 hash for filename (12 hex chars)
 ///
-/// Used for cache-correct file naming: content changes → filename changes.
+/// Used for cache-correct file naming: content changes -> filename changes
 pub fn filename_hash(content: &[u8]) -> String {
     let hash = blake3::hash(content);
     hash.to_hex()[..12].to_string()

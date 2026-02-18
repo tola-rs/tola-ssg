@@ -6,7 +6,7 @@ use quote::quote;
 use crate::config::field::{FieldInfo, FieldStatus};
 use crate::config::types::{format_default_for_type, type_to_string};
 
-/// Generate template code (TokenStream) for fields.
+/// Generate template code (TokenStream) for fields
 pub fn generate_template_code(fields: &[&FieldInfo]) -> TokenStream {
     let field_codes: Vec<TokenStream> = fields
         .iter()
@@ -18,7 +18,7 @@ pub fn generate_template_code(fields: &[&FieldInfo]) -> TokenStream {
     }
 }
 
-/// Generate TOML template code for a single field.
+/// Generate TOML template code for a single field
 fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
     let field_name = &info.name;
     let toml_name = &info.toml_name;

@@ -15,10 +15,10 @@ use crate::utils::path::slug::slugify_path;
 use super::resolve::{resolve_physical_path, resolve_relative_url};
 use super::{ResolveContext, ResolveResult, Resource};
 
-/// Result of updating a page's permalink during hot-reload.
+/// Result of updating a page's permalink during hot-reload
 ///
 /// This is a lightweight result type for single-page permalink changes,
-/// complementing the batch `conflict::detect_conflicts` used during build.
+/// complementing the batch `conflict::detect_conflicts` used during build
 #[derive(Debug, Clone)]
 pub enum PermalinkUpdate {
     /// Permalink unchanged.
@@ -37,10 +37,10 @@ pub enum PermalinkUpdate {
     },
 }
 
-/// Site address space - bidirectional mapping between sources and URLs.
+/// Site address space - bidirectional mapping between sources and URLs
 ///
-/// This is the single source of truth for all addressable resources in the site.
-/// Build it once after metadata collection, then use it for O(1) link validation.
+/// This is the single source of truth for all addressable resources in the site
+/// Build it once after metadata collection, then use it for O(1) link validation
 #[derive(Debug, Default)]
 pub struct AddressSpace {
     /// URL -> Resource mapping

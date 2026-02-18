@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
-/// Respond with a static file, optionally injecting hotreload script.
+/// Respond with a static file, optionally injecting hotreload script
 pub fn respond_file(request: Request, path: &Path, ws_port: Option<u16>) -> Result<()> {
     let content_type = crate::utils::mime::from_path(path);
 
@@ -25,7 +25,7 @@ pub fn respond_file(request: Request, path: &Path, ws_port: Option<u16>) -> Resu
     send_body(request, 200, content_type, body)
 }
 
-/// Handle Range request for media files (video/audio seeking).
+/// Handle Range request for media files (video/audio seeking)
 fn respond_range(
     request: Request,
     path: &Path,
@@ -65,7 +65,7 @@ fn respond_range(
     Ok(())
 }
 
-/// Parse Range header value "start-end" into (start, end) bytes.
+/// Parse Range header value "start-end" into (start, end) bytes
 fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64)> {
     let range = range.trim();
     let parts: Vec<&str> = range.split('-').collect();
@@ -94,7 +94,7 @@ fn parse_range(range: &str, file_size: u64) -> Result<(u64, u64)> {
     Ok((start, end))
 }
 
-/// Extract Range header from request.
+/// Extract Range header from request
 fn get_range_header(request: &Request) -> Option<String> {
     request
         .headers()
@@ -103,10 +103,10 @@ fn get_range_header(request: &Request) -> Option<String> {
         .map(|h| h.value.to_string())
 }
 
-/// Respond with 404 page (custom or default).
+/// Respond with 404 page (custom or default)
 ///
-/// For HTML 404 pages, reads directly from source for hot reload support.
-/// For compiled 404 pages (typst), reads from output directory.
+/// For HTML 404 pages, reads directly from source for hot reload support
+/// For compiled 404 pages (typst), reads from output directory
 pub fn respond_not_found(
     request: Request,
     config: &SiteConfig,
@@ -146,22 +146,22 @@ pub fn respond_not_found(
     send_body(request, 404, PLAIN, b"404 Not Found".to_vec())
 }
 
-/// Respond with loading page (build not ready).
+/// Respond with loading page (build not ready)
 pub fn respond_loading(request: Request) -> Result<()> {
     let body = crate::embed::serve::LOADING_HTML.to_string();
     send_html(request, body)
 }
 
-/// Respond with 503 Service Unavailable (server shutting down).
+/// Respond with 503 Service Unavailable (server shutting down)
 pub fn respond_unavailable(request: Request) -> Result<()> {
     use crate::utils::mime::types::PLAIN;
     send_body(request, 503, PLAIN, b"503 Service Unavailable".to_vec())
 }
 
-/// Respond with welcome page (empty content directory).
+/// Respond with welcome page (empty content directory)
 ///
-/// Includes a polling script that auto-refreshes when content is created.
-/// Note: HEAD requests return without X-Tola-Ready to prevent infinite refresh loop.
+/// Includes a polling script that auto-refreshes when content is created
+/// Note: HEAD requests return without X-Tola-Ready to prevent infinite refresh loop
 pub fn respond_welcome(request: Request) -> Result<()> {
     use crate::embed::serve::{WELCOME_HTML, WelcomeVars};
     use crate::utils::mime::types::HTML;
@@ -226,7 +226,7 @@ fn send_body(
     Ok(())
 }
 
-/// Send HTML without X-Tola-Ready (for loading/welcome pages).
+/// Send HTML without X-Tola-Ready (for loading/welcome pages)
 fn send_html(request: Request, body: String) -> Result<()> {
     use crate::utils::mime::types::HTML;
     let response = Response::from_string(body).with_header(make_header("Content-Type", HTML));
@@ -234,7 +234,7 @@ fn send_html(request: Request, body: String) -> Result<()> {
     Ok(())
 }
 
-/// Respond with compilation error (500), with hotreload for auto-refresh.
+/// Respond with compilation error (500), with hotreload for auto-refresh
 pub fn respond_compile_error(
     request: Request,
     error: &anyhow::Error,
@@ -249,7 +249,7 @@ pub fn respond_compile_error(
     send_body(request, 500, HTML, body)
 }
 
-/// Respond with hotreload.js from memory.
+/// Respond with hotreload.js from memory
 pub fn respond_hotreload_js(request: Request, ws_port: u16) -> Result<()> {
     use crate::embed::serve::{HOTRELOAD_JS, HotreloadVars};
     use crate::utils::mime::types::JAVASCRIPT;

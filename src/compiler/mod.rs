@@ -14,7 +14,7 @@ use page::PageRoute;
 
 pub use page::drain_warnings;
 
-/// Context for the compilation pipeline.
+/// Context for the compilation pipeline
 pub struct CompileContext<'a> {
     pub mode: BuildMode,
     pub config: &'a SiteConfig,
@@ -55,7 +55,7 @@ impl<'a> CompileContext<'a> {
 
 const IGNORED_FILES: &[&str] = &[".DS_Store"];
 
-/// Collect all files from a directory recursively.
+/// Collect all files from a directory recursively
 pub fn collect_all_files(dir: &Path) -> Vec<PathBuf> {
     WalkDir::new(dir)
         .into_iter()

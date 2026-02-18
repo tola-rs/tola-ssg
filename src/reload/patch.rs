@@ -14,8 +14,8 @@ use tola_vdom::algo::{Anchor, Patch};
 
 /// Individual patch operation for DOM updates (anchor-based)
 ///
-/// All operations use StableId for targeting. No position indices.
-/// This design ensures order independence and prevents index drift.
+/// All operations use StableId for targeting. No position indices
+/// This design ensures order independence and prevents index drift
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum PatchOp {
@@ -28,7 +28,7 @@ pub enum PatchOp {
     },
 
     /// Update text content (element.textContent = text)
-    /// Used for single-text-child elements: `<p>Hello</p>` → `<p>World</p>`
+    /// Used for single-text-child elements: `<p>Hello</p>` -> `<p>World</p>`
     Text {
         /// StableId (hex) of element
         target: String,
@@ -142,7 +142,7 @@ impl PatchOp {
 // Conversion from VDOM Patches
 // =============================================================================
 
-/// Convert VDOM patches to PatchOps for WebSocket transmission.
+/// Convert VDOM patches to PatchOps for WebSocket transmission
 pub fn from_vdom_patches(patches: &[Patch]) -> Vec<PatchOp> {
     patches.iter().map(patch_to_op).collect()
 }

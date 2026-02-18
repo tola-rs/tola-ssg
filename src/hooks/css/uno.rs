@@ -6,7 +6,7 @@ use crate::config::section::build::{CssProcessorConfig, HookConfig, WatchMode};
 use anyhow::Result;
 use std::path::Path;
 
-/// Build a HookConfig for UnoCSS.
+/// Build a HookConfig for UnoCSS
 pub fn build_hook(css: &CssProcessorConfig, output: &Path, minify: bool) -> Result<HookConfig> {
     let mut command: Vec<String> = css.command.clone();
 

@@ -1,9 +1,9 @@
 //! Compile scheduler with priority queue.
 //!
 //! Single entry point for all compilation requests:
-//! - On-demand (user request) → Active priority
-//! - Hot-reload → Direct/Affected priority
-//! - Background build → Background priority
+//! - On-demand (user request) -> Active priority
+//! - Hot-reload -> Direct/Affected priority
+//! - Background build -> Background priority
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -22,10 +22,10 @@ use crate::core::{BuildMode, Priority};
 // Public API
 // =============================================================================
 
-/// Global scheduler instance.
+/// Global scheduler instance
 pub static SCHEDULER: LazyLock<CompileScheduler> = LazyLock::new(CompileScheduler::new);
 
-/// Result of a compilation.
+/// Result of a compilation
 #[derive(Debug, Clone)]
 pub enum CompileResult {
     Success(PathBuf),
@@ -37,15 +37,15 @@ pub enum CompileResult {
 // Scheduler
 // =============================================================================
 
-/// Central compile scheduler with priority queue and deduplication.
+/// Central compile scheduler with priority queue and deduplication
 pub struct CompileScheduler {
     /// Priority queue of pending tasks
     queue: Mutex<BinaryHeap<Task>>,
-    /// Pending paths → waiters (for dedup and result broadcasting)
+    /// Pending paths -> waiters (for dedup and result broadcasting)
     pending: DashMap<PathBuf, PendingState>,
-    /// In-progress paths → waiters
+    /// In-progress paths -> waiters
     active: DashMap<PathBuf, Vec<Waiter>>,
-    /// Completed paths → cached results
+    /// Completed paths -> cached results
     cache: DashMap<PathBuf, CompileResult>,
     /// Worker notification
     notify: Condvar,

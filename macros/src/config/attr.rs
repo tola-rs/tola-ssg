@@ -2,7 +2,7 @@
 
 use syn::{Attribute, Lit, Meta};
 
-/// Field status for template generation.
+/// Field status for template generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldStatus {
     Normal,
@@ -12,27 +12,27 @@ pub enum FieldStatus {
     Hidden,
 }
 
-/// Get section name from #[config(section = "xxx")].
+/// Get section name from #[config(section = "xxx")]
 pub fn get_section(attrs: &[Attribute]) -> Option<String> {
     get_string_attr(attrs, "section")
 }
 
-/// Get custom field name from #[config(name = "xxx")].
+/// Get custom field name from #[config(name = "xxx")]
 pub fn get_custom_name(attrs: &[Attribute]) -> Option<String> {
     get_string_attr(attrs, "name")
 }
 
-/// Get default value from #[config(default = "xxx")].
+/// Get default value from #[config(default = "xxx")]
 pub fn get_default_value(attrs: &[Attribute]) -> Option<String> {
     get_string_attr(attrs, "default")
 }
 
-/// Get inline doc from #[config(inline_doc = "xxx")].
+/// Get inline doc from #[config(inline_doc = "xxx")]
 pub fn get_inline_doc(attrs: &[Attribute]) -> Option<String> {
     get_string_attr(attrs, "inline_doc")
 }
 
-/// Get string value from #[config(key = "value")].
+/// Get string value from #[config(key = "value")]
 fn get_string_attr(attrs: &[Attribute], key: &str) -> Option<String> {
     for attr in attrs {
         if !attr.path().is_ident("config") {
@@ -57,7 +57,7 @@ fn get_string_attr(attrs: &[Attribute], key: &str) -> Option<String> {
     None
 }
 
-/// Check if attribute has a flag like #[config(skip)].
+/// Check if attribute has a flag like #[config(skip)]
 pub fn has_attr(attrs: &[Attribute], key: &str) -> bool {
     for attr in attrs {
         if !attr.path().is_ident("config") {
@@ -82,7 +82,7 @@ pub fn has_attr(attrs: &[Attribute], key: &str) -> bool {
     false
 }
 
-/// Parse field status from #[config(status = experimental)].
+/// Parse field status from #[config(status = experimental)]
 pub fn parse_field_status(attrs: &[Attribute]) -> FieldStatus {
     for attr in attrs {
         if !attr.path().is_ident("config") {
@@ -118,7 +118,7 @@ pub fn parse_field_status(attrs: &[Attribute]) -> FieldStatus {
     FieldStatus::Normal
 }
 
-/// Extract doc comment from #[doc = "..."] attributes.
+/// Extract doc comment from #[doc = "..."] attributes
 pub fn extract_doc_comment(attrs: &[Attribute]) -> Option<String> {
     let docs: Vec<String> = attrs
         .iter()

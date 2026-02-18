@@ -13,7 +13,7 @@ pub use crate::core::Priority;
 // Prioritized File
 // =============================================================================
 
-/// A file with its compilation priority.
+/// A file with its compilation priority
 #[derive(Debug, Clone)]
 pub struct PrioritizedFile {
     pub path: PathBuf,
@@ -33,7 +33,7 @@ impl PrioritizedFile {
 // Compile Queue
 // =============================================================================
 
-/// A queue of files to compile, ordered by priority.
+/// A queue of files to compile, ordered by priority
 #[derive(Debug, Default)]
 pub struct CompileQueue {
     pub(crate) files: Vec<PrioritizedFile>,

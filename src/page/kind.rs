@@ -2,10 +2,10 @@
 
 use crate::package::TolaPackage;
 
-/// Page compilation kind.
+/// Page compilation kind
 ///
 /// Determines whether a page needs iterative compilation to resolve
-/// self-referencing metadata (e.g., `pages().len()` in metadata).
+/// self-referencing metadata (e.g., `pages().len()` in metadata)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageKind {
     /// Direct compilation: does not depend on site data, compiles once.

@@ -63,7 +63,7 @@ fn main() -> Result<()> {
 // Serve Command
 // =============================================================================
 
-/// Initialize build environment: fonts + embedded assets.
+/// Initialize build environment: fonts + embedded assets
 fn init_build_env(config: &SiteConfig) -> Result<()> {
     let font_dirs = cli::build::collect_font_dirs(config);
     compiler::page::typst::init_typst(&font_dirs);
@@ -73,7 +73,7 @@ fn init_build_env(config: &SiteConfig) -> Result<()> {
     embed::write_embedded_assets(config, &output_dir)
 }
 
-/// Start serve with cached build support.
+/// Start serve with cached build support
 fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     use crate::core::{set_healthy, set_serving};
 
@@ -135,7 +135,7 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     bound_server.run()
 }
 
-/// Quick scan for progressive serving. Returns false if shutdown requested.
+/// Quick scan for progressive serving. Returns false if shutdown requested
 fn progressive_scan(config: &SiteConfig) -> bool {
     use crate::core::{is_shutdown, set_serving};
 
@@ -160,7 +160,7 @@ fn progressive_scan(config: &SiteConfig) -> bool {
     true
 }
 
-/// Handle startup with existing cache - detect modified files and recompile.
+/// Handle startup with existing cache - detect modified files and recompile
 fn startup_with_cache(config: &SiteConfig) {
     // Initialize build environment (fonts + embedded assets)
     let _ = init_build_env(config);
@@ -194,7 +194,7 @@ fn startup_with_cache(config: &SiteConfig) {
     }
 }
 
-/// Recompile modified files and display/persist errors.
+/// Recompile modified files and display/persist errors
 fn handle_modified_files(files: &[std::path::PathBuf], config: &SiteConfig) {
     // log!("serve"; "recompiling {} modified file(s)", files.len());
 
@@ -217,7 +217,7 @@ fn handle_modified_files(files: &[std::path::PathBuf], config: &SiteConfig) {
     }
 }
 
-/// Persist compile errors to errors.json.
+/// Persist compile errors to errors.json
 fn persist_compile_errors(errors: &[(String, String)], config: &SiteConfig) {
     let mut state = cache::PersistedErrorState::new();
     for (path, error) in errors {
@@ -234,7 +234,7 @@ fn persist_compile_errors(errors: &[(String, String)], config: &SiteConfig) {
 // Build Command
 // =============================================================================
 
-/// Build site and optionally generate rss/sitemap in parallel.
+/// Build site and optionally generate rss/sitemap in parallel
 fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<ThreadSafeRepository> {
     let (repo, _pages) = build_site(mode, config, false)?;
 

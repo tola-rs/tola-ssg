@@ -51,7 +51,7 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Site section configuration containing info, nav, and site-level features.
+/// Site section configuration containing info, nav, and site-level features
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site")]

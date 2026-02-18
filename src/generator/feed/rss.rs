@@ -9,7 +9,7 @@ use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
 use std::{fs, sync::LazyLock};
 
-/// Build RSS 2.0 feed.
+/// Build RSS 2.0 feed
 pub fn build_rss(config: &SiteConfig) -> Result<()> {
     RssFeed::build(config).write()
 }
@@ -99,7 +99,7 @@ fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
     )
 }
 
-/// Normalize author field to RSS format: "email (Name)".
+/// Normalize author field to RSS format: "email (Name)"
 fn normalize_rss_author(author: Option<&String>, config: &SiteConfig) -> Option<String> {
     static RE_VALID_AUTHOR: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}[ \t]*\([^)]+\)$").unwrap()

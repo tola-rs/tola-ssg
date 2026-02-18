@@ -2,22 +2,22 @@
 
 use serde::{Deserialize, Serialize};
 
-/// URL slug generation mode for paths and anchors.
+/// URL slug generation mode for paths and anchors
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugMode {
-    /// Full slugify: Unicode → ASCII, lowercase, use separator.
+    /// Full slugify: Unicode -> ASCII, lowercase, use separator.
     Full,
     /// Safe mode: remove dangerous chars, preserve Unicode, use separator (default).
     #[default]
     Safe,
-    /// ASCII mode: transliterate Unicode → ASCII, use separator.
+    /// ASCII mode: transliterate Unicode -> ASCII, use separator.
     Ascii,
     /// No modification; preserve original text.
     No,
 }
 
-/// Case transformation mode for slugs.
+/// Case transformation mode for slugs
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugCase {
@@ -32,7 +32,7 @@ pub enum SlugCase {
     Preserve,
 }
 
-/// Separator character for slugs.
+/// Separator character for slugs
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SlugSeparator {

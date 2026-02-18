@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// Decoded URL path (internal representation).
+/// Decoded URL path (internal representation)
 ///
 /// Invariants:
 /// - Always decoded (no percent-encoding)
@@ -116,7 +116,7 @@ impl UrlPath {
 
     /// Get parent URL path.
     ///
-    /// `/posts/hello/` → `/posts/`, `/posts/` → `/`, `/` → `None`
+    /// `/posts/hello/` -> `/posts/`, `/posts/` -> `/`, `/` -> `None`
     pub fn parent(&self) -> Option<Self> {
         let trimmed = self.0.trim_end_matches('/');
         if trimmed.is_empty() {
@@ -208,7 +208,7 @@ impl<'de> Deserialize<'de> for UrlPath {
     }
 }
 
-/// URL change notification (permalink changed).
+/// URL change notification (permalink changed)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UrlChange {
     /// Previous URL (decoded)

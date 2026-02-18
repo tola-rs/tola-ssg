@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use super::ContentHash;
 
-/// Global cache for file content hashes (thread-safe).
+/// Global cache for file content hashes (thread-safe)
 pub struct FreshnessCache {
     hashes: DashMap<PathBuf, ContentHash>,
 }
@@ -52,22 +52,22 @@ impl Default for FreshnessCache {
     }
 }
 
-/// Global freshness cache instance.
+/// Global freshness cache instance
 pub static FRESHNESS_CACHE: LazyLock<FreshnessCache> = LazyLock::new(FreshnessCache::new);
 
-/// Get cached hash for a file.
+/// Get cached hash for a file
 #[inline]
 pub fn get_cached_hash(path: &Path) -> Option<ContentHash> {
     FRESHNESS_CACHE.get(path)
 }
 
-/// Store hash in global cache.
+/// Store hash in global cache
 #[inline]
 pub fn set_cached_hash(path: &Path, hash: ContentHash) {
     FRESHNESS_CACHE.set(path, hash);
 }
 
-/// Clear the global freshness cache.
+/// Clear the global freshness cache
 #[inline]
 pub fn clear_cache() {
     FRESHNESS_CACHE.clear();

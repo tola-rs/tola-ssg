@@ -11,18 +11,18 @@ use anyhow::Result;
 use image::{DynamicImage, ImageBuffer, ImageFormat, Rgba, RgbaImage};
 use lab::{Lab, rgb_bytes_to_labs};
 
-/// Default threshold for color distance in LAB space (ΔE).
-/// Values < 10 are generally considered "same color" to human eyes.
+/// Default threshold for color distance in LAB space (ΔE)
+/// Values < 10 are generally considered "same color" to human eyes
 const DEFAULT_THRESHOLD: f32 = 10.0;
 
-/// Extended threshold for anti-aliased edge pixels.
-/// Pixels within this range get gradual transparency.
+/// Extended threshold for anti-aliased edge pixels
+/// Pixels within this range get gradual transparency
 const EDGE_THRESHOLD: f32 = 25.0;
 
-/// Remove background from an image file.
+/// Remove background from an image file
 ///
 /// Reads the image, auto-detects background color from edges,
-/// removes it using flood fill, and writes the result as PNG.
+/// removes it using flood fill, and writes the result as PNG
 pub fn remove_background(input: &Path, output: &Path) -> Result<()> {
     let img = image::open(input)?;
     let processed = process_image(img);
@@ -35,7 +35,7 @@ pub fn remove_background(input: &Path, output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Process image to remove background.
+/// Process image to remove background
 fn process_image(img: DynamicImage) -> DynamicImage {
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
@@ -131,9 +131,9 @@ fn process_image(img: DynamicImage) -> DynamicImage {
     DynamicImage::ImageRgba8(output)
 }
 
-/// Detect background color by sampling edge pixels.
+/// Detect background color by sampling edge pixels
 ///
-/// Samples pixels from the four corners and finds the most common color.
+/// Samples pixels from the four corners and finds the most common color
 fn detect_background_color(img: &RgbaImage) -> Lab {
     let (width, height) = img.dimensions();
     let mut samples: Vec<[u8; 3]> = Vec::with_capacity(100);
@@ -183,16 +183,16 @@ fn detect_background_color(img: &RgbaImage) -> Lab {
     Lab::from_rgb(&avg_rgb)
 }
 
-/// Pre-convert entire image to LAB color space.
+/// Pre-convert entire image to LAB color space
 ///
-/// Uses SIMD-accelerated batch conversion for performance.
+/// Uses SIMD-accelerated batch conversion for performance
 fn preconvert_to_lab(img: &RgbaImage) -> Vec<Lab> {
     let rgb_bytes: Vec<u8> = img.pixels().flat_map(|p| [p[0], p[1], p[2]]).collect();
 
     rgb_bytes_to_labs(&rgb_bytes)
 }
 
-/// Calculate color distance in LAB space (ΔE).
+/// Calculate color distance in LAB space (ΔE)
 #[inline]
 fn color_distance(c1: &Lab, c2: &Lab) -> f32 {
     let dl = c1.l - c2.l;

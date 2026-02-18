@@ -3,7 +3,7 @@
 use crate::config::SiteConfig;
 use std::fs;
 
-/// Check if the content directory is effectively empty.
+/// Check if the content directory is effectively empty
 pub fn is_content_empty(config: &SiteConfig) -> bool {
     let dir = &config.build.content;
 
@@ -34,7 +34,7 @@ pub fn is_content_empty(config: &SiteConfig) -> bool {
     false
 }
 
-/// Maybe inject hotreload script if content is HTML and ws_port is set.
+/// Maybe inject hotreload script if content is HTML and ws_port is set
 pub fn maybe_inject_hotreload(body: Vec<u8>, content_type: &str, ws_port: Option<u16>) -> Vec<u8> {
     match (content_type.starts_with("text/html"), ws_port) {
         (true, Some(port)) => inject_hotreload_script(&body, port),
@@ -42,7 +42,7 @@ pub fn maybe_inject_hotreload(body: Vec<u8>, content_type: &str, ws_port: Option
     }
 }
 
-/// Inject hotreload script before `</body>` tag.
+/// Inject hotreload script before `</body>` tag
 fn inject_hotreload_script(content: &[u8], ws_port: u16) -> Vec<u8> {
     use crate::embed::serve::{HOTRELOAD_JS, HotreloadVars};
 

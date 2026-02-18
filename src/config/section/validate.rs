@@ -82,7 +82,7 @@ impl Default for AssetsValidateConfig {
     }
 }
 
-/// Validation error level.
+/// Validation error level
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ValidateLevel {

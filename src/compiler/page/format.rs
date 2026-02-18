@@ -15,10 +15,10 @@ use super::{PageCompileOutput, PageScanOutput};
 // PageFormat Trait
 // =============================================================================
 
-/// Trait for content format adapters.
+/// Trait for content format adapters
 ///
 /// Each format (Typst, Markdown) implements this trait to provide
-/// unified compilation and scanning capabilities.
+/// unified compilation and scanning capabilities
 pub trait PageFormat {
     /// Compile content to HTML via VDOM pipeline.
     fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutput>;
@@ -31,10 +31,10 @@ pub trait PageFormat {
 // ScannedPage (Unified for all formats)
 // =============================================================================
 
-/// Pre-scanned page data from draft filtering phase.
+/// Pre-scanned page data from draft filtering phase
 ///
 /// Used by both Typst and Markdown to store metadata collected during
-/// the initial scan, avoiding redundant parsing during compilation.
+/// the initial scan, avoiding redundant parsing during compilation
 #[derive(Debug, Clone)]
 pub struct ScannedPage {
     /// Source file path.
@@ -51,7 +51,7 @@ pub struct ScannedPage {
     pub headings: Vec<ScannedHeading>,
 }
 
-/// A heading extracted from the document during scan.
+/// A heading extracted from the document during scan
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ScannedHeading {
     /// Heading level (1-6).
@@ -82,7 +82,7 @@ impl ScannedPage {
 // DraftFilter Trait
 // =============================================================================
 
-/// Result of draft filtering operation.
+/// Result of draft filtering operation
 pub struct FilterResult<'a, T = ()> {
     /// Files that are not drafts.
     pub files: Vec<&'a PathBuf>,
@@ -114,9 +114,9 @@ impl<'a, T> FilterResult<'a, T> {
     }
 }
 
-/// Trait for filtering draft content files.
+/// Trait for filtering draft content files
 ///
-/// Each format implements this to filter out draft files before compilation.
+/// Each format implements this to filter out draft files before compilation
 pub trait DraftFilter {
     /// Extra data returned from filtering (e.g., Typst batcher for reuse).
     type Extra;
@@ -135,9 +135,9 @@ pub trait DraftFilter {
 // Combined Draft Filter Result
 // =============================================================================
 
-/// Result of filtering drafts from both Typst and Markdown files.
+/// Result of filtering drafts from both Typst and Markdown files
 ///
-/// Contains pre-scanned page data (metadata + kind) for all non-draft files.
+/// Contains pre-scanned page data (metadata + kind) for all non-draft files
 pub struct DraftFilterResult<'a> {
     /// Typst batcher for reuse in compilation (internal).
     pub(super) batcher: Option<super::TypstBatcher<'a>>,
@@ -198,11 +198,11 @@ impl<'a> DraftFilterResult<'a> {
 
 use crate::config::SiteConfig;
 
-/// Filter draft files from both Typst and Markdown content.
+/// Filter draft files from both Typst and Markdown content
 ///
 /// This is the unified entry point for draft filtering, used by both
 /// `build` and `serve` modes. Returns a `DraftFilterResult` which can
-/// report errors via `report_errors()`.
+/// report errors via `report_errors()`
 pub fn filter_drafts<'a>(
     config: &'a SiteConfig,
     typst_files: &[&PathBuf],

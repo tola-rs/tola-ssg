@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 // Environment Variables
 // ============================================================================
 
-/// Build `$TOLA_*` environment variables for hook execution.
+/// Build `$TOLA_*` environment variables for hook execution
 pub fn build_tola_vars(config: &SiteConfig, mode: BuildMode) -> FxHashMap<String, String> {
     let mut vars = FxHashMap::default();
 
@@ -39,9 +39,9 @@ pub fn build_tola_vars(config: &SiteConfig, mode: BuildMode) -> FxHashMap<String
 // Command Argument Resolution
 // ============================================================================
 
-/// Resolve `$TOLA_*` variables in command arguments.
+/// Resolve `$TOLA_*` variables in command arguments
 ///
-/// Replaces occurrences of `$TOLA_XXX` with actual values from the vars map.
+/// Replaces occurrences of `$TOLA_XXX` with actual values from the vars map
 pub fn resolve_args(args: &[String], vars: &FxHashMap<String, String>) -> Vec<String> {
     args.iter()
         .map(|arg| {
@@ -59,9 +59,9 @@ pub fn resolve_args(args: &[String], vars: &FxHashMap<String, String>) -> Vec<St
 // Hook Execution
 // ============================================================================
 
-/// Execute a single hook.
+/// Execute a single hook
 ///
-/// The `phase` parameter is used for logging (e.g., "pre" or "post").
+/// The `phase` parameter is used for logging (e.g., "pre" or "post")
 pub fn run_hook(
     hook: &HookConfig,
     config: &SiteConfig,
@@ -107,7 +107,7 @@ pub fn run_hook(
     Ok(())
 }
 
-/// Execute all pre hooks (including CSS processor if enabled).
+/// Execute all pre hooks (including CSS processor if enabled)
 pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
     // User-defined pre hooks
     for hook in &config.build.hooks.pre {
@@ -122,7 +122,7 @@ pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool
     Ok(())
 }
 
-/// Execute all post hooks.
+/// Execute all post hooks
 pub fn run_post_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
     for hook in &config.build.hooks.post {
         run_hook(hook, config, mode, with_build_args, "post")?;
@@ -136,9 +136,9 @@ pub fn run_post_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: boo
 
 use std::path::Path;
 
-/// Check and execute hooks that match changed files (for serve mode).
+/// Check and execute hooks that match changed files (for serve mode)
 ///
-/// Returns the number of hooks executed.
+/// Returns the number of hooks executed
 pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let mut executed = 0;
 
@@ -148,7 +148,7 @@ pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     executed
 }
 
-/// Execute pre hooks that match changed files.
+/// Execute pre hooks that match changed files
 fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let root = config.get_root();
     let mut executed = 0;
@@ -165,7 +165,7 @@ fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     executed
 }
 
-/// Execute post hooks that match changed files.
+/// Execute post hooks that match changed files
 fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let root = config.get_root();
     let mut executed = 0;
@@ -182,7 +182,7 @@ fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize
     executed
 }
 
-/// Check if a hook should run based on changed files.
+/// Check if a hook should run based on changed files
 fn should_run_hook_for_changes(hook: &HookConfig, changed_paths: &[&Path], root: &Path) -> bool {
     if !hook.watch.is_enabled() {
         return false;

@@ -14,5 +14,5 @@ pub use meta::PageMeta;
 pub use route::PageRoute;
 pub use store::{STORED_PAGES, StoredPage};
 
-/// A JSON object map for storing arbitrary metadata fields.
+/// A JSON object map for storing arbitrary metadata fields
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;

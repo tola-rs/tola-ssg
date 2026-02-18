@@ -8,42 +8,35 @@ use macros::Config;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-/// Site metadata for feed generation and Typst templates.
-/// Access in Typst via `#import "@tola/site:0.0.0": info`.
-/// For custom fields, use `[site.info.extra]` and access via `info.extra.xxx`.
+/// Site metadata for feed generation and Typst templates
+/// Access in Typst via `#import "@tola/site:0.0.0": info`
+/// For custom fields, use `[site.info.extra]` and access via `info.extra.xxx`
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site.info")]
 pub struct SiteInfoConfig {
-    /// Site title.
-    #[config(inline_doc = "Site title.")]
+    #[config(inline_doc = "Site title")]
     pub title: String,
 
-    /// Author name.
-    #[config(inline_doc = "Author name.")]
+    #[config(inline_doc = "Author name")]
     pub author: String,
 
-    /// Author email.
-    #[config(inline_doc = "Author email.")]
+    #[config(inline_doc = "Author email")]
     pub email: String,
 
-    /// Site description.
-    #[config(inline_doc = "Site description.")]
+    #[config(inline_doc = "Site description")]
     pub description: String,
 
-    /// Site URL, path used as prefix (e.g., "https://example.com/blog/docs").
-    #[config(inline_doc = "Site URL, path used as prefix (e.g., \"https://example.com/blog/docs\").")]
+    #[config(inline_doc = "Site URL, path used as prefix (e.g., \"https://example.com/blog/docs\")")]
     pub url: Option<String>,
 
-    /// Language code (e.g., "en", "zh-Hans").
-    #[config(default = "en", inline_doc = "Language code (e.g., \"en\", \"zh-Hans\").")]
+    #[config(default = "en", inline_doc = "Language code (e.g., \"en\", \"zh-Hans\")")]
     pub language: String,
 
-    /// Copyright notice.
-    #[config(inline_doc = "Copyright notice.")]
+    #[config(inline_doc = "Copyright notice")]
     pub copyright: String,
 
-    /// Custom fields accessible via `sys.inputs.extra.xxx` in Typst.
+    /// Custom fields accessible via `sys.inputs.extra.xxx` in Typst
     #[serde(default)]
     #[config(skip)]
     pub extra: FxHashMap<String, toml::Value>,

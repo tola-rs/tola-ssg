@@ -19,7 +19,7 @@ use crate::utils::{plural_count, plural_s};
 use report::ValidationReport;
 use scan::{ScanResult, scan_markdown, scan_typst_batch};
 
-/// Validate site links and assets.
+/// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
     // Register VFS for @tola/* virtual packages (no font warmup needed)
     crate::compiler::page::typst::init::init_vfs();
@@ -92,7 +92,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     print_summary(report.internal_file_count(), report.asset_file_count())
 }
 
-/// Scan all content files in parallel, collecting validation data.
+/// Scan all content files in parallel, collecting validation data
 fn scan_all_files(
     files: &[std::path::PathBuf],
     root: &std::path::Path,
@@ -158,7 +158,7 @@ fn scan_all_files(
     });
 }
 
-/// Collect results from a single file scan.
+/// Collect results from a single file scan
 #[allow(clippy::too_many_arguments)]
 fn collect_scan_result(
     result: ScanResult,
@@ -276,7 +276,7 @@ fn collect_scan_result(
     }
 }
 
-/// Handle AddressSpace resolve result.
+/// Handle AddressSpace resolve result
 fn handle_resolve_result(
     result: ResolveResult,
     source: &str,
@@ -345,7 +345,7 @@ fn handle_resolve_result(
     }
 }
 
-/// Build AddressSpace using fast batch scanning (no full compilation).
+/// Build AddressSpace using fast batch scanning (no full compilation)
 fn build_address_space(config: &SiteConfig) -> Result<Vec<CompiledPage>> {
     use rayon::prelude::*;
 
@@ -404,7 +404,7 @@ fn build_address_space(config: &SiteConfig) -> Result<Vec<CompiledPage>> {
     Ok(pages)
 }
 
-/// Print final summary and return error if validation failed.
+/// Print final summary and return error if validation failed
 fn print_summary(internal_errors: usize, asset_errors: usize) -> Result<()> {
     if internal_errors > 0 || asset_errors > 0 {
         let mut parts = Vec::new();

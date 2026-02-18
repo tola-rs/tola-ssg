@@ -14,7 +14,7 @@ use crate::embed::build::{REDIRECT_HTML, RedirectVars};
 use crate::freshness::{self, ContentHash, is_fresh};
 use crate::log;
 
-/// Write a page's HTML to disk. Also copies colocated assets.
+/// Write a page's HTML to disk. Also copies colocated assets
 pub fn write_page_html(page: &CompiledPage) -> Result<()> {
     write_page(page, true, None, false)?;
 
@@ -24,7 +24,7 @@ pub fn write_page_html(page: &CompiledPage) -> Result<()> {
     Ok(())
 }
 
-/// Write redirect HTML files for all aliases of a page.
+/// Write redirect HTML files for all aliases of a page
 pub fn write_redirects(page: &CompiledPage, output_dir: &Path) -> Result<()> {
     let targets = collect_redirect_targets(page);
     if targets.is_empty() {
@@ -33,7 +33,7 @@ pub fn write_redirects(page: &CompiledPage, output_dir: &Path) -> Result<()> {
 
     for (alias_url, canonical_url) in targets {
         write_redirect_file(&alias_url, &canonical_url, output_dir)?;
-        log!("redirect"; "{} → {}", alias_url, canonical_url);
+        log!("redirect"; "{} -> {}", alias_url, canonical_url);
     }
 
     Ok(())
@@ -55,7 +55,7 @@ fn collect_redirect_targets(page: &CompiledPage) -> Vec<(UrlPath, UrlPath)> {
         .collect()
 }
 
-/// Build the final HTML with embedded hash marker for freshness detection.
+/// Build the final HTML with embedded hash marker for freshness detection
 fn build_final_html(
     html_content: &[u8],
     source_hash: &ContentHash,
@@ -78,14 +78,14 @@ fn build_redirect_html(canonical_url: &UrlPath) -> String {
     })
 }
 
-/// `/old-url/` → `{output_dir}/old-url/index.html`
+/// `/old-url/` -> `{output_dir}/old-url/index.html`
 fn compute_redirect_output_path(alias_url: &UrlPath, output_dir: &Path) -> PathBuf {
     let relative = alias_url.to_string();
     let relative = relative.trim_start_matches('/');
     output_dir.join(relative).join("index.html")
 }
 
-/// Write a page's HTML to disk with freshness check.
+/// Write a page's HTML to disk with freshness check
 pub(super) fn write_page(
     page: &CompiledPage,
     clean: bool,

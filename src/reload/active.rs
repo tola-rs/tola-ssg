@@ -13,9 +13,9 @@ use crate::core::UrlPath;
 // Active Page Tracker
 // =============================================================================
 
-/// Tracks all currently active pages across connected clients.
+/// Tracks all currently active pages across connected clients
 ///
-/// Thread-safe. Supports multiple browser tabs viewing different pages.
+/// Thread-safe. Supports multiple browser tabs viewing different pages
 pub struct ActivePageTracker {
     active_urls: DashSet<UrlPath>,
 }
@@ -65,10 +65,10 @@ impl Default for ActivePageTracker {
 // Global Instance
 // =============================================================================
 
-/// Global active page tracker.
+/// Global active page tracker
 ///
 /// Used by WsActor to record clients' current pages,
-/// and by CompilerActor to prioritize compilation.
+/// and by CompilerActor to prioritize compilation
 pub static ACTIVE_PAGE: LazyLock<ActivePageTracker> = LazyLock::new(ActivePageTracker::new);
 
 // =============================================================================

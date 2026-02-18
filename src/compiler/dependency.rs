@@ -20,10 +20,10 @@ type DepEntry = (PathBuf, Vec<PathBuf>);
 // Layer 1: Data Structure
 // =============================================================================
 
-/// Bidirectional dependency graph for incremental builds.
+/// Bidirectional dependency graph for incremental builds
 ///
-/// Maintains both forward (content → deps) and reverse (dep → contents) mappings
-/// for efficient lookups in either direction.
+/// Maintains both forward (content -> deps) and reverse (dep -> contents) mappings
+/// for efficient lookups in either direction
 ///
 /// # Invariants
 /// - Forward and reverse mappings are always consistent
@@ -31,9 +31,9 @@ type DepEntry = (PathBuf, Vec<PathBuf>);
 /// - Self-references are excluded
 #[derive(Debug, Default)]
 pub struct DependencyGraph {
-    /// Forward: content file → its dependencies (templates, utils, packages)
+    /// Forward: content file -> its dependencies (templates, utils, packages)
     forward: PathSetMap,
-    /// Reverse: dependency → content files that use it
+    /// Reverse: dependency -> content files that use it
     reverse: PathSetMap,
 }
 
@@ -123,9 +123,9 @@ impl DependencyGraph {
 // Layer 2: Global State (Thread-Safe Singleton)
 // =============================================================================
 
-/// Global dependency graph access.
+/// Global dependency graph access
 ///
-/// Isolates mutable global state behind a clean interface.
+/// Isolates mutable global state behind a clean interface
 pub mod global {
     use super::*;
 
@@ -198,10 +198,10 @@ pub mod global {
 // Layer 3: Parallel Collection (Lock-Free Accumulation)
 // =============================================================================
 
-/// Lock-free dependency collection for parallel compilation.
+/// Lock-free dependency collection for parallel compilation
 ///
-/// During `par_iter()`, each thread accumulates dependencies locally.
-/// After completion, `flush_to_global()` merges all data with a single lock.
+/// During `par_iter()`, each thread accumulates dependencies locally
+/// After completion, `flush_to_global()` merges all data with a single lock
 pub mod parallel {
     use super::*;
     use std::cell::RefCell;

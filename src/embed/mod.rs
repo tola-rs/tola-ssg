@@ -271,11 +271,11 @@ pub mod recolor {
     }
 
     /// Generate SVG filter for a specific color.
-    /// Uses luminance-based switching: black→target, white→black or white.
+    /// Uses luminance-based switching: black->target, white->black or white.
     pub fn generate_filter(id: &str, hex: &str) -> Option<String> {
         let (r, g, b) = parse_hex_color(hex)?;
 
-        // Luminance-based B value: light target → white becomes black
+        // Luminance-based B value: light target -> white becomes black
         let target_lum = 0.299 * r + 0.587 * g + 0.114 * b;
         let b_val = if target_lum > 0.5 { 0.0 } else { 1.0 };
 
@@ -372,7 +372,7 @@ use crate::config::SiteConfig;
 use anyhow::Result;
 use std::path::Path;
 
-/// Write all embedded assets to output directory.
+/// Write all embedded assets to output directory
 ///
 /// This centralizes the logic for writing config-dependent embedded assets:
 /// - enhance.css (always)
@@ -442,7 +442,7 @@ mod tests {
         assert!(rendered.contains("200ms"));
         assert!(!rendered.contains("__NAV_CSS__"));
         assert!(!rendered.contains("__TRANSITION_TIME__"));
-        // Has variables → has hash
+        // Has variables -> has hash
         let url = css::ENHANCE_CSS.url_path_with_vars(&vars);
         assert!(url.starts_with("/.tola/enhance-"));
         assert!(url.ends_with(".css"));
@@ -457,7 +457,7 @@ mod tests {
             },
         };
         let rendered = css::ENHANCE_CSS.render(&vars);
-        // Nav disabled → no view-transition CSS
+        // Nav disabled -> no view-transition CSS
         assert!(!rendered.contains("view-transition"));
         assert!(!rendered.contains("__NAV_CSS__"));
     }
@@ -468,7 +468,7 @@ mod tests {
         let rendered = serve::HOTRELOAD_JS.render(&vars);
         assert!(rendered.contains("35729"));
         assert!(!rendered.contains("__TOLA_WS_PORT__"));
-        // Has variables → has hash
+        // Has variables -> has hash
         let url = serve::HOTRELOAD_JS.url_path_with_vars(&vars);
         assert!(url.starts_with("/.tola/hotreload-"));
         assert!(url.ends_with(".js"));

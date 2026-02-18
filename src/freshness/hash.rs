@@ -11,7 +11,7 @@ use std::path::Path;
 use super::cache::{get_cached_hash, set_cached_hash};
 use crate::config::SiteConfig;
 
-/// A 256-bit content hash (blake3 output).
+/// A 256-bit content hash (blake3 output)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ContentHash([u8; 32]);
 
@@ -65,7 +65,7 @@ impl std::fmt::Display for ContentHash {
     }
 }
 
-/// Compute blake3 hash of file contents (cached).
+/// Compute blake3 hash of file contents (cached)
 pub fn compute_file_hash(path: &Path) -> ContentHash {
     // Check cache first
     if let Some(cached) = get_cached_hash(path) {
@@ -83,7 +83,7 @@ pub fn compute_file_hash(path: &Path) -> ContentHash {
     hash
 }
 
-/// Compute hash without cache lookup (internal use).
+/// Compute hash without cache lookup (internal use)
 fn compute_file_hash_uncached(path: &Path) -> ContentHash {
     let file = match File::open(path) {
         Ok(f) => f,
@@ -108,7 +108,7 @@ fn compute_file_hash_uncached(path: &Path) -> ContentHash {
     ContentHash::new(*hasher.finalize().as_bytes())
 }
 
-/// Compute combined hash of config and deps directories.
+/// Compute combined hash of config and deps directories
 pub fn compute_deps_hash(config: &SiteConfig) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
 
@@ -139,7 +139,7 @@ pub fn compute_deps_hash(config: &SiteConfig) -> ContentHash {
     ContentHash::new(*hasher.finalize().as_bytes())
 }
 
-/// Compute hash of a directory's contents (recursive, sorted).
+/// Compute hash of a directory's contents (recursive, sorted)
 #[allow(dead_code)]
 pub fn compute_dir_hash(path: &Path) -> ContentHash {
     if !path.is_dir() {
@@ -163,7 +163,7 @@ pub fn compute_dir_hash(path: &Path) -> ContentHash {
     ContentHash::new(*hasher.finalize().as_bytes())
 }
 
-/// Check if output is fresh by comparing embedded hash marker.
+/// Check if output is fresh by comparing embedded hash marker
 pub fn is_fresh(source: &Path, output: &Path, deps_hash: Option<ContentHash>) -> bool {
     // Output must exist
     if !output.exists() {

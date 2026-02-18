@@ -13,7 +13,7 @@ use super::filename_hash;
 use super::optimize::{OptimizeOptions, optimize_svg};
 use crate::config::{SvgConverter, SvgFormat};
 
-/// Context for SVG extraction.
+/// Context for SVG extraction
 #[derive(Debug, Clone)]
 pub struct ExtractContext {
     /// Output directory for the page (e.g., `public/posts/hello/`).
@@ -64,7 +64,7 @@ impl ExtractContext {
     }
 }
 
-/// Result of SVG extraction.
+/// Result of SVG extraction
 pub struct ExtractResult {
     /// Relative path to the extracted file (e.g., `.tola/svg-a1b2c3d4e5f6.avif`).
     pub relative_path: String,
@@ -74,7 +74,7 @@ pub struct ExtractResult {
     pub created: bool,
 }
 
-/// Extract SVG to an external file.
+/// Extract SVG to an external file
 ///
 /// # Process
 /// 1. Optimize SVG using usvg
@@ -88,7 +88,7 @@ pub struct ExtractResult {
 /// * `ctx` - Extraction context with output settings
 ///
 /// # Returns
-/// `ExtractResult` with the relative path to use in HTML.
+/// `ExtractResult` with the relative path to use in HTML
 pub fn extract_svg_to_file(svg_content: &[u8], ctx: &ExtractContext) -> Result<ExtractResult> {
     let optimize_opts = OptimizeOptions {
         dpi: ctx.dpi,
@@ -132,9 +132,9 @@ pub fn extract_svg_to_file(svg_content: &[u8], ctx: &ExtractContext) -> Result<E
     })
 }
 
-/// Check if an extracted file already exists for the given SVG content.
+/// Check if an extracted file already exists for the given SVG content
 ///
-/// Useful for incremental builds to skip re-extraction.
+/// Useful for incremental builds to skip re-extraction
 pub fn check_extracted_exists(svg_content: &[u8], ctx: &ExtractContext) -> Option<PathBuf> {
     // Quick hash check without full optimization
     let hash = filename_hash(svg_content);

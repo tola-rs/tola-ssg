@@ -13,7 +13,7 @@ use crate::core::BuildMode;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// Check if a path is the CSS processor path file.
+/// Check if a path is the CSS processor path file
 pub fn is_css_input(path: &Path, config: &SiteConfig) -> bool {
     config.build.hooks.css.enable
         && config
@@ -25,7 +25,7 @@ pub fn is_css_input(path: &Path, config: &SiteConfig) -> bool {
             .is_some_and(|p| crate::utils::path::normalize_path(path) == *p)
 }
 
-/// Build a HookConfig from CSS processor configuration.
+/// Build a HookConfig from CSS processor configuration
 pub fn build_css_hook(config: &SiteConfig, output: &Path) -> Result<HookConfig> {
     let css = &config.build.hooks.css;
     let minify = config.build.minify;
@@ -37,7 +37,7 @@ pub fn build_css_hook(config: &SiteConfig, output: &Path) -> Result<HookConfig> 
     }
 }
 
-/// Run CSS processor as a pre hook.
+/// Run CSS processor as a pre hook
 pub fn run_css(
     config: &SiteConfig,
     output: &Path,
@@ -55,7 +55,7 @@ pub fn run_css(
     Ok(())
 }
 
-/// Rebuild CSS using configured path.
+/// Rebuild CSS using configured path
 pub fn rebuild_css(
     config: &SiteConfig,
     mode: BuildMode,

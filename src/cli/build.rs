@@ -34,7 +34,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-/// Collect font directories from config for font loading.
+/// Collect font directories from config for font loading
 pub fn collect_font_dirs(config: &SiteConfig) -> Vec<&Path> {
     let mut dirs: Vec<&Path> = vec![config.build.content.as_path()];
     dirs.extend(config.build.assets.nested_sources());
@@ -42,9 +42,9 @@ pub fn collect_font_dirs(config: &SiteConfig) -> Vec<&Path> {
     dirs
 }
 
-/// Build the entire site using two-phase compilation.
+/// Build the entire site using two-phase compilation
 ///
-/// Pipeline: pre-hooks → init → collect → compile → iterative → post-process → post-hooks → finalize
+/// Pipeline: pre-hooks -> init -> collect -> compile -> iterative -> post-process -> post-hooks -> finalize
 pub fn build_site(
     mode: BuildMode,
     config: &SiteConfig,
@@ -88,7 +88,7 @@ pub fn build_site(
     Ok((repo, pages))
 }
 
-/// Collected files for the build.
+/// Collected files for the build
 struct BuildFiles {
     /// Asset files from nested directories
     assets: Vec<PathBuf>,
@@ -99,7 +99,7 @@ struct BuildFiles {
     markdown_count: usize,
 }
 
-/// Initialize build environment.
+/// Initialize build environment
 fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
     // Pre-warm typst library resources
     typst::init_typst(&collect_font_dirs(config));
@@ -125,7 +125,7 @@ fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
     Ok(repo)
 }
 
-/// Collect all files to process.
+/// Collect all files to process
 fn collect_build_files(config: &SiteConfig) -> BuildFiles {
     let assets: Vec<_> = config
         .build
@@ -153,7 +153,7 @@ fn collect_build_files(config: &SiteConfig) -> BuildFiles {
     }
 }
 
-/// Create progress display if not quiet.
+/// Create progress display if not quiet
 fn create_progress(files: &BuildFiles, quiet: bool) -> Option<ProgressLine> {
     if quiet {
         return None;
@@ -165,7 +165,7 @@ fn create_progress(files: &BuildFiles, quiet: bool) -> Option<ProgressLine> {
     ]))
 }
 
-/// Compile content and process assets in parallel.
+/// Compile content and process assets in parallel
 fn compile_and_process(
     mode: BuildMode,
     config: &SiteConfig,
@@ -202,7 +202,7 @@ fn compile_and_process(
     Ok(metadata)
 }
 
-/// Process nested asset files in parallel.
+/// Process nested asset files in parallel
 fn process_assets(
     files: &[PathBuf],
     config: &SiteConfig,
@@ -227,7 +227,7 @@ fn process_assets(
     })
 }
 
-/// Process content-relative asset files in parallel.
+/// Process content-relative asset files in parallel
 fn process_assets_rel(
     files: &[PathBuf],
     config: &SiteConfig,
@@ -252,7 +252,7 @@ fn process_assets_rel(
     })
 }
 
-/// Rebuild iterative pages if any exist.
+/// Rebuild iterative pages if any exist
 fn rebuild_iterative_pages(
     mode: BuildMode,
     config: &SiteConfig,
@@ -279,7 +279,7 @@ fn rebuild_iterative_pages(
     }
 }
 
-/// Post-processing (flatten assets, CNAME, HTML 404).
+/// Post-processing (flatten assets, CNAME, HTML 404)
 fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
     let clean = config.build.clean;
 
@@ -300,7 +300,7 @@ fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
     Ok(())
 }
 
-/// Copy HTML 404 page to output directory if configured.
+/// Copy HTML 404 page to output directory if configured
 fn copy_html_404(config: &SiteConfig) -> Result<()> {
     let Some(not_found) = &config.site.not_found else {
         return Ok(());
@@ -324,7 +324,7 @@ fn copy_html_404(config: &SiteConfig) -> Result<()> {
 
     Ok(())
 }
-/// Finalize build (warnings, cache, logging).
+/// Finalize build (warnings, cache, logging)
 fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
     // Print compiler warnings with truncation
     let warnings = drain_warnings();
@@ -349,7 +349,7 @@ fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-/// Print warnings with truncation rules applied.
+/// Print warnings with truncation rules applied
 fn print_warnings(
     warnings: &typst_batch::Diagnostics,
     config: &crate::config::section::build::DiagnosticsConfig,
@@ -373,8 +373,8 @@ fn print_warnings(
     );
 }
 
-/// Filter warnings by per-file limit.
-/// Returns (filtered items, count of truncated items).
+/// Filter warnings by per-file limit
+/// Returns (filtered items, count of truncated items)
 fn filter_by_file_limit<'a>(
     items: &[&'a typst_batch::DiagnosticInfo],
     max_per_file: Option<usize>,
@@ -404,8 +404,8 @@ fn filter_by_file_limit<'a>(
     (filtered, truncated)
 }
 
-/// Apply total warnings limit.
-/// Returns (filtered items, count of truncated items).
+/// Apply total warnings limit
+/// Returns (filtered items, count of truncated items)
 fn apply_total_limit<T>(mut items: Vec<T>, max: Option<usize>) -> (Vec<T>, usize) {
     let Some(max) = max else {
         return (items, 0);
@@ -420,8 +420,8 @@ fn apply_total_limit<T>(mut items: Vec<T>, max: Option<usize>) -> (Vec<T>, usize
     }
 }
 
-/// Print warnings with line limits.
-/// Returns (count printed, whether lines were truncated).
+/// Print warnings with line limits
+/// Returns (count printed, whether lines were truncated)
 fn print_with_line_limits(
     items: &[&typst_batch::DiagnosticInfo],
     config: &crate::config::section::build::DiagnosticsConfig,
@@ -459,7 +459,7 @@ fn print_with_line_limits(
     (printed, false)
 }
 
-/// Print summary of truncated warnings.
+/// Print summary of truncated warnings
 fn print_truncation_summary(
     total_filtered: usize,
     printed: usize,
@@ -478,7 +478,7 @@ fn print_truncation_summary(
     }
 }
 
-/// Truncate a string to max lines, appending "..." if truncated.
+/// Truncate a string to max lines, appending "..." if truncated
 fn truncate_lines(s: &str, max: usize) -> String {
     let lines: Vec<&str> = s.lines().collect();
     if lines.len() <= max {
@@ -490,7 +490,7 @@ fn truncate_lines(s: &str, max: usize) -> String {
     }
 }
 
-/// Ensure output directory exists with a git repository.
+/// Ensure output directory exists with a git repository
 fn ensure_output_repo(output: &Path, clean: bool) -> Result<ThreadSafeRepository> {
     match (output.exists(), clean) {
         (true, true) => {
@@ -522,7 +522,7 @@ fn log_build_result(output: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Recompile modified files in parallel. Returns (path, error) for failures.
+/// Recompile modified files in parallel. Returns (path, error) for failures
 pub fn recompile_files(files: &[PathBuf], mode: BuildMode) -> Vec<(String, String)> {
     use crate::compiler::page::process_page;
     use crate::config::cfg;

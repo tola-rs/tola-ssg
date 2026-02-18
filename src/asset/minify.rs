@@ -12,7 +12,7 @@ use oxc::minifier::{CompressOptions, Minifier, MinifierOptions};
 use oxc::parser::Parser;
 use oxc::span::SourceType;
 
-/// Minify JavaScript source code.
+/// Minify JavaScript source code
 pub fn minify_js(source: &str) -> Option<String> {
     let allocator = Allocator::default();
     let source_type = SourceType::mjs();
@@ -38,7 +38,7 @@ pub fn minify_js(source: &str) -> Option<String> {
     Some(code)
 }
 
-/// Minify CSS source code.
+/// Minify CSS source code
 pub fn minify_css(source: &str) -> Option<String> {
     let stylesheet = StyleSheet::parse(source, ParserOptions::default()).ok()?;
     let result = stylesheet
@@ -50,9 +50,9 @@ pub fn minify_css(source: &str) -> Option<String> {
     Some(result.code)
 }
 
-/// Minify content based on file extension.
+/// Minify content based on file extension
 ///
-/// Returns `Some(minified)` if minification succeeded, `None` otherwise.
+/// Returns `Some(minified)` if minification succeeded, `None` otherwise
 pub fn minify_by_ext(path: &Path, content: &str) -> Option<String> {
     let ext = path.extension()?.to_str()?;
     match ext {

@@ -43,9 +43,9 @@ use std::{
 // Builder API
 // ============================================================================
 
-/// Command builder for external process execution.
+/// Command builder for external process execution
 ///
-/// Provides a fluent API for configuring and running external commands.
+/// Provides a fluent API for configuring and running external commands
 #[derive(Default)]
 pub struct Cmd {
     program: OsString,
@@ -164,18 +164,18 @@ impl Cmd {
 // Macro helper traits
 // ============================================================================
 
-/// Create a command from a single program name.
+/// Create a command from a single program name
 ///
-/// This is a helper for the `exec!` macro.
+/// This is a helper for the `exec!` macro
 #[inline]
 pub fn cmd<S: AsRef<OsStr>>(program: S) -> Cmd {
     Cmd::new(program)
 }
 
-/// Create a command from a slice of arguments.
+/// Create a command from a slice of arguments
 ///
-/// The first element is the program, rest are arguments.
-/// This is a helper for the `exec!` macro.
+/// The first element is the program, rest are arguments
+/// This is a helper for the `exec!` macro
 #[inline]
 pub fn cmd_slice<S: AsRef<OsStr>>(slice: &[S]) -> Cmd {
     Cmd::from_slice(slice)
@@ -319,7 +319,7 @@ impl Cmd {
 // Macro (syntax sugar for simple cases)
 // ============================================================================
 
-/// Run an external command with arguments.
+/// Run an external command with arguments
 ///
 /// # Syntax
 ///
@@ -407,9 +407,9 @@ macro_rules! exec {
 // Output Filtering
 // ============================================================================
 
-/// Filter rule for command output logging.
+/// Filter rule for command output logging
 ///
-/// Used to reduce noise by skipping known warnings or irrelevant messages.
+/// Used to reduce noise by skipping known warnings or irrelevant messages
 pub struct FilterRule {
     /// Prefixes to skip when logging output.
     pub skip_prefixes: &'static [&'static str],
@@ -443,24 +443,24 @@ impl FilterRule {
     }
 }
 
-/// Empty filter (no skipping).
+/// Empty filter (no skipping)
 pub const EMPTY_FILTER: FilterRule = FilterRule::new(&[]);
 
-/// Silent filter (skip all output).
+/// Silent filter (skip all output)
 pub const SILENT_FILTER: FilterRule = FilterRule::new(&[""]);
 
 // ============================================================================
 // Helpers
 // ============================================================================
 
-/// Strip ANSI escape codes from string.
+/// Strip ANSI escape codes from string
 fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"\x1b\[[0-9;]*m").unwrap());
     re.replace_all(s, "")
 }
 
-/// Log command output, returning error on failure.
+/// Log command output, returning error on failure
 fn log_output(name: &str, output: &Output, filter: &'static FilterRule) -> Result<()> {
     if !output.status.success() {
         anyhow::bail!(format_error(name, output, filter));
@@ -471,7 +471,7 @@ fn log_output(name: &str, output: &Output, filter: &'static FilterRule) -> Resul
     Ok(())
 }
 
-/// Format error message for failed command.
+/// Format error message for failed command
 fn format_error(name: &str, output: &Output, filter: &'static FilterRule) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);

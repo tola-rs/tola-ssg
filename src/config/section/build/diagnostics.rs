@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Diagnostics display configuration.
+/// Diagnostics display configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiagnosticsConfig {

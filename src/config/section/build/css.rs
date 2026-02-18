@@ -33,7 +33,7 @@ impl CssConfig {
     }
 }
 
-/// CSS processor configuration (syntax sugar for pre hook).
+/// CSS processor configuration (syntax sugar for pre hook)
 ///
 /// When enabled, this is internally compiled to a pre hook with:
 /// - Auto-expanded command with `-i $TOLA_INPUT -o $TOLA_OUTPUT`

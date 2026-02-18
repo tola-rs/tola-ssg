@@ -1,4 +1,4 @@
-//! Head content injector (Raw → Raw).
+//! Head content injector (Raw -> Raw).
 //!
 //! Injects site-wide `<head>` content from config into Raw VDOM before indexing.
 //! Also sets `lang` attribute on `<html>` root if not present.
@@ -15,7 +15,7 @@ use crate::compiler::family::{Raw, TolaSite};
 use crate::config::SiteConfig;
 use crate::utils::mime;
 
-/// Injects site-wide `<head>` content into Raw VDOM.
+/// Injects site-wide `<head>` content into Raw VDOM
 pub struct HeaderInjector<'a> {
     config: &'a SiteConfig,
     /// Whether to inject global header content (styles, scripts, elements).
@@ -24,7 +24,7 @@ pub struct HeaderInjector<'a> {
     global_header: bool,
 }
 
-/// Compute versioned href for an asset (with ?v=hash for cache busting).
+/// Compute versioned href for an asset (with ?v=hash for cache busting)
 fn versioned_href(path: &Path, config: &SiteConfig) -> Option<String> {
     let href = compute_asset_href(path, config).ok()?;
     let abs_path = config.get_root().join(path);

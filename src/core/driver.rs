@@ -1,6 +1,6 @@
 //! Build mode configuration for production/development builds.
 
-/// Build mode configuration.
+/// Build mode configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildMode {
     /// Whether to emit `data-tola-id` attributes on elements.

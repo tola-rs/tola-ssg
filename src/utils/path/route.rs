@@ -5,7 +5,7 @@
 //! - Safe filename generation from URLs
 //! - Link type detection (external vs internal)
 
-/// Strip leading slash from a URL path.
+/// Strip leading slash from a URL path
 ///
 /// # Examples
 /// ```
@@ -20,10 +20,10 @@ pub fn strip_leading_slash(url: &str) -> &str {
     url.trim_start_matches('/')
 }
 
-/// Convert a URL path to a safe filename for caching.
+/// Convert a URL path to a safe filename for caching
 ///
-/// Replaces `/` with `_` to create filesystem-safe names.
-/// The leading slash is preserved as `_` to distinguish root from `/index`.
+/// Replaces `/` with `_` to create filesystem-safe names
+/// The leading slash is preserved as `_` to distinguish root from `/index`
 ///
 /// # Examples
 /// ```
@@ -61,10 +61,10 @@ pub fn is_external_link(link: &str) -> bool {
     })
 }
 
-/// Split a URL into path and fragment parts.
+/// Split a URL into path and fragment parts
 ///
 /// # Returns
-/// A tuple of (path, fragment) where fragment is empty string if no `#` found.
+/// A tuple of (path, fragment) where fragment is empty string if no `#` found
 ///
 /// # Examples
 /// ```

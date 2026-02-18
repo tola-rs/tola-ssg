@@ -16,7 +16,7 @@ use field::{FieldInfo, FieldStatus};
 use template::generate_template_code;
 use types::infer_section;
 
-/// Generate Config implementation (FIELDS + template).
+/// Generate Config implementation (FIELDS + template)
 pub fn derive(input: &DeriveInput) -> TokenStream {
     let name = &input.ident;
     let fields_struct_name = syn::Ident::new(&format!("{}Fields", name), name.span());

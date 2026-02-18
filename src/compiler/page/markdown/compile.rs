@@ -11,7 +11,7 @@ use crate::pipeline::compile as pipeline_compile;
 
 use super::{MarkdownMetaExtractor, MarkdownOptions, from_markdown};
 
-/// Compile a Markdown file to HTML.
+/// Compile a Markdown file to HTML
 pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutput> {
     // Read source file
     let source = std::fs::read_to_string(path)?;

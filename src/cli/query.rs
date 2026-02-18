@@ -23,7 +23,7 @@ use crate::log;
 use crate::page::PageMeta;
 use crate::utils::plural_count;
 
-/// Metadata that can be either normalized or raw.
+/// Metadata that can be either normalized or raw
 #[derive(Debug)]
 pub enum QueryMeta {
     Normalized(Box<PageMeta>),
@@ -52,7 +52,7 @@ impl Serialize for QueryMeta {
     }
 }
 
-/// Result for a single queried page.
+/// Result for a single queried page
 #[derive(Debug, Serialize)]
 pub struct PageQueryResult {
     pub path: String,
@@ -61,14 +61,14 @@ pub struct PageQueryResult {
     pub meta: QueryMeta,
 }
 
-/// Result for batch query.
+/// Result for batch query
 #[derive(Debug, Serialize)]
 #[serde(transparent)]
 pub struct QueryResult {
     pub pages: Vec<PageQueryResult>,
 }
 
-/// Execute query command.
+/// Execute query command
 pub fn run_query(args: &QueryArgs, config: &SiteConfig) -> Result<()> {
     // Register VFS for @tola/* virtual packages (no font warmup needed)
     crate::compiler::page::typst::init::init_vfs();
@@ -180,7 +180,7 @@ fn process_query_result(
 // Markdown Query (using shared VDOM pipeline)
 // ============================================================================
 
-/// Query Markdown file metadata using shared VDOM pipeline.
+/// Query Markdown file metadata using shared VDOM pipeline
 fn query_markdown_vdom(file: &Path, config: &SiteConfig) -> Result<Option<JsonValue>> {
     let result = scan_markdown_file(file, config)?;
     Ok(result.raw_meta)
@@ -228,7 +228,7 @@ fn output_results(results: &QueryResult, args: &QueryArgs) -> Result<()> {
     Ok(())
 }
 
-/// Format all results, optionally filtering empty fields.
+/// Format all results, optionally filtering empty fields
 fn format_results(results: &QueryResult, filter_empty: bool) -> JsonValue {
     let pages: Vec<JsonValue> = results
         .pages
@@ -239,7 +239,7 @@ fn format_results(results: &QueryResult, filter_empty: bool) -> JsonValue {
     JsonValue::Array(pages)
 }
 
-/// Format a single page result with path/url first.
+/// Format a single page result with path/url first
 fn format_page(page: &PageQueryResult, filter_empty: bool) -> JsonValue {
     let mut obj = Map::new();
 
@@ -260,7 +260,7 @@ fn format_page(page: &PageQueryResult, filter_empty: bool) -> JsonValue {
     JsonValue::Object(obj)
 }
 
-/// Check if a JSON value is considered "empty" (null, "", or []).
+/// Check if a JSON value is considered "empty" (null, "", or [])
 fn is_empty_value(value: &JsonValue) -> bool {
     match value {
         JsonValue::Null => true,
@@ -270,7 +270,7 @@ fn is_empty_value(value: &JsonValue) -> bool {
     }
 }
 
-/// Filter to specific fields, with path/url always included first.
+/// Filter to specific fields, with path/url always included first
 fn filter_fields(results: &QueryResult, fields: &[String], filter_empty: bool) -> JsonValue {
     let pages: Vec<JsonValue> = results
         .pages

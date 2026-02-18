@@ -4,16 +4,13 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Sitemap generation settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "build.sitemap")]
+#[config(section = "site.sitemap")]
 pub struct SitemapConfig {
-    /// Enable sitemap generation.
-    #[config(inline_doc = "Enable sitemap generation.")]
+    #[config(inline_doc = "Enable sitemap generation")]
     pub enable: bool,
-    /// Output path for sitemap file.
-    #[config(inline_doc = "Output path for sitemap file.")]
+    #[config(inline_doc = "Output path for sitemap file")]
     pub path: PathBuf,
 }
 

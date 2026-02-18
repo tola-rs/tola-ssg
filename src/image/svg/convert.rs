@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use crate::config::{SvgConverter, SvgFormat};
 use crate::utils::exec::Cmd;
 
-/// Convert SVG to the specified format.
+/// Convert SVG to the specified format
 ///
 /// # Arguments
 /// * `svg_data` - Optimized SVG bytes
@@ -18,10 +18,10 @@ use crate::utils::exec::Cmd;
 /// * `quality` - Quality for lossy formats (0-100)
 ///
 /// # Returns
-/// Converted image bytes, or error if conversion fails.
+/// Converted image bytes, or error if conversion fails
 ///
 /// # Note
-/// If `format` is `SVG`, returns the input unchanged (no conversion needed).
+/// If `format` is `SVG`, returns the input unchanged (no conversion needed)
 pub fn convert_svg(
     svg_data: &[u8],
     size: (f32, f32),
@@ -42,9 +42,9 @@ pub fn convert_svg(
     }
 }
 
-/// Convert using built-in Rust libraries.
+/// Convert using built-in Rust libraries
 ///
-/// Requires `resvg` for SVG rendering and format-specific encoders.
+/// Requires `resvg` for SVG rendering and format-specific encoders
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn convert_builtin(
     svg_data: &[u8],
@@ -87,7 +87,7 @@ fn convert_builtin(
     }
 }
 
-/// Render SVG tree and encode to AVIF.
+/// Render SVG tree and encode to AVIF
 fn render_and_encode_avif(
     tree: &usvg::Tree,
     width: u32,
@@ -99,7 +99,7 @@ fn render_and_encode_avif(
     encode_avif(&pixels, width as usize, height as usize, quality)
 }
 
-/// Render SVG tree and encode to PNG.
+/// Render SVG tree and encode to PNG
 fn render_and_encode_png(
     tree: &usvg::Tree,
     width: u32,
@@ -115,9 +115,9 @@ fn render_and_encode_png(
     )
 }
 
-/// Render SVG to RGBA pixels.
+/// Render SVG to RGBA pixels
 ///
-/// Note: This is a placeholder. Full implementation requires `resvg` crate.
+/// Note: This is a placeholder. Full implementation requires `resvg` crate
 fn render_svg_to_rgba(
     _tree: &usvg::Tree,
     _width: u32,
@@ -135,7 +135,7 @@ fn render_svg_to_rgba(
     )
 }
 
-/// Encode RGBA pixels to AVIF using ravif.
+/// Encode RGBA pixels to AVIF using ravif
 fn encode_avif(data: &[u8], width: usize, height: usize, quality: u8) -> Result<Vec<u8>> {
     let mut pixels = Vec::with_capacity(width * height);
     for chunk in data.chunks_exact(4) {
@@ -150,7 +150,7 @@ fn encode_avif(data: &[u8], width: usize, height: usize, quality: u8) -> Result<
     Ok(encoded.avif_file)
 }
 
-/// Convert using ImageMagick.
+/// Convert using ImageMagick
 fn convert_magick(svg_data: &[u8], format: &SvgFormat, dpi: f32) -> Result<Vec<u8>> {
     let density = dpi.to_string();
     let format_arg = format!("{}:-", format.extension());
@@ -171,7 +171,7 @@ fn convert_magick(svg_data: &[u8], format: &SvgFormat, dpi: f32) -> Result<Vec<u
     Ok(output.stdout)
 }
 
-/// Convert using FFmpeg.
+/// Convert using FFmpeg
 fn convert_ffmpeg(svg_data: &[u8], format: &SvgFormat) -> Result<Vec<u8>> {
     let format_args: &[&str] = match format {
         SvgFormat::AVIF => &["-c:v", "libsvtav1", "-pix_fmt", "yuva420p", "-f", "avif"],

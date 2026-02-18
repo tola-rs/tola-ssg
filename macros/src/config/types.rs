@@ -3,12 +3,12 @@
 use quote::quote;
 use syn::Type;
 
-/// Convert syn::Type to string representation.
+/// Convert syn::Type to string representation
 pub fn type_to_string(ty: &Type) -> String {
     quote!(#ty).to_string().replace(' ', "")
 }
 
-/// Infer section name from struct name.
+/// Infer section name from struct name
 pub fn infer_section(name: &str) -> String {
     let name = name
         .strip_suffix("SectionConfig")
@@ -19,7 +19,7 @@ pub fn infer_section(name: &str) -> String {
     to_snake_case(name)
 }
 
-/// Convert PascalCase to snake_case.
+/// Convert PascalCase to snake_case
 pub fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -35,8 +35,8 @@ pub fn to_snake_case(s: &str) -> String {
     result
 }
 
-/// Format default value based on field type.
-/// String/PathBuf/enum types get quoted, others are used as-is.
+/// Format default value based on field type
+/// String/PathBuf/enum types get quoted, others are used as-is
 pub fn format_default_for_type(value: &str, ty: &str) -> String {
     match ty {
         "String" | "PathBuf" => format!("\"{}\"", value),

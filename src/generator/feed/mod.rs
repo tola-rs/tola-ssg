@@ -12,7 +12,7 @@ pub mod atom;
 mod common;
 pub mod rss;
 
-/// Build feed if enabled in config (RSS or Atom based on format setting).
+/// Build feed if enabled in config (RSS or Atom based on format setting)
 pub fn build_feed(config: &SiteConfig) -> Result<()> {
     if config.site.feed.enable {
         match config.site.feed.format {

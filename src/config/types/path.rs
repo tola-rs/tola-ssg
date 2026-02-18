@@ -8,12 +8,12 @@
 //! ```text
 //! SiteConfig
 //!     │
-//!     └── paths() → PathResolver
+//!     └── paths() -> PathResolver
 //!                       │
-//!                       ├── output_root()        → /abs/path/public
-//!                       ├── output_dir()         → /abs/path/public/prefix
-//!                       ├── url_for_filename()   → /prefix/filename
-//!                       └── url_for_path()       → /prefix/path/to/file
+//!                       ├── output_root()        -> /abs/path/public
+//!                       ├── output_dir()         -> /abs/path/public/prefix
+//!                       ├── url_for_filename()   -> /prefix/filename
+//!                       └── url_for_path()       -> /prefix/path/to/file
 //! ```
 //!
 //! # Usage
@@ -26,15 +26,15 @@
 //!
 //! // Generate URL for a file
 //! let url = paths.url_for_filename("styles.css");
-//! // → "/prefix/styles.css" (or "/styles.css" if no prefix)
+//! // -> "/prefix/styles.css" (or "/styles.css" if no prefix)
 //! ```
 
 use std::path::{Path, PathBuf};
 
-/// Centralized path resolver for consistent URL and output path generation.
+/// Centralized path resolver for consistent URL and output path generation
 ///
 /// Provides a unified API for all path operations, ensuring `path_prefix` is
-/// correctly applied everywhere without manual handling.
+/// correctly applied everywhere without manual handling
 #[derive(Debug, Clone, Copy)]
 pub struct PathResolver<'a> {
     /// Output root directory (without path_prefix)
@@ -86,10 +86,10 @@ impl<'a> PathResolver<'a> {
     ///
     /// ```ignore
     /// // With prefix "my-project":
-    /// paths.url_for_filename("styles.css") → "/my-project/styles.css"
+    /// paths.url_for_filename("styles.css") -> "/my-project/styles.css"
     ///
     /// // Without prefix:
-    /// paths.url_for_filename("styles.css") → "/styles.css"
+    /// paths.url_for_filename("styles.css") -> "/styles.css"
     /// ```
     pub fn url_for_filename(&self, filename: &str) -> String {
         if self.has_prefix() {
@@ -107,7 +107,7 @@ impl<'a> PathResolver<'a> {
     ///
     /// ```ignore
     /// // With prefix "my-project":
-    /// paths.url_for_rel_path("css/app.css") → "/my-project/css/app.css"
+    /// paths.url_for_rel_path("css/app.css") -> "/my-project/css/app.css"
     /// ```
     pub fn url_for_rel_path<P: AsRef<Path>>(&self, rel_path: P) -> String {
         let joined = self.prefix.join(rel_path);

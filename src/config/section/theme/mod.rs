@@ -17,7 +17,7 @@ pub use recolor::{RecolorConfig, RecolorSource, RecolorTarget};
 use macros::Config;
 use serde::{Deserialize, Serialize};
 
-/// Theme section configuration.
+/// Theme section configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "theme")]

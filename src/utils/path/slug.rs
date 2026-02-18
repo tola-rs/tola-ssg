@@ -7,10 +7,10 @@
 //!
 //! | Mode | Unicode | Forbidden Chars | Case | Example |
 //! |------|---------|-----------------|------|---------|
-//! | `On` | → ASCII | → separator | lowercase | `"Café World"` → `"cafe-world"` |
-//! | `Safe` | preserved | → separator | configurable | `"Café World"` → `"Café-World"` |
-//! | `Ascii` | → ASCII | → separator | configurable | `"Café World"` → `"Cafe-World"` |
-//! | `No` | preserved | preserved | preserved | `"Café World"` → `"Café World"` |
+//! | `On` | -> ASCII | -> separator | lowercase | `"Café World"` -> `"cafe-world"` |
+//! | `Safe` | preserved | -> separator | configurable | `"Café World"` -> `"Café-World"` |
+//! | `Ascii` | -> ASCII | -> separator | configurable | `"Café World"` -> `"Cafe-World"` |
+//! | `No` | preserved | preserved | preserved | `"Café World"` -> `"Café World"` |
 //!
 //! # Forbidden Characters
 //!
@@ -23,21 +23,21 @@
 //!
 //! ```ignore
 //! // Safe mode: preserves Unicode, replaces forbidden chars
-//! sanitize_text("Chapter:One", '-') // → "Chapter-One"
-//! sanitize_text("A::::B", '-')    // → "A-B" (consecutive collapsed)
+//! sanitize_text("Chapter:One", '-') // -> "Chapter-One"
+//! sanitize_text("A::::B", '-')    // -> "A-B" (consecutive collapsed)
 //!
 //! // Full slugify: converts to ASCII lowercase
-//! slugify_on("München", '-')       // → "munchen"
+//! slugify_on("München", '-')       // -> "munchen"
 //! ```
 
 use crate::config::{SlugCase, SlugConfig, SlugMode};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-/// Characters that are unsafe for URLs and file paths.
+/// Characters that are unsafe for URLs and file paths
 ///
-/// These characters are replaced with the configured separator.
-/// Consecutive occurrences are collapsed into a single separator.
+/// These characters are replaced with the configured separator
+/// Consecutive occurrences are collapsed into a single separator
 pub const FORBIDDEN_CHARS: &[char] = &[
     '<', '>', ':', '|', '?', '*', '#', '\\', '(', ')', '[', ']', '\t', '\r', '\n',
 ];
@@ -46,7 +46,7 @@ pub const FORBIDDEN_CHARS: &[char] = &[
 // Public API
 // ============================================================================
 
-/// Converts fragment text (e.g., heading anchors) to URL-safe format.
+/// Converts fragment text (e.g., heading anchors) to URL-safe format
 ///
 /// # Arguments
 /// * `text` - The text to slugify
@@ -55,8 +55,8 @@ pub const FORBIDDEN_CHARS: &[char] = &[
 /// # Example
 /// ```ignore
 /// // With SlugMode::Safe, separator='-', case=Lower
-/// slugify_fragment("Hello World", &slug) // → "hello-world"
-/// slugify_fragment("Chapter:One", &slug) // → "Chapter-One"
+/// slugify_fragment("Hello World", &slug) // -> "hello-world"
+/// slugify_fragment("Chapter:One", &slug) // -> "Chapter-One"
 /// ```
 pub fn slugify_fragment(text: &str, slug: &SlugConfig) -> String {
     let sep = slug.separator.as_char();
@@ -71,9 +71,9 @@ pub fn slugify_fragment(text: &str, slug: &SlugConfig) -> String {
     apply_case(&result, &slug.case).into_owned()
 }
 
-/// Converts a file path to URL-safe format.
+/// Converts a file path to URL-safe format
 ///
-/// Each path component is processed independently, preserving the directory structure.
+/// Each path component is processed independently, preserving the directory structure
 ///
 /// # Arguments
 /// * `path` - The path to slugify
@@ -83,7 +83,7 @@ pub fn slugify_fragment(text: &str, slug: &SlugConfig) -> String {
 /// ```ignore
 /// // With SlugMode::Safe, separator='-', case=Lower
 /// slugify_path("content/My Posts/Hello World", &slug)
-/// // → "content/my-posts/hello-world"
+/// // -> "content/my-posts/hello-world"
 /// ```
 pub fn slugify_path(path: impl AsRef<Path>, slug: &SlugConfig) -> PathBuf {
     let sep = slug.separator.as_char();
@@ -101,10 +101,10 @@ pub fn slugify_path(path: impl AsRef<Path>, slug: &SlugConfig) -> PathBuf {
 // Core Transformation Functions
 // ============================================================================
 
-/// Full slugification: Unicode → ASCII, lowercase, separator-delimited.
+/// Full slugification: Unicode -> ASCII, lowercase, separator-delimited
 ///
-/// This is the most aggressive transformation, suitable for URL slugs.
-/// Always produces lowercase output regardless of case settings.
+/// This is the most aggressive transformation, suitable for URL slugs
+/// Always produces lowercase output regardless of case settings
 ///
 /// # Processing Steps
 /// 1. Transliterate Unicode to ASCII (via `deunicode`)
@@ -115,10 +115,10 @@ pub fn slugify_path(path: impl AsRef<Path>, slug: &SlugConfig) -> PathBuf {
 ///
 /// # Examples
 /// ```ignore
-/// slugify_full("Hello World", '-')  // → "hello-world"
-/// slugify_full("München", '-')      // → "munchen"
-/// slugify_full("Café Naïve", '-')   // → "cafe-naive"
-/// slugify_full("a:::b", '-')        // → "a-b"
+/// slugify_full("Hello World", '-')  // -> "hello-world"
+/// slugify_full("München", '-')      // -> "munchen"
+/// slugify_full("Café Naïve", '-')   // -> "cafe-naive"
+/// slugify_full("a:::b", '-')        // -> "a-b"
 /// ```
 fn slugify_full(text: &str, sep: char) -> String {
     let ascii = deunicode::deunicode(text);
@@ -126,9 +126,9 @@ fn slugify_full(text: &str, sep: char) -> String {
     collapse_consecutive_separators(&replaced, sep)
 }
 
-/// Sanitizes text by replacing forbidden characters with separator.
+/// Sanitizes text by replacing forbidden characters with separator
 ///
-/// Preserves Unicode characters while making the text URL-safe.
+/// Preserves Unicode characters while making the text URL-safe
 ///
 /// # Processing Steps
 /// 1. Trim leading/trailing whitespace
@@ -138,27 +138,27 @@ fn slugify_full(text: &str, sep: char) -> String {
 ///
 /// # Examples
 /// ```ignore
-/// sanitize("Hello World", '-')   // → "Hello-World"
-/// sanitize("Café#World", '-')      // → "Café-World"
-/// sanitize("a:::b   c", '-')     // → "a-b-c"
-/// sanitize("Chapter:One", '-')   // → "Chapter-One"
+/// sanitize("Hello World", '-')   // -> "Hello-World"
+/// sanitize("Café#World", '-')      // -> "Café-World"
+/// sanitize("a:::b   c", '-')     // -> "a-b-c"
+/// sanitize("Chapter:One", '-')   // -> "Chapter-One"
 /// ```
 fn sanitize(text: &str, sep: char) -> String {
     let replaced = replace_special_chars(text.trim(), sep);
     collapse_consecutive_separators(&replaced, sep)
 }
 
-/// Transforms each component of a path with full slugification.
+/// Transforms each component of a path with full slugification
 ///
 /// Applies `slugify_full` to each path component individually,
-/// preserving the directory structure while fully slugifying each part.
+/// preserving the directory structure while fully slugifying each part
 fn transform_path_components_full(path: &Path, sep: char) -> PathBuf {
     path.components()
         .map(|component| slugify_full(&component.as_os_str().to_string_lossy(), sep))
         .collect()
 }
 
-/// Transforms each component of a path independently.
+/// Transforms each component of a path independently
 ///
 /// # Arguments
 /// * `path` - The path to transform
@@ -183,7 +183,7 @@ fn transform_path_components(path: &Path, sep: char, case: &SlugCase, to_ascii: 
 // Helper Functions
 // ============================================================================
 
-/// Replaces forbidden characters and whitespace with the separator.
+/// Replaces forbidden characters and whitespace with the separator
 #[inline]
 fn replace_special_chars(text: &str, sep: char) -> String {
     text.chars()
@@ -197,13 +197,13 @@ fn replace_special_chars(text: &str, sep: char) -> String {
         .collect()
 }
 
-/// Collapses consecutive separators into one and trims leading/trailing separators.
+/// Collapses consecutive separators into one and trims leading/trailing separators
 ///
 /// # Examples
 /// ```ignore
-/// collapse_consecutive_separators("a--b--c", '-') // → "a-b-c"
-/// collapse_consecutive_separators("--abc--", '-') // → "abc"
-/// collapse_consecutive_separators("------", '-')  // → ""
+/// collapse_consecutive_separators("a--b--c", '-') // -> "a-b-c"
+/// collapse_consecutive_separators("--abc--", '-') // -> "abc"
+/// collapse_consecutive_separators("------", '-')  // -> ""
 /// ```
 fn collapse_consecutive_separators(text: &str, sep: char) -> String {
     let mut result = String::with_capacity(text.len());
@@ -230,7 +230,7 @@ fn collapse_consecutive_separators(text: &str, sep: char) -> String {
     result
 }
 
-/// Applies case transformation to text.
+/// Applies case transformation to text
 ///
 /// # Case Modes
 /// - `Lower`: all lowercase
@@ -238,7 +238,7 @@ fn collapse_consecutive_separators(text: &str, sep: char) -> String {
 /// - `Capitalize`: Title Case (Each Word Capitalized)
 /// - `Preserve`: no change
 ///
-/// Uses `Cow` to avoid allocation for `Preserve` mode.
+/// Uses `Cow` to avoid allocation for `Preserve` mode
 fn apply_case<'a>(text: &'a str, case: &SlugCase) -> Cow<'a, str> {
     match case {
         SlugCase::Lower => Cow::Owned(text.to_lowercase()),
@@ -248,15 +248,15 @@ fn apply_case<'a>(text: &'a str, case: &SlugCase) -> Cow<'a, str> {
     }
 }
 
-/// Capitalizes the first letter of each word.
+/// Capitalizes the first letter of each word
 ///
-/// Words are delimited by `-`, `_`, or whitespace.
+/// Words are delimited by `-`, `_`, or whitespace
 ///
 /// # Examples
 /// ```ignore
-/// capitalize_words("hello world")      // → "Hello World"
-/// capitalize_words("hello-world-test") // → "Hello-World-Test"
-/// capitalize_words("HELLO")            // → "Hello"
+/// capitalize_words("hello world")      // -> "Hello World"
+/// capitalize_words("hello-world-test") // -> "Hello-World-Test"
+/// capitalize_words("HELLO")            // -> "Hello"
 /// ```
 fn capitalize_words(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
@@ -559,11 +559,11 @@ mod tests {
 
     #[test]
     fn test_slugify_full_unicode_to_ascii() {
-        // Unicode → ASCII
+        // Unicode -> ASCII
         assert_eq!(slugify_full("München", SEP_DASH), "munchen");
         assert_eq!(slugify_full("Åland", SEP_DASH), "aland");
 
-        // European accents → ASCII
+        // European accents -> ASCII
         assert_eq!(slugify_full("café", SEP_DASH), "cafe");
         assert_eq!(slugify_full("über", SEP_DASH), "uber");
         assert_eq!(slugify_full("naïve", SEP_DASH), "naive");
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn test_slugify_full_mixed() {
         assert_eq!(slugify_full("Hello München", SEP_DASH), "hello-munchen");
-        // Note: 2024år → "2024ar"
+        // Note: 2024år -> "2024ar"
         assert_eq!(slugify_full("2024år", SEP_DASH), "2024ar");
     }
 

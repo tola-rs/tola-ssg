@@ -14,7 +14,7 @@ pub mod sitemap;
 
 use std::borrow::Cow;
 
-/// Minify XML content if enabled.
+/// Minify XML content if enabled
 pub fn minify_xml(content: &[u8], enabled: bool) -> Cow<'_, [u8]> {
     if enabled {
         let xml_str = std::str::from_utf8(content).unwrap_or("");

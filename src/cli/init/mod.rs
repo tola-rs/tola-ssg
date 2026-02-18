@@ -18,7 +18,7 @@ use std::path::Path;
 
 pub use validate::InitMode;
 
-/// Create a new site with default structure.
+/// Create a new site with default structure
 ///
 /// # Steps
 /// 1. Validate target directory
@@ -28,7 +28,7 @@ pub use validate::InitMode;
 /// 5. Generate LSP stubs
 /// 6. Create initial commit
 ///
-/// If `dry_run` is true, only prints the config template to stdout.
+/// If `dry_run` is true, only prints the config template to stdout
 pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Result<()> {
     if dry_run {
         print!("{}", config::generate_config_template());
@@ -70,9 +70,9 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
     Ok(())
 }
 
-/// Get the output directory path relative to root.
+/// Get the output directory path relative to root
 ///
-/// Helper for external callers that need the output path.
+/// Helper for external callers that need the output path
 pub fn get_output_dir(config: &SiteConfig) -> &Path {
     &config.build.output
 }

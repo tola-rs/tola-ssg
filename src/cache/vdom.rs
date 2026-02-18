@@ -14,7 +14,7 @@ use tola_vdom::serialize::{from_bytes_to_indexed, to_bytes};
 use super::CACHE_DIR;
 use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 
-/// Entry ready to be persisted to disk.
+/// Entry ready to be persisted to disk
 struct PersistEntry {
     url: String,
     filename: String,
@@ -22,7 +22,7 @@ struct PersistEntry {
     info: CacheFileInfo,
 }
 
-/// Persist the VDOM cache to disk.
+/// Persist the VDOM cache to disk
 pub fn persist_cache(
     cache: &SharedCache,
     source_paths: &FxHashMap<UrlPath, PathBuf>,
@@ -52,7 +52,7 @@ pub fn persist_cache(
     Ok(saved)
 }
 
-/// Restore the VDOM cache from disk.
+/// Restore the VDOM cache from disk
 pub fn restore_cache(cache: &SharedCache, root: &Path) -> std::io::Result<usize> {
     let Some(index) = load_cache_index(root)? else {
         return Ok(0);
@@ -77,7 +77,7 @@ pub fn restore_cache(cache: &SharedCache, root: &Path) -> std::io::Result<usize>
     Ok(restored)
 }
 
-/// Restore the dependency graph from cached index.
+/// Restore the dependency graph from cached index
 pub fn restore_dependency_graph(root: &Path) -> std::io::Result<usize> {
     let Some(index) = load_cache_index(root)? else {
         return Ok(0);
@@ -97,12 +97,12 @@ pub fn restore_dependency_graph(root: &Path) -> std::io::Result<usize> {
     Ok(count)
 }
 
-/// Check if valid VDOM cache exists.
+/// Check if valid VDOM cache exists
 pub fn has_cache(root: &Path) -> bool {
     root.join(CACHE_DIR).join(INDEX_FILE).exists()
 }
 
-/// Clear the cache directory.
+/// Clear the cache directory
 pub fn clear_cache_dir(root: &Path) -> std::io::Result<()> {
     let cache_dir = root.join(CACHE_DIR);
     if cache_dir.exists() {
@@ -111,10 +111,10 @@ pub fn clear_cache_dir(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Collect cache entries ready for persistence.
+/// Collect cache entries ready for persistence
 ///
 /// Acquires read locks on cache and dependency graph, extracts all data needed,
-/// then releases locks before any IO happens.
+/// then releases locks before any IO happens
 fn collect_entries_to_persist(
     cache: &SharedCache,
     source_paths: &FxHashMap<UrlPath, PathBuf>,
@@ -137,7 +137,7 @@ fn collect_entries_to_persist(
     entries
 }
 
-/// Build a single persist entry from cache data.
+/// Build a single persist entry from cache data
 fn build_persist_entry(
     url: &str,
     cache_entry: &CacheEntry,
@@ -189,7 +189,7 @@ fn build_persist_entry(
     })
 }
 
-/// Build dependency hash map from path set.
+/// Build dependency hash map from path set
 fn build_dependency_hashes(
     deps: &rustc_hash::FxHashSet<PathBuf>,
     root: &Path,
@@ -202,7 +202,7 @@ fn build_dependency_hashes(
         .collect()
 }
 
-/// Collect entries to restore from disk.
+/// Collect entries to restore from disk
 fn collect_entries_to_restore(
     index: &CacheIndex,
     cache_dir: &Path,
@@ -218,7 +218,7 @@ fn collect_entries_to_restore(
         .collect()
 }
 
-/// Extract dependency entries from index.
+/// Extract dependency entries from index
 fn collect_dependency_entries(index: &CacheIndex, root: &Path) -> Vec<(PathBuf, Vec<PathBuf>)> {
     index
         .entries
@@ -232,7 +232,7 @@ fn collect_dependency_entries(index: &CacheIndex, root: &Path) -> Vec<(PathBuf, 
         .collect()
 }
 
-/// Write a single cache entry to disk.
+/// Write a single cache entry to disk
 fn write_entry(cache_dir: &Path, entry: &PersistEntry) -> std::io::Result<()> {
     let path = cache_dir.join(format!("{}.vdom", &entry.filename));
     fs::write(&path, &entry.bytes).map_err(|e| {
@@ -241,14 +241,14 @@ fn write_entry(cache_dir: &Path, entry: &PersistEntry) -> std::io::Result<()> {
     })
 }
 
-/// Write index file to disk.
+/// Write index file to disk
 fn write_index(cache_dir: &Path, index: &CacheIndex) -> std::io::Result<()> {
     let path = cache_dir.join(INDEX_FILE);
     let json = serde_json::to_string_pretty(index)?;
     fs::write(&path, json)
 }
 
-/// Read and deserialize a single cache entry.
+/// Read and deserialize a single cache entry
 fn read_entry(
     cache_dir: &Path,
     filename: &str,
@@ -266,7 +266,7 @@ fn read_entry(
     })
 }
 
-/// Load cache index from disk.
+/// Load cache index from disk
 fn load_cache_index(root: &Path) -> std::io::Result<Option<CacheIndex>> {
     let path = root.join(CACHE_DIR).join(INDEX_FILE);
 
@@ -281,7 +281,7 @@ fn load_cache_index(root: &Path) -> std::io::Result<Option<CacheIndex>> {
     Ok(Some(index))
 }
 
-/// Compute file content hash (blake3 hex).
+/// Compute file content hash (blake3 hex)
 fn compute_hash(path: &Path) -> String {
     crate::freshness::compute_file_hash(path).to_hex()
 }

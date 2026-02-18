@@ -12,7 +12,7 @@ use crate::core::UrlPath;
 // Resolve Context & Result
 // ============================================================================
 
-/// Context for resolving a link.
+/// Context for resolving a link
 #[derive(Debug, Clone)]
 pub struct ResolveContext<'a> {
     /// Current page's permalink (e.g., /posts/hello/)
@@ -32,7 +32,7 @@ impl ResolveContext<'_> {
     }
 }
 
-/// Result of resolving a link.
+/// Result of resolving a link
 #[derive(Debug, Clone)]
 pub enum ResolveResult {
     /// Successfully found the target resource.
@@ -95,7 +95,7 @@ impl ResolveResult {
 // Helper Functions
 // ============================================================================
 
-/// Resolve a relative URL path.
+/// Resolve a relative URL path
 ///
 /// Examples:
 /// - base="/posts/hello/", rel="../world/" -> "/posts/world/"
@@ -128,7 +128,7 @@ pub fn resolve_relative_url(base: &UrlPath, rel: &str) -> UrlPath {
     }
 }
 
-/// Resolve a relative physical path.
+/// Resolve a relative physical path
 pub fn resolve_physical_path(base: &Path, rel: &str) -> PathBuf {
     let clean_rel = rel.trim_start_matches("./");
     let mut result = base.to_path_buf();

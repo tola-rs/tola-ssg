@@ -11,11 +11,11 @@ use crate::pipeline::compile_for_scan;
 
 use super::from_typst_html;
 
-/// Scan a Typst file to Indexed VDOM (no HTML rendering).
+/// Scan a Typst file to Indexed VDOM (no HTML rendering)
 ///
 /// NOTE: For validate/query use cases, prefer `typst_batch::Scanner`
-/// which is faster by skipping the Layout phase entirely.
-/// This function still performs full Typst compilation for VDOM conversion.
+/// which is faster by skipping the Layout phase entirely
+/// This function still performs full Typst compilation for VDOM conversion
 pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
     let root = ctx.config.get_root();
     let label = &ctx.config.build.meta.label;

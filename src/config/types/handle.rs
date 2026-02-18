@@ -8,11 +8,11 @@ use anyhow::Result;
 use arc_swap::ArcSwap;
 use std::sync::{Arc, LazyLock};
 
-/// Global config storage.
+/// Global config storage
 pub static CONFIG: LazyLock<ArcSwap<SiteConfig>> =
     LazyLock::new(|| ArcSwap::from_pointee(SiteConfig::default()));
 
-/// Global hash of the current config file content.
+/// Global hash of the current config file content
 static CONFIG_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[inline]
@@ -20,9 +20,9 @@ pub fn cfg() -> Arc<SiteConfig> {
     CONFIG.load_full()
 }
 
-/// Reload config from disk if content changed.
+/// Reload config from disk if content changed
 ///
-/// Returns `Ok(true)` if config was updated, `Ok(false)` if unchanged.
+/// Returns `Ok(true)` if config was updated, `Ok(false)` if unchanged
 pub fn reload_config() -> Result<bool> {
     use std::fs;
 
@@ -60,7 +60,7 @@ pub fn init_config(config: SiteConfig) -> Arc<SiteConfig> {
     arc
 }
 
-/// Clear the clean flag after initial build.
+/// Clear the clean flag after initial build
 pub fn clear_clean_flag() {
     let mut config = (*cfg()).clone();
     config.build.clean = false;

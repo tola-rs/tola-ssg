@@ -59,7 +59,7 @@ impl HeaderConfig {
 // Asset Path Checker (Validation Helper)
 // ============================================================================
 
-/// Helper to validate paths are within asset configuration.
+/// Helper to validate paths are within asset configuration
 struct AssetPathChecker<'a> {
     assets: &'a AssetsConfig,
     root: &'a Path,

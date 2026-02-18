@@ -34,7 +34,7 @@ use std::io::{self, Read};
 /// A deterministic hasher using blake3
 ///
 /// Unlike `std::hash::Hasher`, this produces the same output across
-/// process restarts for the same input.
+/// process restarts for the same input
 pub struct StableHasher {
     inner: blake3::Hasher,
 }
@@ -95,7 +95,7 @@ impl Default for StableHasher {
 // Convenience functions
 // =============================================================================
 
-/// Compute 64-bit deterministic hash from byte data.
+/// Compute 64-bit deterministic hash from byte data
 #[inline]
 pub fn compute<T: AsRef<[u8]> + ?Sized>(data: &T) -> u64 {
     hash_bytes(data.as_ref())
@@ -114,7 +114,7 @@ pub fn hash_str(s: &str) -> u64 {
     hash_bytes(s.as_bytes())
 }
 
-/// Generate a short fingerprint string (8 hex chars) from content.
+/// Generate a short fingerprint string (8 hex chars) from content
 #[inline]
 pub fn fingerprint(s: &str) -> String {
     format!("{:08x}", hash_str(s) as u32)
@@ -131,7 +131,7 @@ pub fn hash_strs(strs: &[&str]) -> u64 {
     hasher.finish()
 }
 
-/// Compute hash from a reader (streaming, for large files).
+/// Compute hash from a reader (streaming, for large files)
 #[allow(dead_code)]
 pub fn compute_reader(mut reader: impl Read) -> io::Result<u64> {
     let mut hasher = blake3::Hasher::new();

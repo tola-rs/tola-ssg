@@ -9,11 +9,11 @@
 //! ```toml
 //! [build.assets]
 //! nested = [
-//!     "assets",                              # assets/ → output/assets/
-//!     { dir = "vendor/static", as = "lib" }, # vendor/static/ → output/lib/
+//!     "assets",                              # assets/ -> output/assets/
+//!     { dir = "vendor/static", as = "lib" }, # vendor/static/ -> output/lib/
 //! ]
 //! flatten = [
-//!     "assets/CNAME",                        # → output/CNAME
+//!     "assets/CNAME",                        # -> output/CNAME
 //!     { file = "icons/fav.ico", as = "favicon.ico" },
 //! ]
 //! ```
@@ -30,7 +30,7 @@ use crate::config::{ConfigDiagnostics, FieldPath};
 // Output Name Tracker (Validation Helper)
 // ============================================================================
 
-/// Tracks output names to detect conflicts during validation.
+/// Tracks output names to detect conflicts during validation
 struct OutputNameTracker<'a> {
     seen: FxHashMap<&'a str, (&'static str, &'a Path)>,
 }
@@ -79,16 +79,16 @@ pub struct AssetsConfig {
     /// Each directory is copied to `output/{basename}/`.
     /// Files inside can be referenced as `/{basename}/path/to/file`.
     /// Examples:
-    /// - `"assets"` → `/assets/xxx`
-    /// - `"assets/styles"` → `/styles/xxx`
-    /// - `{ dir = "vendor", as = "lib" }` → `/lib/xxx`
+    /// - `"assets"` -> `/assets/xxx`
+    /// - `"assets/styles"` -> `/styles/xxx`
+    /// - `{ dir = "vendor", as = "lib" }` -> `/lib/xxx`
     pub nested: Vec<NestedEntry>,
 
     /// Flatten files (copy to output root).
     /// Each file is copied directly to `output/{basename}`.
     /// Examples:
-    /// - `"assets/CNAME"` → `/CNAME`
-    /// - `{ file = "icons/fav.ico", as = "favicon.ico" }` → `/favicon.ico`
+    /// - `"assets/CNAME"` -> `/CNAME`
+    /// - `{ file = "icons/fav.ico", as = "favicon.ico" }` -> `/favicon.ico`
     pub flatten: Vec<FlattenEntry>,
 }
 

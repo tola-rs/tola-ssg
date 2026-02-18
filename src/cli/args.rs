@@ -92,7 +92,7 @@ pub enum Commands {
     },
 }
 
-/// Validate command arguments.
+/// Validate command arguments
 #[derive(clap::Args, Debug, Clone)]
 pub struct ValidateArgs {
     /// Files or directories to validate. If omitted, validates all content.
@@ -157,7 +157,7 @@ pub struct BuildArgs {
     pub skip_drafts: bool,
 }
 
-/// Query command arguments.
+/// Query command arguments
 #[derive(clap::Args, Debug, Clone)]
 pub struct QueryArgs {
     /// Paths to query (files, directories, or omit for all content).

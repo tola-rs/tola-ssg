@@ -17,14 +17,14 @@
 //!
 //! # Behavior
 //!
-//! - `external = false` → SVG embedded in HTML (other options ignored)
-//! - `external = true, format = "svg"` → Extract as SVG file (no conversion)
-//! - `external = true, format = "avif"` → Convert to AVIF using `converter`
+//! - `external = false` -> SVG embedded in HTML (other options ignored)
+//! - `external = true, format = "svg"` -> Extract as SVG file (no conversion)
+//! - `external = true, format = "avif"` -> Convert to AVIF using `converter`
 
 use macros::Config;
 use serde::{Deserialize, Serialize};
 
-/// SVG output format.
+/// SVG output format
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -60,7 +60,7 @@ impl SvgFormat {
     }
 }
 
-/// SVG conversion backend.
+/// SVG conversion backend
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SvgConverter {
@@ -189,7 +189,7 @@ impl SvgConfig {
     }
 }
 
-/// Parse size string (e.g., "10KB") to bytes.
+/// Parse size string (e.g., "10KB") to bytes
 fn parse_size_string(s: &str) -> usize {
     let s = s.trim().to_uppercase();
     if s.ends_with("MB") {

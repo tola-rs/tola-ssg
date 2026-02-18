@@ -8,12 +8,12 @@
 //! ```text
 //! ┌──────────────────────────────────────────┐
 //! │         Compile Phase (rayon sync)       │
-//! │  Raw → Indexed → Processed → HTML        │
+//! │  Raw -> Indexed -> Processed -> HTML        │
 //! └──────────────────────────────────────────┘
 //!
 //! ┌──────────────────────────────────────────┐
 //! │         Scan Phase (lightweight)         │
-//! │  Raw → Indexed (stop here)               │
+//! │  Raw -> Indexed (stop here)               │
 //! └──────────────────────────────────────────┘
 //! ```
 //!
@@ -36,7 +36,7 @@ pub use transform::{BodyInjector, HeaderInjector, LinkTransform, MediaTransform,
 // Types
 // =============================================================================
 
-/// Result of the compilation pipeline.
+/// Result of the compilation pipeline
 #[derive(Debug)]
 pub struct CompileOutput {
     /// Rendered HTML bytes.
@@ -53,10 +53,10 @@ pub struct CompileOutput {
 // Compilation (Sync)
 // =============================================================================
 
-/// Compile a Raw VDOM document to HTML.
+/// Compile a Raw VDOM document to HTML
 ///
-/// This is a **synchronous** function for optimal performance with rayon.
-/// Validation is handled separately by `cli/validate.rs`.
+/// This is a **synchronous** function for optimal performance with rayon
+/// Validation is handled separately by `cli/validate.rs`
 ///
 /// # Returns
 ///
@@ -106,10 +106,10 @@ pub fn compile(doc: Document<Raw>, ctx: &CompileContext<'_>) -> CompileOutput {
 // Scan Mode (Lightweight)
 // =============================================================================
 
-/// Compile a Raw VDOM document to Indexed phase only.
+/// Compile a Raw VDOM document to Indexed phase only
 ///
 /// This is a **lightweight** pipeline that stops at the Indexed phase,
-/// skipping LinkTransform, MediaTransform, Processor, and HTML rendering.
+/// skipping LinkTransform, MediaTransform, Processor, and HTML rendering
 ///
 /// Use this for:
 /// - **Validation**: Extract links/assets without full rendering
@@ -117,7 +117,7 @@ pub fn compile(doc: Document<Raw>, ctx: &CompileContext<'_>) -> CompileOutput {
 ///
 /// # Performance
 ///
-/// ~3-5x faster than `compile()` for validation/query scenarios.
+/// ~3-5x faster than `compile()` for validation/query scenarios
 #[inline]
 pub fn compile_for_scan(doc: Document<Raw>, ctx: &CompileContext<'_>) -> IndexedDocument {
     let indexer = match ctx.permalink() {

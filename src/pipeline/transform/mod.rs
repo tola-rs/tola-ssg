@@ -4,11 +4,11 @@
 //!
 //! # Modules
 //!
-//! - `header`: Injects `<head>` content and sets `lang` attribute (Raw → Raw)
-//! - `link`: Processes href/src and heading id with slugification (Indexed → Indexed)
-//! - `media`: Processes media elements with auto-enhance (Indexed → Indexed)
-//! - `svg`: Processes SVG elements (optimize/extract) (Indexed → Indexed)
-//! - `body`: Injects body scripts (SPA navigation) (Indexed → Indexed)
+//! - `header`: Injects `<head>` content and sets `lang` attribute (Raw -> Raw)
+//! - `link`: Processes href/src and heading id with slugification (Indexed -> Indexed)
+//! - `media`: Processes media elements with auto-enhance (Indexed -> Indexed)
+//! - `svg`: Processes SVG elements (optimize/extract) (Indexed -> Indexed)
+//! - `body`: Injects body scripts (SPA navigation) (Indexed -> Indexed)
 
 mod body;
 mod header;

@@ -37,7 +37,7 @@ use crate::utils::html::{is_raw_text_element, parse_attributes};
 
 type FrameId = u32;
 
-/// Collect all frames from the document in document order.
+/// Collect all frames from the document in document order
 fn collect_frames<'a>(doc: &'a HtmlDocument) -> Vec<HtmlFrame<'a>> {
     let mut frames = Vec::new();
     collect_frames_from_element(doc.root(), &mut frames);
@@ -131,7 +131,7 @@ impl<'a> Converter<'a> {
 // SVG Parsing
 // =============================================================================
 
-/// Convert an SVG string to a VDOM node with vertical-align for baseline alignment.
+/// Convert an SVG string to a VDOM node with vertical-align for baseline alignment
 fn svg_string_to_node(svg: &str, vertical_align_em: f64) -> Node<TolaSite::Raw> {
     let (mut attrs, inner_content) = parse_svg_string(svg);
 
@@ -215,7 +215,7 @@ fn parse_svg_string(svg: &str) -> (Vec<(String, String)>, String) {
 // Public API
 // =============================================================================
 
-/// Convert typst HtmlDocument to Raw VDOM.
+/// Convert typst HtmlDocument to Raw VDOM
 ///
 /// Uses three phases for optimal performance:
 /// 1. Collect all frames from the document

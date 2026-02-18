@@ -21,7 +21,7 @@ use std::fs;
 
 const SITEMAP_NS: &str = "http://www.sitemaps.org/schemas/sitemap/0.9";
 
-/// Build sitemap if enabled.
+/// Build sitemap if enabled
 pub fn build_sitemap(config: &SiteConfig) -> Result<()> {
     if config.site.sitemap.enable {
         let sitemap = Sitemap::build(config);
@@ -102,7 +102,7 @@ impl Sitemap {
     }
 }
 
-/// Escape special XML characters.
+/// Escape special XML characters
 fn escape_xml(s: &str) -> Cow<'_, str> {
     // Fast path: check if escaping is needed
     if !s.contains(['&', '<', '>', '"', '\'']) {
