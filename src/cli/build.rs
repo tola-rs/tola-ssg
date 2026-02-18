@@ -278,7 +278,7 @@ fn rebuild_iterative_pages(
     }
 }
 
-/// Post-processing (flatten assets, CNAME).
+/// Post-processing (flatten assets, CNAME, HTML 404).
 fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
     let clean = config.build.clean;
 
@@ -288,10 +288,38 @@ fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
     // Auto-generate CNAME if needed
     crate::asset::process_cname(config)?;
 
+    // Copy HTML 404 page if configured
+    copy_html_404(config)?;
+
     // Remove original images that are only referenced with nobg (minify mode only)
     if config.build.minify {
         crate::pipeline::transform::cleanup_nobg_originals();
     }
+
+    Ok(())
+}
+
+/// Copy HTML 404 page to output directory if configured.
+fn copy_html_404(config: &SiteConfig) -> Result<()> {
+    let Some(not_found) = &config.build.not_found else {
+        return Ok(());
+    };
+
+    // Only handle .html files (typst files are compiled normally)
+    if not_found.extension().and_then(|e| e.to_str()) != Some("html") {
+        return Ok(());
+    }
+
+    let source = config.root_join(not_found);
+    if !source.is_file() {
+        log!("warning"; "404 page not found: {}", not_found.display());
+        return Ok(());
+    }
+
+    let dest = config.build.output.join("404.html");
+    fs::copy(&source, &dest).with_context(|| {
+        format!("Failed to copy 404 page from {} to {}", source.display(), dest.display())
+    })?;
 
     Ok(())
 }

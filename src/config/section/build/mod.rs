@@ -11,7 +11,7 @@
 //! assets = "assets"           # Static assets directory (relative to site root)
 //! deps = ["templates"]        # Dependency dirs (relative to site root)
 //! minify = true               # Minify HTML output
-//! not_found = "error.typ"     # Custom 404 page (relative to `[build.content]`)
+//! not_found = "404.html"      # Custom 404 page (relative to site root, supports .typ/.html)
 //!
 //! [build.feed]
 //! enable = true               # Generate RSS/Atom feed
