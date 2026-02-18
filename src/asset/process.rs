@@ -1,4 +1,4 @@
-//! Asset processing with side effects (copying, CSS processor).
+//! Asset processing with side effects (copying, minification).
 
 use std::fs;
 use std::path::Path;
@@ -8,9 +8,9 @@ use anyhow::{Result, anyhow};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
 use crate::freshness::is_newer_than;
+use crate::hooks::css;
 use crate::log;
 use crate::page::PageRoute;
-use crate::utils::css;
 
 use super::meta::{relative_path, route_from_source};
 
@@ -44,8 +44,8 @@ pub fn process_asset(
         .and_then(|e| e.to_str())
         .unwrap_or_default();
 
-    // Skip CSS processor input (handled centrally in watch.rs)
-    if ext == "css" && css::is_css_processor_input(asset_path, config) {
+    // Skip CSS processor input (handled centrally)
+    if ext == "css" && css::is_css_input(asset_path, config) {
         return Ok(());
     }
 
@@ -178,25 +178,6 @@ fn copy_dir_recursive(
     }
 
     Ok(())
-}
-
-/// Rebuild CSS using processor (as a pre hook).
-///
-/// Delegates to `utils::css::rebuild_css_processor` with asset path resolution.
-pub fn rebuild_css_processor(
-    config: &SiteConfig,
-    mode: crate::core::BuildMode,
-    with_build_args: bool,
-) -> Result<()> {
-    css::rebuild_css_processor(
-        config,
-        |input| {
-            let route = route_from_source(input.to_path_buf(), config)?;
-            Ok(route.output)
-        },
-        mode,
-        with_build_args,
-    )
 }
 
 /// Process flatten assets (files that go to output root).

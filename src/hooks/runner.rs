@@ -69,7 +69,7 @@ pub fn run_hook(
     with_build_args: bool,
     phase: &str,
 ) -> Result<()> {
-    use super::exec::{Cmd, SILENT_FILTER};
+    use crate::utils::exec::{Cmd, SILENT_FILTER};
 
     if !hook.enable || hook.command.is_empty() {
         return Ok(());
@@ -115,8 +115,8 @@ pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool
     }
 
     // CSS processor (syntax sugar for pre hook)
-    if config.build.css.processor.enable {
-        crate::asset::rebuild_css_processor(config, mode, with_build_args)?;
+    if config.build.hooks.css.enable {
+        super::css::rebuild_css(config, mode, with_build_args)?;
     }
 
     Ok(())
@@ -143,7 +143,6 @@ pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     let mut executed = 0;
 
     executed += run_watched_pre_hooks(config, changed_paths);
-    executed += run_watched_css_processor(config, changed_paths);
     executed += run_watched_post_hooks(config, changed_paths);
 
     executed
@@ -164,23 +163,6 @@ fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     }
 
     executed
-}
-
-/// Execute CSS processor on any file change.
-fn run_watched_css_processor(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
-    if !config.build.css.processor.enable
-        || config.build.css.processor.input.is_none()
-        || changed_paths.is_empty()
-    {
-        return 0;
-    }
-
-    if let Err(e) = crate::asset::rebuild_css_processor(config, BuildMode::DEVELOPMENT, false) {
-        crate::log!("css"; "rebuild failed: {}", e);
-        return 0;
-    }
-
-    1
 }
 
 /// Execute post hooks that match changed files.

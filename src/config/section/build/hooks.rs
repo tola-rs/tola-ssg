@@ -15,9 +15,18 @@
 //! # Post hooks (run after build)
 //! [[build.hooks.post]]
 //! command = ["imagemin", "$TOLA_OUTPUT_DIR/images", "--out-dir", "$TOLA_OUTPUT_DIR/images"]
+//!
+//! # CSS processor (syntax sugar for pre hook)
+//! [build.hooks.css]
+//! enable = true
+//! input = "assets/css/main.css"
+//! command = ["tailwindcss"]
 //! ```
 
+use crate::config::ConfigDiagnostics;
+use macros::Config;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Hooks configuration containing pre and post build hooks.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -27,6 +36,15 @@ pub struct HooksConfig {
     pub pre: Vec<HookConfig>,
     /// Post-build hooks (run after build completion).
     pub post: Vec<HookConfig>,
+    /// CSS processor hook (syntax sugar for pre hook).
+    pub css: CssProcessorConfig,
+}
+
+impl HooksConfig {
+    /// Validate hooks configuration.
+    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
+        self.css.validate(diag);
+    }
 }
 
 /// Configuration for a single build hook.
@@ -203,5 +221,164 @@ build_args = ["--minify", "--sourcemap"]
         );
         let hook = &config.build.hooks.pre[0];
         assert_eq!(hook.build_args, vec!["--minify", "--sourcemap"]);
+    }
+}
+
+// ============================================================================
+// CSS Processor Config
+// ============================================================================
+
+/// CSS processor format (determines CLI arguments).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CssFormat {
+    /// Auto-detect from command (default).
+    #[default]
+    Auto,
+    /// Tailwind CSS: `-i input -o output [--minify]`
+    Tailwind,
+    /// UnoCSS: `input -o output [--minify]`
+    Uno,
+}
+
+impl CssFormat {
+    /// Infer format from command.
+    pub fn infer_from_command(command: &[String]) -> Self {
+        let cmd_str = command.join(" ").to_lowercase();
+        if cmd_str.contains("unocss") || cmd_str.contains("uno") {
+            CssFormat::Uno
+        } else {
+            CssFormat::Tailwind // default
+        }
+    }
+
+    /// Resolve auto to concrete format.
+    pub fn resolve(&self, command: &[String]) -> Self {
+        match self {
+            CssFormat::Auto => Self::infer_from_command(command),
+            _ => *self,
+        }
+    }
+}
+
+/// CSS processor hook configuration (syntax sugar for pre hook).
+///
+/// When enabled, this is internally compiled to a pre hook with:
+/// - Auto-expanded command with format-specific arguments
+/// - `watch = true` (any file change triggers rebuild)
+/// - `build_args` for minification
+///
+/// # Example
+///
+/// ```toml
+/// [build.hooks.css]
+/// enable = true
+/// input = "assets/css/main.css"
+/// command = ["tailwindcss"]
+/// # format = "auto"  # default, inferred from command
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Config)]
+#[serde(default)]
+#[config(section = "build.hooks.css")]
+pub struct CssProcessorConfig {
+    /// Enable CSS processor hook.
+    pub enable: bool,
+    /// Input CSS file path.
+    pub input: Option<PathBuf>,
+    /// Command to execute (e.g., `["tailwindcss"]` or `["npx", "unocss"]`).
+    pub command: Vec<String>,
+    /// CSS processor format (auto, tailwind, uno). Default: auto (inferred from command).
+    pub format: CssFormat,
+    /// Suppress output (default: true).
+    pub quiet: bool,
+}
+
+impl Default for CssProcessorConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            input: None,
+            command: vec!["tailwindcss".into()],
+            format: CssFormat::Auto,
+            quiet: true,
+        }
+    }
+}
+
+impl CssProcessorConfig {
+    /// Get the resolved format (auto → concrete).
+    pub fn resolved_format(&self) -> CssFormat {
+        self.format.resolve(&self.command)
+    }
+
+    /// Validate CSS processor configuration.
+    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
+        if !self.enable {
+            return;
+        }
+
+        // Command must have at least one element
+        if self.command.is_empty() {
+            diag.error(
+                Self::FIELDS.command,
+                format!(
+                    "{} is true but {} is empty",
+                    Self::FIELDS.enable,
+                    Self::FIELDS.command
+                ),
+            );
+            return;
+        }
+
+        // Check if command is installed
+        let cmd = &self.command[0];
+        let is_package_runner = ["npx", "bunx", "pnpx", "yarn", "dlx"].contains(&cmd.as_str());
+
+        if which::which(cmd).is_err() {
+            if is_package_runner {
+                // Package runners can download packages at runtime, just hint
+                if self.command.len() > 1 {
+                    diag.hint(
+                        Self::FIELDS.command,
+                        format!(
+                            "`{}` via `{}` — ensure package is installed",
+                            self.command[1], cmd
+                        ),
+                    );
+                }
+            } else {
+                diag.error_with_hint(
+                    Self::FIELDS.command,
+                    format!("`{cmd}` not found"),
+                    format!("install the command or update {}", Self::FIELDS.command),
+                );
+            }
+        }
+
+        // Input must be configured
+        let Some(input) = &self.input else {
+            diag.error(
+                Self::FIELDS.input,
+                format!(
+                    "{} is true but {} is not configured",
+                    Self::FIELDS.enable,
+                    Self::FIELDS.input
+                ),
+            );
+            return;
+        };
+
+        // Input must exist and be a file
+        if !input.exists() {
+            diag.error(
+                Self::FIELDS.input,
+                format!("{} file not found: {}", Self::FIELDS.input, input.display()),
+            );
+        } else if !input.is_file() {
+            diag.error(
+                Self::FIELDS.input,
+                format!("{} is not a file: {}", Self::FIELDS.input, input.display()),
+            );
+        }
     }
 }

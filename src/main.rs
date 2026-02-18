@@ -13,6 +13,7 @@ mod core;
 mod embed;
 mod freshness;
 mod generator;
+mod hooks;
 mod image;
 mod logger;
 mod package;

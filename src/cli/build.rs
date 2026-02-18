@@ -18,10 +18,11 @@ use crate::{
     config::SiteConfig,
     core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, is_shutdown},
     freshness::{self, ContentHash},
+    hooks,
     log,
     logger::ProgressLine,
     package::generate_lsp_stubs,
-    utils::{git, hooks, plural_count},
+    utils::{git, plural_count},
 };
 use anyhow::{Context, Result, anyhow};
 use gix::ThreadSafeRepository;

@@ -19,7 +19,6 @@ pub use scan::{scan_colocated_assets, scan_flatten_assets, scan_global_assets};
 // Processing (side effects)
 pub use process::{
     copy_colocated_assets, process_asset, process_cname, process_flatten_assets, process_rel_asset,
-    rebuild_css_processor,
 };
 
 // Metadata helpers
