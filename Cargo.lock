@@ -5878,8 +5878,6 @@ dependencies = [
 [[package]]
 name = "tola-ssg-macros"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aac9633860eaae8cd226be8390839e051cc3413c53bcf510b183378096a29c0c"
 dependencies = [
  "proc-macro2",
  "quote",

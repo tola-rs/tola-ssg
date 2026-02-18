@@ -36,7 +36,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let validate_config = &config.validate;
 
     // Check if any validation is enabled
-    let check_internal = validate_config.link.internal.enable;
+    let check_internal = validate_config.pages.enable;
     let check_assets = validate_config.assets.enable;
 
     if !check_internal && !check_assets {
@@ -223,7 +223,7 @@ fn collect_scan_result(
                 }
 
                 // Try AddressSpace for non-asset links
-                if !validate_config.link.internal.enable {
+                if !validate_config.pages.enable {
                     continue;
                 }
 
@@ -249,7 +249,7 @@ fn collect_scan_result(
 
             // File-relative and fragment links: validate via AddressSpace
             LinkKind::FileRelative(_) | LinkKind::Fragment(_) => {
-                if !validate_config.link.internal.enable && !validate_config.assets.enable {
+                if !validate_config.pages.enable && !validate_config.assets.enable {
                     continue;
                 }
 
@@ -297,7 +297,7 @@ fn handle_resolve_result(
                         "not found".to_string(),
                     );
                 }
-            } else if validate_config.link.internal.enable {
+            } else if validate_config.pages.enable {
                 report.write().add_internal(
                     source.to_string(),
                     link.to_string(),
@@ -311,7 +311,7 @@ fn handle_resolve_result(
             available,
             ..
         } => {
-            if validate_config.link.internal.enable {
+            if validate_config.pages.enable {
                 let msg = if available.is_empty() {
                     format!("fragment '{}' not found", fragment)
                 } else {
@@ -328,7 +328,7 @@ fn handle_resolve_result(
         }
 
         ResolveResult::Warning { message, .. } => {
-            if validate_config.link.internal.enable {
+            if validate_config.pages.enable {
                 report
                     .write()
                     .add_internal(source.to_string(), link.to_string(), message);
@@ -336,7 +336,7 @@ fn handle_resolve_result(
         }
 
         ResolveResult::Error { message } => {
-            if validate_config.link.internal.enable {
+            if validate_config.pages.enable {
                 report
                     .write()
                     .add_internal(source.to_string(), link.to_string(), message);
