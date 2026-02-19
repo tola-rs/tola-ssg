@@ -10,7 +10,7 @@ mod uno;
 use crate::config::SiteConfig;
 use crate::config::section::build::{CssFormat, HookConfig};
 use crate::core::BuildMode;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::Path;
 
 /// Check if a path is the CSS processor path file
@@ -56,11 +56,7 @@ pub fn run_css(
 }
 
 /// Rebuild CSS using configured path
-pub fn rebuild_css(
-    config: &SiteConfig,
-    mode: BuildMode,
-    with_build_args: bool,
-) -> Result<()> {
+pub fn rebuild_css(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
     let path = config
         .build
         .hooks

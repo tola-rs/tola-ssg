@@ -4,8 +4,8 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::config::section::build::AssetsConfig;
 use crate::config::ConfigDiagnostics;
+use crate::config::section::build::AssetsConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]

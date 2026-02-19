@@ -295,8 +295,14 @@
           // Replace inner HTML (for mixed content structure changes)
           const el = this.getById(op.target);
           if (el) {
-            // SVG and non-SVG: just use innerHTML directly
-            el.innerHTML = op.html;
+            if (op.is_svg) {
+              // SVG requires namespace-aware parsing
+              const temp = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+              temp.innerHTML = op.html;
+              el.replaceChildren(...temp.childNodes);
+            } else {
+              el.innerHTML = op.html;
+            }
           }
           break;
         }

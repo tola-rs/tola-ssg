@@ -27,10 +27,15 @@ pub struct SiteInfoConfig {
     #[config(inline_doc = "Site description")]
     pub description: String,
 
-    #[config(inline_doc = "Site URL, path used as prefix (e.g., \"https://example.com/blog/docs\")")]
+    #[config(
+        inline_doc = "Site URL, path used as prefix (e.g., \"https://example.com/blog/docs\")"
+    )]
     pub url: Option<String>,
 
-    #[config(default = "en", inline_doc = "Language code (e.g., \"en\", \"zh-Hans\")")]
+    #[config(
+        default = "en",
+        inline_doc = "Language code (e.g., \"en\", \"zh-Hans\")"
+    )]
     pub language: String,
 
     #[config(inline_doc = "Copyright notice")]

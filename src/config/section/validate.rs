@@ -123,10 +123,7 @@ level = "warn""#,
         );
         assert!(config.validate.pages.enable);
         assert!(!config.validate.assets.enable);
-        assert!(matches!(
-            config.validate.pages.level,
-            ValidateLevel::Warn
-        ));
+        assert!(matches!(config.validate.pages.level, ValidateLevel::Warn));
     }
 
     #[test]

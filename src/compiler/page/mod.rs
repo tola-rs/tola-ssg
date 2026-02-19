@@ -105,10 +105,7 @@ pub type BatchCompileResult =
 ///
 /// This limits the number of errors displayed to avoid cascading error spam
 /// from a single syntax error
-pub fn format_compile_error(
-    error: &typst_batch::CompileError,
-    max_errors: usize,
-) -> anyhow::Error {
+pub fn format_compile_error(error: &typst_batch::CompileError, max_errors: usize) -> anyhow::Error {
     match error.diagnostics() {
         Some(diags) => anyhow::anyhow!("{}", diags.with_max_errors(max_errors)),
         None => anyhow::anyhow!("{}", error),

@@ -423,6 +423,7 @@ impl VdomActor {
             .ws_tx
             .send(WsMsg::Reload {
                 reason,
+                url_path: None,
                 url_change: None,
             })
             .await;
@@ -519,6 +520,7 @@ impl VdomActor {
                     .ws_tx
                     .send(WsMsg::Reload {
                         reason: format!("internal error: {}", e),
+                        url_path: None,
                         url_change: None,
                     })
                     .await;
@@ -591,14 +593,15 @@ impl VdomActor {
                     .await;
             }
             DiffOutcome::Initial => {
-                self.handle_initial(&rel_path, priority, url_change).await;
+                self.handle_initial(&rel_path, url_path, priority, url_change)
+                    .await;
             }
             DiffOutcome::Unchanged => {
                 self.handle_unchanged(&rel_path, url_path, priority, url_change)
                     .await;
             }
             DiffOutcome::NeedsReload { reason } => {
-                self.handle_needs_reload(&rel_path, reason, priority, url_change)
+                self.handle_needs_reload(&rel_path, url_path, reason, priority, url_change)
                     .await;
             }
         }
@@ -613,7 +616,10 @@ impl VdomActor {
         priority: Option<crate::core::Priority>,
         url_change: Option<crate::core::UrlChange>,
     ) {
-        crate::debug!("vdom"; "reload: {} ({} ops): {:?}", rel_path.display(), ops.len(), ops);
+        crate::debug_do! {
+            let ops_summary: Vec<String> = ops.iter().map(|op| op.summary()).collect();
+            crate::debug!("vdom"; "reload: {} ({} ops): {:?}", rel_path.display(), ops.len(), ops_summary);
+        }
 
         self.batch
             .push_reload(rel_path.display().to_string(), priority);
@@ -639,6 +645,7 @@ impl VdomActor {
     async fn handle_initial(
         &mut self,
         rel_path: &Path,
+        url_path: UrlPath,
         priority: Option<crate::core::Priority>,
         url_change: Option<crate::core::UrlChange>,
     ) {
@@ -649,6 +656,7 @@ impl VdomActor {
             .ws_tx
             .send(WsMsg::Reload {
                 reason: "initial compile".to_string(),
+                url_path: Some(url_path),
                 url_change,
             })
             .await;
@@ -682,6 +690,7 @@ impl VdomActor {
     async fn handle_needs_reload(
         &mut self,
         rel_path: &Path,
+        url_path: UrlPath,
         reason: String,
         priority: Option<crate::core::Priority>,
         url_change: Option<crate::core::UrlChange>,
@@ -689,7 +698,14 @@ impl VdomActor {
         crate::debug!("vdom"; "reload: {}: {}", rel_path.display(), reason);
         self.batch
             .push_reload(rel_path.display().to_string(), priority);
-        let _ = self.ws_tx.send(WsMsg::Reload { reason, url_change }).await;
+        let _ = self
+            .ws_tx
+            .send(WsMsg::Reload {
+                reason,
+                url_path: Some(url_path),
+                url_change,
+            })
+            .await;
     }
 
     fn try_reload_cache_if_empty(&self) {

@@ -76,9 +76,10 @@ impl CompilerActor {
         bg: Option<BackgroundTask>,
     ) -> Option<BackgroundTask> {
         match msg {
-            CompilerMsg::Compile { queue, changed_paths } => {
-                self.on_compile(queue, changed_paths).await
-            }
+            CompilerMsg::Compile {
+                queue,
+                changed_paths,
+            } => self.on_compile(queue, changed_paths).await,
             CompilerMsg::CompileDependents(deps) => {
                 self.on_compile_dependents(deps).await;
                 bg
@@ -241,7 +242,6 @@ impl CompilerActor {
             let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
         }
     }
-
 
     async fn on_full_rebuild(&mut self) {
         use crate::asset::version;

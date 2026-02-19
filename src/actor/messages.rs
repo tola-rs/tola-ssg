@@ -86,9 +86,12 @@ pub enum WsMsg {
         /// If set, browser updates URL bar without reload
         url_change: Option<UrlChange>,
     },
-    /// Full reload with optional URL change
+    /// Reload page
     Reload {
         reason: String,
+        /// - Some: targeted reload (only clients viewing this route)
+        /// - None: broadcast reload (all clients)
+        url_path: Option<UrlPath>,
         /// If set, browser updates URL before reload
         url_change: Option<UrlChange>,
     },
