@@ -70,9 +70,11 @@ impl FsActor {
             let _ = notify_tx.send(res);
         })?;
 
-        // Start watching all paths
+        // Start watching all paths (skip non-existent paths to handle race conditions)
         for path in &paths {
-            watcher.watch(path, RecursiveMode::Recursive)?;
+            if path.exists() {
+                watcher.watch(path, RecursiveMode::Recursive)?;
+            }
         }
 
         // Events are now buffering in notify_rx while caller does initial build
@@ -264,16 +266,18 @@ impl Debouncer {
     /// Returns `None` if:
     /// - Debounce period not elapsed
     /// - Cooldown from last compile not elapsed
-    /// - Initial build not complete
-    /// - No existing files to process (deleted files are filtered out)
+    /// - Initial scan not complete (not serving)
+    /// - No existing files to process (deleted files and directories are filtered out)
     fn take_if_ready(&mut self) -> Option<Vec<PathBuf>> {
         if !self.is_ready() {
             return None;
         }
 
-        // Wait for initial build to complete before processing changes
+        // Wait for initial scan to complete before processing changes
         // This prevents false "deps changed but no dependents" when
         // dependency graph hasn't been populated yet
+        // Note: We check is_serving() not is_healthy() to allow hot-reload
+        // during on-demand compilation (scheduler mode)
         if !crate::core::is_serving() {
             return None;
         }
