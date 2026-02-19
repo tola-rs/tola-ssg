@@ -135,9 +135,24 @@ async fn process_changes(
         return Ok(());
     };
 
-    // If initial build failed, trigger full rebuild on any file change
+    // Classify all changed files
+    let result = classify_changes(&paths, config);
+
+    // Get non-output paths (for rebuild logic and hooks)
+    let non_output_paths: Vec<PathBuf> = result
+        .classified
+        .iter()
+        .filter(|(_, cat)| *cat != crate::core::FileCategory::Output)
+        .map(|(p, _)| p.clone())
+        .collect();
+
+    // If initial build failed, trigger full rebuild on non-output file change
+    // (output-only changes should not trigger rebuild to prevent loops)
     if !crate::core::is_healthy() {
-        crate::log!("watch"; "retrying full build after change: {:?}", paths);
+        if non_output_paths.is_empty() {
+            return Ok(()); // Only output files changed, ignore
+        }
+        crate::log!("watch"; "retrying full build after change: {:?}", non_output_paths);
         compiler_tx
             .send(CompilerMsg::FullRebuild)
             .await
@@ -145,23 +160,23 @@ async fn process_changes(
         return Ok(());
     }
 
-    // Classify and log
-    let result = classify_changes(&paths, config);
+    // Log changes first (before consuming result)
     log_changes(&result);
 
-    // Execute watched hooks only for non-output files (prevent infinite loops)
-    let non_output_paths: Vec<&Path> = result
-        .classified
-        .iter()
-        .filter(|(_, cat)| *cat != crate::core::FileCategory::Output)
-        .map(|(p, _)| p.as_path())
-        .collect();
+    // When healthy: process all changes including output files for hot-reload
+    let messages = result_to_messages(result);
+    if messages.is_empty() {
+        return Ok(()); // Nothing to do
+    }
+
+    // Execute watched hooks (only for non-output files)
     if !non_output_paths.is_empty() {
-        hooks::run_watched_hooks(config, &non_output_paths);
+        let refs: Vec<&Path> = non_output_paths.iter().map(|p| p.as_path()).collect();
+        hooks::run_watched_hooks(config, &refs);
     }
 
     // Route to CompilerActor
-    for msg in result_to_messages(result) {
+    for msg in messages {
         compiler_tx.send(msg).await.map_err(|_| ())?;
     }
 
