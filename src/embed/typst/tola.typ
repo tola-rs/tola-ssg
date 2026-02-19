@@ -22,6 +22,9 @@
     } else { it }
   }
 
+  // Tight bounds for math equations (removes extra whitespace)
+  show math.equation: set text(top-edge: "bounds", bottom-edge: "bounds")
+
   show math.equation.where(block: false): it => context {
     if not _tola-svg-inside-figure.get() {
       html.span(class: "tola-inline-math", role: "math")[#html.frame(it)]

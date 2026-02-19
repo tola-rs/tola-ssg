@@ -77,6 +77,26 @@ macro_rules! debug {
     }};
 }
 
+/// Execute code only when --verbose is enabled
+///
+/// Use this to avoid computing expensive debug data when not needed.
+///
+/// # Usage
+/// ```ignore
+/// debug_do! {
+///     let summary = expensive_computation();
+///     debug!("module"; "result: {:?}", summary);
+/// }
+/// ```
+#[macro_export]
+macro_rules! debug_do {
+    ($($body:tt)*) => {{
+        if $crate::logger::is_verbose() {
+            $($body)*
+        }
+    }};
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================

@@ -19,7 +19,9 @@ pub mod theme;
 mod validate;
 
 // Re-export section configs
-pub use build::{AssetsConfig, BuildSectionConfig, SlugCase, SlugConfig, SlugMode, SvgConverter, SvgFormat};
+pub use build::{
+    AssetsConfig, BuildSectionConfig, SlugCase, SlugConfig, SlugMode, SvgConverter, SvgFormat,
+};
 pub use deploy::DeployConfig;
 pub use serve::ServeConfig;
 pub use site::{FeedConfig, FeedFormat, SiteSectionConfig};

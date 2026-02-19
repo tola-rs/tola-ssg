@@ -6,8 +6,8 @@ use crate::asset::{copy_colocated_assets, scan_colocated_assets, scan_global_ass
 use crate::compiler::CompileContext;
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
-    BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, ScannedPage,
-    TypstBatcher, collect_warnings, filter_drafts, format_compile_error,
+    BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, ScannedPage, TypstBatcher,
+    collect_warnings, filter_drafts, format_compile_error,
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;

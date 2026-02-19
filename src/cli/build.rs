@@ -18,8 +18,7 @@ use crate::{
     config::SiteConfig,
     core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, is_shutdown},
     freshness::{self, ContentHash},
-    hooks,
-    log,
+    hooks, log,
     logger::ProgressLine,
     package::generate_lsp_stubs,
     utils::{git, plural_count},
@@ -319,7 +318,11 @@ fn copy_html_404(config: &SiteConfig) -> Result<()> {
 
     let dest = config.build.output.join("404.html");
     fs::copy(&source, &dest).with_context(|| {
-        format!("Failed to copy 404 page from {} to {}", source.display(), dest.display())
+        format!(
+            "Failed to copy 404 page from {} to {}",
+            source.display(),
+            dest.display()
+        )
     })?;
 
     Ok(())

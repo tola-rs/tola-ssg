@@ -171,7 +171,9 @@ impl SiteConfig {
         let cwd = std::env::current_dir().context("Failed to get current working directory")?;
 
         match &cli.command {
-            Commands::Init { name: Some(name), .. } => {
+            Commands::Init {
+                name: Some(name), ..
+            } => {
                 let path = cwd.join(name).join(&cli.config);
                 let exists = path.exists();
                 Ok((path, exists))
@@ -195,9 +197,9 @@ impl SiteConfig {
     fn finalize(&mut self, cli: &Cli) {
         // Resolve root path
         let root = match &cli.command {
-            Commands::Init { name: Some(name), .. } => {
-                std::env::current_dir().unwrap_or_default().join(name)
-            }
+            Commands::Init {
+                name: Some(name), ..
+            } => std::env::current_dir().unwrap_or_default().join(name),
             Commands::Init { name: None, .. } => std::env::current_dir().unwrap_or_default(),
             _ => self
                 .config_path
@@ -492,8 +494,7 @@ impl SiteConfig {
     /// Normalize optional paths (CSS processor path, deploy token).
     fn normalize_optional_paths(&mut self, root: &Path) {
         if let Some(path) = self.build.hooks.css.path.take() {
-            self.build.hooks.css.path =
-                Some(crate::utils::path::normalize_path(&root.join(path)));
+            self.build.hooks.css.path = Some(crate::utils::path::normalize_path(&root.join(path)));
         }
 
         if let Some(token_path) = self.deploy.github.token_path.take() {

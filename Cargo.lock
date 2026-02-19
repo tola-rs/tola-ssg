@@ -5887,8 +5887,6 @@ dependencies = [
 [[package]]
 name = "tola-vdom"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d59a85f30c8e50d1c9c1ecb83f37efb4b526c60eb37c93c3772976d6aba07ce"
 dependencies = [
  "blake3",
  "compact_str 0.8.1",

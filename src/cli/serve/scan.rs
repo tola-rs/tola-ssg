@@ -5,9 +5,7 @@
 
 use anyhow::Result;
 
-use crate::compiler::page::{
-    build_address_space, collect_content_files, filter_drafts,
-};
+use crate::compiler::page::{build_address_space, collect_content_files, filter_drafts};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
 use crate::page::{CompiledPage, PAGE_LINKS, STORED_PAGES};
@@ -53,7 +51,6 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
 
     // Populate GLOBAL_ADDRESS_SPACE
     build_address_space(&pages, config);
-
 
     let total = pages.len();
     if drafts_skipped > 0 {

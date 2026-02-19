@@ -4,7 +4,7 @@
 //! - `runner`: Hook execution utilities (environment variables, command execution)
 //! - `css`: CSS processor integrations (tailwind, etc.)
 
-mod runner;
 pub mod css;
+mod runner;
 
 pub use runner::*;

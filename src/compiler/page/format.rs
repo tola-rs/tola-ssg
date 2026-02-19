@@ -188,7 +188,10 @@ impl<'a> DraftFilterResult<'a> {
             eprintln!("... and {} more errors", total_errors - max_errors);
         }
 
-        Err(anyhow::anyhow!("Scan failed with {} error(s)", total_errors))
+        Err(anyhow::anyhow!(
+            "Scan failed with {} error(s)",
+            total_errors
+        ))
     }
 }
 

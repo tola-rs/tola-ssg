@@ -139,11 +139,7 @@ async fn process_changes(
     let result = classify_changes(&paths, config);
 
     // Collect all changed paths (for running watched hooks)
-    let changed_paths: Vec<PathBuf> = result
-        .classified
-        .iter()
-        .map(|(p, _)| p.clone())
-        .collect();
+    let changed_paths: Vec<PathBuf> = result.classified.iter().map(|(p, _)| p.clone()).collect();
 
     // If initial build failed, trigger full rebuild on any file change
     if !crate::core::is_healthy() {

@@ -94,7 +94,11 @@ impl WsActor {
                     self.send_to_route(&url_path, Message::Text(hr_msg.to_json().into()));
                 }
 
-                WsMsg::Reload { reason, url_change } => {
+                WsMsg::Reload {
+                    reason,
+                    url_path,
+                    url_change,
+                } => {
                     crate::debug!("ws"; "sending reload: {}", reason);
                     let hr_msg = if let Some(change) = url_change {
                         crate::debug!("ws"; "reload with url_change: {} -> {}", change.old, change.new);
@@ -108,7 +112,12 @@ impl WsActor {
                     } else {
                         HotReloadMessage::reload_with_reason(&reason)
                     };
-                    self.broadcast(Message::Text(hr_msg.to_json().into()));
+                    // Targeted or broadcast based on url_path
+                    if let Some(ref route) = url_path {
+                        self.send_to_route(route, Message::Text(hr_msg.to_json().into()));
+                    } else {
+                        self.broadcast(Message::Text(hr_msg.to_json().into()));
+                    }
                 }
 
                 WsMsg::Error { path, error } => {
