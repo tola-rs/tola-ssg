@@ -138,21 +138,19 @@ async fn process_changes(
     // Classify all changed files
     let result = classify_changes(&paths, config);
 
-    // Get non-output paths (for rebuild logic and hooks)
-    let non_output_paths: Vec<PathBuf> = result
+    // Collect all changed paths (for running watched hooks)
+    let changed_paths: Vec<PathBuf> = result
         .classified
         .iter()
-        .filter(|(_, cat)| *cat != crate::core::FileCategory::Output)
         .map(|(p, _)| p.clone())
         .collect();
 
-    // If initial build failed, trigger full rebuild on non-output file change
-    // (output-only changes should not trigger rebuild to prevent loops)
+    // If initial build failed, trigger full rebuild on any file change
     if !crate::core::is_healthy() {
-        if non_output_paths.is_empty() {
-            return Ok(()); // Only output files changed, ignore
+        if changed_paths.is_empty() {
+            return Ok(());
         }
-        crate::log!("watch"; "retrying full build after change: {:?}", non_output_paths);
+        crate::log!("watch"; "retrying full build after change: {:?}", changed_paths);
         compiler_tx
             .send(CompilerMsg::FullRebuild)
             .await
@@ -163,9 +161,8 @@ async fn process_changes(
     // Log changes first (before consuming result)
     log_changes(&result);
 
-    // When healthy: process all changes including output files for hot-reload
-    // Pass non_output_paths to CompilerActor for running watched hooks
-    let messages = result_to_messages(result, non_output_paths);
+    // When healthy: process all changes for hot-reload
+    let messages = result_to_messages(result, changed_paths);
     if messages.is_empty() {
         return Ok(()); // Nothing to do
     }
@@ -191,8 +188,6 @@ fn log_changes(result: &ClassifyResult) {
 /// Convert ClassifyResult to CompilerMsg(s)
 ///
 /// May return multiple messages:
-/// - AssetChange for asset files
-/// - OutputChange for output files (from hooks)
 /// - Compile for content files (with changed_paths for hooks)
 /// - FullRebuild for config changes (overrides everything)
 fn result_to_messages(result: ClassifyResult, changed_paths: Vec<PathBuf>) -> Vec<CompilerMsg> {
@@ -205,11 +200,6 @@ fn result_to_messages(result: ClassifyResult, changed_paths: Vec<PathBuf>) -> Ve
     // Asset changes
     if !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
-    }
-
-    // Output changes (from hooks)
-    if !result.output_changed.is_empty() {
-        messages.push(CompilerMsg::OutputChange(result.output_changed));
     }
 
     // Content compilation (with changed_paths for hooks)

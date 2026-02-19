@@ -54,8 +54,6 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     // Populate GLOBAL_ADDRESS_SPACE
     build_address_space(&pages, config);
 
-    // Mark scan as completed (build_all will skip redundant global state updates)
-    crate::core::set_scan_completed();
 
     let total = pages.len();
     if drafts_skipped > 0 {

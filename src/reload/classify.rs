@@ -58,8 +58,6 @@ pub struct ClassifyResult {
     pub compile_queue: CompileQueue,
     /// Asset files that changed (need copy, not compile)
     pub asset_changed: Vec<PathBuf>,
-    /// Output files that changed (from hooks, trigger hot reload)
-    pub output_changed: Vec<PathBuf>,
     /// Optional note (e.g., "deps changed but no dependents")
     pub note: Option<String>,
 }
@@ -84,7 +82,6 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
     let mut deps_changed = Vec::new();
     let mut content_changed = Vec::new();
     let mut asset_changed = Vec::new();
-    let mut output_changed = Vec::new();
 
     // Categorize each path
     for path in paths {
@@ -100,8 +97,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
             FileCategory::Deps => deps_changed.push(normalized),
             FileCategory::Content(_) => content_changed.push(normalized),
             FileCategory::Asset => asset_changed.push(normalized),
-            FileCategory::Output => output_changed.push(normalized),
-            FileCategory::Unknown => {}
+            FileCategory::Output | FileCategory::Unknown => {}
         }
     }
 
@@ -147,7 +143,6 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
         config_changed,
         compile_queue: queue,
         asset_changed,
-        output_changed,
         note,
     }
 }

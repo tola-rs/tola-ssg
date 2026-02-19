@@ -5,7 +5,7 @@
 //! - `template` - Template types for typed variable injection
 //! - `asset` - Embedded asset types with content-hash filenames
 //! - `build` - Build-time templates (redirect.html)
-//! - `serve` - Dev server templates (loading.html, welcome.html, hotreload.js)
+//! - `serve` - Dev server templates (welcome.html, hotreload.js)
 //! - `css` - Embedded stylesheets (enhance.css)
 //!
 //! Typst virtual packages (@tola/*) are in `src/package/embed/`.
@@ -14,7 +14,7 @@
 //!
 //! ```ignore
 //! use embed::build::{REDIRECT_HTML, RedirectVars};
-//! use embed::serve::{LOADING_HTML, HOTRELOAD_JS, HotreloadVars};
+//! use embed::serve::{HOTRELOAD_JS, HotreloadVars};
 //! use embed::css::ENHANCE_CSS;
 //!
 //! // Render redirect template
@@ -114,9 +114,6 @@ pub mod serve {
                 .replace("__VERSION__", self.version)
         }
     }
-
-    /// Loading page shown during initial build.
-    pub const LOADING_HTML: &str = include_str!("serve/loading.html");
 
     /// Welcome page template.
     pub const WELCOME_HTML: Template<WelcomeVars<'static>> =

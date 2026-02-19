@@ -14,7 +14,7 @@ pub use driver::BuildMode;
 pub use link::LinkKind;
 pub use priority::Priority;
 pub use state::{
-    begin_update, end_update, is_busy, is_healthy, is_scan_completed, is_serving, is_shutdown,
-    register_server, set_healthy, set_scan_completed, set_serving, setup_shutdown_handler,
+    is_healthy, is_serving, is_shutdown, register_server, set_healthy, set_serving,
+    setup_shutdown_handler,
 };
 pub use url::{UrlChange, UrlPath};

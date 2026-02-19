@@ -146,10 +146,15 @@ pub fn respond_not_found(
     send_body(request, 404, PLAIN, b"404 Not Found".to_vec())
 }
 
-/// Respond with loading page (build not ready)
+/// Respond with 503 + auto-retry (build not ready yet)
 pub fn respond_loading(request: Request) -> Result<()> {
-    let body = crate::embed::serve::LOADING_HTML.to_string();
-    send_html(request, body)
+    let body = r#"<html><head><meta http-equiv="refresh" content="1"></head><body></body></html>"#;
+    use crate::utils::mime::types::HTML;
+    let response = Response::from_string(body)
+        .with_status_code(StatusCode(503))
+        .with_header(make_header("Content-Type", HTML));
+    request.respond(response)?;
+    Ok(())
 }
 
 /// Respond with 503 Service Unavailable (server shutting down)
@@ -226,7 +231,7 @@ fn send_body(
     Ok(())
 }
 
-/// Send HTML without X-Tola-Ready (for loading/welcome pages)
+/// Send HTML without X-Tola-Ready (for welcome pages)
 fn send_html(request: Request, body: String) -> Result<()> {
     use crate::utils::mime::types::HTML;
     let response = Response::from_string(body).with_header(make_header("Content-Type", HTML));

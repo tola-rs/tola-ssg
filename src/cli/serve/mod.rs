@@ -51,7 +51,7 @@ pub struct BoundServer {
 ///
 /// This allows the caller to start background tasks (like scan) before
 /// entering the request loop, while still being able to respond to requests
-/// with a loading page
+/// with a 503 response
 pub fn bind_server() -> Result<BoundServer> {
     let config = cfg();
     let (server, addr) = lifecycle::bind_with_retry(config.serve.interface, config.serve.port)?;
@@ -134,11 +134,6 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
     }
 
     if !crate::core::is_serving() {
-        return response::respond_loading(request);
-    }
-
-    // Gate: return loading page during rebuild (hotreload will refresh after)
-    if crate::core::is_busy() {
         return response::respond_loading(request);
     }
 

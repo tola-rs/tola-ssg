@@ -32,8 +32,6 @@ pub enum CompilerMsg {
     CompileDependents(Vec<PathBuf>),
     /// Process asset changes (copy files, trigger reload)
     AssetChange(Vec<PathBuf>),
-    /// Process output file changes (from hooks, trigger hot reload)
-    OutputChange(Vec<PathBuf>),
     /// Full rebuild (config changed)
     FullRebuild,
     /// Shutdown
