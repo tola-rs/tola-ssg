@@ -123,6 +123,18 @@ impl Coordinator {
         for dep in &self.config.build.deps {
             paths.push(root.join(dep));
         }
+        // Watch asset directories (nested)
+        for source in self.config.build.assets.nested_sources() {
+            paths.push(source.to_path_buf());
+        }
+        // Watch asset files (flatten) - watch parent directories
+        for source in self.config.build.assets.flatten_sources() {
+            if let Some(parent) = source.parent() {
+                if !paths.contains(&parent.to_path_buf()) {
+                    paths.push(parent.to_path_buf());
+                }
+            }
+        }
         // Watch config file for full rebuild trigger
         if self.config.config_path.exists() {
             paths.push(self.config.config_path.clone());
