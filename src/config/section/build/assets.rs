@@ -108,7 +108,6 @@ impl AssetsConfig {
     }
 
     /// Get all flatten source files.
-    #[allow(dead_code)]
     pub fn flatten_sources(&self) -> impl Iterator<Item = &Path> {
         self.flatten.iter().map(|e| e.source())
     }

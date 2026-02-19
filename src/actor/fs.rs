@@ -10,7 +10,6 @@
 //! - Debounces rapid changes
 //! - Delegates classification to `pipeline::classify`
 //! - Routes messages to CompilerActor
-//! - Executes watched hooks on file changes
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +20,6 @@ use tokio::sync::mpsc;
 
 use super::messages::CompilerMsg;
 use crate::config::SiteConfig;
-use crate::hooks;
 use crate::reload::classify::{ClassifyResult, classify_changes};
 use crate::utils::path::normalize_path;
 
@@ -164,15 +162,10 @@ async fn process_changes(
     log_changes(&result);
 
     // When healthy: process all changes including output files for hot-reload
-    let messages = result_to_messages(result);
+    // Pass non_output_paths to CompilerActor for running watched hooks
+    let messages = result_to_messages(result, non_output_paths);
     if messages.is_empty() {
         return Ok(()); // Nothing to do
-    }
-
-    // Execute watched hooks (only for non-output files)
-    if !non_output_paths.is_empty() {
-        let refs: Vec<&Path> = non_output_paths.iter().map(|p| p.as_path()).collect();
-        hooks::run_watched_hooks(config, &refs);
     }
 
     // Route to CompilerActor
@@ -198,9 +191,9 @@ fn log_changes(result: &ClassifyResult) {
 /// May return multiple messages:
 /// - AssetChange for asset files
 /// - OutputChange for output files (from hooks)
-/// - Compile for content files
+/// - Compile for content files (with changed_paths for hooks)
 /// - FullRebuild for config changes (overrides everything)
-fn result_to_messages(result: ClassifyResult) -> Vec<CompilerMsg> {
+fn result_to_messages(result: ClassifyResult, changed_paths: Vec<PathBuf>) -> Vec<CompilerMsg> {
     if result.config_changed {
         return vec![CompilerMsg::FullRebuild];
     }
@@ -217,9 +210,12 @@ fn result_to_messages(result: ClassifyResult) -> Vec<CompilerMsg> {
         messages.push(CompilerMsg::OutputChange(result.output_changed));
     }
 
-    // Content compilation
+    // Content compilation (with changed_paths for hooks)
     if !result.compile_queue.is_empty() {
-        messages.push(CompilerMsg::Compile(result.compile_queue));
+        messages.push(CompilerMsg::Compile {
+            queue: result.compile_queue,
+            changed_paths,
+        });
     }
 
     messages
@@ -315,7 +311,7 @@ impl Debouncer {
         self.last_compile = Some(std::time::Instant::now());
         std::mem::take(&mut self.changed)
             .into_iter()
-            .filter(|p| p.exists())
+            .filter(|p| p.exists() && p.is_file()) // Filter out directories
             .collect()
     }
 }

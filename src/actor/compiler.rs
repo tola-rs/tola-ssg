@@ -55,7 +55,7 @@ impl CompilerActor {
 
                 Some(msg) = self.rx.recv() => {
                     // Interrupt background on new compile request
-                    if matches!(msg, CompilerMsg::Compile(_)) {
+                    if matches!(msg, CompilerMsg::Compile { .. }) {
                         abort_task(&mut background);
                     }
                     background = self.dispatch(msg, background).await;
@@ -76,7 +76,9 @@ impl CompilerActor {
         bg: Option<BackgroundTask>,
     ) -> Option<BackgroundTask> {
         match msg {
-            CompilerMsg::Compile(queue) => self.on_compile(queue).await,
+            CompilerMsg::Compile { queue, changed_paths } => {
+                self.on_compile(queue, changed_paths).await
+            }
             CompilerMsg::CompileDependents(deps) => {
                 self.on_compile_dependents(deps).await;
                 bg
@@ -103,14 +105,21 @@ impl CompilerActor {
 }
 
 impl CompilerActor {
-    /// Handle compile request: direct files sync, affected files async
+    /// Handle compile request: run hooks first, then compile
     async fn on_compile(
         &mut self,
         queue: crate::reload::queue::CompileQueue,
+        changed_paths: Vec<PathBuf>,
     ) -> Option<BackgroundTask> {
         crate::core::begin_update();
         let start = Instant::now();
         let pages_hash = STORED_PAGES.pages_hash();
+
+        // Run pre hooks BEFORE compilation (blocking)
+        // This ensures CSS/JS assets are ready before pages are compiled
+        if !changed_paths.is_empty() {
+            self.run_pre_hooks(&changed_paths);
+        }
 
         // Direct/Active - compile immediately
         let direct: Vec<_> = queue.direct_files().cloned().collect();
@@ -129,6 +138,38 @@ impl CompilerActor {
         } else {
             Some(spawn_batch(affected, Arc::clone(&self.config), pages_hash))
         }
+    }
+
+    /// Run pre hooks that match changed files and update asset versions
+    fn run_pre_hooks(&self, changed_paths: &[PathBuf]) {
+        use crate::asset::version;
+        use crate::hooks;
+
+        let refs: Vec<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
+        let executed = hooks::run_watched_hooks(&self.config, &refs);
+
+        // If hooks ran, update CSS output version immediately
+        // so subsequent compiles use the new asset version
+        if executed > 0 {
+            if let Some(css_output) = self.get_css_output_path() {
+                version::update_version(&css_output);
+            }
+        }
+    }
+
+    /// Get CSS processor output path if enabled
+    fn get_css_output_path(&self) -> Option<PathBuf> {
+        if !self.config.build.hooks.css.enable {
+            return None;
+        }
+        self.config
+            .build
+            .hooks
+            .css
+            .path
+            .as_ref()
+            .and_then(|p| crate::asset::route_from_source(p.clone(), &self.config).ok())
+            .map(|r| r.output)
     }
 
     /// Handle background task completion

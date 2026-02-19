@@ -22,7 +22,11 @@ use tola_vdom::{Document, algo::Patch};
 #[derive(Debug)]
 pub enum CompilerMsg {
     /// Compile files with priority information
-    Compile(CompileQueue),
+    Compile {
+        queue: CompileQueue,
+        /// Paths that triggered this compile (for running watched hooks)
+        changed_paths: Vec<PathBuf>,
+    },
     /// Compile content files that depend on changed deps
     #[allow(dead_code)] // Reserved for future dependency-aware rebuild
     CompileDependents(Vec<PathBuf>),
