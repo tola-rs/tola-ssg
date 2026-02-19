@@ -1,9 +1,8 @@
 //! Build state tracking for serve mode.
 //!
-//! Four orthogonal states:
-//! - `SERVING`: Is the site ready to serve requests? (loading phase complete)
+//! Three orthogonal states:
+//! - `SERVING`: Is the site ready to serve requests? (init phase complete)
 //! - `HEALTHY`: Is the build healthy? (can hot-reload vs needs full rebuild)
-//! - `BUSY`: Is an update in progress? (revision gating)
 //! - `SHUTDOWN`: Has shutdown been requested? (Ctrl+C received)
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 
 use tiny_http::Server;
 
-/// Site is ready to serve requests (initial loading phase complete)
-/// - `false`: Show loading page
+/// Site is ready to serve requests (init phase complete)
+/// - `false`: Return 503
 /// - `true`: Serve normally
 static SERVING: AtomicBool = AtomicBool::new(false);
 
@@ -21,17 +20,8 @@ static SERVING: AtomicBool = AtomicBool::new(false);
 /// - `true`: Next file change triggers hot-reload
 static HEALTHY: AtomicBool = AtomicBool::new(false);
 
-/// Update is in progress (revision gating)
-/// - `false`: Serve immediately
-/// - `true`: Wait for update to complete
-static BUSY: AtomicBool = AtomicBool::new(false);
-
 /// Shutdown has been requested (Ctrl+C received)
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-
-/// Scan phase has completed (global state is populated)
-/// When true, build_all() should skip clearing/repopulating STORED_PAGES and GLOBAL_ADDRESS_SPACE
-static SCAN_COMPLETED: AtomicBool = AtomicBool::new(false);
 
 /// HTTP server reference for graceful shutdown
 static SERVER: OnceLock<Arc<Server>> = OnceLock::new();
@@ -67,24 +57,7 @@ pub fn set_healthy(healthy: bool) {
     HEALTHY.store(healthy, Ordering::SeqCst);
 }
 
-// =============================================================================
-// BUSY state (revision gating)
-// =============================================================================
 
-/// Check if an update is in progress
-pub fn is_busy() -> bool {
-    BUSY.load(Ordering::Acquire)
-}
-
-/// Mark update as started
-pub fn begin_update() {
-    BUSY.store(true, Ordering::Release);
-}
-
-/// Mark update as finished
-pub fn end_update() {
-    BUSY.store(false, Ordering::Release);
-}
 
 // =============================================================================
 // SHUTDOWN state
@@ -133,21 +106,7 @@ pub fn is_shutdown() -> bool {
     SHUTDOWN.load(Ordering::Relaxed)
 }
 
-// =============================================================================
-// SCAN_COMPLETED state
-// =============================================================================
 
-/// Mark scan phase as completed
-///
-/// After this, build_all() will skip clearing/repopulating global state
-pub fn set_scan_completed() {
-    SCAN_COMPLETED.store(true, Ordering::SeqCst);
-}
-
-/// Check if scan phase has completed
-pub fn is_scan_completed() -> bool {
-    SCAN_COMPLETED.load(Ordering::SeqCst)
-}
 
 // =============================================================================
 // Tests
@@ -175,14 +134,4 @@ mod tests {
         assert!(is_healthy());
     }
 
-    #[test]
-    fn test_busy() {
-        BUSY.store(false, Ordering::SeqCst);
-
-        begin_update();
-        assert!(BUSY.load(Ordering::Acquire));
-
-        end_update();
-        assert!(!BUSY.load(Ordering::Acquire));
-    }
 }

@@ -86,7 +86,7 @@ fn run_actor_system(config: Arc<SiteConfig>, ws_port: Option<u16>, shutdown_rx: 
     });
 }
 
-/// Wait for actor system to shutdown gracefully (max 2 seconds)
+/// Wait for actor system to shutdown gracefully (max 2 seconds), then force exit
 pub fn wait_for_shutdown(handle: Option<JoinHandle<()>>) {
     let Some(handle) = handle else { return };
 
@@ -97,4 +97,7 @@ pub fn wait_for_shutdown(handle: Option<JoinHandle<()>>) {
         }
         thread::sleep(std::time::Duration::from_millis(50));
     }
+
+    // Force exit: background threads (tokio, hook subprocesses) may not respond
+    std::process::exit(0);
 }

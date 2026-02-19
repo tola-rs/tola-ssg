@@ -72,7 +72,7 @@ pub fn build_static_pages(
     deps_hash: Option<ContentHash>,
     progress: Option<&crate::logger::ProgressLine>,
 ) -> Result<MetadataResult> {
-    let skip_global_state = crate::core::is_scan_completed();
+    let skip_global_state = crate::core::is_serving();
 
     if !skip_global_state {
         STORED_PAGES.clear();
@@ -625,7 +625,7 @@ fn finalize_static_page(
     }
 
     // Store in global data (skip if scan already populated it)
-    if !crate::core::is_scan_completed() {
+    if !crate::core::is_serving() {
         STORED_PAGES.insert_page(
             page.route.permalink.clone(),
             page.content_meta.clone().unwrap_or_default(),

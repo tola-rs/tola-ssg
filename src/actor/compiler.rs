@@ -87,10 +87,6 @@ impl CompilerActor {
                 self.on_asset_change(paths).await;
                 bg
             }
-            CompilerMsg::OutputChange(paths) => {
-                self.on_output_change(paths).await;
-                bg
-            }
             CompilerMsg::FullRebuild => {
                 abort_task(&mut { bg });
                 self.on_full_rebuild().await;
@@ -111,7 +107,6 @@ impl CompilerActor {
         queue: crate::reload::queue::CompileQueue,
         changed_paths: Vec<PathBuf>,
     ) -> Option<BackgroundTask> {
-        crate::core::begin_update();
         let start = Instant::now();
         let pages_hash = STORED_PAGES.pages_hash();
 
@@ -191,7 +186,6 @@ impl CompilerActor {
             self.recompile_virtual_users().await;
         }
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
-        crate::core::end_update();
     }
 
     async fn on_compile_dependents(&mut self, deps: Vec<PathBuf>) {
@@ -238,6 +232,8 @@ impl CompilerActor {
                         self.compile_one(&path).await;
                     }
                 }
+                // Flush batch log
+                let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
             }
         } else if !errors.is_empty() {
             // Only errors, no version changes - still notify
@@ -246,49 +242,15 @@ impl CompilerActor {
         }
     }
 
-    /// Handle output file changes (from hooks).
-    ///
-    /// Unlike assets, output files don't need copying - they're already in output dir.
-    /// Just update versions and trigger hot reload.
-    async fn on_output_change(&mut self, paths: Vec<PathBuf>) {
-        use crate::asset::version;
-        use crate::reload::active::ACTIVE_PAGE;
-
-        let count = paths.len();
-
-        // Update versions for changed output files
-        let mut any_changed = false;
-        for path in &paths {
-            if version::update_version(path) {
-                any_changed = true;
-            }
-        }
-
-        // If versions changed, recompile active pages (VDOM Patch, no reload)
-        if any_changed {
-            let active_urls = ACTIVE_PAGE.get_all();
-            if !active_urls.is_empty() {
-                crate::log!("output"; "{} files changed, recompiling {} active pages", count, active_urls.len());
-                for url in active_urls {
-                    if let Some(path) = url_to_content_path(url.as_str(), &self.config) {
-                        self.compile_one(&path).await;
-                    }
-                }
-            }
-        }
-    }
 
     async fn on_full_rebuild(&mut self) {
         use crate::asset::version;
         use crate::compiler::dependency::clear_graph;
         use crate::config::{clear_clean_flag, reload_config};
-        use crate::core::{BuildMode, begin_update, end_update, set_healthy};
+        use crate::core::{BuildMode, set_healthy};
         use crate::reload::active::ACTIVE_PAGE;
 
         crate::debug!("compile"; "full rebuild triggered");
-
-        // Gate: block HTTP requests during rebuild
-        begin_update();
 
         if let Ok(true) = reload_config() {
             self.config = crate::config::cfg();
@@ -333,9 +295,6 @@ impl CompilerActor {
                 let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
             }
         }
-
-        // Ungate: allow HTTP requests
-        end_update();
     }
 }
 

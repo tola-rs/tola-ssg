@@ -326,7 +326,7 @@ impl VdomActor {
             .map(|e| (e.path.clone(), crate::utils::ansi_to_html(&e.error)));
 
         // Restore AddressSpace from cache (skip if scan already populated it)
-        if !crate::core::is_scan_completed() {
+        if !crate::core::is_serving() {
             Self::restore_address_space(&root);
         }
 

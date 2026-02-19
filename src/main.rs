@@ -88,7 +88,7 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     let has_cache =
         !config.build.clean && cache::has_cache(config.get_root()) && config.build.output.exists();
 
-    // Bind HTTP server first (so we can respond with loading page during scan)
+    // Bind HTTP server first (so we can respond with 503 during scan)
     let bound_server = cli::serve::bind_server()?;
 
     // Start compile scheduler workers
@@ -144,6 +144,10 @@ fn progressive_scan(config: &SiteConfig) -> bool {
     // that get deleted by clean operation
     if let Err(e) = cli::serve::init_serve_build(config) {
         log!("init"; "failed: {}", e);
+        return false;
+    }
+
+    if is_shutdown() {
         return false;
     }
 
