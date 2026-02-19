@@ -1,127 +1,328 @@
 # tola-ssg
 
-A static site generator for Typst-based blogs.  \
+A static site generator for Typst-based websites.  \
 
-**NOTE:**  \
-**There would be huge change in v0.7.x: vdom diff, live reloading, interactive cli, more useful local server**  \
-**See showcase videos in [issue #41](https://github.com/tola-ssg/tola-ssg/issues/41), for coming semless hot reloading**
-
+v0.7.0 is coming soon (26.02.23)
 
 ## Table of Contents
 
 - [Showcase](#showcase)
 - [Features](#features)
 - [Philosophy](#philosophy)
-- [Installation](#installation)
 - [Usage](#usage)
+- [Installation](#installation)
 - [Roadmap](#roadmap-v070)
 - [Note](#note)
 
 ## Showcase
-> Yeah, my blog is also built with `tola`.  \
-> There are example site collection: https://tola-rs.github.io/example-sites
 
-[my blog](https://kawayww.com):
+> Yeah, my blog is also built with `tola`.
+
+| Site | Description |
+|------|-------------|
+| [kawayww.com](https://kawayww.com) | Author's personal blog |
+| [example-sites](https://tola-rs.github.io/example-sites/) | Official example collection |
+
+<details>
+<summary>Screenshots</summary>
+
 ![home](/screenshots/home.avif)
-
-[example site collection](https://tola-rs.github.io/example-sites/):
 ![example](/screenshots/example.avif)
 
-Thanks to `typst`, `tola` offers writing flexibility.  \
-e.g.: Implement `Recent Posts` easily and customizable (as shown in the image above):
+</details>
+
+<details>
+<summary>How to make "Recent 5 Posts" with Tola's virtual package system</summary>
+
+Thanks to `typst` and `tailwindcss`, `tola` offers writing flexibility.
+Implement `Recent Posts` easily with the `@tola/pages` virtual package:
 
 ```typst
-// Data Architecture: Tola provides virtual JSON files for site metadata.
-// Why? This gives you full control over how to list and filter content.
-// Available virtual files:
-// - "/_data/pages.json": List of all pages with their metadata (url, title, date, etc.)
-// - "/_data/tags.json": Map of tags to the pages that use them
-// - ...more in the future!
+#import "@tola/pages:0.0.0": pages
+#import "/components/ui.typ" as ui
 
-#import "/utils/helpers.typ" as utils
-
-#let pages = json("/_data/pages.json")
-#let posts = (pages
-  .filter(p => "/posts/" in p.url)
+#let posts = (pages()
+  .filter(p => "/posts/" in p.permalink)
   .filter(p => p.at("draft", default: false) == false)
   .sorted(key: p => p.date)
   .rev())
 
 #html.div(class: "space-y-6")[
   #for post in posts.slice(0, calc.min(posts.len(), 5)) {
-    utils.post-card(post)
+    ui.post-card(post)
   }
 ]
 ```
 
+The `@tola/pages` package provides access to all page metadata (title, date, permalink, tags, etc.) at compile time.
+
+</details>
+
 ## Features
 
 ### Performance
-(There would be a huge change/refactor in future v0.7.x)
 
-- **font caching** — Fonts loaded once at startup, shared across all compilations
-- **file caching** — Only re-read changed files, zero-cost for unchanged files
-- **parallel compilation** — Build pages and assets concurrently using rayon
-- **incremental rebuilds** — Intelligent dependency tracking for sub-second hot reload
-  - **content**: Direct rebuild of changed file
-  - **deps (templates/utils)**: Reverse-lookup of dependencies to rebuild only affected pages
-  - **config**: Full rebuild to ensure consistency across the site
-
-When a template or shared file changes, `tola` uses its in-memory dependency graph to determine the minimal rebuild set:
-
-```text
-DependencyGraph
-├── forward: content.typ → {template.typ, utils/a.typ, ...}
-└── reverse: template.typ → {page1.typ, page2.typ, ...}
-```
-
-This ensures that editing a utility function used by 5 pages only rebuilds those 5 pages, not the entire site.
+- **parallel compilation** — Process pages concurrently
+- **font preloading** — Fonts loaded once at startup, shared across all compilations
+- **snapshot sharing** — Typst compiler snapshot reused across batch compilations, avoiding repeated initialization
 
 ### Development Experience
 
-- **smart watch mode** — Robust file watching strategy:
-  - **debouncing (300ms)**: Batches rapid file events (e.g. "Save All") into single builds
-  - **cooldown**: Prevents build thrashing during compilation
-  - **error recovery**: Server stays alive on build failures; just fix and save to recover
-- **local server** — Built-in HTTP server with directory listing and clean URLs
-- **auto config discovery** — Run `tola` from any subdirectory; it finds `tola.toml` automatically
+- **zero config to start** — `tola init <SITE-NAME>` gets you running in seconds
+- **local server** — Built-in HTTP server with on-demand compilation
+- **hot reloading** — File changes are diff/patched to the browser instantly via WebSocket
+- **priority queue scheduler** — Prioritizes currently viewed pages for faster feedback
+- **incremental rebuilds** — Bidirectional dependency graph + VDOM caching enables minimal rebuilds; only affected pages are recompiled
 - **graceful error handling** — Human-readable diagnostic messages from Typst
+- **escape hatches** — Full access to HTML/CSS/JS when you need it
 
-### Content Processing
+### Build & Integration
 
-- **svg extraction & optimization** — Extract inline SVGs, adjust viewBox, compress to SVGZ
-- **dark mode svg adaptation** — Auto-inject CSS for SVG theme adaptation (enabled by default)
+- **build hooks** — Pre/post build hooks for custom scripts (e.g., esbuild, imagemin)
+- **Tailwind CSS** — Built-in CSS processor integration
 - **html/xml minification** — Optional minification for production builds
-- **url slugification** — Configurable slug modes (full, safe, ascii, no) with case options
-- **typst package support** — Uses standard Typst package registry with shared cache
+- **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API
 
-### Site Generation
+### Image & SVG
 
-- **rss-2.0 support** — Auto-generate `feed.xml` from page metadata
-- **sitemap support** — Auto-generate `sitemap.xml` for search engines
-- **tailwind-css support** — Built-in support, out of the box
-- **github pages deployment** — One-command deploy (or use GitHub Actions)
+- **SVG math tight bounds** — Removes extra whitespace around equations via Typst's `bounds` edge setting
+- **SVG baseline alignment** — Auto-apply `vertical-align` for inline SVG to align with surrounding text
+- **SVG viewBox expansion** — Expands viewBox to include stroke boundaries, preventing content clipping
+- **SVG dark mode adaptation** — Auto-inject CSS for SVG theme switching (enabled by default)
+- **image recolor** — SVG filter-based color adaptation for local images (png/jpg/webp), matching screenshots to site theme (experimental)
+- **image background removal** — Auto-detect and remove image backgrounds (experimental)
+
+### Routing & SEO
+
+- **clean URLs** — `content/posts/hello.typ` → `/posts/hello/`
+- **custom permalinks** — Override URL via page metadata
+- **aliases** — Redirect old URLs to new locations
+- **url slugification** — Configurable slug modes (full, safe, ascii) with case options
+- **url conflict detection** — Errors when multiple pages resolve to the same URL
+- **rss/atom support** — Auto-generate `feed.xml` from page metadata
+- **sitemap** — Auto-generate `sitemap.xml` for search engines
+- **Open Graph & Twitter Cards** — Auto-inject default OG tags from site config, or customize per-page via `og-tags()` in Typst
+- **404 typst/html page** — Configurable not-found page(.typ or .md)
+
+### Virtual Packages
+
+Tola injects virtual packages at compile time, enabling cross-page data access without external build steps:
+
+- `@tola/site:0.0.0` — Site configuration (`info`, `info.extra` from `[site.info]` in `tola.toml`)
+- `@tola/pages:0.0.0` — All pages metadata (title, date, permalink, tags, draft status...)
+- `@tola/current:0.0.0` — Current page info (useful in templates)
+
+```typst
+#import "@tola/pages:0.0.0": pages
+#import "@tola/site:0.0.0": info
+
+// List all posts
+#for post in pages().filter(p => "/posts/" in p.permalink) {
+  [#post.title (#post.date)]
+}
+
+// Access site title
+#info.title
+```
+
+See [Virtual Packages in Usage](#virtual-packages-1) for more details.
 
 ## Philosophy
 
 > **Keep your focus on the content itself.**
 
-`tola` is built around three core principles:
-
-### Minimal Abstraction
-
-`tola` provides a thin layer over Typst — just enough to handle the boring stuff (routing, live reload, local server, incremental rebuild smartly) without locking you into a rigid framework. Your Typst code stays portable.
-
 ### Typst First
 
-If Typst can do something easily, use Typst. `tola` doesn't reinvent the wheel — it leverages Typst's powerful markup and scripting capabilities.
+If Typst can easily do it, use Typst. No need to explain Typst's strengths here — even with HTML export losing many layout features, it's still remarkably powerful.
 
-### Developer Joy
+`tola` leverages Typst's markup and scripting capabilities instead of reinventing the wheel.
 
-- **zero config to start** — `tola init <SITE-NAME>` gets you running in seconds
-- **fast feedback loop** — Incremental rebuilds keep iteration snappy
-- **escape hatches** — Full access to HTML/CSS/JS when you need it
-- **predictable output** — What you write is what you get
+### Tola Second
+
+Some things are beyond what a standalone `typst` CLI can do — especially batch processing and site-wide coordination:
+
+- Automatic routing from file structure
+- Seamless hot reload with VDOM diff/patch
+- SVG dark mode adaptation out of the box
+- Cross-page state via `sys.inputs` and virtual packages injection
+- ...And more!
+
+That's where `tola` steps in — optimizing developer experience and integrating these features seamlessly is no small feat.
+
+
+## Usage
+
+Run `tola --help` or `tola <command> --help` for detailed CLI usage.
+
+You can run `tola` from any subdirectory — it will automatically find `tola.toml` by searching upward.
+
+### Example Site Structure
+
+```text
+.
+├── tola.toml                 # Site configuration
+├── content/                  # Page sources (routes)
+│   ├── index.typ             #   -> /
+│   ├── about.typ             #   -> /about/
+│   ├── posts/
+│   │   └── hello.typ         #   -> /posts/hello/
+│   └── error.typ             # Custom 404 page
+├── templates/                # Shared layouts (default in `build.deps`)
+│   ├── tola.typ              #   Default template from `tola init` (fully customizable)
+│   ├── post.typ              #   Post layout (can extend tola.typ)
+│   └── normal.typ            #   Normal page layout
+├── utils/                    # Helper functions (default in `build.deps`)
+│   └── tola.typ              #   Utility functions from `tola init` (CSS class, OG tags, etc.)
+├── components/               # Custom components (add to `build.deps` manually)
+│   ├── layout.typ            #   Reusable layout components
+│   └── ui.typ                #   UI components (post-card, tag-list, etc.)
+└── assets/
+    ├── images/
+    ├── fonts/
+    │   └── Luciole-math.otf  # Embedded math font (auto-loaded by tola)
+    ├── styles/
+    │   └── tailwind.css      # Tailwind input (if using `build.hooks.css`)
+    └── scripts/
+```
+
+### Shared Dependencies
+
+The routing under `content/` is probably intuitive — files map to URLs. But you might wonder about `build.deps` in `tola.toml`. You can actually use it without thinking too hard, but a quick explanation might help:
+
+Typst files in `content/` become pages. But they often `#import` shared code from `templates/`, `utils/`, or something else you prefer — these are just conventional names tola provides by default, feel free to rename them. Tola tracks these dependencies internally. When you declare directories in `build.deps`, tola knows: "if anything here changes, recompile all pages that import from it." This enables instant hot-reload across your entire site.
+
+`templates/` and `utils/` are just default names — you can rename them or add more via `build.deps`. For example: you have `templates/base.typ` that styles math equations with Tailwind classes. When you change `text-base` to `text-2xl` in that file, any page importing it (like `content/example.typ` -> `/example/`) will instantly reflect the larger equations — no manual refresh needed.
+
+### Configuration
+
+Common `tola.toml` settings (run `tola init --dry` to see full defaults):
+
+```toml
+# Access in Typst: #import "@tola/site:0.0.0": info
+# Then use: info.title, info.author, info.extra.custom
+[site.info]
+title = "My Blog"
+author = "Your Name"
+email = "you@example.com"
+description = "A blog built with Typst and Tola"
+language = "en"
+url = "https://example.com"
+
+[site.info.extra]
+custom = "This is my custom data"
+
+[site.header]
+icon = "assets/images/favicon.ico"
+styles = ["assets/styles/custom.css"]
+scripts = [
+  "assets/scripts/custom.js" # Simple: No defer and async
+  { path = "assets/scripts/app.js", defer = true }
+  { path = "assets/scripts/app.js", async = true }
+]
+elements = ['<meta name="darkreader-lock">'] # Extra special html elements
+
+[site.seo]
+auto_og = true   # Auto-inject default OG tags (site_name, locale, description, type, twitter:card)
+
+[site.seo.feed]
+enable = true
+format = "rss"   # "rss" | "atom"
+
+[site.seo.sitemap]
+enable = true
+
+[site.nav]
+enable = true    # SPA navigation (link interception + DOM morphing)
+# transition = { style = "fade", time = 200 }
+# preload = { enable = true, delay = 100 }
+
+[build]
+content = "content"
+output = "public"
+minify = true
+deps = ["templates", "utils"]  # Shared dependencies — changes trigger range rebuild
+
+[build.assets]
+nested = ["assets/images", "assets/styles", "assets/fonts"]
+
+[build.hooks.css]
+enable = true
+path = "assets/styles/tailwind.css"
+command = ["tailwindcss"]
+```
+
+### Virtual Packages
+
+Tola provides virtual packages that you can import directly in your Typst files:
+
+| Package | Exports |
+|---------|---------|
+| `@tola/site:0.0.0` | `info` — Site metadata (title, author, email, description, url, language, copyright, extra) |
+| `@tola/pages:0.0.0` | `pages()`, `by-tag(tag)`, `by-tags(..tags)`, `all-tags()` |
+| `@tola/current:0.0.0` | `path`, `parent`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages)`, `prev(pages, n)`, `find(pages, n)` |
+
+```typst
+// content/index.typ — list recent posts
+#import "/templates/normal.typ": conf
+#import "/components/ui.typ" as ui
+#import "@tola/pages:0.0.0": pages
+
+#show: conf.with(
+  title: "Home",
+  permalink: "/"
+)
+
+#let posts = (pages()
+  .filter(p => "/posts/" in p.permalink and p.date != none)
+  .sorted(key: p => p.date)
+  .rev())
+
+#for post in posts.slice(0, calc.min(posts.len(), 5)) {
+  ui.post-card(post)
+}
+```
+
+### Open Graph & Twitter Cards
+
+Tola auto-injects default OG tags from `[site.info]` when `site.seo.auto_og = true`. For page-specific customization, use the `og-tags()` function in your template's `head` parameter:
+
+```typst
+#import "/utils/tola.typ": og-tags
+
+#let head = og-tags(
+  title: "My Post",
+  description: "A great article about...",
+  url: "https://example.com/posts/my-post/",
+  image: "https://example.com/og-image.png",
+  type: "article",           // "website" | "article" | "book" | "profile"
+  published: "2024-01-15",   // article:published_time
+  tags: ("rust", "typst"),   // article:tag
+)
+
+// In your template
+tola-page(
+  title: "My Post",
+  head: head,
+)[...]
+```
+
+When you use `og-tags()`, Tola skips auto-injection and uses your custom tags instead.
+
+### Quick Start
+
+```sh
+# Create a new site
+tola init my-blog
+cd my-blog
+
+# Edit `content/index.typ`
+
+# Build for production
+tola build
+
+# Start development server
+tola serve
+```
 
 ## Installation
 
@@ -181,99 +382,9 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 
 > **Note**: The `default` package builds natively for your system. If a pre-built binary is not available in the cache for `default`, Nix will build it from source. The specific architecture packages (e.g., `aarch64-darwin`) are explicit cross-compilation targets that are likely populated in the cache.
 
-## Usage
-
-```text
-A static site generator for typst-based blog
-
-Usage: tola [OPTIONS] <COMMAND>
-
-Commands:
-  init    Init a template site
-  build   Deletes the output directory if there is one and rebuilds the site
-  serve   Serve the site. Rebuild and reload on change automatically
-  deploy  Deletes the output directory if there is one and rebuilds the site
-  help    Print this message or the help of the given subcommand(s)
-
-Options:
-  -o, --output <OUTPUT>    Output directory path (relative to project root)
-  -c, --content <CONTENT>  Content directory path (relative to project root)
-  -a, --assets <ASSETS>    Assets directory path (relative to project root)
-  -C, --config <CONFIG>    Config file name [default: tola.toml]
-  -h, --help               Print help
-  -V, --version            Print version
-
-Build/Serve Options:
-  --base-url <URL>         Override base URL for deployment (e.g., GitHub Pages)
-  --clean                  Clean output directory before building
-  -m, --minify             Minify HTML output
-  -t, --tailwind           Enable Tailwind CSS processing
-  --rss                    Enable RSS feed generation
-  --sitemap                Enable sitemap generation
-```
-
-You can run `tola` from any subdirectory — it will automatically find `tola.toml` by searching upward.
-
-### Project Structure
-
-```text
-.
-├── assets/
-│   ├── fonts/
-│   ├── images/
-│   ├── scripts/
-│   └── styles/
-├── content/
-│   ├── posts/
-│   ├── index.typ
-│   └── about.typ
-├── templates/          # Dependency directory (triggers dependent rebuilds)
-│   └── base.typ
-├── utils/              # Dependency directory (triggers dependent rebuilds)
-│   └── helpers.typ
-└── tola.toml
-```
-
-### Routing
-
-Files under `content/` are mapped to their respective routes:
-
-| Source Path | URL |
-|-------------|-----|
-| `content/index.typ` | `/index.html` |
-| `content/about.typ` | `/about/` |
-| `content/posts/hello.typ` | `/posts/hello/` |
-
-### Quick Start
-
-```sh
-# Create a new site
-tola init my-blog
-cd my-blog
-
-# Build for production
-tola build
-
-# Start development server
-tola serve
-```
-
-## Roadmap (v0.7.0)
-
-> **Coming Soon**: Incremental Rendering & VDOM Architecture
-
-The next major release focuses on **instant hot-reloading** with sub-second refresh times:
-
-- **VDOM Core** — Type-safe virtual DOM with TTG (Trees that Grow) pattern
-- **Stable Identity** — Span-based node IDs for precise diffing across compilations
-- **Binary Patch Protocol** — `rkyv` zero-copy serialization for efficient updates
-- **Actor Concurrency** — Non-blocking `FsActor` / `CompilerActor` / `WsActor` via `tokio`
-
-Goal: *"Local refresh feels like a web app"*
-
 ## Note
 
-> ⚠️ **Early development & experimental HTML export**
+> **Early development & experimental HTML export**
 
 `tola` is usable but evolving — expect breaking changes and rough edges. Feedback and contributions are welcome!
 
