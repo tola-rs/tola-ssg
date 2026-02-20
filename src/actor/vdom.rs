@@ -24,8 +24,8 @@ use tokio::sync::mpsc;
 
 use super::messages::{VdomMsg, WsMsg};
 use crate::cache::{
-    PersistedError, PersistedErrorState, persist_cache, persist_errors, restore_cache,
-    restore_dependency_graph, restore_errors,
+    PersistedDiagnostics, PersistedError, persist_cache, persist_diagnostics, restore_cache,
+    restore_dependency_graph, restore_diagnostics,
 };
 use crate::compiler::family::{CacheEntry, Indexed};
 use crate::compiler::page::BUILD_CACHE;
@@ -301,17 +301,17 @@ pub struct VdomActor {
     ws_tx: mpsc::Sender<WsMsg>,
     root: PathBuf,
     batch: BatchLogger,
-    error_state: PersistedErrorState,
+    error_state: PersistedDiagnostics,
 }
 
-/// Result of VdomActor::new() - (actor, cache_entries, first_error)
-pub type VdomRestoreResult = (VdomActor, usize, Option<(String, String)>);
+/// Result of VdomActor::new() - (actor, cache_entries, first_error, warnings)
+pub type VdomRestoreResult = (VdomActor, usize, Option<(String, String)>, Vec<String>);
 
 impl VdomActor {
     /// Create a new VdomActor.
     ///
-    /// Attempts to restore cache and errors from disk.
-    /// Returns (actor, cache_count, first_error) where first_error is (path, error).
+    /// Attempts to restore cache and diagnostics from disk.
+    /// Returns (actor, cache_count, first_error, warnings).
     pub fn new(
         rx: mpsc::Receiver<VdomMsg>,
         ws_tx: mpsc::Sender<WsMsg>,
@@ -328,13 +328,16 @@ impl VdomActor {
             crate::debug!("vdom"; "dependency graph restore failed: {}", e);
         }
 
-        // Restore errors from disk
-        let error_state = restore_errors(&root).unwrap_or_default();
+        // Restore diagnostics from disk
+        let error_state = restore_diagnostics(&root).unwrap_or_default();
 
         // Get first error for WsActor initialization
         let first_error = error_state
-            .first()
+            .first_error()
             .map(|e| (e.path.clone(), crate::utils::ansi_to_html(&e.error)));
+
+        // Get warnings for display
+        let warnings: Vec<String> = error_state.warnings().map(|w| w.warning.clone()).collect();
 
         // Restore AddressSpace from cache (skip if scan already populated it)
         if !crate::core::is_serving() {
@@ -349,7 +352,7 @@ impl VdomActor {
             error_state,
         };
 
-        (actor, restored, first_error)
+        (actor, restored, first_error, warnings)
     }
 
     fn restore_address_space(root: &Path) {
@@ -374,8 +377,9 @@ impl VdomActor {
                     url_path,
                     vdom,
                     permalink_change,
+                    warnings,
                 } => {
-                    self.handle_process(path, url_path, *vdom, permalink_change)
+                    self.handle_process(path, url_path, *vdom, permalink_change, warnings)
                         .await
                 }
 
@@ -407,7 +411,7 @@ impl VdomActor {
     }
 
     async fn replay_errors(&self) {
-        for error in self.error_state.iter() {
+        for error in self.error_state.errors() {
             let _ = self
                 .ws_tx
                 .send(WsMsg::Error {
@@ -440,15 +444,15 @@ impl VdomActor {
         self.batch.push_error(&rel_path_str, &error);
 
         // Track for persistence
-        self.error_state.push(PersistedError::new(
+        self.error_state.push_error(PersistedError::new(
             rel_path_str.clone(),
             url_path.to_string(),
             error.clone(),
         ));
 
         // Persist immediately for crash safety
-        if let Err(e) = persist_errors(&self.error_state, &self.root) {
-            crate::debug!("vdom"; "error persist failed: {}", e);
+        if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
+            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
         }
 
         // Invalidate cache
@@ -474,8 +478,14 @@ impl VdomActor {
         url_path: UrlPath,
         new_vdom: Document<Indexed>,
         permalink_change: Option<crate::address::PermalinkUpdate>,
+        warnings: Vec<String>,
     ) {
         use crate::address::PermalinkUpdate;
+
+        // Store warnings for this path
+        let rel_path = self.to_relative(&path);
+        let rel_path_str = rel_path.display().to_string();
+        self.error_state.set_warnings(&rel_path_str, warnings);
 
         // Handle permalink conflict early (detected by CompilerActor)
         if let Some(PermalinkUpdate::Conflict {
@@ -575,7 +585,7 @@ impl VdomActor {
         let rel_path_str = rel_path.display().to_string();
 
         // Clear any previous errors for this file (compilation succeeded)
-        if self.error_state.clear_for(&rel_path_str) {
+        if self.error_state.clear_errors_for(&rel_path_str) {
             // Notify browser to hide error overlay
             let _ = self.ws_tx.send(WsMsg::ClearError).await;
         }
@@ -732,8 +742,12 @@ impl VdomActor {
             Ok(n) => crate::debug!("vdom"; "persisted {} cache entries", n),
             Err(e) => crate::debug!("vdom"; "cache persist failed: {}", e),
         }
-        if let Err(e) = persist_errors(&self.error_state, &self.root) {
-            crate::debug!("vdom"; "error persist failed: {}", e);
+        // Skip if empty: initial build warnings are saved by finalize_serve_build(),
+        // which runs in parallel. Persisting empty state here would overwrite them.
+        if !self.error_state.is_empty() {
+            if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
+                crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+            }
         }
         crate::debug!("vdom"; "shutting down");
     }
@@ -742,7 +756,7 @@ impl VdomActor {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
-    use crate::cache::restore_errors;
+    use crate::cache::restore_diagnostics;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -752,7 +766,7 @@ mod persistence_tests {
         let (tx, rx) = mpsc::channel(10);
         let (ws_tx, _ws_rx) = mpsc::channel(10);
 
-        let (actor, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let (actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
         let actor_handle = tokio::spawn(actor.run());
 
         tx.send(VdomMsg::Error {
@@ -766,9 +780,9 @@ mod persistence_tests {
         tx.send(VdomMsg::Shutdown).await.unwrap();
         actor_handle.await.unwrap();
 
-        let state = restore_errors(&root).unwrap();
-        assert_eq!(state.count(), 1, "Should have 1 persisted error");
-        let error = state.first().unwrap();
+        let state = restore_diagnostics(&root).unwrap();
+        assert_eq!(state.error_count(), 1, "Should have 1 persisted error");
+        let error = state.first_error().unwrap();
         assert_eq!(error.error, "test error");
     }
 }

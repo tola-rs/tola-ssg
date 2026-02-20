@@ -26,6 +26,8 @@ pub enum CompileOutcome {
         path: PathBuf,
         url_path: UrlPath,
         vdom: Box<Document<Indexed>>,
+        /// Compilation warnings (for persistence)
+        warnings: Vec<String>,
     },
     /// Non-content file changed, needs full reload
     Reload { reason: String },
@@ -74,10 +76,15 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
             }
 
             if let Some(vdom) = page_result.indexed_vdom {
+                // Convert warnings to strings for persistence
+                let warnings: Vec<String> =
+                    page_result.warnings.iter().map(|w| w.to_string()).collect();
+
                 CompileOutcome::Vdom {
                     path: path.to_path_buf(),
                     url_path: permalink,
                     vdom: Box::new(vdom),
+                    warnings,
                 }
             } else {
                 CompileOutcome::Skipped

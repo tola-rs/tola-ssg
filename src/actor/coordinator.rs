@@ -84,13 +84,13 @@ impl Coordinator {
             }
         }
 
-        // Create actors - VdomActor tries to restore cache and errors first
+        // Create actors - VdomActor tries to restore cache and diagnostics first
         let watch_paths = self.watch_paths();
         let fs_actor = FsActor::new(watch_paths, compiler_tx.clone(), self.config.clone())
             .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
 
         let compiler_actor = CompilerActor::new(compiler_rx, vdom_tx.clone(), self.config.clone());
-        let (vdom_actor, restored_count, first_error) =
+        let (vdom_actor, restored_count, first_error, restored_warnings) =
             VdomActor::new(vdom_rx, ws_tx.clone(), self.config.get_root().to_path_buf());
 
         // Create WsActor with initial pending error if restored
@@ -99,6 +99,23 @@ impl Coordinator {
             None => WsActor::new(ws_rx),
         };
         crate::debug!("vdom"; "cache: {} entries", restored_count);
+
+        // Display restored warnings
+        if !restored_warnings.is_empty() {
+            let max = self
+                .config
+                .build
+                .diagnostics
+                .max_warnings
+                .unwrap_or(usize::MAX);
+            for warning in restored_warnings.iter().take(max) {
+                eprintln!("{}", warning);
+            }
+            let remaining = restored_warnings.len().saturating_sub(max);
+            if remaining > 0 {
+                eprintln!("... and {} more warnings", remaining);
+            }
+        }
 
         // Run actors until shutdown signal
         crate::debug!("actor"; "start");
