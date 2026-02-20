@@ -36,10 +36,10 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let validate_config = &config.validate;
 
     // Check if any validation is enabled
-    let check_internal = validate_config.pages.enable;
+    let check_pages = validate_config.pages.enable;
     let check_assets = validate_config.assets.enable;
 
-    if !check_internal && !check_assets {
+    if !check_pages && !check_assets {
         log!("validate"; "no checks enabled");
         return Ok(());
     }
@@ -49,26 +49,41 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     // Setup paths
     let root = crate::utils::path::normalize_path(config.get_root());
 
-    // Build AddressSpace for internal validation if needed
-    let all_pages = if check_internal || check_assets {
+    // Build AddressSpace for validation
+    let all_pages = if check_pages || check_assets {
         build_address_space(config)?
     } else {
         Vec::new()
     };
 
+    // Check for permalink conflicts
+    let url_sources = crate::address::conflict::collect_url_sources(&all_pages, config);
+    let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
+    if !conflicts.is_empty() {
+        crate::address::conflict::print_conflicts(&conflicts);
+        let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
+        anyhow::bail!(
+            "validation failed: {} conflicting url{}, {} source{}",
+            conflicts.len(),
+            plural_s(conflicts.len()),
+            total_sources,
+            plural_s(total_sources)
+        );
+    }
+
     // Unified report
     let report = Arc::new(RwLock::new(ValidationReport::default()));
 
-    // Parallel scan all files (collects internal/asset errors)
+    // Parallel scan all files (collects page/asset errors)
     scan_all_files(&files, &root, config, &all_pages, &report);
 
-    // Log internal link results
-    if check_internal {
-        let count = report.read().internal_error_count();
+    // Log page link results
+    if check_pages {
+        let count = report.read().page_error_count();
         if count > 0 {
-            log!("validate"; "found {} broken internal link{}", count, plural_s(count));
+            log!("validate"; "found {} broken page link{}", count, plural_s(count));
         } else {
-            log!("validate"; "all internal links valid");
+            log!("validate"; "all page links valid");
         }
     }
 
@@ -76,20 +91,20 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     if check_assets {
         let count = report.read().asset_error_count();
         if count > 0 {
-            log!("validate"; "found {} missing asset{}", count, plural_s(count));
+            log!("validate"; "found {} broken asset link{}", count, plural_s(count));
         } else {
-            log!("validate"; "all assets valid");
+            log!("validate"; "all asset links valid");
         }
     }
 
     // Get final report
     let report = Arc::try_unwrap(report).unwrap().into_inner();
 
-    // Print detailed report (internal -> assets)
+    // Print detailed report (pages -> assets)
     report.print();
 
-    // Final summary (internal -> assets)
-    print_summary(report.internal_file_count(), report.asset_file_count())
+    // Final summary (pages -> assets)
+    print_summary(report.page_file_count(), report.asset_file_count())
 }
 
 /// Scan all content files in parallel, collecting validation data
@@ -232,7 +247,6 @@ fn collect_scan_result(
                 let ctx = ResolveContext {
                     current_permalink: &page.route.permalink,
                     source_path: &page.route.source,
-                    colocated_dir: page.route.colocated_dir.as_deref(),
                     attr: &link.attr,
                 };
 
@@ -258,7 +272,6 @@ fn collect_scan_result(
                 let ctx = ResolveContext {
                     current_permalink: &page.route.permalink,
                     source_path: &page.route.source,
-                    colocated_dir: page.route.colocated_dir.as_deref(),
                     attr: &link.attr,
                 };
 
@@ -298,7 +311,7 @@ fn handle_resolve_result(
                     );
                 }
             } else if validate_config.pages.enable {
-                report.write().add_internal(
+                report.write().add_page(
                     source.to_string(),
                     link.to_string(),
                     "not found".to_string(),
@@ -323,7 +336,7 @@ fn handle_resolve_result(
                 };
                 report
                     .write()
-                    .add_internal(source.to_string(), link.to_string(), msg);
+                    .add_page(source.to_string(), link.to_string(), msg);
             }
         }
 
@@ -331,7 +344,7 @@ fn handle_resolve_result(
             if validate_config.pages.enable {
                 report
                     .write()
-                    .add_internal(source.to_string(), link.to_string(), message);
+                    .add_page(source.to_string(), link.to_string(), message);
             }
         }
 
@@ -339,7 +352,7 @@ fn handle_resolve_result(
             if validate_config.pages.enable {
                 report
                     .write()
-                    .add_internal(source.to_string(), link.to_string(), message);
+                    .add_page(source.to_string(), link.to_string(), message);
             }
         }
     }
@@ -405,25 +418,24 @@ fn build_address_space(config: &SiteConfig) -> Result<Vec<CompiledPage>> {
 }
 
 /// Print final summary and return error if validation failed
-fn print_summary(internal_errors: usize, asset_errors: usize) -> Result<()> {
-    if internal_errors > 0 || asset_errors > 0 {
+fn print_summary(page_errors: usize, asset_errors: usize) -> Result<()> {
+    if page_errors > 0 || asset_errors > 0 {
         let mut parts = Vec::new();
-        if internal_errors > 0 {
+        if page_errors > 0 {
             parts.push(format!(
-                "{} with internal link errors",
-                plural_count(internal_errors, "file")
+                "{} with page link errors",
+                plural_count(page_errors, "file")
             ));
         }
         if asset_errors > 0 {
             parts.push(format!(
-                "{} with asset errors",
+                "{} with asset link errors",
                 plural_count(asset_errors, "file")
             ));
         }
         anyhow::bail!("found {}", parts.join(", "));
     }
 
-    log!("validate"; "all checks passed");
     Ok(())
 }
 
@@ -437,7 +449,7 @@ fn get_validate_args() -> crate::cli::ValidateArgs {
         _ => crate::cli::ValidateArgs {
             paths: vec![],
             warn_only: false,
-            internal: None,
+            pages: None,
             assets: None,
         },
     }

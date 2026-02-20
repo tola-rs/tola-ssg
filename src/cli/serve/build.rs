@@ -59,7 +59,7 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
 fn process_assets(config: &SiteConfig) -> Result<()> {
     let clean = config.build.clean;
 
-    // Collect asset files
+    // Collect asset files from assets directories
     let assets: Vec<_> = config
         .build
         .assets
@@ -67,23 +67,17 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
         .flat_map(compiler::collect_all_files)
         .collect();
 
-    let content_assets: Vec<_> = compiler::collect_all_files(&config.build.content)
-        .into_iter()
-        .filter(|p| !ContentKind::is_content_file(p))
-        .collect();
-
     // Process in parallel
     assets.par_iter().for_each(|path| {
         let _ = asset::process_asset(path, config, clean, false);
     });
 
-    content_assets.par_iter().for_each(|path| {
-        let _ = asset::process_rel_asset(path, config, clean, false);
-    });
-
     // Flatten assets and CNAME
     let _ = asset::process_flatten_assets(config, clean, false);
     let _ = asset::process_cname(config);
+
+    // Process content assets (non-.typ/.md files in content directory)
+    let _ = asset::process_content_assets(config, clean);
 
     Ok(())
 }

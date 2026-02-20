@@ -153,7 +153,7 @@ impl<'a> MediaTransform<'a> {
     /// Resolve source file path from src attribute.
     ///
     /// Supports:
-    /// - File-relative paths: `./image.png` -> colocated_dir or source parent
+    /// - File-relative paths: `./image.png` -> source file's parent directory
     /// - Site-root paths: `/images/xxx` -> config.build.assets.nested mapping
     fn resolve_source_path(&self, src: &str) -> Option<PathBuf> {
         match LinkKind::parse(src) {
@@ -182,14 +182,6 @@ impl<'a> MediaTransform<'a> {
                 None
             }
             LinkKind::FileRelative(_) | LinkKind::Fragment(_) => {
-                // Try colocated directory first (for ./image.png style paths)
-                if let Some(colocated) = &self.route.colocated_dir {
-                    let path = resolve_physical_path(colocated, src);
-                    if path.exists() {
-                        return Some(path);
-                    }
-                }
-
                 // Try relative to source file's directory
                 if let Some(source_dir) = self.route.source.parent() {
                     let path = resolve_physical_path(source_dir, src);

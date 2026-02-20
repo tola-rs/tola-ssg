@@ -10,7 +10,6 @@ use crate::core::ContentKind;
 use crate::freshness::is_newer_than;
 use crate::hooks::css;
 use crate::log;
-use crate::page::PageRoute;
 
 use super::meta::{relative_path, route_from_source};
 
@@ -102,68 +101,66 @@ pub fn process_rel_asset(
     Ok(())
 }
 
-/// Copy colocated assets from source directory to output directory
+/// Process all non-content files in the content directory
 ///
-/// Colocated assets are files that live alongside a content file:
+/// Copies all files that are not pages (.typ, .md) to the output directory,
+/// preserving the directory structure.
+///
 /// ```text
-/// content/posts/
-/// ├── hello.typ           -> public/posts/hello/index.html
-/// └── hello/              -> colocated_dir
-///     ├── image.png       -> public/posts/hello/image.png
-///     └── assets/
-///         └── logo.svg    -> public/posts/hello/assets/logo.svg
+/// content/
+/// ├── index.typ           -> (page, skipped)
+/// ├── about.typ           -> (page, skipped)
+/// ├── about/
+/// │   └── photo.png       -> public/about/photo.png
+/// └── posts/
+///     ├── hello.typ       -> (page, skipped)
+///     └── hello/
+///         └── image.png   -> public/posts/hello/image.png
 /// ```
 ///
-/// For index files, all non-content files in the same directory are colocated assets
-///
 /// Returns the number of files copied
-pub fn copy_colocated_assets(route: &PageRoute, clean: bool) -> Result<usize> {
-    let colocated_dir = match &route.colocated_dir {
-        Some(dir) => dir,
-        None => return Ok(0),
-    };
+pub fn process_content_assets(config: &SiteConfig, clean: bool) -> Result<usize> {
+    let content_dir = &config.build.content;
+    let output_dir = config.paths().output_dir();
 
-    if !colocated_dir.exists() {
+    if !content_dir.exists() {
         return Ok(0);
     }
 
     let mut count = 0;
-    copy_dir_recursive(
-        colocated_dir,
-        &route.output_dir,
-        route.is_index,
-        clean,
-        &mut count,
-    )?;
+    copy_content_assets_recursive(content_dir, content_dir, &output_dir, clean, &mut count)?;
     Ok(count)
 }
 
-/// Recursively copy directory contents, skipping content files for index pages
-fn copy_dir_recursive(
-    src_dir: &Path,
-    dest_dir: &Path,
-    is_index: bool,
+/// Recursively copy non-content files from content directory to output
+fn copy_content_assets_recursive(
+    dir: &Path,
+    content_root: &Path,
+    output_root: &Path,
     clean: bool,
     count: &mut usize,
 ) -> Result<()> {
-    for entry in fs::read_dir(src_dir)? {
-        let entry = entry?;
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+
+    for entry in entries.flatten() {
         let src_path = entry.path();
-        let file_name = entry.file_name();
-        let dest_path = dest_dir.join(&file_name);
 
         if src_path.is_dir() {
-            // Recursively copy subdirectories
-            copy_dir_recursive(&src_path, &dest_path, false, clean, count)?;
+            // Recursively process subdirectories
+            copy_content_assets_recursive(&src_path, content_root, output_root, clean, count)?;
         } else {
-            // For index files, skip content files (.typ, .md) in the same directory
-            if is_index && ContentKind::from_path(&src_path).is_some() {
+            // Skip content files (.typ, .md) - they are pages, not assets
+            if ContentKind::from_path(&src_path).is_some() {
                 continue;
             }
 
-            // Skip if destination is fresh (use mtime comparison for assets)
-            // Note: is_fresh is designed for HTML with embedded hashes, so we use
-            // is_newer_than for binary assets which compares modification times.
+            // Compute output path: content/a/b/file.png -> output/a/b/file.png
+            let rel_path = src_path.strip_prefix(content_root).unwrap_or(&src_path);
+            let dest_path = output_root.join(rel_path);
+
+            // Skip if destination is fresh
             if !clean && dest_path.exists() && !is_newer_than(&src_path, &dest_path) {
                 continue;
             }
@@ -236,146 +233,122 @@ pub fn process_cname(config: &SiteConfig) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::UrlPath;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn make_route(
-        colocated_dir: Option<PathBuf>,
-        output_dir: PathBuf,
-        is_index: bool,
-    ) -> PageRoute {
-        PageRoute {
-            source: PathBuf::from("test.typ"),
-            is_index,
-            is_404: false,
-            colocated_dir,
-            permalink: UrlPath::from_page("/test/"),
-            output_file: output_dir.join("index.html"),
-            output_dir,
-            full_url: "https://example.com/test/".to_string(),
-            relative: "test".to_string(),
-        }
-    }
-
     #[test]
-    fn test_copy_colocated_assets_none() {
+    fn test_process_content_assets_empty() {
         let dir = TempDir::new().unwrap();
-        let route = make_route(None, dir.path().to_path_buf(), false);
-        let count = copy_colocated_assets(&route, true).unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.output = dir.path().join("public");
+
+        let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 0);
     }
 
     #[test]
-    fn test_copy_colocated_assets_non_existent() {
+    fn test_process_content_assets_simple() {
         let dir = TempDir::new().unwrap();
-        let route = make_route(
-            Some(PathBuf::from("/nonexistent/path")),
-            dir.path().to_path_buf(),
-            false,
-        );
-        let count = copy_colocated_assets(&route, true).unwrap();
-        assert_eq!(count, 0);
-    }
+        let content_dir = dir.path().join("content");
+        let about_dir = content_dir.join("about");
+        fs::create_dir_all(&about_dir).unwrap();
 
-    #[test]
-    fn test_copy_colocated_assets_simple() {
-        let dir = TempDir::new().unwrap();
+        // Create content file (should be skipped)
+        fs::write(content_dir.join("about.typ"), "= About").unwrap();
+        // Create asset files (should be copied)
+        fs::write(about_dir.join("photo.png"), "fake png").unwrap();
+        fs::write(about_dir.join("style.css"), "body {}").unwrap();
 
-        // Create colocated assets directory with files
-        let colocated_dir = dir.path().join("hello");
-        fs::create_dir_all(&colocated_dir).unwrap();
-        fs::write(colocated_dir.join("image.png"), "fake png").unwrap();
-        fs::write(colocated_dir.join("style.css"), "body {}").unwrap();
+        let output_dir = dir.path().join("public");
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.output = output_dir.clone();
 
-        // Create output directory
-        let output_dir = dir.path().join("public/posts/hello");
-        fs::create_dir_all(&output_dir).unwrap();
-
-        let route = make_route(Some(colocated_dir), output_dir.clone(), false);
-        let count = copy_colocated_assets(&route, true).unwrap();
-
+        let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 2);
-        assert!(output_dir.join("image.png").exists());
-        assert!(output_dir.join("style.css").exists());
+        assert!(output_dir.join("about/photo.png").exists());
+        assert!(output_dir.join("about/style.css").exists());
+        assert!(!output_dir.join("about.typ").exists());
     }
 
     #[test]
-    fn test_copy_colocated_assets_nested() {
+    fn test_process_content_assets_nested() {
         let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let posts_dir = content_dir.join("posts");
+        let hello_dir = posts_dir.join("hello");
+        fs::create_dir_all(&hello_dir).unwrap();
 
-        // Create nested structure
-        let colocated_dir = dir.path().join("hello");
-        let assets_dir = colocated_dir.join("assets");
-        fs::create_dir_all(&assets_dir).unwrap();
-        fs::write(colocated_dir.join("image.png"), "fake png").unwrap();
-        fs::write(assets_dir.join("logo.svg"), "<svg></svg>").unwrap();
+        // Create content files (should be skipped)
+        fs::write(posts_dir.join("hello.typ"), "= Hello").unwrap();
+        // Create asset files (should be copied)
+        fs::write(hello_dir.join("image.png"), "fake png").unwrap();
 
-        let output_dir = dir.path().join("public/posts/hello");
-        fs::create_dir_all(&output_dir).unwrap();
+        let output_dir = dir.path().join("public");
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.output = output_dir.clone();
 
-        let route = make_route(Some(colocated_dir), output_dir.clone(), false);
-        let count = copy_colocated_assets(&route, true).unwrap();
-
-        assert_eq!(count, 2);
-        assert!(output_dir.join("image.png").exists());
-        assert!(output_dir.join("assets/logo.svg").exists());
-    }
-
-    #[test]
-    fn test_copy_colocated_assets_index_skips_content() {
-        let dir = TempDir::new().unwrap();
-
-        // Content files (.typ, .md) should always be skipped - they are pages, not assets
-        let colocated_dir = dir.path().join("posts");
-        fs::create_dir_all(&colocated_dir).unwrap();
-        fs::write(colocated_dir.join("index.typ"), "= Index").unwrap();
-        fs::write(colocated_dir.join("other.md"), "# Other").unwrap();
-        fs::write(colocated_dir.join("image.png"), "fake png").unwrap();
-
-        let output_dir = dir.path().join("public/posts");
-        fs::create_dir_all(&output_dir).unwrap();
-
-        let route = make_route(Some(colocated_dir), output_dir.clone(), true);
-        let count = copy_colocated_assets(&route, true).unwrap();
-
-        // Only image.png should be copied, not .typ or .md files
+        let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 1);
-        assert!(output_dir.join("image.png").exists());
-        assert!(!output_dir.join("index.typ").exists());
-        assert!(!output_dir.join("other.md").exists());
+        assert!(output_dir.join("posts/hello/image.png").exists());
     }
 
     #[test]
-    fn test_copy_colocated_assets_incremental() {
+    fn test_process_content_assets_skips_content_files() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        // Create various files
+        fs::write(content_dir.join("index.typ"), "= Home").unwrap();
+        fs::write(content_dir.join("about.md"), "# About").unwrap();
+        fs::write(content_dir.join("logo.png"), "fake png").unwrap();
+
+        let output_dir = dir.path().join("public");
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.output = output_dir.clone();
+
+        let count = process_content_assets(&config, true).unwrap();
+        assert_eq!(count, 1); // Only logo.png
+        assert!(output_dir.join("logo.png").exists());
+        assert!(!output_dir.join("index.typ").exists());
+        assert!(!output_dir.join("about.md").exists());
+    }
+
+    #[test]
+    fn test_process_content_assets_incremental() {
         use std::thread;
         use std::time::Duration;
 
         let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        fs::write(content_dir.join("image.png"), "fake png").unwrap();
 
-        let colocated_dir = dir.path().join("hello");
-        fs::create_dir_all(&colocated_dir).unwrap();
-        fs::write(colocated_dir.join("image.png"), "fake png").unwrap();
-
-        let output_dir = dir.path().join("public/posts/hello");
-        fs::create_dir_all(&output_dir).unwrap();
-
-        let route = make_route(Some(colocated_dir.clone()), output_dir.clone(), false);
+        let output_dir = dir.path().join("public");
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir.clone();
+        config.build.output = output_dir;
 
         // First copy (clean mode)
-        let count = copy_colocated_assets(&route, true).unwrap();
+        let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 1);
 
         // Second copy (incremental mode) - should skip since dest is newer
-        let count = copy_colocated_assets(&route, false).unwrap();
+        let count = process_content_assets(&config, false).unwrap();
         assert_eq!(count, 0);
 
         // Wait a bit and modify source file
         thread::sleep(Duration::from_millis(10));
-        fs::write(colocated_dir.join("image.png"), "modified png").unwrap();
+        fs::write(content_dir.join("image.png"), "modified png").unwrap();
 
         // Third copy (incremental mode) - should copy since source is newer
-        let count = copy_colocated_assets(&route, false).unwrap();
+        let count = process_content_assets(&config, false).unwrap();
         assert_eq!(count, 1);
     }
 }

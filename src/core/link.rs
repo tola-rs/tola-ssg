@@ -39,7 +39,7 @@ impl<'a> LinkKind<'a> {
         link.starts_with("http://") || link.starts_with("https://")
     }
 
-    /// Check if link is file-relative (colocated asset candidate).
+    /// Check if link is file-relative (content asset candidate).
     #[inline]
     pub fn is_file_relative(link: &str) -> bool {
         !is_external_link(link) && !link.starts_with('#') && !link.starts_with('/')

@@ -385,7 +385,7 @@ impl SiteConfig {
     /// Apply validate arguments from CLI.
     fn apply_validate_args(&mut self, args: &ValidateArgs) {
         // CLI flags override config enable settings
-        Self::update_option(&mut self.validate.pages.enable, args.internal.as_ref());
+        Self::update_option(&mut self.validate.pages.enable, args.pages.as_ref());
         Self::update_option(&mut self.validate.assets.enable, args.assets.as_ref());
 
         // --warn-only sets all levels to Warn

@@ -18,6 +18,6 @@ pub struct AssetRoute {
     pub url: UrlPath,
     /// Output file path (absolute)
     pub output: PathBuf,
-    /// Asset kind (Global or Colocated)
+    /// Asset kind (Global or Content)
     pub kind: AssetKind,
 }

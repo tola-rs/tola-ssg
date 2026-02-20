@@ -1,6 +1,6 @@
 //! Page link graph for links-to / linked-by tracking.
 //!
-//! Tracks internal links between pages:
+//! Tracks links between pages:
 //! - `links_to`: Pages that this page links to (outgoing)
 //! - `linked_by`: Pages that link to this page (incoming/backlinks)
 

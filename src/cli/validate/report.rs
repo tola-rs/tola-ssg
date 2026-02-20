@@ -19,22 +19,19 @@ pub struct ValidationError {
 /// Unified validation report for all error types
 #[derive(Debug, Default)]
 pub struct ValidationReport {
-    /// Internal link errors (broken page links), grouped by source file.
-    pub internal: BTreeMap<String, Vec<ValidationError>>,
+    /// Page link errors (broken page links), grouped by source file.
+    pub pages: BTreeMap<String, Vec<ValidationError>>,
     /// Asset errors (missing files), grouped by source file.
     pub assets: BTreeMap<String, Vec<ValidationError>>,
 }
 
 impl ValidationReport {
-    /// Add an internal link error.
-    pub fn add_internal(&mut self, source: String, link: String, reason: String) {
-        self.internal
-            .entry(source)
-            .or_default()
-            .push(ValidationError {
-                target: link,
-                reason,
-            });
+    /// Add a page link error.
+    pub fn add_page(&mut self, source: String, link: String, reason: String) {
+        self.pages.entry(source).or_default().push(ValidationError {
+            target: link,
+            reason,
+        });
     }
 
     /// Add an asset error.
@@ -48,9 +45,9 @@ impl ValidationReport {
             });
     }
 
-    /// Count of files with internal link errors.
-    pub fn internal_file_count(&self) -> usize {
-        self.internal.len()
+    /// Count of files with page link errors.
+    pub fn page_file_count(&self) -> usize {
+        self.pages.len()
     }
 
     /// Count of files with asset errors.
@@ -58,9 +55,9 @@ impl ValidationReport {
         self.assets.len()
     }
 
-    /// Total internal link error count.
-    pub fn internal_error_count(&self) -> usize {
-        self.internal.values().map(|v| v.len()).sum()
+    /// Total page link error count.
+    pub fn page_error_count(&self) -> usize {
+        self.pages.values().map(|v| v.len()).sum()
     }
 
     /// Total asset error count.
@@ -68,9 +65,9 @@ impl ValidationReport {
         self.assets.values().map(|v| v.len()).sum()
     }
 
-    /// Print the full report to stdout (internal -> assets).
+    /// Print the full report to stdout (pages -> assets).
     pub fn print(&self) {
-        self.print_section("internal links", &self.internal);
+        self.print_section("pages", &self.pages);
         self.print_section("assets", &self.assets);
     }
 
@@ -108,9 +105,9 @@ impl ValidationReport {
 
 impl fmt::Display for ValidationReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let internal = self.internal_error_count();
+        let pages = self.page_error_count();
         let assets = self.asset_error_count();
-        let total = internal + assets;
+        let total = pages + assets;
 
         if total == 0 {
             write!(f, "{}", "all checks passed".green())

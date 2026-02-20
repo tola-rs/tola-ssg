@@ -102,9 +102,6 @@ impl CompiledPage {
             .unwrap_or_default()
             .trim_end_matches('/');
 
-        // Source directory
-        let source_dir = source.parent().unwrap_or(Path::new("")).to_path_buf();
-
         // Check if this is an index file
         let is_index = source.file_stem().map(|s| s == "index").unwrap_or(false);
 
@@ -122,13 +119,22 @@ impl CompiledPage {
             .is_some_and(|nf| config.root_relative(&source) == *nf);
 
         // Use file_stem to handle any supported extension (.typ, .md, etc.)
-        let relative = rel_path
-            .with_extension("")
-            .to_str()
-            .ok_or_else(|| anyhow!("Invalid path encoding"))?
-            .to_owned();
+        // For index files (xxx/index.typ), use parent directory as relative path
+        let relative = if is_index {
+            rel_path
+                .parent()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_owned())
+                .unwrap_or_default()
+        } else {
+            rel_path
+                .with_extension("")
+                .to_str()
+                .ok_or_else(|| anyhow!("Invalid path encoding"))?
+                .to_owned()
+        };
 
-        let is_root_index = relative == "index";
+        let is_root_index = relative.is_empty() || relative == "index";
 
         // Compute HTML output path
         // 404 page outputs as 404.html (not 404/index.html)
@@ -145,22 +151,6 @@ impl CompiledPage {
 
         // Output directory
         let output_dir = output_file.parent().unwrap_or(Path::new("")).to_path_buf();
-
-        // Compute colocated assets directory
-        // For non-index files: look for a directory with the same name as the file (without extension)
-        // For index files: the source directory itself contains colocated assets
-        let colocated_dir = if is_index {
-            // For index.typ, colocated assets are in the same directory
-            Some(source_dir.clone())
-        } else {
-            // For hello.typ, look for hello/ directory
-            let potential_dir = source.with_extension("");
-            if potential_dir.is_dir() {
-                Some(potential_dir)
-            } else {
-                None
-            }
-        };
 
         // Compute URL path from the final HTML path to ensure consistency
         let full_path_url = url_from_output_path(&output_file, config)?;
@@ -180,7 +170,6 @@ impl CompiledPage {
                 source,
                 is_index,
                 is_404,
-                colocated_dir,
                 permalink,
                 output_file,
                 output_dir,
@@ -306,7 +295,6 @@ mod tests {
             source,
             is_index,
             is_404: false,
-            colocated_dir: None,
             permalink: UrlPath::from_page(permalink),
             output_file,
             output_dir,

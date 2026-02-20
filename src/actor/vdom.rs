@@ -744,10 +744,10 @@ impl VdomActor {
         }
         // Skip if empty: initial build warnings are saved by finalize_serve_build(),
         // which runs in parallel. Persisting empty state here would overwrite them.
-        if !self.error_state.is_empty() {
-            if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
-                crate::debug!("vdom"; "diagnostics persist failed: {}", e);
-            }
+        if !self.error_state.is_empty()
+            && let Err(e) = persist_diagnostics(&self.error_state, &self.root)
+        {
+            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
         }
         crate::debug!("vdom"; "shutting down");
     }

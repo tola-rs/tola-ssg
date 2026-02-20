@@ -21,7 +21,7 @@ nested = []
 # Each file is copied to `output/{name}`.
 flatten = []
 
-[build.feed]
+[site.feed]
 # Enable feed generation.
 enable = false
 # Output path for feed file.
@@ -30,7 +30,7 @@ path = "feed.xml"
 format = "rss"
 
 # Sitemap generation settings.
-[build.sitemap]
+[site.sitemap]
 enable = false  # Enable sitemap generation.
 path = "sitemap.xml"  # Output path for sitemap file.
 
