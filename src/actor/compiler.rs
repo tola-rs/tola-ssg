@@ -146,7 +146,9 @@ impl CompilerActor {
 
         // If hooks ran, update CSS output version immediately
         // so subsequent compiles use the new asset version
-        if executed > 0 && let Some(css_output) = self.get_css_output_path() {
+        if executed > 0
+            && let Some(css_output) = self.get_css_output_path()
+        {
             version::update_version(&css_output);
         }
     }
@@ -274,7 +276,7 @@ impl CompilerActor {
                 // Recompile active pages for VDOM Patch (no reload!)
                 let active_urls = ACTIVE_PAGE.get_all();
                 if !active_urls.is_empty() {
-                    crate::log!("compile"; "recompiling {} active pages after rebuild", active_urls.len());
+                    crate::debug!("compile"; "recompiling {} active pages after rebuild", active_urls.len());
                     for url in active_urls {
                         if let Some(path) = url_to_content_path(url.as_str(), &self.config) {
                             self.compile_one(&path).await;
@@ -349,6 +351,7 @@ impl CompilerActor {
                 path,
                 url_path,
                 vdom,
+                warnings,
             } => {
                 let permalink_change = update_address_space(&path, &url_path);
                 VdomMsg::Process {
@@ -356,6 +359,7 @@ impl CompilerActor {
                     url_path,
                     vdom,
                     permalink_change,
+                    warnings,
                 }
             }
             CompileOutcome::Reload { reason } => VdomMsg::Reload { reason },

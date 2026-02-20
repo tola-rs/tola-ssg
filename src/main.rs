@@ -175,8 +175,8 @@ fn startup_with_cache(config: &SiteConfig) {
     let mut files_to_compile = FxHashSet::default();
 
     // Add error files (always revalidate errors)
-    let errors = cache::restore_errors(config.get_root()).unwrap_or_default();
-    for error in errors.iter() {
+    let diagnostics = cache::restore_diagnostics(config.get_root()).unwrap_or_default();
+    for error in diagnostics.errors() {
         // Convert relative path to absolute
         let abs_path = config.root_join(&error.path);
         if abs_path.exists() {
@@ -221,17 +221,17 @@ fn handle_modified_files(files: &[std::path::PathBuf], config: &SiteConfig) {
     }
 }
 
-/// Persist compile errors to errors.json
+/// Persist compile errors to diagnostics.json
 fn persist_compile_errors(errors: &[(String, String)], config: &SiteConfig) {
-    let mut state = cache::PersistedErrorState::new();
+    let mut state = cache::PersistedDiagnostics::new();
     for (path, error) in errors {
-        state.push(cache::PersistedError::new(
+        state.push_error(cache::PersistedError::new(
             path.clone(),
             String::new(),
             error.clone(),
         ));
     }
-    let _ = cache::persist_errors(&state, config.get_root());
+    let _ = cache::persist_diagnostics(&state, config.get_root());
 }
 
 // =============================================================================

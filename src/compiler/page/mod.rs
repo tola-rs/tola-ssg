@@ -174,6 +174,7 @@ pub struct PageResult {
     pub page: CompiledPage,
     pub indexed_vdom: Option<IndexedDocument>,
     pub permalink: crate::core::UrlPath,
+    pub warnings: typst_batch::Diagnostics,
 }
 
 // ============================================================================

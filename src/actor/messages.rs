@@ -54,6 +54,8 @@ pub enum VdomMsg {
         vdom: Box<Document<Indexed>>,
         /// Permalink change detected by CompilerActor (None = unchanged)
         permalink_change: Option<PermalinkUpdate>,
+        /// Compilation warnings (for persistence)
+        warnings: Vec<String>,
     },
     /// Trigger reload
     Reload { reason: String },

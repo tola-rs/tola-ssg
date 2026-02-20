@@ -177,7 +177,7 @@ fn log_changes(result: &ClassifyResult) {
         crate::debug!("watch"; "{} changed: {}", category.name(), path.display());
     }
     if let Some(note) = &result.note {
-        crate::log!("watch"; "{}", note);
+        crate::debug!("watch"; "{}", note);
     }
 }
 

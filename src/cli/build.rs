@@ -352,144 +352,21 @@ fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-/// Print warnings with truncation rules applied
+/// Print warnings with max_warnings limit
 fn print_warnings(
     warnings: &typst_batch::Diagnostics,
     config: &crate::config::section::build::DiagnosticsConfig,
 ) {
-    let items: Vec<_> = warnings.iter().collect();
+    let max = config.max_warnings.unwrap_or(usize::MAX);
+    let total = warnings.len();
 
-    // Apply per-file and total limits
-    let (filtered, per_file_truncated) = filter_by_file_limit(&items, config.max_warnings_per_file);
-    let (filtered, total_truncated) = apply_total_limit(filtered, config.max_warnings);
-
-    // Print with line limits
-    let (printed, lines_truncated) = print_with_line_limits(&filtered, config);
-
-    // Print truncation summary
-    print_truncation_summary(
-        filtered.len(),
-        printed,
-        per_file_truncated,
-        total_truncated,
-        lines_truncated,
-    );
-}
-
-/// Filter warnings by per-file limit
-/// Returns (filtered items, count of truncated items)
-fn filter_by_file_limit<'a>(
-    items: &[&'a typst_batch::DiagnosticInfo],
-    max_per_file: Option<usize>,
-) -> (Vec<&'a typst_batch::DiagnosticInfo>, usize) {
-    use rustc_hash::FxHashMap;
-
-    let Some(max) = max_per_file else {
-        return (items.to_vec(), 0);
-    };
-
-    let mut file_counts: FxHashMap<&str, usize> = FxHashMap::default();
-    let mut filtered = Vec::new();
-    let mut truncated = 0;
-
-    for item in items {
-        let file = item.path.as_deref().unwrap_or("");
-        let count = file_counts.entry(file).or_insert(0);
-
-        if *count >= max {
-            truncated += 1;
-        } else {
-            *count += 1;
-            filtered.push(*item);
-        }
+    for item in warnings.iter().take(max) {
+        eprintln!("{}", item);
     }
 
-    (filtered, truncated)
-}
-
-/// Apply total warnings limit
-/// Returns (filtered items, count of truncated items)
-fn apply_total_limit<T>(mut items: Vec<T>, max: Option<usize>) -> (Vec<T>, usize) {
-    let Some(max) = max else {
-        return (items, 0);
-    };
-
-    if items.len() > max {
-        let truncated = items.len() - max;
-        items.truncate(max);
-        (items, truncated)
-    } else {
-        (items, 0)
-    }
-}
-
-/// Print warnings with line limits
-/// Returns (count printed, whether lines were truncated)
-fn print_with_line_limits(
-    items: &[&typst_batch::DiagnosticInfo],
-    config: &crate::config::section::build::DiagnosticsConfig,
-) -> (usize, bool) {
-    let mut total_lines = 0;
-    let mut printed = 0;
-
-    for item in items {
-        let warning = item.to_string();
-
-        // Apply per-warning line limit
-        let output = match config.max_lines_per_warning {
-            Some(max) => truncate_lines(&warning, max),
-            None => warning,
-        };
-
-        let line_count = output.lines().count();
-
-        // Check total lines limit
-        if let Some(max_lines) = config.max_lines
-            && total_lines + line_count > max_lines
-        {
-            let remaining = max_lines.saturating_sub(total_lines);
-            if remaining > 0 {
-                eprintln!("{}", truncate_lines(&output, remaining));
-            }
-            return (printed, true);
-        }
-
-        eprintln!("{output}");
-        total_lines += line_count;
-        printed += 1;
-    }
-
-    (printed, false)
-}
-
-/// Print summary of truncated warnings
-fn print_truncation_summary(
-    total_filtered: usize,
-    printed: usize,
-    per_file_truncated: usize,
-    total_truncated: usize,
-    lines_truncated: bool,
-) {
-    let remaining = total_filtered - printed;
-    let total_hidden = per_file_truncated + total_truncated + remaining;
-
-    if lines_truncated {
-        eprintln!("  ...");
-    }
-    if total_hidden > 0 {
-        eprintln!("... and {} more warning(s)", total_hidden);
-    }
-}
-
-/// Truncate a string to max lines, appending "..." if truncated
-fn truncate_lines(s: &str, max: usize) -> String {
-    let lines: Vec<&str> = s.lines().collect();
-    if lines.len() <= max {
-        s.to_string()
-    } else {
-        let mut result: String = lines[..max].join("\n");
-        result.push_str("\n  ...");
-        result
+    let hidden = total.saturating_sub(max);
+    if hidden > 0 {
+        eprintln!("... and {} more warning(s)", hidden);
     }
 }
 

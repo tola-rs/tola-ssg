@@ -58,6 +58,7 @@ pub fn process_page(
     page.apply_custom_permalink(config);
     page.compiled_html = Some(result.html);
 
+    let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
     // Update global site data with permalink and content metadata
@@ -72,6 +73,7 @@ pub fn process_page(
         page,
         indexed_vdom: result.indexed_vdom,
         permalink,
+        warnings,
     }))
 }
 

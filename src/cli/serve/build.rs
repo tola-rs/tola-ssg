@@ -135,6 +135,7 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
 
 /// Finalize serve build: print warnings and persist cache
 fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
+    use crate::cache::{PersistedDiagnostics, PersistedWarning, persist_diagnostics};
     use crate::core::GLOBAL_ADDRESS_SPACE;
 
     // Print compiler warnings with configured limits
@@ -148,6 +149,16 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
         if remaining > 0 {
             eprintln!("... and {} more warning(s)", remaining);
         }
+    }
+
+    // Persist warnings for cache restore
+    let mut diagnostics = PersistedDiagnostics::new();
+    for warning in warnings.iter() {
+        let path = warning.path.as_deref().unwrap_or_default();
+        diagnostics.push_warning(PersistedWarning::new(path, warning.to_string()));
+    }
+    if let Err(e) = persist_diagnostics(&diagnostics, config.get_root()) {
+        crate::debug!("build"; "failed to persist diagnostics: {}", e);
     }
 
     // Persist VDOM cache for serve reuse
