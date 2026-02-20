@@ -100,9 +100,9 @@ pub struct ValidateArgs {
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
 
-    /// Validate internal links (site pages)
+    /// Validate page links
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
-    pub internal: Option<bool>,
+    pub pages: Option<bool>,
 
     /// Validate asset references
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]

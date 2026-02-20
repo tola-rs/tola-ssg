@@ -159,20 +159,13 @@ fn resolve_file_relative(value: &str, route: &PageRoute) -> String {
         return value.to_string();
     }
 
-    // For index files, relative paths work as-is (assets in same directory)
+    // For index files, relative paths work as-is
     if route.is_index {
         return value.to_string();
     }
 
-    // For non-index files with colocated assets directory:
-    // ./image.png and image.png stay as-is (assets are copied to output_dir)
-    // Only ../ paths need adjustment (they reference parent directory)
-    if route.colocated_dir.is_some() && !value.starts_with("../") {
-        return value.to_string();
-    }
-
-    // For non-index files without colocated assets:
-    // ./image.png -> ../image.png (go up one level because foo.typ -> foo/index.html)
+    // For non-index files: a.typ -> a/index.html (one level deeper)
+    // All relative paths need ../ to compensate
     format!("../{value}")
 }
 
@@ -262,7 +255,6 @@ mod tests {
             source: PathBuf::from("test.typ"),
             is_index,
             is_404: false,
-            colocated_dir: None,
             permalink: UrlPath::from_page("/test/"),
             output_file: PathBuf::from("public/test/index.html"),
             output_dir: PathBuf::from("public/test"),
@@ -335,7 +327,7 @@ mod tests {
         let route = test_route(false);
         let config = SiteConfig::default();
 
-        // Non-index without colocated: paths get ../ prefix
+        // Non-index: paths get ../ prefix (because a.typ -> a/index.html)
         assert_eq!(
             resolve_link("./img.png", &config, &route).unwrap(),
             ".././img.png"
@@ -408,15 +400,14 @@ mod tests {
     }
 
     // =========================================================================
-    // Colocated Assets Tests
+    // Non-index File Relative Path Tests
     // =========================================================================
 
-    fn test_route_colocated() -> PageRoute {
+    fn test_route_non_index() -> PageRoute {
         PageRoute {
             source: PathBuf::from("content/posts/hello.typ"),
             is_index: false,
             is_404: false,
-            colocated_dir: Some(PathBuf::from("content/posts/hello")),
             permalink: UrlPath::from_page("/posts/hello/"),
             output_file: PathBuf::from("public/posts/hello/index.html"),
             output_dir: PathBuf::from("public/posts/hello"),
@@ -426,65 +417,27 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_colocated_asset() {
-        let route = test_route_colocated();
+    fn test_resolve_non_index_relative_paths() {
+        let route = test_route_non_index();
         let config = SiteConfig::default();
 
-        // With colocated_dir set, ./image.png is preserved (assets copied by asset.rs)
+        // Non-index files: all relative paths get ../ prefix
+        // This compensates for a.typ -> a/index.html (one level deeper)
         assert_eq!(
             resolve_link("./image.png", &config, &route).unwrap(),
-            "./image.png"
+            ".././image.png"
         );
-    }
-
-    #[test]
-    fn test_resolve_colocated_nested_asset() {
-        let route = test_route_colocated();
-        let config = SiteConfig::default();
-
         assert_eq!(
-            resolve_link("./assets/logo.svg", &config, &route).unwrap(),
-            "./assets/logo.svg"
+            resolve_link("image.png", &config, &route).unwrap(),
+            "../image.png"
         );
-    }
-
-    #[test]
-    fn test_resolve_colocated_parent_path_adjusted() {
-        let route = test_route_colocated();
-        let config = SiteConfig::default();
-
-        // ../other paths are NOT colocated, get adjusted
+        assert_eq!(
+            resolve_link("hello/cat.svg", &config, &route).unwrap(),
+            "../hello/cat.svg"
+        );
         assert_eq!(
             resolve_link("../doc.pdf", &config, &route).unwrap(),
             "../../doc.pdf"
-        );
-    }
-
-    #[test]
-    fn test_resolve_colocated_bare_path_preserved() {
-        let route = test_route_colocated();
-        let config = SiteConfig::default();
-
-        // Bare paths (no ./ prefix) are also colocated assets
-        assert_eq!(
-            resolve_link("image.png", &config, &route).unwrap(),
-            "image.png"
-        );
-    }
-
-    #[test]
-    fn test_resolve_non_index_without_colocated_dir() {
-        let route = test_route(false);
-        let config = SiteConfig::default();
-
-        // Non-index without colocated_dir: all paths get ../ prefix
-        assert_eq!(
-            resolve_link("./img.png", &config, &route).unwrap(),
-            ".././img.png"
-        );
-        assert_eq!(
-            resolve_link("img.png", &config, &route).unwrap(),
-            "../img.png"
         );
     }
 }

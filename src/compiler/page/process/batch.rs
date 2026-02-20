@@ -2,7 +2,7 @@
 
 use typst_batch::prelude::*;
 
-use crate::asset::{copy_colocated_assets, scan_colocated_assets, scan_global_assets};
+use crate::asset::scan_global_assets;
 use crate::compiler::CompileContext;
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
@@ -294,7 +294,6 @@ pub fn rebuild_iterative_pages(
     let output_dir = &ctx.config.build.output;
     for page in &pages {
         write_page(page, true, ctx.deps_hash, false)?;
-        copy_colocated_assets(&page.route, ctx.clean)?;
         crate::compiler::page::write_redirects(page, output_dir)?;
     }
 
@@ -667,7 +666,7 @@ fn collect_results(
 /// Write all static pages to disk
 ///
 /// This is called after conflict detection passes. It writes all non-iterative
-/// pages, copies their colocated assets, and generates redirect HTML for aliases
+/// pages and generates redirect HTML for aliases
 fn write_static_pages(
     pages: &[CompiledPage],
     iterative_paths: &[PathBuf],
@@ -698,7 +697,7 @@ fn filter_direct_pages<'a>(
         .collect()
 }
 
-/// Write a single page: HTML file, colocated assets, and redirects
+/// Write a single page: HTML file and redirects
 fn write_single_page(
     page: &CompiledPage,
     clean: bool,
@@ -708,7 +707,6 @@ fn write_single_page(
     use crate::compiler::page::write_redirects;
 
     write_page(page, clean, deps_hash, false)?;
-    copy_colocated_assets(&page.route, clean)?;
     write_redirects(page, output_dir)?;
     Ok(())
 }
@@ -742,13 +740,6 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
     for page in pages {
         let title = page.content_meta.as_ref().and_then(|m| m.title.clone());
         space.register_page(page.route.clone(), title);
-
-        // Register colocated assets (using pure scanner)
-        if let Some(dir) = &page.route.colocated_dir {
-            for asset in scan_colocated_assets(dir, &page.route) {
-                space.register_asset(asset);
-            }
-        }
     }
 
     // Register global assets (nested directories)
@@ -758,6 +749,11 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
 
     // Register flatten assets (individual files at output root)
     for asset in crate::asset::scan_flatten_assets(config) {
+        space.register_asset(asset);
+    }
+
+    // Register content assets (non-.typ/.md files in content directory)
+    for asset in crate::asset::scan_content_assets(config) {
         space.register_asset(asset);
     }
 }

@@ -11,7 +11,7 @@ use super::{AssetKind, AssetRoute};
 
 /// Create an `AssetRoute` from a source path in a nested assets directory
 ///
-/// This is for global assets only. Use `scan::scan_colocated_assets` for colocated assets
+/// This is for global assets only. Content assets are handled by `process_content_assets`
 ///
 /// # Errors
 ///

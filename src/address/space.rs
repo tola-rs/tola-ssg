@@ -464,56 +464,44 @@ impl AddressSpace {
 
     /// Resolve a file-relative link.
     ///
-    /// This handles both colocated assets (./image.png) and relative page links (../other/).
+    /// This handles both content assets (./image.png) and relative page links (../other/).
     fn resolve_relative(&self, link: &str, ctx: &ResolveContext<'_>) -> ResolveResult {
         let (path, fragment) = split_path_fragment(link);
 
-        // Asset attributes (src, poster, data) -> resolve as colocated asset
+        // Asset attributes (src, poster, data) -> resolve as content asset
         if ctx.is_asset_attr() {
-            return self.resolve_colocated_asset(path, fragment, ctx);
+            return self.resolve_content_asset(path, fragment, ctx);
         }
 
         // href attribute -> could be page or asset, use smart resolution
         self.resolve_relative_page(path, fragment, ctx)
     }
 
-    /// Resolve a colocated asset reference.
-    fn resolve_colocated_asset(
+    /// Resolve a content asset reference (file-relative path to non-content file).
+    fn resolve_content_asset(
         &self,
         path: &str,
         fragment: &str,
         ctx: &ResolveContext<'_>,
     ) -> ResolveResult {
-        // Compute the physical path
+        // Compute the physical path relative to source file directory
         let source_dir = ctx.source_path.parent().unwrap_or(Path::new(""));
         let clean_path = path.trim_start_matches("./");
         let physical_path = source_dir.join(clean_path);
-
-        // Check if there's a colocated directory
-        if let Some(colocated_dir) = ctx.colocated_dir {
-            let asset_path = colocated_dir.join(clean_path);
-
-            // Check if asset is registered
-            if let Some(url) = self.by_source.get(&asset_path)
-                && let Some(resource) = self.by_url.get(url)
-            {
-                if !fragment.is_empty() {
-                    return ResolveResult::Warning {
-                        resolved: Some(url.to_string()),
-                        message: format!(
-                            "Fragment '{}' specified on asset. Assets don't have fragments.",
-                            fragment
-                        ),
-                    };
-                }
-                return ResolveResult::Found(resource.clone());
-            }
-        }
 
         // Check physical path directly
         if let Some(url) = self.by_source.get(&physical_path)
             && let Some(resource) = self.by_url.get(url)
         {
+            if !fragment.is_empty() && resource.is_asset() {
+                return ResolveResult::Warning {
+                    resolved: Some(url.to_string()),
+                    message: format!(
+                        "Fragment '{}' specified on asset. Assets don't have fragments.",
+                        fragment
+                    ),
+                };
+            }
             return ResolveResult::Found(resource.clone());
         }
 
@@ -521,12 +509,7 @@ impl AddressSpace {
         // The caller should verify file existence
         ResolveResult::NotFound {
             target: path.to_string(),
-            tried: vec![
-                physical_path.display().to_string(),
-                ctx.colocated_dir
-                    .map(|d| d.join(clean_path).display().to_string())
-                    .unwrap_or_default(),
-            ],
+            tried: vec![physical_path.display().to_string()],
         }
     }
 
@@ -597,29 +580,32 @@ impl AddressSpace {
             }
 
             // Case 2: URL doesn't match, but physical path finds a page
-            (None, Some((found_url, _))) => {
-                // Physical path is correct, but that page has a different permalink
-                ResolveResult::Error {
-                    message: format!(
-                        "Relative link '{}' physically points to '{}',\n\
-                         but that page's permalink is '{}'.\n\
-                         The link will not work. Use absolute path '{}'.",
-                        path,
-                        physical_target.display(),
-                        found_url,
-                        found_url
-                    ),
+            // This is valid because resolve_file_relative will adjust the path
+            (None, Some((found_url, resource))) => {
+                if !fragment.is_empty() {
+                    return self.check_fragment_on_resource(resource, found_url, fragment);
                 }
+                ResolveResult::Found(resource.clone())
             }
 
-            // Case 3: Neither matches
-            (None, None) => ResolveResult::NotFound {
-                target: path.to_string(),
-                tried: vec![
-                    format!("URL: {}", url_target),
-                    format!("Physical: {}", physical_target.display()),
-                ],
-            },
+            // Case 3: Neither matches - try as content asset
+            (None, None) => {
+                // Try physical path as content asset (handles ../ properly)
+                let asset_path = resolve_physical_path(source_dir, path);
+                if let Some(url) = self.by_source.get(&asset_path)
+                    && let Some(resource) = self.by_url.get(url)
+                {
+                    return ResolveResult::Found(resource.clone());
+                }
+
+                ResolveResult::NotFound {
+                    target: path.to_string(),
+                    tried: vec![
+                        format!("URL: {}", url_target),
+                        format!("Physical: {}", physical_target.display()),
+                    ],
+                }
+            }
         }
     }
 
@@ -679,7 +665,7 @@ impl AddressSpace {
                 use crate::asset::AssetKind;
                 let kind_str = match route.kind {
                     AssetKind::Global => "global",
-                    AssetKind::Colocated => "colocated",
+                    AssetKind::Content => "content",
                 };
                 writeln!(
                     output,
@@ -718,7 +704,6 @@ mod tests {
             output_file: PathBuf::from(output),
             is_index: false,
             is_404: false,
-            colocated_dir: None,
             output_dir: PathBuf::new(),
             full_url: String::new(),
             relative: String::new(),

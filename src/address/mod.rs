@@ -14,7 +14,7 @@
 //! Source Files                    URL Space
 //! ============                   =========
 //! content/posts/hello.typ   <->   /blog/hello/
-//! content/posts/hello/      <->   /blog/hello/  (colocated assets)
+//! content/posts/image.png   <->   /blog/posts/image.png  (content assets)
 //! assets/logo.png           <->   /assets/logo.png
 //! ```
 //!

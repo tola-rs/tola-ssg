@@ -69,7 +69,6 @@ mod tests {
             output_file: PathBuf::from("public/test/index.html"),
             is_index: false,
             is_404: false,
-            colocated_dir: None,
             output_dir: PathBuf::from("public/test"),
             full_url: String::new(),
             relative: String::new(),

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use crate::asset::{scan_colocated_assets, scan_global_assets};
+use crate::asset::scan_global_assets;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::log;
@@ -33,7 +33,7 @@ pub fn collect_url_sources(pages: &[CompiledPage], config: &SiteConfig) -> UrlSo
     // Collect global assets
     collect_global_assets(&mut url_sources, config);
 
-    // Collect pages (permalinks + aliases + colocated assets)
+    // Collect pages (permalinks + aliases)
     for page in pages {
         collect_page_urls(&mut url_sources, page);
     }
@@ -53,7 +53,7 @@ fn collect_global_assets(url_sources: &mut UrlSourceMap, config: &SiteConfig) {
     }
 }
 
-/// Collect all URLs from a single page: permalink, aliases, and colocated assets
+/// Collect all URLs from a single page: permalink and aliases
 fn collect_page_urls(url_sources: &mut UrlSourceMap, page: &CompiledPage) {
     // Skip 404 page (it's a fallback file, not a route target)
     if page.route.is_404 {
@@ -76,13 +76,6 @@ fn collect_page_urls(url_sources: &mut UrlSourceMap, page: &CompiledPage) {
                 .entry(alias_url)
                 .or_default()
                 .push(source.clone());
-        }
-    }
-
-    // Colocated assets
-    if let Some(dir) = &page.route.colocated_dir {
-        for asset in scan_colocated_assets(dir, &page.route) {
-            url_sources.entry(asset.url).or_default().push(asset.source);
         }
     }
 }
@@ -169,7 +162,6 @@ mod tests {
                 source: PathBuf::from(source),
                 is_index: false,
                 is_404: false,
-                colocated_dir: None,
                 permalink: UrlPath::from_page(permalink),
                 output_file: PathBuf::from("public/test/index.html"),
                 output_dir: PathBuf::from("public/test"),

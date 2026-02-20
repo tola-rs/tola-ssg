@@ -19,8 +19,6 @@ pub struct ResolveContext<'a> {
     pub current_permalink: &'a UrlPath,
     /// Current page's source file path
     pub source_path: &'a Path,
-    /// Colocated assets directory (if any)
-    pub colocated_dir: Option<&'a Path>,
     /// HTML attribute containing the link (href, src, etc.)
     pub attr: &'a str,
 }
@@ -163,7 +161,6 @@ mod tests {
             output_file: PathBuf::new(),
             is_index: false,
             is_404: false,
-            colocated_dir: None,
             output_dir: PathBuf::new(),
             full_url: String::new(),
             relative: String::new(),

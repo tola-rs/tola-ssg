@@ -11,7 +11,7 @@
 //! - **Finalize** - Cache persistence, warnings, logging
 
 use crate::{
-    asset::{process_asset, process_rel_asset},
+    asset::process_asset,
     compiler::page::Pages,
     compiler::page::typst,
     compiler::{collect_all_files, drain_warnings},
@@ -91,8 +91,6 @@ pub fn build_site(
 struct BuildFiles {
     /// Asset files from nested directories
     assets: Vec<PathBuf>,
-    /// Non-content files in content directory
-    content_assets: Vec<PathBuf>,
     /// Content file counts by type
     typst_count: usize,
     markdown_count: usize,
@@ -133,22 +131,21 @@ fn collect_build_files(config: &SiteConfig) -> BuildFiles {
         .flat_map(collect_all_files)
         .collect();
 
-    // Scan content directory once, then partition
-    let all_content = collect_all_files(&config.build.content);
-    let (content_files, content_assets): (Vec<_>, Vec<_>) = all_content
-        .into_iter()
-        .partition(|p| ContentKind::is_content_file(p));
-
+    // Count content files by type (content assets handled separately)
+    let content_files = collect_all_files(&config.build.content);
     let typst_count = content_files
         .iter()
         .filter(|p| ContentKind::from_path(p) == Some(ContentKind::Typst))
         .count();
+    let markdown_count = content_files
+        .iter()
+        .filter(|p| ContentKind::from_path(p) == Some(ContentKind::Markdown))
+        .count();
 
     BuildFiles {
         assets,
-        content_assets,
         typst_count,
-        markdown_count: content_files.len() - typst_count,
+        markdown_count,
     }
 }
 
@@ -160,7 +157,7 @@ fn create_progress(files: &BuildFiles, quiet: bool) -> Option<ProgressLine> {
     Some(ProgressLine::new(&[
         ("typst", files.typst_count),
         ("markdown", files.markdown_count),
-        ("assets", files.assets.len() + files.content_assets.len()),
+        ("assets", files.assets.len()),
     ]))
 }
 
@@ -185,18 +182,11 @@ fn compile_and_process(
                 progress,
             )
         },
-        || {
-            rayon::join(
-                || process_assets(&files.assets, config, clean, &has_error, progress),
-                || process_assets_rel(&files.content_assets, config, clean, &has_error, progress),
-            )
-        },
+        || process_assets(&files.assets, config, clean, &has_error, progress),
     );
 
     let metadata = metadata_result?;
-    let (assets_res, content_assets_res) = assets_result;
-    assets_res?;
-    content_assets_res?;
+    assets_result?;
 
     Ok(metadata)
 }
@@ -214,31 +204,6 @@ fn process_assets(
             return Err(anyhow!("Aborted"));
         }
         if let Err(e) = process_asset(path, config, clean, false) {
-            if !has_error.swap(true, Ordering::Relaxed) {
-                log!("error"; "{}: {:#}", path.display(), e);
-            }
-            return Err(anyhow!("Build failed"));
-        }
-        if let Some(p) = progress {
-            p.inc("assets");
-        }
-        Ok(())
-    })
-}
-
-/// Process content-relative asset files in parallel
-fn process_assets_rel(
-    files: &[PathBuf],
-    config: &SiteConfig,
-    clean: bool,
-    has_error: &AtomicBool,
-    progress: Option<&ProgressLine>,
-) -> Result<()> {
-    files.par_iter().try_for_each(|path| {
-        if is_shutdown() || has_error.load(Ordering::Relaxed) {
-            return Err(anyhow!("Aborted"));
-        }
-        if let Err(e) = process_rel_asset(path, config, clean, false) {
             if !has_error.swap(true, Ordering::Relaxed) {
                 log!("error"; "{}: {:#}", path.display(), e);
             }
@@ -278,7 +243,7 @@ fn rebuild_iterative_pages(
     }
 }
 
-/// Post-processing (flatten assets, CNAME, HTML 404)
+/// Post-processing (flatten assets, CNAME, HTML 404, content assets)
 fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
     let clean = config.build.clean;
 
@@ -287,6 +252,9 @@ fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
 
     // Auto-generate CNAME if needed
     crate::asset::process_cname(config)?;
+
+    // Copy content assets (non-.typ/.md files in content directory)
+    crate::asset::process_content_assets(config, clean)?;
 
     // Copy HTML 404 page if configured
     copy_html_404(config)?;

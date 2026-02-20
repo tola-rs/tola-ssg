@@ -14,13 +14,9 @@ use crate::embed::build::{REDIRECT_HTML, RedirectVars};
 use crate::freshness::{self, ContentHash, is_fresh};
 use crate::log;
 
-/// Write a page's HTML to disk. Also copies colocated assets
+/// Write a page's HTML to disk
 pub fn write_page_html(page: &CompiledPage) -> Result<()> {
     write_page(page, true, None, false)?;
-
-    // Copy colocated assets if present
-    crate::asset::copy_colocated_assets(&page.route, true)?;
-
     Ok(())
 }
 

@@ -19,7 +19,6 @@ use crate::core::UrlPath;
 ///
 /// PageRoute {
 ///     source:      content/posts/hello.typ
-///     source_dir:  content/posts/
 ///     is_index:    false
 ///     permalink:   /blog/posts/hello/
 ///     output_file: public/blog/posts/hello/index.html
@@ -28,19 +27,17 @@ use crate::core::UrlPath;
 /// }
 /// ```
 ///
-/// # Colocated Assets
+/// # Content Assets
 ///
-/// If a directory with the same name as the content file exists (without extension),
-/// it's treated as a colocated assets directory:
+/// Non-content files in the content directory are automatically copied
+/// to the corresponding output location:
 ///
 /// ```text
 /// content/posts/
 /// ├── hello.typ           -> public/posts/hello/index.html
-/// └── hello/              -> colocated_dir (copied to public/posts/hello/)
+/// └── hello/
 ///     └── image.png       -> public/posts/hello/image.png
 /// ```
-///
-/// For index files, the source directory itself is the colocated directory
 #[derive(Debug, Clone, Default)]
 pub struct PageRoute {
     // === Source ===
@@ -50,8 +47,6 @@ pub struct PageRoute {
     pub is_index: bool,
     /// Whether this is the 404 page (configured via `build.not_found`)
     pub is_404: bool,
-    /// Colocated assets directory (e.g., content/posts/hello/ for hello.typ)
-    pub colocated_dir: Option<PathBuf>,
 
     // === Output ===
     /// URL path / permalink (e.g., /blog/posts/hello/)

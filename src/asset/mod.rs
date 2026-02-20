@@ -14,11 +14,11 @@ pub use kind::AssetKind;
 pub use route::AssetRoute;
 
 // Scanning (pure functions)
-pub use scan::{scan_colocated_assets, scan_flatten_assets, scan_global_assets};
+pub use scan::{scan_content_assets, scan_flatten_assets, scan_global_assets};
 
 // Processing (side effects)
 pub use process::{
-    copy_colocated_assets, process_asset, process_cname, process_flatten_assets, process_rel_asset,
+    process_asset, process_cname, process_content_assets, process_flatten_assets, process_rel_asset,
 };
 
 // Metadata helpers
