@@ -61,11 +61,11 @@ fn is_output_fresh(source: &Path, output: &Path) -> bool {
         let output_mtime = get_mtime(output);
         for dep in &deps {
             // If any dependency is newer than output, output is stale
-            if let (Some(out_time), Some(dep_time)) = (output_mtime, get_mtime(dep)) {
-                if dep_time > out_time {
-                    crate::debug!("fresh"; "{}: dep {} is newer", source.display(), dep.display());
-                    return false;
-                }
+            if let (Some(out_time), Some(dep_time)) = (output_mtime, get_mtime(dep))
+                && dep_time > out_time
+            {
+                crate::debug!("fresh"; "{}: dep {} is newer", source.display(), dep.display());
+                return false;
             }
         }
         crate::debug!("fresh"; "{}: fresh (checked {} deps)", source.display(), deps.len());

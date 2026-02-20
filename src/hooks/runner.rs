@@ -164,15 +164,14 @@ fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     }
 
     // CSS processor (syntax sugar for pre hook)
-    if config.build.hooks.css.enable {
-        if let Ok(css_hook) = super::css::build_css_hook(config, &css_output_path(config)) {
-            if should_run_hook_for_changes(&css_hook, changed_paths, root) {
-                if let Err(e) = run_hook(&css_hook, config, BuildMode::DEVELOPMENT, false, "pre") {
-                    crate::log!("css"; "failed: {}", e);
-                }
-                executed += 1;
-            }
+    if config.build.hooks.css.enable
+        && let Ok(css_hook) = super::css::build_css_hook(config, &css_output_path(config))
+        && should_run_hook_for_changes(&css_hook, changed_paths, root)
+    {
+        if let Err(e) = run_hook(&css_hook, config, BuildMode::DEVELOPMENT, false, "pre") {
+            crate::log!("css"; "failed: {}", e);
         }
+        executed += 1;
     }
 
     executed

@@ -23,7 +23,13 @@
   }
 
   // Tight bounds for math equations (removes extra whitespace)
-  show math.equation: set text(top-edge: "bounds", bottom-edge: "bounds")
+  show math.equation: set text(
+    // Default: New Computer Modern Math (embedded in Tola)
+    // Custom with fallback: ("Luciole Math", "New Computer Modern Math")
+    font: "New Computer Modern Math",
+    top-edge: "bounds",
+    bottom-edge: "bounds",
+  )
 
   show math.equation.where(block: false): it => context {
     if not _tola-svg-inside-figure.get() {
@@ -56,7 +62,6 @@
   permalink: none,
   aliases: (),
   global-header: true,
-
   body,
 ) = {
   [#metadata((
