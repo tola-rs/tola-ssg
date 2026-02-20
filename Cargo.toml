@@ -9,12 +9,7 @@ repository = "https://github.com/tola-rs/tola-ssg"
 keywords = ["blog", "static", "typst", "ssg", "cli"]
 categories = ["command-line-utilities"]
 license = "MIT"
-exclude = [
-    "/target",
-    "/screenshots",
-    "/result",
-    "/__test_site"
-]
+exclude = ["/target", "/screenshots", "/result", "/__test_site"]
 
 # Reduce the size of binary file
 [profile.release]
@@ -39,41 +34,65 @@ owo-colors = { version = "4", features = ["supports-colors"] }
 crossterm = { version = "0.29.0", default-features = false }
 notify = "8.0.0"
 rayon = "1.10.0"
-regex = { version = "1.12.2", default-features = false, features = ["std", "perf"] }
+regex = { version = "1.12.2", default-features = false, features = [
+    "std",
+    "perf",
+] }
 serde = { version = "1.0.219", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0.0", features = ["preserve_order"] }
 serde_ignored = "0.1"
 toml = "0.8.23"
 thiserror = "2.0.12"
-gix = { version = "0.72.1", default-features = false, features = ["basic", "parallel", "excludes"] }
-shellexpand = { version = "3.1.1", default-features = false, features = ["base-0", "tilde"] }
+gix = { version = "0.72.1", default-features = false, features = [
+    "basic",
+    "parallel",
+    "excludes",
+] }
+shellexpand = { version = "3.1.1", default-features = false, features = [
+    "base-0",
+    "tilde",
+] }
 quick-xml = { version = "0.38.0", default-features = false }
 usvg = { version = "0.45.1", default-features = false }
-ravif = { version = "0.12.0", default-features = false, features = ["asm", "threading"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
-lab = "0.11"  # LAB color space conversion (AVX2 accelerated)
+ravif = { version = "0.12.0", default-features = false, features = [
+    "asm",
+    "threading",
+] }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+] }
+lab = "0.11" # LAB color space conversion (AVX2 accelerated)
 url = "2"
 percent-encoding = "2.3"
-rss = { version = "2.0.12", default-features = false, features = ["builders", "validation"] }
-atom_syndication = { version = "0.12", default-features = false, features = ["builders"] }
+rss = { version = "2.0.12", default-features = false, features = [
+    "builders",
+    "validation",
+] }
+atom_syndication = { version = "0.12", default-features = false, features = [
+    "builders",
+] }
 jwalk = "0.8"
 tiny_http = "0.12.0"
 ctrlc = "3.5.1"
 deunicode = "1.6.2"
 portable-pty = "0.9.0"
-macros = { package = "tola-ssg-macros", path = "macros" }
+macros = { package = "tola-ssg-macros", version = "0.1.1" }
 
 # Typst integration (via typst-batch crate)
-# typst-batch = { version = "0.2.1", features = ["svg"] }
-typst-batch = { path = "typst-batch", features = ["svg"] }
-tola-vdom = { path = "tola-vdom", features = ["parallel"] }
+typst-batch = { version = "0.2.2", features = ["svg", "embed-fonts"] }
+tola-vdom = { version = "0.2.1", features = ["parallel"] }
 smallvec = "1.13"
 
 parking_lot = "0.12.5"
 rustc-hash = "2.1.1"
 
 # Lock-free concurrent data structures
-crossbeam = { version = "0.8", default-features = false, features = ["crossbeam-queue", "crossbeam-channel"] }
+crossbeam = { version = "0.8", default-features = false, features = [
+    "crossbeam-queue",
+    "crossbeam-channel",
+] }
 
 # WebSocket for hot reload
 tungstenite = "0.27"
@@ -83,19 +102,32 @@ blake3 = "1.8"
 hex = "0.4"
 
 # Markdown parsing
-pulldown-cmark = { version = "0.13", default-features = false, features = ["simd"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = [
+    "simd",
+] }
 
 # Async runtime for Actor model
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "sync",
+    "macros",
+    "time",
+] }
 
 # Async HTTP client for link validation
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
 
 tl = "0.7.8"
 dashmap = "6.1.0"
 
 # Asset minification
-oxc = { version = "0.113", default-features = false, features = ["minifier", "codegen", "mangler"] }
+oxc = { version = "0.113", default-features = false, features = [
+    "minifier",
+    "codegen",
+    "mangler",
+] }
 lightningcss = "1.0.0-alpha.70"
 
 [features]
@@ -103,12 +135,18 @@ default = []
 
 # Windows-specific: enable crossterm Windows support
 [target.'cfg(windows)'.dependencies]
-crossterm = { version = "0.29.0", default-features = false, features = ["windows"] }
+crossterm = { version = "0.29.0", default-features = false, features = [
+    "windows",
+] }
 
 [dev-dependencies]
 tempfile = "3"
 
 [build-dependencies]
-oxc = { version = "0.113", default-features = false, features = ["minifier", "codegen", "mangler"] }
+oxc = { version = "0.113", default-features = false, features = [
+    "minifier",
+    "codegen",
+    "mangler",
+] }
 lightningcss = "1.0.0-alpha.70"
-typst-batch = { path = "typst-batch", features = ["svg"] }
+typst-batch = { version = "0.2.2", features = ["svg"] }

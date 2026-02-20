@@ -146,10 +146,8 @@ impl CompilerActor {
 
         // If hooks ran, update CSS output version immediately
         // so subsequent compiles use the new asset version
-        if executed > 0 {
-            if let Some(css_output) = self.get_css_output_path() {
-                version::update_version(&css_output);
-            }
+        if executed > 0 && let Some(css_output) = self.get_css_output_path() {
+            version::update_version(&css_output);
         }
     }
 
