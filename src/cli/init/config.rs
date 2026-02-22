@@ -10,7 +10,7 @@ use crate::config::section::{
     build::CssProcessorConfig,
     site::{HeaderConfig, SiteInfoConfig, SitemapConfig},
 };
-use crate::embed::typst::TOLA_TYP;
+use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL};
 
 /// Default config filename
 const CONFIG_FILE: &str = "tola.toml";
@@ -111,7 +111,18 @@ pub fn write_tola_template(root: &Path) -> Result<()> {
     let path = root.join("templates/tola.typ");
     // Only create if doesn't exist
     if !path.exists() {
-        fs::write(&path, TOLA_TYP)
+        fs::write(&path, TOLA_TEMPLATE)
+            .with_context(|| format!("Failed to write '{}'", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Write utils/tola.typ with utility functions
+pub fn write_tola_util(root: &Path) -> Result<()> {
+    let path = root.join("utils/tola.typ");
+    // Only create if doesn't exist
+    if !path.exists() {
+        fs::write(&path, TOLA_UTIL)
             .with_context(|| format!("Failed to write '{}'", path.display()))?;
     }
     Ok(())

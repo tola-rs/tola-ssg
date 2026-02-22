@@ -4,42 +4,49 @@
 // Provides page template with metadata for SSG
 
 // ============================================================================
+// Shared State
+// ============================================================================
+
+#let inside-figure = state("_tola-inside-figure", false)
+
+// ============================================================================
 // Base Template (Show Rules)
 // ============================================================================
 
-#let base(body) = {
-  let _tola-svg-inside-figure = state("_tola-svg-inside-figure", false)
-
+#let base(
+  // CSS classes for customization
+  figure-class: "",
+  math-inline-class: "",
+  math-block-class: "",
+  // Math font (string or array for fallback)
+  math-font: "New Computer Modern Math",
+  body,
+) = {
   show figure: it => {
-    _tola-svg-inside-figure.update(true)
-    it
-    _tola-svg-inside-figure.update(false)
+    inside-figure.update(true)
+    html.figure(class: figure-class)[#it]
+    inside-figure.update(false)
   }
 
-  show table: it => context {
-    if not _tola-svg-inside-figure.get() {
-      html.div(class: "tola-table")[#html.frame(it)]
-    } else { it }
-  }
+  // Note: No table show rule - Typst renders tables as native HTML <table>.
+  // Using html.frame() on tables would convert them to SVG, causing internal
+  // HTML elements (like html.code, html.span for math) to be ignored.
 
-  // Tight bounds for math equations (removes extra whitespace)
   show math.equation: set text(
-    // Default: New Computer Modern Math (embedded in Tola)
-    // Custom with fallback: ("Luciole Math", "New Computer Modern Math")
-    font: "New Computer Modern Math",
+    font: math-font,
     top-edge: "bounds",
     bottom-edge: "bounds",
   )
 
   show math.equation.where(block: false): it => context {
-    if not _tola-svg-inside-figure.get() {
-      html.span(class: "tola-inline-math", role: "math")[#html.frame(it)]
+    if not inside-figure.get() {
+      html.span(class: math-inline-class, role: "math")[#html.frame(it)]
     } else { it }
   }
 
   show math.equation.where(block: true): it => context {
-    if not _tola-svg-inside-figure.get() {
-      html.div(class: "tola-block-math", role: "math")[#html.frame(it)]
+    if not inside-figure.get() {
+      html.div(class: math-block-class, role: "math")[#html.frame(it)]
     } else { it }
   }
 

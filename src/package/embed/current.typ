@@ -43,16 +43,34 @@
   crumbs
 }
 
-#let find-prev(pages, key: p => p.date, filter: p => true) = {
-  let me = pages.find(p => p.permalink == path)
-  if me == none or key(me) == none { return none }
-  let candidates = pages.filter(p => filter(p) and p.permalink != path and key(p) != none and key(p) > key(me))
-  if candidates.len() > 0 { candidates.sorted(key: key).first() } else { none }
+/// Find page at offset in a sorted list.
+/// Returns none if current page not found or offset out of bounds.
+#let at-offset(sorted-pages, offset) = {
+  let idx = sorted-pages.position(p => p.permalink == path)
+  if idx == none { return none }
+  let target = idx + offset
+  if target < 0 or target >= sorted-pages.len() { return none }
+  sorted-pages.at(target)
 }
 
-#let find-next(pages, key: p => p.date, filter: p => true) = {
-  let me = pages.find(p => p.permalink == path)
-  if me == none or key(me) == none { return none }
-  let candidates = pages.filter(p => filter(p) and p.permalink != path and key(p) != none and key(p) < key(me))
-  if candidates.len() > 0 { candidates.sorted(key: key).rev().first() } else { none }
+/// Find previous page in a sorted list.
+#let prev(sorted-pages, n: 1) = at-offset(sorted-pages, -n)
+
+/// Find next page in a sorted list.
+#let next(sorted-pages, n: 1) = at-offset(sorted-pages, n)
+
+/// Take previous n pages in a sorted list.
+#let take-prev(sorted-pages, n: 1) = {
+  let idx = sorted-pages.position(p => p.permalink == path)
+  if idx == none { return () }
+  let start = calc.max(0, idx - n)
+  sorted-pages.slice(start, idx)
+}
+
+/// Take next n pages in a sorted list.
+#let take-next(sorted-pages, n: 1) = {
+  let idx = sorted-pages.position(p => p.permalink == path)
+  if idx == none { return () }
+  let end = calc.min(sorted-pages.len(), idx + 1 + n)
+  sorted-pages.slice(idx + 1, end)
 }

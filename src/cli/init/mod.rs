@@ -61,6 +61,7 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
     let output_dir = site_config.root_relative(&site_config.build.output);
     config::write_ignore_files(root, &output_dir)?;
     config::write_tola_template(root)?;
+    config::write_tola_util(root)?;
 
     generate_lsp_stubs(root)?;
 
