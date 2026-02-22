@@ -27,7 +27,6 @@ strip = false
 [dependencies]
 arc-swap = "1.7"
 anyhow = "1.0.98"
-bitflags = "2.11.0"
 which = "8.0.0"
 clap = { version = "4.5.40", features = ["derive", "string"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
@@ -82,6 +81,7 @@ macros = { package = "tola-ssg-macros", version = "0.1.1" }
 
 # Typst integration (via typst-batch crate)
 typst-batch = { version = "0.2.2", features = ["svg", "embed-fonts"] }
+# typst-batch = { path = "./typst-batch", features = ["svg"] }
 tola-vdom = { version = "0.2.1", features = ["parallel"] }
 smallvec = "1.13"
 
@@ -114,10 +114,10 @@ tokio = { version = "1", features = [
     "time",
 ] }
 
-# Async HTTP client for link validation
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
-] }
+# # Async HTTP client for link validation
+# reqwest = { version = "0.12", default-features = false, features = [
+#     "rustls-tls",
+# ] }
 
 tl = "0.7.8"
 dashmap = "6.1.0"
@@ -150,3 +150,4 @@ oxc = { version = "0.113", default-features = false, features = [
 ] }
 lightningcss = "1.0.0-alpha.70"
 typst-batch = { version = "0.2.2", features = ["svg"] }
+# typst-batch = { path = "./typst-batch", features = ["svg"] }

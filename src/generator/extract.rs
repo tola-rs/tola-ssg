@@ -5,9 +5,9 @@
 use crate::utils::html::{escape, escape_attr, is_void_element};
 use serde_json::{Map, Value};
 
-/// Extract HTML from Typst content JSON
+/// Extract HTML from Typst content JSON (with trimmed whitespace)
 pub fn extract(value: &Value) -> String {
-    Extractor::new(value).run()
+    Extractor::new(value).run().trim().to_string()
 }
 
 struct Extractor<'a> {
