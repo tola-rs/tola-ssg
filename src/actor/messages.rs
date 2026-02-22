@@ -32,6 +32,8 @@ pub enum CompilerMsg {
     CompileDependents(Vec<PathBuf>),
     /// Process asset changes (copy files, trigger reload)
     AssetChange(Vec<PathBuf>),
+    /// Retry scan after initial failure (triggered by file change when !is_healthy)
+    RetryScan { changed_paths: Vec<PathBuf> },
     /// Full rebuild (config changed)
     FullRebuild,
     /// Shutdown

@@ -141,14 +141,14 @@ async fn process_changes(
     // Collect all changed paths (for running watched hooks)
     let changed_paths: Vec<PathBuf> = result.classified.iter().map(|(p, _)| p.clone()).collect();
 
-    // If initial build failed, trigger full rebuild on any file change
+    // If initial build failed, trigger retry scan on any file change
     if !crate::core::is_healthy() {
         if changed_paths.is_empty() {
             return Ok(());
         }
-        crate::log!("watch"; "retrying full build after change: {:?}", changed_paths);
+        crate::log!("watch"; "retrying scan after change");
         compiler_tx
-            .send(CompilerMsg::FullRebuild)
+            .send(CompilerMsg::RetryScan { changed_paths })
             .await
             .map_err(|_| ())?;
         return Ok(());

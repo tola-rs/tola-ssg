@@ -88,6 +88,11 @@ impl CompilerActor {
                 self.on_asset_change(paths).await;
                 bg
             }
+            CompilerMsg::RetryScan { changed_paths } => {
+                abort_task(&mut { bg });
+                self.on_retry_scan(changed_paths).await;
+                None
+            }
             CompilerMsg::FullRebuild => {
                 abort_task(&mut { bg });
                 self.on_full_rebuild().await;
@@ -293,6 +298,54 @@ impl CompilerActor {
                 crate::debug!("compile"; "spawn_blocking error: {}", e);
                 let reason = format!("internal error: {}", e);
                 let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
+            }
+        }
+    }
+
+    /// Retry scan after initial failure, then compile changed files
+    async fn on_retry_scan(&mut self, changed_paths: Vec<PathBuf>) {
+        use crate::cli::serve::scan_pages;
+        use crate::core::{set_healthy, ContentKind};
+        use crate::reload::active::ACTIVE_PAGE;
+
+        crate::debug!("compile"; "retry scan triggered");
+
+        let config = Arc::clone(&self.config);
+        let result = tokio::task::spawn_blocking(move || scan_pages(&config)).await;
+
+        match result {
+            Ok(Ok(_)) => {
+                set_healthy(true);
+                crate::log!("scan"; "recovered");
+
+                // Compile changed content files
+                let content_files: Vec<_> = changed_paths
+                    .iter()
+                    .filter(|p| ContentKind::is_content_file(p))
+                    .cloned()
+                    .collect();
+
+                for path in &content_files {
+                    self.compile_one(path).await;
+                }
+
+                // Also compile active pages if not in changed_paths
+                let active_urls = ACTIVE_PAGE.get_all();
+                for url in active_urls {
+                    if let Some(path) = url_to_content_path(url.as_str(), &self.config) {
+                        if !content_files.contains(&path) {
+                            self.compile_one(&path).await;
+                        }
+                    }
+                }
+
+                let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
+            }
+            Ok(Err(e)) => {
+                crate::log!("scan"; "still failing: {}", e);
+            }
+            Err(e) => {
+                crate::debug!("compile"; "spawn_blocking error: {}", e);
             }
         }
     }

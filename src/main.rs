@@ -99,7 +99,16 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     let needs_full_build = !has_cache;
     std::thread::spawn(move || {
         // Progressive serving: init → scan → set_serving → build
-        if needs_full_build && !progressive_scan(&config_arc) {
+        // Even if scan fails, we still set_serving() so FsActor can trigger rebuild on fix
+        let scan_success = !needs_full_build || progressive_scan(&config_arc);
+
+        // Always set serving state (even on failure) to enable recovery via file changes
+        if needs_full_build {
+            set_serving();
+        }
+
+        if !scan_success {
+            set_healthy(false);
             return;
         }
 
@@ -135,13 +144,11 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     bound_server.run()
 }
 
-/// Quick scan for progressive serving. Returns false if shutdown requested
+/// Quick scan for progressive serving. Returns false if scan failed or shutdown requested
 fn progressive_scan(config: &SiteConfig) -> bool {
-    use crate::core::{is_shutdown, set_serving};
+    use crate::core::is_shutdown;
 
-    // Initialize serve build environment (clean + assets) BEFORE set_serving()
-    // This avoids race condition where on-demand compilation writes files
-    // that get deleted by clean operation
+    // Initialize serve build environment (clean + assets)
     if let Err(e) = cli::serve::init_serve_build(config) {
         log!("init"; "failed: {}", e);
         return false;
@@ -160,7 +167,6 @@ fn progressive_scan(config: &SiteConfig) -> bool {
         return false;
     }
 
-    set_serving();
     true
 }
 
