@@ -68,10 +68,13 @@ pub fn has_attr(attrs: &[Attribute], key: &str) -> bool {
             if meta.path.is_ident(key) {
                 found = true;
             }
-            // Skip value if present (e.g., `default = "en"`)
+            // Skip value if present (e.g., `default = "en"` or `status = experimental`)
             if meta.input.peek(syn::Token![=]) {
                 let _ = meta.value();
-                let _: Option<syn::Lit> = meta.input.parse().ok();
+                // Try to parse as ident first, then as literal
+                if meta.input.parse::<syn::Ident>().is_err() {
+                    let _ = meta.input.parse::<syn::Lit>();
+                }
             }
             Ok(())
         });
@@ -126,12 +129,11 @@ pub fn extract_doc_comment(attrs: &[Attribute]) -> Option<String> {
             if !attr.path().is_ident("doc") {
                 return None;
             }
-            if let Meta::NameValue(nv) = &attr.meta {
-                if let syn::Expr::Lit(expr_lit) = &nv.value {
-                    if let Lit::Str(s) = &expr_lit.lit {
-                        return Some(s.value());
-                    }
-                }
+            if let Meta::NameValue(nv) = &attr.meta
+                && let syn::Expr::Lit(expr_lit) = &nv.value
+                && let Lit::Str(s) = &expr_lit.lit
+            {
+                return Some(s.value());
             }
             None
         })

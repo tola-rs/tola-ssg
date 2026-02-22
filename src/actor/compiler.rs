@@ -305,7 +305,7 @@ impl CompilerActor {
     /// Retry scan after initial failure, then compile changed files
     async fn on_retry_scan(&mut self, changed_paths: Vec<PathBuf>) {
         use crate::cli::serve::scan_pages;
-        use crate::core::{set_healthy, ContentKind};
+        use crate::core::{ContentKind, set_healthy};
         use crate::reload::active::ACTIVE_PAGE;
 
         crate::debug!("compile"; "retry scan triggered");
@@ -332,10 +332,10 @@ impl CompilerActor {
                 // Also compile active pages if not in changed_paths
                 let active_urls = ACTIVE_PAGE.get_all();
                 for url in active_urls {
-                    if let Some(path) = url_to_content_path(url.as_str(), &self.config) {
-                        if !content_files.contains(&path) {
-                            self.compile_one(&path).await;
-                        }
+                    if let Some(path) = url_to_content_path(url.as_str(), &self.config)
+                        && !content_files.contains(&path)
+                    {
+                        self.compile_one(&path).await;
                     }
                 }
 

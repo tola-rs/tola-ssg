@@ -1,15 +1,17 @@
-//! Content generators for static site output.
+//! SEO utilities for static site output.
 //!
-//! Generates auxiliary files from compiled page metadata:
+//! Generates auxiliary files and injects metadata for search engines and social media:
 //!
 //! - **Feed**: RSS/Atom feeds for blog readers (`rss.xml`, `atom.xml`)
 //! - **Sitemap**: Search engine indexing (`sitemap.xml`)
+//! - **OG Tags**: Open Graph meta tags for social media sharing
 //!
-//! Both generators use pre-collected `PageMeta` from the build pipeline,
+//! All generators use pre-collected `PageMeta` from the build pipeline,
 //! avoiding redundant filesystem scans or re-compilation.
 
 pub mod extract;
 pub mod feed;
+pub mod og;
 pub mod sitemap;
 
 use std::borrow::Cow;

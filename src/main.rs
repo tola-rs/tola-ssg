@@ -12,7 +12,6 @@ mod config;
 mod core;
 mod embed;
 mod freshness;
-mod seo;
 mod hooks;
 mod image;
 mod logger;
@@ -20,6 +19,7 @@ mod package;
 mod page;
 mod pipeline;
 mod reload;
+mod seo;
 mod utils;
 
 use anyhow::Result;
@@ -27,9 +27,9 @@ use clap::{ColorChoice, Parser};
 use cli::{Cli, Commands, build::build_site};
 use config::{SiteConfig, clear_clean_flag, init_config};
 use core::BuildMode;
-use seo::{feed::build_feed, sitemap::build_sitemap};
 use gix::ThreadSafeRepository;
 use rustc_hash::FxHashSet;
+use seo::{feed::build_feed, sitemap::build_sitemap};
 
 fn main() -> Result<()> {
     // Setup global Ctrl+C handler (before any blocking operations)
@@ -248,7 +248,8 @@ fn persist_compile_errors(errors: &[(String, String)], config: &SiteConfig) {
 fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<ThreadSafeRepository> {
     let (repo, _pages) = build_site(mode, config, false)?;
 
-    // Generate rss and sitemap in parallel
+    // Generate SEO files in parallel (feed, sitemap)
+    // Note: OG tags are injected during VDOM pipeline (see HeaderInjector)
     let (rss_result, sitemap_result) = rayon::join(|| build_feed(config), || build_sitemap(config));
 
     rss_result?;

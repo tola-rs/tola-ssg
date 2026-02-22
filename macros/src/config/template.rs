@@ -60,12 +60,13 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
     let ty_str = type_to_string(&info.ty);
     let is_optional = ty_str.starts_with("Option<");
 
-    // For sub fields - use the field type's TEMPLATE_SECTION
+    // For sub fields - output the sub config's template_with_header
     if info.sub {
         let field_ty = &info.ty;
         return quote! {
+            out.push('\n');
             #doc_code
-            out.push_str(&format!("# see [{}] section\n", <#field_ty>::TEMPLATE_SECTION));
+            out.push_str(&<#field_ty>::template_with_header());
         };
     }
 

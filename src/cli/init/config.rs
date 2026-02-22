@@ -6,11 +6,11 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
 use crate::config::section::{
-    AssetsConfig, AssetsValidateConfig, FeedConfig, PagesValidateConfig, ServeConfig,
+    AssetsConfig, AssetsValidateConfig, PagesValidateConfig, ServeConfig,
     build::CssProcessorConfig,
-    site::{HeaderConfig, SiteInfoConfig, SitemapConfig},
+    site::{HeaderConfig, SeoConfig, SiteInfoConfig},
 };
-use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL};
+use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL, TolaTypstVars};
 
 /// Default config filename
 const CONFIG_FILE: &str = "tola.toml";
@@ -33,12 +33,8 @@ pub fn generate_config_template() -> String {
     out.push_str(&SiteInfoConfig::template_with_header());
     out.push('\n');
 
-    // [site.feed] section
-    out.push_str(&FeedConfig::template_with_header());
-    out.push('\n');
-
-    // [site.sitemap] section
-    out.push_str(&SitemapConfig::template_with_header());
+    // [site.seo] section (auto_og, feed, sitemap)
+    out.push_str(&SeoConfig::template_with_header());
     out.push('\n');
 
     // [site.header] section
@@ -111,7 +107,8 @@ pub fn write_tola_template(root: &Path) -> Result<()> {
     let path = root.join("templates/tola.typ");
     // Only create if doesn't exist
     if !path.exists() {
-        fs::write(&path, TOLA_TEMPLATE)
+        let content = TOLA_TEMPLATE.render(&TolaTypstVars::default());
+        fs::write(&path, content)
             .with_context(|| format!("Failed to write '{}'", path.display()))?;
     }
     Ok(())
@@ -122,7 +119,8 @@ pub fn write_tola_util(root: &Path) -> Result<()> {
     let path = root.join("utils/tola.typ");
     // Only create if doesn't exist
     if !path.exists() {
-        fs::write(&path, TOLA_UTIL)
+        let content = TOLA_UTIL.render(&TolaTypstVars::default());
+        fs::write(&path, content)
             .with_context(|| format!("Failed to write '{}'", path.display()))?;
     }
     Ok(())
@@ -143,7 +141,7 @@ mod tests {
 
         let content = fs::read_to_string(&config_path).unwrap();
         assert!(content.contains("[site.info]"));
-        assert!(content.contains("[site.feed]"));
+        assert!(content.contains("[site.seo.feed]"));
     }
 
     #[test]

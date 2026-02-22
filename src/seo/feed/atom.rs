@@ -3,7 +3,7 @@
 //! Generates Atom feeds from page metadata stored in STORED_PAGES.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, seo::minify_xml, log, utils::date::DateTimeUtc};
+use crate::{config::SiteConfig, log, seo::minify_xml, utils::date::DateTimeUtc};
 use anyhow::{Ok, Result};
 use atom_syndication::{
     Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,
@@ -70,7 +70,7 @@ impl AtomFeed {
             .href(format!(
                 "{}/{}",
                 base_url,
-                self.config.site.feed.path.display()
+                self.config.site.seo.feed.path.display()
             ))
             .rel("self".to_string())
             .mime_type(Some("application/atom+xml".to_string()))
@@ -105,7 +105,7 @@ impl AtomFeed {
     fn write(self) -> Result<()> {
         let minify = self.config.build.minify;
         let output_dir = self.config.paths().output_dir();
-        let feed_path = self.config.site.feed.path.clone();
+        let feed_path = self.config.site.seo.feed.path.clone();
         let xml = self.into_xml()?;
         let xml = minify_xml(xml.as_bytes(), minify);
         // Resolve feed path relative to output_dir (with path_prefix)

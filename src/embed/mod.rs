@@ -190,10 +190,33 @@ pub mod css {
 }
 
 pub mod typst {
+    use super::{Template, TemplateVars};
+
+    /// Variables for tola.typ templates.
+    pub struct TolaTypstVars {
+        pub version: &'static str,
+    }
+
+    impl Default for TolaTypstVars {
+        fn default() -> Self {
+            Self {
+                version: env!("CARGO_PKG_VERSION"),
+            }
+        }
+    }
+
+    impl TemplateVars for TolaTypstVars {
+        fn apply(&self, content: &str) -> String {
+            content.replace("__VERSION__", self.version)
+        }
+    }
+
     /// Tola template for tola init to generate templates/tola.typ.
-    pub const TOLA_TEMPLATE: &str = include_str!("typst/templates/tola.typ");
+    pub const TOLA_TEMPLATE: Template<TolaTypstVars> =
+        Template::new(include_str!("typst/templates/tola.typ"));
     /// Tola util for tola init to generate utils/tola.typ.
-    pub const TOLA_UTIL: &str = include_str!("typst/utils/tola.typ");
+    pub const TOLA_UTIL: Template<TolaTypstVars> =
+        Template::new(include_str!("typst/utils/tola.typ"));
 }
 
 pub mod recolor {

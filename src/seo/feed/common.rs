@@ -1,9 +1,9 @@
 //! Common utilities for feed generation.
 
 use crate::{
-    seo::extract::extract,
     log,
     page::{STORED_PAGES, StoredPage},
+    seo::extract::extract,
 };
 
 /// A page validated for feed inclusion (requires title and date)

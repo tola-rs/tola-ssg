@@ -434,8 +434,14 @@ mod tests {
 
         // Absolute paths
         assert_eq!(base.join("/blog/post?v=1").unwrap().path(), "/blog/post");
-        assert_eq!(base.join("/blog/post#section").unwrap().path(), "/blog/post");
-        assert_eq!(base.join("/blog/post?v=1#section").unwrap().path(), "/blog/post");
+        assert_eq!(
+            base.join("/blog/post#section").unwrap().path(),
+            "/blog/post"
+        );
+        assert_eq!(
+            base.join("/blog/post?v=1#section").unwrap().path(),
+            "/blog/post"
+        );
 
         // Relative paths (become absolute via join)
         assert_eq!(base.join("blog/post?v=1").unwrap().path(), "/blog/post");

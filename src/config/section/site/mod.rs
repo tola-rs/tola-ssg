@@ -24,28 +24,29 @@
 //! styles = ["styles/custom.css"]
 //! scripts = ["scripts/app.js"]
 //!
-//! [site.feed]
+//! [site.seo]
+//! auto_og = true
+//!
+//! [site.seo.feed]
 //! enable = true
 //! path = "feed.xml"
 //!
-//! [site.sitemap]
+//! [site.seo.sitemap]
 //! enable = true
 //!
 //! [site]
 //! not_found = "404.html"
 //! ```
 
-mod feed;
 mod header;
 mod info;
 mod nav;
-mod sitemap;
+mod seo;
 
-pub use feed::{FeedConfig, FeedFormat};
 pub use header::HeaderConfig;
 pub use info::SiteInfoConfig;
 pub use nav::NavConfig;
-pub use sitemap::SitemapConfig;
+pub use seo::{FeedConfig, FeedFormat, SeoConfig};
 
 use macros::Config;
 use serde::{Deserialize, Serialize};
@@ -68,13 +69,9 @@ pub struct SiteSectionConfig {
     #[config(sub)]
     pub header: HeaderConfig,
 
-    /// Feed generation settings (RSS/Atom).
+    /// SEO settings (feed, sitemap, OG tags).
     #[config(sub)]
-    pub feed: FeedConfig,
-
-    /// Sitemap generation settings.
-    #[config(sub)]
-    pub sitemap: SitemapConfig,
+    pub seo: SeoConfig,
 
     /// Custom 404 page source file (relative to site root).
     pub not_found: Option<PathBuf>,

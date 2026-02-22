@@ -1,4 +1,8 @@
-// Tola SSG utility functions
+// Tola SSG utility functions (v__VERSION__)
+//
+// AUTO-GENERATED - Avoid modifying this file directly.
+// Instead, extend it or create your own copy to reduce migration
+// difficulty when upgrading to future versions with breaking changes.
 //
 // Helper functions for common operations in Typst
 
@@ -27,10 +31,7 @@
     }
     result
   }
-  let raw = flatten(args.pos())
-    .filter(x => x != none and x != "")
-    .map(x => str(x))
-    .join(" ")
+  let raw = flatten(args.pos()).filter(x => x != none and x != "").map(x => str(x)).join(" ")
   raw.split(" ").filter(x => x != "").join(" ")
 }
 
@@ -117,17 +118,11 @@
 /// to-string(42)             // => "42"
 /// ```
 #let to-string(it) = {
-  if it == none { "" }
-  else if type(it) == str { it }
-  else if type(it) != content { str(it) }
-  else if it.has("text") {
-    if type(it.text) == str { it.text }
-    else { to-string(it.text) }
-  }
-  else if it.has("children") { it.children.map(to-string).join() }
-  else if it.has("body") { to-string(it.body) }
-  else if it == [ ] { " " }
-  else { "" }
+  if it == none { "" } else if type(it) == str { it } else if type(it) != content { str(it) } else if it.has("text") {
+    if type(it.text) == str { it.text } else { to-string(it.text) }
+  } else if it.has("children") { it.children.map(to-string).join() } else if it.has("body") {
+    to-string(it.body)
+  } else if it == [ ] { " " } else { "" }
 }
 
 // ============================================================================
@@ -142,9 +137,129 @@
 /// #set-tab-title(page-title + " | " + info.author + "'s blog")
 /// ```
 #let set-tab-title(title) = {
-  let s = title
-    .replace("\\", "\\\\")
-    .replace("\"", "\\\"")
-    .replace("\n", "")
+  let s = title.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "")
   html.script("document.title=\"" + s + "\";")
+}
+
+// ============================================================================
+// SEO Utilities (Open Graph / Twitter Cards)
+// ============================================================================
+
+/// Generate a single meta tag.
+/// - `prop`: property name (e.g., "og:title", "twitter:card")
+/// - `content`: content value
+#let _meta(prop, content) = {
+  if content == none or content == "" { return none }
+  let c = to-string(content)
+  // OG/article/book/profile use "property" attribute, not supported by html.meta
+  if prop.starts-with("og:") or prop.starts-with("article:") or prop.starts-with("book:") or prop.starts-with("profile:") {
+    html.elem("meta", attrs: (property: prop, content: c))
+  } else {
+    html.meta(name: prop, content: c)
+  }
+}
+
+/// Generate Open Graph and Twitter Card meta tags.
+///
+/// All parameters are optional. Missing values will be omitted from output.
+///
+/// Supported og:type values:
+/// - "website" (default for pages)
+/// - "article" (default for posts)
+/// - "book"
+/// - "profile"
+///
+/// Parameters:
+/// - `title`: Page title (og:title, twitter:title)
+/// - `description`: Page description (og:description, twitter:description)
+/// - `url`: Canonical URL (og:url)
+/// - `image`: Preview image URL (og:image, twitter:image)
+/// - `type`: Content type (og:type)
+/// - `site-name`: Site name (og:site_name)
+/// - `locale`: Locale string e.g. "en_US" (og:locale)
+/// - Article-specific (type="article"):
+///   - `author`: Author name or URL (article:author)
+///   - `section`: Section/category (article:section)
+///   - `published`: Published date ISO string (article:published_time)
+///   - `modified`: Modified date ISO string (article:modified_time)
+///   - `tags`: Array of tags (article:tag)
+/// - Book-specific (type="book"):
+///   - `author`: Author name or URL (book:author)
+///   - `isbn`: ISBN number (book:isbn)
+///   - `release-date`: Release date (book:release_date)
+///   - `tags`: Array of tags (book:tag)
+/// - Profile-specific (type="profile"):
+///   - `first-name`: First name (profile:first_name)
+///   - `last-name`: Last name (profile:last_name)
+///   - `username`: Username (profile:username)
+///   - `gender`: Gender (profile:gender)
+/// - Twitter Card:
+///   - `twitter-card`: Card type, default "summary_large_image"
+///   - `twitter-site`: Twitter @username for the site
+///   - `twitter-creator`: Twitter @username for the author
+#let og-tags(
+  title: none,
+  description: none,
+  url: none,
+  image: none,
+  type: "article",
+  site-name: none,
+  locale: none,
+  // Article
+  author: none,
+  section: none,
+  published: none,
+  modified: none,
+  tags: (),
+  // Book
+  isbn: none,
+  release-date: none,
+  // Profile
+  first-name: none,
+  last-name: none,
+  username: none,
+  gender: none,
+  // Twitter
+  twitter-card: "summary_large_image",
+  twitter-site: none,
+  twitter-creator: none,
+) = context {
+  if target() != "html" { return }
+
+  // Open Graph basic
+  _meta("og:title", title)
+  _meta("og:description", description)
+  _meta("og:url", url)
+  _meta("og:image", image)
+  _meta("og:type", type)
+  _meta("og:site_name", site-name)
+  _meta("og:locale", locale)
+
+  // Type-specific metadata
+  if type == "article" {
+    _meta("article:author", author)
+    _meta("article:section", section)
+    _meta("article:published_time", published)
+    _meta("article:modified_time", modified)
+    for tag in tags { _meta("article:tag", tag) }
+  } else if type == "book" {
+    _meta("book:author", author)
+    _meta("book:isbn", isbn)
+    _meta("book:release_date", release-date)
+    for tag in tags { _meta("book:tag", tag) }
+  } else if type == "profile" {
+    _meta("profile:first_name", first-name)
+    _meta("profile:last_name", last-name)
+    _meta("profile:username", username)
+    _meta("profile:gender", gender)
+  }
+  // "website" has no additional properties
+
+  // Twitter Cards
+  _meta("twitter:card", twitter-card)
+  _meta("twitter:title", title)
+  _meta("twitter:description", description)
+  _meta("twitter:image", image)
+  _meta("twitter:site", twitter-site)
+  _meta("twitter:creator", twitter-creator)
 }

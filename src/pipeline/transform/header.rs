@@ -176,6 +176,66 @@ impl<'a> HeaderInjector<'a> {
             // This allows custom script tags, meta tags, etc. to be rendered unescaped
             head.push(Node::Text(Text::raw(raw.as_str())));
         }
+
+        // Open Graph / Twitter Cards (default injection if not user-defined)
+        if !Self::has_og_tags(head) {
+            self.inject_og_defaults(head);
+        }
+    }
+
+    /// Check if OG tags already exist in head (user-defined via Typst head parameter).
+    fn has_og_tags(head: &Element<Raw>) -> bool {
+        head.children.iter().any(|n| {
+            if let Node::Element(e) = n {
+                e.tag == "meta" && e.get_attr("property").is_some_and(|v| v.starts_with("og:"))
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Inject default Open Graph and Twitter Card meta tags.
+    fn inject_og_defaults(&self, head: &mut Element<Raw>) {
+        use crate::seo::og::OgDefaults;
+
+        let og = OgDefaults::from_config(self.config);
+
+        // og:type
+        head.push_elem(Self::meta_property("og:type", og.og_type));
+
+        // og:site_name
+        if !og.site_name.is_empty() {
+            head.push_elem(Self::meta_property("og:site_name", og.site_name));
+        }
+
+        // og:locale
+        if !og.locale.is_empty() {
+            head.push_elem(Self::meta_property("og:locale", og.locale));
+        }
+
+        // og:description
+        if !og.description.is_empty() {
+            head.push_elem(Self::meta_property("og:description", og.description));
+        }
+
+        // twitter:card
+        head.push_elem(Self::meta_name("twitter:card", og.twitter_card));
+    }
+
+    /// Create a meta element with property attribute.
+    fn meta_property(property: &str, content: &str) -> Element<Raw> {
+        let mut meta = TolaSite::element("meta", Attrs::new());
+        meta.set_attr("property", property);
+        meta.set_attr("content", content);
+        meta
+    }
+
+    /// Create a meta element with name attribute.
+    fn meta_name(name: &str, content: &str) -> Element<Raw> {
+        let mut meta = TolaSite::element("meta", Attrs::new());
+        meta.set_attr("name", name);
+        meta.set_attr("content", content);
+        meta
     }
 }
 

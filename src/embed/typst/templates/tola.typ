@@ -1,4 +1,8 @@
-// Tola SSG base template:
+// Tola SSG base template (v__VERSION__)
+//
+// AUTO-GENERATED - Avoid modifying this file directly.
+// Instead, extend it or create your own copy to reduce migration
+// difficulty when upgrading to future versions with breaking changes.
 //
 // Handles math/table/figure rendering with proper HTML structure
 // Provides page template with metadata for SSG
@@ -59,6 +63,8 @@
 // Page Template
 // ============================================================================
 
+/// Page template with metadata for Tola SSG.
+/// Usage: `page(title: "...", ...)[body]` or `page(title: "...", ..., head: [...])[body]`
 #let page(
   // Content metadata (standard fields recognized by Tola SSG)
   title: none,
@@ -71,7 +77,12 @@
   permalink: none,
   aliases: (),
   global-header: true,
+  // Head content (optional)
+  head: [],
+  // Body content (required, positional)
   body,
+  // Extra metadata fields (order, pinned, etc.)
+  ..extra,
 ) = {
   [#metadata((
     title: title,
@@ -84,9 +95,19 @@
     permalink: permalink,
     aliases: aliases,
     global-header: global-header,
+    ..extra.named(),
   )) <tola-meta>]
 
   show: base
 
-  body
+  context {
+    if target() == "html" {
+      html.html[
+        #html.head[#head]
+        #html.body[#body]
+      ]
+    } else {
+      body
+    }
+  }
 }
