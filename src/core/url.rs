@@ -31,6 +31,7 @@ impl UrlPath {
     }
 
     /// Create page URL (with trailing slash). Normalizes leading/trailing slashes.
+    /// Strips query string and fragment.
     pub fn from_page(decoded: &str) -> Self {
         let trimmed = decoded.trim();
 
@@ -39,11 +40,14 @@ impl UrlPath {
             return Self(Arc::from("/"));
         }
 
+        // Use url crate to properly strip query and fragment
+        let path = Self::strip_query_fragment(trimmed);
+
         // Add leading slash if missing
-        let with_leading = if trimmed.starts_with('/') {
-            trimmed.to_string()
+        let with_leading = if path.starts_with('/') {
+            path
         } else {
-            format!("/{}", trimmed)
+            format!("/{}", path)
         };
 
         // Add trailing slash if missing (for page URLs)
@@ -54,6 +58,27 @@ impl UrlPath {
         };
 
         Self(Arc::from(normalized))
+    }
+
+    /// Strip query string and fragment from a path using url crate.
+    fn strip_query_fragment(path: &str) -> String {
+        use percent_encoding::percent_decode_str;
+
+        // Use a dummy base URL to parse the path
+        static BASE: std::sync::OnceLock<url::Url> = std::sync::OnceLock::new();
+        let base = BASE.get_or_init(|| url::Url::parse("http://x").unwrap());
+
+        match base.join(path) {
+            Ok(parsed) => {
+                // url crate returns percent-encoded path, decode it
+                percent_decode_str(parsed.path())
+                    .decode_utf8()
+                    .map(|s| s.into_owned())
+                    .unwrap_or_else(|_| parsed.path().to_string())
+            }
+            // Fallback to simple split if url parsing fails
+            Err(_) => path.split(['?', '#']).next().unwrap_or(path).to_string(),
+        }
     }
 
     /// Create asset URL (no trailing slash normalization).
@@ -269,6 +294,24 @@ mod tests {
     }
 
     #[test]
+    fn test_from_page_strips_query() {
+        let url = UrlPath::from_page("/posts/hello?v=1");
+        assert_eq!(url.as_str(), "/posts/hello/");
+    }
+
+    #[test]
+    fn test_from_page_strips_fragment() {
+        let url = UrlPath::from_page("/posts/hello#section");
+        assert_eq!(url.as_str(), "/posts/hello/");
+    }
+
+    #[test]
+    fn test_from_page_strips_query_and_fragment() {
+        let url = UrlPath::from_page("/posts/hello?v=1#section");
+        assert_eq!(url.as_str(), "/posts/hello/");
+    }
+
+    #[test]
     fn test_to_encoded_chinese() {
         let url = UrlPath::from_page("/posts/中文/");
         assert_eq!(url.to_encoded(), "/posts/%E4%B8%AD%E6%96%87/");
@@ -382,5 +425,35 @@ mod tests {
         let url = UrlPath::from_page("/posts/hello/");
         let s: &str = url.as_ref();
         assert_eq!(s, "/posts/hello/");
+    }
+
+    #[test]
+    fn test_strip_query_fragment_internal() {
+        // Verify url crate join behavior
+        let base = url::Url::parse("http://x").unwrap();
+
+        // Absolute paths
+        assert_eq!(base.join("/blog/post?v=1").unwrap().path(), "/blog/post");
+        assert_eq!(base.join("/blog/post#section").unwrap().path(), "/blog/post");
+        assert_eq!(base.join("/blog/post?v=1#section").unwrap().path(), "/blog/post");
+
+        // Relative paths (become absolute via join)
+        assert_eq!(base.join("blog/post?v=1").unwrap().path(), "/blog/post");
+
+        // Edge cases
+        assert_eq!(base.join("/").unwrap().path(), "/");
+        assert_eq!(base.join("?v=1").unwrap().path(), "/");
+        assert_eq!(base.join("#section").unwrap().path(), "/");
+
+        // Chinese characters (should be percent-encoded in path)
+        let chinese = base.join("/blog/中文?v=1").unwrap();
+        assert_eq!(chinese.path(), "/blog/%E4%B8%AD%E6%96%87");
+    }
+
+    #[test]
+    fn test_from_page_chinese_with_query() {
+        // Chinese characters should be preserved (decoded) even with query
+        let url = UrlPath::from_page("/posts/中文?v=1");
+        assert_eq!(url.as_str(), "/posts/中文/");
     }
 }
