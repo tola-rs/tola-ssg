@@ -218,9 +218,99 @@ fn parse_u16(bytes: &[u8]) -> Option<u16> {
     Some(result)
 }
 
+/// Parse Typst datetime repr format.
+///
+/// Handles both single-line and multi-line formats:
+/// - `datetime(year: 2024, month: 6, day: 15)`
+/// - `datetime(\n  year: 2024,\n  month: 6,\n  day: 15,\n  hour: 14,\n  ...)`
+///
+/// Returns ISO 8601 string: "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SSZ"
+pub fn parse_typst_datetime(s: &str) -> Option<String> {
+    let s = s.trim();
+    if !s.starts_with("datetime(") || !s.ends_with(')') {
+        return None;
+    }
+
+    // Extract inner content
+    let inner = &s[9..s.len() - 1];
+
+    // Parse key-value pairs
+    let mut year: Option<u16> = None;
+    let mut month: Option<u8> = None;
+    let mut day: Option<u8> = None;
+    let mut hour: Option<u8> = None;
+    let mut minute: Option<u8> = None;
+    let mut second: Option<u8> = None;
+
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let mut kv = part.splitn(2, ':');
+        let key = kv.next()?.trim();
+        let value = kv.next()?.trim();
+
+        match key {
+            "year" => year = value.parse().ok(),
+            "month" => month = value.parse().ok(),
+            "day" => day = value.parse().ok(),
+            "hour" => hour = value.parse().ok(),
+            "minute" => minute = value.parse().ok(),
+            "second" => second = value.parse().ok(),
+            _ => {}
+        }
+    }
+
+    let y = year?;
+    let m = month?;
+    let d = day?;
+
+    // Validate
+    let dt = DateTimeUtc::new(
+        y,
+        m,
+        d,
+        hour.unwrap_or(0),
+        minute.unwrap_or(0),
+        second.unwrap_or(0),
+    );
+    dt.validate().ok()?;
+
+    // Format output
+    if hour.is_some() || minute.is_some() || second.is_some() {
+        Some(dt.to_rfc3339())
+    } else {
+        Some(format!("{:04}-{:02}-{:02}", y, m, d))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_typst_datetime_date_only() {
+        let input = "datetime(year: 2024, month: 6, day: 15)";
+        assert_eq!(parse_typst_datetime(input), Some("2024-06-15".to_string()));
+    }
+
+    #[test]
+    fn test_parse_typst_datetime_with_time() {
+        let input = "datetime(\n  year: 2024,\n  month: 6,\n  day: 15,\n  hour: 14,\n  minute: 30,\n  second: 45,\n)";
+        assert_eq!(
+            parse_typst_datetime(input),
+            Some("2024-06-15T14:30:45Z".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_typst_datetime_invalid() {
+        assert_eq!(parse_typst_datetime("2024-06-15"), None);
+        assert_eq!(parse_typst_datetime("datetime()"), None);
+        assert_eq!(parse_typst_datetime("datetime(year: 2024)"), None);
+    }
 
     #[test]
     fn test_datetime_utc_new() {

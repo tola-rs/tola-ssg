@@ -362,6 +362,17 @@ pub fn batch_scan_typst_metadata_iterative(
     Ok(metas)
 }
 
+/// Parse metadata JSON to PageMeta, logging warning on failure.
+fn parse_page_meta(meta_json: JsonValue, file: &Path) -> Option<PageMeta> {
+    match serde_json::from_value::<PageMeta>(meta_json) {
+        Ok(meta) => Some(meta),
+        Err(e) => {
+            crate::log!("warning"; "failed to parse metadata for {}: {}", file.display(), e);
+            None
+        }
+    }
+}
+
 /// Populate STORED_PAGES from all content files
 ///
 /// Scans all Typst and Markdown files to build the global page store
@@ -384,7 +395,7 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
 
     for (file, meta_json) in typst_files.iter().zip(typst_metas) {
         if let Some(meta_json) = meta_json
-            && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json)
+            && let Some(page_meta) = parse_page_meta(meta_json, file)
             && let Ok(mut compiled) = CompiledPage::from_paths(file, config)
         {
             compiled.content_meta = Some(page_meta.clone());
@@ -399,7 +410,7 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     for file in &markdown_files {
         if let Ok(result) = scan_markdown_file(file, config)
             && let Some(meta_json) = result.raw_meta
-            && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json)
+            && let Some(page_meta) = parse_page_meta(meta_json, file)
             && let Ok(mut compiled) = CompiledPage::from_paths(file, config)
         {
             compiled.content_meta = Some(page_meta.clone());

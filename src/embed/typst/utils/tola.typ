@@ -126,6 +126,49 @@
 }
 
 // ============================================================================
+// Date Utilities
+// ============================================================================
+
+/// Check if a year is a leap year.
+#let _is-leap-year(year) = {
+  calc.rem(year, 4) == 0 and (calc.rem(year, 100) != 0 or calc.rem(year, 400) == 0)
+}
+
+/// Get the number of days in a month.
+#let _days-in-month(year, month) = {
+  if month in (1, 3, 5, 7, 8, 10, 12) { 31 } else if month in (4, 6, 9, 11) { 30 } else if month == 2 {
+    if _is-leap-year(year) { 29 } else { 28 }
+  } else { 0 }
+}
+
+/// Parse a date string into a datetime object.
+/// Only supports format: "YYYY-MM-DD" (e.g., "2024-01-15", "2024-1-5")
+///
+/// Example:
+/// ```typst
+/// parse-date("2024-01-15")  // => datetime(year: 2024, month: 1, day: 15)
+/// parse-date("2024-1-5")    // => datetime(year: 2024, month: 1, day: 5)
+/// parse-date(none)          // => none
+/// ```
+#let parse-date(s) = {
+  if s == none { return none }
+  if type(s) == datetime { return s }
+  let s = str(s).split("T").at(0) // Strip time part if present
+  let parts = s.split("-")
+  assert(parts.len() == 3, message: "Invalid date format: '" + s + "', expected YYYY-MM-DD")
+  let year = int(parts.at(0))
+  let month = int(parts.at(1))
+  let day = int(parts.at(2))
+  assert(month >= 1 and month <= 12, message: "Invalid month: " + str(month) + " in date '" + s + "'")
+  let max-days = _days-in-month(year, month)
+  assert(
+    day >= 1 and day <= max-days,
+    message: "Invalid day: " + str(day) + " for month " + str(month) + " in date '" + s + "'",
+  )
+  datetime(year: year, month: month, day: day)
+}
+
+// ============================================================================
 // HTML Utilities
 // ============================================================================
 
@@ -145,14 +188,20 @@
 // SEO Utilities (Open Graph / Twitter Cards)
 // ============================================================================
 
-/// Generate a single meta tag.
+/// Generate a single OG meta tag.
 /// - `prop`: property name (e.g., "og:title", "twitter:card")
 /// - `content`: content value
-#let _meta(prop, content) = {
+#let _og-meta(prop, content) = {
   if content == none or content == "" { return none }
-  let c = to-string(content)
+  let c = if type(content) == datetime {
+    content.display("[year]-[month]-[day]")
+  } else {
+    to-string(content)
+  }
   // OG/article/book/profile use "property" attribute, not supported by html.meta
-  if prop.starts-with("og:") or prop.starts-with("article:") or prop.starts-with("book:") or prop.starts-with("profile:") {
+  if (
+    prop.starts-with("og:") or prop.starts-with("article:") or prop.starts-with("book:") or prop.starts-with("profile:")
+  ) {
     html.elem("meta", attrs: (property: prop, content: c))
   } else {
     html.meta(name: prop, content: c)
@@ -227,39 +276,39 @@
   if target() != "html" { return }
 
   // Open Graph basic
-  _meta("og:title", title)
-  _meta("og:description", description)
-  _meta("og:url", url)
-  _meta("og:image", image)
-  _meta("og:type", type)
-  _meta("og:site_name", site-name)
-  _meta("og:locale", locale)
+  _og-meta("og:title", title)
+  _og-meta("og:description", description)
+  _og-meta("og:url", url)
+  _og-meta("og:image", image)
+  _og-meta("og:type", type)
+  _og-meta("og:site_name", site-name)
+  _og-meta("og:locale", locale)
 
   // Type-specific metadata
   if type == "article" {
-    _meta("article:author", author)
-    _meta("article:section", section)
-    _meta("article:published_time", published)
-    _meta("article:modified_time", modified)
-    for tag in tags { _meta("article:tag", tag) }
+    _og-meta("article:author", author)
+    _og-meta("article:section", section)
+    _og-meta("article:published_time", published)
+    _og-meta("article:modified_time", modified)
+    for tag in tags { _og-meta("article:tag", tag) }
   } else if type == "book" {
-    _meta("book:author", author)
-    _meta("book:isbn", isbn)
-    _meta("book:release_date", release-date)
-    for tag in tags { _meta("book:tag", tag) }
+    _og-meta("book:author", author)
+    _og-meta("book:isbn", isbn)
+    _og-meta("book:release_date", release-date)
+    for tag in tags { _og-meta("book:tag", tag) }
   } else if type == "profile" {
-    _meta("profile:first_name", first-name)
-    _meta("profile:last_name", last-name)
-    _meta("profile:username", username)
-    _meta("profile:gender", gender)
+    _og-meta("profile:first_name", first-name)
+    _og-meta("profile:last_name", last-name)
+    _og-meta("profile:username", username)
+    _og-meta("profile:gender", gender)
   }
   // "website" has no additional properties
 
   // Twitter Cards
-  _meta("twitter:card", twitter-card)
-  _meta("twitter:title", title)
-  _meta("twitter:description", description)
-  _meta("twitter:image", image)
-  _meta("twitter:site", twitter-site)
-  _meta("twitter:creator", twitter-creator)
+  _og-meta("twitter:card", twitter-card)
+  _og-meta("twitter:title", title)
+  _og-meta("twitter:description", description)
+  _og-meta("twitter:image", image)
+  _og-meta("twitter:site", twitter-site)
+  _og-meta("twitter:creator", twitter-creator)
 }

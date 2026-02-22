@@ -3,6 +3,7 @@
 use serde::Deserialize;
 
 use super::JsonMap;
+use crate::utils::date::parse_typst_datetime;
 
 /// Deserialize tags, treating `null` as empty vec
 fn deserialize_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -11,6 +12,34 @@ where
 {
     let value: Option<Vec<String>> = Option::deserialize(deserializer)?;
     Ok(value.unwrap_or_default())
+}
+
+/// Deserialize date field, only accepting Typst datetime repr format.
+///
+/// Accepts:
+/// - `datetime(year: 2024, month: 6, day: 15)` (Typst datetime type)
+///
+/// Rejects plain strings like "2024-06-15".
+/// Use `parse-date("2024-06-15")` in your Typst template to convert strings to datetime.
+fn deserialize_date<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<String> = Option::deserialize(deserializer)?;
+    match value {
+        None => Ok(None),
+        Some(s) => {
+            if let Some(parsed) = parse_typst_datetime(&s) {
+                Ok(Some(parsed))
+            } else {
+                Err(serde::de::Error::custom(format!(
+                    "Invalid date format: '{}'. Expected Typst datetime type.\n\
+                     Hint: Use `parse-date(\"{}\")` in your template to convert string to datetime.",
+                    s, s
+                )))
+            }
+        }
+    }
 }
 
 /// Page metadata from `#metadata(...) <tola-meta>` in Typst files
@@ -42,7 +71,9 @@ pub struct PageMeta {
     /// Summary content (raw JSON, may contain Content structure)
     #[serde(default)]
     pub summary: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_date")]
     pub date: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_date")]
     #[allow(dead_code)] // Reserved for future use
     pub update: Option<String>,
     pub author: Option<String>,

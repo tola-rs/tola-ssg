@@ -12,6 +12,17 @@ use crate::pipeline::compile as pipeline_compile;
 
 use super::from_typst_html;
 
+/// Parse metadata JSON to PageMeta, logging warning on failure.
+fn parse_page_meta(json: serde_json::Value) -> Option<PageMeta> {
+    match serde_json::from_value::<PageMeta>(json) {
+        Ok(meta) => Some(meta),
+        Err(e) => {
+            crate::log!("warning"; "failed to parse metadata: {}", e);
+            None
+        }
+    }
+}
+
 /// Compile a Typst file to HTML
 ///
 /// For single-page compilation (watch mode), this injects both:
@@ -66,9 +77,7 @@ pub fn process_result(
     let (document, accessed, _) = result.into_parts();
 
     // Extract and convert metadata (JsonValue → PageMeta)
-    let meta: Option<PageMeta> = document
-        .query_metadata(label)
-        .and_then(|json| serde_json::from_value(json).ok());
+    let meta: Option<PageMeta> = document.query_metadata(label).and_then(parse_page_meta);
 
     // Get global_header from metadata (default: true)
     let global_header = meta.as_ref().is_none_or(|m| m.global_header);
