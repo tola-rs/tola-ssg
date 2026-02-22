@@ -3,7 +3,7 @@
 //! Generates Atom feeds from page metadata stored in STORED_PAGES.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, generator::minify_xml, log, utils::date::DateTimeUtc};
+use crate::{config::SiteConfig, seo::minify_xml, log, utils::date::DateTimeUtc};
 use anyhow::{Ok, Result};
 use atom_syndication::{
     Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,

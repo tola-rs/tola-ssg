@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, generator::minify_xml, log, page::STORED_PAGES};
+use crate::{config::SiteConfig, seo::minify_xml, log, page::STORED_PAGES};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;

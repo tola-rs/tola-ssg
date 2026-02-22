@@ -3,7 +3,7 @@
 //! Generates RSS feeds from page metadata stored in GLOBAL_SITE_DATA.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, generator::minify_xml, log, utils::date::DateTimeUtc};
+use crate::{config::SiteConfig, seo::minify_xml, log, utils::date::DateTimeUtc};
 use anyhow::{Ok, Result, anyhow};
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};

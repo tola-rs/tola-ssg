@@ -12,7 +12,7 @@ mod config;
 mod core;
 mod embed;
 mod freshness;
-mod generator;
+mod seo;
 mod hooks;
 mod image;
 mod logger;
@@ -27,7 +27,7 @@ use clap::{ColorChoice, Parser};
 use cli::{Cli, Commands, build::build_site};
 use config::{SiteConfig, clear_clean_flag, init_config};
 use core::BuildMode;
-use generator::{feed::build_feed, sitemap::build_sitemap};
+use seo::{feed::build_feed, sitemap::build_sitemap};
 use gix::ThreadSafeRepository;
 use rustc_hash::FxHashSet;
 

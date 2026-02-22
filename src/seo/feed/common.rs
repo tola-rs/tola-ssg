@@ -1,7 +1,7 @@
 //! Common utilities for feed generation.
 
 use crate::{
-    generator::extract::extract,
+    seo::extract::extract,
     log,
     page::{STORED_PAGES, StoredPage},
 };

@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::{
     asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
-    freshness, generator, hooks, log, utils::git,
+    freshness, seo, hooks, log, utils::git,
 };
 
 /// Initialize serve build environment
@@ -116,8 +116,8 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
 
     // Generate feed and sitemap
     let (rss_result, sitemap_result) = rayon::join(
-        || generator::feed::build_feed(config),
-        || generator::sitemap::build_sitemap(config),
+        || seo::feed::build_feed(config),
+        || seo::sitemap::build_sitemap(config),
     );
 
     rss_result?;
