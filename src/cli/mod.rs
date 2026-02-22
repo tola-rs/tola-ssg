@@ -4,6 +4,7 @@ mod args;
 pub mod build;
 pub mod common;
 pub mod deploy;
+pub mod fix;
 pub mod init;
 pub mod query;
 pub mod serve;

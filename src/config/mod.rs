@@ -379,6 +379,8 @@ impl SiteConfig {
             Commands::Validate { args } => {
                 self.apply_validate_args(args);
             }
+            // Fix command doesn't modify config
+            Commands::Fix => {}
         }
     }
 

@@ -90,6 +90,10 @@ pub enum Commands {
         #[command(flatten)]
         args: ValidateArgs,
     },
+
+    /// Check and fix common issues (missing templates, outdated files)
+    #[command(visible_alias = "F")]
+    Fix,
 }
 
 /// Validate command arguments
@@ -210,5 +214,8 @@ impl Cli {
     }
     pub const fn is_validate(&self) -> bool {
         matches!(self.command, Commands::Validate { .. })
+    }
+    pub const fn is_fix(&self) -> bool {
+        matches!(self.command, Commands::Fix)
     }
 }

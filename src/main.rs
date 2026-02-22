@@ -56,6 +56,7 @@ fn main() -> Result<()> {
         Commands::Serve { .. } => serve_with_cache(&config),
         Commands::Query { args } => cli::query::run_query(args, &config),
         Commands::Validate { .. } => cli::validate::validate_site(&config),
+        Commands::Fix => cli::fix::run_fix(&config),
     }
 }
 
