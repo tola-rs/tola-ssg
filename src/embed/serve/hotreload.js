@@ -276,7 +276,14 @@
       switch (op.op) {
         case 'replace': {
           const el = this.getById(op.target);
-          if (el) el.outerHTML = op.html;
+          if (el) {
+            // Seamless CSS update: preload new stylesheet before removing old one
+            if (el.tagName === 'LINK' && el.rel === 'stylesheet') {
+              this.seamlessCssUpdate(el, op.html);
+            } else {
+              el.outerHTML = op.html;
+            }
+          }
           break;
         }
 
@@ -390,6 +397,48 @@
       }
       if (el) this.idMap.set(id, el);
       return el;
+    },
+
+    // Seamless CSS update: preload new stylesheet before removing old one
+    // This prevents flash of unstyled content (FOUC)
+    seamlessCssUpdate(oldLink, newHtml) {
+      // Parse new link element from HTML
+      const temp = document.createElement('div');
+      temp.innerHTML = newHtml;
+      const newLink = temp.querySelector('link');
+      if (!newLink) {
+        // Fallback to direct replacement if parsing fails
+        oldLink.outerHTML = newHtml;
+        return;
+      }
+
+      // Create a preload link to fetch CSS without applying it
+      const preload = document.createElement('link');
+      preload.rel = 'preload';
+      preload.as = 'style';
+      preload.href = newLink.href;
+
+      // When preload completes, swap the stylesheets
+      preload.onload = () => {
+        // Copy all attributes from new link
+        for (const attr of newLink.attributes) {
+          oldLink.setAttribute(attr.name, attr.value);
+        }
+        // Remove preload
+        preload.remove();
+        // Re-hydrate to update ID mapping
+        this.hydrate();
+      };
+
+      preload.onerror = () => {
+        // Fallback to direct replacement on error
+        oldLink.outerHTML = newHtml;
+        preload.remove();
+        this.hydrate();
+      };
+
+      // Start preloading
+      document.head.appendChild(preload);
     },
 
     // SyncTeX: get source location from element
