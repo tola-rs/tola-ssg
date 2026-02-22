@@ -30,10 +30,14 @@
   })
 }
 
-#let breadcrumbs(pages) = {
+#let breadcrumbs(pages, include-root: false) = {
   if path == none { return () }
   let parts = path.split("/").filter(s => s != "")
   let crumbs = ()
+  if include-root {
+    let root-page = pages.find(p => p.permalink == "/")
+    crumbs.push((permalink: "/", title: if root-page != none { root-page.title } else { "/" }))
+  }
   let cur = "/"
   for part in parts {
     cur = cur + part + "/"

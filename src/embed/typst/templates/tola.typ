@@ -22,10 +22,12 @@
   math-font: "New Computer Modern Math",
   body,
 ) = {
-  show figure: it => {
-    inside-figure.update(true)
-    html.figure(class: figure-class)[#it]
-    inside-figure.update(false)
+  show figure: it => context {
+    if target() == "html" {
+      inside-figure.update(true)
+      html.figure(class: figure-class)[#it]
+      inside-figure.update(false)
+    } else { it }
   }
 
   // Note: No table show rule - Typst renders tables as native HTML <table>.
@@ -39,13 +41,13 @@
   )
 
   show math.equation.where(block: false): it => context {
-    if not inside-figure.get() {
+    if target() == "html" and not inside-figure.get() {
       html.span(class: math-inline-class, role: "math")[#html.frame(it)]
     } else { it }
   }
 
   show math.equation.where(block: true): it => context {
-    if not inside-figure.get() {
+    if target() == "html" and not inside-figure.get() {
       html.div(class: math-block-class, role: "math")[#html.frame(it)]
     } else { it }
   }
