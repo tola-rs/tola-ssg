@@ -21,8 +21,13 @@ use scan::{ScanResult, scan_markdown, scan_typst_batch};
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
-    // Register VFS for @tola/* virtual packages (no font warmup needed)
-    crate::compiler::page::typst::init::init_vfs();
+    // Register VFS with nested asset mappings (no font warmup needed)
+    let nested_mappings =
+        crate::compiler::page::typst::init::build_nested_mappings(&config.build.assets.nested);
+    crate::compiler::page::typst::init::init_vfs_with_mappings(
+        config.get_root().to_path_buf(),
+        nested_mappings,
+    );
 
     let args = get_validate_args();
     let files = collect_content_files(&args.paths, &config.build.content)?;
@@ -188,10 +193,10 @@ fn collect_scan_result(
     let page = all_pages.iter().find(|p| p.route.source == *file);
 
     for link in &result.links {
-        // Determine if this is an asset attribute (src, poster, data)
+        // Determine if this is an asset attribute (src, poster, data, Image)
         let is_asset_attr = matches!(
             link.attr.as_str(),
-            "src" | "poster" | "data" | "Src" | "Poster" | "Data"
+            "src" | "poster" | "data" | "Src" | "Poster" | "Data" | "Image"
         );
 
         match link.kind() {

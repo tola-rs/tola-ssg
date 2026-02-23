@@ -183,7 +183,15 @@ pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_bat
         return vec![];
     }
 
-    let scanner = match Batcher::for_scan(root).with_snapshot_from(files) {
+    // Inject format="html" so image show rules can detect HTML output during scan.
+    //
+    // Scan phase is Eval-only (no Layout), so `context { target() }` won't work.
+    // Image show rules use `is-html` (sys.inputs.format) to output <img> tags,
+    // which allows LinkExtractor to find image src paths for validation.
+    let scanner = match Batcher::for_scan(root)
+        .with_inputs([("format", "html")])
+        .with_snapshot_from(files)
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}", e);

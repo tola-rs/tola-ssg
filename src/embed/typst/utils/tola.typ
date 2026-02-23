@@ -129,18 +129,6 @@
 // Date Utilities
 // ============================================================================
 
-/// Check if a year is a leap year.
-#let _is-leap-year(year) = {
-  calc.rem(year, 4) == 0 and (calc.rem(year, 100) != 0 or calc.rem(year, 400) == 0)
-}
-
-/// Get the number of days in a month.
-#let _days-in-month(year, month) = {
-  if month in (1, 3, 5, 7, 8, 10, 12) { 31 } else if month in (4, 6, 9, 11) { 30 } else if month == 2 {
-    if _is-leap-year(year) { 29 } else { 28 }
-  } else { 0 }
-}
-
 /// Parse a date string into a datetime object.
 /// Only supports format: "YYYY-MM-DD" (e.g., "2024-01-15", "2024-1-5")
 ///
@@ -153,19 +141,10 @@
 #let parse-date(s) = {
   if s == none { return none }
   if type(s) == datetime { return s }
-  let s = str(s).split("T").at(0) // Strip time part if present
+  let s = str(s).split("T").at(0)
   let parts = s.split("-")
   assert(parts.len() == 3, message: "Invalid date format: '" + s + "', expected YYYY-MM-DD")
-  let year = int(parts.at(0))
-  let month = int(parts.at(1))
-  let day = int(parts.at(2))
-  assert(month >= 1 and month <= 12, message: "Invalid month: " + str(month) + " in date '" + s + "'")
-  let max-days = _days-in-month(year, month)
-  assert(
-    day >= 1 and day <= max-days,
-    message: "Invalid day: " + str(day) + " for month " + str(month) + " in date '" + s + "'",
-  )
-  datetime(year: year, month: month, day: day)
+  datetime(year: int(parts.at(0)), month: int(parts.at(1)), day: int(parts.at(2)))
 }
 
 // ============================================================================

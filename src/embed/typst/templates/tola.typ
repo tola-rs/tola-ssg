@@ -8,6 +8,27 @@
 // Provides page template with metadata for SSG
 
 // ============================================================================
+// Format Detection: is-html vs target()
+// ============================================================================
+//
+// Two ways to detect HTML output, each with different use cases:
+//
+// 1. is-html (sys.inputs.format == "html")
+//    - Static value injected by Tola at compile time
+//    - Works during scan phase (Eval-only, no Layout)
+//    - Use for: image show rules (need to extract src paths during scan)
+//    - Caveat: Still "html" even inside html.frame() internal rendering
+//
+// 2. context { target() }
+//    - Runtime check, returns "html" or "paged"
+//    - Returns "paged" inside html.frame() (when rendering math to SVG)
+//    - Use for: math show rules with html.frame() (avoids "paged export" warnings)
+//    - Caveat: Requires context block, not evaluated during scan phase
+//
+// For typst CLI users: add --input format=html when compiling to HTML.
+#let is-html = sys.inputs.at("format", default: none) == "html"
+
+// ============================================================================
 // Shared State
 // ============================================================================
 
@@ -17,7 +38,7 @@
 // Base Template (Show Rules)
 // ============================================================================
 
-#let base(
+#let tola-base(
   // CSS classes for customization
   figure-class: "",
   math-inline-class: "",
@@ -26,8 +47,8 @@
   math-font: "New Computer Modern Math",
   body,
 ) = {
-  show figure: it => context {
-    if target() == "html" {
+  show figure: it => {
+    if is-html {
       inside-figure.update(true)
       html.figure(class: figure-class)[#it]
       inside-figure.update(false)
@@ -44,6 +65,10 @@
     bottom-edge: "bounds",
   )
 
+  // Math equations: use target() instead of is-html
+  // - html.frame() internally renders to SVG using "paged" mode
+  // - If we used is-html, the show rule would try to wrap again, causing warnings
+  // - target() returns "paged" inside html.frame(), so the show rule skips
   show math.equation.where(block: false): it => context {
     if target() == "html" and not inside-figure.get() {
       html.span(class: math-inline-class, role: "math")[#html.frame(it)]
@@ -56,7 +81,41 @@
     } else { it }
   }
 
+  // Images: use is-html instead of target()
+  // - No html.frame() involved, so no "paged" mode issue
+  // - Must work during scan phase to extract src paths for link validation
+  // - Scan is Eval-only (no Layout), so context { target() } won't work
+  //
+  // Image src paths support VFS mapping:
+  // - Write: #image("/images/photo.webp")
+  // - Actual file: assets/images/photo.webp (configured in tola.toml [build.assets])
+  //
+  // Note: width/height are not passed to HTML because Typst's length type
+  // (e.g., "50% + 10pt") doesn't map cleanly to HTML attributes.
+  // Use CSS classes or inline styles for sizing instead.
+  show image: it => {
+    if is-html {
+      let attrs = (src: it.source)
+      if it.alt != none { attrs.insert("alt", it.alt) }
+      html.elem("img", attrs: attrs)
+    } else { it }
+  }
+
   body
+}
+
+// ============================================================================
+// Date Utilities
+// ============================================================================
+
+/// Parse date string to datetime (simple version).
+#let _parse-date(s) = {
+  if s == none { return none }
+  if type(s) == datetime { return s }
+  let s = str(s).split("T").at(0)
+  let parts = s.split("-")
+  if parts.len() != 3 { return none }
+  datetime(year: int(parts.at(0)), month: int(parts.at(1)), day: int(parts.at(2)))
 }
 
 // ============================================================================
@@ -64,8 +123,10 @@
 // ============================================================================
 
 /// Page template with metadata for Tola SSG.
-/// Usage: `page(title: "...", ...)[body]` or `page(title: "...", ..., head: [...])[body]`
-#let page(
+/// Usage: `tola-page(title: "...", ...)[body]` or `tola-page(title: "...", ..., head: [...])[body]`
+///
+/// Date fields (date, update) are automatically converted from string to datetime.
+#let tola-page(
   // Content metadata (standard fields recognized by Tola SSG)
   title: none,
   summary: none,
@@ -84,6 +145,10 @@
   // Extra metadata fields (order, pinned, etc.)
   ..extra,
 ) = {
+  // Auto-convert date strings to datetime
+  let date = _parse-date(date)
+  let update = _parse-date(update)
+
   [#metadata((
     title: title,
     summary: summary,
@@ -98,16 +163,68 @@
     ..extra.named(),
   )) <tola-meta>]
 
-  show: base
+  show: tola-base
 
-  context {
-    if target() == "html" {
-      html.html[
-        #html.head[#head]
-        #html.body[#body]
-      ]
-    } else {
-      body
-    }
+  if is-html {
+    html.html[
+      #html.head[#head]
+      #html.body[#body]
+    ]
+  } else {
+    body
   }
+}
+
+// ============================================================================
+// Template Builder
+// ============================================================================
+
+/// Create a custom template with automatic parameter forwarding.
+///
+/// This helper reduces boilerplate when creating templates that extend tola-page.
+/// It automatically handles:
+/// - Parameter declaration and forwarding to tola-page
+/// - Applying base show rules (won't forget `show: base`)
+/// - Head content generation from metadata
+///
+/// Parameters:
+/// - `base`: Show rule function to apply (e.g., your custom base with heading styles)
+/// - `head`: Function `(meta) => content` to generate <head> content (e.g., og-tags)
+/// - `view`: Function `(body, meta) => content` to wrap the body with layout
+///
+/// Example:
+/// ```typst
+/// #import "/templates/tola.typ": wrap-page
+/// #import "/templates/base.typ": base
+/// #import "/utils/tola.typ": og-tags
+///
+/// #let post = wrap-page(
+///   base: base,
+///   head: (m) => og-tags(title: m.title, published: m.date),
+///   view: (body, m) => {
+///     show heading.where(level: 1): it => html.h2[#it.body]
+///     html.article[
+///       #if m.title != none { html.h1[#m.title] }
+///       #body
+///     ]
+///   },
+/// )
+/// ```
+#let wrap-page(
+  base: none,
+  head: none,
+  view: (body, meta) => body,
+) = (body, ..args) => {
+  let meta = args.named()
+  // Auto-convert date strings to datetime
+  if "date" in meta { meta.date = _parse-date(meta.date) }
+  if "update" in meta { meta.update = _parse-date(meta.update) }
+
+  let head-content = if head != none { head(meta) }
+  let base-fn = if base == none { it => it } else { base }
+
+  tola-page(..meta, head: head-content)[
+    #show: base-fn
+    #view(body, meta)
+  ]
 }

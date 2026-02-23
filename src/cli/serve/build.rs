@@ -29,9 +29,14 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
         std::fs::remove_dir_all(&config.build.output)?;
     }
 
-    // Initialize fonts
+    // Initialize fonts with nested asset mappings
     let font_dirs = crate::cli::build::collect_font_dirs(config);
-    compiler::page::typst::init_typst(&font_dirs);
+    let nested_mappings = compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
+    compiler::page::typst::init_typst_with_mappings(
+        &font_dirs,
+        config.get_root().to_path_buf(),
+        nested_mappings,
+    );
 
     // Create output directory with git repo
     let output_dir = config.paths().output_dir();

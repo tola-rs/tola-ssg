@@ -24,7 +24,7 @@ use crate::compiler::CompileContext;
 pub use compile::process_result;
 pub use convert::from_typst_html;
 pub use filter::filter_drafts;
-pub use init::init_typst;
+pub use init::{build_nested_mappings, init_typst_with_mappings};
 
 // =============================================================================
 // Typst Format

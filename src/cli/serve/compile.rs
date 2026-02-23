@@ -19,7 +19,13 @@ fn ensure_typst_initialized(config: &SiteConfig) {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         let font_dirs = crate::cli::build::collect_font_dirs(config);
-        crate::compiler::page::typst::init_typst(&font_dirs);
+        let nested_mappings =
+            crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
+        crate::compiler::page::typst::init_typst_with_mappings(
+            &font_dirs,
+            config.get_root().to_path_buf(),
+            nested_mappings,
+        );
     });
 }
 

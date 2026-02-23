@@ -67,7 +67,13 @@ fn main() -> Result<()> {
 /// Initialize build environment: fonts + embedded assets
 fn init_build_env(config: &SiteConfig) -> Result<()> {
     let font_dirs = cli::build::collect_font_dirs(config);
-    compiler::page::typst::init_typst(&font_dirs);
+    let nested_mappings =
+        compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
+    compiler::page::typst::init_typst_with_mappings(
+        &font_dirs,
+        config.get_root().to_path_buf(),
+        nested_mappings,
+    );
 
     let output_dir = config.paths().output_dir();
     std::fs::create_dir_all(&output_dir)?;

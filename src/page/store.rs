@@ -175,6 +175,17 @@ impl StoredPageMap {
             Phase::input_key().to_string(),
             serde_json::json!(Phase::Visible.as_str()),
         );
+        // Inject format="html" for templates to detect HTML output.
+        //
+        // Why not just use `context { target() }`?
+        // - target() requires a context block and is only evaluated during Layout phase
+        // - Scan phase (Eval-only) cannot evaluate context blocks, so target() won't work
+        // - Image show rules need to work during scan to extract image paths for validation
+        //
+        // Templates should use:
+        // - `is-html` (sys.inputs.format) for image show rules (works during scan)
+        // - `target() == "html"` for math show rules with html.frame() (avoids paged warnings)
+        combined.insert("format".to_string(), serde_json::json!("html"));
 
         typst_batch::Inputs::from_json_with_content(
             &serde_json::Value::Object(combined),

@@ -98,8 +98,13 @@ struct BuildFiles {
 
 /// Initialize build environment
 fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
-    // Pre-warm typst library resources
-    typst::init_typst(&collect_font_dirs(config));
+    // Pre-warm typst library resources with nested asset mappings
+    let nested_mappings = typst::build_nested_mappings(&config.build.assets.nested);
+    typst::init_typst_with_mappings(
+        &collect_font_dirs(config),
+        config.get_root().to_path_buf(),
+        nested_mappings,
+    );
 
     // Generate LSP stubs for tinymist completion
     let _ = generate_lsp_stubs(config.get_root());

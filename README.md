@@ -263,14 +263,11 @@ Tola provides virtual packages that you can import directly in your Typst files:
 
 ```typst
 // content/index.typ — list recent posts
-#import "/templates/normal.typ": conf
+#import "/templates/page.typ": page
 #import "/components/ui.typ" as ui
 #import "@tola/pages:0.0.0": pages
 
-#show: conf.with(
-  title: "Home",
-  permalink: "/"
-)
+#show: page.with(title: "Home")
 
 #let posts = (pages()
   .filter(p => "/posts/" in p.permalink and p.date != none)
@@ -287,16 +284,17 @@ Tola provides virtual packages that you can import directly in your Typst files:
 Tola auto-injects default OG tags from `[site.info]` when `site.seo.auto_og = true`. For page-specific customization, use the `og-tags()` function in your template's `head` parameter:
 
 ```typst
-#import "/utils/tola.typ": og-tags
+#import "/templates/tola.typ": tola-page
+#import "/utils/tola.typ": og-tags, parse-date
 
 #let head = og-tags(
   title: "My Post",
   description: "A great article about...",
   url: "https://example.com/posts/my-post/",
   image: "https://example.com/og-image.png",
-  type: "article",           // "website" | "article" | "book" | "profile"
-  published: "2024-01-15",   // article:published_time
-  tags: ("rust", "typst"),   // article:tag
+  type: "article",                      // "website" | "article" | "book" | "profile"
+  published: parse-date("2024-01-15"),  // article:published_time
+  tags: ("rust", "typst"),              // article:tag
 )
 
 // In your template

@@ -70,8 +70,13 @@ pub struct QueryResult {
 
 /// Execute query command
 pub fn run_query(args: &QueryArgs, config: &SiteConfig) -> Result<()> {
-    // Register VFS for @tola/* virtual packages (no font warmup needed)
-    crate::compiler::page::typst::init::init_vfs();
+    // Register VFS with nested asset mappings (no font warmup needed)
+    let nested_mappings =
+        crate::compiler::page::typst::init::build_nested_mappings(&config.build.assets.nested);
+    crate::compiler::page::typst::init::init_vfs_with_mappings(
+        config.get_root().to_path_buf(),
+        nested_mappings,
+    );
 
     // Populate STORED_PAGES with all site pages first
     // This ensures pages() returns correct data for all pages
