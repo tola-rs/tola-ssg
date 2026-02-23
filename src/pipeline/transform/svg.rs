@@ -113,6 +113,13 @@ impl<'a> SvgTransform<'a> {
             return Ok(());
         }
 
+        // Skip zero-size SVGs (e.g., from html.frame() in paged export mode)
+        // These occur when math show rules use is-html instead of target(),
+        // causing html.span/html.frame to be ignored during paged rendering
+        if elem.get_attr("width") == Some("0pt") || elem.get_attr("height") == Some("0pt") {
+            return Ok(());
+        }
+
         let options = OptimizeOptions {
             dpi: self.config.build.svg.dpi,
             expand_viewbox: self.config.build.svg.expand_viewbox,
@@ -132,6 +139,11 @@ impl<'a> SvgTransform<'a> {
     fn extract_to_file(&self, elem: &mut Element<Indexed>) -> Result<()> {
         let svg_content = self.reconstruct_svg(elem);
         if svg_content.len() < 10 {
+            return Ok(());
+        }
+
+        // Skip zero-size SVGs (same as optimize_inline)
+        if elem.get_attr("width") == Some("0pt") || elem.get_attr("height") == Some("0pt") {
             return Ok(());
         }
 
