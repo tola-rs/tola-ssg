@@ -97,7 +97,11 @@ impl ValidationReport {
             // File path
             eprintln!("{}{}{}", "[".dimmed(), path.cyan(), "]".dimmed());
             for e in errs {
-                eprintln!("{} {}", "→".red(), e.target);
+                if e.reason.is_empty() {
+                    eprintln!("{} {}", "→".red(), e.target);
+                } else {
+                    eprintln!("{} {} {}", "→".red(), e.target, e.reason);
+                }
             }
         }
     }

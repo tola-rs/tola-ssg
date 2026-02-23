@@ -1,10 +1,10 @@
 //! Content file scanning for validation.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 
-use crate::cli::common::{batch_scan_typst, scan_markdown_file};
+use crate::cli::common::scan_markdown_file;
 use crate::compiler::family::Indexed;
 use crate::config::SiteConfig;
 use crate::core::LinkKind;
@@ -56,43 +56,6 @@ pub struct ScanResult {
     pub links: Vec<ScannedLink>,
     /// Indexed VDOM for fragment validation (Markdown only).
     pub indexed_vdom: Option<Document<Indexed>>,
-}
-
-/// Scan Typst files in batch (for link extraction, not metadata)
-/// Uses default Phase::Filter so pages() in content body returns empty silently
-pub fn scan_typst_batch(files: &[&PathBuf], root: &Path) -> Vec<Option<ScanResult>> {
-    let scans = batch_scan_typst(files, root);
-
-    scans
-        .into_iter()
-        .zip(files)
-        .map(|(scan, file)| {
-            scan.map(|s| {
-                let source = file
-                    .strip_prefix(root)
-                    .unwrap_or(file)
-                    .to_string_lossy()
-                    .to_string();
-                ScanResult {
-                    source,
-                    links: s
-                        .links()
-                        .into_iter()
-                        .map(|l| typst_link_to_scanned(&l))
-                        .collect(),
-                    indexed_vdom: None,
-                }
-            })
-        })
-        .collect()
-}
-
-/// Convert typst-batch Link to ScannedLink
-fn typst_link_to_scanned(link: &typst_batch::Link) -> ScannedLink {
-    ScannedLink {
-        dest: link.dest.clone(),
-        attr: format!("{:?}", link.source),
-    }
 }
 
 /// Scan a Markdown file for links
