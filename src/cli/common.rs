@@ -272,7 +272,7 @@ pub fn batch_scan_typst_metadata_iterative(
         return Ok(vec![]);
     }
 
-    // Phase 1: Initial scan with STORED_PAGES data
+    // Initial scan with STORED_PAGES data
     let inputs = STORED_PAGES.build_inputs(config)?;
     let scanner = Batcher::for_scan(root)
         .with_inputs_obj(inputs)
@@ -314,7 +314,7 @@ pub fn batch_scan_typst_metadata_iterative(
         return Ok(metas);
     }
 
-    // Phase 2: Iterative re-scan until convergence
+    // Iterative re-scan until convergence
     let iterative_files: Vec<&PathBuf> = iterative_indices.iter().map(|&i| files[i]).collect();
     let mut prev_hash = STORED_PAGES.pages_hash();
 

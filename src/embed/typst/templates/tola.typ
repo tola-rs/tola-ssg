@@ -81,26 +81,6 @@
     } else { it }
   }
 
-  // Images: use is-html instead of target()
-  // - No html.frame() involved, so no "paged" mode issue
-  // - Must work during scan phase to extract src paths for link validation
-  // - Scan is Eval-only (no Layout), so context { target() } won't work
-  //
-  // Image src paths support VFS mapping:
-  // - Write: #image("/images/photo.webp")
-  // - Actual file: assets/images/photo.webp (configured in tola.toml [build.assets])
-  //
-  // Note: width/height are not passed to HTML because Typst's length type
-  // (e.g., "50% + 10pt") doesn't map cleanly to HTML attributes.
-  // Use CSS classes or inline styles for sizing instead.
-  show image: it => {
-    if is-html {
-      let attrs = (src: it.source)
-      if it.alt != none { attrs.insert("alt", it.alt) }
-      html.elem("img", attrs: attrs)
-    } else { it }
-  }
-
   body
 }
 

@@ -165,10 +165,25 @@ fn recompile_virtual_users(config: &SiteConfig) {
     crate::compiler::dependency::flush_thread_local_deps();
 }
 
-/// Finalize serve build: print warnings and persist cache
+/// Finalize serve build: print warnings/errors and persist cache
 fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
-    use crate::cache::{PersistedDiagnostics, PersistedWarning, persist_diagnostics};
+    use crate::cache::{PersistedDiagnostics, PersistedError, PersistedWarning, persist_diagnostics};
+    use crate::compiler::scheduler::SCHEDULER;
     use crate::core::GLOBAL_ADDRESS_SPACE;
+
+    // Drain compilation failures from scheduler cache
+    let failures = SCHEDULER.drain_failures();
+    if !failures.is_empty() {
+        let max = config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
+        for (path, msg) in failures.iter().take(max) {
+            log!("error"; "✗ compile error in {}", path.display());
+            eprintln!("{}", msg);
+        }
+        let remaining = failures.len().saturating_sub(max);
+        if remaining > 0 {
+            eprintln!("... and {} more error(s)", remaining);
+        }
+    }
 
     // Print compiler warnings with configured limits
     let warnings = compiler::drain_warnings();
@@ -183,8 +198,12 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
         }
     }
 
-    // Persist warnings for cache restore
+    // Persist warnings and errors for cache restore / browser replay
     let mut diagnostics = PersistedDiagnostics::new();
+    for (path, msg) in failures.iter() {
+        let path_str = path.to_string_lossy().into_owned();
+        diagnostics.push_error(PersistedError::new(path_str, "", msg.clone()));
+    }
     for warning in warnings.iter() {
         let path = warning.path.as_deref().unwrap_or_default();
         diagnostics.push_warning(PersistedWarning::new(path, warning.to_string()));

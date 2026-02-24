@@ -226,13 +226,13 @@ fn parse_svg_string(svg: &str) -> (Vec<(String, String)>, String) {
 /// * `doc` - The Typst HtmlDocument to convert
 /// * `baseline_align` - Whether to apply vertical-align for baseline alignment
 pub fn from_typst_html(doc: &HtmlDocument, baseline_align: bool) -> Document<TolaSite::Raw> {
-    // Phase 1: Collect all frames
+    // Collect all frames
     let frames = collect_frames(doc);
 
-    // Phase 2: Batch render (parallel when available)
+    // Batch render (parallel when available)
     let svg_cache = doc.render_frames(&frames);
 
-    // Phase 3: Build VDOM
+    // Build VDOM
     let mut converter = Converter::new(doc, svg_cache, baseline_align);
     converter.convert_document()
 }

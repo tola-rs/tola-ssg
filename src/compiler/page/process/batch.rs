@@ -47,7 +47,7 @@ impl<'a> BuildContext<'a> {
     }
 
     fn max_errors(&self) -> usize {
-        self.config.build.diagnostics.max_errors
+        self.config.build.diagnostics.max_errors.unwrap_or(usize::MAX)
     }
 }
 

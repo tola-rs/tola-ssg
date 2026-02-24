@@ -157,7 +157,7 @@ async fn process_changes(
     }
 
     // Classify events (business logic)
-    let Some(events) = EventClassifier::classify(raw_events) else {
+    let Some(events) = EventClassifier::classify(raw_events, config) else {
         return Ok(());
     };
 
@@ -184,7 +184,7 @@ fn log_events(events: &DebouncedEvents) {
 
 /// Convert DebouncedEvents to CompilerMsg(s)
 fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<CompilerMsg> {
-    use crate::core::ContentKind;
+    use crate::reload::classify::{categorize_path, FileCategory};
 
     let (created, modified, removed) = events.split();
 
@@ -197,20 +197,20 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
 
     let mut messages = Vec::new();
 
-    // Filter created files to content files only
+    // Filter created files to content files in content directory
     let created_content: Vec<_> = created
         .into_iter()
-        .filter(|p| ContentKind::is_content_file(p))
+        .filter(|p| matches!(categorize_path(p, config), FileCategory::Content(_)))
         .collect();
     if !created_content.is_empty() {
         messages.push(CompilerMsg::ContentCreated(created_content));
     }
 
-    // Filter removed files to content files only
-    // Note: We check by extension since the file no longer exists
+    // Filter removed files to content files in content directory
+    // Note: categorize_path checks path prefix, works even if file no longer exists
     let removed_content: Vec<_> = removed
         .into_iter()
-        .filter(|p| ContentKind::is_content_file(p))
+        .filter(|p| matches!(categorize_path(p, config), FileCategory::Content(_)))
         .collect();
     if !removed_content.is_empty() {
         messages.push(CompilerMsg::ContentRemoved(removed_content));
@@ -431,12 +431,12 @@ struct EventClassifier;
 
 impl EventClassifier {
     /// Main classification pipeline.
-    fn classify(raw: FxHashMap<PathBuf, ChangeKind>) -> Option<DebouncedEvents> {
+    fn classify(raw: FxHashMap<PathBuf, ChangeKind>, config: &SiteConfig) -> Option<DebouncedEvents> {
         let mut changes = raw;
 
         Self::correct_by_existence(&mut changes);
         Self::recover_from_dir_events(&mut changes);
-        Self::promote_untracked(&mut changes);
+        Self::promote_untracked(&mut changes, config);
         Self::filter_actionable(&mut changes);
 
         if changes.is_empty() {
@@ -445,7 +445,7 @@ impl EventClassifier {
         Some(DebouncedEvents(changes.into_iter().collect()))
     }
 
-    /// Step 1: Reconcile event kinds with actual filesystem state.
+    /// Reconcile event kinds with actual filesystem state.
     ///
     /// The watcher may report stale events (e.g., Created for a file that's already
     /// been deleted, or Removed for a file that still exists after an atomic save).
@@ -472,7 +472,7 @@ impl EventClassifier {
         }
     }
 
-    /// Step 2: Recover file-level events from directory-level events.
+    /// Recover file-level events from directory-level events.
     ///
     /// Both kqueue and FSEvents may fail to deliver file-level events after a file
     /// is deleted and recreated (different inode/fd). We only get a directory Modify
@@ -534,18 +534,30 @@ impl EventClassifier {
         }
     }
 
-    /// Step 3: Promote Modified files not in AddressSpace to Created.
+    /// Promote Modified files not in AddressSpace to Created.
     ///
     /// A file that's modified but not yet tracked is effectively a new file
     /// (e.g., created by an editor that writes-then-renames).
-    fn promote_untracked(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
+    ///
+    /// IMPORTANT: Only promote content files. Deps files (templates, utils) and
+    /// Asset files should remain as Modified so they can be processed correctly
+    /// by classify_changes().
+    fn promote_untracked(changes: &mut FxHashMap<PathBuf, ChangeKind>, config: &SiteConfig) {
         use crate::address::GLOBAL_ADDRESS_SPACE;
+        use crate::reload::classify::{categorize_path, FileCategory};
 
         let space = GLOBAL_ADDRESS_SPACE.read();
         let to_promote: Vec<_> = changes
             .iter()
             .filter(|(_, k)| **k == ChangeKind::Modified)
             .filter(|(p, _)| space.url_for_source(p).is_none())
+            // Don't promote deps/asset files - they need to stay Modified for proper handling
+            .filter(|(p, _)| {
+                !matches!(
+                    categorize_path(p, config),
+                    FileCategory::Deps | FileCategory::Asset
+                )
+            })
             .map(|(p, _)| p.clone())
             .collect();
         for path in to_promote {
@@ -553,7 +565,7 @@ impl EventClassifier {
         }
     }
 
-    /// Step 4: Filter to actionable events only.
+    /// Filter to actionable events only.
     ///
     /// - Created/Modified: must be a file (not a directory)
     /// - Removed: must still be tracked in AddressSpace (prevents duplicate removals)

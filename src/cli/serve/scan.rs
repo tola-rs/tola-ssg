@@ -30,7 +30,7 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     let scan_result = filter_drafts(config, &typst_files, &markdown_files);
 
     // Report scan phase errors
-    scan_result.report_errors(config.build.diagnostics.max_errors)?;
+    scan_result.report_errors(config.build.diagnostics.max_errors.unwrap_or(usize::MAX))?;
 
     let scanned = scan_result.scanned;
     let drafts_skipped = scan_result.drafts_skipped;

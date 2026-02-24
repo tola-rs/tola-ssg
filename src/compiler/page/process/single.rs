@@ -4,10 +4,11 @@
 
 use crate::compiler::CompileContext;
 use crate::compiler::page::compile;
-use crate::compiler::page::{PageResult, collect_warnings};
+use crate::compiler::page::{PageResult, collect_warnings, scan_single_page};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE};
-use crate::page::{CompiledPage, PageMeta, STORED_PAGES};
+use crate::page::{CompiledPage, PageMeta, PAGE_LINKS, STORED_PAGES};
+use crate::utils::path::slug::slugify_path;
 use anyhow::Result;
 use std::path::Path;
 
@@ -30,10 +31,34 @@ pub fn process_page(
 ) -> Result<Option<PageResult>> {
     let mut page = CompiledPage::from_paths(path, config)?;
 
-    // Build compile context with route for StableId seeding and link resolution
-    let ctx = CompileContext::new(mode, config).with_route(&page.route);
+    // Scan to extract headings and links ===
+    // This must happen BEFORE compile so @tola/current has fresh data
+    let scan_data = scan_single_page(path, config);
 
-    // Compile using unified compile (supports Typst + Markdown)
+    // Update headings and links in global stores
+    let permalink = page.route.permalink.clone();
+    STORED_PAGES.insert_headings(permalink.clone(), scan_data.headings);
+
+    // Convert raw link paths to UrlPaths and record in PAGE_LINKS
+    if !scan_data.links.is_empty() {
+        let slug_config = &config.build.slug;
+        let targets: Vec<_> = scan_data
+            .links
+            .iter()
+            .map(|link| {
+                let (path, _) = crate::utils::path::route::split_path_fragment(link);
+                let slugified = slugify_path(path, slug_config);
+                crate::core::UrlPath::from_page(&format!(
+                    "/{}/",
+                    slugified.to_string_lossy().trim_matches('/')
+                ))
+            })
+            .collect();
+        PAGE_LINKS.record(&permalink, targets);
+    }
+
+    // Compile with fresh @tola/current data ===
+    let ctx = CompileContext::new(mode, config).with_route(&page.route);
     let result = compile(path, &ctx)?;
 
     // Extract metadata
@@ -45,7 +70,6 @@ pub fn process_page(
     }
 
     // Record dependencies (thread-local for parallel safety)
-    // Include virtual package sentinels for @tola/* packages
     let mut deps = result.accessed_files;
     for pkg in &result.accessed_packages {
         if let Some(sentinel) = crate::package::package_sentinel(pkg) {
@@ -61,12 +85,11 @@ pub fn process_page(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
-    // Update global site data with permalink and content metadata
+    // Update global site data
     STORED_PAGES.insert_page(
         page.route.permalink.clone(),
         page.content_meta.clone().unwrap_or_default(),
     );
-    // Also update source mapping for remove_by_source to work correctly
     STORED_PAGES.insert_source_mapping(path.to_path_buf(), page.route.permalink.clone());
 
     // Register to AddressSpace for hot-reload tracking

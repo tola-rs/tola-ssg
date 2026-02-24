@@ -200,6 +200,7 @@ impl<'a> DraftFilterResult<'a> {
 // =============================================================================
 
 use crate::config::SiteConfig;
+use crate::core::ContentKind;
 
 /// Filter draft files from both Typst and Markdown content
 ///
@@ -223,5 +224,77 @@ pub fn filter_drafts<'a>(
         scanned: [typst_result.scanned, md_result.scanned].concat(),
         drafts_skipped,
         errors: typst_result.errors,
+    }
+}
+
+// =============================================================================
+// Single Page Scan (for hot reload)
+// =============================================================================
+
+/// Scanned data from a single page (headings + links)
+#[derive(Debug, Clone, Default)]
+pub struct SinglePageScanData {
+    /// Document headings.
+    pub headings: Vec<ScannedHeading>,
+    /// Internal page links (site-root only).
+    pub links: Vec<String>,
+}
+
+/// Scan a single page to extract headings and links.
+///
+/// This is used by hot reload mode to update `@tola/current` data
+/// before compilation. Dispatches to format-specific scan logic.
+pub fn scan_single_page(path: &Path, config: &SiteConfig) -> SinglePageScanData {
+    let kind = match ContentKind::from_path(path) {
+        Some(k) => k,
+        None => return SinglePageScanData::default(),
+    };
+
+    match kind {
+        ContentKind::Typst => scan_typst_page(path, config),
+        ContentKind::Markdown => scan_markdown_page(path),
+    }
+}
+
+/// Scan a Typst page using typst_batch::Scanner (Eval-only, fast)
+fn scan_typst_page(path: &Path, config: &SiteConfig) -> SinglePageScanData {
+    use typst_batch::prelude::*;
+
+    let root = config.get_root();
+    let scan = match Scanner::new(root).scan(path) {
+        Ok(s) => s,
+        Err(_) => return SinglePageScanData::default(),
+    };
+
+    let headings = scan
+        .headings()
+        .into_iter()
+        .map(|h| ScannedHeading {
+            level: h.level,
+            text: h.text,
+            supplement: h.supplement,
+        })
+        .collect();
+
+    let links = scan
+        .links()
+        .into_iter()
+        .filter(|link| link.is_site_root())
+        .map(|link| link.dest)
+        .collect();
+
+    SinglePageScanData { headings, links }
+}
+
+/// Scan a Markdown page (reuses filter.rs logic)
+fn scan_markdown_page(path: &Path) -> SinglePageScanData {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return SinglePageScanData::default(),
+    };
+
+    SinglePageScanData {
+        headings: super::markdown::extract_headings(&content),
+        links: super::markdown::extract_links(&content),
     }
 }

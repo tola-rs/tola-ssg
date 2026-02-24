@@ -16,17 +16,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiagnosticsConfig {
-    /// Maximum errors to display.
-    pub max_errors: usize,
+    /// Maximum errors to display (None = unlimited).
+    pub max_errors: Option<usize>,
 
-    /// Maximum warnings to display.
+    /// Maximum warnings to display (None = unlimited).
     pub max_warnings: Option<usize>,
 }
 
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
-            max_errors: 3,
+            max_errors: Some(3),
             max_warnings: Some(3),
         }
     }
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn test_defaults() {
         let config = DiagnosticsConfig::default();
-        assert_eq!(config.max_errors, 3);
+        assert_eq!(config.max_errors, Some(3));
         assert_eq!(config.max_warnings, Some(3));
     }
 }

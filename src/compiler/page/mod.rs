@@ -33,7 +33,7 @@ use crate::core::ContentKind;
 
 // Re-export types
 pub use cache::{BUILD_CACHE, IndexedDocument, cache_vdom};
-pub use format::{PageFormat, ScannedHeading, ScannedPage, filter_drafts};
+pub use format::{PageFormat, ScannedHeading, ScannedPage, filter_drafts, scan_single_page};
 pub use markdown::{Markdown, filter_markdown_drafts};
 pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;

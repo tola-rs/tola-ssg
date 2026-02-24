@@ -65,7 +65,7 @@ fn extract_meta(content: &str) -> Option<PageMeta> {
 }
 
 /// Extract internal page links from Markdown content
-fn extract_links(content: &str) -> Vec<String> {
+pub fn extract_links(content: &str) -> Vec<String> {
     use pulldown_cmark::{Event, Parser, Tag};
 
     let parser = Parser::new(content);
@@ -85,7 +85,7 @@ fn extract_links(content: &str) -> Vec<String> {
 }
 
 /// Extract headings from Markdown content
-fn extract_headings(content: &str) -> Vec<ScannedHeading> {
+pub fn extract_headings(content: &str) -> Vec<ScannedHeading> {
     use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 
     let parser = Parser::new(content);

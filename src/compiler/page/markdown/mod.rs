@@ -21,6 +21,7 @@ use crate::compiler::CompileContext;
 // Re-export utilities
 pub use convert::{MarkdownMetaExtractor, MarkdownOptions, from_markdown};
 pub use filter::filter_drafts as filter_markdown_drafts;
+pub use filter::{extract_headings, extract_links};
 
 // =============================================================================
 // Markdown Format

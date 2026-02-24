@@ -180,6 +180,21 @@ impl CompileScheduler {
         self.notify.notify_all();
     }
 
+    /// Drain all cached failures (path, error message).
+    /// Used after initial build to report errors that occurred during background compilation.
+    pub fn drain_failures(&self) -> Vec<(PathBuf, String)> {
+        let mut failures = Vec::new();
+        self.cache.retain(|path, result| {
+            if let CompileResult::Failed(msg) = result {
+                failures.push((path.clone(), msg.clone()));
+                false // remove from cache so hot-reload can retry
+            } else {
+                true
+            }
+        });
+        failures
+    }
+
     /// Wait for all tasks to complete.
     pub fn wait_all(&self) {
         while !self.queue.lock().is_empty() || !self.pending.is_empty() || !self.active.is_empty() {
