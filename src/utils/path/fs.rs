@@ -6,10 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::package::TolaPackage;
+
 /// Normalize a file system path to absolute form
 ///
 /// Tries `canonicalize()` first (resolves symlinks, `.`, `..`)
 /// Falls back to:
+/// - Return as-is for virtual package sentinels (`@tola/*`)
 /// - Return as-is if already absolute
 /// - Join with current directory if relative
 ///
@@ -17,9 +20,17 @@ use std::path::{Path, PathBuf};
 /// ```ignore
 /// use tola::utils::path::normalize_path;
 /// let abs = normalize_path(Path::new("./content/post.typ"));
+/// // Virtual package sentinels are preserved as-is
+/// let sentinel = normalize_path(Path::new("@tola/pages"));
+/// assert_eq!(sentinel, PathBuf::from("@tola/pages"));
 /// ```
 #[inline]
 pub fn normalize_path(path: &Path) -> PathBuf {
+    // Virtual package sentinels are preserved as-is
+    if TolaPackage::from_sentinel(path).is_some() {
+        return path.to_path_buf();
+    }
+
     path.canonicalize().unwrap_or_else(|_| {
         if path.is_absolute() {
             path.to_path_buf()
@@ -91,5 +102,15 @@ mod tests {
         let path = Path::new("nonexistent/path");
         let resolved = resolve_path(path, Path::new("/fallback"));
         assert_eq!(resolved, PathBuf::from("/fallback/nonexistent/path"));
+    }
+
+    #[test]
+    fn test_normalize_path_virtual() {
+        // Virtual paths starting with @ should be preserved as-is
+        let sentinel = Path::new("@tola/pages");
+        assert_eq!(normalize_path(sentinel), PathBuf::from("@tola/pages"));
+
+        let sentinel2 = Path::new("@tola/site");
+        assert_eq!(normalize_path(sentinel2), PathBuf::from("@tola/site"));
     }
 }

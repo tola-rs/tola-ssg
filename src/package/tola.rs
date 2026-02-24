@@ -151,6 +151,18 @@ entrypoint = "lib.typ"
         }
     }
 
+    /// Match from sentinel path (e.g., `@tola/pages`).
+    pub fn from_sentinel(path: &Path) -> Option<Self> {
+        let s = path.to_str()?;
+        let name = s.strip_prefix(&format!("@{}/", TOLA_NAMESPACE))?;
+        match name {
+            "site" => Some(Self::Site),
+            "pages" => Some(Self::Pages),
+            "current" => Some(Self::Current),
+            _ => None,
+        }
+    }
+
     /// All tola packages.
     pub const fn all() -> &'static [Self] {
         &[Self::Site, Self::Pages, Self::Current]

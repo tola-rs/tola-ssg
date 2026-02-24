@@ -252,6 +252,16 @@ pub mod parallel {
         crate::debug!("dep"; "flushed {} rayon + {} main deps, reverse map has {} entries",
             rayon_count, main_count, reverse_count);
     }
+
+    /// Flush current thread's dependencies to the global graph.
+    ///
+    /// Used for scheduler workers
+    pub fn flush_current_thread() {
+        let deps: Vec<DepEntry> = LOCAL.with(|deps| std::mem::take(&mut *deps.borrow_mut()));
+        if !deps.is_empty() {
+            global::merge(deps.into_iter());
+        }
+    }
 }
 
 // =============================================================================
@@ -260,8 +270,21 @@ pub mod parallel {
 
 pub use global::{clear as clear_graph, remove as remove_content, used_by as get_dependents};
 pub use parallel::{
+    flush_current_thread as flush_current_thread_deps,
     flush_to_global as flush_thread_local_deps, record_local as record_dependencies_local,
 };
+
+/// Collect all pages that depend on any `@tola/*` virtual package.
+///
+/// Used by both initial build (serve/build.rs) and hot-reload (CompilerActor)
+/// to recompile pages whose data may have changed.
+pub fn collect_virtual_dependents() -> rustc_hash::FxHashSet<std::path::PathBuf> {
+    use crate::package::TolaPackage;
+    TolaPackage::all()
+        .iter()
+        .flat_map(|pkg| get_dependents(&pkg.sentinel()))
+        .collect()
+}
 
 // =============================================================================
 // Tests

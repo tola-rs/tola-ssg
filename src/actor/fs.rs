@@ -2,6 +2,11 @@
 //!
 //! Watches for file changes and sends debounced events to the CompilerActor.
 //! Implements the "Watcher-First" pattern for zero event loss.
+//!
+//! Architecture:
+//! ```text
+//! Watcher → Debouncer (pure timing) → Classifier (business logic) → CompilerMsg
+//! ```
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,16 +132,22 @@ async fn process_changes(
     compiler_tx: &mpsc::Sender<CompilerMsg>,
     config: &SiteConfig,
 ) -> Result<(), ()> {
-    let Some(events) = debouncer.take_if_ready() else {
+    // Must be serving to process events (check BEFORE taking to preserve events)
+    if !crate::core::is_serving() {
+        return Ok(());
+    }
+
+    // Get raw events from debouncer (pure timing)
+    let Some(raw_events) = debouncer.take_if_ready() else {
         return Ok(());
     };
 
     // If initial build failed, trigger retry scan on any file change
     if !crate::core::is_healthy() {
-        if events.is_empty() {
+        if raw_events.is_empty() {
             return Ok(());
         }
-        let changed_paths = events.all_paths();
+        let changed_paths: Vec<_> = raw_events.keys().cloned().collect();
         crate::log!("watch"; "retrying scan after change");
         compiler_tx
             .send(CompilerMsg::RetryScan { changed_paths })
@@ -144,6 +155,11 @@ async fn process_changes(
             .map_err(|_| ())?;
         return Ok(());
     }
+
+    // Classify events (business logic)
+    let Some(events) = EventClassifier::classify(raw_events) else {
+        return Ok(());
+    };
 
     log_events(&events);
 
@@ -168,6 +184,8 @@ fn log_events(events: &DebouncedEvents) {
 
 /// Convert DebouncedEvents to CompilerMsg(s)
 fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<CompilerMsg> {
+    use crate::core::ContentKind;
+
     let (created, modified, removed) = events.split();
 
     // Classify modified files through the existing pipeline
@@ -179,12 +197,23 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
 
     let mut messages = Vec::new();
 
-    if !created.is_empty() {
-        messages.push(CompilerMsg::ContentCreated(created));
+    // Filter created files to content files only
+    let created_content: Vec<_> = created
+        .into_iter()
+        .filter(|p| ContentKind::is_content_file(p))
+        .collect();
+    if !created_content.is_empty() {
+        messages.push(CompilerMsg::ContentCreated(created_content));
     }
 
-    if !removed.is_empty() {
-        messages.push(CompilerMsg::ContentRemoved(removed));
+    // Filter removed files to content files only
+    // Note: We check by extension since the file no longer exists
+    let removed_content: Vec<_> = removed
+        .into_iter()
+        .filter(|p| ContentKind::is_content_file(p))
+        .collect();
+    if !removed_content.is_empty() {
+        messages.push(CompilerMsg::ContentRemoved(removed_content));
     }
 
     if !result.asset_changed.is_empty() {
@@ -254,9 +283,11 @@ impl DebouncedEvents {
 }
 
 // =============================================================================
-// Debouncer
+// Debouncer - Pure timing and event deduplication
 // =============================================================================
 
+/// Pure debouncer: only handles timing and event deduplication.
+/// No business logic, no global state access.
 struct Debouncer {
     /// Path → ChangeKind (dedup is free via HashMap key uniqueness)
     changes: FxHashMap<PathBuf, ChangeKind>,
@@ -273,8 +304,14 @@ impl Debouncer {
         }
     }
 
+    /// Add a notify event, applying dedup rules:
+    /// - Remove + Create/Modify → Create/Modify (file was restored)
+    /// - Create/Modify + Remove → Remove (file was deleted)
+    /// - Same type events: first event wins
     fn add_event(&mut self, event: &notify::Event) {
         use notify::EventKind;
+
+        crate::debug!("watch"; "raw notify: {:?} {:?}", event.kind, event.paths);
 
         let kind = match event.kind {
             EventKind::Create(_) => ChangeKind::Created,
@@ -290,79 +327,59 @@ impl Debouncer {
 
             let path = normalize_path(path);
 
-            // First event for this path wins (later events within same batch are redundant)
-            if self.changes.contains_key(&path) {
+            if let Some(&existing) = self.changes.get(&path) {
+                // State transitions:
+                // - Removed -> Created/Modified: restored, use new event
+                // - Modified -> Removed: deleted, upgrade to Removed
+                // - Created -> Removed: appeared then vanished, discard (no-op)
+                // - otherwise: first event wins
+                match (existing, kind) {
+                    (ChangeKind::Removed, ChangeKind::Created | ChangeKind::Modified) => {
+                        // File was deleted then restored → use the restore event
+                        crate::debug!("watch"; "restore {}->created: {}", existing.label(), path.display());
+                        self.changes.insert(path, kind);
+                    }
+                    (ChangeKind::Modified, ChangeKind::Removed) => {
+                        // Tracked file was modified then deleted → upgrade to Removed
+                        crate::debug!("watch"; "upgrade modified->removed: {}", path.display());
+                        self.changes.insert(path, ChangeKind::Removed);
+                    }
+                    (ChangeKind::Created, ChangeKind::Removed) => {
+                        // New file appeared then vanished within window → no-op
+                        crate::debug!("watch"; "discard created+removed: {}", path.display());
+                        self.changes.remove(&path);
+                    }
+                    _ => {
+                        // Same kind or other combos (Created+Modified, etc.) → first wins
+                        continue;
+                    }
+                }
+                self.last_event = Some(std::time::Instant::now());
                 continue;
             }
 
+            crate::debug!("watch"; "event {}: {}", kind.label(), path.display());
             self.changes.insert(path, kind);
             self.last_event = Some(std::time::Instant::now());
         }
     }
 
-    /// Take events if debounce + cooldown elapsed, applying merge rules.
-    ///
-    /// Only sets `last_compile` when returning non-empty events.
-    fn take_if_ready(&mut self) -> Option<DebouncedEvents> {
+    /// Take raw events if debounce + cooldown elapsed.
+    /// Returns raw events without any business logic applied.
+    fn take_if_ready(&mut self) -> Option<FxHashMap<PathBuf, ChangeKind>> {
         if !self.is_ready() {
             return None;
         }
 
-        if !crate::core::is_serving() {
-            return None;
-        }
-
-        let mut changes = std::mem::take(&mut self.changes);
+        let changes = std::mem::take(&mut self.changes);
         self.last_event = None;
-
-        // Existence-based corrections
-        let paths: Vec<_> = changes.keys().cloned().collect();
-        for path in paths {
-            let kind = changes[&path];
-            match kind {
-                ChangeKind::Created if !path.exists() => {
-                    // Created but already gone → discard
-                    changes.remove(&path);
-                }
-                ChangeKind::Modified if !path.exists() => {
-                    // Modified but gone → treat as removed
-                    changes.insert(path, ChangeKind::Removed);
-                }
-                ChangeKind::Removed if path.exists() => {
-                    // Removed but still there → treat as modified (macOS FSEvents)
-                    changes.insert(path, ChangeKind::Modified);
-                }
-                _ => {}
-            }
-        }
-
-        // Promote modified files not in AddressSpace to created
-        {
-            use crate::address::GLOBAL_ADDRESS_SPACE;
-            let space = GLOBAL_ADDRESS_SPACE.read();
-            let to_promote: Vec<_> = changes
-                .iter()
-                .filter(|(_, k)| **k == ChangeKind::Modified)
-                .filter(|(p, _)| space.url_for_source(p).is_none())
-                .map(|(p, _)| p.clone())
-                .collect();
-            for path in to_promote {
-                changes.insert(path, ChangeKind::Created);
-            }
-        }
-
-        // Filter created/modified to files only (not directories)
-        changes.retain(|p, k| match k {
-            ChangeKind::Created | ChangeKind::Modified => p.is_file(),
-            ChangeKind::Removed => true, // can't check is_file on deleted paths
-        });
 
         if changes.is_empty() {
             return None;
         }
 
         self.last_compile = Some(std::time::Instant::now());
-        Some(DebouncedEvents(changes.into_iter().collect()))
+        Some(changes)
     }
 
     fn is_ready(&self) -> bool {
@@ -400,6 +417,160 @@ impl Debouncer {
         debounce_remaining
             .max(cooldown_remaining)
             .max(Duration::from_millis(1))
+    }
+}
+
+// =============================================================================
+// EventClassifier - Business logic for event classification
+// =============================================================================
+
+/// Classifies raw debounced events into final DebouncedEvents.
+///
+/// Pipeline: correct_by_existence → recover_from_dir_events → promote_untracked → filter_actionable
+struct EventClassifier;
+
+impl EventClassifier {
+    /// Main classification pipeline.
+    fn classify(raw: FxHashMap<PathBuf, ChangeKind>) -> Option<DebouncedEvents> {
+        let mut changes = raw;
+
+        Self::correct_by_existence(&mut changes);
+        Self::recover_from_dir_events(&mut changes);
+        Self::promote_untracked(&mut changes);
+        Self::filter_actionable(&mut changes);
+
+        if changes.is_empty() {
+            return None;
+        }
+        Some(DebouncedEvents(changes.into_iter().collect()))
+    }
+
+    /// Step 1: Reconcile event kinds with actual filesystem state.
+    ///
+    /// The watcher may report stale events (e.g., Created for a file that's already
+    /// been deleted, or Removed for a file that still exists after an atomic save).
+    fn correct_by_existence(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
+        let paths: Vec<_> = changes.keys().cloned().collect();
+        for path in paths {
+            let kind = changes[&path];
+            let exists = path.exists();
+            match kind {
+                ChangeKind::Created if !exists => {
+                    crate::debug!("watch"; "discard created (gone): {}", path.display());
+                    changes.remove(&path);
+                }
+                ChangeKind::Modified if !exists => {
+                    crate::debug!("watch"; "upgrade modified->removed: {}", path.display());
+                    changes.insert(path, ChangeKind::Removed);
+                }
+                ChangeKind::Removed if exists => {
+                    crate::debug!("watch"; "downgrade removed->modified: {}", path.display());
+                    changes.insert(path, ChangeKind::Modified);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Step 2: Recover file-level events from directory-level events.
+    ///
+    /// Both kqueue and FSEvents may fail to deliver file-level events after a file
+    /// is deleted and recreated (different inode/fd). We only get a directory Modify
+    /// event. Scan modified directories to detect:
+    /// - Tracked files that disappeared → Removed
+    /// - Untracked files that appeared  → Created
+    fn recover_from_dir_events(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
+        use crate::address::GLOBAL_ADDRESS_SPACE;
+
+        let modified_dirs: Vec<PathBuf> = changes
+            .iter()
+            .filter(|(_, k)| **k == ChangeKind::Modified)
+            .filter(|(p, _)| p.is_dir())
+            .map(|(p, _)| p.clone())
+            .collect();
+
+        if modified_dirs.is_empty() {
+            return;
+        }
+
+        let space = GLOBAL_ADDRESS_SPACE.read();
+
+        for dir in &modified_dirs {
+            Self::detect_disappeared(&space, dir, changes);
+            Self::detect_appeared(&space, dir, changes);
+        }
+    }
+
+    /// Detect tracked files that no longer exist in a directory.
+    fn detect_disappeared(
+        space: &crate::address::AddressSpace,
+        dir: &Path,
+        changes: &mut FxHashMap<PathBuf, ChangeKind>,
+    ) {
+        for source in space.iter_sources() {
+            if source.parent() == Some(dir) && !source.exists() && !changes.contains_key(source) {
+                crate::debug!("watch"; "dir-scan found missing: {}", source.display());
+                changes.insert(source.to_path_buf(), ChangeKind::Removed);
+            }
+        }
+    }
+
+    /// Detect new files that exist in a directory but aren't tracked.
+    fn detect_appeared(
+        space: &crate::address::AddressSpace,
+        dir: &Path,
+        changes: &mut FxHashMap<PathBuf, ChangeKind>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = normalize_path(&entry.path());
+            if path.is_file() && !changes.contains_key(&path) && space.url_for_source(&path).is_none()
+            {
+                crate::debug!("watch"; "dir-scan found untracked: {}", path.display());
+                changes.insert(path, ChangeKind::Created);
+            }
+        }
+    }
+
+    /// Step 3: Promote Modified files not in AddressSpace to Created.
+    ///
+    /// A file that's modified but not yet tracked is effectively a new file
+    /// (e.g., created by an editor that writes-then-renames).
+    fn promote_untracked(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
+        use crate::address::GLOBAL_ADDRESS_SPACE;
+
+        let space = GLOBAL_ADDRESS_SPACE.read();
+        let to_promote: Vec<_> = changes
+            .iter()
+            .filter(|(_, k)| **k == ChangeKind::Modified)
+            .filter(|(p, _)| space.url_for_source(p).is_none())
+            .map(|(p, _)| p.clone())
+            .collect();
+        for path in to_promote {
+            changes.insert(path, ChangeKind::Created);
+        }
+    }
+
+    /// Step 4: Filter to actionable events only.
+    ///
+    /// - Created/Modified: must be a file (not a directory)
+    /// - Removed: must still be tracked in AddressSpace (prevents duplicate removals)
+    fn filter_actionable(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
+        use crate::address::GLOBAL_ADDRESS_SPACE;
+
+        let space = GLOBAL_ADDRESS_SPACE.read();
+        changes.retain(|p, k| match k {
+            ChangeKind::Created | ChangeKind::Modified => p.is_file(),
+            ChangeKind::Removed => {
+                let tracked = space.url_for_source(p).is_some();
+                if !tracked {
+                    crate::debug!("watch"; "filter removed (not tracked): {}", p.display());
+                }
+                tracked
+            }
+        });
     }
 }
 
@@ -539,5 +710,53 @@ mod tests {
         assert_eq!(created.len(), 2);
         assert_eq!(modified.len(), 1);
         assert_eq!(removed.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_then_create_restores() {
+        let mut debouncer = Debouncer::new();
+
+        // File removed, then restored (created) — should become Created
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], remove_kind()));
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/a.typ")],
+            ChangeKind::Removed
+        );
+
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], create_kind()));
+        assert_eq!(debouncer.changes.len(), 1);
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/a.typ")],
+            ChangeKind::Created
+        );
+    }
+
+    #[test]
+    fn test_create_then_remove_discards() {
+        let mut debouncer = Debouncer::new();
+
+        // File created, then removed — net no-op, should be discarded entirely
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], create_kind()));
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/a.typ")],
+            ChangeKind::Created
+        );
+
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], remove_kind()));
+        assert!(debouncer.changes.is_empty(), "created+removed should discard");
+    }
+
+    #[test]
+    fn test_modify_then_remove_upgrades() {
+        let mut debouncer = Debouncer::new();
+
+        // File modified, then removed — should upgrade to Removed
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], modify_kind()));
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], remove_kind()));
+        assert_eq!(debouncer.changes.len(), 1);
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/a.typ")],
+            ChangeKind::Removed
+        );
     }
 }

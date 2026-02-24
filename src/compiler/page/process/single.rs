@@ -6,7 +6,7 @@ use crate::compiler::CompileContext;
 use crate::compiler::page::compile;
 use crate::compiler::page::{PageResult, collect_warnings};
 use crate::config::SiteConfig;
-use crate::core::BuildMode;
+use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE};
 use crate::page::{CompiledPage, PageMeta, STORED_PAGES};
 use anyhow::Result;
 use std::path::Path;
@@ -66,6 +66,13 @@ pub fn process_page(
         page.route.permalink.clone(),
         page.content_meta.clone().unwrap_or_default(),
     );
+    // Also update source mapping for remove_by_source to work correctly
+    STORED_PAGES.insert_source_mapping(path.to_path_buf(), page.route.permalink.clone());
+
+    // Register to AddressSpace for hot-reload tracking
+    GLOBAL_ADDRESS_SPACE
+        .write()
+        .register_page(page.route.clone(), page.content_meta.as_ref().and_then(|m| m.title.clone()));
 
     let permalink = page.route.permalink.clone();
 

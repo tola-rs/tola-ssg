@@ -634,8 +634,8 @@ mod tests {
         let json = r#"{
             "title": "My Blog Post",
             "summary": {"func": "text", "text": "This is the summary"},
-            "date": "2025-01-15",
-            "update": "2025-01-20",
+            "date": "datetime(year: 2025, month: 1, day: 15)",
+            "update": "datetime(year: 2025, month: 1, day: 20)",
             "author": "Alice",
             "draft": false
         }"#;

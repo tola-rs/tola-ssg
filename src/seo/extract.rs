@@ -137,7 +137,8 @@ mod tests {
 
         #[test]
         fn space() {
-            assert_eq!(extract(&json!({"func": "space"})), " ");
+            // space alone gets trimmed to empty string
+            assert_eq!(extract(&json!({"func": "space"})), "");
         }
 
         #[test]

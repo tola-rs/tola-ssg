@@ -145,6 +145,14 @@ fn build_persist_entry(
     dep_graph: &DependencyGraph,
     root: &Path,
 ) -> Option<PersistEntry> {
+    // Get source path first - skip if source file no longer exists
+    // This handles the case where a file was deleted but debouncer didn't process it yet
+    let source_file = source_paths.get(url)?;
+    if !source_file.exists() {
+        crate::debug!("persist"; "skipping {} (source deleted)", url);
+        return None;
+    }
+
     // Serialize document
     let bytes = match to_bytes(&cache_entry.doc) {
         Ok(b) => b,
@@ -157,22 +165,14 @@ fn build_persist_entry(
     let filename = CacheIndex::url_to_filename(url);
 
     // Build source info
-    let (source_path, source_hash) = source_paths
-        .get(url)
-        .map(|p| {
-            let rel = p.strip_prefix(root).unwrap_or(p);
-            (rel.display().to_string(), compute_hash(p))
-        })
-        .unwrap_or_else(|| {
-            crate::debug!("persist"; "no source path for {}", url);
-            (String::new(), String::new())
-        });
+    let rel = source_file.strip_prefix(root).unwrap_or(source_file);
+    let source_path = rel.display().to_string();
+    let source_hash = compute_hash(source_file);
 
     // Build dependency info
-    let dependencies = source_paths
-        .get(url)
-        .map(|p| crate::utils::path::normalize_path(p))
-        .and_then(|normalized| dep_graph.uses(&normalized))
+    let normalized = crate::utils::path::normalize_path(source_file);
+    let dependencies = dep_graph
+        .uses(&normalized)
         .map(|deps| build_dependency_hashes(deps, root))
         .unwrap_or_default();
 

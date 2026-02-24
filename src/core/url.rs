@@ -21,13 +21,14 @@ impl UrlPath {
     /// Create from browser URL (decode percent-encoding, strip query string).
     pub fn from_browser(encoded: &str) -> Self {
         use percent_encoding::percent_decode_str;
-        // Strip query string before decoding
-        let path = encoded.split('?').next().unwrap_or(encoded);
+        // Strip query string and fragment before decoding (on encoded string)
+        let path = encoded.split(['?', '#']).next().unwrap_or(encoded);
         let decoded = percent_decode_str(path)
             .decode_utf8()
             .map(|s| s.into_owned())
             .unwrap_or_else(|_| path.to_string());
-        Self::from_page(&decoded)
+        // Use from_page_internal to skip redundant query/fragment stripping
+        Self::from_page_internal(&decoded)
     }
 
     /// Create page URL (with trailing slash). Normalizes leading/trailing slashes.
@@ -43,11 +44,23 @@ impl UrlPath {
         // Use url crate to properly strip query and fragment
         let path = Self::strip_query_fragment(trimmed);
 
+        Self::from_page_internal(&path)
+    }
+
+    /// Internal: create page URL without stripping query/fragment (already done).
+    fn from_page_internal(path: &str) -> Self {
+        let trimmed = path.trim();
+
+        // Handle root path specially
+        if trimmed.is_empty() || trimmed == "/" {
+            return Self(Arc::from("/"));
+        }
+
         // Add leading slash if missing
-        let with_leading = if path.starts_with('/') {
-            path
+        let with_leading = if trimmed.starts_with('/') {
+            trimmed.to_string()
         } else {
-            format!("/{}", path)
+            format!("/{}", trimmed)
         };
 
         // Add trailing slash if missing (for page URLs)

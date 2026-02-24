@@ -110,6 +110,10 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
     // Wait for all background tasks to complete
     SCHEDULER.wait_all();
 
+    // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
+    // This ensures they have complete data after all pages are compiled
+    recompile_virtual_users(config);
+
     // Post-processing (flatten assets already done in init_serve_build)
     // CNAME already done in init_serve_build
 
@@ -130,6 +134,35 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
 
     log!("build"; "done");
     Ok(())
+}
+
+/// Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
+///
+/// This ensures iterative pages have complete data after all pages are compiled.
+/// Called after initial scheduler compilation to fix race condition where
+/// pages may have been compiled before STORED_PAGES was fully populated.
+fn recompile_virtual_users(config: &SiteConfig) {
+    use crate::compiler::dependency::collect_virtual_dependents;
+    use crate::reload::compile::compile_page;
+
+    let all_dependents = collect_virtual_dependents();
+
+    if all_dependents.is_empty() {
+        return;
+    }
+
+    debug!("build"; "recompiling {} virtual package users", all_dependents.len());
+
+    // Recompile each dependent page (compile_page handles write + cache)
+    for path in &all_dependents {
+        let outcome = compile_page(path, config);
+        if let crate::reload::compile::CompileOutcome::Vdom { url_path, vdom, .. } = outcome {
+            crate::compiler::page::cache_vdom(&url_path, *vdom);
+        }
+    }
+
+    // Flush dependencies recorded during recompilation
+    crate::compiler::dependency::flush_thread_local_deps();
 }
 
 /// Finalize serve build: print warnings and persist cache

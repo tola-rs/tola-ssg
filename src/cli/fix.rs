@@ -83,7 +83,7 @@ fn check_and_fix(
     github_url: &str,
     generate: impl FnOnce() -> String,
 ) -> Result<CheckResult> {
-    // Case 1: File missing → prompt to create
+    // Case: File missing → prompt to create
     if !path.exists() {
         log!("fix"; "{} not found", name);
         if prompt_create(name)? {
@@ -94,7 +94,7 @@ fn check_and_fix(
         return Ok(CheckResult::Skipped);
     }
 
-    // Case 2: File exists → check version
+    // Case: File exists → check version
     match extract_version(path)? {
         Some(v) if v == current_version => Ok(CheckResult::Ok),
         Some(v) => {

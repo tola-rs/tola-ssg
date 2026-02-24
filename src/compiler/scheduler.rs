@@ -333,6 +333,7 @@ impl CompileScheduler {
 
 impl CompileScheduler {
     fn do_compile(&self, path: &Path) -> CompileResult {
+        use crate::compiler::dependency::flush_current_thread_deps;
         use crate::compiler::page::{cache_vdom, process_page, write_page_html};
         use crate::config::cfg;
 
@@ -343,6 +344,10 @@ impl CompileScheduler {
             Ok(None) => return CompileResult::Skipped,
             Err(e) => return CompileResult::Failed(format!("{:#}", e)),
         };
+
+        // Flush dependencies recorded by process_page to global graph
+        // (scheduler workers are not rayon threads, so flush_to_global won't reach them)
+        flush_current_thread_deps();
 
         if let Err(e) = write_page_html(&result.page) {
             return CompileResult::Failed(format!("write failed: {:#}", e));

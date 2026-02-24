@@ -238,21 +238,55 @@ impl CompilerActor {
             // Look up URL before removing mappings
             let url = GLOBAL_ADDRESS_SPACE.read().url_for_source(path).cloned();
 
-            // Clean up all stores
+            // Untrack from all stores
             GLOBAL_ADDRESS_SPACE.write().remove_by_source(path);
             STORED_PAGES.remove_by_source(path);
             remove_content(path);
 
-            // Clean up VDOM cache
             if let Some(url) = &url {
                 BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
+                self.clean_output_file(url);
                 crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
             }
         }
 
-        // Trigger reload so browsers reflect the removal
-        let reason = format!("{} file(s) removed", count);
-        let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
+        // Recompile pages that use @tola/pages (they need updated page list)
+        self.recompile_virtual_users().await;
+
+        // Signal batch end to flush any pending output
+        let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
+    }
+
+    /// Remove output HTML file and empty parent directory for a removed page.
+    fn clean_output_file(&self, url: &crate::core::UrlPath) {
+        let output_dir = self.config.paths().output_dir();
+        let rel_path = url.as_str().trim_matches('/');
+        let output_file = if rel_path.is_empty() {
+            output_dir.join("index.html")
+        } else {
+            output_dir.join(rel_path).join("index.html")
+        };
+
+        if !output_file.exists() {
+            return;
+        }
+
+        if let Err(e) = std::fs::remove_file(&output_file) {
+            crate::debug!("watch"; "failed to remove {}: {}", output_file.display(), e);
+            return;
+        }
+        crate::debug!("watch"; "removed output {}", output_file.display());
+
+        // Remove empty parent directory
+        if let Some(parent) = output_file.parent()
+            && parent != output_dir
+            && parent.is_dir()
+            && std::fs::read_dir(parent)
+                .map(|mut e| e.next().is_none())
+                .unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir(parent);
+        }
     }
 
     async fn on_asset_change(&mut self, paths: Vec<PathBuf>) {
@@ -411,7 +445,10 @@ impl CompilerActor {
 
         let result = tokio::task::spawn_blocking(move || {
             let outcome = compile_page(&path, &config);
-            crate::compiler::dependency::flush_thread_local_deps();
+            // Use flush_current_thread_deps (not flush_thread_local_deps) because
+            // spawn_blocking threads are not rayon workers, so rayon::broadcast
+            // won't reach them. This is consistent with scheduler's do_compile.
+            crate::compiler::dependency::flush_current_thread_deps();
             outcome
         })
         .await;
@@ -432,20 +469,16 @@ impl CompilerActor {
 
     /// Recompile pages using @tola/* virtual packages
     async fn recompile_virtual_users(&mut self) {
-        use crate::compiler::dependency::get_dependents;
-        use crate::package::TolaPackage;
-        use rustc_hash::FxHashSet;
+        use crate::compiler::dependency::collect_virtual_dependents;
 
-        // Collect dependents from all virtual packages
-        let all_dependents: FxHashSet<_> = TolaPackage::all()
-            .iter()
-            .flat_map(|pkg| get_dependents(&pkg.sentinel()))
-            .collect();
+        let all_dependents = collect_virtual_dependents();
 
         if !all_dependents.is_empty() {
             crate::log!("compile"; "recompiling {} virtual package users", all_dependents.len());
             self.compile_batch_blocking(all_dependents.into_iter().collect())
                 .await;
+        } else {
+            crate::debug!("compile"; "no virtual package users to recompile");
         }
     }
 

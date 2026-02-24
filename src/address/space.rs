@@ -209,7 +209,11 @@ impl AddressSpace {
 
         match old_url {
             Some(old) => PermalinkUpdate::Changed { old_url: old },
-            None => PermalinkUpdate::Unchanged, // First time seeing this source
+            None => {
+                // First time seeing this source - this is a new page
+                crate::debug!("address_space"; "new source registered: {} -> {}", source.display(), new_url);
+                PermalinkUpdate::Unchanged
+            }
         }
     }
 
@@ -243,6 +247,11 @@ impl AddressSpace {
     /// Get URL for a source file.
     pub fn url_for_source(&self, source: &Path) -> Option<&UrlPath> {
         self.by_source.get(source)
+    }
+
+    /// Iterate over all tracked source paths.
+    pub fn iter_sources(&self) -> impl Iterator<Item = &Path> {
+        self.by_source.keys().map(|p| p.as_path())
     }
 
     /// Get source file path for a URL (reverse lookup, pages only).
@@ -535,22 +544,22 @@ impl AddressSpace {
         fragment: &str,
         ctx: &ResolveContext<'_>,
     ) -> ResolveResult {
-        // Step 1: Compute URL-space target
+        // Compute URL-space target
         let url_target = resolve_relative_url(ctx.current_permalink, path);
 
-        // Step 2: Compute physical-space target
+        // Compute physical-space target
         let source_dir = ctx.source_path.parent().unwrap_or(Path::new(""));
         let physical_target = resolve_physical_path(source_dir, path);
 
-        // Step 3: Try URL-space match
+        // Try URL-space match
         let url_match = self.by_url.get(&url_target);
 
-        // Step 4: Try physical-space match
+        // Try physical-space match
         let physical_match = self.find_page_by_physical_path(&physical_target);
 
-        // Step 5: Analyze results
+        // Analyze results
         match (url_match, physical_match) {
-            // Case 1: URL matches, check consistency
+            // Case: URL matches, check consistency
             (Some(resource), _) => {
                 if let Resource::Page { route, .. } = resource {
                     if self.source_matches_physical(&physical_target, &route.source) {
@@ -589,7 +598,7 @@ impl AddressSpace {
                 }
             }
 
-            // Case 2: URL doesn't match, but physical path finds a page
+            // Case: URL doesn't match, but physical path finds a page
             // This is valid because resolve_file_relative will adjust the path
             (None, Some((found_url, resource))) => {
                 if !fragment.is_empty() {
@@ -598,7 +607,7 @@ impl AddressSpace {
                 ResolveResult::Found(resource.clone())
             }
 
-            // Case 3: Neither matches - try as content asset
+            // Case: Neither matches - try as content asset
             (None, None) => {
                 // Try physical path as content asset (handles ../ properly)
                 let asset_path = resolve_physical_path(source_dir, path);
