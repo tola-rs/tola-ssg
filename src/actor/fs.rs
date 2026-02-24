@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 
 use super::messages::CompilerMsg;
 use crate::config::SiteConfig;
-use crate::reload::classify::{ClassifyResult, classify_changes};
+use crate::reload::classify::classify_changes;
 use crate::utils::path::normalize_path;
 
 /// Debounce configuration
@@ -126,21 +127,16 @@ async fn process_changes(
     compiler_tx: &mpsc::Sender<CompilerMsg>,
     config: &SiteConfig,
 ) -> Result<(), ()> {
-    let Some(paths) = debouncer.take_if_ready() else {
+    let Some(events) = debouncer.take_if_ready() else {
         return Ok(());
     };
 
-    // Classify all changed files
-    let result = classify_changes(&paths, config);
-
-    // Collect all changed paths (for running watched hooks)
-    let changed_paths: Vec<PathBuf> = result.classified.iter().map(|(p, _)| p.clone()).collect();
-
     // If initial build failed, trigger retry scan on any file change
     if !crate::core::is_healthy() {
-        if changed_paths.is_empty() {
+        if events.is_empty() {
             return Ok(());
         }
+        let changed_paths = events.all_paths();
         crate::log!("watch"; "retrying scan after change");
         compiler_tx
             .send(CompilerMsg::RetryScan { changed_paths })
@@ -149,16 +145,13 @@ async fn process_changes(
         return Ok(());
     }
 
-    // Log changes first (before consuming result)
-    log_changes(&result);
+    log_events(&events);
 
-    // When healthy: process all changes for hot-reload
-    let messages = result_to_messages(result, changed_paths);
+    let messages = events_to_messages(events, config);
     if messages.is_empty() {
-        return Ok(()); // Nothing to do
+        return Ok(());
     }
 
-    // Route to CompilerActor
     for msg in messages {
         compiler_tx.send(msg).await.map_err(|_| ())?;
     }
@@ -166,35 +159,41 @@ async fn process_changes(
     Ok(())
 }
 
-/// Log file changes in verbose mode
-fn log_changes(result: &ClassifyResult) {
-    for (path, category) in &result.classified {
-        crate::debug!("watch"; "{} changed: {}", category.name(), path.display());
-    }
-    if let Some(note) = &result.note {
-        crate::debug!("watch"; "{}", note);
+/// Log file change events
+fn log_events(events: &DebouncedEvents) {
+    for (path, kind) in &events.0 {
+        crate::debug!("watch"; "{}: {}", kind.label(), path.display());
     }
 }
 
-/// Convert ClassifyResult to CompilerMsg(s)
-///
-/// May return multiple messages:
-/// - Compile for content files (with changed_paths for hooks)
-/// - FullRebuild for config changes (overrides everything)
-fn result_to_messages(result: ClassifyResult, changed_paths: Vec<PathBuf>) -> Vec<CompilerMsg> {
+/// Convert DebouncedEvents to CompilerMsg(s)
+fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<CompilerMsg> {
+    let (created, modified, removed) = events.split();
+
+    // Classify modified files through the existing pipeline
+    let result = classify_changes(&modified, config);
+
     if result.config_changed {
         return vec![CompilerMsg::FullRebuild];
     }
 
     let mut messages = Vec::new();
 
-    // Asset changes
+    if !created.is_empty() {
+        messages.push(CompilerMsg::ContentCreated(created));
+    }
+
+    if !removed.is_empty() {
+        messages.push(CompilerMsg::ContentRemoved(removed));
+    }
+
     if !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
     }
 
-    // Content compilation (with changed_paths for hooks)
     if !result.compile_queue.is_empty() {
+        let changed_paths: Vec<PathBuf> =
+            result.classified.iter().map(|(p, _)| p.clone()).collect();
         messages.push(CompilerMsg::Compile {
             queue: result.compile_queue,
             changed_paths,
@@ -204,76 +203,166 @@ fn result_to_messages(result: ClassifyResult, changed_paths: Vec<PathBuf>) -> Ve
     messages
 }
 
-/// Simple debouncer for file events
+// =============================================================================
+// Change types
+// =============================================================================
+
+/// What happened to a file
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChangeKind {
+    Created,
+    Modified,
+    Removed,
+}
+
+impl ChangeKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Modified => "modified",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// Debounced file events, categorized by type
+pub(crate) struct DebouncedEvents(Vec<(PathBuf, ChangeKind)>);
+
+impl DebouncedEvents {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn all_paths(&self) -> Vec<PathBuf> {
+        self.0.iter().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// Split into (created, modified, removed) path lists
+    fn split(self) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+        let mut created = Vec::new();
+        let mut modified = Vec::new();
+        let mut removed = Vec::new();
+        for (path, kind) in self.0 {
+            match kind {
+                ChangeKind::Created => created.push(path),
+                ChangeKind::Modified => modified.push(path),
+                ChangeKind::Removed => removed.push(path),
+            }
+        }
+        (created, modified, removed)
+    }
+}
+
+// =============================================================================
+// Debouncer
+// =============================================================================
+
 struct Debouncer {
-    /// Accumulated changed paths
-    changed: Vec<PathBuf>,
-    /// Time of last event
+    /// Path → ChangeKind (dedup is free via HashMap key uniqueness)
+    changes: FxHashMap<PathBuf, ChangeKind>,
     last_event: Option<std::time::Instant>,
-    /// Time of last compile
     last_compile: Option<std::time::Instant>,
 }
 
 impl Debouncer {
     fn new() -> Self {
         Self {
-            changed: Vec::new(),
+            changes: FxHashMap::default(),
             last_event: None,
             last_compile: None,
         }
     }
 
     fn add_event(&mut self, event: &notify::Event) {
+        use notify::EventKind;
+
+        let kind = match event.kind {
+            EventKind::Create(_) => ChangeKind::Created,
+            EventKind::Remove(_) => ChangeKind::Removed,
+            EventKind::Modify(_) => ChangeKind::Modified,
+            _ => return,
+        };
+
         for path in &event.paths {
-            // Skip editor temporary/backup files
             if is_temp_file(path) {
                 continue;
             }
 
-            // Normalize path to ensure consistent keys with VDOM cache
-            // Fixes macOS /var vs /private/var symlink issues
             let path = normalize_path(path);
 
-            if !self.changed.contains(&path) {
-                self.changed.push(path);
-                self.last_event = Some(std::time::Instant::now());
+            // First event for this path wins (later events within same batch are redundant)
+            if self.changes.contains_key(&path) {
+                continue;
             }
+
+            self.changes.insert(path, kind);
+            self.last_event = Some(std::time::Instant::now());
         }
     }
 
-    /// Only sets `last_compile` when returning actual paths.
-    /// Empty results (e.g. all deleted files) do NOT trigger cooldown.
-    fn take_if_ready(&mut self) -> Option<Vec<PathBuf>> {
+    /// Take events if debounce + cooldown elapsed, applying merge rules.
+    ///
+    /// Only sets `last_compile` when returning non-empty events.
+    fn take_if_ready(&mut self) -> Option<DebouncedEvents> {
         if !self.is_ready() {
             return None;
         }
 
-        // Wait for initial scan to complete before processing changes
-        // This prevents false "deps changed but no dependents" when
-        // dependency graph hasn't been populated yet
-        // Note: We check is_serving() not is_healthy() to allow hot-reload
-        // during on-demand compilation (scheduler mode)
         if !crate::core::is_serving() {
             return None;
         }
 
-        // Filter to existing files, consume changed buffer
-        let paths: Vec<_> = std::mem::take(&mut self.changed)
-            .into_iter()
-            .filter(|p| p.exists() && p.is_file())
-            .collect();
-
-        // Always clear event timer (we consumed the buffer)
+        let mut changes = std::mem::take(&mut self.changes);
         self.last_event = None;
 
-        if paths.is_empty() {
-            // No valid files — do NOT trigger cooldown
+        // Existence-based corrections
+        let paths: Vec<_> = changes.keys().cloned().collect();
+        for path in paths {
+            let kind = changes[&path];
+            match kind {
+                ChangeKind::Created if !path.exists() => {
+                    // Created but already gone → discard
+                    changes.remove(&path);
+                }
+                ChangeKind::Modified if !path.exists() => {
+                    // Modified but gone → treat as removed
+                    changes.insert(path, ChangeKind::Removed);
+                }
+                ChangeKind::Removed if path.exists() => {
+                    // Removed but still there → treat as modified (macOS FSEvents)
+                    changes.insert(path, ChangeKind::Modified);
+                }
+                _ => {}
+            }
+        }
+
+        // Promote modified files not in AddressSpace to created
+        {
+            use crate::address::GLOBAL_ADDRESS_SPACE;
+            let space = GLOBAL_ADDRESS_SPACE.read();
+            let to_promote: Vec<_> = changes
+                .iter()
+                .filter(|(_, k)| **k == ChangeKind::Modified)
+                .filter(|(p, _)| space.url_for_source(p).is_none())
+                .map(|(p, _)| p.clone())
+                .collect();
+            for path in to_promote {
+                changes.insert(path, ChangeKind::Created);
+            }
+        }
+
+        // Filter created/modified to files only (not directories)
+        changes.retain(|p, k| match k {
+            ChangeKind::Created | ChangeKind::Modified => p.is_file(),
+            ChangeKind::Removed => true, // can't check is_file on deleted paths
+        });
+
+        if changes.is_empty() {
             return None;
         }
 
-        // Only set cooldown when we actually have work to dispatch
         self.last_compile = Some(std::time::Instant::now());
-        Some(paths)
+        Some(DebouncedEvents(changes.into_iter().collect()))
     }
 
     fn is_ready(&self) -> bool {
@@ -281,25 +370,22 @@ impl Debouncer {
             return false;
         };
 
-        // Must wait for debounce period
         if last_event.elapsed() < Duration::from_millis(DEBOUNCE_MS) {
             return false;
         }
 
-        // Must wait for cooldown from last compile
         if let Some(last_compile) = self.last_compile
             && last_compile.elapsed() < Duration::from_millis(REBUILD_COOLDOWN_MS)
         {
             return false;
         }
 
-        !self.changed.is_empty()
+        !self.changes.is_empty()
     }
 
     /// Precise sleep duration until next possible ready time.
     fn sleep_duration(&self) -> Duration {
         let Some(last_event) = self.last_event else {
-            // No pending events — sleep long, recv will wake us
             return Duration::from_secs(86400);
         };
 
@@ -311,7 +397,6 @@ impl Debouncer {
             .map(|t| Duration::from_millis(REBUILD_COOLDOWN_MS).saturating_sub(t.elapsed()))
             .unwrap_or(Duration::ZERO);
 
-        // Wait for whichever is longer, with a minimum of 1ms to avoid busy-loop
         debounce_remaining
             .max(cooldown_remaining)
             .max(Duration::from_millis(1))
@@ -330,6 +415,20 @@ mod tests {
         }
     }
 
+    fn modify_kind() -> notify::EventKind {
+        notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        ))
+    }
+
+    fn create_kind() -> notify::EventKind {
+        notify::EventKind::Create(notify::event::CreateKind::File)
+    }
+
+    fn remove_kind() -> notify::EventKind {
+        notify::EventKind::Remove(notify::event::RemoveKind::File)
+    }
+
     #[test]
     fn test_debouncer_empty() {
         let debouncer = Debouncer::new();
@@ -337,49 +436,67 @@ mod tests {
     }
 
     #[test]
-    fn test_temp_file_no_debounce_reset() {
+    fn test_event_routing_by_kind() {
         let mut debouncer = Debouncer::new();
 
-        // Add a real file event
-        let event = make_event(vec!["/tmp/real.typ"], notify::EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)));
-        debouncer.add_event(&event);
-        assert!(debouncer.last_event.is_some());
-        let first_time = debouncer.last_event.unwrap();
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], create_kind()));
+        debouncer.add_event(&make_event(vec!["/tmp/b.typ"], modify_kind()));
+        debouncer.add_event(&make_event(vec!["/tmp/c.typ"], remove_kind()));
 
-        // Wait a bit
-        std::thread::sleep(Duration::from_millis(5));
-
-        // Add a temp file event — should NOT update last_event
-        let temp_event = make_event(vec!["/tmp/.swp"], notify::EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)));
-        debouncer.add_event(&temp_event);
-        assert_eq!(debouncer.last_event.unwrap(), first_time);
-        assert_eq!(debouncer.changed.len(), 1); // only real file
+        assert_eq!(debouncer.changes.len(), 3);
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/a.typ")],
+            ChangeKind::Created
+        );
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/b.typ")],
+            ChangeKind::Modified
+        );
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/c.typ")],
+            ChangeKind::Removed
+        );
     }
 
     #[test]
-    fn test_empty_take_no_cooldown() {
+    fn test_temp_file_ignored() {
         let mut debouncer = Debouncer::new();
 
-        // Add a non-existent file (simulates delete event)
-        let event = make_event(vec!["/nonexistent/deleted.typ"], notify::EventKind::Remove(notify::event::RemoveKind::File));
-        debouncer.add_event(&event);
+        debouncer.add_event(&make_event(vec!["/tmp/real.typ"], modify_kind()));
+        assert!(debouncer.last_event.is_some());
+        let first_time = debouncer.last_event.unwrap();
 
-        // Force debounce to expire
-        debouncer.last_event = Some(std::time::Instant::now() - Duration::from_millis(DEBOUNCE_MS + 100));
+        std::thread::sleep(Duration::from_millis(5));
 
-        // is_ready should be true (changed is non-empty)
-        assert!(debouncer.is_ready());
+        // Temp file event — should NOT update last_event or add to changes
+        debouncer.add_event(&make_event(vec!["/tmp/.swp"], modify_kind()));
+        assert_eq!(debouncer.last_event.unwrap(), first_time);
+        assert_eq!(debouncer.changes.len(), 1);
+    }
 
-        // But we can't call take_if_ready without is_serving() being true,
-        // so test the logic directly: filter produces empty, cooldown should NOT be set
-        let paths: Vec<_> = std::mem::take(&mut debouncer.changed)
-            .into_iter()
-            .filter(|p| p.exists() && p.is_file())
-            .collect();
-        assert!(paths.is_empty());
-        // In the old code, last_compile would have been set here.
-        // In the new code, it remains None.
-        assert!(debouncer.last_compile.is_none());
+    #[test]
+    fn test_dedup_first_event_wins() {
+        let mut debouncer = Debouncer::new();
+
+        // Same path: create then modify — first one (create) wins
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], create_kind()));
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ"], modify_kind()));
+
+        assert_eq!(debouncer.changes.len(), 1);
+        assert_eq!(
+            debouncer.changes[&PathBuf::from("/tmp/a.typ")],
+            ChangeKind::Created
+        );
+    }
+
+    #[test]
+    fn test_dedup_same_event() {
+        let mut debouncer = Debouncer::new();
+        debouncer.add_event(&make_event(
+            vec!["/tmp/a.typ", "/tmp/a.typ"],
+            modify_kind(),
+        ));
+        assert_eq!(debouncer.changes.len(), 1);
     }
 
     #[test]
@@ -394,7 +511,6 @@ mod tests {
         debouncer.last_event = Some(std::time::Instant::now());
 
         let dur = debouncer.sleep_duration();
-        // Should be close to DEBOUNCE_MS (within a few ms tolerance)
         assert!(dur >= Duration::from_millis(DEBOUNCE_MS - 10));
         assert!(dur <= Duration::from_millis(DEBOUNCE_MS + 10));
     }
@@ -402,22 +518,26 @@ mod tests {
     #[test]
     fn test_sleep_duration_respects_cooldown() {
         let mut debouncer = Debouncer::new();
-        // Event just happened
         debouncer.last_event = Some(std::time::Instant::now());
-        // Compile just happened (cooldown > debounce)
         debouncer.last_compile = Some(std::time::Instant::now());
 
         let dur = debouncer.sleep_duration();
-        // Should be close to REBUILD_COOLDOWN_MS (the longer of the two)
         assert!(dur >= Duration::from_millis(REBUILD_COOLDOWN_MS - 10));
         assert!(dur <= Duration::from_millis(REBUILD_COOLDOWN_MS + 10));
     }
 
     #[test]
-    fn test_dedup_paths() {
-        let mut debouncer = Debouncer::new();
-        let event = make_event(vec!["/tmp/a.typ", "/tmp/a.typ"], notify::EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)));
-        debouncer.add_event(&event);
-        assert_eq!(debouncer.changed.len(), 1);
+    fn test_debounced_events_split() {
+        let events = DebouncedEvents(vec![
+            (PathBuf::from("/a.typ"), ChangeKind::Created),
+            (PathBuf::from("/b.typ"), ChangeKind::Modified),
+            (PathBuf::from("/c.typ"), ChangeKind::Removed),
+            (PathBuf::from("/d.typ"), ChangeKind::Created),
+        ]);
+
+        let (created, modified, removed) = events.split();
+        assert_eq!(created.len(), 2);
+        assert_eq!(modified.len(), 1);
+        assert_eq!(removed.len(), 1);
     }
 }

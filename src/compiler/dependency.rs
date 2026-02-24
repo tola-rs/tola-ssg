@@ -103,7 +103,7 @@ impl DependencyGraph {
     // -------------------------------------------------------------------------
 
     /// Remove a content file and clean up its reverse mappings.
-    fn remove_content(&mut self, content: &Path) {
+    pub(crate) fn remove_content(&mut self, content: &Path) {
         let Some(old_deps) = self.forward.remove(content) else {
             return;
         };
@@ -182,6 +182,14 @@ pub mod global {
         GRAPH.write().clear();
     }
 
+    /// Remove a content file from the dependency graph.
+    ///
+    /// Cleans up both forward and reverse mappings.
+    pub fn remove(content_file: &Path) {
+        let normalized = normalize_path(content_file);
+        GRAPH.write().remove_content(&normalized);
+    }
+
     /// Merge dependency entries into the global graph.
     ///
     /// Used by [`parallel::flush_to_global`] after collecting from all threads.
@@ -250,7 +258,7 @@ pub mod parallel {
 // Public API
 // =============================================================================
 
-pub use global::{clear as clear_graph, used_by as get_dependents};
+pub use global::{clear as clear_graph, remove as remove_content, used_by as get_dependents};
 pub use parallel::{
     flush_to_global as flush_thread_local_deps, record_local as record_dependencies_local,
 };

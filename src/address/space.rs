@@ -137,6 +137,16 @@ impl AddressSpace {
         self.headings.remove(url);
     }
 
+    /// Remove a source file and all its mappings from the address space.
+    ///
+    /// Cleans up by_url, by_source, and headings in one operation.
+    pub fn remove_by_source(&mut self, source: &Path) {
+        if let Some(url) = self.by_source.remove(source) {
+            self.by_url.remove(&url);
+            self.headings.remove(&url);
+        }
+    }
+
     /// Set source -> URL mapping (low-level, no change detection).
     ///
     /// This is a low-level operation. Use `update_source_url` for permalink change handling.

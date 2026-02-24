@@ -92,7 +92,7 @@ impl AtomFeed {
             .generator(Some(
                 GeneratorBuilder::default()
                     .value("tola-ssg")
-                    .uri(Some("https://github.com/kawayww/tola-ssg".to_string()))
+                    .uri(Some("https://github.com/tola-rs/tola-ssg".to_string()))
                     .build(),
             ))
             .lang(self.config.site.info.language.clone())

@@ -30,6 +30,10 @@ pub enum CompilerMsg {
     /// Compile content files that depend on changed deps
     #[allow(dead_code)] // Reserved for future dependency-aware rebuild
     CompileDependents(Vec<PathBuf>),
+    /// New content files created - register + compile
+    ContentCreated(Vec<PathBuf>),
+    /// Content files deleted - cleanup mappings
+    ContentRemoved(Vec<PathBuf>),
     /// Process asset changes (copy files, trigger reload)
     AssetChange(Vec<PathBuf>),
     /// Retry scan after initial failure (triggered by file change when !is_healthy)

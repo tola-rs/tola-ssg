@@ -90,6 +90,16 @@ impl StoredPageMap {
         self.headings.write().remove(permalink);
     }
 
+    /// Remove a page by its source file path.
+    ///
+    /// Cleans up pages, headings, and source_to_url in one operation.
+    pub fn remove_by_source(&self, source: &Path) {
+        if let Some(permalink) = self.source_to_url.write().remove(source) {
+            self.pages.write().remove(&permalink);
+            self.headings.write().remove(&permalink);
+        }
+    }
+
     /// Insert headings for a page.
     pub fn insert_headings(&self, permalink: UrlPath, headings: Vec<ScannedHeading>) {
         if !headings.is_empty() {

@@ -84,6 +84,14 @@ impl CompilerActor {
                 self.on_compile_dependents(deps).await;
                 bg
             }
+            CompilerMsg::ContentCreated(paths) => {
+                self.on_content_created(paths).await;
+                bg
+            }
+            CompilerMsg::ContentRemoved(paths) => {
+                self.on_content_removed(paths).await;
+                bg
+            }
             CompilerMsg::AssetChange(paths) => {
                 self.on_asset_change(paths).await;
                 bg
@@ -201,6 +209,50 @@ impl CompilerActor {
         } else {
             self.compile_batch_blocking(affected).await;
         }
+    }
+
+    /// Handle new content files — compile and register
+    async fn on_content_created(&mut self, paths: Vec<PathBuf>) {
+        let count = paths.len();
+        crate::log!("watch"; "{} new content files", count);
+
+        let pages_hash = STORED_PAGES.pages_hash();
+
+        for path in &paths {
+            self.compile_one(path).await;
+        }
+
+        self.finish_batch(pages_hash).await;
+    }
+
+    /// Handle deleted content files — cleanup all state
+    async fn on_content_removed(&mut self, paths: Vec<PathBuf>) {
+        use crate::compiler::dependency::remove_content;
+        use crate::compiler::page::BUILD_CACHE;
+        use tola_vdom::CacheKey;
+
+        let count = paths.len();
+        crate::log!("watch"; "{} content files removed", count);
+
+        for path in &paths {
+            // Look up URL before removing mappings
+            let url = GLOBAL_ADDRESS_SPACE.read().url_for_source(path).cloned();
+
+            // Clean up all stores
+            GLOBAL_ADDRESS_SPACE.write().remove_by_source(path);
+            STORED_PAGES.remove_by_source(path);
+            remove_content(path);
+
+            // Clean up VDOM cache
+            if let Some(url) = &url {
+                BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
+                crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
+            }
+        }
+
+        // Trigger reload so browsers reflect the removal
+        let reason = format!("{} file(s) removed", count);
+        let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
     }
 
     async fn on_asset_change(&mut self, paths: Vec<PathBuf>) {
