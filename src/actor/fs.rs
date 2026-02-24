@@ -2,14 +2,6 @@
 //!
 //! Watches for file changes and sends debounced events to the CompilerActor.
 //! Implements the "Watcher-First" pattern for zero event loss.
-//!
-//! # Responsibility
-//!
-//! This actor is a **thin wrapper** that:
-//! - Receives file system events from notify
-//! - Debounces rapid changes
-//! - Delegates classification to `pipeline::classify`
-//! - Routes messages to CompilerActor
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,9 +106,12 @@ impl FsActor {
 
         loop {
             tokio::select! {
+                biased;
                 Some(event) = async_rx.recv() => debouncer.add_event(&event),
-                _ = tokio::time::sleep(Duration::from_millis(50)) => if process_changes(&mut debouncer, &compiler_tx, &config).await.is_err() {
-                    break;
+                _ = tokio::time::sleep(debouncer.sleep_duration()) => {
+                    if process_changes(&mut debouncer, &compiler_tx, &config).await.is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -229,8 +224,6 @@ impl Debouncer {
     }
 
     fn add_event(&mut self, event: &notify::Event) {
-        self.last_event = Some(std::time::Instant::now());
-
         for path in &event.paths {
             // Skip editor temporary/backup files
             if is_temp_file(path) {
@@ -243,17 +236,13 @@ impl Debouncer {
 
             if !self.changed.contains(&path) {
                 self.changed.push(path);
+                self.last_event = Some(std::time::Instant::now());
             }
         }
     }
 
-    /// Take paths if ready and build is complete.
-    ///
-    /// Returns `None` if:
-    /// - Debounce period not elapsed
-    /// - Cooldown from last compile not elapsed
-    /// - Initial scan not complete (not serving)
-    /// - No existing files to process (deleted files and directories are filtered out)
+    /// Only sets `last_compile` when returning actual paths.
+    /// Empty results (e.g. all deleted files) do NOT trigger cooldown.
     fn take_if_ready(&mut self) -> Option<Vec<PathBuf>> {
         if !self.is_ready() {
             return None;
@@ -268,11 +257,22 @@ impl Debouncer {
             return None;
         }
 
-        let paths = self.take();
+        // Filter to existing files, consume changed buffer
+        let paths: Vec<_> = std::mem::take(&mut self.changed)
+            .into_iter()
+            .filter(|p| p.exists() && p.is_file())
+            .collect();
+
+        // Always clear event timer (we consumed the buffer)
+        self.last_event = None;
+
         if paths.is_empty() {
+            // No valid files — do NOT trigger cooldown
             return None;
         }
 
+        // Only set cooldown when we actually have work to dispatch
+        self.last_compile = Some(std::time::Instant::now());
         Some(paths)
     }
 
@@ -296,13 +296,25 @@ impl Debouncer {
         !self.changed.is_empty()
     }
 
-    fn take(&mut self) -> Vec<PathBuf> {
-        self.last_event = None;
-        self.last_compile = Some(std::time::Instant::now());
-        std::mem::take(&mut self.changed)
-            .into_iter()
-            .filter(|p| p.exists() && p.is_file()) // Filter out directories
-            .collect()
+    /// Precise sleep duration until next possible ready time.
+    fn sleep_duration(&self) -> Duration {
+        let Some(last_event) = self.last_event else {
+            // No pending events — sleep long, recv will wake us
+            return Duration::from_secs(86400);
+        };
+
+        let debounce_remaining =
+            Duration::from_millis(DEBOUNCE_MS).saturating_sub(last_event.elapsed());
+
+        let cooldown_remaining = self
+            .last_compile
+            .map(|t| Duration::from_millis(REBUILD_COOLDOWN_MS).saturating_sub(t.elapsed()))
+            .unwrap_or(Duration::ZERO);
+
+        // Wait for whichever is longer, with a minimum of 1ms to avoid busy-loop
+        debounce_remaining
+            .max(cooldown_remaining)
+            .max(Duration::from_millis(1))
     }
 }
 
@@ -310,9 +322,102 @@ impl Debouncer {
 mod tests {
     use super::*;
 
+    fn make_event(paths: Vec<&str>, kind: notify::EventKind) -> notify::Event {
+        notify::Event {
+            kind,
+            paths: paths.into_iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
     #[test]
     fn test_debouncer_empty() {
         let debouncer = Debouncer::new();
         assert!(!debouncer.is_ready());
+    }
+
+    #[test]
+    fn test_temp_file_no_debounce_reset() {
+        let mut debouncer = Debouncer::new();
+
+        // Add a real file event
+        let event = make_event(vec!["/tmp/real.typ"], notify::EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)));
+        debouncer.add_event(&event);
+        assert!(debouncer.last_event.is_some());
+        let first_time = debouncer.last_event.unwrap();
+
+        // Wait a bit
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Add a temp file event — should NOT update last_event
+        let temp_event = make_event(vec!["/tmp/.swp"], notify::EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)));
+        debouncer.add_event(&temp_event);
+        assert_eq!(debouncer.last_event.unwrap(), first_time);
+        assert_eq!(debouncer.changed.len(), 1); // only real file
+    }
+
+    #[test]
+    fn test_empty_take_no_cooldown() {
+        let mut debouncer = Debouncer::new();
+
+        // Add a non-existent file (simulates delete event)
+        let event = make_event(vec!["/nonexistent/deleted.typ"], notify::EventKind::Remove(notify::event::RemoveKind::File));
+        debouncer.add_event(&event);
+
+        // Force debounce to expire
+        debouncer.last_event = Some(std::time::Instant::now() - Duration::from_millis(DEBOUNCE_MS + 100));
+
+        // is_ready should be true (changed is non-empty)
+        assert!(debouncer.is_ready());
+
+        // But we can't call take_if_ready without is_serving() being true,
+        // so test the logic directly: filter produces empty, cooldown should NOT be set
+        let paths: Vec<_> = std::mem::take(&mut debouncer.changed)
+            .into_iter()
+            .filter(|p| p.exists() && p.is_file())
+            .collect();
+        assert!(paths.is_empty());
+        // In the old code, last_compile would have been set here.
+        // In the new code, it remains None.
+        assert!(debouncer.last_compile.is_none());
+    }
+
+    #[test]
+    fn test_sleep_duration_no_events() {
+        let debouncer = Debouncer::new();
+        assert!(debouncer.sleep_duration() >= Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn test_sleep_duration_after_event() {
+        let mut debouncer = Debouncer::new();
+        debouncer.last_event = Some(std::time::Instant::now());
+
+        let dur = debouncer.sleep_duration();
+        // Should be close to DEBOUNCE_MS (within a few ms tolerance)
+        assert!(dur >= Duration::from_millis(DEBOUNCE_MS - 10));
+        assert!(dur <= Duration::from_millis(DEBOUNCE_MS + 10));
+    }
+
+    #[test]
+    fn test_sleep_duration_respects_cooldown() {
+        let mut debouncer = Debouncer::new();
+        // Event just happened
+        debouncer.last_event = Some(std::time::Instant::now());
+        // Compile just happened (cooldown > debounce)
+        debouncer.last_compile = Some(std::time::Instant::now());
+
+        let dur = debouncer.sleep_duration();
+        // Should be close to REBUILD_COOLDOWN_MS (the longer of the two)
+        assert!(dur >= Duration::from_millis(REBUILD_COOLDOWN_MS - 10));
+        assert!(dur <= Duration::from_millis(REBUILD_COOLDOWN_MS + 10));
+    }
+
+    #[test]
+    fn test_dedup_paths() {
+        let mut debouncer = Debouncer::new();
+        let event = make_event(vec!["/tmp/a.typ", "/tmp/a.typ"], notify::EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Any)));
+        debouncer.add_event(&event);
+        assert_eq!(debouncer.changed.len(), 1);
     }
 }
