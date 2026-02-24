@@ -23,13 +23,18 @@ v0.7.0 is coming soon (26.02.23)
 | [kawayww.com](https://kawayww.com) | Author's personal blog |
 | [example-sites](https://tola-rs.github.io/example-sites/) | Official example collection |
 
-<details>
-<summary>Screenshots</summary>
+**My site ([kawayww.com](https://kawayww.com))**
 
-![home](/screenshots/home.avif)
-![example](/screenshots/example.avif)
+| | |
+|:---:|:---:|
+| <img src="screenshots/home-0.webp" width="100%"> | <img src="screenshots/home-1.webp" width="100%"> |
+| <img src="screenshots/home-2.webp" width="100%"> | <img src="screenshots/home-3.webp" width="100%"> |
 
-</details>
+**Starter Template** ([example-sites/starter](https://tola-rs.github.io/example-sites/starter))
+
+| | |
+|:---:|:---:|
+| <img src="screenshots/starter-0.webp" width="100%"> | <img src="screenshots/starter-1.webp" width="100%"> |
 
 <details>
 <summary>How to make "Recent 5 Posts" with Tola's virtual package system</summary>

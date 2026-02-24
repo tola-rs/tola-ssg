@@ -45,7 +45,7 @@ mod seo;
 
 pub use header::HeaderConfig;
 pub use info::SiteInfoConfig;
-pub use nav::NavConfig;
+pub use nav::{NavConfig, TransitionStyle};
 pub use seo::{FeedConfig, FeedFormat, SeoConfig};
 
 use macros::Config;

@@ -129,18 +129,19 @@ pub mod serve {
 
 pub mod css {
     use super::{AssetKind, EmbeddedAsset, TemplateVars};
+    use crate::config::section::site::TransitionStyle;
 
     /// Typst CSS for SVG color adaptation and math/table layout.
     const TYPST_CSS: &str = include_str!("css/typst.css");
 
     /// Nav CSS template for View Transitions.
-    const NAV_CSS_TEMPLATE: &str = include_str!("css/nav.css");
+    const NAV_CSS_FADE: &str = include_str!("css/nav/fade.css");
 
     /// Variables for nav.css sub-template (from site.nav config).
     #[derive(Clone)]
     pub struct NavVars {
-        /// Whether View Transitions are enabled.
-        pub enabled: bool,
+        /// Transition style.
+        pub style: TransitionStyle,
         /// View Transitions duration in milliseconds (site.nav.transition.time).
         pub transition_time: u32,
     }
@@ -148,11 +149,17 @@ pub mod css {
     impl NavVars {
         /// Generate nav CSS content (empty if disabled).
         pub fn render(&self) -> String {
-            if self.enabled {
-                NAV_CSS_TEMPLATE.replace("__TRANSITION_TIME__", &self.transition_time.to_string())
-            } else {
-                String::new()
+            match self.style {
+                TransitionStyle::None => String::new(),
+                TransitionStyle::Fade => {
+                    NAV_CSS_FADE.replace("__TRANSITION_TIME__", &self.transition_time.to_string())
+                }
             }
+        }
+
+        /// Whether View Transitions are enabled.
+        pub fn is_enabled(&self) -> bool {
+            self.style != TransitionStyle::None
         }
     }
 
@@ -170,7 +177,7 @@ pub mod css {
         }
 
         fn hash_input(&self) -> String {
-            format!("{}{}", self.nav.enabled, self.nav.transition_time)
+            format!("{:?}{}", self.nav.style, self.nav.transition_time)
         }
     }
 
@@ -178,7 +185,7 @@ pub mod css {
     pub fn enhance_vars(config: &crate::config::SiteConfig) -> EnhanceVars {
         EnhanceVars {
             nav: NavVars {
-                enabled: config.site.nav.transition.is_enabled(),
+                style: config.site.nav.transition.style,
                 transition_time: config.site.nav.transition.time,
             },
         }
@@ -454,9 +461,10 @@ mod tests {
 
     #[test]
     fn test_css_asset() {
+        use crate::config::section::site::TransitionStyle;
         let vars = css::EnhanceVars {
             nav: css::NavVars {
-                enabled: true,
+                style: TransitionStyle::Fade,
                 transition_time: 200,
             },
         };
@@ -472,9 +480,10 @@ mod tests {
 
     #[test]
     fn test_css_asset_nav_disabled() {
+        use crate::config::section::site::TransitionStyle;
         let vars = css::EnhanceVars {
             nav: css::NavVars {
-                enabled: false,
+                style: TransitionStyle::None,
                 transition_time: 200,
             },
         };

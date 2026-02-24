@@ -17,14 +17,17 @@ use super::{AssetKind, AssetRoute};
 ///
 /// Returns an error if the source path is not within any configured assets directory
 pub fn route_from_source(source: PathBuf, config: &SiteConfig) -> Result<AssetRoute> {
-    let output_dir = config.paths().output_dir();
+    let paths = config.paths();
+    let output_dir = paths.output_dir();
 
     // Find which nested directory contains this source
     for entry in &config.build.assets.nested {
         let assets_dir = entry.source();
         if let Ok(relative) = source.strip_prefix(assets_dir) {
             let prefix = entry.output_name();
-            let url = UrlPath::from_asset(&format!("/{}/{}", prefix, relative.display()));
+            // Use PathResolver to include path_prefix in URL
+            let rel_path = format!("{}/{}", prefix, relative.display());
+            let url = UrlPath::from_asset(&paths.url_for_rel_path(&rel_path));
             let output = output_dir.join(prefix).join(relative);
 
             return Ok(AssetRoute {
@@ -111,12 +114,13 @@ pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<Stri
     // Convert to absolute path for comparison (entries are normalized to absolute)
     let root = config.get_root();
     let abs_path = crate::utils::path::normalize_path(&root.join(normalized));
+    let paths = config.paths();
 
     // Try flatten entries first (exact file match)
     for entry in &config.build.assets.flatten {
         if abs_path == entry.source() {
-            // Flatten files go to output root
-            return Ok(format!("/{}", entry.output_name()));
+            // Flatten files go to output root (with path_prefix)
+            return Ok(paths.url_for_filename(entry.output_name()));
         }
     }
 
@@ -130,9 +134,10 @@ pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<Stri
             let output_name = entry.output_name();
 
             if rel_clean.is_empty() {
-                return Ok(format!("/{}/", output_name));
+                return Ok(format!("{}/", paths.url_for_filename(output_name)));
             } else {
-                return Ok(format!("/{}/{}", output_name, rel_clean));
+                let rel_path = format!("{}/{}", output_name, rel_clean);
+                return Ok(paths.url_for_rel_path(&rel_path));
             }
         }
     }
