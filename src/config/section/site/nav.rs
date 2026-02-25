@@ -4,7 +4,7 @@
 //!
 //! ```toml
 //! [site.nav]
-//! enable = true
+//! spa = true
 //! transition = { style = "fade", time = 200 }
 //! preload = { enable = true, delay = 100 }
 //! ```
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[config(section = "site.nav")]
 pub struct NavConfig {
     /// Enable SPA navigation (link interception + DOM morphing).
-    pub enable: bool,
+    pub spa: bool,
 
     /// View transition settings.
     #[config(skip)]
@@ -32,7 +32,7 @@ pub struct NavConfig {
 impl Default for NavConfig {
     fn default() -> Self {
         Self {
-            enable: true,
+            spa: true,
             transition: TransitionConfig::default(),
             preload: PreloadConfig::default(),
         }

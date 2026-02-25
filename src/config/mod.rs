@@ -22,8 +22,7 @@
 //! | Section            | Purpose                                      |
 //! |--------------------|----------------------------------------------|
 //! | `[site.info]`      | Site metadata (title, author, url, extra)    |
-//! | `[site.nav]`       | SPA navigation settings                      |
-//! | `[site.preload]`   | Link prefetch settings                       |
+//! | `[site.nav]`       | SPA navigation, transition, preload settings |
 //! | `[build]`          | Build paths, svg, css, feed, sitemap, etc.   |
 //! | `[serve]`          | Development server (port, interface, watch)  |
 //! | `[deploy]`         | Deployment targets (GitHub, Cloudflare)      |

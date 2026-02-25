@@ -52,7 +52,7 @@ impl<'a> BodyInjector<'a> {
         }
 
         // SPA navigation script
-        if nav.enable {
+        if nav.spa {
             let vars = SpaVars {
                 transition: nav.transition.is_enabled(),
                 preload: nav.preload.enable,

@@ -405,7 +405,7 @@ use std::path::Path;
 ///
 /// This centralizes the logic for writing config-dependent embedded assets:
 /// - enhance.css (always)
-/// - spa.js (if site.nav.enable)
+/// - spa.js (if site.nav.spa)
 /// - recolor.css + recolor.js (if theme.recolor.enable)
 pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<()> {
     // Ensure output directory exists
@@ -419,8 +419,8 @@ pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<(
         ENHANCE_CSS.write_with_vars(output_dir, &vars)?;
     }
 
-    // spa.js (if nav enabled)
-    if config.site.nav.enable {
+    // spa.js (if spa enabled)
+    if config.site.nav.spa {
         use build::{SPA_JS, SpaVars};
 
         let nav = &config.site.nav;

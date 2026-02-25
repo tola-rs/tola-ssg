@@ -238,7 +238,7 @@ format = "rss"   # "rss" | "atom"
 enable = true
 
 [site.nav]
-enable = true    # SPA navigation (link interception + DOM morphing)
+spa = true    # SPA navigation (link interception + DOM morphing)
 # transition = { style = "fade", time = 200 }
 # preload = { enable = true, delay = 100 }
 

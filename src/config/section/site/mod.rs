@@ -15,7 +15,7 @@
 //! github = "https://github.com/alice"
 //!
 //! [site.nav]
-//! enable = true
+//! spa = true
 //! transition = { style = "fade", time = 200 }
 //! preload = { enable = true, delay = 100 }
 //!
