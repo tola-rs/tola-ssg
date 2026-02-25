@@ -49,6 +49,7 @@ Implement `Recent Posts` easily with the `@tola/pages` virtual package:
 #let posts = (pages()
   .filter(p => "/posts/" in p.permalink)
   .filter(p => p.at("draft", default: false) == false)
+  .filter(p => p.at("date", default: none) != none)
   .sorted(key: p => p.date)
   .rev())
 

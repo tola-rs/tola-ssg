@@ -207,7 +207,11 @@ impl StoredPageMap {
     /// Build current page context for `@tola/current` virtual package.
     ///
     /// Returns JSON with `__tola_current` key for injection into `sys.inputs`.
-    pub fn build_current_context(&self, url: &UrlPath) -> serde_json::Value {
+    ///
+    /// # Arguments
+    /// * `url` - The page's permalink (URL path)
+    /// * `source` - Optional source file path relative to content directory
+    pub fn build_current_context(&self, url: &UrlPath, source: Option<&str>) -> serde_json::Value {
         use crate::package::TolaPackage;
 
         let parent = url.parent().map(|p| p.as_str().to_string());
@@ -230,6 +234,7 @@ impl StoredPageMap {
             TolaPackage::Current.input_key(): {
                 "path": url.as_str(),
                 "parent": parent,
+                "source": source,
                 "links_to": links_to,
                 "linked_by": linked_by,
                 "headings": headings,

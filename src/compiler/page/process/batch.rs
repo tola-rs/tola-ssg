@@ -206,6 +206,7 @@ pub fn rebuild_iterative_pages(
 
     let ctx = BuildContext::new(mode, config, clean, deps_hash);
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
+    let content_dir = &config.build.content;
 
     // Build path -> url mapping for @tola/current injection
     // Uses permalink from STORED_PAGES (populated by populate_pages with custom permalink support)
@@ -235,9 +236,15 @@ pub fn rebuild_iterative_pages(
         )?;
 
         let typst_results = compile_typst_batch_with_closure(&batch, &typst_paths, |path| {
+            // Get source path relative to content directory
+            let source = path
+                .strip_prefix(content_dir)
+                .ok()
+                .map(|p| p.to_string_lossy().to_string());
+
             path_to_url
                 .get(path)
-                .map(|url| STORED_PAGES.build_current_context(url))
+                .map(|url| STORED_PAGES.build_current_context(url, source.as_deref()))
                 .unwrap_or_default()
         })?;
 
@@ -443,6 +450,8 @@ fn compile_typst_batch_with_context<'a>(
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
 
+    let content_dir = &config.build.content;
+
     // Build path -> url mapping
     let path_to_url: rustc_hash::FxHashMap<&Path, UrlPath> = files
         .iter()
@@ -459,9 +468,15 @@ fn compile_typst_batch_with_context<'a>(
         }
         crate::debug!("typst"; "compiled {}", path.display());
 
+        // Get source path relative to content directory
+        let source = path
+            .strip_prefix(content_dir)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+
         path_to_url
             .get(path)
-            .map(|url| STORED_PAGES.build_current_context(url))
+            .map(|url| STORED_PAGES.build_current_context(url, source.as_deref()))
             .unwrap_or_default()
     })
     .map_err(|e| anyhow::anyhow!("{}", e))

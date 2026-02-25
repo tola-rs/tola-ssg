@@ -1,8 +1,19 @@
 // @tola/current:0.0.0 - Current page context and navigation
 
 #let _tola_current = sys.inputs.at("__CURRENT_KEY__", default: (:))
+
+/// Current page's permalink (URL path).
+/// Example: "/blog/hello/"
 #let path = _tola_current.at("path", default: none)
+
+/// Parent page's permalink.
+/// Example: "/blog/"
 #let parent = _tola_current.at("parent", default: none)
+
+/// Source file path relative to content directory.
+/// Example: "blog/2025_02_27_hello.typ"
+/// Useful for e.g.: extracting date or other info from filename.
+#let source = _tola_current.at("source", default: none)
 
 /// Pages this page links to (outgoing links).
 /// Returns an array of page objects with permalink, title, date, etc.
@@ -18,16 +29,24 @@
 
 #let siblings(pages) = {
   if parent == none { return () }
-  pages.filter(p => p.permalink != path and p.permalink.starts-with(parent) and {
-    p.permalink.slice(parent.len()).split("/").filter(s => s != "").len() == 1
-  })
+  pages.filter(p => (
+    p.permalink != path
+      and p.permalink.starts-with(parent)
+      and {
+        p.permalink.slice(parent.len()).split("/").filter(s => s != "").len() == 1
+      }
+  ))
 }
 
 #let children(pages) = {
   if path == none { return () }
-  pages.filter(p => p.permalink != path and p.permalink.starts-with(path) and {
-    p.permalink.slice(path.len()).split("/").filter(s => s != "").len() == 1
-  })
+  pages.filter(p => (
+    p.permalink != path
+      and p.permalink.starts-with(path)
+      and {
+        p.permalink.slice(path.len()).split("/").filter(s => s != "").len() == 1
+      }
+  ))
 }
 
 #let breadcrumbs(pages, include-root: false) = {

@@ -171,6 +171,8 @@
 /// - `base`: Show rule function to apply (e.g., your custom base with heading styles)
 /// - `head`: Function `(meta) => content` to generate <head> content (e.g., og-tags)
 /// - `view`: Function `(body, meta) => content` to wrap the body with layout
+/// - `transform-meta`: Function `(meta) => meta` to transform metadata before passing to tola-page.
+///   Use this to derive fields from source path (e.g., extract date/permalink from filename).
 ///
 /// Example:
 /// ```typst
@@ -194,9 +196,14 @@
   base: none,
   head: none,
   view: (body, meta) => body,
+  transform-meta: none,
 ) = (body, ..args) => {
   let meta = args.named()
-  // Auto-convert date strings to datetime
+
+  // Transform meta first (e.g., derive date/permalink from source)
+  if transform-meta != none { meta = transform-meta(meta) }
+
+  // Auto-convert date strings to datetime (after transform, so derived dates get converted)
   if "date" in meta { meta.date = _parse-date(meta.date) }
   if "update" in meta { meta.update = _parse-date(meta.update) }
 

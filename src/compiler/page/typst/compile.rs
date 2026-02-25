@@ -43,7 +43,14 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
 
     // Inject @tola/current context if route is available
     if let Some(route) = ctx.route {
-        let current_context = STORED_PAGES.build_current_context(&route.permalink);
+        // Get source path relative to content directory
+        let source = route
+            .source
+            .strip_prefix(&ctx.config.build.content)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+
+        let current_context = STORED_PAGES.build_current_context(&route.permalink, source.as_deref());
         inputs.merge_json(&current_context)?;
     }
 
