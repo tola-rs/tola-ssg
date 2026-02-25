@@ -190,9 +190,13 @@ impl WsActor {
                     }
                 }
 
+                // Try to read initial page message immediately to avoid race condition
+                // where hot reload message is sent before client's route is set
+                let route = Self::try_read_initial_route(&mut ws);
+
                 let mut clients = self.clients.lock();
-                crate::debug!("ws"; "client connected (total: {})", clients.len() + 1);
-                clients.push(RegisteredClient { ws, route: None });
+                crate::debug!("ws"; "client connected (total: {}, route: {:?})", clients.len() + 1, route);
+                clients.push(RegisteredClient { ws, route });
             }
             Err(e) => {
                 crate::log!("ws"; "handshake failed: {}", e);
@@ -253,6 +257,33 @@ impl WsActor {
                 ACTIVE_PAGE.clear();
             }
         }
+    }
+
+    /// Try to read initial page message from client
+    ///
+    /// Client sends `{type: "page", path: "/..."}` in onopen callback.
+    /// We try to read it immediately to avoid race condition where
+    /// hot reload message is sent before client's route is set.
+    fn try_read_initial_route(ws: &mut WebSocket<TcpStream>) -> Option<UrlPath> {
+        // Try multiple times with short delays to catch the initial message
+        for _ in 0..5 {
+            match ws.read() {
+                Ok(Message::Text(text)) => {
+                    if let Some(route) = Self::parse_page_message(&text) {
+                        ACTIVE_PAGE.add(route.clone());
+                        return Some(route);
+                    }
+                }
+                Err(tungstenite::Error::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    // Message not yet arrived, wait a bit
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => break,
+            }
+        }
+        None
     }
 
     /// Parse page message and return the route if valid
