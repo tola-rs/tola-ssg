@@ -53,11 +53,7 @@ impl<'a> BodyInjector<'a> {
 
         // SPA navigation script
         if nav.spa {
-            let vars = SpaVars {
-                transition: nav.transition.is_enabled(),
-                preload: nav.preload.enable,
-                preload_delay: nav.preload.delay,
-            };
+            let vars = SpaVars::from_config(self.config);
 
             // Inject as raw HTML text node (script tag)
             let script_tag = SPA_JS.external_tag_with_vars(&vars);

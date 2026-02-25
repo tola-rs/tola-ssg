@@ -2,11 +2,16 @@
 //!
 //! Uses content hash to generate version strings for assets.
 //! When asset content changes, version changes, triggering browser re-fetch.
+//!
+//! IMPORTANT: All paths are normalized before use as cache keys to ensure
+//! consistent lookups regardless of relative/absolute path differences.
 
 use std::path::{Path, PathBuf};
 
 use dashmap::DashMap;
 use std::sync::LazyLock;
+
+use crate::utils::path::normalize_path;
 
 /// Asset path -> version hash mapping
 ///
@@ -24,12 +29,14 @@ pub fn compute_version(path: &Path) -> String {
 ///
 /// Returns `base_url?v=abc12345` format
 pub fn versioned_url(base_url: &str, path: &Path) -> String {
+    let path = normalize_path(path);
     let version = ASSET_VERSIONS
-        .get(path)
+        .get(&path)
         .map(|v| v.clone())
         .unwrap_or_else(|| {
-            let v = compute_version(path);
-            ASSET_VERSIONS.insert(path.to_path_buf(), v.clone());
+            let v = compute_version(&path);
+            crate::debug!("version"; "computed new version for {}: {}", path.display(), v);
+            ASSET_VERSIONS.insert(path.clone(), v.clone());
             v
         });
     format!("{}?v={}", base_url, version)
@@ -37,14 +44,15 @@ pub fn versioned_url(base_url: &str, path: &Path) -> String {
 
 /// Update asset version and return whether it changed
 pub fn update_version(path: &Path) -> bool {
-    let new_version = compute_version(path);
+    let path = normalize_path(path);
+    let new_version = compute_version(&path);
     let changed = ASSET_VERSIONS
-        .get(path)
+        .get(&path)
         .map(|old| *old != new_version)
         .unwrap_or(true);
 
     if changed {
-        ASSET_VERSIONS.insert(path.to_path_buf(), new_version);
+        ASSET_VERSIONS.insert(path, new_version);
     }
     changed
 }

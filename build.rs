@@ -11,19 +11,23 @@ use std::fs;
 use std::path::Path;
 use typst_batch::{Compiler, WithInputs};
 
+const HOTRELOAD_CSS_PLACEHOLDER: &str = "__TOLA_ERROR_OVERLAY_CSS__";
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
 
     minify_js_file("src/embed/build/spa.js", &out_path.join("spa.min.js"));
-    minify_js_file(
+    minify_hotreload_js_file(
         "src/embed/serve/hotreload.js",
+        "src/embed/serve/hotreload-error-overlay.css",
         &out_path.join("hotreload.min.js"),
     );
     compile_welcome_typ(&out_path.join("welcome.html"));
 
     println!("cargo:rerun-if-changed=src/embed/build/spa.js");
     println!("cargo:rerun-if-changed=src/embed/serve/hotreload.js");
+    println!("cargo:rerun-if-changed=src/embed/serve/hotreload-error-overlay.css");
     println!("cargo:rerun-if-changed=src/embed/serve/welcome.typ");
     println!("cargo:rerun-if-changed=src/embed/serve/welcome.css");
     println!("cargo:rerun-if-changed=src/embed/serve/tola.webp");
@@ -56,8 +60,37 @@ fn minify_js(source: &str) -> String {
 
 fn minify_js_file(input: &str, output: &Path) {
     let source = fs::read_to_string(input).expect("Failed to read JS file");
-    let code = minify_js(&source);
-    fs::write(output, code).expect("Failed to write minified JS");
+    write_minified_js(&source, output, "Failed to write minified JS");
+}
+
+fn minify_hotreload_js_file(js_input: &str, css_input: &str, output: &Path) {
+    let mut source = fs::read_to_string(js_input).expect("Failed to read hotreload.js");
+    let css_source =
+        fs::read_to_string(css_input).expect("Failed to read hotreload-error-overlay.css");
+    let css = minify_css(&css_source);
+    let escaped_css = escape_template_literal(&css);
+
+    let count = source.matches(HOTRELOAD_CSS_PLACEHOLDER).count();
+    assert_eq!(
+        count, 1,
+        "hotreload.js must contain exactly one {} placeholder",
+        HOTRELOAD_CSS_PLACEHOLDER
+    );
+
+    source = source.replace(HOTRELOAD_CSS_PLACEHOLDER, &escaped_css);
+    write_minified_js(&source, output, "Failed to write minified hotreload JS");
+}
+
+fn escape_template_literal(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace("${", "\\${")
+}
+
+fn write_minified_js(source: &str, output: &Path, write_error: &str) {
+    let code = minify_js(source);
+    fs::write(output, code).expect(write_error);
 }
 
 fn minify_css(source: &str) -> String {

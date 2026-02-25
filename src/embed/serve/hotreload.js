@@ -11,6 +11,8 @@
 // - Simple, predictable behavior
 
 (function() {
+  const ERROR_OVERLAY_CSS = `__TOLA_ERROR_OVERLAY_CSS__`;
+
   const Tola = {
     // StableId -> Element mapping for O(1) lookups
     idMap: new Map(),
@@ -165,70 +167,7 @@
         overlay = document.createElement('div');
         overlay.id = 'tola-error-overlay';
         overlay.innerHTML = `
-          <style>
-            #tola-error-overlay {
-              position: fixed;
-              bottom: 0;
-              left: 0;
-              right: 0;
-              max-height: 50vh;
-              display: flex;
-              flex-direction: column;
-              background: #18181b;
-              color: #fafafa;
-              font-family: ui-monospace, 'SF Mono', Menlo, Monaco, 'Cascadia Code', monospace;
-              font-size: 13px;
-              z-index: 99999;
-              border-top: 2px solid #dc2626;
-              box-shadow: 0 -8px 32px rgba(0,0,0,0.4);
-            }
-            #tola-error-overlay .tola-error-header {
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              padding: 10px 16px;
-              background: #27272a;
-              flex-shrink: 0;
-            }
-            #tola-error-overlay .tola-error-title {
-              color: #fafafa;
-              font-weight: 600;
-              font-size: 13px;
-              letter-spacing: 0.02em;
-            }
-            #tola-error-overlay .tola-error-close {
-              background: transparent;
-              border: 1px solid #3f3f46;
-              color: #a1a1aa;
-              padding: 4px 10px;
-              cursor: pointer;
-              font-size: 12px;
-              font-family: inherit;
-              transition: all 0.15s;
-            }
-            #tola-error-overlay .tola-error-close:hover {
-              background: #3f3f46;
-              color: #fafafa;
-              border-color: #52525b;
-            }
-            #tola-error-overlay .tola-error-content {
-              overflow: auto;
-              padding: 14px 16px;
-              flex: 1;
-              min-height: 0;
-            }
-            #tola-error-overlay .tola-error-path {
-              color: #71717a;
-              margin-bottom: 10px;
-              font-size: 12px;
-            }
-            #tola-error-overlay .tola-error-message {
-              white-space: pre-wrap;
-              word-break: break-word;
-              line-height: 1.6;
-              color: #e4e4e7;
-            }
-          </style>
+          <style>${ERROR_OVERLAY_CSS}</style>
           <div class="tola-error-header">
             <span class="tola-error-title">Compilation Error</span>
             <button class="tola-error-close" onclick="Tola.hideErrorOverlay()">Dismiss</button>
@@ -253,22 +192,81 @@
     },
 
     // Apply patch operations
+    // Phase 1: apply stylesheet replacements and wait for preload completion
+    // Phase 2: apply all remaining DOM patches
     applyPatches(ops) {
+      const cssOps = [];
+      const otherOps = [];
+
       for (const op of ops) {
+        if (this.isStylesheetReplaceOp(op)) {
+          cssOps.push(op);
+        } else {
+          otherOps.push(op);
+        }
+      }
+
+      const applyRemaining = () => {
+        for (const op of otherOps) {
+          try {
+            this.applyPatch(op);
+          } catch (err) {
+            console.error('[tola] patch failed:', op.op, err);
+            location.reload();
+            return;
+          }
+        }
+        this.hydrate();
+
+        // Update recolor filter (CSS variables may have changed)
+        if (window.TolaRecolor && typeof window.TolaRecolor.update === 'function') {
+          window.TolaRecolor.update();
+        }
+      };
+
+      if (cssOps.length === 0) {
+        applyRemaining();
+        return;
+      }
+
+      const cssTasks = [];
+      for (const op of cssOps) {
         try {
-          this.applyPatch(op);
+          cssTasks.push(this.applyStylesheetReplace(op));
         } catch (err) {
-          console.error('[tola] patch failed:', op.op, err);
+          console.error('[tola] css patch failed:', op.op, err);
           location.reload();
           return;
         }
       }
-      this.hydrate();
 
-      // Update recolor filter (CSS variables may have changed)
-      if (window.TolaRecolor && typeof window.TolaRecolor.update === 'function') {
-        window.TolaRecolor.update();
+      Promise.all(cssTasks)
+        .then(applyRemaining)
+        .catch((err) => {
+          console.error('[tola] css patch failed:', err);
+          location.reload();
+        });
+    },
+
+    isStylesheetReplaceOp(op) {
+      if (!op || op.op !== 'replace' || typeof op.html !== 'string') return false;
+      const temp = document.createElement('div');
+      temp.innerHTML = op.html;
+      const link = temp.querySelector('link');
+      return !!(link && link.rel === 'stylesheet');
+    },
+
+    applyStylesheetReplace(op) {
+      const el = this.getById(op.target);
+      if (!el) {
+        return Promise.resolve();
       }
+      if (el.tagName === 'LINK' && el.rel === 'stylesheet') {
+        return this.seamlessCssUpdate(el, op.html);
+      }
+      // Fallback: if target exists but is not stylesheet, apply as normal replace
+      this.applyPatch(op);
+      return Promise.resolve();
     },
 
     // Apply single patch - pure ID/anchor based, no position indices
@@ -402,43 +400,53 @@
     // Seamless CSS update: preload new stylesheet before removing old one
     // This prevents flash of unstyled content (FOUC)
     seamlessCssUpdate(oldLink, newHtml) {
+      return new Promise((resolve) => {
       // Parse new link element from HTML
-      const temp = document.createElement('div');
-      temp.innerHTML = newHtml;
-      const newLink = temp.querySelector('link');
-      if (!newLink) {
-        // Fallback to direct replacement if parsing fails
-        oldLink.outerHTML = newHtml;
-        return;
-      }
-
-      // Create a preload link to fetch CSS without applying it
-      const preload = document.createElement('link');
-      preload.rel = 'preload';
-      preload.as = 'style';
-      preload.href = newLink.href;
-
-      // When preload completes, swap the stylesheets
-      preload.onload = () => {
-        // Copy all attributes from new link
-        for (const attr of newLink.attributes) {
-          oldLink.setAttribute(attr.name, attr.value);
+        const temp = document.createElement('div');
+        temp.innerHTML = newHtml;
+        const newLink = temp.querySelector('link');
+        if (!newLink) {
+          // Fallback to direct replacement if parsing fails
+          oldLink.outerHTML = newHtml;
+          resolve();
+          return;
         }
-        // Remove preload
-        preload.remove();
-        // Re-hydrate to update ID mapping
-        this.hydrate();
-      };
 
-      preload.onerror = () => {
-        // Fallback to direct replacement on error
-        oldLink.outerHTML = newHtml;
-        preload.remove();
-        this.hydrate();
-      };
+        // Create a preload link to fetch CSS without applying it
+        const preload = document.createElement('link');
+        preload.rel = 'preload';
+        preload.as = 'style';
+        preload.href = newLink.href;
 
-      // Start preloading
-      document.head.appendChild(preload);
+        const finish = () => {
+          preload.remove();
+          resolve();
+        };
+
+        // When preload completes, swap the stylesheets
+        preload.onload = () => {
+          // Remove attributes that no longer exist
+          for (const attr of Array.from(oldLink.attributes)) {
+            if (!newLink.hasAttribute(attr.name)) {
+              oldLink.removeAttribute(attr.name);
+            }
+          }
+          // Copy all attributes from new link
+          for (const attr of newLink.attributes) {
+            oldLink.setAttribute(attr.name, attr.value);
+          }
+          finish();
+        };
+
+        preload.onerror = () => {
+          // Fallback to direct replacement on error
+          oldLink.outerHTML = newHtml;
+          finish();
+        };
+
+        // Start preloading
+        document.head.appendChild(preload);
+      });
     },
 
     // SyncTeX: get source location from element
@@ -465,4 +473,3 @@
   Tola.connect(__TOLA_WS_PORT__);
   window.Tola = Tola;
 })();
-

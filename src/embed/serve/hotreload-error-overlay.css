@@ -1,0 +1,69 @@
+#tola-error-overlay {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  max-height: 50vh;
+  display: flex;
+  flex-direction: column;
+  background: #18181b;
+  color: #fafafa;
+  font-family: ui-monospace, 'SF Mono', Menlo, Monaco, 'Cascadia Code', monospace;
+  font-size: 13px;
+  z-index: 99999;
+  border-top: 2px solid #dc2626;
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.4);
+}
+
+#tola-error-overlay .tola-error-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: #27272a;
+  flex-shrink: 0;
+}
+
+#tola-error-overlay .tola-error-title {
+  color: #fafafa;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+#tola-error-overlay .tola-error-close {
+  background: transparent;
+  border: 1px solid #3f3f46;
+  color: #a1a1aa;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+#tola-error-overlay .tola-error-close:hover {
+  background: #3f3f46;
+  color: #fafafa;
+  border-color: #52525b;
+}
+
+#tola-error-overlay .tola-error-content {
+  overflow: auto;
+  padding: 14px 16px;
+  flex: 1;
+  min-height: 0;
+}
+
+#tola-error-overlay .tola-error-path {
+  color: #71717a;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+#tola-error-overlay .tola-error-message {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+  color: #e4e4e7;
+}

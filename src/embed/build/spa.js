@@ -31,6 +31,9 @@
     prefetchCacheSize: 20     // Max prefetch entries
   };
 
+  // Build-time injected path prefix (e.g. "/blog"), empty string for root.
+  const PATH_PREFIX = __TOLA_PATH_PREFIX__;
+
   // ==========================================================================
   // Caches
   // ==========================================================================
@@ -73,6 +76,8 @@
 
   // Current request (for abort)
   let currentController = null;
+  // Monotonic navigation sequence for stale-response protection
+  let currentNavigationId = 0;
 
   // ==========================================================================
   // Utility: normalize URL to path key (always absolute path)
@@ -84,6 +89,25 @@
     } catch (e) {
       return url;
     }
+  }
+
+  function withPathPrefix(path) {
+    if (!PATH_PREFIX) return path;
+    if (path === '/') return PATH_PREFIX + '/';
+    return PATH_PREFIX + (path.charAt(0) === '/' ? path : '/' + path);
+  }
+
+  function nextNavigationId() {
+    currentNavigationId += 1;
+    return currentNavigationId;
+  }
+
+  function isStaleNavigation(navId) {
+    return navId !== currentNavigationId;
+  }
+
+  function closestAnchor(target) {
+    return target && typeof target.closest === 'function' ? target.closest('a') : null;
   }
 
   // ==========================================================================
@@ -106,7 +130,7 @@
     // Ignore non-primary button clicks
     if (e.button !== 0) return;
 
-    const link = e.target.closest('a');
+    const link = closestAnchor(e.target);
     if (!shouldIntercept(link)) return;
 
     e.preventDefault();
@@ -126,6 +150,7 @@
     if (pushState && toPathKey(location.href) === pathKey) {
       return;
     }
+    const navId = nextNavigationId();
 
     // Abort previous request if still pending
     if (currentController) {
@@ -144,7 +169,7 @@
     var html = prefetchCache.get(pathKey);
     if (html) {
       prefetchCache.delete(pathKey);
-      finishNavigation(html, url, pushState, restoreScroll, pathKey);
+      finishNavigation(html, url, pushState, restoreScroll, pathKey, navId);
       return;
     }
 
@@ -156,7 +181,7 @@
     .then(function(response) {
       if (response.status === 404) {
         // Fetch 404 page for seamless transition
-        return fetch('/404.html', { signal: currentController.signal })
+        return fetch(withPathPrefix('/404.html'), { signal: currentController.signal })
           .then(function(r) {
             if (r.ok) return r.text();
             // 404 page not found, fallback
@@ -172,12 +197,12 @@
       return response.text();
     })
     .then(function(html) {
-      if (html) {
-        finishNavigation(html, url, pushState, restoreScroll, pathKey);
+      if (html && !isStaleNavigation(navId)) {
+        finishNavigation(html, url, pushState, restoreScroll, pathKey, navId);
       }
     })
     .catch(function(err) {
-      if (err.name === 'AbortError') {
+      if (err.name === 'AbortError' || isStaleNavigation(navId)) {
         // Request was aborted, ignore
         return;
       }
@@ -187,7 +212,8 @@
     });
   }
 
-  function finishNavigation(html, url, pushState, restoreScroll, pathKey) {
+  function finishNavigation(html, url, pushState, restoreScroll, pathKey, navId) {
+    if (isStaleNavigation(navId)) return;
     currentController = null;
 
     var newDoc = new DOMParser().parseFromString(html, 'text/html');
@@ -197,6 +223,8 @@
 
     // Wait for styles to load, then morph
     Promise.all(stylePromises).then(function() {
+      if (isStaleNavigation(navId)) return;
+
       // Morph the page (with or without View Transitions)
       if (CONFIG.transition && document.startViewTransition) {
         document.startViewTransition(function() {
@@ -230,6 +258,38 @@
     });
   }
 
+  // Extract pathname from href (strip query string for version comparison)
+  function getStylesheetPathname(href) {
+    try {
+      var url = new URL(href, location.origin);
+      return url.pathname;
+    } catch (e) {
+      // Fallback: strip query string manually
+      var idx = href.indexOf('?');
+      return idx >= 0 ? href.substring(0, idx) : href;
+    }
+  }
+
+  // Sync all attributes from source to target (including data-tola-id)
+  function syncElementAttributes(target, source) {
+    var i;
+
+    // Remove attributes that no longer exist
+    var targetAttrs = Array.prototype.slice.call(target.attributes);
+    for (i = 0; i < targetAttrs.length; i++) {
+      var name = targetAttrs[i].name;
+      if (!source.hasAttribute(name)) {
+        target.removeAttribute(name);
+      }
+    }
+
+    // Set current attributes
+    var sourceAttrs = Array.prototype.slice.call(source.attributes);
+    for (i = 0; i < sourceAttrs.length; i++) {
+      target.setAttribute(sourceAttrs[i].name, sourceAttrs[i].value);
+    }
+  }
+
   // Preload stylesheets from new document before morphing
   function preloadNewStylesheets(newHead) {
     var promises = [];
@@ -239,19 +299,49 @@
       var href = newLink.getAttribute('href');
       if (!href) return;
 
-      // Check if this stylesheet already exists in current document
-      var existing = document.querySelector('link[rel="stylesheet"][href="' + href + '"]');
-      if (existing) return;
+      var newPathname = getStylesheetPathname(href);
+
+      // Check if this stylesheet (by pathname, ignoring version) already exists
+      var existingLinks = document.querySelectorAll('link[rel="stylesheet"]');
+      var existing = null;
+      var exactMatch = null;
+      for (var i = 0; i < existingLinks.length; i++) {
+        var existingHref = existingLinks[i].getAttribute('href');
+        if (!existingHref) continue;
+        if (existingHref === href) {
+          exactMatch = existingLinks[i];
+          break;
+        }
+        if (!existing && getStylesheetPathname(existingHref) === newPathname) {
+          existing = existingLinks[i];
+        }
+      }
+
+      // Same stylesheet URL: keep node, but sync attrs (important for data-tola-id)
+      if (exactMatch) {
+        syncElementAttributes(exactMatch, newLink);
+        return;
+      }
 
       // Create and append the new stylesheet, wait for it to load
-      var link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = href;
+      var link = newLink.cloneNode(true);
 
       var promise = new Promise(function(resolve) {
-        link.onload = resolve;
+        link.onload = function() {
+          // Remove old version after new one loads (seamless update)
+          if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
+          }
+          resolve();
+        };
         link.onerror = resolve;
-        setTimeout(resolve, 500); // Short timeout fallback
+        setTimeout(function() {
+          // Timeout fallback: still remove old version
+          if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
+          }
+          resolve();
+        }, 500);
       });
 
       document.head.appendChild(link);
@@ -343,13 +433,19 @@
   function mergeHead(newHead) {
     var oldHead = document.head;
 
-    // Collect existing elements by key
+    // Collect existing elements by key (keep arrays to support duplicate keys)
     var oldElements = new Map();
-    var i, el, key;
+    var i, el, key, arr;
     for (i = 0; i < oldHead.children.length; i++) {
       el = oldHead.children[i];
       key = getHeadElementKey(el);
-      if (key) oldElements.set(key, el);
+      if (!key) continue;
+      arr = oldElements.get(key);
+      if (!arr) {
+        arr = [];
+        oldElements.set(key, arr);
+      }
+      arr.push(el);
     }
 
     // Track elements to remove later
@@ -362,15 +458,21 @@
       key = getHeadElementKey(newEl);
       if (!key) continue;
 
-      var oldEl = oldElements.get(key);
+      var oldList = oldElements.get(key);
+      var oldEl = oldList && oldList.length > 0 ? oldList.shift() : null;
+      if (oldList && oldList.length === 0) {
+        oldElements.delete(key);
+      }
       if (oldEl) {
-        // Update existing element if content changed (skip stylesheets, already preloaded)
+        // Update existing element if content changed
+        // For stylesheets: preloadNewStylesheets already handled the update, just skip
+        // But we still need to mark it as processed
         if (oldEl.outerHTML !== newEl.outerHTML) {
           if (!(newEl.tagName === 'LINK' && newEl.rel === 'stylesheet')) {
             oldEl.parentNode.replaceChild(newEl.cloneNode(true), oldEl);
           }
+          // Note: stylesheets are updated by preloadNewStylesheets which removes old version
         }
-        oldElements.delete(key);
       } else {
         // Add new element (skip scripts and stylesheets - stylesheets already preloaded)
         if (newEl.tagName !== 'SCRIPT' && !(newEl.tagName === 'LINK' && newEl.rel === 'stylesheet')) {
@@ -379,14 +481,17 @@
       }
     }
 
-    // Collect elements to remove (except scripts, global styles, and stylesheets)
-    oldElements.forEach(function(el) {
-      // Keep: scripts, inline styles, stylesheets, and .tola assets
-      if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') return;
-      if (el.tagName === 'LINK' && el.rel === 'stylesheet') return; // Keep all stylesheets
-      if (el.tagName === 'LINK' && el.href && el.href.indexOf('/.tola/') !== -1) return;
-      // Mark for removal
-      toRemove.push(el);
+    // Collect elements to remove (except scripts, global styles)
+    // Note: stylesheets are handled by preloadNewStylesheets which removes old versions
+    oldElements.forEach(function(list) {
+      for (var i = 0; i < list.length; i++) {
+        var el = list[i];
+        // Keep: scripts, inline styles, and .tola assets
+        if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+        if (el.tagName === 'LINK' && el.href && el.href.indexOf('/.tola/') !== -1) continue;
+        // Mark for removal (including orphaned stylesheets not in new head)
+        toRemove.push(el);
+      }
     });
 
     // Remove old elements
@@ -407,6 +512,11 @@
         }
         return null;
       case 'LINK':
+        // For stylesheets, use pathname (without version query) as key
+        // This allows proper matching when CSS version changes
+        if (el.rel === 'stylesheet') {
+          return 'link:stylesheet:' + getStylesheetPathname(el.href);
+        }
         return 'link:' + el.rel + ':' + el.href;
       case 'SCRIPT':
         if (el.src) {
@@ -435,10 +545,7 @@
 
   if (CONFIG.preload) {
     document.addEventListener('mouseover', function(e) {
-      var link = null;
-      if (e.target.closest) {
-        link = e.target.closest('a');
-      }
+      var link = closestAnchor(e.target);
       if (!link) return;
       if (!shouldIntercept(link)) return;
 
@@ -482,10 +589,7 @@
     });
 
     document.addEventListener('mouseout', function(e) {
-      var link = null;
-      if (e.target.closest) {
-        link = e.target.closest('a');
-      }
+      var link = closestAnchor(e.target);
       if (!link) return;
 
       var pathKey = toPathKey(link.href);
@@ -505,8 +609,16 @@
 
     links.forEach(function(link) {
       var href = link.href;
-      // Skip if already in current document
+      var pathname = getStylesheetPathname(href);
+
+      // Skip if same version already in current document
       if (document.querySelector('link[href="' + href + '"]')) return;
+
+      // Skip if same pathname (different version) already being preloaded
+      var preloadLinks = document.querySelectorAll('link[rel="preload"][as="style"]');
+      for (var i = 0; i < preloadLinks.length; i++) {
+        if (getStylesheetPathname(preloadLinks[i].href) === pathname) return;
+      }
 
       // Create a preload link
       var preload = document.createElement('link');

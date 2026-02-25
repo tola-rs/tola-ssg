@@ -33,6 +33,7 @@ pub use template::{Template, TemplateVars};
 
 pub mod build {
     use super::{AssetKind, EmbeddedAsset, Template, TemplateVars};
+    use crate::config::SiteConfig;
 
     /// Variables for redirect.html template.
     pub struct RedirectVars<'a> {
@@ -54,6 +55,39 @@ pub mod build {
         pub transition: bool,
         pub preload: bool,
         pub preload_delay: u32,
+        pub path_prefix: String,
+    }
+
+    impl SpaVars {
+        /// Build SPA runtime variables from site config.
+        pub fn from_config(config: &SiteConfig) -> Self {
+            let nav = &config.site.nav;
+            Self {
+                transition: nav.transition.is_enabled(),
+                preload: nav.preload.enable,
+                preload_delay: nav.preload.delay,
+                path_prefix: normalize_path_prefix(&config.build.path_prefix),
+            }
+        }
+    }
+
+    /// Normalize config path_prefix to URL path format.
+    ///
+    /// Examples:
+    /// - "" -> ""
+    /// - "blog" -> "/blog"
+    /// - "a/b" -> "/a/b"
+    fn normalize_path_prefix(path: &std::path::Path) -> String {
+        let parts: Vec<_> = path
+            .iter()
+            .filter_map(|c| c.to_str())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
     }
 
     impl TemplateVars for SpaVars {
@@ -68,10 +102,17 @@ pub mod build {
                     if self.preload { "true" } else { "false" },
                 )
                 .replace("__TOLA_PRELOAD_DELAY__", &self.preload_delay.to_string())
+                .replace(
+                    "__TOLA_PATH_PREFIX__",
+                    &serde_json::to_string(&self.path_prefix).unwrap_or_else(|_| "\"\"".into()),
+                )
         }
 
         fn hash_input(&self) -> String {
-            format!("{}{}{}", self.transition, self.preload, self.preload_delay)
+            format!(
+                "{}{}{}{}",
+                self.transition, self.preload, self.preload_delay, self.path_prefix
+            )
         }
     }
 
@@ -423,12 +464,7 @@ pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<(
     if config.site.nav.spa {
         use build::{SPA_JS, SpaVars};
 
-        let nav = &config.site.nav;
-        let vars = SpaVars {
-            transition: nav.transition.is_enabled(),
-            preload: nav.preload.enable,
-            preload_delay: nav.preload.delay,
-        };
+        let vars = SpaVars::from_config(config);
 
         SPA_JS.cleanup_old(output_dir)?;
         SPA_JS.write_with_vars(output_dir, &vars)?;
@@ -503,6 +539,35 @@ mod tests {
         let url = serve::HOTRELOAD_JS.url_path_with_vars(&vars);
         assert!(url.starts_with("/.tola/hotreload-"));
         assert!(url.ends_with(".js"));
+    }
+
+    #[test]
+    fn test_spa_js_with_vars() {
+        let vars = build::SpaVars {
+            transition: true,
+            preload: true,
+            preload_delay: 150,
+            path_prefix: "/blog".to_string(),
+        };
+        let rendered = build::SPA_JS.render(&vars);
+        assert!(rendered.contains("150"));
+        assert!(rendered.contains("/blog"));
+        assert!(!rendered.contains("__TOLA_TRANSITION__"));
+        assert!(!rendered.contains("__TOLA_PRELOAD__"));
+        assert!(!rendered.contains("__TOLA_PRELOAD_DELAY__"));
+        assert!(!rendered.contains("__TOLA_PATH_PREFIX__"));
+        // Has variables -> has hash
+        let url = build::SPA_JS.url_path_with_vars(&vars);
+        assert!(url.starts_with("/.tola/spa-"));
+        assert!(url.ends_with(".js"));
+    }
+
+    #[test]
+    fn test_spa_vars_from_config_path_prefix() {
+        let mut config = crate::config::SiteConfig::default();
+        config.build.path_prefix = std::path::PathBuf::from("docs/blog");
+        let vars = build::SpaVars::from_config(&config);
+        assert_eq!(vars.path_prefix, "/docs/blog");
     }
 
     #[test]

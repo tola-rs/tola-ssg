@@ -162,7 +162,8 @@ impl CompilerActor {
         if executed > 0
             && let Some(css_output) = self.get_css_output_path()
         {
-            version::update_version(&css_output);
+            let changed = version::update_version(&css_output);
+            crate::debug!("css"; "version update: path={}, changed={}", css_output.display(), changed);
         }
     }
 
