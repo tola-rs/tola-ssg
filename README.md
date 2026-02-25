@@ -158,6 +158,13 @@ That's where `tola` steps in — optimizing developer experience and integrating
 
 ## Usage
 
+- [Example Site Structure](#example-site-structure)
+- [Shared Dependencies](#shared-dependencies)
+- [Configuration](#configuration)
+- [Virtual Packages](#virtual-packages-1)
+- [Open Graph & Twitter Cards](#open-graph--twitter-cards)
+- [Quick Start](#quick-start)
+
 Run `tola --help` or `tola <command> --help` for detailed CLI usage.
 
 You can run `tola` from any subdirectory — it will automatically find `tola.toml` by searching upward.
@@ -265,7 +272,7 @@ Tola provides virtual packages that you can import directly in your Typst files:
 |---------|---------|
 | `@tola/site:0.0.0` | `info` — Site metadata (title, author, email, description, url, language, copyright, extra) |
 | `@tola/pages:0.0.0` | `pages()`, `by-tag(tag)`, `by-tags(..tags)`, `all-tags()` |
-| `@tola/current:0.0.0` | `path`, `parent`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages)`, `prev(pages, n)`, `find(pages, n)` |
+| `@tola/current:0.0.0` | `path`, `parent`, `source`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages)`, `prev(pages, n)`, `next(pages, n)` |
 
 ```typst
 // content/index.typ — list recent posts
@@ -284,6 +291,183 @@ Tola provides virtual packages that you can import directly in your Typst files:
   ui.post-card(post)
 }
 ```
+
+<details>
+<summary>Example: Recent Posts</summary>
+
+```typst
+#import "@tola/pages:0.0.0": pages
+
+#let recent-posts = (pages()
+  .filter(p => "/posts/" in p.permalink)
+  .filter(p => p.at("draft", default: false) == false)
+  .filter(p => p.at("date", default: none) != none)
+  .sorted(key: p => p.date)
+  .rev()
+  .slice(0, calc.min(5, pages().len())))
+
+#for post in recent-posts {
+  [- #link(post.permalink)[#post.title] (#post.date)]
+}
+```
+
+</details>
+
+<details>
+<summary>Example: Pinned Posts</summary>
+
+Use page metadata `pinned: true` to mark featured posts:
+
+```typst
+// content/posts/important.typ
+#set page(meta: (pinned: true, date: "2025-01-01", title: "Important Post"))
+```
+
+```typst
+#import "@tola/pages:0.0.0": pages
+
+#let pinned = pages().filter(p => p.at("pinned", default: false) == true)
+
+#if pinned.len() > 0 [
+  == Pinned Posts
+  #for post in pinned {
+    [- #link(post.permalink)[#post.title]]
+  }
+]
+```
+
+</details>
+
+<details>
+<summary>Example: Custom Sort Order</summary>
+
+Sort by custom `order` field, then by date:
+
+```typst
+// content/docs/intro.typ
+#set page(meta: (order: 1, title: "Introduction"))
+
+// content/docs/setup.typ
+#set page(meta: (order: 2, title: "Setup Guide"))
+```
+
+```typst
+#import "@tola/pages:0.0.0": pages
+
+#let docs = (pages()
+  .filter(p => "/docs/" in p.permalink)
+  .sorted(key: p => (
+    p.at("order", default: 999),
+    p.at("date", default: "9999-99-99")
+  )))
+
+#for doc in docs {
+  [- #link(doc.permalink)[#doc.title]]
+}
+```
+
+</details>
+
+<details>
+<summary>Example: Extract Date from Filename</summary>
+
+Use `source` from `@tola/current` to parse date from filename like `2025_02_27_hello.typ`:
+
+```typst
+#import "@tola/current:0.0.0": source
+
+// source = "posts/2025_02_27_hello.typ"
+#let filename = source.split("/").last()  // "2025_02_27_hello.typ"
+#let parts = filename.split("_")
+#let date = parts.slice(0, 3).join("-")    // "2025-02-27"
+#let slug = parts.slice(3).join("_").replace(".typ", "")  // "hello"
+```
+
+You can use this pattern in your template to auto-generate dates:
+
+```typst
+// templates/post.typ
+#let post-page(body) = {
+  import "@tola/current:0.0.0": source
+
+  let filename = source.split("/").last()
+  let parts = filename.split("_")
+  let auto-date = if parts.len() >= 4 {
+    parts.slice(0, 3).join("-")
+  } else { none }
+
+  // Use auto-date as fallback if no explicit date in metadata
+  // ...
+}
+```
+
+</details>
+
+<details>
+<summary>Example: Prev/Next Navigation</summary>
+
+Navigate between posts in a sorted list:
+
+```typst
+#import "@tola/pages:0.0.0": pages
+#import "@tola/current:0.0.0": prev, next
+
+#let sorted-posts = (pages()
+  .filter(p => "/posts/" in p.permalink and p.date != none)
+  .sorted(key: p => p.date))
+
+#let prev-post = prev(sorted-posts)
+#let next-post = next(sorted-posts)
+
+#html.nav(class: "flex justify-between")[
+  #if prev-post != none {
+    link(prev-post.permalink)[← #prev-post.title]
+  }
+  #if next-post != none {
+    link(next-post.permalink)[#next-post.title →]
+  }
+]
+```
+
+</details>
+
+<details>
+<summary>Example: Breadcrumbs</summary>
+
+Generate breadcrumb navigation from URL hierarchy:
+
+```typst
+#import "@tola/pages:0.0.0": pages
+#import "@tola/current:0.0.0": breadcrumbs
+
+#let crumbs = breadcrumbs(pages(), include-root: true)
+
+#html.nav(class: "breadcrumbs")[
+  #for (i, crumb) in crumbs.enumerate() {
+    if i > 0 [ / ]
+    link(crumb.permalink)[#crumb.title]
+  }
+]
+// Output: Home / Blog / My Post
+```
+
+</details>
+
+<details>
+<summary>Example: Tag Cloud</summary>
+
+List all tags with post counts:
+
+```typst
+#import "@tola/pages:0.0.0": pages, all-tags, by-tag
+
+#for tag in all-tags() {
+  let count = by-tag(tag).len()
+  [#link("/tags/" + tag + "/")[#tag (#count)] ]
+}
+```
+
+</details>
 
 ### Open Graph & Twitter Cards
 
