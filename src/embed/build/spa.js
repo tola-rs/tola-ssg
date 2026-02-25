@@ -310,12 +310,31 @@
     // 3. Morph body
     Idiomorph.morph(document.body, newDoc.body);
 
-    // 4. Re-hydrate tola IDs (for hot reload compatibility)
+    // 4. Execute inline scripts in body (they don't run after DOM morph)
+    executeInlineScripts(document.body);
+
+    // 5. Re-hydrate tola IDs (for hot reload compatibility)
     if (window.Tola && typeof window.Tola.hydrate === 'function') {
       window.Tola.hydrate();
     }
 
     // Note: tola:navigate event is dispatched in finishNavigation after URL update
+  }
+
+  // Execute inline scripts after morph (external scripts are skipped)
+  function executeInlineScripts(container) {
+    var scripts = container.querySelectorAll('script:not([src])');
+    scripts.forEach(function(oldScript) {
+      var newScript = document.createElement('script');
+      // Copy attributes
+      Array.from(oldScript.attributes).forEach(function(attr) {
+        newScript.setAttribute(attr.name, attr.value);
+      });
+      // Copy content
+      newScript.textContent = oldScript.textContent;
+      // Replace to execute
+      oldScript.parentNode.replaceChild(newScript, oldScript);
+    });
   }
 
   // ==========================================================================

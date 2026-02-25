@@ -50,7 +50,8 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
             .ok()
             .map(|p| p.to_string_lossy().to_string());
 
-        let current_context = STORED_PAGES.build_current_context(&route.permalink, source.as_deref());
+        let current_context =
+            STORED_PAGES.build_current_context(&route.permalink, source.as_deref());
         inputs.merge_json(&current_context)?;
     }
 

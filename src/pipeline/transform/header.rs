@@ -71,15 +71,15 @@ impl<'a> HeaderInjector<'a> {
             head.push_elem(script);
         }
 
-        // Title
-        if !config.site.info.title.is_empty() {
+        // Title (skip if user already defined one)
+        if !config.site.info.title.is_empty() && !Self::has_tag(head, "title") {
             let mut title = TolaSite::element("title", Attrs::new());
             title.push_text(&config.site.info.title);
             head.push_elem(title);
         }
 
-        // Description meta
-        if !config.site.info.description.is_empty() {
+        // Description meta (skip if user already defined one)
+        if !config.site.info.description.is_empty() && !Self::has_meta_name(head, "description") {
             let mut meta = TolaSite::element("meta", Attrs::new());
             meta.set_attr("name", "description");
             meta.set_attr("content", &config.site.info.description);
@@ -183,14 +183,24 @@ impl<'a> HeaderInjector<'a> {
         }
     }
 
-    /// Check if OG tags already exist in head (user-defined via Typst head parameter).
+    /// Check if head already contains a specific tag.
+    fn has_tag(head: &Element<Raw>, tag: &str) -> bool {
+        head.children
+            .iter()
+            .any(|n| matches!(n, Node::Element(e) if e.tag == tag))
+    }
+
+    /// Check if head already contains a meta tag with specific name.
+    fn has_meta_name(head: &Element<Raw>, name: &str) -> bool {
+        head.children.iter().any(|n| {
+            matches!(n, Node::Element(e) if e.tag == "meta" && e.get_attr("name").is_some_and(|v| v == name))
+        })
+    }
+
+    /// Check if head already contains OG tags (user-defined via Typst head parameter).
     fn has_og_tags(head: &Element<Raw>) -> bool {
         head.children.iter().any(|n| {
-            if let Node::Element(e) = n {
-                e.tag == "meta" && e.get_attr("property").is_some_and(|v| v.starts_with("og:"))
-            } else {
-                false
-            }
+            matches!(n, Node::Element(e) if e.tag == "meta" && e.get_attr("property").is_some_and(|v| v.starts_with("og:")))
         })
     }
 
