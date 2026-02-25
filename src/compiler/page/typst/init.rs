@@ -31,7 +31,10 @@ pub struct TolaVirtualFS {
 impl TolaVirtualFS {
     /// Create a new VFS with nested asset mappings.
     pub fn new(root: PathBuf, nested_mappings: Vec<NestedMapping>) -> Self {
-        Self { root, nested_mappings }
+        Self {
+            root,
+            nested_mappings,
+        }
     }
 
     /// Create a VFS without nested mappings (for lightweight operations).
@@ -122,7 +125,12 @@ pub fn build_nested_mappings(
 ) -> Vec<NestedMapping> {
     nested
         .iter()
-        .map(|entry| (entry.output_name().to_string(), entry.source().to_path_buf()))
+        .map(|entry| {
+            (
+                entry.output_name().to_string(),
+                entry.source().to_path_buf(),
+            )
+        })
         .collect()
 }
 

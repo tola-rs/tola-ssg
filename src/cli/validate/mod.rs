@@ -16,10 +16,32 @@ use crate::compiler::page::CompiledPage;
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, ResolveContext, ResolveResult};
 use crate::log;
+use crate::page::PageMeta;
 use crate::utils::{plural_count, plural_s};
 
 use report::ValidationReport;
 use scan::scan_markdown;
+
+/// Result type for address space building: (pages, typst_links, compile_errors)
+type AddressSpaceResult = (
+    Vec<CompiledPage>,
+    HashMap<PathBuf, Vec<scan::ScannedLink>>,
+    Vec<(String, String)>,
+);
+
+/// Result type for batch Typst scanning: (metas, links, errors)
+type BatchScanResult = (
+    Vec<Option<serde_json::Value>>,
+    Vec<Vec<scan::ScannedLink>>,
+    Vec<(String, String)>,
+);
+
+/// Parsed scan result with PageMeta instead of raw JSON
+type ParsedScanResult = (
+    Vec<Option<PageMeta>>,
+    Vec<Vec<scan::ScannedLink>>,
+    Vec<(String, String)>,
+);
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
@@ -257,24 +279,25 @@ fn validate_links(
                     if validate_config.assets.enable {
                         // Check if path matches a nested source directory
                         // e.g., /assets/images/photo.webp -> should be /images/photo.webp
-                        let suggestion = nested_assets.iter().find_map(|(output_name, abs_source)| {
-                            // Get relative source path by stripping root
-                            let rel_source = abs_source.strip_prefix(root).ok()?;
-                            let source_str = rel_source.to_string_lossy();
-                            // trimmed: "assets/images/photo.webp", source_str: "assets/images"
-                            let rest = trimmed.strip_prefix(source_str.as_ref())?;
-                            let rest = rest.trim_start_matches('/');
-                            let file_path = abs_source.join(rest);
-                            if file_path.exists() {
-                                let correct = if rest.is_empty() {
-                                    format!("/{}", output_name)
-                                } else {
-                                    format!("/{}/{}", output_name, rest)
-                                };
-                                return Some(correct);
-                            }
-                            None
-                        });
+                        let suggestion =
+                            nested_assets.iter().find_map(|(output_name, abs_source)| {
+                                // Get relative source path by stripping root
+                                let rel_source = abs_source.strip_prefix(root).ok()?;
+                                let source_str = rel_source.to_string_lossy();
+                                // trimmed: "assets/images/photo.webp", source_str: "assets/images"
+                                let rest = trimmed.strip_prefix(source_str.as_ref())?;
+                                let rest = rest.trim_start_matches('/');
+                                let file_path = abs_source.join(rest);
+                                if file_path.exists() {
+                                    let correct = if rest.is_empty() {
+                                        format!("/{}", output_name)
+                                    } else {
+                                        format!("/{}/{}", output_name, rest)
+                                    };
+                                    return Some(correct);
+                                }
+                                None
+                            });
 
                         let reason = if let Some(correct_path) = suggestion {
                             format!("maybe should be `{}`", correct_path)
@@ -417,17 +440,10 @@ fn handle_resolve_result(
 /// - pages: All compiled pages
 /// - typst_links: HashMap<PathBuf, Vec<ScannedLink>> for Typst files
 /// - compile_errors: Vec<(source_path, error_message)> for compile failures
-fn build_address_space(
-    config: &SiteConfig,
-) -> Result<(
-    Vec<CompiledPage>,
-    HashMap<PathBuf, Vec<scan::ScannedLink>>,
-    Vec<(String, String)>,
-)> {
+fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
     use rayon::prelude::*;
 
     use crate::cli::common::scan_markdown_file;
-    use crate::page::PageMeta;
 
     let root = crate::utils::path::normalize_path(config.get_root());
     let content_files = crate::compiler::collect_all_files(&config.build.content);
@@ -437,11 +453,8 @@ fn build_address_space(
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Batch scan Typst files for metadata AND links (unified scan)
-    let (typst_metas, typst_links_vec, compile_errors): (
-        Vec<Option<PageMeta>>,
-        Vec<Vec<scan::ScannedLink>>,
-        Vec<(String, String)>,
-    ) = if typst_files.is_empty() {
+    let (typst_metas, typst_links_vec, compile_errors): ParsedScanResult = if typst_files.is_empty()
+    {
         (vec![], vec![], vec![])
     } else {
         match batch_scan_typst_unified(&typst_files, &root, label) {
@@ -505,11 +518,7 @@ fn batch_scan_typst_unified(
     files: &[&PathBuf],
     root: &std::path::Path,
     label: &str,
-) -> Result<(
-    Vec<Option<serde_json::Value>>,
-    Vec<Vec<scan::ScannedLink>>,
-    Vec<(String, String)>,
-)> {
+) -> Result<BatchScanResult> {
     use typst_batch::prelude::*;
 
     if files.is_empty() {
@@ -570,7 +579,10 @@ fn extract_asset_path(error: &str, root: &std::path::Path) -> String {
     // Find "searched at " and extract the path
     if let Some(start) = error.find("searched at ") {
         let path_start = start + "searched at ".len();
-        let path_end = error[path_start..].find(')').map(|e| path_start + e).unwrap_or(error.len());
+        let path_end = error[path_start..]
+            .find(')')
+            .map(|e| path_start + e)
+            .unwrap_or(error.len());
         let abs_path = &error[path_start..path_end];
 
         // Convert absolute path to site-relative path

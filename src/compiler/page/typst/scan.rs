@@ -19,7 +19,12 @@ use super::from_typst_html;
 pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
     let root = ctx.config.get_root();
     let label = &ctx.config.build.meta.label;
-    let max_errors = ctx.config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
+    let max_errors = ctx
+        .config
+        .build
+        .diagnostics
+        .max_errors
+        .unwrap_or(usize::MAX);
 
     // Compile Typst to HtmlDocument using Builder API
     let result = Compiler::new(root)

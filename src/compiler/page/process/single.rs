@@ -7,7 +7,7 @@ use crate::compiler::page::compile;
 use crate::compiler::page::{PageResult, collect_warnings, scan_single_page};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE};
-use crate::page::{CompiledPage, PageMeta, PAGE_LINKS, STORED_PAGES};
+use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, STORED_PAGES};
 use crate::utils::path::slug::slugify_path;
 use anyhow::Result;
 use std::path::Path;
@@ -93,9 +93,10 @@ pub fn process_page(
     STORED_PAGES.insert_source_mapping(path.to_path_buf(), page.route.permalink.clone());
 
     // Register to AddressSpace for hot-reload tracking
-    GLOBAL_ADDRESS_SPACE
-        .write()
-        .register_page(page.route.clone(), page.content_meta.as_ref().and_then(|m| m.title.clone()));
+    GLOBAL_ADDRESS_SPACE.write().register_page(
+        page.route.clone(),
+        page.content_meta.as_ref().and_then(|m| m.title.clone()),
+    );
 
     let permalink = page.route.permalink.clone();
 

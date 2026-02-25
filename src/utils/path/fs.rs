@@ -11,10 +11,10 @@ use crate::package::TolaPackage;
 /// Normalize a file system path to absolute form
 ///
 /// Tries `canonicalize()` first (resolves symlinks, `.`, `..`)
-/// Falls back to:
-/// - Return as-is for virtual package sentinels (`@tola/*`)
-/// - Return as-is if already absolute
-/// - Join with current directory if relative
+/// Falls back to `absolute()` for non-existent files (e.g., deleted files)
+///
+/// This ensures consistent path normalization regardless of file existence,
+/// which is critical for dependency graph cleanup when files are removed.
 ///
 /// # Example
 /// ```ignore
@@ -31,13 +31,10 @@ pub fn normalize_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
 
-    path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-        }
-    })
+    // Prefer canonicalize (resolves symlinks), fall back to absolute for deleted files
+    path.canonicalize()
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Resolve a path that may be relative to cwd or a fallback directory

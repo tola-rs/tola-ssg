@@ -148,7 +148,7 @@ async fn process_changes(
             return Ok(());
         }
         let changed_paths: Vec<_> = raw_events.keys().cloned().collect();
-        crate::log!("watch"; "retrying scan after change");
+        crate::debug!("watch"; "retrying scan after change");
         compiler_tx
             .send(CompilerMsg::RetryScan { changed_paths })
             .await
@@ -184,7 +184,7 @@ fn log_events(events: &DebouncedEvents) {
 
 /// Convert DebouncedEvents to CompilerMsg(s)
 fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<CompilerMsg> {
-    use crate::reload::classify::{categorize_path, FileCategory};
+    use crate::reload::classify::{FileCategory, categorize_path};
 
     let (created, modified, removed) = events.split();
 
@@ -197,6 +197,16 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
 
     let mut messages = Vec::new();
 
+    // Process removed files FIRST (before created) to handle renames correctly
+    // This ensures old state is cleaned up before new files are compiled
+    let removed_content: Vec<_> = removed
+        .into_iter()
+        .filter(|p| matches!(categorize_path(p, config), FileCategory::Content(_)))
+        .collect();
+    if !removed_content.is_empty() {
+        messages.push(CompilerMsg::ContentRemoved(removed_content));
+    }
+
     // Filter created files to content files in content directory
     let created_content: Vec<_> = created
         .into_iter()
@@ -204,16 +214,6 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
         .collect();
     if !created_content.is_empty() {
         messages.push(CompilerMsg::ContentCreated(created_content));
-    }
-
-    // Filter removed files to content files in content directory
-    // Note: categorize_path checks path prefix, works even if file no longer exists
-    let removed_content: Vec<_> = removed
-        .into_iter()
-        .filter(|p| matches!(categorize_path(p, config), FileCategory::Content(_)))
-        .collect();
-    if !removed_content.is_empty() {
-        messages.push(CompilerMsg::ContentRemoved(removed_content));
     }
 
     if !result.asset_changed.is_empty() {
@@ -431,7 +431,10 @@ struct EventClassifier;
 
 impl EventClassifier {
     /// Main classification pipeline.
-    fn classify(raw: FxHashMap<PathBuf, ChangeKind>, config: &SiteConfig) -> Option<DebouncedEvents> {
+    fn classify(
+        raw: FxHashMap<PathBuf, ChangeKind>,
+        config: &SiteConfig,
+    ) -> Option<DebouncedEvents> {
         let mut changes = raw;
 
         Self::correct_by_existence(&mut changes);
@@ -526,7 +529,9 @@ impl EventClassifier {
         };
         for entry in entries.flatten() {
             let path = normalize_path(&entry.path());
-            if path.is_file() && !changes.contains_key(&path) && space.url_for_source(&path).is_none()
+            if path.is_file()
+                && !changes.contains_key(&path)
+                && space.url_for_source(&path).is_none()
             {
                 crate::debug!("watch"; "dir-scan found untracked: {}", path.display());
                 changes.insert(path, ChangeKind::Created);
@@ -544,7 +549,7 @@ impl EventClassifier {
     /// by classify_changes().
     fn promote_untracked(changes: &mut FxHashMap<PathBuf, ChangeKind>, config: &SiteConfig) {
         use crate::address::GLOBAL_ADDRESS_SPACE;
-        use crate::reload::classify::{categorize_path, FileCategory};
+        use crate::reload::classify::{FileCategory, categorize_path};
 
         let space = GLOBAL_ADDRESS_SPACE.read();
         let to_promote: Vec<_> = changes
@@ -675,10 +680,7 @@ mod tests {
     #[test]
     fn test_dedup_same_event() {
         let mut debouncer = Debouncer::new();
-        debouncer.add_event(&make_event(
-            vec!["/tmp/a.typ", "/tmp/a.typ"],
-            modify_kind(),
-        ));
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ", "/tmp/a.typ"], modify_kind()));
         assert_eq!(debouncer.changes.len(), 1);
     }
 
@@ -755,7 +757,10 @@ mod tests {
         );
 
         debouncer.add_event(&make_event(vec!["/tmp/a.typ"], remove_kind()));
-        assert!(debouncer.changes.is_empty(), "created+removed should discard");
+        assert!(
+            debouncer.changes.is_empty(),
+            "created+removed should discard"
+        );
     }
 
     #[test]

@@ -270,8 +270,8 @@ pub mod parallel {
 
 pub use global::{clear as clear_graph, remove as remove_content, used_by as get_dependents};
 pub use parallel::{
-    flush_current_thread as flush_current_thread_deps,
-    flush_to_global as flush_thread_local_deps, record_local as record_dependencies_local,
+    flush_current_thread as flush_current_thread_deps, flush_to_global as flush_thread_local_deps,
+    record_local as record_dependencies_local,
 };
 
 /// Collect all pages that depend on any `@tola/*` virtual package.

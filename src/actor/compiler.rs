@@ -214,7 +214,7 @@ impl CompilerActor {
     /// Handle new content files — compile and register
     async fn on_content_created(&mut self, paths: Vec<PathBuf>) {
         let count = paths.len();
-        crate::log!("watch"; "{} new content files", count);
+        crate::debug!("watch"; "{} new content files", count);
 
         let pages_hash = STORED_PAGES.pages_hash();
 
@@ -232,7 +232,7 @@ impl CompilerActor {
         use tola_vdom::CacheKey;
 
         let count = paths.len();
-        crate::log!("watch"; "{} content files removed", count);
+        crate::debug!("watch"; "{} content files removed", count);
 
         for path in &paths {
             // Look up URL before removing mappings
@@ -402,7 +402,7 @@ impl CompilerActor {
         match result {
             Ok(Ok(_)) => {
                 set_healthy(true);
-                crate::log!("scan"; "recovered");
+                crate::debug!("scan"; "recovered");
 
                 // Compile changed content files
                 let content_files: Vec<_> = changed_paths
@@ -474,7 +474,7 @@ impl CompilerActor {
         let all_dependents = collect_virtual_dependents();
 
         if !all_dependents.is_empty() {
-            crate::log!("compile"; "recompiling {} virtual package users", all_dependents.len());
+            crate::debug!("compile"; "recompiling {} virtual package users", all_dependents.len());
             self.compile_batch_blocking(all_dependents.into_iter().collect())
                 .await;
         } else {

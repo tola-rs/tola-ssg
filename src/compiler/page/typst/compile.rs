@@ -31,7 +31,12 @@ fn parse_page_meta(json: serde_json::Value) -> Option<PageMeta> {
 pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutput> {
     let root = ctx.config.get_root();
     let label = &ctx.config.build.meta.label;
-    let max_errors = ctx.config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
+    let max_errors = ctx
+        .config
+        .build
+        .diagnostics
+        .max_errors
+        .unwrap_or(usize::MAX);
 
     // Build inputs with site config and pages data for @tola/* virtual packages
     let mut inputs = STORED_PAGES.build_inputs(ctx.config)?;

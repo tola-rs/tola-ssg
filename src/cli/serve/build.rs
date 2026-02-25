@@ -167,7 +167,9 @@ fn recompile_virtual_users(config: &SiteConfig) {
 
 /// Finalize serve build: print warnings/errors and persist cache
 fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
-    use crate::cache::{PersistedDiagnostics, PersistedError, PersistedWarning, persist_diagnostics};
+    use crate::cache::{
+        PersistedDiagnostics, PersistedError, PersistedWarning, persist_diagnostics,
+    };
     use crate::compiler::scheduler::SCHEDULER;
     use crate::core::GLOBAL_ADDRESS_SPACE;
 
