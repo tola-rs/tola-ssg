@@ -57,6 +57,14 @@ pub fn update_version(path: &Path) -> bool {
     changed
 }
 
+/// Remove cached version for a path.
+///
+/// Returns true if an entry existed and was removed.
+pub fn remove_version(path: &Path) -> bool {
+    let path = normalize_path(path);
+    ASSET_VERSIONS.remove(&path).is_some()
+}
+
 /// Clear all cached versions
 pub fn clear() {
     ASSET_VERSIONS.clear();
@@ -113,5 +121,18 @@ mod tests {
         // Modify content = changed
         fs::write(&file, "console.log(2)").unwrap();
         assert!(update_version(&file));
+    }
+
+    #[test]
+    fn test_remove_version() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("remove.css");
+        fs::write(&file, "body{}").unwrap();
+
+        // Seed cache
+        let _ = versioned_url("/remove.css", &file);
+        assert!(remove_version(&file));
+        // Already removed
+        assert!(!remove_version(&file));
     }
 }

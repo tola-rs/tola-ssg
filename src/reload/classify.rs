@@ -58,6 +58,8 @@ pub struct ClassifyResult {
     pub compile_queue: CompileQueue,
     /// Asset files that changed (need copy, not compile)
     pub asset_changed: Vec<PathBuf>,
+    /// Output files that changed (hook-generated artifacts)
+    pub output_changed: Vec<PathBuf>,
     /// Optional note (e.g., "deps changed but no dependents")
     pub note: Option<String>,
 }
@@ -82,6 +84,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
     let mut deps_changed = Vec::new();
     let mut content_changed = Vec::new();
     let mut asset_changed = Vec::new();
+    let mut output_changed = Vec::new();
 
     // Categorize each path
     for path in paths {
@@ -97,7 +100,8 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
             FileCategory::Deps => deps_changed.push(normalized),
             FileCategory::Content(_) => content_changed.push(normalized),
             FileCategory::Asset => asset_changed.push(normalized),
-            FileCategory::Output | FileCategory::Unknown => {}
+            FileCategory::Output => output_changed.push(normalized),
+            FileCategory::Unknown => {}
         }
     }
 
@@ -143,6 +147,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
         config_changed,
         compile_queue: queue,
         asset_changed,
+        output_changed,
         note,
     }
 }
@@ -172,4 +177,55 @@ pub fn collect_dependents(changed_files: &[PathBuf]) -> Vec<PathBuf> {
     }
 
     affected.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SiteConfig;
+    use crate::utils::path::normalize_path;
+    use tempfile::TempDir;
+
+    fn make_config() -> (TempDir, SiteConfig) {
+        let temp = TempDir::new().unwrap();
+        let root = normalize_path(temp.path());
+
+        let mut config = SiteConfig::default();
+        config.set_root(&root);
+        config.build.content = root.join("content");
+        config.build.output = root.join("public");
+        config.config_path = root.join("tola.toml");
+
+        std::fs::create_dir_all(&config.build.content).unwrap();
+        std::fs::create_dir_all(config.paths().output_dir()).unwrap();
+
+        (temp, config)
+    }
+
+    #[test]
+    fn test_categorize_output_path() {
+        let (_tmp, config) = make_config();
+        let output_file = config.paths().output_dir().join("assets").join("app.css");
+        let parent = output_file.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        std::fs::write(&output_file, "body{}").unwrap();
+
+        let category = categorize_path(&output_file, &config);
+        assert_eq!(category, FileCategory::Output);
+    }
+
+    #[test]
+    fn test_classify_collects_output_changes() {
+        let (_tmp, config) = make_config();
+        let output_file = config.paths().output_dir().join("assets").join("app.css");
+        let parent = output_file.parent().unwrap();
+        std::fs::create_dir_all(parent).unwrap();
+        std::fs::write(&output_file, "body{}").unwrap();
+
+        let result = classify_changes(std::slice::from_ref(&output_file), &config);
+        assert_eq!(result.output_changed, vec![output_file]);
+        assert!(result.asset_changed.is_empty());
+        assert!(result.compile_queue.is_empty());
+        assert!(!result.config_changed);
+    }
 }

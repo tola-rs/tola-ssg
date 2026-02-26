@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::mpsc;
 
 use super::messages::CompilerMsg;
@@ -40,7 +40,11 @@ pub struct FsActor {
     /// Channel to receive notify events (sync -> async bridge)
     notify_rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
     /// Watcher handle (must be kept alive)
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
+    /// Paths that should be watched (re-attached when recreated)
+    watch_paths: Vec<PathBuf>,
+    /// Successfully attached watch roots
+    watched_paths: FxHashSet<PathBuf>,
     /// Channel to send messages to CompilerActor
     compiler_tx: mpsc::Sender<CompilerMsg>,
     /// Debouncer state
@@ -69,9 +73,11 @@ impl FsActor {
         })?;
 
         // Start watching all paths (skip non-existent paths to handle race conditions)
+        let mut watched_paths = FxHashSet::default();
         for path in &paths {
             if path.exists() {
                 watcher.watch(path, RecursiveMode::Recursive)?;
+                watched_paths.insert(path.clone());
             }
         }
 
@@ -79,7 +85,9 @@ impl FsActor {
 
         Ok(Self {
             notify_rx,
-            _watcher: watcher,
+            watcher,
+            watch_paths: paths,
+            watched_paths,
             compiler_tx,
             debouncer: Debouncer::new(),
             config,
@@ -90,9 +98,12 @@ impl FsActor {
     pub async fn run(self) {
         // Extract fields before consuming self
         let notify_rx = self.notify_rx;
-        let compiler_tx = self.compiler_tx;
-        let config = self.config;
+        let compiler_tx = self.compiler_tx.clone();
+        let config = Arc::clone(&self.config);
         let mut debouncer = self.debouncer;
+        let mut watcher = self.watcher;
+        let watch_paths = self.watch_paths;
+        let mut watched_paths = self.watched_paths;
 
         let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(64);
 
@@ -115,11 +126,33 @@ impl FsActor {
                 biased;
                 Some(event) = async_rx.recv() => debouncer.add_event(&event),
                 _ = tokio::time::sleep(debouncer.sleep_duration()) => {
+                    refresh_watches(&mut watcher, &watch_paths, &mut watched_paths);
                     if process_changes(&mut debouncer, &compiler_tx, &config).await.is_err() {
                         break;
                     }
                 }
             }
+        }
+    }
+}
+
+/// Re-attach watches for directories that were removed and recreated.
+fn refresh_watches(
+    watcher: &mut RecommendedWatcher,
+    watch_paths: &[PathBuf],
+    watched_paths: &mut FxHashSet<PathBuf>,
+) {
+    // Drop stale handles for paths that no longer exist.
+    watched_paths.retain(|path| path.exists());
+
+    for path in watch_paths {
+        if watched_paths.contains(path) || !path.exists() {
+            continue;
+        }
+
+        if watcher.watch(path, RecursiveMode::Recursive).is_ok() {
+            watched_paths.insert(path.clone());
+            crate::debug!("watch"; "re-attached watch: {}", path.display());
         }
     }
 }
@@ -200,8 +233,9 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
     // Process removed files FIRST (before created) to handle renames correctly
     // This ensures old state is cleaned up before new files are compiled
     let removed_content: Vec<_> = removed
-        .into_iter()
+        .iter()
         .filter(|p| matches!(categorize_path(p, config), FileCategory::Content(_)))
+        .cloned()
         .collect();
     if !removed_content.is_empty() {
         messages.push(CompilerMsg::ContentRemoved(removed_content));
@@ -209,8 +243,9 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
 
     // Filter created files to content files in content directory
     let created_content: Vec<_> = created
-        .into_iter()
+        .iter()
         .filter(|p| matches!(categorize_path(p, config), FileCategory::Content(_)))
+        .cloned()
         .collect();
     if !created_content.is_empty() {
         messages.push(CompilerMsg::ContentCreated(created_content));
@@ -218,6 +253,28 @@ fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<Compi
 
     if !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
+    }
+
+    // Output changes are tracked separately:
+    // - classified modified output files
+    // - created/removed output files from raw events
+    let mut output_changed = result.output_changed;
+    output_changed.extend(
+        created
+            .iter()
+            .filter(|p| matches!(categorize_path(p, config), FileCategory::Output))
+            .cloned(),
+    );
+    output_changed.extend(
+        removed
+            .iter()
+            .filter(|p| matches!(categorize_path(p, config), FileCategory::Output))
+            .cloned(),
+    );
+    if !output_changed.is_empty() {
+        let mut seen = FxHashSet::default();
+        output_changed.retain(|p| seen.insert(p.clone()));
+        messages.push(CompilerMsg::OutputChange(output_changed));
     }
 
     if !result.compile_queue.is_empty() {
@@ -447,7 +504,7 @@ impl EventClassifier {
         Self::correct_by_existence(&mut changes);
         Self::recover_from_dir_events(&mut changes);
         Self::promote_untracked(&mut changes, config);
-        Self::filter_actionable(&mut changes);
+        Self::filter_actionable(&mut changes, config);
 
         if changes.is_empty() {
             return None;
@@ -581,13 +638,17 @@ impl EventClassifier {
     ///
     /// - Created/Modified: must be a file (not a directory)
     /// - Removed: must still be tracked in AddressSpace (prevents duplicate removals)
-    fn filter_actionable(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
+    fn filter_actionable(changes: &mut FxHashMap<PathBuf, ChangeKind>, config: &SiteConfig) {
         use crate::address::GLOBAL_ADDRESS_SPACE;
+        use crate::reload::classify::{FileCategory, categorize_path};
 
         let space = GLOBAL_ADDRESS_SPACE.read();
         changes.retain(|p, k| match k {
             ChangeKind::Created | ChangeKind::Modified => p.is_file(),
             ChangeKind::Removed => {
+                if matches!(categorize_path(p, config), FileCategory::Output) {
+                    return true;
+                }
                 let tracked = space.url_for_source(p).is_some();
                 if !tracked {
                     crate::debug!("watch"; "filter removed (not tracked): {}", p.display());
@@ -601,6 +662,25 @@ impl EventClassifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SiteConfig;
+    use crate::utils::path::normalize_path;
+    use tempfile::TempDir;
+
+    fn make_config() -> (TempDir, SiteConfig) {
+        let temp = TempDir::new().unwrap();
+        let root = normalize_path(temp.path());
+
+        let mut config = SiteConfig::default();
+        config.set_root(&root);
+        config.build.content = root.join("content");
+        config.build.output = root.join("public");
+        config.config_path = root.join("tola.toml");
+
+        std::fs::create_dir_all(&config.build.content).unwrap();
+        std::fs::create_dir_all(config.paths().output_dir()).unwrap();
+
+        (temp, config)
+    }
 
     fn make_event(paths: Vec<&str>, kind: notify::EventKind) -> notify::Event {
         notify::Event {
@@ -782,5 +862,46 @@ mod tests {
             debouncer.changes[&PathBuf::from("/tmp/a.typ")],
             ChangeKind::Removed
         );
+    }
+
+    #[test]
+    fn test_events_to_messages_includes_output_change() {
+        let (_tmp, config) = make_config();
+        let output_css = config.paths().output_dir().join("assets").join("hook.css");
+        let output_html = config.paths().output_dir().join("page").join("index.html");
+        std::fs::create_dir_all(output_css.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(output_html.parent().unwrap()).unwrap();
+        std::fs::write(&output_css, "body{}").unwrap();
+        std::fs::write(&output_html, "<html></html>").unwrap();
+
+        let events = DebouncedEvents(vec![
+            (output_css.clone(), ChangeKind::Modified),
+            (output_html.clone(), ChangeKind::Created),
+        ]);
+
+        let messages = events_to_messages(events, &config);
+        let output_msg = messages.into_iter().find_map(|msg| match msg {
+            CompilerMsg::OutputChange(paths) => Some(paths),
+            _ => None,
+        });
+
+        let paths = output_msg.expect("expected OutputChange message");
+        assert!(paths.contains(&output_css));
+        assert!(paths.contains(&output_html));
+    }
+
+    #[test]
+    fn test_filter_actionable_keeps_removed_output() {
+        let (_tmp, config) = make_config();
+        let removed_output = config
+            .paths()
+            .output_dir()
+            .join("assets")
+            .join("removed.css");
+        let mut changes = FxHashMap::default();
+        changes.insert(removed_output.clone(), ChangeKind::Removed);
+
+        EventClassifier::filter_actionable(&mut changes, &config);
+        assert!(changes.contains_key(&removed_output));
     }
 }

@@ -36,6 +36,8 @@ pub enum CompilerMsg {
     ContentRemoved(Vec<PathBuf>),
     /// Process asset changes (copy files, trigger reload)
     AssetChange(Vec<PathBuf>),
+    /// Output file changes (usually hook-generated artifacts)
+    OutputChange(Vec<PathBuf>),
     /// Retry scan after initial failure (triggered by file change when !is_healthy)
     RetryScan { changed_paths: Vec<PathBuf> },
     /// Full rebuild (config changed)

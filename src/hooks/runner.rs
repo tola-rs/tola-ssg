@@ -7,7 +7,6 @@ use crate::config::section::build::HookConfig;
 use crate::core::BuildMode;
 use anyhow::Result;
 use rustc_hash::FxHashMap;
-use std::path::PathBuf;
 
 // ============================================================================
 // Environment Variables
@@ -110,8 +109,8 @@ pub fn run_hook(
 
 /// Execute all pre hooks (including CSS processor if enabled)
 pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
-    for entry in collect_pre_hooks(config)? {
-        run_hook(&entry.hook, config, mode, with_build_args, "pre")?;
+    for hook in collect_pre_hooks(config)? {
+        run_hook(&hook, config, mode, with_build_args, "pre")?;
     }
 
     Ok(())
@@ -133,84 +132,50 @@ use std::path::Path;
 
 /// Check and execute hooks that match changed files (for serve mode)
 ///
-/// Returns execution summary for no-op-safe recompilation decisions.
-#[derive(Debug, Clone, Default)]
-pub struct WatchedHooksResult {
-    /// Total hooks executed (pre + post + sugar hooks).
-    pub executed: usize,
-    /// Number of hooks whose side effects are not precisely tracked.
-    pub conservative_executed: usize,
-    /// Output files for hooks with explicitly tracked side effects.
-    pub tracked_outputs: Vec<PathBuf>,
-}
-
-/// Check and execute hooks that match changed files (for serve mode).
-pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> WatchedHooksResult {
-    let mut result = WatchedHooksResult::default();
-
-    run_watched_pre_hooks(config, changed_paths, &mut result);
-    run_watched_post_hooks(config, changed_paths, &mut result);
-
-    result
+/// Returns the number of hooks executed.
+pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
+    run_watched_pre_hooks(config, changed_paths) + run_watched_post_hooks(config, changed_paths)
 }
 
 /// Execute pre hooks that match changed files
-fn run_watched_pre_hooks(
-    config: &SiteConfig,
-    changed_paths: &[&Path],
-    result: &mut WatchedHooksResult,
-) {
+fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let root = config.get_root();
     let pre_hooks = match collect_pre_hooks(config) {
         Ok(hooks) => hooks,
         Err(e) => {
             crate::log!("hook"; "failed to build pre hooks: {}", e);
-            config
-                .build
-                .hooks
-                .pre
-                .iter()
-                .cloned()
-                .map(|hook| PreHookEntry {
-                    hook,
-                    tracked_output: None,
-                })
-                .collect()
+            config.build.hooks.pre.clone()
         }
     };
+    let mut executed = 0;
 
-    for entry in pre_hooks {
-        if should_run_hook_for_changes(&entry.hook, changed_paths, root) {
-            if let Err(e) = run_hook(&entry.hook, config, BuildMode::DEVELOPMENT, false, "pre") {
+    for hook in pre_hooks {
+        if should_run_hook_for_changes(&hook, changed_paths, root) {
+            if let Err(e) = run_hook(&hook, config, BuildMode::DEVELOPMENT, false, "pre") {
                 crate::log!("hook"; "failed: {}", e);
             }
-            result.executed += 1;
-            if let Some(output) = entry.tracked_output {
-                result.tracked_outputs.push(output);
-            } else {
-                result.conservative_executed += 1;
-            }
+            executed += 1;
         }
     }
+
+    executed
 }
 
 /// Execute post hooks that match changed files
-fn run_watched_post_hooks(
-    config: &SiteConfig,
-    changed_paths: &[&Path],
-    result: &mut WatchedHooksResult,
-) {
+fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let root = config.get_root();
+    let mut executed = 0;
 
     for hook in &config.build.hooks.post {
         if should_run_hook_for_changes(hook, changed_paths, root) {
             if let Err(e) = run_hook(hook, config, BuildMode::DEVELOPMENT, false, "post") {
                 crate::log!("hook"; "failed: {}", e);
             }
-            result.executed += 1;
-            result.conservative_executed += 1;
+            executed += 1;
         }
     }
+
+    executed
 }
 
 /// Check if a hook should run based on changed files
@@ -225,37 +190,18 @@ fn should_run_hook_for_changes(hook: &HookConfig, changed_paths: &[&Path], root:
 }
 
 /// Collect user pre hooks plus optional CSS syntax-sugar hook.
-fn collect_pre_hooks(config: &SiteConfig) -> Result<Vec<PreHookEntry>> {
-    let mut hooks: Vec<PreHookEntry> = config
-        .build
-        .hooks
-        .pre
-        .iter()
-        .cloned()
-        .map(|hook| PreHookEntry {
-            hook,
-            tracked_output: None,
-        })
-        .collect();
+fn collect_pre_hooks(config: &SiteConfig) -> Result<Vec<HookConfig>> {
+    let mut hooks = config.build.hooks.pre.clone();
 
     if let Some(output) = super::css::css_output_path(config)? {
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let css_hook = super::css::build_css_hook(config, &output)?;
-        hooks.push(PreHookEntry {
-            hook: css_hook,
-            tracked_output: Some(output),
-        });
+        hooks.push(css_hook);
     }
 
     Ok(hooks)
-}
-
-#[derive(Debug, Clone)]
-struct PreHookEntry {
-    hook: HookConfig,
-    tracked_output: Option<PathBuf>,
 }
 
 // ============================================================================

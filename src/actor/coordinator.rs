@@ -159,6 +159,13 @@ impl Coordinator {
         if self.config.config_path.exists() {
             paths.push(self.config.config_path.clone());
         }
+        // Watch output directory for hook-generated artifact changes.
+        // Output events are classified separately to avoid rebuild loops.
+        let output_dir = self.config.paths().output_dir();
+        let _ = std::fs::create_dir_all(&output_dir);
+        if !paths.contains(&output_dir) {
+            paths.push(output_dir);
+        }
         paths
     }
 }
