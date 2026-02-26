@@ -29,8 +29,25 @@ impl WatchRoots {
             if !path.exists() {
                 continue;
             }
-            watcher.watch(path, RecursiveMode::Recursive)?;
-            self.attached.insert(path.clone());
+            match watcher.watch(path, RecursiveMode::Recursive) {
+                Ok(()) => {
+                    self.attached.insert(path.clone());
+                }
+                Err(err) => {
+                    // Race-safe startup:
+                    // path may be deleted between `exists()` and `watch()` during `serve --clean`.
+                    // Treat as transient and let maintain() re-attach later.
+                    if !path.exists() {
+                        crate::debug!(
+                            "watch";
+                            "skip attach missing root during startup: {}",
+                            path.display()
+                        );
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
         }
 
         Ok(())
