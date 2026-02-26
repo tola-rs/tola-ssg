@@ -1,7 +1,7 @@
 //! Body content injector (Indexed -> Indexed).
 //!
 //! Injects scripts before `</body>` based on site configuration.
-//! Currently handles SPA navigation script injection and recolor filter/JS.
+//! Currently handles SPA navigation script injection and recolor SVG filter.
 
 use tola_vdom::prelude::*;
 
@@ -59,21 +59,6 @@ impl<'a> BodyInjector<'a> {
             let script_tag = SPA_JS.external_tag_with_vars(&vars);
             body.push(Node::Text(Text::raw(script_tag)));
         }
-
-        // Recolor JS (dynamic mode only, inject at body end)
-        if recolor.enable {
-            use crate::config::section::theme::RecolorSource;
-            use crate::embed::recolor;
-
-            match &recolor.source {
-                RecolorSource::Static => {} // No JS needed for static mode
-                _ => {
-                    let vars = recolor::js_vars(recolor);
-                    let script_tag = recolor::RECOLOR_JS.external_tag_with_vars(&vars);
-                    body.push(Node::Text(Text::raw(script_tag)));
-                }
-            }
-        }
     }
 }
 
@@ -83,5 +68,72 @@ impl<'a> Transform<Indexed> for BodyInjector<'a> {
     fn transform(self, mut doc: Document<Indexed>) -> Document<Indexed> {
         self.inject_body(&mut doc.root);
         doc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    use crate::compiler::family::{Raw, TolaSite};
+    use crate::config::section::theme::RecolorSource;
+
+    fn make_indexed_doc() -> Document<Indexed> {
+        let mut html = TolaSite::element("html", Attrs::new());
+        let head = TolaSite::element("head", Attrs::new());
+        let body = TolaSite::element("body", Attrs::new());
+        html.push_elem(head);
+        html.push_elem(body);
+
+        let raw: Document<Raw> = Document::new(html);
+        Pipeline::new(raw).pipe(TolaSite::indexer()).into_inner()
+    }
+
+    fn body_text_content(doc: &Document<Indexed>) -> String {
+        let body = doc
+            .root
+            .children
+            .iter()
+            .find_map(|n| match n {
+                Node::Element(e) if e.tag == "body" => Some(e.as_ref()),
+                _ => None,
+            })
+            .expect("document should have <body>");
+        body.text_content()
+    }
+
+    #[test]
+    fn test_dynamic_recolor_injects_filter_but_not_recolor_script() {
+        let mut config = SiteConfig::default();
+        config.theme.recolor.enable = true;
+        config.theme.recolor.source = RecolorSource::Auto;
+
+        let doc = BodyInjector::new(&config).transform(make_indexed_doc());
+        let text = body_text_content(&doc);
+
+        assert!(text.contains("filter id=\"tola-recolor\""));
+        assert!(
+            !text.contains("/.tola/recolor-"),
+            "recolor.js should be injected in head, not body"
+        );
+    }
+
+    #[test]
+    fn test_static_recolor_injects_static_svg_only() {
+        let mut config = SiteConfig::default();
+        config.theme.recolor.enable = true;
+        config.theme.recolor.source = RecolorSource::Static;
+        config.theme.recolor.list = HashMap::from([
+            ("light".to_string(), "#000000".to_string()),
+            ("dark".to_string(), "#ffffff".to_string()),
+        ]);
+
+        let doc = BodyInjector::new(&config).transform(make_indexed_doc());
+        let text = body_text_content(&doc);
+
+        assert!(text.contains("tola-recolor-light"));
+        assert!(text.contains("tola-recolor-dark"));
+        assert!(!text.contains("/.tola/recolor-"));
     }
 }
