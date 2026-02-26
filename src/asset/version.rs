@@ -65,6 +65,30 @@ pub fn remove_version(path: &Path) -> bool {
     ASSET_VERSIONS.remove(&path).is_some()
 }
 
+/// Remove cached versions under a directory prefix.
+///
+/// Returns number of removed entries.
+pub fn invalidate_under(dir: &Path) -> usize {
+    let dir = normalize_path(dir);
+    let keys: Vec<PathBuf> = ASSET_VERSIONS
+        .iter()
+        .filter_map(|entry| {
+            let key = entry.key();
+            if key.starts_with(&dir) {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let removed = keys.len();
+    for key in keys {
+        ASSET_VERSIONS.remove(&key);
+    }
+    removed
+}
+
 /// Clear all cached versions
 pub fn clear() {
     ASSET_VERSIONS.clear();
@@ -134,5 +158,29 @@ mod tests {
         assert!(remove_version(&file));
         // Already removed
         assert!(!remove_version(&file));
+    }
+
+    #[test]
+    fn test_invalidate_under() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("public");
+        let css = output.join("assets").join("app.css");
+        let js = output.join("assets").join("app.js");
+        let other = dir.path().join("static").join("site.css");
+        fs::create_dir_all(css.parent().unwrap()).unwrap();
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&css, "a{}").unwrap();
+        fs::write(&js, "console.log(1)").unwrap();
+        fs::write(&other, "b{}").unwrap();
+
+        let _ = versioned_url("/assets/app.css", &css);
+        let _ = versioned_url("/assets/app.js", &js);
+        let _ = versioned_url("/static/site.css", &other);
+
+        let removed = invalidate_under(&output);
+        assert_eq!(removed, 2);
+        assert!(!ASSET_VERSIONS.contains_key(&normalize_path(&css)));
+        assert!(!ASSET_VERSIONS.contains_key(&normalize_path(&js)));
+        assert!(ASSET_VERSIONS.contains_key(&normalize_path(&other)));
     }
 }

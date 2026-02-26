@@ -192,14 +192,14 @@
     },
 
     // Apply patch operations
-    // Phase 1: apply stylesheet replacements and wait for preload completion
+    // Phase 1: apply stylesheet updates (replace/attrs) and wait for preload completion
     // Phase 2: apply all remaining DOM patches
     applyPatches(ops) {
       const cssOps = [];
       const otherOps = [];
 
       for (const op of ops) {
-        if (this.isStylesheetReplaceOp(op)) {
+        if (this.isStylesheetPatchOp(op)) {
           cssOps.push(op);
         } else {
           otherOps.push(op);
@@ -232,7 +232,7 @@
       const cssTasks = [];
       for (const op of cssOps) {
         try {
-          cssTasks.push(this.applyStylesheetReplace(op));
+          cssTasks.push(this.applyStylesheetPatch(op));
         } catch (err) {
           console.error('[tola] css patch failed:', op.op, err);
           location.reload();
@@ -248,12 +248,31 @@
         });
     },
 
+    isStylesheetPatchOp(op) {
+      return this.isStylesheetReplaceOp(op) || this.isStylesheetAttrsOp(op);
+    },
+
     isStylesheetReplaceOp(op) {
       if (!op || op.op !== 'replace' || typeof op.html !== 'string') return false;
       const temp = document.createElement('div');
       temp.innerHTML = op.html;
       const link = temp.querySelector('link');
       return !!(link && link.rel === 'stylesheet');
+    },
+
+    isStylesheetAttrsOp(op) {
+      if (!op || op.op !== 'attrs' || !Array.isArray(op.attrs) || !op.target) return false;
+      const hasHrefUpdate = op.attrs.some(([name, value]) => name === 'href' && typeof value === 'string');
+      if (!hasHrefUpdate) return false;
+      const el = this.getById(op.target);
+      return !!(el && el.tagName === 'LINK' && el.rel === 'stylesheet');
+    },
+
+    applyStylesheetPatch(op) {
+      if (!op) return Promise.resolve();
+      if (op.op === 'replace') return this.applyStylesheetReplace(op);
+      if (op.op === 'attrs') return this.applyStylesheetAttrs(op);
+      return Promise.resolve();
     },
 
     applyStylesheetReplace(op) {
@@ -265,6 +284,35 @@
         return this.seamlessCssUpdate(el, op.html);
       }
       // Fallback: if target exists but is not stylesheet, apply as normal replace
+      this.applyPatch(op);
+      return Promise.resolve();
+    },
+
+    applyStylesheetAttrs(op) {
+      const oldLink = this.getById(op.target);
+      if (!(oldLink && oldLink.tagName === 'LINK' && oldLink.rel === 'stylesheet')) {
+        this.applyPatch(op);
+        return Promise.resolve();
+      }
+
+      const nextLink = oldLink.cloneNode(false);
+      for (const [name, value] of op.attrs) {
+        if (value === null) {
+          nextLink.removeAttribute(name);
+        } else {
+          nextLink.setAttribute(name, value);
+        }
+      }
+
+      const oldHref = oldLink.getAttribute('href') || '';
+      const nextHref = nextLink.getAttribute('href') || '';
+      const nextRel = (nextLink.getAttribute('rel') || '').toLowerCase();
+
+      // Only use preload swap when stylesheet href actually changes.
+      if (nextRel === 'stylesheet' && nextHref && nextHref !== oldHref) {
+        return this.seamlessCssUpdate(oldLink, nextLink.outerHTML);
+      }
+
       this.applyPatch(op);
       return Promise.resolve();
     },

@@ -49,11 +49,27 @@ impl CompilerActor {
     }
 
     /// Run watched hooks and return whether hook outputs may have changed.
+    ///
+    /// When hooks execute, invalidate cached versions for output artifacts so
+    /// the same compilation round uses fresh `?v=` links.
     fn run_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
+        use crate::asset::version;
         use crate::hooks;
 
         let refs: Vec<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
-        hooks::run_watched_hooks(&self.config, &refs) > 0
+        let executed = hooks::run_watched_hooks(&self.config, &refs);
+        if executed == 0 {
+            return false;
+        }
+
+        let removed = version::invalidate_under(self.config.paths().output_dir().as_path());
+        crate::debug!(
+            "hook";
+            "watched hooks executed: {}, invalidated output versions: {}",
+            executed,
+            removed
+        );
+        true
     }
 
     /// Skip recompilation for no-op saves.
