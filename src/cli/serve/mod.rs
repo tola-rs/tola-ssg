@@ -137,6 +137,12 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
         return response::respond_loading(request);
     }
 
+    // During startup/recovery, metadata and virtual package data may still be converging.
+    // Serve loading page until build becomes healthy to avoid transient empty data flashes.
+    if !crate::core::is_healthy() {
+        return response::respond_loading(request);
+    }
+
     if content::is_content_empty(config) {
         return response::respond_welcome(request);
     }

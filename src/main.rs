@@ -105,15 +105,15 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     let needs_full_build = !has_cache;
     std::thread::spawn(move || {
         // Progressive serving: init → scan → set_serving → build
-        // Even if scan fails, we still set_serving() so FsActor can trigger rebuild on fix
+        // If scan fails, set_serving() so FsActor can trigger rebuild on fix.
+        // If scan succeeds, delay set_serving() until initial build finishes
+        // to avoid serving partially converged virtual package data.
         let scan_success = !needs_full_build || progressive_scan(&config_arc);
 
-        // Always set serving state (even on failure) to enable recovery via file changes
-        if needs_full_build {
-            set_serving();
-        }
-
         if !scan_success {
+            if needs_full_build {
+                set_serving();
+            }
             set_healthy(false);
             return;
         }
@@ -141,8 +141,10 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             clear_clean_flag();
         }
 
-        // Mark site as ready to serve (only needed for cache path; progressive path already set)
-        if has_cache {
+        // Mark site as ready to serve:
+        // - cache path: after startup_with_cache
+        // - full-build path: after initial build completes
+        if has_cache || needs_full_build {
             set_serving();
         }
     });
@@ -156,7 +158,7 @@ fn progressive_scan(config: &SiteConfig) -> bool {
 
     // Initialize serve build environment (clean + assets)
     if let Err(e) = cli::serve::init_serve_build(config) {
-        log!("init"; "failed: {}", e);
+        debug!("init"; "failed: {}", e);
         return false;
     }
 
@@ -165,7 +167,7 @@ fn progressive_scan(config: &SiteConfig) -> bool {
     }
 
     if let Err(e) = cli::serve::scan_pages(config) {
-        log!("scan"; "failed: {}", e);
+        debug!("scan"; "failed: {}", e);
         return false;
     }
 

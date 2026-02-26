@@ -403,7 +403,6 @@ impl CompilerActor {
 
         match result {
             Ok(Ok(_)) => {
-                set_healthy(true);
                 crate::debug!("scan"; "recovered");
 
                 // Compile changed content files
@@ -429,10 +428,12 @@ impl CompilerActor {
                     }
                 }
 
+                // Mark healthy only after retry compilation finishes.
+                set_healthy(true);
                 let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
             }
             Ok(Err(e)) => {
-                crate::log!("scan"; "still failing: {}", e);
+                crate::debug!("scan"; "still failing: {}", e);
             }
             Err(e) => {
                 crate::debug!("compile"; "spawn_blocking error: {}", e);
