@@ -65,6 +65,21 @@ struct Converter<'a> {
     baseline_align: bool,
 }
 
+const MAX_ABS_VERTICAL_ALIGN_EM: f64 = 3.0;
+
+#[inline]
+fn normalize_vertical_align_em(vertical_align_em: f64) -> Option<f64> {
+    if !vertical_align_em.is_finite() {
+        return None;
+    }
+
+    if vertical_align_em.abs() > MAX_ABS_VERTICAL_ALIGN_EM {
+        return None;
+    }
+
+    Some(vertical_align_em)
+}
+
 impl<'a> Converter<'a> {
     fn new(doc: &'a HtmlDocument, svg_cache: Vec<String>, baseline_align: bool) -> Self {
         Self {
@@ -114,11 +129,15 @@ impl<'a> Converter<'a> {
             NodeKind::Frame(frame) => {
                 let id = self.next_frame_id as usize;
                 self.next_frame_id += 1;
+
+                // Typst's built-in baseline formula:
+                // vertical-align = -(height - baseline) / text_size
                 let vertical_align_em = if self.baseline_align {
-                    frame.vertical_align_em()
+                    normalize_vertical_align_em(frame.vertical_align_em())
                 } else {
-                    f64::NAN // Will be skipped by is_finite() check
+                    None
                 };
+
                 self.svg_cache
                     .get(id)
                     .map(|svg| svg_string_to_node(svg, vertical_align_em))
@@ -132,12 +151,11 @@ impl<'a> Converter<'a> {
 // =============================================================================
 
 /// Convert an SVG string to a VDOM node with vertical-align for baseline alignment
-fn svg_string_to_node(svg: &str, vertical_align_em: f64) -> Node<TolaSite::Raw> {
+fn svg_string_to_node(svg: &str, vertical_align_em: Option<f64>) -> Node<TolaSite::Raw> {
     let (mut attrs, inner_content) = parse_svg_string(svg);
 
     // Add vertical-align to style attribute for baseline alignment
-    // Only add if the value is finite (not NaN or Infinity from division by zero)
-    if vertical_align_em.is_finite() {
+    if let Some(vertical_align_em) = vertical_align_em {
         let existing_style = attrs
             .iter()
             .find(|(k, _)| k == "style")
@@ -289,5 +307,56 @@ mod tests {
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0].0, "viewBox");
         assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_vertical_align_em() {
+        assert_eq!(normalize_vertical_align_em(-0.4321), Some(-0.4321));
+        assert_eq!(normalize_vertical_align_em(f64::NAN), None);
+        assert_eq!(normalize_vertical_align_em(f64::INFINITY), None);
+        assert_eq!(normalize_vertical_align_em(4.0), None);
+        assert_eq!(normalize_vertical_align_em(-3.5), None);
+    }
+
+    #[test]
+    fn test_svg_string_to_node_injects_vertical_align_style() {
+        let svg = r#"<svg viewBox="0 0 10 10"></svg>"#;
+        let node = svg_string_to_node(svg, Some(-0.5));
+
+        let Node::Element(svg_elem) = node else {
+            panic!("expected element node");
+        };
+
+        assert_eq!(
+            svg_elem.get_attr("style"),
+            Some("vertical-align: -0.5000em")
+        );
+    }
+
+    #[test]
+    fn test_svg_string_to_node_appends_vertical_align_style() {
+        let svg = r#"<svg style="overflow: visible"></svg>"#;
+        let node = svg_string_to_node(svg, Some(-0.25));
+
+        let Node::Element(svg_elem) = node else {
+            panic!("expected element node");
+        };
+
+        assert_eq!(
+            svg_elem.get_attr("style"),
+            Some("overflow: visible; vertical-align: -0.2500em")
+        );
+    }
+
+    #[test]
+    fn test_svg_string_to_node_skips_vertical_align_when_none() {
+        let svg = r#"<svg viewBox="0 0 10 10"></svg>"#;
+        let node = svg_string_to_node(svg, None);
+
+        let Node::Element(svg_elem) = node else {
+            panic!("expected element node");
+        };
+
+        assert_eq!(svg_elem.get_attr("style"), None);
     }
 }
