@@ -173,12 +173,14 @@ impl<'a> DraftFilterResult<'a> {
     /// Report errors and return an error if any exist.
     ///
     /// This centralizes error reporting logic for scan phase errors.
-    pub fn report_errors(&self, max_errors: usize) -> anyhow::Result<()> {
+    pub fn report_errors(&self, max_errors: usize, root: &Path) -> anyhow::Result<()> {
         if self.errors.is_empty() {
             return Ok(());
         }
 
-        for (_path, error) in self.errors.iter().take(max_errors) {
+        for (path, error) in self.errors.iter().take(max_errors) {
+            let display_path = path.strip_prefix(root).unwrap_or(path);
+            crate::log!("error"; "{}", display_path.display());
             let err = super::format_compile_error(error, max_errors);
             eprintln!("{}", err);
         }

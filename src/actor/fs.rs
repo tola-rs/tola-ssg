@@ -311,14 +311,21 @@ impl Debouncer {
     fn add_event(&mut self, event: &notify::Event) {
         use notify::EventKind;
 
-        crate::debug!("watch"; "raw notify: {:?} {:?}", event.kind, event.paths);
-
         let kind = match event.kind {
             EventKind::Create(_) => ChangeKind::Created,
             EventKind::Remove(_) => ChangeKind::Removed,
-            EventKind::Modify(_) => ChangeKind::Modified,
+            EventKind::Modify(modify) => {
+                // Ignore metadata-only changes (mtime/atime/chmod noise)
+                // maybe trigger endless rebuild loops
+                if matches!(modify, notify::event::ModifyKind::Metadata(_)) {
+                    return;
+                }
+                ChangeKind::Modified
+            }
             _ => return,
         };
+
+        crate::debug!("watch"; "raw notify: {:?} {:?}", event.kind, event.paths);
 
         for path in &event.paths {
             if is_temp_file(path) {

@@ -92,7 +92,7 @@ pub fn build_static_pages(
     let drafts_skipped = scan_result.drafts_skipped;
 
     // Report scan phase errors immediately
-    scan_result.report_errors(ctx.max_errors())?;
+    scan_result.report_errors(ctx.max_errors(), ctx.config.get_root())?;
 
     // Get paths and identify iterative pages from scan results
     let (scanned_typst, scanned_md) = ScannedPage::partition_by_kind(&scan_result.scanned);
