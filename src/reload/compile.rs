@@ -51,7 +51,14 @@ pub fn compile_page(path: &Path, config: &SiteConfig) -> CompileOutcome {
     let ext = path.extension().and_then(|e| e.to_str());
 
     match ext {
-        Some(e) if ContentKind::from_extension(e).is_some() => compile_content_file(path, config),
+        Some(e) if ContentKind::from_extension(e).is_some() => {
+            // Page pipeline requires sources under content dir.
+            // Guard here to avoid passing deps/templates into CompiledPage::from_paths.
+            if !path.starts_with(&config.build.content) {
+                return CompileOutcome::Skipped;
+            }
+            compile_content_file(path, config)
+        }
         Some("css" | "js" | "html") => CompileOutcome::Reload {
             reason: format!("asset changed: {}", path.display()),
         },
@@ -102,6 +109,8 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_compile_outcome_variants() {
@@ -114,5 +123,23 @@ mod tests {
             url_path: None,
             error: "test error".to_string(),
         };
+    }
+
+    #[test]
+    fn test_compile_page_skips_typ_outside_content_dir() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let templates_dir = dir.path().join("templates");
+        fs::create_dir_all(&templates_dir).unwrap();
+
+        let template = templates_dir.join("post.typ");
+        fs::write(&template, "= Template").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        let outcome = compile_page(&template, &config);
+        assert!(matches!(outcome, CompileOutcome::Skipped));
     }
 }

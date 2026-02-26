@@ -392,8 +392,9 @@ impl CompilerActor {
     /// Retry scan after initial failure, then compile changed files
     async fn on_retry_scan(&mut self, changed_paths: Vec<PathBuf>) {
         use crate::cli::serve::scan_pages;
-        use crate::core::{ContentKind, set_healthy};
+        use crate::core::set_healthy;
         use crate::reload::active::ACTIVE_PAGE;
+        use crate::reload::classify::{FileCategory, categorize_path};
 
         crate::debug!("compile"; "retry scan triggered");
 
@@ -408,7 +409,9 @@ impl CompilerActor {
                 // Compile changed content files
                 let content_files: Vec<_> = changed_paths
                     .iter()
-                    .filter(|p| ContentKind::is_content_file(p))
+                    .filter(|p| {
+                        matches!(categorize_path(p, &self.config), FileCategory::Content(_))
+                    })
                     .cloned()
                     .collect();
 
