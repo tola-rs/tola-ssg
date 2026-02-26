@@ -25,6 +25,7 @@ use owo_colors::OwoColorize;
 use parking_lot::Mutex;
 use std::{
     io::{Write, stdout},
+    sync::LazyLock,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -179,6 +180,13 @@ pub struct WatchStatus {
     last_lines: usize,
 }
 
+/// Global watch status display shared across watch-mode subsystems.
+///
+/// This allows scan/build/reload phases to overwrite each other's status block
+/// instead of leaving stale error blocks in terminal.
+static WATCH_STATUS: LazyLock<Mutex<WatchStatus>> =
+    LazyLock::new(|| Mutex::new(WatchStatus::new()));
+
 impl WatchStatus {
     /// Create a new watch status display.
     pub const fn new() -> Self {
@@ -255,6 +263,27 @@ impl WatchStatus {
             self.last_lines = 0;
         }
     }
+}
+
+/// Global watch status: success
+pub fn status_success(message: &str) {
+    WATCH_STATUS.lock().success(message);
+}
+
+/// Global watch status: unchanged
+#[allow(dead_code)]
+pub fn status_unchanged(message: &str) {
+    WATCH_STATUS.lock().unchanged(message);
+}
+
+/// Global watch status: error
+pub fn status_error(summary: &str, detail: &str) {
+    WATCH_STATUS.lock().error(summary, detail);
+}
+
+/// Global watch status: warning
+pub fn status_warning(detail: &str) {
+    WATCH_STATUS.lock().warning(detail);
 }
 
 // ============================================================================

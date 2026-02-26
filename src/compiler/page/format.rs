@@ -178,16 +178,30 @@ impl<'a> DraftFilterResult<'a> {
             return Ok(());
         }
 
-        for (path, error) in self.errors.iter().take(max_errors) {
-            let display_path = path.strip_prefix(root).unwrap_or(path);
-            crate::log!("error"; "{}", display_path.display());
-            let err = super::format_compile_error(error, max_errors);
-            eprintln!("{}", err);
-        }
-
         let total_errors = self.errors.len();
-        if total_errors > max_errors {
-            eprintln!("... and {} more errors", total_errors - max_errors);
+
+        // In serve/watch mode, route scan errors through shared WatchStatus
+        // so later reload/unchanged messages can overwrite stale error blocks.
+        if crate::core::is_serving() {
+            if let Some((path, error)) = self.errors.first() {
+                let display_path = path.strip_prefix(root).unwrap_or(path);
+                let detail = super::format_compile_error(error, max_errors).to_string();
+                crate::logger::status_error(&display_path.display().to_string(), &detail);
+            }
+            if total_errors > 1 {
+                crate::log!("error"; "... and {} more errors", total_errors - 1);
+            }
+        } else {
+            for (path, error) in self.errors.iter().take(max_errors) {
+                let display_path = path.strip_prefix(root).unwrap_or(path);
+                crate::log!("error"; "{}", display_path.display());
+                let err = super::format_compile_error(error, max_errors);
+                eprintln!("{}", err);
+            }
+
+            if total_errors > max_errors {
+                eprintln!("... and {} more errors", total_errors - max_errors);
+            }
         }
 
         Err(anyhow::anyhow!(

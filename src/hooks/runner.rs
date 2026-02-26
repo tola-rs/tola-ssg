@@ -7,6 +7,7 @@ use crate::config::section::build::HookConfig;
 use crate::core::BuildMode;
 use anyhow::Result;
 use rustc_hash::FxHashMap;
+use std::path::PathBuf;
 
 // ============================================================================
 // Environment Variables
@@ -109,14 +110,8 @@ pub fn run_hook(
 
 /// Execute all pre hooks (including CSS processor if enabled)
 pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
-    // User-defined pre hooks
-    for hook in &config.build.hooks.pre {
-        run_hook(hook, config, mode, with_build_args, "pre")?;
-    }
-
-    // CSS processor (syntax sugar for pre hook)
-    if config.build.hooks.css.enable {
-        super::css::rebuild_css(config, mode, with_build_args)?;
+    for entry in collect_pre_hooks(config)? {
+        run_hook(&entry.hook, config, mode, with_build_args, "pre")?;
     }
 
     Ok(())
@@ -138,73 +133,84 @@ use std::path::Path;
 
 /// Check and execute hooks that match changed files (for serve mode)
 ///
-/// Returns the number of hooks executed
-pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
-    let mut executed = 0;
+/// Returns execution summary for no-op-safe recompilation decisions.
+#[derive(Debug, Clone, Default)]
+pub struct WatchedHooksResult {
+    /// Total hooks executed (pre + post + sugar hooks).
+    pub executed: usize,
+    /// Number of hooks whose side effects are not precisely tracked.
+    pub conservative_executed: usize,
+    /// Output files for hooks with explicitly tracked side effects.
+    pub tracked_outputs: Vec<PathBuf>,
+}
 
-    executed += run_watched_pre_hooks(config, changed_paths);
-    executed += run_watched_post_hooks(config, changed_paths);
+/// Check and execute hooks that match changed files (for serve mode).
+pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> WatchedHooksResult {
+    let mut result = WatchedHooksResult::default();
 
-    executed
+    run_watched_pre_hooks(config, changed_paths, &mut result);
+    run_watched_post_hooks(config, changed_paths, &mut result);
+
+    result
 }
 
 /// Execute pre hooks that match changed files
-fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
+fn run_watched_pre_hooks(
+    config: &SiteConfig,
+    changed_paths: &[&Path],
+    result: &mut WatchedHooksResult,
+) {
     let root = config.get_root();
-    let mut executed = 0;
+    let pre_hooks = match collect_pre_hooks(config) {
+        Ok(hooks) => hooks,
+        Err(e) => {
+            crate::log!("hook"; "failed to build pre hooks: {}", e);
+            config
+                .build
+                .hooks
+                .pre
+                .iter()
+                .cloned()
+                .map(|hook| PreHookEntry {
+                    hook,
+                    tracked_output: None,
+                })
+                .collect()
+        }
+    };
 
-    // User-defined pre hooks
-    for hook in &config.build.hooks.pre {
-        if should_run_hook_for_changes(hook, changed_paths, root) {
-            if let Err(e) = run_hook(hook, config, BuildMode::DEVELOPMENT, false, "pre") {
+    for entry in pre_hooks {
+        if should_run_hook_for_changes(&entry.hook, changed_paths, root) {
+            if let Err(e) = run_hook(&entry.hook, config, BuildMode::DEVELOPMENT, false, "pre") {
                 crate::log!("hook"; "failed: {}", e);
             }
-            executed += 1;
+            result.executed += 1;
+            if let Some(output) = entry.tracked_output {
+                result.tracked_outputs.push(output);
+            } else {
+                result.conservative_executed += 1;
+            }
         }
     }
-
-    // CSS processor (syntax sugar for pre hook)
-    if config.build.hooks.css.enable
-        && let Ok(css_hook) = super::css::build_css_hook(config, &css_output_path(config))
-        && should_run_hook_for_changes(&css_hook, changed_paths, root)
-    {
-        if let Err(e) = run_hook(&css_hook, config, BuildMode::DEVELOPMENT, false, "pre") {
-            crate::log!("css"; "failed: {}", e);
-        }
-        executed += 1;
-    }
-
-    executed
-}
-
-/// Get CSS output path for watch mode
-fn css_output_path(config: &SiteConfig) -> std::path::PathBuf {
-    config
-        .build
-        .hooks
-        .css
-        .path
-        .as_ref()
-        .and_then(|p| crate::asset::route_from_source(p.clone(), config).ok())
-        .map(|r| r.output)
-        .unwrap_or_default()
 }
 
 /// Execute post hooks that match changed files
-fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
+fn run_watched_post_hooks(
+    config: &SiteConfig,
+    changed_paths: &[&Path],
+    result: &mut WatchedHooksResult,
+) {
     let root = config.get_root();
-    let mut executed = 0;
 
     for hook in &config.build.hooks.post {
         if should_run_hook_for_changes(hook, changed_paths, root) {
             if let Err(e) = run_hook(hook, config, BuildMode::DEVELOPMENT, false, "post") {
                 crate::log!("hook"; "failed: {}", e);
             }
-            executed += 1;
+            result.executed += 1;
+            result.conservative_executed += 1;
         }
     }
-
-    executed
 }
 
 /// Check if a hook should run based on changed files
@@ -216,6 +222,40 @@ fn should_run_hook_for_changes(hook: &HookConfig, changed_paths: &[&Path], root:
     changed_paths
         .iter()
         .any(|path| hook.watch.matches(path, root))
+}
+
+/// Collect user pre hooks plus optional CSS syntax-sugar hook.
+fn collect_pre_hooks(config: &SiteConfig) -> Result<Vec<PreHookEntry>> {
+    let mut hooks: Vec<PreHookEntry> = config
+        .build
+        .hooks
+        .pre
+        .iter()
+        .cloned()
+        .map(|hook| PreHookEntry {
+            hook,
+            tracked_output: None,
+        })
+        .collect();
+
+    if let Some(output) = super::css::css_output_path(config)? {
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let css_hook = super::css::build_css_hook(config, &output)?;
+        hooks.push(PreHookEntry {
+            hook: css_hook,
+            tracked_output: Some(output),
+        });
+    }
+
+    Ok(hooks)
+}
+
+#[derive(Debug, Clone)]
+struct PreHookEntry {
+    hook: HookConfig,
+    tracked_output: Option<PathBuf>,
 }
 
 // ============================================================================

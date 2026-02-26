@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rustc_hash::FxHashSet;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -126,13 +127,16 @@ impl CompilerActor {
 
         // Run pre hooks BEFORE compilation (blocking)
         // This ensures CSS/JS assets are ready before pages are compiled
-        if !changed_paths.is_empty() {
-            self.run_pre_hooks(&changed_paths);
-        }
+        let hook_outputs_changed = !changed_paths.is_empty() && self.run_pre_hooks(&changed_paths);
+        let changed_set: FxHashSet<PathBuf> = changed_paths.iter().cloned().collect();
 
         // Direct/Active - compile immediately
         let direct: Vec<_> = queue.direct_files().cloned().collect();
         for path in &direct {
+            if self.should_skip_noop_change(path, &changed_set, hook_outputs_changed) {
+                crate::debug!("compile"; "skip no-op save: {}", path.display());
+                continue;
+            }
             self.compile_one(path).await;
         }
 
@@ -149,37 +153,57 @@ impl CompilerActor {
         }
     }
 
-    /// Run pre hooks that match changed files and update asset versions
-    fn run_pre_hooks(&self, changed_paths: &[PathBuf]) {
+    /// Run watched hooks and return whether hook outputs may have changed.
+    ///
+    /// Rules:
+    /// - No hooks executed => false
+    /// - Any conservative hook executed => true
+    /// - Only tracked-output hooks executed => use version diff
+    ///
+    /// This keeps no-op-save skipping safe while still allowing tracked-output
+    /// unchanged runs to avoid redundant page recompilation.
+    fn run_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
         use crate::asset::version;
         use crate::hooks;
 
         let refs: Vec<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
-        let executed = hooks::run_watched_hooks(&self.config, &refs);
-
-        // If hooks ran, update CSS output version immediately
-        // so subsequent compiles use the new asset version
-        if executed > 0
-            && let Some(css_output) = self.get_css_output_path()
-        {
-            let changed = version::update_version(&css_output);
-            crate::debug!("css"; "version update: path={}, changed={}", css_output.display(), changed);
+        let watched = hooks::run_watched_hooks(&self.config, &refs);
+        if watched.executed == 0 {
+            return false;
         }
+
+        // Conservative hooks may have arbitrary side effects.
+        if watched.conservative_executed > 0 {
+            return true;
+        }
+
+        watched
+            .tracked_outputs
+            .into_iter()
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .any(|output| version::update_version(&output))
     }
 
-    /// Get CSS processor output path if enabled
-    fn get_css_output_path(&self) -> Option<PathBuf> {
-        if !self.config.build.hooks.css.enable {
-            return None;
+    /// Skip recompilation for no-op saves:
+    /// - file was directly reported as changed
+    /// - tracked hook outputs did not change
+    /// - output still contains matching source hash marker
+    fn should_skip_noop_change(
+        &self,
+        path: &Path,
+        changed_set: &FxHashSet<PathBuf>,
+        hook_outputs_changed: bool,
+    ) -> bool {
+        if hook_outputs_changed || !changed_set.contains(path) {
+            return false;
         }
-        self.config
-            .build
-            .hooks
-            .css
-            .path
-            .as_ref()
-            .and_then(|p| crate::asset::route_from_source(p.clone(), &self.config).ok())
-            .map(|r| r.output)
+
+        let Ok(page) = crate::page::CompiledPage::from_paths(path, &self.config) else {
+            return false;
+        };
+
+        crate::freshness::is_fresh(path, &page.route.output_file, None)
     }
 
     /// Handle background task completion

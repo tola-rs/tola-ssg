@@ -30,7 +30,6 @@ use crate::cache::{
 use crate::compiler::family::{CacheEntry, Indexed};
 use crate::compiler::page::BUILD_CACHE;
 use crate::core::{GLOBAL_ADDRESS_SPACE, UrlPath};
-use crate::logger::WatchStatus;
 use crate::reload::diff::{DiffOutcome, compute_diff_shared};
 use tola_vdom::prelude::*;
 
@@ -109,7 +108,6 @@ struct BatchLogger {
     results: Vec<BatchEntry>,
     conflicts: FxHashMap<UrlPath, Vec<PathBuf>>,
     permalink_changes: Vec<(PathBuf, UrlPath, UrlPath)>, // (path, old_url, new_url)
-    status: WatchStatus,
 }
 
 impl BatchLogger {
@@ -118,7 +116,6 @@ impl BatchLogger {
             results: Vec::new(),
             conflicts: FxHashMap::default(),
             permalink_changes: Vec::new(),
-            status: WatchStatus::new(),
         }
     }
 
@@ -199,7 +196,7 @@ impl BatchLogger {
             let primary_error = &errors[0];
             let detail = primary_error.error_detail().unwrap_or("");
             let summary = format!("compile error in {}", primary_error.path());
-            self.status.error(&summary, detail);
+            crate::logger::status_error(&summary, detail);
         } else {
             // Show warnings only when no errors (with configured limit)
             let warnings = crate::compiler::drain_warnings();
@@ -215,7 +212,7 @@ impl BatchLogger {
                     .map(|w| w.to_string())
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.status.warning(&truncated);
+                crate::logger::status_warning(&truncated);
             }
 
             if let Some(primary) = primary_reload {
@@ -233,14 +230,14 @@ impl BatchLogger {
                     }
                     n => format!("reload: {}, others: {}", primary.path(), n),
                 };
-                self.status.success(&msg);
+                crate::logger::status_success(&msg);
             } else if !unchanged.is_empty() {
                 let first = unchanged[0].path();
                 let msg = match unchanged.len() {
                     1 => format!("unchanged: {}", first),
                     n => format!("unchanged: {}, others: {}", first, n - 1),
                 };
-                self.status.unchanged(&msg);
+                crate::logger::status_unchanged(&msg);
             }
         }
 
