@@ -179,7 +179,7 @@ impl BatchLogger {
         if !errors.is_empty() {
             let primary_error = &errors[0];
             let detail = primary_error.error_detail().unwrap_or("");
-            let summary = format!("compile error in {}", primary_error.path());
+            let summary = primary_error.path().to_string();
             crate::logger::status_error(&summary, detail);
         } else {
             // Show warnings only when no errors (with configured limit)

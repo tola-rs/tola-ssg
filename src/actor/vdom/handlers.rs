@@ -15,6 +15,19 @@ impl VdomActor {
     pub(super) async fn handle_error(&mut self, path: PathBuf, url_path: UrlPath, error: String) {
         let rel_path = self.to_relative(&path);
         let rel_path_str = rel_path.display().to_string();
+        let duplicate_same_error = self
+            .error_state
+            .errors()
+            .any(|e| e.path == rel_path_str && e.error == error);
+
+        if duplicate_same_error {
+            crate::debug!(
+                "vdom";
+                "skip duplicate compile error output: {}",
+                rel_path_str
+            );
+            return;
+        }
 
         // Check if this is the first error in the batch (before adding)
         let is_first_error = !self.batch.has_errors();

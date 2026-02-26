@@ -132,7 +132,7 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
     rss_result?;
     sitemap_result?;
 
-    log!("build"; "done");
+    debug!("build"; "done");
     Ok(())
 }
 
@@ -178,7 +178,7 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     if !failures.is_empty() {
         let max = config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
         for (path, msg) in failures.iter().take(max) {
-            log!("error"; "✗ compile error in {}", path.display());
+            log!("error"; "{}", path.display());
             eprintln!("{}", msg);
         }
         let remaining = failures.len().saturating_sub(max);

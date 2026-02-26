@@ -304,8 +304,6 @@ fn log_build_result(output: &Path) -> Result<()> {
 
     if file_count == 0 {
         log!("warn"; "output is empty, check if content has .typ or .md files");
-    } else {
-        log!("build"; "done");
     }
 
     Ok(())

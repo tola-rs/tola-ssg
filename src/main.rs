@@ -223,7 +223,7 @@ fn handle_modified_files(files: &[std::path::PathBuf], config: &SiteConfig) {
 
     // Display first error
     if let Some((path, msg)) = errors.first() {
-        logger::WatchStatus::new().error(&format!("compile error in {}", path), msg);
+        logger::WatchStatus::new().error(&path.to_string(), msg);
     }
 
     // Log summary

@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use rustc_hash::FxHashSet;
 
+use super::is_transient_not_found;
+
 /// Watch-root consistency manager.
 ///
 /// Responsibility:
@@ -35,17 +37,27 @@ impl WatchRoots {
                 }
                 Err(err) => {
                     // Race-safe startup:
-                    // path may be deleted between `exists()` and `watch()` during `serve --clean`.
-                    // Treat as transient and let maintain() re-attach later.
-                    if !path.exists() {
+                    // - root may disappear between `exists()` and `watch()` during `serve --clean`
+                    // - recursive watch may hit transient missing descendants (e.g. .git/objects/pack)
+                    // Don't fail actor startup for single-path watch errors.
+                    // maintain() will keep trying to re-attach roots.
+                    let transient = !path.exists() || is_transient_not_found(&err);
+                    if transient {
                         crate::debug!(
                             "watch";
-                            "skip attach missing root during startup: {}",
-                            path.display()
+                            "skip transient watch attach error on startup: {} ({})",
+                            path.display(),
+                            err
                         );
-                        continue;
+                    } else {
+                        crate::debug!(
+                            "watch";
+                            "skip non-transient watch attach error on startup: {} ({})",
+                            path.display(),
+                            err
+                        );
                     }
-                    return Err(err);
+                    continue;
                 }
             }
         }

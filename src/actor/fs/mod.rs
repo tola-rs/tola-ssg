@@ -108,7 +108,7 @@ impl FsActor {
                             break; // Receiver dropped
                         }
                     }
-                    Err(e) => crate::log!("watch"; "notify error: {}", e),
+                    Err(_e) => {}
                 }
             }
         });
@@ -127,6 +127,18 @@ impl FsActor {
                 }
             }
         }
+    }
+}
+
+fn is_transient_not_found(err: &notify::Error) -> bool {
+    if err.paths.iter().any(|path| !path.exists()) {
+        return true;
+    }
+
+    match &err.kind {
+        notify::ErrorKind::PathNotFound => true,
+        notify::ErrorKind::Io(io_err) => io_err.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
     }
 }
 
