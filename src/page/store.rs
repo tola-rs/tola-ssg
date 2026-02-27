@@ -320,8 +320,16 @@ mod tests {
 
         let pages = store.get_pages_with_drafts();
         assert_eq!(pages.len(), 2);
-        assert!(pages.iter().any(|p| p.permalink == UrlPath::from_page("/pub/")));
-        assert!(pages.iter().any(|p| p.permalink == UrlPath::from_page("/draft/")));
+        assert!(
+            pages
+                .iter()
+                .any(|p| p.permalink == UrlPath::from_page("/pub/"))
+        );
+        assert!(
+            pages
+                .iter()
+                .any(|p| p.permalink == UrlPath::from_page("/draft/"))
+        );
     }
 
     #[test]

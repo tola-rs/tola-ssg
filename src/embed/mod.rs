@@ -328,60 +328,6 @@ pub mod recolor {
     pub const RECOLOR_CSS: EmbeddedAsset<RecolorCssVars> =
         EmbeddedAsset::new(AssetKind::Css, "recolor", RECOLOR_CSS_TEMPLATE);
 
-    /// Parse hex color to RGB values (0.0-1.0).
-    pub fn parse_hex_color(hex: &str) -> Option<(f32, f32, f32)> {
-        let hex = hex.trim_start_matches('#');
-        if hex.len() != 6 {
-            return None;
-        }
-        let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
-        let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
-        let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
-        Some((r, g, b))
-    }
-
-    /// Generate SVG filter for a specific color.
-    /// Uses luminance-based switching: black->target, white->black or white.
-    pub fn generate_filter(id: &str, hex: &str) -> Option<String> {
-        let (r, g, b) = parse_hex_color(hex)?;
-
-        // Luminance-based B value: light target -> white becomes black
-        let target_lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        let b_val = if target_lum > 0.5 { 0.0 } else { 1.0 };
-
-        Some(format!(
-            r#"<filter id="{id}" color-interpolation-filters="sRGB">
-      <feColorMatrix type="matrix" values=".33 .33 .33 0 0
-                                           .33 .33 .33 0 0
-                                           .33 .33 .33 0 0
-                                            0   0   0  1 0"/>
-      <feComponentTransfer>
-        <feFuncR type="table" tableValues="{r:.3} {b_val:.3}"/>
-        <feFuncG type="table" tableValues="{g:.3} {b_val:.3}"/>
-        <feFuncB type="table" tableValues="{b:.3} {b_val:.3}"/>
-      </feComponentTransfer>
-    </filter>"#
-        ))
-    }
-
-    /// Generate static mode SVG with all theme filters.
-    pub fn generate_static_svg(list: &HashMap<String, String>) -> String {
-        let mut filters = Vec::new();
-        for (name, color) in list {
-            if let Some(filter) = generate_filter(&format!("tola-recolor-{name}"), color) {
-                filters.push(filter);
-            }
-        }
-        format!(
-            r#"<svg style="display:none" aria-hidden="true">
-  <defs>
-    {}
-  </defs>
-</svg>"#,
-            filters.join("\n    ")
-        )
-    }
-
     /// Generate static mode CSS variables.
     fn generate_static_vars(list: &HashMap<String, String>) -> String {
         let theme_overrides: Vec<_> = list
@@ -602,14 +548,6 @@ mod tests {
         assert!(rendered.contains("var(--tola-recolor-filter)"));
         assert!(rendered.contains(":root"));
         assert!(!rendered.contains("__FILTER_VALUE__"));
-    }
-
-    #[test]
-    fn test_recolor_parse_hex() {
-        let (r, g, b) = recolor::parse_hex_color("#88c0d0").unwrap();
-        assert!((r - 0.533).abs() < 0.01);
-        assert!((g - 0.753).abs() < 0.01);
-        assert!((b - 0.816).abs() < 0.01);
     }
 
     #[test]

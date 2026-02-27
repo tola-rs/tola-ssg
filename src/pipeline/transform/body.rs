@@ -41,11 +41,12 @@ impl<'a> BodyInjector<'a> {
         // Recolor SVG filter (inject at body start)
         if recolor.enable {
             use crate::config::section::theme::RecolorSource;
-            use crate::embed::recolor;
+            use crate::embed::recolor::FILTER_SVG;
+            use crate::image::recolor::generate_static_svg;
 
             let svg = match &recolor.source {
-                RecolorSource::Static => recolor::generate_static_svg(&recolor.list),
-                _ => recolor::FILTER_SVG.to_string(),
+                RecolorSource::Static => generate_static_svg(&recolor.list),
+                _ => FILTER_SVG.to_string(),
             };
             // Insert at beginning of body
             body.children.insert(0, Node::Text(Text::raw(svg)));

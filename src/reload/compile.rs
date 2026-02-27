@@ -251,7 +251,11 @@ mod tests {
         fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
         let draft_outcome = compile_page(&page, &config);
         assert!(matches!(draft_outcome, CompileOutcome::Skipped));
-        assert!(crate::page::STORED_PAGES.get_permalink_by_source(&page).is_none());
+        assert!(
+            crate::page::STORED_PAGES
+                .get_permalink_by_source(&page)
+                .is_none()
+        );
         assert!(!output_file.exists());
 
         // Simulate previously published state for this source.
@@ -284,11 +288,17 @@ mod tests {
             "expected Skipped when removing published page, got: {:?}",
             back_to_draft
         );
-        assert!(crate::page::STORED_PAGES.get_permalink_by_source(&page).is_none());
-        assert!(crate::address::GLOBAL_ADDRESS_SPACE
-            .read()
-            .url_for_source(&page)
-            .is_none());
+        assert!(
+            crate::page::STORED_PAGES
+                .get_permalink_by_source(&page)
+                .is_none()
+        );
+        assert!(
+            crate::address::GLOBAL_ADDRESS_SPACE
+                .read()
+                .url_for_source(&page)
+                .is_none()
+        );
         assert!(!output_file.exists());
         assert_ne!(crate::page::STORED_PAGES.pages_hash(), hash_published);
 

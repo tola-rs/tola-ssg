@@ -12,7 +12,7 @@ mod config;
 mod structure;
 mod validate;
 
-use crate::{config::SiteConfig, log, package::generate_lsp_stubs, utils::git};
+use crate::{config::SiteConfig, log, package::generate_lsp_stubs};
 use anyhow::Result;
 use std::path::Path;
 
@@ -22,11 +22,9 @@ pub use validate::InitMode;
 ///
 /// # Steps
 /// 1. Validate target directory
-/// 2. Initialize git repository
-/// 3. Create directory structure
-/// 4. Write configuration files
-/// 5. Generate LSP stubs
-/// 6. Create initial commit
+/// 2. Create directory structure
+/// 3. Write configuration files
+/// 4. Generate LSP stubs
 ///
 /// If `dry_run` is true, only prints the config template to stdout
 pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Result<()> {
@@ -47,14 +45,6 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
         std::process::exit(1);
     }
 
-    let repo = match git::create_repo(root) {
-        Ok(repo) => repo,
-        Err(e) => {
-            log!("error"; "Failed to initialize git repository: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     structure::create_structure(root)?;
 
     config::write_config(root)?;
@@ -64,8 +54,6 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
     config::write_tola_util(root)?;
 
     generate_lsp_stubs(root)?;
-
-    let _ = git::commit_all(&repo, "initial commit")?;
 
     log!("init"; "Site initialized successfully");
     Ok(())

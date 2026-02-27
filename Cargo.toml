@@ -80,7 +80,7 @@ portable-pty = "0.9.0"
 macros = { package = "tola-ssg-macros", version = "0.1.3" }
 
 # Typst integration (via typst-batch crate)
-typst-batch = { version = "0.2.3", features = ["svg", "embed-fonts"] }
+typst-batch = { version = "0.2.4", features = ["svg", "embed-fonts"] }
 # typst-batch = { path = "./typst-batch", features = ["svg", "embed-fonts"] }
 tola-vdom = { version = "0.2.1", features = ["parallel"] }
 smallvec = "1.13"
@@ -149,5 +149,5 @@ oxc = { version = "0.113", default-features = false, features = [
     "mangler",
 ] }
 lightningcss = "1.0.0-alpha.70"
-typst-batch = { version = "0.2.3", features = ["svg"] }
+typst-batch = { version = "0.2.4", features = ["svg"] }
 # typst-batch = { path = "./typst-batch", features = ["svg"] }
