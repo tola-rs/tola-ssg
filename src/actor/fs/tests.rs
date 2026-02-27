@@ -261,12 +261,16 @@ fn test_asset_change_without_watched_hooks_does_not_enqueue_compile() {
     let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
 
     let messages = events_to_messages(events, &config);
-    assert!(messages
-        .iter()
-        .any(|m| matches!(m, CompilerMsg::AssetChange(_))));
-    assert!(!messages
-        .iter()
-        .any(|m| matches!(m, CompilerMsg::Compile { .. })));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, CompilerMsg::AssetChange(_)))
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|m| matches!(m, CompilerMsg::Compile { .. }))
+    );
 }
 
 #[test]
@@ -287,9 +291,11 @@ fn test_asset_change_with_watched_hooks_enqueues_hook_only_compile() {
     let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
     let messages = events_to_messages(events, &config);
 
-    assert!(messages
-        .iter()
-        .any(|m| matches!(m, CompilerMsg::AssetChange(_))));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, CompilerMsg::AssetChange(_)))
+    );
 
     let compile = messages.into_iter().find_map(|m| match m {
         CompilerMsg::Compile {

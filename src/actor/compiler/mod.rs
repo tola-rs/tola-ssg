@@ -13,6 +13,7 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ use crate::reload::compile::CompileOutcome;
 pub(super) struct BatchResult {
     pub(super) outcomes: Vec<CompileOutcome>,
     pub(super) pages_hash: u64,
+    pub(super) watched_post_paths: Option<Vec<PathBuf>>,
 }
 
 pub(super) type BackgroundTask = JoinHandle<BatchResult>;

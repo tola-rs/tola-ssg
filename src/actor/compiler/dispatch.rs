@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Instant;
 
 use super::tasks::{abort_task, wait_task};
@@ -85,14 +86,22 @@ impl CompilerActor {
             self.route(outcome).await;
         }
 
-        self.finish_batch(result.pages_hash).await;
+        self.finish_batch(result.pages_hash, result.watched_post_paths)
+            .await;
         crate::debug!("compile"; "background done in {:?}", start.elapsed());
     }
 
     /// Finalize a compilation batch
-    pub(super) async fn finish_batch(&mut self, hash_before: u64) {
+    pub(super) async fn finish_batch(
+        &mut self,
+        hash_before: u64,
+        watched_post_paths: Option<Vec<PathBuf>>,
+    ) {
         if STORED_PAGES.pages_hash() != hash_before {
             self.recompile_virtual_users().await;
+        }
+        if let Some(paths) = watched_post_paths {
+            self.run_watched_post_hooks(&paths);
         }
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
     }

@@ -11,12 +11,14 @@ pub(super) fn spawn_batch(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
     pages_hash: u64,
+    watched_post_paths: Option<Vec<PathBuf>>,
 ) -> BackgroundTask {
     tokio::spawn(async move {
         let outcomes = compile_batch(paths, config).await;
         BatchResult {
             outcomes,
             pages_hash,
+            watched_post_paths,
         }
     })
 }
@@ -54,6 +56,7 @@ pub(super) async fn wait_task(task: &mut Option<BackgroundTask>) -> BatchResult 
         Some(handle) => handle.await.unwrap_or(BatchResult {
             outcomes: vec![],
             pages_hash: 0,
+            watched_post_paths: None,
         }),
         None => std::future::pending().await,
     }

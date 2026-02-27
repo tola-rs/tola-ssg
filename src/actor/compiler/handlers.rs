@@ -24,7 +24,9 @@ impl CompilerActor {
         let pages_hash = STORED_PAGES.pages_hash();
 
         // Run pre hooks before compilation so dependent assets are up to date.
-        let hook_outputs_changed = !changed_paths.is_empty() && self.run_pre_hooks(&changed_paths);
+        let watched_post_paths = self.collect_watched_post_paths(&changed_paths);
+        let hook_outputs_changed =
+            !changed_paths.is_empty() && self.run_watched_pre_hooks(&changed_paths);
         let changed_set: FxHashSet<PathBuf> = changed_paths.iter().cloned().collect();
 
         let direct: Vec<_> = queue.direct_files().cloned().collect();
@@ -40,24 +42,59 @@ impl CompilerActor {
         crate::debug!("compile"; "{} direct, {} affected", direct.len(), affected.len());
 
         if affected.is_empty() {
-            self.finish_batch(pages_hash).await;
+            self.finish_batch(pages_hash, watched_post_paths).await;
             crate::debug!("compile"; "done in {:?}", start.elapsed());
             None
         } else {
-            Some(spawn_batch(affected, Arc::clone(&self.config), pages_hash))
+            Some(spawn_batch(
+                affected,
+                Arc::clone(&self.config),
+                pages_hash,
+                watched_post_paths,
+            ))
         }
     }
 
-    /// Run watched hooks and return whether hook outputs may have changed.
+    /// Run watched pre hooks and return whether hook outputs may have changed.
     ///
     /// When hooks execute, invalidate cached versions for output artifacts so
     /// the same compilation round uses fresh `?v=` links.
-    fn run_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
-        use crate::asset::version;
+    fn run_watched_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
         use crate::hooks;
 
-        let refs: Vec<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
-        let executed = hooks::run_watched_hooks(&self.config, &refs);
+        let refs = Self::path_refs(changed_paths);
+        let executed = hooks::run_watched_pre_hooks(&self.config, &refs);
+        self.invalidate_output_versions_after_hooks("pre", executed)
+    }
+
+    /// Run watched post hooks and return whether hook outputs may have changed.
+    pub(super) fn run_watched_post_hooks(&self, changed_paths: &[PathBuf]) -> bool {
+        use crate::hooks;
+
+        let refs = Self::path_refs(changed_paths);
+        let executed = hooks::run_watched_post_hooks(&self.config, &refs);
+        self.invalidate_output_versions_after_hooks("post", executed)
+    }
+
+    /// Capture changed paths for post hooks only when a watched post hook exists.
+    fn collect_watched_post_paths(&self, changed_paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
+        use crate::hooks;
+
+        if changed_paths.is_empty() {
+            return None;
+        }
+
+        let refs = Self::path_refs(changed_paths);
+        hooks::has_watched_post_hooks(&self.config, &refs).then(|| changed_paths.to_vec())
+    }
+
+    fn path_refs(paths: &[PathBuf]) -> Vec<&Path> {
+        paths.iter().map(|p| p.as_path()).collect()
+    }
+
+    fn invalidate_output_versions_after_hooks(&self, phase: &str, executed: usize) -> bool {
+        use crate::asset::version;
+
         if executed == 0 {
             return false;
         }
@@ -65,7 +102,8 @@ impl CompilerActor {
         let removed = version::invalidate_under(self.config.paths().output_dir().as_path());
         crate::debug!(
             "hook";
-            "watched hooks executed: {}, invalidated output versions: {}",
+            "{} watched hooks executed: {}, invalidated output versions: {}",
+            phase,
             executed,
             removed
         );
@@ -110,7 +148,7 @@ impl CompilerActor {
             self.compile_one(path).await;
         }
 
-        self.finish_batch(pages_hash).await;
+        self.finish_batch(pages_hash, None).await;
     }
 
     /// Handle deleted content files and cleanup all related state.

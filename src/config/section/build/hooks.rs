@@ -145,7 +145,9 @@ impl WatchMode {
                 let rel_path = path.strip_prefix(root).unwrap_or(path);
                 let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
-                patterns.iter().any(|pattern| Self::match_pattern(pattern, &rel_str))
+                patterns
+                    .iter()
+                    .any(|pattern| Self::match_pattern(pattern, &rel_str))
             }
         }
     }
@@ -178,7 +180,12 @@ impl WatchMode {
         }
 
         // Non-anchored patterns also match by basename for convenience.
-        if !anchored && rel_path.rsplit('/').next().is_some_and(|name| name == pattern) {
+        if !anchored
+            && rel_path
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name == pattern)
+        {
             return true;
         }
 
@@ -266,10 +273,7 @@ build_args = ["--minify", "--sourcemap"]
             std::path::Path::new("/site/assets/icons/nested/b.svg"),
             root
         ));
-        assert!(!watch.matches(
-            std::path::Path::new("/site/assets/images/a.svg"),
-            root
-        ));
+        assert!(!watch.matches(std::path::Path::new("/site/assets/images/a.svg"), root));
     }
 
     #[test]
@@ -281,10 +285,7 @@ build_args = ["--minify", "--sourcemap"]
             std::path::Path::new("/site/assets/styles/tailwind.css"),
             root
         ));
-        assert!(!watch.matches(
-            std::path::Path::new("/site/assets/styles/app.css"),
-            root
-        ));
+        assert!(!watch.matches(std::path::Path::new("/site/assets/styles/app.css"), root));
     }
 }
 
