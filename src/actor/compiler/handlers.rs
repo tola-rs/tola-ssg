@@ -10,6 +10,7 @@ use super::utils::{
 };
 use super::{ACTIVE_RECOMPILE_COOLDOWN, BackgroundTask, CompilerActor};
 use crate::address::GLOBAL_ADDRESS_SPACE;
+use crate::hooks::HookPhase;
 use crate::page::STORED_PAGES;
 use crate::reload::classify::{collect_dependents, url_to_content_path};
 
@@ -64,7 +65,7 @@ impl CompilerActor {
 
         let refs = Self::path_refs(changed_paths);
         let executed = hooks::run_watched_pre_hooks(&self.config, &refs);
-        self.invalidate_output_versions_after_hooks("pre", executed)
+        self.invalidate_output_versions_after_hooks(HookPhase::Pre, executed)
     }
 
     /// Run watched post hooks and return whether hook outputs may have changed.
@@ -73,7 +74,7 @@ impl CompilerActor {
 
         let refs = Self::path_refs(changed_paths);
         let executed = hooks::run_watched_post_hooks(&self.config, &refs);
-        self.invalidate_output_versions_after_hooks("post", executed)
+        self.invalidate_output_versions_after_hooks(HookPhase::Post, executed)
     }
 
     /// Capture changed paths for post hooks only when a watched post hook exists.
@@ -92,7 +93,7 @@ impl CompilerActor {
         paths.iter().map(|p| p.as_path()).collect()
     }
 
-    fn invalidate_output_versions_after_hooks(&self, phase: &str, executed: usize) -> bool {
+    fn invalidate_output_versions_after_hooks(&self, phase: HookPhase, executed: usize) -> bool {
         use crate::asset::version;
 
         if executed == 0 {
@@ -101,9 +102,9 @@ impl CompilerActor {
 
         let removed = version::invalidate_under(self.config.paths().output_dir().as_path());
         crate::debug!(
-            "hook";
+            phase.as_str();
             "{} watched hooks executed: {}, invalidated output versions: {}",
-            phase,
+            phase.as_str(),
             executed,
             removed
         );

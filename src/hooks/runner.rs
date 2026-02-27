@@ -59,15 +59,32 @@ pub fn resolve_args(args: &[String], vars: &FxHashMap<String, String>) -> Vec<St
 // Hook Execution
 // ============================================================================
 
+/// Build hook execution phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPhase {
+    Pre,
+    Post,
+}
+
+impl HookPhase {
+    /// String form used by logging targets.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            HookPhase::Pre => "pre",
+            HookPhase::Post => "post",
+        }
+    }
+}
+
 /// Execute a single hook
 ///
-/// The `phase` parameter is used for logging (e.g., "pre" or "post")
+/// The `phase` parameter is used for logging labels.
 pub fn run_hook(
     hook: &HookConfig,
     config: &SiteConfig,
     mode: BuildMode,
     with_build_args: bool,
-    phase: &str,
+    phase: HookPhase,
 ) -> Result<()> {
     use crate::utils::exec::{Cmd, SILENT_FILTER};
 
@@ -85,7 +102,7 @@ pub fn run_hook(
     }
 
     if !hook.quiet {
-        crate::log!(phase; "`{}` running", hook.display_name());
+        crate::log!(phase.as_str(); "`{}` running", hook.display_name());
     }
 
     let output = Cmd::from_slice(&resolved)
@@ -110,7 +127,7 @@ pub fn run_hook(
 /// Execute all pre hooks (including CSS processor if enabled)
 pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
     for hook in collect_pre_hooks(config)? {
-        run_hook(&hook, config, mode, with_build_args, "pre")?;
+        run_hook(&hook, config, mode, with_build_args, HookPhase::Pre)?;
     }
 
     Ok(())
@@ -119,7 +136,7 @@ pub fn run_pre_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool
 /// Execute all post hooks
 pub fn run_post_hooks(config: &SiteConfig, mode: BuildMode, with_build_args: bool) -> Result<()> {
     for hook in &config.build.hooks.post {
-        run_hook(hook, config, mode, with_build_args, "post")?;
+        run_hook(hook, config, mode, with_build_args, HookPhase::Post)?;
     }
     Ok(())
 }
@@ -162,7 +179,13 @@ pub fn has_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> b
 pub fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let root = config.get_root();
     let pre_hooks = resolve_pre_hooks(config);
-    run_watched_hook_set(pre_hooks.iter(), config, changed_paths, root, "pre")
+    run_watched_hook_set(
+        pre_hooks.iter(),
+        config,
+        changed_paths,
+        root,
+        HookPhase::Pre,
+    )
 }
 
 /// Resolve pre hooks with CSS syntax-sugar expansion.
@@ -186,7 +209,7 @@ pub fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> u
         config,
         changed_paths,
         root,
-        "post",
+        HookPhase::Post,
     )
 }
 
@@ -195,7 +218,7 @@ fn run_watched_hook_set<'a>(
     config: &SiteConfig,
     changed_paths: &[&Path],
     root: &Path,
-    phase: &str,
+    phase: HookPhase,
 ) -> usize {
     let mut executed = 0;
 
