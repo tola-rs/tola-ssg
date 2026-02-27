@@ -137,16 +137,29 @@ pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     run_watched_pre_hooks(config, changed_paths) + run_watched_post_hooks(config, changed_paths)
 }
 
+/// Check if any watched hook would run for changed files.
+///
+/// This is a pure predicate used by file-event routing to decide whether
+/// to enqueue a hook-only compile cycle.
+pub fn has_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> bool {
+    let root = config.get_root();
+    let pre_hooks = resolve_pre_hooks(config);
+
+    pre_hooks
+        .iter()
+        .any(|hook| should_run_hook_for_changes(hook, changed_paths, root))
+        || config
+            .build
+            .hooks
+            .post
+            .iter()
+            .any(|hook| should_run_hook_for_changes(hook, changed_paths, root))
+}
+
 /// Execute pre hooks that match changed files
 fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
     let root = config.get_root();
-    let pre_hooks = match collect_pre_hooks(config) {
-        Ok(hooks) => hooks,
-        Err(e) => {
-            crate::log!("hook"; "failed to build pre hooks: {}", e);
-            config.build.hooks.pre.clone()
-        }
-    };
+    let pre_hooks = resolve_pre_hooks(config);
     let mut executed = 0;
 
     for hook in pre_hooks {
@@ -159,6 +172,19 @@ fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize 
     }
 
     executed
+}
+
+/// Resolve pre hooks with CSS syntax-sugar expansion.
+///
+/// Falls back to user-defined pre hooks when CSS hook construction fails.
+fn resolve_pre_hooks(config: &SiteConfig) -> Vec<HookConfig> {
+    match collect_pre_hooks(config) {
+        Ok(hooks) => hooks,
+        Err(e) => {
+            crate::log!("hook"; "failed to build pre hooks: {}", e);
+            config.build.hooks.pre.clone()
+        }
+    }
 }
 
 /// Execute post hooks that match changed files

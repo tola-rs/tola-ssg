@@ -6,7 +6,7 @@
 //! # Pre hooks (run before build)
 //! [[build.hooks.pre]]
 //! command = ["./scripts/gen-icons.sh"]
-//! watch = ["assets/icons/**"]
+//! watch = ["assets/icons"]
 //!
 //! [[build.hooks.pre]]
 //! command = ["esbuild", "src/app.ts", "--bundle", "--outfile=$TOLA_OUTPUT_DIR/assets/js/app.js"]
@@ -117,7 +117,7 @@ pub enum WatchMode {
     Disabled,
     /// Boolean: true = always re-execute, false = disabled.
     Bool(bool),
-    /// Glob patterns: re-execute when matching files change.
+    /// Literal file/dir names: re-execute when matching files change.
     Patterns(Vec<String>),
 }
 
@@ -135,7 +135,7 @@ impl WatchMode {
     ///
     /// - `Disabled` / `Bool(false)`: never matches
     /// - `Bool(true)`: always matches (any file change triggers)
-    /// - `Patterns(paths)`: matches if path ends with any of the patterns
+    /// - `Patterns(paths)`: literal file/dir names matched against path relative to site root
     pub fn matches(&self, path: &std::path::Path, root: &std::path::Path) -> bool {
         match self {
             WatchMode::Disabled => false,
@@ -143,13 +143,46 @@ impl WatchMode {
             WatchMode::Patterns(patterns) => {
                 // Get relative path from root
                 let rel_path = path.strip_prefix(root).unwrap_or(path);
-                let rel_str = rel_path.to_string_lossy();
+                let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
-                patterns
-                    .iter()
-                    .any(|pattern| rel_str == *pattern || rel_str.ends_with(pattern))
+                patterns.iter().any(|pattern| Self::match_pattern(pattern, &rel_str))
             }
         }
+    }
+
+    fn match_pattern(pattern: &str, rel_path: &str) -> bool {
+        let mut pattern = pattern.trim().replace('\\', "/");
+        if pattern.is_empty() {
+            return false;
+        }
+
+        let rel_path = rel_path.trim_start_matches("./");
+        let anchored = pattern.starts_with('/');
+        if anchored {
+            pattern.remove(0);
+        }
+
+        let pattern = pattern.trim_end_matches('/');
+        if pattern.is_empty() {
+            return false;
+        }
+
+        // Exact path match from root-relative path
+        if rel_path == pattern {
+            return true;
+        }
+
+        // Directory prefix match from root-relative path
+        if rel_path.starts_with(&format!("{}/", pattern)) {
+            return true;
+        }
+
+        // Non-anchored patterns also match by basename for convenience.
+        if !anchored && rel_path.rsplit('/').next().is_some_and(|name| name == pattern) {
+            return true;
+        }
+
+        false
     }
 }
 
@@ -200,12 +233,12 @@ watch = true
             r#"
 [[build.hooks.pre]]
 command = ["gen-icons"]
-watch = ["assets/icons/**"]
+watch = ["assets/icons"]
 "#,
         );
         let hook = &config.build.hooks.pre[0];
         match &hook.watch {
-            WatchMode::Patterns(p) => assert_eq!(p, &vec!["assets/icons/**"]),
+            WatchMode::Patterns(p) => assert_eq!(p, &vec!["assets/icons"]),
             _ => panic!("Expected patterns"),
         }
     }
@@ -221,6 +254,37 @@ build_args = ["--minify", "--sourcemap"]
         );
         let hook = &config.build.hooks.pre[0];
         assert_eq!(hook.build_args, vec!["--minify", "--sourcemap"]);
+    }
+
+    #[test]
+    fn test_watch_matches_directory_pattern() {
+        let watch = WatchMode::Patterns(vec!["assets/icons".into()]);
+        let root = std::path::Path::new("/site");
+
+        assert!(watch.matches(std::path::Path::new("/site/assets/icons/a.svg"), root));
+        assert!(watch.matches(
+            std::path::Path::new("/site/assets/icons/nested/b.svg"),
+            root
+        ));
+        assert!(!watch.matches(
+            std::path::Path::new("/site/assets/images/a.svg"),
+            root
+        ));
+    }
+
+    #[test]
+    fn test_watch_matches_basename_pattern() {
+        let watch = WatchMode::Patterns(vec!["tailwind.css".into()]);
+        let root = std::path::Path::new("/site");
+
+        assert!(watch.matches(
+            std::path::Path::new("/site/assets/styles/tailwind.css"),
+            root
+        ));
+        assert!(!watch.matches(
+            std::path::Path::new("/site/assets/styles/app.css"),
+            root
+        ));
     }
 }
 

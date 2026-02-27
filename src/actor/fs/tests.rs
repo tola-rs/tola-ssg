@@ -10,6 +10,7 @@ use super::router::events_to_messages;
 use super::types::{ChangeKind, DebouncedEvents};
 use crate::actor::messages::CompilerMsg;
 use crate::config::SiteConfig;
+use crate::config::section::build::{HookConfig, WatchMode};
 use crate::utils::path::normalize_path;
 
 fn make_config() -> (TempDir, SiteConfig) {
@@ -249,4 +250,55 @@ fn test_filter_actionable_keeps_removed_output() {
 
     EventClassifier::filter_actionable(&mut changes, &config);
     assert!(changes.contains_key(&removed_output));
+}
+
+#[test]
+fn test_asset_change_without_watched_hooks_does_not_enqueue_compile() {
+    let (_tmp, mut config) = make_config();
+    let root = config.get_root().to_path_buf();
+    config.build.assets.normalize(&root);
+    let asset = config.get_root().join("assets/styles/tailwind.css");
+    let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
+
+    let messages = events_to_messages(events, &config);
+    assert!(messages
+        .iter()
+        .any(|m| matches!(m, CompilerMsg::AssetChange(_))));
+    assert!(!messages
+        .iter()
+        .any(|m| matches!(m, CompilerMsg::Compile { .. })));
+}
+
+#[test]
+fn test_asset_change_with_watched_hooks_enqueues_hook_only_compile() {
+    let (_tmp, mut config) = make_config();
+    let root = config.get_root().to_path_buf();
+    config.build.assets.normalize(&root);
+    config.build.hooks.pre.push(HookConfig {
+        enable: true,
+        name: Some("watched".into()),
+        command: vec!["echo".into(), "hook".into()],
+        watch: WatchMode::Bool(true),
+        build_args: vec![],
+        quiet: true,
+    });
+
+    let asset = config.get_root().join("assets/styles/tailwind.css");
+    let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
+    let messages = events_to_messages(events, &config);
+
+    assert!(messages
+        .iter()
+        .any(|m| matches!(m, CompilerMsg::AssetChange(_))));
+
+    let compile = messages.into_iter().find_map(|m| match m {
+        CompilerMsg::Compile {
+            queue,
+            changed_paths,
+        } => Some((queue, changed_paths)),
+        _ => None,
+    });
+    let (queue, changed_paths) = compile.expect("expected hook-only compile message");
+    assert!(queue.is_empty());
+    assert_eq!(changed_paths.len(), 1);
 }
