@@ -233,7 +233,7 @@ mod tests {
             .extra
             .insert("custom0".into(), toml::Value::String("ABC".into()));
 
-        let files = vec![page];
+        let files = [page];
         let refs = files.iter().collect::<Vec<_>>();
         let result = filter_drafts_with_config(&refs, root, "tola-meta", &config);
 

@@ -10,7 +10,7 @@
     };
   };
 
-  outputs = inputs@{ flake-parts, ... }:
+  outputs = inputs@{ flake-parts, nixpkgs, rust-overlay, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
         "x86_64-linux"
@@ -19,50 +19,75 @@
         "aarch64-darwin"
       ];
 
-      perSystem = { lib, system, ... }:
+      perSystem = { lib, system, self', ... }:
         let
-          pkgs = import inputs.nixpkgs {
+          pkgs = import nixpkgs {
             inherit system;
-            overlays = [ inputs.rust-overlay.overlays.default ];
+            overlays = [ rust-overlay.overlays.default ];
           };
 
-          rustToolchain = pkgs.rust-bin.stable.latest.minimal;
+          cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+          packageName = cargoToml.package.name; # or "tola"
+          packageVersion = cargoToml.package.version; # or "0.7.0"
+          packageDescription = cargoToml.package.description;
+          commonNativeBuildInputs = [ pkgs.nasm pkgs.perl pkgs.pkg-config ];
+          darwinBuildInputs = lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconvReal ];
+          nativeBuildInputs = commonNativeBuildInputs ++ darwinBuildInputs;
+          libPath = lib.optionalString pkgs.stdenv.isDarwin
+            (lib.makeLibraryPath [ pkgs.libiconvReal ]);
 
-          mkPackage = targetPkgs:
+          mkTolaPackage = targetPkgs:
             targetPkgs.rustPlatform.buildRustPackage {
-              pname = "tola";
-              version = "0.7.0";
+              pname = packageName;
+              version = packageVersion;
 
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
 
-              nativeBuildInputs = with pkgs; [ nasm libiconvReal perl pkg-config ];
+              inherit nativeBuildInputs;
               buildInputs = [ targetPkgs.openssl ];
-              env.LIBRARY_PATH = lib.makeLibraryPath [ pkgs.libiconvReal ];
+              LIBRARY_PATH = libPath;
 
               doCheck = false;
               enableParallelBuilding = true;
+              strictDeps = true;
 
               meta = {
-                description = "Static site generator for typst-based blog";
+                description = packageDescription;
                 homepage = "https://github.com/kawayww/tola-ssg";
                 license = lib.licenses.mit;
+                mainProgram = packageName;
               };
             };
+
+          crossTargets = {
+            x86_64-linux = pkgs.pkgsCross.gnu64;
+            x86_64-linux-static = pkgs.pkgsCross.gnu64.pkgsStatic;
+
+            aarch64-linux = pkgs.pkgsCross.aarch64-multiplatform;
+            aarch64-linux-static = pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
+
+            x86_64-windows = pkgs.pkgsCross.mingwW64;
+            aarch64-darwin = pkgs.pkgsCross.aarch64-darwin;
+          };
+
+          packages = {
+            default = mkTolaPackage pkgs;
+            static = mkTolaPackage pkgs.pkgsStatic;
+          } // lib.mapAttrs (_: targetPkgs: mkTolaPackage targetPkgs) crossTargets;
         in
         {
-          packages = {
-            default = mkPackage pkgs;
-            static = mkPackage pkgs.pkgsStatic;
+          inherit packages;
 
-            x86_64-linux = mkPackage pkgs.pkgsCross.gnu64;
-            x86_64-linux-static = mkPackage pkgs.pkgsCross.gnu64.pkgsStatic;
+          apps.default = {
+            type = "app";
+            program = "${self'.packages.default}/bin/tola";
+          };
 
-            aarch64-linux = mkPackage pkgs.pkgsCross.aarch64-multiplatform;
-            aarch64-linux-static = mkPackage pkgs.pkgsCross.aarch64-multiplatform.pkgsStatic;
+          checks.default = packages.default;
 
-            x86_64-windows = mkPackage pkgs.pkgsCross.mingwW64;
-            aarch64-darwin = mkPackage pkgs.pkgsCross.aarch64-darwin;
+          devShells.default = pkgs.mkShell {
+            packages = [ pkgs.rust-bin.stable.latest.default pkgs.openssl ] ++ nativeBuildInputs;
           };
         };
     };

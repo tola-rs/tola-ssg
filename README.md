@@ -89,14 +89,14 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 - **html/xml minification** — Optional minification for production builds
 - **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API
 
-### Image & SVG
+### Image & SVG (experimental, WIP)
 
 - **SVG math tight bounds** — Removes extra whitespace around equations via Typst's `bounds` edge setting
-- **SVG baseline alignment** — Auto-apply `vertical-align` for inline SVG to align with surrounding text
+- **SVG baseline alignment** — Optional vertical-align for inline SVG math
 - **SVG viewBox expansion** — Expands viewBox to include stroke boundaries, preventing content clipping
 - **SVG dark mode adaptation** — Auto-inject CSS for SVG theme switching (enabled by default)
-- **image recolor** — SVG filter-based color adaptation for local images (png/jpg/webp), matching screenshots to site theme (experimental)
-- **image background removal** — Auto-detect and remove image backgrounds (experimental)
+- **image recolor** — SVG filter-based color adaptation for local images (png/jpg/webp), matching screenshots to site theme
+- **image background removal** — Auto-detect and remove image backgrounds
 
 ### Routing & SEO
 

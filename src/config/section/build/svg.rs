@@ -12,7 +12,7 @@
 //! dpi = 144.0             # Rendering DPI (default: 96.0)
 //! threshold = "10KB"      # SVGs smaller than this stay inline
 //! expand_viewbox = true   # Auto-expand viewBox to include stroke (default: true)
-//! baseline_align = true   # Apply vertical-align for inline SVG baseline (default: true)
+//! baseline_align = false  # Apply vertical-align for inline SVG baseline (default: false)
 //! ```
 //!
 //! # Behavior
@@ -75,7 +75,7 @@ pub enum SvgConverter {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "build.svg", status = not_implemented)]
+#[config(section = "build.svg", status = experimental)]
 pub struct SvgConfig {
     /// Extract SVG to separate files (true) or embed in HTML (false).
     pub external: bool,
@@ -108,8 +108,8 @@ pub struct SvgConfig {
 
     /// Apply vertical-align style to SVG for baseline alignment.
     /// Enables inline math to align with surrounding text.
-    /// Default: true
-    #[config(default = "true")]
+    /// Default: false (opt-in)
+    #[config(default = "false")]
     pub baseline_align: bool,
 }
 
@@ -122,7 +122,7 @@ impl Default for SvgConfig {
             dpi: 96.0,
             threshold: "0B".to_string(),
             expand_viewbox: true,
-            baseline_align: true,
+            baseline_align: false,
         }
     }
 }
@@ -225,6 +225,7 @@ mod tests {
         assert_eq!(config.build.svg.converter, SvgConverter::Builtin);
         assert_eq!(config.build.svg.dpi, 96.0);
         assert!(config.build.svg.expand_viewbox);
+        assert!(!config.build.svg.baseline_align);
     }
 
     #[test]
