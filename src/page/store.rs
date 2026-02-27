@@ -139,10 +139,10 @@ impl StoredPageMap {
         hasher.finish()
     }
 
-    /// Get all non-draft pages sorted by date (newest first).
-    pub fn get_pages(&self) -> Vec<StoredPage> {
+    /// Get all pages (including drafts) sorted by date (newest first).
+    pub fn get_pages_with_drafts(&self) -> Vec<StoredPage> {
         let pages = self.pages.read();
-        let mut result: Vec<_> = pages.values().filter(|p| !p.is_draft()).cloned().collect();
+        let mut result: Vec<_> = pages.values().cloned().collect();
         result.sort_by(|a, b| {
             // Sort by date descending, then by title
             match (&b.meta.date, &a.meta.date) {
@@ -153,6 +153,14 @@ impl StoredPageMap {
             }
         });
         result
+    }
+
+    /// Get all non-draft pages sorted by date (newest first).
+    pub fn get_pages(&self) -> Vec<StoredPage> {
+        self.get_pages_with_drafts()
+            .into_iter()
+            .filter(|p| !p.is_draft())
+            .collect()
     }
 
     /// Get pages as JSON Value for injection via sys.inputs.
@@ -166,6 +174,12 @@ impl StoredPageMap {
         serde_json::to_value(&pages).unwrap_or(serde_json::Value::Array(vec![]))
     }
 
+    /// Get all pages (including drafts) as JSON Value for injection via sys.inputs.
+    pub fn pages_to_json_value_with_drafts(&self) -> serde_json::Value {
+        let pages = self.get_pages_with_drafts();
+        serde_json::to_value(&pages).unwrap_or(serde_json::Value::Array(vec![]))
+    }
+
     /// Build `sys.inputs` with site config and pages data.
     ///
     /// Used by both build (iterative pages) and hot reload to inject
@@ -174,7 +188,7 @@ impl StoredPageMap {
     /// - `@tola/pages` - Page metadata
     /// - Phase set to "compile" to indicate compile phase
     pub fn build_inputs(&self, config: &SiteConfig) -> anyhow::Result<typst_batch::Inputs> {
-        let pages_json = self.pages_to_json_value();
+        let pages_json = self.pages_to_json_value_with_drafts();
         let site_info_json = serde_json::to_value(&config.site.info)
             .unwrap_or(serde_json::Value::Object(Default::default()));
 
@@ -297,6 +311,20 @@ mod tests {
     }
 
     #[test]
+    fn test_get_pages_with_drafts_includes_drafts() {
+        let store = StoredPageMap::new();
+        let (url_pub, meta_pub) = make_page("/pub/", "Published", Some("2024-01-15"), false);
+        let (url_draft, meta_draft) = make_page("/draft/", "Draft", Some("2024-01-20"), true);
+        store.insert_page(url_pub, meta_pub);
+        store.insert_page(url_draft, meta_draft);
+
+        let pages = store.get_pages_with_drafts();
+        assert_eq!(pages.len(), 2);
+        assert!(pages.iter().any(|p| p.permalink == UrlPath::from_page("/pub/")));
+        assert!(pages.iter().any(|p| p.permalink == UrlPath::from_page("/draft/")));
+    }
+
+    #[test]
     fn test_clear() {
         let store = StoredPageMap::new();
         let (url, meta) = make_page("/test/", "Test", None, false);
@@ -321,6 +349,21 @@ mod tests {
         assert_eq!(page["permalink"], "/hello/");
         assert_eq!(page["title"], "Hello World");
         assert_eq!(page["date"], "2024-01-15");
+    }
+
+    #[test]
+    fn test_json_with_drafts_serialization() {
+        let store = StoredPageMap::new();
+        let (url_pub, meta_pub) = make_page("/pub/", "Published", Some("2024-01-15"), false);
+        let (url_draft, meta_draft) = make_page("/draft/", "Draft", Some("2024-01-20"), true);
+        store.insert_page(url_pub, meta_pub);
+        store.insert_page(url_draft, meta_draft);
+
+        let json = store.pages_to_json_value_with_drafts();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr.iter().any(|p| p["permalink"] == "/pub/"));
+        assert!(arr.iter().any(|p| p["permalink"] == "/draft/"));
     }
 
     #[test]

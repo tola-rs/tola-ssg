@@ -6,11 +6,15 @@
 //   Returns empty array - dynamic content won't be generated,
 //   but scan can complete without errors.
 // - "visible" phase: Compile phase with injected data.
-//   Returns actual pages data.
+//   Returns actual pages data (including drafts).
+//
+// API:
+// - pages()                -> non-draft pages only
+// - pages-with-drafts()    -> all pages (raw)
 
 #let _phase = sys.inputs.at("__PHASE_KEY__", default: "__FILTER_PHASE__")
 
-#let pages() = {
+#let pages-with-drafts() = {
   let data = sys.inputs.at("__PAGES_KEY__", default: none)
   if data != none {
     data
@@ -24,6 +28,8 @@
     panic("@tola/pages: no data available (this is a bug)")
   }
 }
+
+#let pages() = pages-with-drafts().filter(p => not p.at("draft", default: false))
 
 #let by-tag(tag) = pages().filter(p => tag in p.tags)
 
