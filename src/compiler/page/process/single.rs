@@ -85,6 +85,15 @@ pub fn process_page(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
+    // Permalink can change after compile (e.g. custom permalink from metadata).
+    // Remove stale entry for this source to avoid duplicate pages in @tola/pages.
+    if let Some(old_permalink) = STORED_PAGES.get_permalink_by_source(path)
+        && old_permalink != page.route.permalink
+    {
+        STORED_PAGES.remove_page(&old_permalink);
+        PAGE_LINKS.record(&old_permalink, vec![]);
+    }
+
     // Update global site data
     STORED_PAGES.insert_page(
         page.route.permalink.clone(),
@@ -153,8 +162,15 @@ pub fn compile_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::UrlPath;
     use std::fs;
     use tempfile::TempDir;
+
+    fn reset_global_state() {
+        STORED_PAGES.clear();
+        PAGE_LINKS.clear();
+        GLOBAL_ADDRESS_SPACE.write().clear();
+    }
 
     #[test]
     fn test_compile_meta_no_label() {
@@ -256,5 +272,68 @@ mod tests {
 
         // Should return an error, not panic or silently skip
         assert!(result.is_err(), "Invalid typst should return Err");
+    }
+
+    #[test]
+    fn test_process_page_removes_stale_permalink_for_same_source() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let file_path = content_dir.join("source-field-test.md");
+
+        // TOML frontmatter: ensure `permalink` is parsed by PageMeta.
+        fs::write(
+            &file_path,
+            r#"+++
+title = "Testing @tola/current.source"
+date = "datetime(year: 2026, month: 2, day: 25)"
+permalink = "/showcase/source-field-test/"
++++
+
+# Body
+"#,
+        )
+        .unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        reset_global_state();
+
+        let old_permalink = UrlPath::from_page("/showcase/2026_02_25_source-field-test/");
+        STORED_PAGES.insert_page(
+            old_permalink.clone(),
+            PageMeta {
+                title: Some("Testing @tola/current.source".to_string()),
+                ..Default::default()
+            },
+        );
+        STORED_PAGES.insert_source_mapping(file_path.clone(), old_permalink.clone());
+
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config)
+            .expect("process_page should succeed");
+        assert!(result.is_some(), "page should not be filtered as draft");
+
+        let mapped = STORED_PAGES.get_permalink_by_source(&file_path);
+        assert!(mapped.is_some(), "source mapping should exist");
+        assert_ne!(
+            mapped,
+            Some(old_permalink.clone()),
+            "source mapping should be updated from old permalink"
+        );
+
+        let pages = STORED_PAGES.get_pages_with_drafts();
+        let mapped = mapped.unwrap();
+        assert!(
+            pages.iter().any(|p| p.permalink == mapped),
+            "mapped permalink should exist"
+        );
+        assert!(
+            !pages.iter().any(|p| p.permalink == old_permalink),
+            "old permalink should be removed"
+        );
+
+        reset_global_state();
     }
 }

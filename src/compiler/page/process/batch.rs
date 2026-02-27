@@ -317,8 +317,20 @@ fn process_iterative_page(
     mut page: CompiledPage,
     result: PageCompileOutput,
 ) -> Result<CompiledPage> {
+    let source = page.route.source.clone();
     page.content_meta = result.meta;
     page.apply_custom_permalink(ctx.config);
+
+    // Keep source->permalink mapping consistent across iterative passes.
+    // Without this, pages that derive permalink from runtime context can leave
+    // stale entries and appear duplicated in @tola/pages.
+    if let Some(old_permalink) = STORED_PAGES.get_permalink_by_source(&source)
+        && old_permalink != page.route.permalink
+    {
+        STORED_PAGES.remove_page(&old_permalink);
+        PAGE_LINKS.record(&old_permalink, vec![]);
+    }
+    STORED_PAGES.insert_source_mapping(source, page.route.permalink.clone());
 
     // Update STORED_PAGES with metadata from compile phase
     if let Some(ref meta) = page.content_meta {
