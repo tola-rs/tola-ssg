@@ -23,7 +23,7 @@ use crate::compiler::CompileContext;
 // Re-export utilities
 pub use compile::process_result;
 pub use convert::from_typst_html;
-pub use filter::filter_drafts;
+pub use filter::filter_drafts_with_config;
 pub use init::{build_nested_mappings, init_typst_with_mappings};
 
 // =============================================================================

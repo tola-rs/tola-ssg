@@ -42,7 +42,7 @@ pub use process::{
     build_address_space, build_static_pages, populate_pages, rebuild_iterative_pages,
 };
 pub use typst::process_result as process_typst_result;
-pub use typst::{Typst, filter_drafts as filter_typst_drafts};
+pub use typst::{Typst, filter_drafts_with_config as filter_typst_drafts_with_config};
 pub use warning::{collect_warnings, drain_warnings};
 pub use write::{write_page_html, write_redirects};
 

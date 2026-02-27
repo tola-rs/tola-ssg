@@ -231,7 +231,7 @@ pub fn filter_drafts<'a>(
     let root = config.get_root();
     let label = &config.build.meta.label;
 
-    let typst_result = super::filter_typst_drafts(typst_files, root, label);
+    let typst_result = super::filter_typst_drafts_with_config(typst_files, root, label, config);
     let md_result = super::filter_markdown_drafts(markdown_files, root, label);
     let drafts_skipped = typst_result.draft_count + md_result.draft_count;
 

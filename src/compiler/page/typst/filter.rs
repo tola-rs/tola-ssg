@@ -6,7 +6,9 @@ use typst_batch::prelude::*;
 
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::{Typst, TypstBatcher};
+use crate::config::SiteConfig;
 use crate::package::Phase;
+use crate::package::TolaPackage;
 use crate::page::{PageKind, PageMeta};
 
 /// Result of Typst draft filtering, includes batcher for reuse
@@ -41,22 +43,41 @@ impl<'a> TypstFilterResult<'a> {
     }
 }
 
-/// Filter Typst files, removing drafts
-///
-/// Also collects metadata and detects iterative pages (importing @tola/pages or @tola/current)
-/// for pre-scan optimization
-///
-/// Returns batcher for reuse in subsequent compilation phases
-pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> TypstFilterResult<'a> {
+fn build_scan_inputs(root: &Path, config: Option<&SiteConfig>) -> Option<typst_batch::Inputs> {
+    let mut combined = serde_json::Map::new();
+    combined.insert(
+        Phase::input_key().to_string(),
+        serde_json::json!(Phase::Filter.as_str()),
+    );
+
+    // Keep @tola/site available during scan phase so expressions like
+    // `info.extra.foo` don't fail before visible compilation.
+    if let Some(config) = config {
+        let site_info_json = serde_json::to_value(&config.site.info)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        combined.insert(TolaPackage::Site.input_key(), site_info_json);
+    }
+
+    typst_batch::Inputs::from_json_with_content(&serde_json::Value::Object(combined), root).ok()
+}
+
+fn filter_drafts_impl<'a>(
+    files: &[&PathBuf],
+    root: &'a Path,
+    label: &str,
+    config: Option<&SiteConfig>,
+) -> TypstFilterResult<'a> {
     if files.is_empty() {
         return TypstFilterResult::empty(0, None);
     }
 
-    let batcher = match Compiler::new(root)
-        .into_batch()
-        .with_inputs([(Phase::input_key(), Phase::Filter.as_str())])
-        .with_snapshot_from(files)
-    {
+    let mut builder = Compiler::new(root).into_batch();
+    builder = match build_scan_inputs(root, config) {
+        Some(inputs) => builder.with_inputs_obj(inputs),
+        None => builder.with_inputs([(Phase::input_key(), Phase::Filter.as_str())]),
+    };
+
+    let batcher = match builder.with_snapshot_from(files) {
         Ok(b) => b,
         Err(_) => return TypstFilterResult::empty(0, None), // On prepare error, include all
     };
@@ -125,6 +146,28 @@ pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> Typ
     TypstFilterResult::new(draft_count, Some(batcher), scanned, errors)
 }
 
+/// Filter Typst files, removing drafts
+///
+/// Also collects metadata and detects iterative pages (importing @tola/pages or @tola/current)
+/// for pre-scan optimization
+///
+/// Returns batcher for reuse in subsequent compilation phases
+pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> TypstFilterResult<'a> {
+    filter_drafts_impl(files, root, label, None)
+}
+
+/// Filter Typst drafts with explicit site config injection.
+///
+/// This keeps `@tola/site` behavior consistent between filter and visible phases.
+pub fn filter_drafts_with_config<'a>(
+    files: &[&PathBuf],
+    root: &'a Path,
+    label: &str,
+    config: &SiteConfig,
+) -> TypstFilterResult<'a> {
+    filter_drafts_impl(files, root, label, Some(config))
+}
+
 /// Check if a Typst scan result indicates a draft page
 #[allow(dead_code)]
 #[inline]
@@ -153,5 +196,52 @@ impl DraftFilter for Typst {
             .filter_map(|s| files.iter().find(|f| ***f == s.path).copied())
             .collect();
         FilterResult::new(non_draft_files, result.draft_count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::page::typst::init::init_typst;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_filter_drafts_with_config_injects_site_extra() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let page = root.join("page.typ");
+
+        fs::write(
+            &page,
+            r#"
+#import "@tola/site:0.0.0": info
+#metadata((title: "test")) <tola-meta>
+#let _x = info.extra.custom0
+= Hello
+"#,
+        )
+        .unwrap();
+
+        init_typst(&[]);
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config
+            .site
+            .info
+            .extra
+            .insert("custom0".into(), toml::Value::String("ABC".into()));
+
+        let files = vec![page];
+        let refs = files.iter().collect::<Vec<_>>();
+        let result = filter_drafts_with_config(&refs, root, "tola-meta", &config);
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected scan errors: {:?}",
+            result.errors.len()
+        );
+        assert_eq!(result.scanned.len(), 1);
     }
 }
