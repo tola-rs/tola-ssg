@@ -78,8 +78,7 @@ pub fn process_page(
     }
     crate::compiler::dependency::record_dependencies_local(path, deps);
 
-    page.content_meta = content_meta;
-    page.apply_custom_permalink(config);
+    page.apply_meta(content_meta, config);
     page.compiled_html = Some(result.html);
 
     let warnings = result.warnings.clone();

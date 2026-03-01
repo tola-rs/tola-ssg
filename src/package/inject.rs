@@ -140,15 +140,11 @@ fn merge_current_context(
         .map_err(|e| anyhow!("failed to merge @tola/current inputs: {}", e))
 }
 
-fn build_inputs_for_source_impl(
+fn resolve_source_context(
     config: &SiteConfig,
     store: &StoredPageMap,
     source_path: &Path,
-    spec: InjectSpec,
-) -> Result<typst_batch::Inputs> {
-    validate_spec(spec, true)?;
-
-    let mut inputs = build_base_inputs_impl(config, store, spec)?;
+) -> Result<(UrlPath, Option<String>)> {
     let normalized = normalize_path(source_path);
 
     // Resolve permalink from source mapping first. If absent, derive from route.
@@ -173,6 +169,20 @@ fn build_inputs_for_source_impl(
         .strip_prefix(&content_dir)
         .ok()
         .map(|p| p.to_string_lossy().to_string());
+
+    Ok((permalink, source_rel))
+}
+
+fn build_inputs_for_source_impl(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+    source_path: &Path,
+    spec: InjectSpec,
+) -> Result<typst_batch::Inputs> {
+    validate_spec(spec, true)?;
+
+    let mut inputs = build_base_inputs_impl(config, store, spec)?;
+    let (permalink, source_rel) = resolve_source_context(config, store, source_path)?;
 
     merge_current_context(&mut inputs, store, &permalink, source_rel.as_deref())?;
     Ok(inputs)
@@ -203,9 +213,25 @@ pub fn build_visible_inputs_for_source(
     build_inputs_for_source_impl(config, store, source_path, InjectSpec::visible())
 }
 
+/// Build visible-phase `@tola/current` payload for a specific source.
+pub fn build_visible_current_context_for_source(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+    source_path: &Path,
+) -> Result<serde_json::Value> {
+    validate_spec(InjectSpec::visible(), true)?;
+    let (permalink, source_rel) = resolve_source_context(config, store, source_path)?;
+    Ok(store.build_current_context(&permalink, source_rel.as_deref()))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use tempfile::TempDir;
+
+    use crate::page::StoredPageMap;
 
     #[test]
     fn test_visible_spec_requires_site_and_pages() {
@@ -217,5 +243,36 @@ mod tests {
     fn test_filter_spec_rejects_current_context() {
         let spec = InjectSpec::filter();
         assert!(validate_spec(spec, true).is_err());
+    }
+
+    #[test]
+    fn test_build_visible_current_context_for_source_includes_source() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let content_dir = root.join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let source = content_dir.join("post.typ");
+        fs::write(&source, "= Hello").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.content = content_dir.clone();
+
+        let store = StoredPageMap::new();
+        let current = build_visible_current_context_for_source(&config, &store, &source).unwrap();
+
+        let key = TolaPackage::Current.input_key();
+        let source_rel = current
+            .get(&key)
+            .and_then(|v| v.get("source"))
+            .and_then(|v| v.as_str());
+        let path = current
+            .get(&key)
+            .and_then(|v| v.get("path"))
+            .and_then(|v| v.as_str());
+
+        assert_eq!(source_rel, Some("post.typ"));
+        assert_eq!(path, Some("/post/"));
     }
 }

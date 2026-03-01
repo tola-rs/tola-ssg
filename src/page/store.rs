@@ -180,9 +180,8 @@ impl StoredPageMap {
         config: &SiteConfig,
         stale_link_policy: StaleLinkPolicy,
     ) -> Option<UrlPath> {
-        let mut compiled = CompiledPage::from_paths(source, config).ok()?;
-        compiled.content_meta = Some(meta.clone());
-        compiled.apply_custom_permalink(config);
+        let compiled =
+            CompiledPage::from_paths_with_meta(source, config, Some(meta.clone())).ok()?;
 
         let permalink = compiled.route.permalink;
         self.sync_source_permalink(source, permalink.clone(), stale_link_policy);

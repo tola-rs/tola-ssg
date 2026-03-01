@@ -41,12 +41,7 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     // Build CompiledPage list with correct permalinks
     let pages: Vec<CompiledPage> = scanned
         .iter()
-        .filter_map(|s| {
-            let mut page = CompiledPage::from_paths(&s.path, config).ok()?;
-            page.content_meta = s.meta.clone();
-            page.apply_custom_permalink(config);
-            Some(page)
-        })
+        .filter_map(|s| CompiledPage::from_paths_with_meta(&s.path, config, s.meta.clone()).ok())
         .collect();
 
     // Populate STORED_PAGES and PAGE_LINKS

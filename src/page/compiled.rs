@@ -72,7 +72,7 @@ impl CompiledPage {
     /// Create `CompiledPage` from a source content file path without querying metadata.
     ///
     /// This is the lightweight version that only computes paths.
-    /// Use `with_content` to set the content metadata later.
+    /// Use `apply_meta` to set the content metadata later.
     ///
     /// # Errors
     ///
@@ -182,23 +182,28 @@ impl CompiledPage {
         })
     }
 
-    /// Set content metadata and check for draft status.
-    ///
-    /// Returns `Some(self)` if not a draft, `None` if draft.
-    #[allow(dead_code)] // Utility method for future use
-    pub fn with_content(mut self, content: Option<PageMeta>) -> Option<Self> {
-        if content.as_ref().is_some_and(|c| c.draft) {
-            return None;
-        }
-        self.content_meta = content;
-        Some(self)
+    /// Create `CompiledPage` from source and apply metadata-driven route updates.
+    pub fn from_paths_with_meta(
+        source: impl AsRef<Path>,
+        config: &SiteConfig,
+        meta: Option<PageMeta>,
+    ) -> Result<Self> {
+        let mut page = Self::from_paths(source, config)?;
+        page.apply_meta(meta, config);
+        Ok(page)
+    }
+
+    /// Apply metadata and update permalink/output route if needed.
+    pub fn apply_meta(&mut self, meta: Option<PageMeta>, config: &SiteConfig) {
+        self.content_meta = meta;
+        self.apply_custom_permalink(config);
     }
 
     /// Apply custom permalink from PageMeta if present.
     ///
     /// Updates route.permalink, route.output_file, route.output_dir, and route.full_url.
     /// Call this after setting content_meta.
-    pub fn apply_custom_permalink(&mut self, config: &SiteConfig) {
+    fn apply_custom_permalink(&mut self, config: &SiteConfig) {
         let custom_permalink = self
             .content_meta
             .as_ref()
@@ -716,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_custom_permalink() {
+    fn test_apply_meta_updates_route_from_custom_permalink() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -736,12 +741,14 @@ mod tests {
         // Default permalink
         assert_eq!(page.route.permalink, "/hello/");
 
-        // Set custom permalink
-        page.content_meta = Some(PageMeta {
-            permalink: Some("/archive/2024/custom/".to_string()),
-            ..Default::default()
-        });
-        page.apply_custom_permalink(&config);
+        // Set custom permalink via unified metadata application path.
+        page.apply_meta(
+            Some(PageMeta {
+                permalink: Some("/archive/2024/custom/".to_string()),
+                ..Default::default()
+            }),
+            &config,
+        );
 
         // Verify updated values
         assert_eq!(page.route.permalink, "/archive/2024/custom/");
@@ -762,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_custom_permalink_normalizes() {
+    fn test_apply_meta_normalizes_permalink() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -778,19 +785,21 @@ mod tests {
 
         let mut page = CompiledPage::from_paths(source, &config).unwrap();
 
-        // Set permalink without leading/trailing slashes
-        page.content_meta = Some(PageMeta {
-            permalink: Some("custom-slug".to_string()),
-            ..Default::default()
-        });
-        page.apply_custom_permalink(&config);
+        // Set permalink without leading/trailing slashes.
+        page.apply_meta(
+            Some(PageMeta {
+                permalink: Some("custom-slug".to_string()),
+                ..Default::default()
+            }),
+            &config,
+        );
 
         // Should be normalized
         assert_eq!(page.route.permalink, "/custom-slug/");
     }
 
     #[test]
-    fn test_apply_custom_permalink_none_no_change() {
+    fn test_apply_meta_without_permalink_keeps_route() {
         use tempfile::TempDir;
 
         let dir = TempDir::new().unwrap();
@@ -807,9 +816,8 @@ mod tests {
         let mut page = CompiledPage::from_paths(source, &config).unwrap();
         let original_permalink = page.route.permalink.clone();
 
-        // No custom permalink
-        page.content_meta = Some(PageMeta::default());
-        page.apply_custom_permalink(&config);
+        // No custom permalink.
+        page.apply_meta(Some(PageMeta::default()), &config);
 
         // Should remain unchanged
         assert_eq!(page.route.permalink, original_permalink);

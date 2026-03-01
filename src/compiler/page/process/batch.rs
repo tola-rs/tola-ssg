@@ -13,6 +13,7 @@ use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::freshness::ContentHash;
+use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
 use crate::page::CompiledPage;
 use crate::page::{PAGE_LINKS, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::slug::slugify_path;
@@ -206,18 +207,6 @@ pub fn rebuild_iterative_pages(
 
     let ctx = BuildContext::new(mode, config, clean, deps_hash);
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
-    let content_dir = &config.build.content;
-
-    // Build path -> url mapping for @tola/current injection
-    // Uses permalink from STORED_PAGES (populated by populate_pages with custom permalink support)
-    let path_to_url: rustc_hash::FxHashMap<&Path, UrlPath> = typst_paths
-        .iter()
-        .filter_map(|path| {
-            STORED_PAGES
-                .get_permalink_by_source(path)
-                .map(|url| (path.as_path(), url))
-        })
-        .collect();
 
     // Iterative compilation loop
     let mut prev_hash = STORED_PAGES.pages_hash();
@@ -234,19 +223,7 @@ pub fn rebuild_iterative_pages(
             snapshot.clone(),
             Some(inputs),
         )?;
-
-        let typst_results = compile_typst_batch_with_closure(&batch, &typst_paths, |path| {
-            // Get source path relative to content directory
-            let source = path
-                .strip_prefix(content_dir)
-                .ok()
-                .map(|p| p.to_string_lossy().to_string());
-
-            path_to_url
-                .get(path)
-                .map(|url| STORED_PAGES.build_current_context(url, source.as_deref()))
-                .unwrap_or_default()
-        })?;
+        let typst_results = compile_typst_batch_with_context(&batch, &typst_paths, config, None)?;
 
         // Process results (updates STORED_PAGES)
         let max_errors = ctx.max_errors();
@@ -318,8 +295,7 @@ fn process_iterative_page(
     result: PageCompileOutput,
 ) -> Result<CompiledPage> {
     let source = page.route.source.clone();
-    page.content_meta = result.meta;
-    page.apply_custom_permalink(ctx.config);
+    page.apply_meta(result.meta, ctx.config);
 
     // Keep source->permalink mapping consistent across iterative passes.
     STORED_PAGES.sync_source_permalink(
@@ -374,7 +350,7 @@ fn create_batch_compiler<'a>(
 
 /// Build inputs with site config and pages data
 fn build_site_inputs(config: &SiteConfig) -> Result<typst_batch::Inputs> {
-    STORED_PAGES.build_inputs(config)
+    build_visible_inputs(config, &STORED_PAGES)
 }
 
 /// Populate STORED_PAGES and PAGE_LINKS from pre-scan results
@@ -455,54 +431,30 @@ fn compile_typst_batch_with_context<'a>(
     progress: Option<&crate::logger::ProgressLine>,
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
-
-    let content_dir = &config.build.content;
-
-    // Build path -> url mapping
-    let path_to_url: rustc_hash::FxHashMap<&Path, UrlPath> = files
+    let current_context_by_path: rustc_hash::FxHashMap<&Path, serde_json::Value> = files
         .iter()
-        .filter_map(|p| {
-            CompiledPage::from_paths(p, config)
-                .ok()
-                .map(|page| (p.as_path(), page.route.permalink))
+        .map(|p| {
+            let current = build_visible_current_context_for_source(config, &STORED_PAGES, p)?;
+            Ok((p.as_path(), current))
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     b.batch_compile_with_context(files, |path| {
         if let Some(p) = progress {
             p.inc("typst");
         }
         crate::debug!("typst"; "compiled {}", path.display());
-
-        // Get source path relative to content directory
-        let source = path
-            .strip_prefix(content_dir)
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-
-        path_to_url
+        current_context_by_path
             .get(path)
-            .map(|url| STORED_PAGES.build_current_context(url, source.as_deref()))
-            .unwrap_or_default()
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing precomputed @tola/current context for {}",
+                    path.display()
+                )
+            })
     })
     .map_err(|e| anyhow::anyhow!("{}", e))
-}
-
-/// Compile with custom context closure (for rebuild_iterative_pages)
-fn compile_typst_batch_with_closure<'a, F>(
-    batch: &Option<TypstBatcher<'a>>,
-    files: &[&PathBuf],
-    context_fn: F,
-) -> Result<Vec<BatchCompileResult>>
-where
-    F: Fn(&Path) -> serde_json::Value + Sync,
-{
-    match batch {
-        Some(b) => b
-            .batch_compile_with_context(files, context_fn)
-            .map_err(|e| anyhow::anyhow!("{}", e)),
-        None => Ok(vec![]),
-    }
 }
 
 fn create_batch_compiler_with_inputs<'a>(
@@ -630,8 +582,7 @@ fn finalize_static_page(
         return Ok(None);
     }
 
-    page.content_meta = result.meta;
-    page.apply_custom_permalink(ctx.config); // Apply custom permalink FIRST
+    page.apply_meta(result.meta, ctx.config); // Apply metadata/permalink FIRST
     page.compiled_html = Some(result.html);
 
     STORED_PAGES.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);

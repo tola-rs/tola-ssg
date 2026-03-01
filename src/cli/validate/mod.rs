@@ -493,9 +493,7 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
         HashMap::with_capacity(typst_files.len());
 
     for ((file, meta), links) in typst_files.iter().zip(typst_metas).zip(typst_links_vec) {
-        if let Ok(mut page) = CompiledPage::from_paths(file, config) {
-            page.content_meta = meta;
-            page.apply_custom_permalink(config);
+        if let Ok(page) = CompiledPage::from_paths_with_meta(file, config, meta) {
             typst_links.insert(page.route.source.clone(), links);
             pages.push(page);
         }
@@ -505,14 +503,12 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
     let markdown_pages: Vec<CompiledPage> = markdown_files
         .par_iter()
         .filter_map(|file| {
-            let mut page = CompiledPage::from_paths(*file, config).ok()?;
-            if let Ok(result) = scan_markdown_file(file, config) {
-                page.content_meta = result
-                    .raw_meta
-                    .and_then(|json| serde_json::from_value(json).ok());
-                page.apply_custom_permalink(config);
-            }
-            Some(page)
+            let meta = scan_markdown_file(file, config)
+                .ok()
+                .and_then(|result| result.raw_meta)
+                .and_then(|json| serde_json::from_value(json).ok());
+
+            CompiledPage::from_paths_with_meta(*file, config, meta).ok()
         })
         .collect();
 

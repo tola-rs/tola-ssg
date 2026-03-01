@@ -7,7 +7,7 @@ use typst_batch::prelude::*;
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::{Typst, TypstBatcher};
 use crate::config::SiteConfig;
-use crate::package::{Phase, build_filter_inputs_with_site};
+use crate::package::build_filter_inputs_with_site;
 use crate::page::{PageKind, PageMeta, STORED_PAGES};
 
 /// Result of Typst draft filtering, includes batcher for reuse
@@ -42,29 +42,28 @@ impl<'a> TypstFilterResult<'a> {
     }
 }
 
-fn build_scan_inputs(config: Option<&SiteConfig>) -> Option<typst_batch::Inputs> {
-    config.and_then(|cfg| {
-        // Filter phase: only inject phase + optional site info.
-        // pages/current remain intentionally unavailable in this stage.
-        build_filter_inputs_with_site(cfg, &STORED_PAGES).ok()
-    })
+fn build_scan_inputs(config: &SiteConfig) -> Option<typst_batch::Inputs> {
+    // Filter phase: only inject phase + optional site info.
+    // pages/current remain intentionally unavailable in this stage.
+    build_filter_inputs_with_site(config, &STORED_PAGES).ok()
 }
 
 fn filter_drafts_impl<'a>(
     files: &[&PathBuf],
     root: &'a Path,
     label: &str,
-    config: Option<&SiteConfig>,
+    config: &SiteConfig,
 ) -> TypstFilterResult<'a> {
     if files.is_empty() {
         return TypstFilterResult::empty(0, None);
     }
 
-    let mut builder = Compiler::new(root).into_batch();
-    builder = match build_scan_inputs(config) {
-        Some(inputs) => builder.with_inputs_obj(inputs),
-        None => builder.with_inputs([(Phase::input_key(), Phase::Filter.as_str())]),
+    let Some(inputs) = build_scan_inputs(config) else {
+        return TypstFilterResult::empty(0, None);
     };
+
+    let mut builder = Compiler::new(root).into_batch();
+    builder = builder.with_inputs_obj(inputs);
 
     let batcher = match builder.with_snapshot_from(files) {
         Ok(b) => b,
@@ -142,7 +141,11 @@ fn filter_drafts_impl<'a>(
 ///
 /// Returns batcher for reuse in subsequent compilation phases
 pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> TypstFilterResult<'a> {
-    filter_drafts_impl(files, root, label, None)
+    // Preserve API compatibility for trait-based call sites that don't carry SiteConfig.
+    // Use default config rooted at the caller's workspace to keep package resolution valid.
+    let mut config = SiteConfig::default();
+    config.set_root(root);
+    filter_drafts_impl(files, root, label, &config)
 }
 
 /// Filter Typst drafts with explicit site config injection.
@@ -154,7 +157,7 @@ pub fn filter_drafts_with_config<'a>(
     label: &str,
     config: &SiteConfig,
 ) -> TypstFilterResult<'a> {
-    filter_drafts_impl(files, root, label, Some(config))
+    filter_drafts_impl(files, root, label, config)
 }
 
 /// Check if a Typst scan result indicates a draft page
