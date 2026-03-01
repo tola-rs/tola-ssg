@@ -14,6 +14,7 @@ use crate::compiler::family::Indexed;
 use crate::compiler::page::scan;
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
+use crate::package::{InjectSpec, build_base_inputs, build_inputs_for_source};
 use crate::page::{PageKind, PageMeta, STORED_PAGES};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
@@ -272,8 +273,8 @@ pub fn batch_scan_typst_metadata_iterative(
         return Ok(vec![]);
     }
 
-    // Initial scan with STORED_PAGES data
-    let inputs = STORED_PAGES.build_inputs(config)?;
+    // Initial scan with visible-phase site/pages inputs.
+    let inputs = build_base_inputs(config, &STORED_PAGES, InjectSpec::visible())?;
     let scanner = Batcher::for_scan(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(files)?;
@@ -369,35 +370,7 @@ pub fn batch_scan_typst_metadata_iterative(
 
 /// Build scan inputs with both @tola/pages and file-specific @tola/current context.
 fn build_scan_inputs_with_current(file: &Path, config: &SiteConfig) -> Result<typst_batch::Inputs> {
-    let mut inputs = STORED_PAGES.build_inputs(config)?;
-    let normalized = crate::utils::path::normalize_path(file);
-
-    // Get permalink from existing mapping, or derive default route when missing.
-    let permalink = if let Some(url) = STORED_PAGES
-        .get_permalink_by_source(&normalized)
-        .or_else(|| STORED_PAGES.get_permalink_by_source(file))
-    {
-        url
-    } else if let Ok(compiled) =
-        crate::compiler::page::CompiledPage::from_paths(&normalized, config)
-    {
-        let url = compiled.route.permalink.clone();
-        STORED_PAGES.insert_source_mapping(normalized.clone(), url.clone());
-        url
-    } else {
-        // No valid route context available, return pages-only inputs.
-        return Ok(inputs);
-    };
-
-    let content_dir = crate::utils::path::normalize_path(&config.build.content);
-    let source = normalized
-        .strip_prefix(&content_dir)
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-    let current = STORED_PAGES.build_current_context(&permalink, source.as_deref());
-    inputs.merge_json(&current)?;
-
-    Ok(inputs)
+    build_inputs_for_source(config, &STORED_PAGES, file, InjectSpec::visible())
 }
 
 /// Update STORED_PAGES entry for a source file using metadata-derived permalink.

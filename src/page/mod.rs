@@ -12,7 +12,7 @@ pub use kind::PageKind;
 pub use links::PAGE_LINKS;
 pub use meta::PageMeta;
 pub use route::PageRoute;
-pub use store::{STORED_PAGES, StoredPage};
+pub use store::{STORED_PAGES, StoredPage, StoredPageMap};
 
 /// A JSON object map for storing arbitrary metadata fields
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;

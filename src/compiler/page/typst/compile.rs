@@ -7,6 +7,7 @@ use typst_batch::prelude::*;
 
 use crate::compiler::CompileContext;
 use crate::compiler::page::{PageCompileOutput, format_compile_error};
+use crate::package::{InjectSpec, build_base_inputs, build_inputs_for_source};
 use crate::page::{PageMeta, STORED_PAGES};
 use crate::pipeline::compile as pipeline_compile;
 
@@ -38,22 +39,18 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
         .max_errors
         .unwrap_or(usize::MAX);
 
-    // Build inputs with site config and pages data for @tola/* virtual packages
-    let mut inputs = STORED_PAGES.build_inputs(ctx.config)?;
-
-    // Inject @tola/current context if route is available
-    if let Some(route) = ctx.route {
-        // Get source path relative to content directory
-        let source = route
-            .source
-            .strip_prefix(&ctx.config.build.content)
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
-
-        let current_context =
-            STORED_PAGES.build_current_context(&route.permalink, source.as_deref());
-        inputs.merge_json(&current_context)?;
-    }
+    // Build inputs for virtual packages. If route is available, include per-page
+    // current context so templates can access @tola/current.source/path.
+    let inputs = if let Some(route) = ctx.route {
+        build_inputs_for_source(
+            ctx.config,
+            &STORED_PAGES,
+            &route.source,
+            InjectSpec::visible(),
+        )?
+    } else {
+        build_base_inputs(ctx.config, &STORED_PAGES, InjectSpec::visible())?
+    };
 
     // Compile Typst to HtmlDocument using Builder API with inputs
     let result = Compiler::new(root)

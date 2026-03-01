@@ -14,7 +14,7 @@ use super::links::PAGE_LINKS;
 use crate::compiler::page::ScannedHeading;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
-use crate::package::{Phase, TolaPackage};
+use crate::package::{InjectSpec, build_base_inputs};
 
 /// Global page data store
 pub static STORED_PAGES: LazyLock<StoredPageMap> = LazyLock::new(StoredPageMap::new);
@@ -188,34 +188,7 @@ impl StoredPageMap {
     /// - `@tola/pages` - Page metadata
     /// - Phase set to "compile" to indicate compile phase
     pub fn build_inputs(&self, config: &SiteConfig) -> anyhow::Result<typst_batch::Inputs> {
-        let pages_json = self.pages_to_json_value_with_drafts();
-        let site_info_json = serde_json::to_value(&config.site.info)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-
-        let mut combined = serde_json::Map::new();
-        combined.insert(TolaPackage::Site.input_key(), site_info_json);
-        combined.insert(TolaPackage::Pages.input_key(), pages_json);
-        combined.insert(
-            Phase::input_key().to_string(),
-            serde_json::json!(Phase::Visible.as_str()),
-        );
-        // Inject format="html" for templates to detect HTML output.
-        //
-        // Why not just use `context { target() }`?
-        // - target() requires a context block and is only evaluated during Layout phase
-        // - Scan phase (Eval-only) cannot evaluate context blocks, so target() won't work
-        // - Image show rules need to work during scan to extract image paths for validation
-        //
-        // Templates should use:
-        // - `is-html` (sys.inputs.format) for image show rules (works during scan)
-        // - `target() == "html"` for math show rules with html.frame() (avoids paged warnings)
-        combined.insert("format".to_string(), serde_json::json!("html"));
-
-        typst_batch::Inputs::from_json_with_content(
-            &serde_json::Value::Object(combined),
-            config.get_root(),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to build site inputs: {}", e))
+        build_base_inputs(config, self, InjectSpec::visible())
     }
 
     /// Build current page context for `@tola/current` virtual package.

@@ -13,8 +13,10 @@
 //! #import "@tola/current:0.0.0": path, siblings, find-prev
 //! ```
 
+mod inject;
 mod phase;
 mod tola;
 
+pub use inject::{InjectSpec, build_base_inputs, build_inputs_for_source};
 pub use phase::Phase;
 pub use tola::{TolaPackage, generate_lsp_stubs, package_sentinel, read_package};
