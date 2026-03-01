@@ -7,9 +7,11 @@ mod lifecycle;
 mod path;
 mod response;
 mod scan;
+mod startup;
 
 pub use build::{init_serve_build, serve_build};
 pub use scan::scan_pages;
+pub use startup::serve_with_cache;
 
 use crate::{
     config::{SiteConfig, cfg},

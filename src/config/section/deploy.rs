@@ -19,10 +19,10 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Deploy configuration (experimental)
+/// Deploy configuration (not implemented)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "deploy", status = experimental)]
+#[config(section = "deploy", status = not_implemented)]
 pub struct DeployConfig {
     /// Deployment provider: "github", "cloudflare", "vercel".
     pub provider: String,
@@ -87,7 +87,7 @@ impl DeployConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "deploy.github", status = experimental)]
+#[config(section = "deploy.github", status = not_implemented)]
 pub struct GithubDeployConfig {
     /// Repository URL (HTTPS or SSH format).
     pub url: String,

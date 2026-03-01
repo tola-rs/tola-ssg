@@ -1,5 +1,4 @@
 use anyhow::{Context, Result, anyhow};
-use gix::ThreadSafeRepository;
 use rayon::prelude::*;
 use std::{
     ffi::OsStr,
@@ -19,7 +18,6 @@ use crate::{
     log,
     logger::ProgressLine,
     package::generate_lsp_stubs,
-    utils::git,
 };
 
 /// Collected files for the build
@@ -32,7 +30,7 @@ pub(super) struct BuildFiles {
 }
 
 /// Initialize build environment
-pub(super) fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
+pub(super) fn init_build(config: &SiteConfig) -> Result<()> {
     // Pre-warm typst library resources with nested asset mappings
     let nested_mappings = typst::build_nested_mappings(&config.build.assets.nested);
     typst::init_typst_with_mappings(
@@ -44,7 +42,7 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
     // Generate LSP stubs for tinymist completion
     let _ = generate_lsp_stubs(config.get_root());
 
-    let repo = ensure_output_repo(&config.build.output, config.build.clean)?;
+    ensure_output_dir(&config.build.output, config.build.clean)?;
 
     if config.build.clean
         && let Err(e) = crate::cache::clear_cache_dir(config.get_root())
@@ -59,7 +57,7 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<ThreadSafeRepository> {
     typst_batch::clear_file_cache();
     freshness::clear_cache();
 
-    Ok(repo)
+    Ok(())
 }
 
 /// Collect all files to process
@@ -280,20 +278,19 @@ fn print_warnings(
     }
 }
 
-/// Ensure output directory exists with a git repository
-fn ensure_output_repo(output: &Path, clean: bool) -> Result<ThreadSafeRepository> {
+/// Ensure output directory exists and apply clean policy
+fn ensure_output_dir(output: &Path, clean: bool) -> Result<()> {
     match (output.exists(), clean) {
         (true, true) => {
             fs::remove_dir_all(output).with_context(|| {
                 format!("Failed to clear output directory: {}", output.display())
             })?;
-            git::create_repo(output)
+            fs::create_dir_all(output)
+                .with_context(|| format!("Failed to create output directory: {}", output.display()))
         }
-        (true, false) => git::open_repo(output).or_else(|_| {
-            log!("git"; "initializing repo");
-            git::create_repo(output)
-        }),
-        (false, _) => git::create_repo(output),
+        (true, false) => Ok(()),
+        (false, _) => fs::create_dir_all(output)
+            .with_context(|| format!("Failed to create output directory: {}", output.display())),
     }
 }
 

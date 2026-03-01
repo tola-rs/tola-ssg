@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::{
     asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
-    freshness, hooks, log, seo, utils::git,
+    freshness, hooks, log, seo,
 };
 
 /// Initialize serve build environment
@@ -38,10 +38,10 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
         nested_mappings,
     );
 
-    // Create output directory with git repo
+    // Ensure output directory exists
     let output_dir = config.paths().output_dir();
     if !output_dir.exists() {
-        git::create_repo(&config.build.output)?;
+        std::fs::create_dir_all(&config.build.output)?;
     }
 
     // Write embedded assets (CSS, JS)

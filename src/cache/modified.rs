@@ -37,7 +37,7 @@ impl RemovedFile {
     /// Returns `None` when:
     /// - source path is invalid/empty
     /// - source file still exists (not removed)
-    fn from_index_entry(root: &Path, url: &str, info: &CacheFileInfo) -> Option<Self> {
+    pub fn new(root: &Path, url: &str, info: &CacheFileInfo) -> Option<Self> {
         let source_path = resolve_source_path(root, info)?;
         if source_path.exists() {
             return None;
@@ -82,7 +82,7 @@ pub fn get_modified_files(root: &Path, content_dir: &Path) -> ModifiedFilesResul
             .cached_urls_by_source
             .insert(source_path.clone(), url_path.clone());
 
-        if let Some(removed) = RemovedFile::from_index_entry(root, url, info) {
+        if let Some(removed) = RemovedFile::new(root, url, info) {
             result.removed.push(removed);
             continue;
         }

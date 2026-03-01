@@ -2,7 +2,7 @@
 //!
 //! Build pipeline phases:
 //! - **Pre Hooks** - User-defined pre-build commands
-//! - **Init** - Typst warm-up, output repo, cache clear
+//! - **Init** - Typst warm-up, output directory, cache clear
 //! - **Collect** - Gather content files and assets
 //! - **Compile** - Parallel content compilation + asset processing
 //! - **Iterative** - Rebuild iterative pages with complete metadata
@@ -14,7 +14,6 @@ mod pipeline;
 mod recompile;
 
 use anyhow::Result;
-use gix::ThreadSafeRepository;
 use std::path::Path;
 
 use crate::{
@@ -41,9 +40,9 @@ pub fn build_site(
     mode: BuildMode,
     config: &SiteConfig,
     quiet: bool,
-) -> Result<(ThreadSafeRepository, Pages)> {
+) -> Result<Pages> {
     // Initialize (must be before pre hooks to clean output dir first)
-    let repo = pipeline::init_build(config)?;
+    pipeline::init_build(config)?;
     let deps_hash: ContentHash = freshness::compute_deps_hash(config);
 
     // Pre Hooks (after init so output dir exists and is clean)
@@ -82,5 +81,5 @@ pub fn build_site(
     // Finalize
     pipeline::finalize_build(config, quiet)?;
 
-    Ok((repo, pages))
+    Ok(pages)
 }
