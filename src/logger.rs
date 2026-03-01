@@ -86,7 +86,7 @@ macro_rules! debug {
 /// ```ignore
 /// debug_do! {
 ///     let summary = expensive_computation();
-///     debug!("module"; "result: {:?}", summary);
+///     log!("module"; "result: {:?}", summary);
 /// }
 /// ```
 #[macro_export]

@@ -8,8 +8,10 @@ use crate::config::SiteConfig;
 use crate::reload::classify::classify_changes;
 
 pub(super) fn log_events(events: &DebouncedEvents) {
-    for (path, kind) in &events.0 {
-        crate::debug!("watch"; "{}: {}", kind.label(), path.display());
+    crate::debug_do! {
+        for (path, kind) in &events.0 {
+            crate::log!("watch"; "{}: {}", kind.label(), path.display());
+        }
     }
 }
 

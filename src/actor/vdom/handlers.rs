@@ -220,7 +220,7 @@ impl VdomActor {
     ) {
         crate::debug_do! {
             let ops_summary: Vec<String> = ops.iter().map(|op| op.summary()).collect();
-            crate::debug!("vdom"; "reload: {} ({} ops): {:?}", rel_path.display(), ops.len(), ops_summary);
+            crate::log!("vdom"; "reload: {} ({} ops): {:?}", rel_path.display(), ops.len(), ops_summary);
         }
 
         self.batch
