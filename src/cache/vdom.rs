@@ -99,7 +99,26 @@ pub fn restore_dependency_graph(root: &Path) -> std::io::Result<usize> {
 
 /// Check if valid VDOM cache exists
 pub fn has_cache(root: &Path) -> bool {
-    root.join(CACHE_DIR).join(INDEX_FILE).exists()
+    let Some(index) = load_cache_index(root).ok().flatten() else {
+        return false;
+    };
+
+    if index.entries.is_empty() {
+        crate::debug!("persist"; "cache index exists but has no entries");
+        return false;
+    }
+
+    let cache_dir = root.join(CACHE_DIR);
+    let has_vdom = index
+        .entries
+        .values()
+        .any(|info| fs::read(cache_dir.join(format!("{}.vdom", info.filename))).is_ok());
+
+    if !has_vdom {
+        crate::debug!("persist"; "cache index exists but no readable vdom entries");
+    }
+
+    has_vdom
 }
 
 /// Clear the cache directory
@@ -284,4 +303,72 @@ fn load_cache_index(root: &Path) -> std::io::Result<Option<CacheIndex>> {
 /// Compute file content hash (blake3 hex)
 fn compute_hash(path: &Path) -> String {
     crate::freshness::compute_file_hash(path).to_hex()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn cache_dir(root: &Path) -> PathBuf {
+        root.join(CACHE_DIR)
+    }
+
+    #[test]
+    fn has_cache_false_when_index_missing() {
+        let dir = TempDir::new().unwrap();
+        assert!(!has_cache(dir.path()));
+    }
+
+    #[test]
+    fn has_cache_false_when_index_invalid() {
+        let dir = TempDir::new().unwrap();
+        let cache = cache_dir(dir.path());
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join(INDEX_FILE), "{ invalid json").unwrap();
+
+        assert!(!has_cache(dir.path()));
+    }
+
+    #[test]
+    fn has_cache_false_when_index_empty() {
+        let dir = TempDir::new().unwrap();
+        let cache = cache_dir(dir.path());
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join(INDEX_FILE), r#"{"entries":{},"created_at":0}"#).unwrap();
+
+        assert!(!has_cache(dir.path()));
+    }
+
+    #[test]
+    fn has_cache_false_when_vdom_missing() {
+        let dir = TempDir::new().unwrap();
+        let cache = cache_dir(dir.path());
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(
+            cache.join(INDEX_FILE),
+            r#"{"entries":{"/post/":{"filename":"post","source_path":"content/post.typ","source_hash":"","dependencies":{}}},"created_at":0}"#,
+        )
+        .unwrap();
+
+        assert!(!has_cache(dir.path()));
+    }
+
+    #[test]
+    fn has_cache_true_when_index_and_vdom_exist() {
+        let dir = TempDir::new().unwrap();
+        let cache = cache_dir(dir.path());
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(
+            cache.join(INDEX_FILE),
+            r#"{"entries":{"/post/":{"filename":"post","source_path":"content/post.typ","source_hash":"","dependencies":{}}},"created_at":0}"#,
+        )
+        .unwrap();
+        fs::write(cache.join("post.vdom"), b"test-bytes").unwrap();
+
+        assert!(has_cache(dir.path()));
+    }
 }

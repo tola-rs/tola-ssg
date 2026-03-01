@@ -22,14 +22,23 @@ mod reload;
 mod seo;
 mod utils;
 
+use crate::address::GLOBAL_ADDRESS_SPACE;
+use crate::compiler::dependency::{self, collect_virtual_dependents};
+use crate::compiler::page::{BUILD_CACHE, cache_vdom};
+use crate::compiler::scheduler::SCHEDULER;
+use crate::page::{PAGE_LINKS, STORED_PAGES};
+use crate::reload::compile::{self, CompileOutcome};
 use anyhow::Result;
+use cache::{PersistedDiagnostics, PersistedError, RemovedFile};
 use clap::{ColorChoice, Parser};
 use cli::{Cli, Commands, build::build_site};
 use config::{SiteConfig, clear_clean_flag, init_config};
 use core::BuildMode;
+use core::UrlPath;
 use gix::ThreadSafeRepository;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use seo::{feed::build_feed, sitemap::build_sitemap};
+use tola_vdom::CacheKey;
 
 fn main() -> Result<()> {
     // Setup global Ctrl+C handler (before any blocking operations)
@@ -64,21 +73,6 @@ fn main() -> Result<()> {
 // Serve Command
 // =============================================================================
 
-/// Initialize build environment: fonts + embedded assets
-fn init_build_env(config: &SiteConfig) -> Result<()> {
-    let font_dirs = cli::build::collect_font_dirs(config);
-    let nested_mappings = compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-    compiler::page::typst::init_typst_with_mappings(
-        &font_dirs,
-        config.get_root().to_path_buf(),
-        nested_mappings,
-    );
-
-    let output_dir = config.paths().output_dir();
-    std::fs::create_dir_all(&output_dir)?;
-    embed::write_embedded_assets(config, &output_dir)
-}
-
 /// Start serve with cached build support
 fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     use crate::core::{set_healthy, set_serving};
@@ -93,6 +87,11 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     // Check if VDOM cache AND output dir exist - if so, we can skip initial build
     let has_cache =
         !config.build.clean && cache::has_cache(config.get_root()) && config.build.output.exists();
+    debug!(
+        "startup";
+        "serve startup path: {}",
+        if has_cache { "cache" } else { "full-build" }
+    );
 
     // Bind HTTP server first (so we can respond with 503 during scan)
     let bound_server = cli::serve::bind_server()?;
@@ -128,8 +127,7 @@ fn serve_with_cache(config: &SiteConfig) -> Result<()> {
                 }
             }
         } else {
-            startup_with_cache(&config_arc);
-            true
+            startup_with_cache(&config_arc)
         };
 
         // Track whether initial build succeeded (for retry on file change)
@@ -179,73 +177,218 @@ fn progressive_scan(config: &SiteConfig) -> bool {
 }
 
 /// Handle startup with existing cache - detect modified files and recompile
-fn startup_with_cache(config: &SiteConfig) {
-    // Initialize build environment (fonts + embedded assets)
-    let _ = init_build_env(config);
+fn startup_with_cache(config: &SiteConfig) -> bool {
+    if let Err(e) = cli::serve::init_serve_build(config) {
+        log!("build"; "cache startup init failed: {}", e);
+        return false;
+    }
 
-    // Get files that need recompilation:
-    // - from previous errors (always revalidate)
-    // = with modified mtime
+    if let Err(e) = cli::serve::scan_pages(config) {
+        log!("scan"; "cache startup scan failed: {}", e);
+        return false;
+    }
+
+    let root = config.get_root();
+    let mut diagnostics = cache::restore_diagnostics(root).unwrap_or_default();
     let mut files_to_compile = FxHashSet::default();
+    let mut error_files = 0usize;
 
-    // Add error files (always revalidate errors)
-    let diagnostics = cache::restore_diagnostics(config.get_root()).unwrap_or_default();
+    // Always retry previous compile errors on startup.
     for error in diagnostics.errors() {
-        // Convert relative path to absolute
-        let abs_path = config.root_join(&error.path);
+        let abs_path = crate::utils::path::normalize_path(&config.root_join(&error.path));
         if abs_path.exists() {
             files_to_compile.insert(abs_path);
+            error_files += 1;
         }
     }
 
-    // Add modified files
-    let modified = cache::get_modified_files(config.get_root());
-    for path in &modified.modified {
-        files_to_compile.insert(path.clone());
+    let modified = cache::get_modified_files(root, &config.build.content);
+
+    debug!(
+        "startup";
+        "offline changes: errors={}, created={}, removed={}, modified={}",
+        error_files,
+        modified.created.len(),
+        modified.removed.len(),
+        modified.modified.len()
+    );
+
+    cleanup_removed_files(&modified.removed, config, &mut diagnostics);
+
+    for path in modified.created {
+        files_to_compile.insert(path);
+    }
+    for path in modified.modified {
+        files_to_compile.insert(path);
     }
 
-    if !files_to_compile.is_empty() {
-        let files: Vec<_> = files_to_compile.into_iter().collect();
-        handle_modified_files(&files, config);
-    } else {
+    let mut compile_targets: Vec<_> = files_to_compile.into_iter().collect();
+    compile_targets.sort();
+
+    let pages_hash = STORED_PAGES.pages_hash();
+    let mut stats = StartupCompileStats::default();
+    if !compile_targets.is_empty() {
+        stats = compile_startup_batch(
+            &compile_targets,
+            &modified.cached_urls_by_source,
+            config,
+            &mut diagnostics,
+        );
+    }
+
+    // Keep @tola/pages users consistent when metadata graph changed.
+    if STORED_PAGES.pages_hash() != pages_hash {
+        let dependents = collect_virtual_dependents();
+        if !dependents.is_empty() {
+            let virtual_stats = compile_startup_batch(
+                &dependents.into_iter().collect::<Vec<_>>(),
+                &FxHashMap::default(),
+                config,
+                &mut diagnostics,
+            );
+            stats.success += virtual_stats.success;
+            stats.failed += virtual_stats.failed;
+            stats.skipped += virtual_stats.skipped;
+        }
+    }
+
+    if let Err(e) = cache::persist_diagnostics(&diagnostics, root) {
+        debug!("startup"; "failed to persist diagnostics: {}", e);
+    }
+
+    if let Some(first_error) = diagnostics.first_error() {
+        logger::WatchStatus::new().error(&first_error.path, &first_error.error);
+    }
+
+    debug!(
+        "startup";
+        "compile result: success={}, failed={}, skipped={}",
+        stats.success,
+        stats.failed,
+        stats.skipped
+    );
+
+    if stats.failed == 0 && compile_targets.is_empty() && modified.removed.is_empty() {
         log!("serve"; "using cached build");
-    }
-}
-
-/// Recompile modified files and display/persist errors
-fn handle_modified_files(files: &[std::path::PathBuf], config: &SiteConfig) {
-    // log!("serve"; "recompiling {} modified file(s)", files.len());
-
-    let errors = cli::build::recompile_files(files, BuildMode::DEVELOPMENT);
-
-    // Persist errors for VdomActor to restore
-    persist_compile_errors(&errors, config);
-
-    // Display first error
-    if let Some((path, msg)) = errors.first() {
-        logger::WatchStatus::new().error(&path.to_string(), msg);
-    }
-
-    // Log summary
-    if errors.is_empty() {
-        log!("serve"; "using cached build (recompiled {} files)", files.len());
+    } else if stats.failed == 0 {
+        log!("serve"; "using cached build (startup compiled {} files)", stats.success);
     } else {
-        log!("serve"; "using cached build ({} error{})",
-            errors.len(), if errors.len() == 1 { "" } else { "s" });
+        log!("serve"; "using cached build (startup compile errors: {})", stats.failed);
+    }
+
+    true
+}
+
+#[derive(Debug, Default)]
+struct StartupCompileStats {
+    success: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+fn cleanup_removed_files(
+    removed: &[RemovedFile],
+    config: &SiteConfig,
+    diagnostics: &mut PersistedDiagnostics,
+) {
+    if removed.is_empty() {
+        return;
+    }
+
+    for item in removed {
+        SCHEDULER.invalidate(&item.source_path);
+        GLOBAL_ADDRESS_SPACE
+            .write()
+            .remove_by_source(&item.source_path);
+        STORED_PAGES.remove_by_source(&item.source_path);
+        dependency::remove_content(&item.source_path);
+        BUILD_CACHE.remove(&CacheKey::new(item.url_path.as_str()));
+        PAGE_LINKS.record(&item.url_path, vec![]);
+        compile::cleanup_output_for_url(config, &item.url_path);
+
+        let rel = item
+            .source_path
+            .strip_prefix(config.get_root())
+            .unwrap_or(&item.source_path)
+            .display()
+            .to_string();
+        diagnostics.clear_for(&rel);
     }
 }
 
-/// Persist compile errors to diagnostics.json
-fn persist_compile_errors(errors: &[(String, String)], config: &SiteConfig) {
-    let mut state = cache::PersistedDiagnostics::new();
-    for (path, error) in errors {
-        state.push_error(cache::PersistedError::new(
-            path.clone(),
-            String::new(),
-            error.clone(),
-        ));
+fn compile_startup_batch(
+    paths: &[std::path::PathBuf],
+    cached_urls: &FxHashMap<std::path::PathBuf, UrlPath>,
+    config: &SiteConfig,
+    diagnostics: &mut PersistedDiagnostics,
+) -> StartupCompileStats {
+    let mut stats = StartupCompileStats::default();
+    let outcomes = compile::compile_startup_batch(paths, config);
+
+    for (input_path, outcome) in paths.iter().zip(outcomes.into_iter()) {
+        let rel_input = input_path
+            .strip_prefix(config.get_root())
+            .unwrap_or(input_path)
+            .display()
+            .to_string();
+
+        match outcome {
+            CompileOutcome::Vdom {
+                path,
+                url_path,
+                vdom,
+                warnings,
+            } => {
+                // If permalink changed since cached index, remove stale output/cache key.
+                if let Some(old_url) = cached_urls.get(&path)
+                    && old_url != &url_path
+                {
+                    BUILD_CACHE.remove(&CacheKey::new(old_url.as_str()));
+                    PAGE_LINKS.record(old_url, vec![]);
+                    compile::cleanup_output_for_url(config, old_url);
+                }
+
+                cache_vdom(&url_path, *vdom);
+
+                let rel = path
+                    .strip_prefix(config.get_root())
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                diagnostics.clear_errors_for(&rel);
+                diagnostics.set_warnings(&rel, warnings);
+                stats.success += 1;
+            }
+            CompileOutcome::Error {
+                path,
+                url_path,
+                error,
+            } => {
+                let rel = path
+                    .strip_prefix(config.get_root())
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                diagnostics.push_error(PersistedError::new(
+                    rel,
+                    url_path.unwrap_or_default().to_string(),
+                    error,
+                ));
+                stats.failed += 1;
+            }
+            CompileOutcome::Skipped => {
+                diagnostics.clear_for(&rel_input);
+                stats.skipped += 1;
+            }
+            CompileOutcome::Reload { reason } => {
+                debug!("startup"; "startup compile requested reload: {}", reason);
+                diagnostics.clear_for(&rel_input);
+                stats.skipped += 1;
+            }
+        }
     }
-    let _ = cache::persist_diagnostics(&state, config.get_root());
+
+    stats
 }
 
 // =============================================================================

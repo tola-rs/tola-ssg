@@ -62,6 +62,25 @@ pub fn compile_page(path: &Path, config: &SiteConfig) -> CompileOutcome {
     }
 }
 
+/// Compile a startup batch in parallel using the same per-file semantics as hot-reload.
+///
+/// This is used by `serve` cache startup to ensure changed files are written to disk
+/// and draft transitions are cleaned up consistently.
+pub fn compile_startup_batch(paths: &[PathBuf], config: &SiteConfig) -> Vec<CompileOutcome> {
+    use rayon::prelude::*;
+
+    let outcomes: Vec<_> = paths
+        .par_iter()
+        .map(|path| compile_page(path, config))
+        .collect();
+
+    // Rayon workers keep dependency records in thread-local buffers.
+    // Flush them once after the batch so dependency-driven recompiles stay correct.
+    crate::compiler::dependency::flush_thread_local_deps();
+
+    outcomes
+}
+
 /// Compile a single content file (Typst or Markdown) to VDOM
 fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
     match process_page(BuildMode::DEVELOPMENT, path, config) {
@@ -187,6 +206,11 @@ fn cleanup_output_file(config: &SiteConfig, url: &UrlPath) {
     {
         let _ = std::fs::remove_dir(parent);
     }
+}
+
+/// Remove generated HTML output for a URL if it exists.
+pub fn cleanup_output_for_url(config: &SiteConfig, url: &UrlPath) {
+    cleanup_output_file(config, url);
 }
 
 #[cfg(test)]

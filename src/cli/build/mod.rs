@@ -26,8 +26,6 @@ use crate::{
     utils::plural_count,
 };
 
-pub use recompile::recompile_files;
-
 /// Collect font directories from config for font loading
 pub fn collect_font_dirs(config: &SiteConfig) -> Vec<&Path> {
     let mut dirs: Vec<&Path> = vec![config.build.content.as_path()];
