@@ -20,4 +20,4 @@ pub use failure::{
 };
 
 // Modified file detection
-pub use modified::{RemovedFile, get_modified_files, get_source_paths};
+pub use modified::{RemovedFile, get_modified_files};

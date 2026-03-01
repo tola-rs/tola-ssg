@@ -192,6 +192,7 @@ fn startup_with_cache(config: &SiteConfig) -> bool {
     let mut diagnostics = cache::restore_diagnostics(root).unwrap_or_default();
     let mut files_to_compile = FxHashSet::default();
     let mut error_files = 0usize;
+    let mut stale_diagnostics = Vec::new();
 
     // Always retry previous compile errors on startup.
     for error in diagnostics.errors() {
@@ -199,7 +200,12 @@ fn startup_with_cache(config: &SiteConfig) -> bool {
         if abs_path.exists() {
             files_to_compile.insert(abs_path);
             error_files += 1;
+        } else {
+            stale_diagnostics.push(error.path.clone());
         }
+    }
+    for path in stale_diagnostics {
+        diagnostics.clear_for(&path);
     }
 
     let modified = cache::get_modified_files(root, &config.build.content);
@@ -369,6 +375,7 @@ fn compile_startup_batch(
                     .unwrap_or(&path)
                     .display()
                     .to_string();
+                diagnostics.clear_warnings_for(&rel);
                 diagnostics.push_error(PersistedError::new(
                     rel,
                     url_path.unwrap_or_default().to_string(),

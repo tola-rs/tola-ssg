@@ -21,7 +21,7 @@ mod batch;
 mod handlers;
 mod permalink;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
@@ -86,10 +86,8 @@ impl VdomActor {
         // Get warnings for display
         let warnings: Vec<String> = error_state.warnings().map(|w| w.warning.clone()).collect();
 
-        // Restore AddressSpace from cache (skip if scan already populated it)
-        if !crate::core::is_serving() {
-            Self::restore_address_space(&root);
-        }
+        // AddressSpace is rebuilt by startup `scan_pages` before serving.
+        // Avoid restoring only source->url mappings from cache, which leaves url->source incomplete.
 
         let actor = Self {
             rx,
@@ -100,17 +98,6 @@ impl VdomActor {
         };
 
         (actor, restored, first_error, warnings)
-    }
-
-    fn restore_address_space(root: &Path) {
-        let source_paths = crate::cache::get_source_paths(root);
-        let count = source_paths.len();
-
-        let mut space = GLOBAL_ADDRESS_SPACE.write();
-        for (url, source) in source_paths {
-            space.set_source_url(source, url);
-        }
-        crate::debug!("address_space"; "restored {} source mappings from cache", count);
     }
 
     /// Run the actor event loop.
@@ -200,7 +187,9 @@ impl VdomActor {
 #[cfg(test)]
 mod persistence_tests {
     use crate::cache::restore_diagnostics;
+    use crate::core::GLOBAL_ADDRESS_SPACE;
     use crate::core::UrlPath;
+    use std::fs;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
@@ -231,5 +220,31 @@ mod persistence_tests {
         assert_eq!(state.error_count(), 1, "Should have 1 persisted error");
         let error = state.first_error().unwrap();
         assert_eq!(error.error, "test error");
+    }
+
+    #[test]
+    fn test_new_does_not_restore_address_space_from_cache() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let cache_dir = root.join(".tola/cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+
+        // Populate cache index with one entry. VdomActor::new should not mutate AddressSpace.
+        fs::write(
+            cache_dir.join("index.json"),
+            r#"{"entries":{"/from-cache/":{"filename":"from-cache","source_path":"content/from-cache.typ","source_hash":"abc","dependencies":{}}},"created_at":0}"#,
+        )
+        .unwrap();
+
+        GLOBAL_ADDRESS_SPACE.write().clear();
+
+        let (_tx, rx) = mpsc::channel(1);
+        let (ws_tx, _ws_rx) = mpsc::channel(1);
+        let _ = VdomActor::new(rx, ws_tx, root);
+
+        assert!(
+            GLOBAL_ADDRESS_SPACE.read().is_empty(),
+            "AddressSpace should be rebuilt by scan_pages, not partially restored from cache"
+        );
     }
 }
