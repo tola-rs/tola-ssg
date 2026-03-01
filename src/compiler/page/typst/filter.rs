@@ -7,7 +7,7 @@ use typst_batch::prelude::*;
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::{Typst, TypstBatcher};
 use crate::config::SiteConfig;
-use crate::package::{InjectSpec, Phase, build_base_inputs};
+use crate::package::{Phase, build_filter_inputs_with_site};
 use crate::page::{PageKind, PageMeta, STORED_PAGES};
 
 /// Result of Typst draft filtering, includes batcher for reuse
@@ -46,8 +46,7 @@ fn build_scan_inputs(config: Option<&SiteConfig>) -> Option<typst_batch::Inputs>
     config.and_then(|cfg| {
         // Filter phase: only inject phase + optional site info.
         // pages/current remain intentionally unavailable in this stage.
-        let spec = InjectSpec::filter().with_site(true);
-        build_base_inputs(cfg, &STORED_PAGES, spec).ok()
+        build_filter_inputs_with_site(cfg, &STORED_PAGES).ok()
     })
 }
 

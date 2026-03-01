@@ -14,7 +14,7 @@ use crate::compiler::family::Indexed;
 use crate::compiler::page::scan;
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
-use crate::package::{InjectSpec, build_base_inputs, build_inputs_for_source};
+use crate::package::{build_visible_inputs, build_visible_inputs_for_source};
 use crate::page::{PageKind, PageMeta, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
@@ -274,7 +274,7 @@ pub fn batch_scan_typst_metadata_iterative(
     }
 
     // Initial scan with visible-phase site/pages inputs.
-    let inputs = build_base_inputs(config, &STORED_PAGES, InjectSpec::visible())?;
+    let inputs = build_visible_inputs(config, &STORED_PAGES)?;
     let scanner = Batcher::for_scan(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(files)?;
@@ -370,7 +370,7 @@ pub fn batch_scan_typst_metadata_iterative(
 
 /// Build scan inputs with both @tola/pages and file-specific @tola/current context.
 fn build_scan_inputs_with_current(file: &Path, config: &SiteConfig) -> Result<typst_batch::Inputs> {
-    build_inputs_for_source(config, &STORED_PAGES, file, InjectSpec::visible())
+    build_visible_inputs_for_source(config, &STORED_PAGES, file)
 }
 
 /// Update STORED_PAGES entry for a source file using metadata-derived permalink.

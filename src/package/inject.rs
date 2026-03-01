@@ -16,7 +16,7 @@ use super::{Phase, TolaPackage};
 
 /// Typed specification for base virtual-package injection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InjectSpec {
+struct InjectSpec {
     /// Virtual package phase (`filter` or `visible`).
     pub phase: Phase,
     /// Include `@tola/site` payload.
@@ -55,24 +55,47 @@ impl InjectSpec {
     }
 
     /// Toggle pages payload.
-    pub const fn with_pages(mut self, include_pages: bool) -> Self {
+    #[allow(dead_code)]
+    const fn with_pages(mut self, include_pages: bool) -> Self {
         self.include_pages = include_pages;
         self
     }
 
     /// Toggle format helper.
-    pub const fn with_format(mut self, include_format: bool) -> Self {
+    #[allow(dead_code)]
+    const fn with_format(mut self, include_format: bool) -> Self {
         self.include_format = include_format;
         self
     }
 }
 
-/// Build base inputs (`site/pages/phase/format`) without file-specific `current` context.
-pub fn build_base_inputs(
+fn validate_spec(spec: InjectSpec, needs_current: bool) -> Result<()> {
+    match spec.phase {
+        Phase::Visible => {
+            if !spec.include_site || !spec.include_pages {
+                anyhow::bail!(
+                    "invalid visible injection contract: @tola/site and @tola/pages are required"
+                );
+            }
+        }
+        Phase::Filter => {
+            if needs_current {
+                anyhow::bail!(
+                    "invalid filter injection contract: @tola/current is not available in filter phase"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_base_inputs_impl(
     config: &SiteConfig,
     store: &StoredPageMap,
     spec: InjectSpec,
 ) -> Result<typst_batch::Inputs> {
+    validate_spec(spec, false)?;
+
     let mut combined = serde_json::Map::new();
 
     if spec.include_site {
@@ -105,7 +128,7 @@ pub fn build_base_inputs(
 }
 
 /// Merge `@tola/current` payload into existing inputs.
-pub fn merge_current_context(
+fn merge_current_context(
     inputs: &mut typst_batch::Inputs,
     store: &StoredPageMap,
     permalink: &UrlPath,
@@ -117,14 +140,15 @@ pub fn merge_current_context(
         .map_err(|e| anyhow!("failed to merge @tola/current inputs: {}", e))
 }
 
-/// Build inputs for a specific source file, including `@tola/current`.
-pub fn build_inputs_for_source(
+fn build_inputs_for_source_impl(
     config: &SiteConfig,
     store: &StoredPageMap,
     source_path: &Path,
     spec: InjectSpec,
 ) -> Result<typst_batch::Inputs> {
-    let mut inputs = build_base_inputs(config, store, spec)?;
+    validate_spec(spec, true)?;
+
+    let mut inputs = build_base_inputs_impl(config, store, spec)?;
     let normalized = normalize_path(source_path);
 
     // Resolve permalink from source mapping first. If absent, derive from route.
@@ -152,4 +176,46 @@ pub fn build_inputs_for_source(
 
     merge_current_context(&mut inputs, store, &permalink, source_rel.as_deref())?;
     Ok(inputs)
+}
+
+/// Build visible-phase base inputs.
+pub fn build_visible_inputs(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> Result<typst_batch::Inputs> {
+    build_base_inputs_impl(config, store, InjectSpec::visible())
+}
+
+/// Build filter-phase base inputs with site payload.
+pub fn build_filter_inputs_with_site(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> Result<typst_batch::Inputs> {
+    build_base_inputs_impl(config, store, InjectSpec::filter().with_site(true))
+}
+
+/// Build visible-phase inputs for a specific source, including `@tola/current`.
+pub fn build_visible_inputs_for_source(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+    source_path: &Path,
+) -> Result<typst_batch::Inputs> {
+    build_inputs_for_source_impl(config, store, source_path, InjectSpec::visible())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_visible_spec_requires_site_and_pages() {
+        let spec = InjectSpec::visible().with_site(false);
+        assert!(validate_spec(spec, false).is_err());
+    }
+
+    #[test]
+    fn test_filter_spec_rejects_current_context() {
+        let spec = InjectSpec::filter();
+        assert!(validate_spec(spec, true).is_err());
+    }
 }

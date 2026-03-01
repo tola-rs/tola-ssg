@@ -16,7 +16,8 @@ use crate::compiler::page::CompiledPage;
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, ResolveContext, ResolveResult};
 use crate::log;
-use crate::page::PageMeta;
+use crate::package::{build_visible_inputs, build_visible_inputs_for_source};
+use crate::page::{PageKind, PageMeta, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::{plural_count, plural_s};
 
 use report::ValidationReport;
@@ -42,6 +43,9 @@ type ParsedScanResult = (
     Vec<Vec<scan::ScannedLink>>,
     Vec<(String, String)>,
 );
+
+/// Maximum iterations for metadata convergence in validate scan.
+const MAX_SCAN_ITERATIONS: usize = 5;
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
@@ -445,19 +449,30 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
 
     use crate::cli::common::scan_markdown_file;
 
-    let root = crate::utils::path::normalize_path(config.get_root());
+    STORED_PAGES.clear();
+
     let content_files = crate::compiler::collect_all_files(&config.build.content);
     let label = &config.build.meta.label;
 
     // Separate Typst and Markdown files
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
+    // Preload markdown metadata into STORED_PAGES so @tola/pages has complete
+    // cross-format context during Typst validation scans.
+    for file in &markdown_files {
+        if let Ok(result) = scan_markdown_file(file, config)
+            && let Some(meta_json) = result.raw_meta
+        {
+            update_stored_page_from_meta(file, &meta_json, config);
+        }
+    }
+
     // Batch scan Typst files for metadata AND links (unified scan)
     let (typst_metas, typst_links_vec, compile_errors): ParsedScanResult = if typst_files.is_empty()
     {
         (vec![], vec![], vec![])
     } else {
-        match batch_scan_typst_unified(&typst_files, &root, label) {
+        match batch_scan_typst_unified(&typst_files, label, config) {
             Ok((metas, links, errors)) => {
                 let parsed_metas = metas
                     .into_iter()
@@ -516,8 +531,8 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
 /// - errors: Vec<(source_path, error_message)> for compile failures
 fn batch_scan_typst_unified(
     files: &[&PathBuf],
-    root: &std::path::Path,
     label: &str,
+    config: &SiteConfig,
 ) -> Result<BatchScanResult> {
     use typst_batch::prelude::*;
 
@@ -525,9 +540,13 @@ fn batch_scan_typst_unified(
         return Ok((vec![], vec![], vec![]));
     }
 
-    // Inject format="html" so image show rules output <img> tags for link extraction
-    let scanner = Batcher::for_scan(root)
-        .with_inputs([("format", "html")])
+    let root = crate::utils::path::normalize_path(config.get_root());
+
+    // Validate scan follows visible-phase contract for virtual package injection.
+    // It shares base inputs and adds per-file @tola/current only for iterative pages.
+    let base_inputs = build_visible_inputs(config, &STORED_PAGES)?;
+    let scanner = Batcher::for_scan(&root)
+        .with_inputs_obj(base_inputs)
         .with_snapshot_from(files)?;
 
     match scanner.batch_scan(files) {
@@ -535,18 +554,26 @@ fn batch_scan_typst_unified(
             let mut metas = Vec::with_capacity(results.len());
             let mut all_links = Vec::with_capacity(results.len());
             let mut errors = Vec::new();
+            let mut iterative_indices = Vec::new();
 
-            for (result, file) in results.into_iter().zip(files) {
+            for (index, (result, file)) in results.into_iter().zip(files).enumerate() {
                 let rel_path = file
-                    .strip_prefix(root)
+                    .strip_prefix(&root)
                     .unwrap_or(file)
                     .to_string_lossy()
                     .to_string();
 
                 match result {
                     Ok(scan) => {
-                        metas.push(scan.metadata(label));
-                        // Extract links and convert to ScannedLink
+                        let meta = scan.metadata(label);
+                        if let Some(ref meta_json) = meta {
+                            update_stored_page_from_meta(file, meta_json, config);
+                        }
+                        if PageKind::from_packages(scan.accessed_packages()).is_iterative() {
+                            iterative_indices.push(index);
+                        }
+                        metas.push(meta);
+                        // Extract links and convert to ScannedLink.
                         let links: Vec<scan::ScannedLink> = scan
                             .links()
                             .into_iter()
@@ -565,12 +592,107 @@ fn batch_scan_typst_unified(
                     }
                 }
             }
+
+            if iterative_indices.is_empty() {
+                return Ok((metas, all_links, errors));
+            }
+
+            let mut prev_hash = STORED_PAGES.pages_hash();
+            for iteration in 0..MAX_SCAN_ITERATIONS {
+                for &idx in &iterative_indices {
+                    let file = files[idx];
+                    let rel_path = file
+                        .strip_prefix(&root)
+                        .unwrap_or(file)
+                        .to_string_lossy()
+                        .to_string();
+                    let single = [file];
+
+                    let inputs = match build_visible_inputs_for_source(config, &STORED_PAGES, file)
+                    {
+                        Ok(inputs) => inputs,
+                        Err(e) => {
+                            errors.push((rel_path.clone(), e.to_string()));
+                            continue;
+                        }
+                    };
+
+                    let scanner = match Batcher::for_scan(&root)
+                        .with_inputs_obj(inputs)
+                        .with_snapshot_from(&single)
+                    {
+                        Ok(scanner) => scanner,
+                        Err(e) => {
+                            errors.push((rel_path.clone(), e.to_string()));
+                            continue;
+                        }
+                    };
+
+                    let result = match scanner.batch_scan(&single) {
+                        Ok(mut rs) => rs.pop(),
+                        Err(e) => {
+                            errors.push((rel_path.clone(), e.to_string()));
+                            None
+                        }
+                    };
+
+                    match result {
+                        Some(Ok(scan)) => {
+                            let meta = scan.metadata(label);
+                            if let Some(ref meta_json) = meta {
+                                update_stored_page_from_meta(file, meta_json, config);
+                            }
+                            metas[idx] = meta;
+                            all_links[idx] = scan
+                                .links()
+                                .into_iter()
+                                .map(|l| scan::ScannedLink {
+                                    dest: l.dest,
+                                    attr: format!("{:?}", l.source),
+                                })
+                                .collect();
+                        }
+                        Some(Err(e)) => {
+                            errors.push((rel_path.clone(), e.to_string()));
+                        }
+                        None => {
+                            errors.push((
+                                rel_path,
+                                "single-file scan returned no result".to_string(),
+                            ));
+                        }
+                    }
+                }
+
+                let new_hash = STORED_PAGES.pages_hash();
+                if new_hash == prev_hash {
+                    crate::debug!("validate"; "metadata converged after {} iteration(s)", iteration + 1);
+                    break;
+                }
+
+                if iteration == MAX_SCAN_ITERATIONS - 1 {
+                    crate::log!("warning"; "validate metadata did not converge after {} iterations", MAX_SCAN_ITERATIONS);
+                }
+                prev_hash = new_hash;
+            }
+
             Ok((metas, all_links, errors))
         }
         Err(e) => {
             anyhow::bail!("Batch scan failed: {}", e);
         }
     }
+}
+
+fn update_stored_page_from_meta(
+    file: &std::path::Path,
+    meta_json: &serde_json::Value,
+    config: &SiteConfig,
+) {
+    let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
+        return;
+    };
+    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
 }
 
 /// Extract asset path from compile error.

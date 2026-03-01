@@ -14,7 +14,7 @@ use super::{CompiledPage, PageMeta};
 use crate::compiler::page::ScannedHeading;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
-use crate::package::{InjectSpec, build_base_inputs};
+use crate::package::build_visible_inputs;
 use crate::utils::path::normalize_path;
 
 /// Global page data store
@@ -261,7 +261,7 @@ impl StoredPageMap {
     /// - `@tola/pages` - Page metadata
     /// - Phase set to "compile" to indicate compile phase
     pub fn build_inputs(&self, config: &SiteConfig) -> anyhow::Result<typst_batch::Inputs> {
-        build_base_inputs(config, self, InjectSpec::visible())
+        build_visible_inputs(config, self)
     }
 
     /// Build current page context for `@tola/current` virtual package.

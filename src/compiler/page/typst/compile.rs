@@ -7,7 +7,7 @@ use typst_batch::prelude::*;
 
 use crate::compiler::CompileContext;
 use crate::compiler::page::{PageCompileOutput, format_compile_error};
-use crate::package::{InjectSpec, build_base_inputs, build_inputs_for_source};
+use crate::package::{build_visible_inputs, build_visible_inputs_for_source};
 use crate::page::{PageMeta, STORED_PAGES};
 use crate::pipeline::compile as pipeline_compile;
 
@@ -42,14 +42,9 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
     // Build inputs for virtual packages. If route is available, include per-page
     // current context so templates can access @tola/current.source/path.
     let inputs = if let Some(route) = ctx.route {
-        build_inputs_for_source(
-            ctx.config,
-            &STORED_PAGES,
-            &route.source,
-            InjectSpec::visible(),
-        )?
+        build_visible_inputs_for_source(ctx.config, &STORED_PAGES, &route.source)?
     } else {
-        build_base_inputs(ctx.config, &STORED_PAGES, InjectSpec::visible())?
+        build_visible_inputs(ctx.config, &STORED_PAGES)?
     };
 
     // Compile Typst to HtmlDocument using Builder API with inputs

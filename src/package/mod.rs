@@ -17,6 +17,8 @@ mod inject;
 mod phase;
 mod tola;
 
-pub use inject::{InjectSpec, build_base_inputs, build_inputs_for_source};
+pub use inject::{
+    build_filter_inputs_with_site, build_visible_inputs, build_visible_inputs_for_source,
+};
 pub use phase::Phase;
 pub use tola::{TolaPackage, generate_lsp_stubs, package_sentinel, read_package};
