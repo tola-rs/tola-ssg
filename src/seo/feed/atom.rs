@@ -3,7 +3,7 @@
 //! Generates Atom feeds from page metadata stored in STORED_PAGES.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, log, seo::minify_xml, utils::date::DateTimeUtc};
+use crate::{config::SiteConfig, core::UrlPath, log, seo::minify_xml, utils::date::DateTimeUtc};
 use anyhow::{Ok, Result};
 use atom_syndication::{
     Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,
@@ -31,14 +31,19 @@ impl AtomFeed {
     }
 
     fn into_xml(self) -> Result<String> {
-        let base_url = self
-            .config
-            .site
-            .info
-            .url
-            .as_deref()
-            .unwrap_or_default()
-            .trim_end_matches('/');
+        let site_url = self.config.site.info.url.as_deref();
+        let base_url = UrlPath::from_page("/").canonical_url(site_url);
+        let feed_path = format!(
+            "/{}",
+            self.config
+                .site
+                .seo
+                .feed
+                .path
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
+        let feed_url = UrlPath::from_asset(&feed_path).canonical_url(site_url);
 
         let entries: Vec<Entry> = self
             .pages
@@ -67,18 +72,14 @@ impl AtomFeed {
 
         // Build self link
         let self_link: Link = LinkBuilder::default()
-            .href(format!(
-                "{}/{}",
-                base_url,
-                self.config.site.seo.feed.path.display()
-            ))
+            .href(feed_url)
             .rel("self".to_string())
             .mime_type(Some("application/atom+xml".to_string()))
             .build();
 
         // Build alternate link
         let alternate_link: Link = LinkBuilder::default()
-            .href(base_url.to_string())
+            .href(base_url.clone())
             .rel("alternate".to_string())
             .build();
 
@@ -125,15 +126,8 @@ fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
     let updated_str = DateTimeUtc::parse(&page.date)?.to_rfc3339();
     let updated: FixedDateTime = updated_str.parse().ok()?;
 
-    // Build full URL from base URL + permalink
-    let base_url = config
-        .site
-        .info
-        .url
-        .as_deref()
-        .unwrap_or_default()
-        .trim_end_matches('/');
-    let link = format!("{}{}", base_url, page.permalink);
+    let permalink = UrlPath::from_page(&page.permalink);
+    let link = permalink.canonical_url(config.site.info.url.as_deref());
 
     // Build entry link
     let entry_link: Link = LinkBuilder::default()

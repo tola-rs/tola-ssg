@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::sync::LazyLock;
 
@@ -30,15 +31,15 @@ pub fn compute_version(path: &Path) -> String {
 /// Returns `base_url?v=abc12345` format
 pub fn versioned_url(base_url: &str, path: &Path) -> String {
     let path = normalize_path(path);
-    let version = ASSET_VERSIONS
-        .get(&path)
-        .map(|v| v.clone())
-        .unwrap_or_else(|| {
+    let version = match ASSET_VERSIONS.entry(path.clone()) {
+        Entry::Occupied(entry) => entry.get().clone(),
+        Entry::Vacant(entry) => {
             let v = compute_version(&path);
             crate::debug!("version"; "computed new version for {}: {}", path.display(), v);
-            ASSET_VERSIONS.insert(path.clone(), v.clone());
+            entry.insert(v.clone());
             v
-        });
+        }
+    };
     format!("{}?v={}", base_url, version)
 }
 

@@ -181,12 +181,7 @@ fn cleanup_draft_state(path: &Path, config: &SiteConfig) -> bool {
 
 fn cleanup_output_file(config: &SiteConfig, url: &UrlPath) {
     let output_dir = config.paths().output_dir();
-    let rel_path = url.as_str().trim_matches('/');
-    let output_file = if rel_path.is_empty() {
-        output_dir.join("index.html")
-    } else {
-        output_dir.join(rel_path).join("index.html")
-    };
+    let output_file = url.output_html_path(&output_dir);
 
     if !output_file.exists() {
         return;
@@ -266,7 +261,7 @@ mod tests {
         fs::create_dir_all(&content_dir).unwrap();
 
         let page = content_dir.join("post.md");
-        let output_file = output_dir.join("post").join("index.html");
+        let output_file = UrlPath::from_page("/post/").output_html_path(&output_dir);
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());

@@ -172,8 +172,38 @@ pub fn respond_not_found(
 
 /// Respond with 503 + auto-retry (build not ready yet)
 pub fn respond_loading(request: Request) -> Result<()> {
-    let body = r#"<html><head><meta http-equiv="refresh" content="1"></head><body></body></html>"#;
     use crate::utils::mime::types::HTML;
+
+    // HEAD requests are used by polling logic; keep response lightweight.
+    if is_head_request(&request) {
+        let response =
+            Response::empty(StatusCode(503)).with_header(make_header("Content-Type", HTML));
+        request.respond(response)?;
+        return Ok(());
+    }
+
+    // Keep a stable loading page and poll readiness via HEAD.
+    // This avoids repeated full-page meta-refresh flicker during startup.
+    let body = r#"<!doctype html>
+<html><body>Loading...
+<script>
+(function() {
+  var url = location.origin + location.pathname + location.search;
+  var poll = function() {
+    fetch(url, { method: 'HEAD' })
+      .then(function(r) {
+        if (r.headers.get('X-Tola-Ready') === 'true') {
+          location.reload();
+        }
+      })
+      .catch(function() {});
+  };
+  poll();
+  setInterval(poll, 500);
+})();
+</script>
+</body></html>"#;
+
     let response = Response::from_string(body)
         .with_status_code(StatusCode(503))
         .with_header(make_header("Content-Type", HTML));

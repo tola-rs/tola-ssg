@@ -3,7 +3,7 @@
 //! Generates RSS feeds from page metadata stored in GLOBAL_SITE_DATA.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, log, seo::minify_xml, utils::date::DateTimeUtc};
+use crate::{config::SiteConfig, core::UrlPath, log, seo::minify_xml, utils::date::DateTimeUtc};
 use anyhow::{Ok, Result, anyhow};
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
@@ -72,15 +72,8 @@ impl RssFeed {
 fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
     let pub_date = DateTimeUtc::parse(&page.date).map(DateTimeUtc::to_rfc2822)?;
 
-    // Build full URL from base URL + permalink
-    let base_url = config
-        .site
-        .info
-        .url
-        .as_deref()
-        .unwrap_or_default()
-        .trim_end_matches('/');
-    let link = format!("{}{}", base_url, page.permalink);
+    let permalink = UrlPath::from_page(&page.permalink);
+    let link = permalink.canonical_url(config.site.info.url.as_deref());
 
     let author = normalize_rss_author(page.author.as_ref(), config);
 

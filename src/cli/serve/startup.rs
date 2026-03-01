@@ -432,16 +432,7 @@ mod tests {
     }
 
     fn output_file_for(config: &SiteConfig, url: &UrlPath) -> PathBuf {
-        let rel_path = url.as_str().trim_matches('/');
-        if rel_path.is_empty() {
-            config.paths().output_dir().join("index.html")
-        } else {
-            config
-                .paths()
-                .output_dir()
-                .join(rel_path)
-                .join("index.html")
-        }
+        url.output_html_path(&config.paths().output_dir())
     }
 
     #[test]

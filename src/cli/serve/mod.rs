@@ -125,9 +125,9 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
         return response::respond_unavailable(request);
     }
 
-    // Serve hotreload.js from memory (doesn't depend on file system)
-    // Use actual ws_port which may differ from DEFAULT_WS_PORT after retry
-    let ws_port = Some(get_actual_ws_port());
+    // Serve hotreload.js from memory only when watch mode is enabled.
+    // Use actual ws_port which may differ from DEFAULT_WS_PORT after retry.
+    let ws_port = config.serve.watch.then_some(get_actual_ws_port());
     if let Some(port) = ws_port {
         use crate::embed::serve::{HOTRELOAD_JS, HotreloadVars};
         let vars = HotreloadVars { ws_port: port };

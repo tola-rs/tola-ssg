@@ -42,18 +42,11 @@ struct UrlEntry {
 impl Sitemap {
     fn build(config: &SiteConfig) -> Self {
         let pages = STORED_PAGES.get_pages();
-        let base_url = config
-            .site
-            .info
-            .url
-            .as_deref()
-            .unwrap_or_default()
-            .trim_end_matches('/');
 
         let urls: Vec<UrlEntry> = pages
             .iter()
             .map(|page| {
-                let full_url = format!("{}{}", base_url, page.permalink.as_str());
+                let full_url = page.permalink.canonical_url(config.site.info.url.as_deref());
                 UrlEntry {
                     loc: full_url,
                     lastmod: page.meta.date.clone(),

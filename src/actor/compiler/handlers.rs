@@ -171,7 +171,7 @@ impl CompilerActor {
 
             if let Some(url) = &url {
                 BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
-                self.clean_output_file(url);
+                crate::reload::compile::cleanup_output_for_url(&self.config, url);
                 crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
             }
         }
@@ -181,37 +181,6 @@ impl CompilerActor {
             .vdom_tx
             .send(crate::actor::messages::VdomMsg::BatchEnd)
             .await;
-    }
-
-    /// Remove output HTML file and empty parent directory for a removed page.
-    fn clean_output_file(&self, url: &crate::core::UrlPath) {
-        let output_dir = self.config.paths().output_dir();
-        let rel_path = url.as_str().trim_matches('/');
-        let output_file = if rel_path.is_empty() {
-            output_dir.join("index.html")
-        } else {
-            output_dir.join(rel_path).join("index.html")
-        };
-
-        if !output_file.exists() {
-            return;
-        }
-
-        if let Err(e) = std::fs::remove_file(&output_file) {
-            crate::debug!("watch"; "failed to remove {}: {}", output_file.display(), e);
-            return;
-        }
-        crate::debug!("watch"; "removed output {}", output_file.display());
-
-        if let Some(parent) = output_file.parent()
-            && parent != output_dir
-            && parent.is_dir()
-            && std::fs::read_dir(parent)
-                .map(|mut e| e.next().is_none())
-                .unwrap_or(false)
-        {
-            let _ = std::fs::remove_dir(parent);
-        }
     }
 
     pub(super) async fn on_asset_change(&mut self, paths: Vec<PathBuf>) {

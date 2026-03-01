@@ -8,27 +8,6 @@
 // Provides page template with metadata for SSG
 
 // ============================================================================
-// Format Detection: is-html vs target()
-// ============================================================================
-//
-// Two ways to detect HTML output, each with different use cases:
-//
-// 1. is-html (sys.inputs.format == "html")
-//    - Static value injected by Tola at compile time
-//    - Works during scan phase (Eval-only, no Layout)
-//    - Use for: image show rules (need to extract src paths during scan)
-//    - Caveat: Still "html" even inside html.frame() internal rendering
-//
-// 2. context { target() }
-//    - Runtime check, returns "html" or "paged"
-//    - Returns "paged" inside html.frame() (when rendering math to SVG)
-//    - Use for: math show rules with html.frame() (avoids "paged export" warnings)
-//    - Caveat: Requires context block, not evaluated during scan phase
-//
-// For typst CLI users: add --input format=html when compiling to HTML.
-#let is-html = sys.inputs.at("format", default: none) == "html"
-
-// ============================================================================
 // Shared State
 // ============================================================================
 
@@ -107,11 +86,14 @@
   math-font: "New Computer Modern Math",
   body,
 ) = {
-  show figure: it => {
-    if is-html {
+  // Figure wrapper: use target() to avoid html.elem warnings inside html.frame()
+  // internal paged render passes.
+  show figure: it => context {
+    if target() == "html" {
       inside-figure.update(true)
-      html.figure(class: figure-class)[#it]
+      let wrapped = html.figure(class: figure-class)[#it]
       inside-figure.update(false)
+      wrapped
     } else { it }
   }
 
@@ -125,9 +107,8 @@
     bottom-edge: "bounds",
   )
 
-  // Math equations: use target() instead of is-html
+  // Math equations: use target()
   // - html.frame() internally renders to SVG using "paged" mode
-  // - If we used is-html, the show rule would try to wrap again, causing warnings
   // - target() returns "paged" inside html.frame(), so the show rule skips
   show math.equation.where(block: false): it => context {
     if target() == "html" and not inside-figure.get() {
@@ -205,13 +186,15 @@
 
   show: tola-base
 
-  if is-html {
-    html.html[
-      #html.head[#head]
-      #html.body[#body]
-    ]
-  } else {
-    body
+  context {
+    if target() == "html" {
+      html.html[
+        #html.head[#head]
+        #html.body[#body]
+      ]
+    } else {
+      body
+    }
   }
 }
 

@@ -76,9 +76,7 @@ fn build_redirect_html(canonical_url: &UrlPath) -> String {
 
 /// `/old-url/` -> `{output_dir}/old-url/index.html`
 fn compute_redirect_output_path(alias_url: &UrlPath, output_dir: &Path) -> PathBuf {
-    let relative = alias_url.to_string();
-    let relative = relative.trim_start_matches('/');
-    output_dir.join(relative).join("index.html")
+    alias_url.output_html_path(output_dir)
 }
 
 /// Write a page's HTML to disk with freshness check

@@ -94,13 +94,6 @@ impl CompiledPage {
         let content_dir = crate::utils::path::normalize_path(&config.build.content);
         let paths = config.paths();
         let output_root = paths.output_dir();
-        let base_url = config
-            .site
-            .info
-            .url
-            .as_deref()
-            .unwrap_or_default()
-            .trim_end_matches('/');
 
         // Check if this is an index file
         let is_index = source.file_stem().map(|s| s == "index").unwrap_or(false);
@@ -162,7 +155,7 @@ impl CompiledPage {
             UrlPath::from_page(&full_path_url)
         };
 
-        let full_url = format!("{base_url}{permalink}");
+        let full_url = permalink.canonical_url(config.site.info.url.as_deref());
         let lastmod = fs::metadata(&source).and_then(|m| m.modified()).ok();
 
         Ok(Self {
@@ -219,27 +212,11 @@ impl CompiledPage {
         // Update output paths based on new permalink
         let paths = config.paths();
         let output_root = paths.output_dir();
-        let base_url = config
-            .site
-            .info
-            .url
-            .as_deref()
-            .unwrap_or_default()
-            .trim_end_matches('/');
 
-        // Build output file path from permalink
-        // /custom/path/ -> output_root/custom/path/index.html
-        let rel_path = permalink
-            .as_str()
-            .trim_start_matches('/')
-            .trim_end_matches('/');
-        let output_file = if rel_path.is_empty() {
-            output_root.join("index.html")
-        } else {
-            output_root.join(rel_path).join("index.html")
-        };
+        // Build output file path from permalink.
+        let output_file = permalink.output_html_path(&output_root);
         let output_dir = output_file.parent().unwrap_or(Path::new("")).to_path_buf();
-        let full_url = format!("{base_url}{permalink}");
+        let full_url = permalink.canonical_url(config.site.info.url.as_deref());
 
         // Update route
         self.route.permalink = permalink;

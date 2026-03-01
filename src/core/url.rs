@@ -4,6 +4,7 @@
 //! - Browser boundary: Decode on input, encode on output
 
 use std::borrow::Borrow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -176,6 +177,29 @@ impl UrlPath {
             return true;
         }
         self_trimmed == other_trimmed
+    }
+
+    /// Build canonical URL string from optional site base URL.
+    ///
+    /// - `Some("https://example.com") + /posts/hello/` -> `https://example.com/posts/hello/`
+    /// - `Some("https://example.com/") + /posts/hello/` -> `https://example.com/posts/hello/`
+    /// - `None + /posts/hello/` -> `/posts/hello/`
+    pub fn canonical_url(&self, site_url: Option<&str>) -> String {
+        let base = site_url.unwrap_or_default().trim_end_matches('/');
+        format!("{base}{self}")
+    }
+
+    /// Map URL path to generated HTML output path.
+    ///
+    /// - `/` -> `{output_dir}/index.html`
+    /// - `/posts/hello/` -> `{output_dir}/posts/hello/index.html`
+    pub fn output_html_path(&self, output_dir: &Path) -> PathBuf {
+        let rel = self.as_str().trim_matches('/');
+        if rel.is_empty() {
+            output_dir.join("index.html")
+        } else {
+            output_dir.join(rel).join("index.html")
+        }
     }
 }
 
@@ -474,5 +498,32 @@ mod tests {
         // Chinese characters should be preserved (decoded) even with query
         let url = UrlPath::from_page("/posts/中文?v=1");
         assert_eq!(url.as_str(), "/posts/中文/");
+    }
+
+    #[test]
+    fn test_canonical_url() {
+        let url = UrlPath::from_page("/posts/hello/");
+        assert_eq!(
+            url.canonical_url(Some("https://example.com")),
+            "https://example.com/posts/hello/"
+        );
+        assert_eq!(
+            url.canonical_url(Some("https://example.com/")),
+            "https://example.com/posts/hello/"
+        );
+        assert_eq!(url.canonical_url(None), "/posts/hello/");
+    }
+
+    #[test]
+    fn test_output_html_path() {
+        let output = std::path::Path::new("/tmp/site/public");
+        assert_eq!(
+            UrlPath::from_page("/").output_html_path(output),
+            std::path::PathBuf::from("/tmp/site/public/index.html")
+        );
+        assert_eq!(
+            UrlPath::from_page("/posts/hello/").output_html_path(output),
+            std::path::PathBuf::from("/tmp/site/public/posts/hello/index.html")
+        );
     }
 }
