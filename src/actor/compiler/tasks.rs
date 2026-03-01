@@ -29,6 +29,9 @@ pub(super) async fn compile_batch(
     config: Arc<SiteConfig>,
 ) -> Vec<CompileOutcome> {
     use rayon::prelude::*;
+    for path in &paths {
+        crate::compiler::scheduler::SCHEDULER.invalidate(path);
+    }
 
     tokio::task::spawn_blocking(move || {
         let results: Vec<_> = paths

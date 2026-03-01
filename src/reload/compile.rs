@@ -143,6 +143,10 @@ fn cleanup_draft_state(path: &Path, config: &SiteConfig) -> bool {
     if has_alt {
         crate::compiler::dependency::remove_content(&normalized);
     }
+    crate::compiler::scheduler::SCHEDULER.invalidate(path);
+    if has_alt {
+        crate::compiler::scheduler::SCHEDULER.invalidate(&normalized);
+    }
 
     let Some(old_url) = old_url else {
         return false;

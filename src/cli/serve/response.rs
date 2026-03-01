@@ -6,23 +6,47 @@ use anyhow::{Context, Result};
 use std::{fs, path::Path};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
+/// Result of attempting to serve a file from disk.
+///
+/// `Missing` indicates the file disappeared before read and may be recovered
+/// by recompiling from source.
+pub enum FileServeResult {
+    Served,
+    Missing(Request),
+}
+
 /// Respond with a static file, optionally injecting hotreload script
-pub fn respond_file(request: Request, path: &Path, ws_port: Option<u16>) -> Result<()> {
+pub fn respond_file(
+    request: Request,
+    path: &Path,
+    ws_port: Option<u16>,
+) -> Result<FileServeResult> {
     let content_type = crate::utils::mime::from_path(path);
 
     if is_head_request(&request) {
-        return send_head(request, 200, content_type);
+        send_head(request, 200, content_type)?;
+        return Ok(FileServeResult::Served);
     }
 
     // Check for Range header (video/audio seeking)
     if let Some(range) = get_range_header(&request) {
-        return respond_range(request, path, content_type, &range);
+        respond_range(request, path, content_type, &range)?;
+        return Ok(FileServeResult::Served);
     }
 
-    let body = fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let body = match fs::read(path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FileServeResult::Missing(request));
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to read {}", path.display()));
+        }
+    };
     let body = maybe_inject_hotreload(body, content_type, ws_port);
 
-    send_body(request, 200, content_type, body)
+    send_body(request, 200, content_type, body)?;
+    Ok(FileServeResult::Served)
 }
 
 /// Handle Range request for media files (video/audio seeking)

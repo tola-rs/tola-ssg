@@ -18,6 +18,7 @@ use crate::{
 use anyhow::Result;
 use crossbeam::channel;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use tiny_http::{Request, Server};
@@ -147,23 +148,77 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
         return response::respond_welcome(request);
     }
 
+    let request_url = request.url().to_string();
+
     // Try to serve from disk (already compiled)
-    if let Some(path) = path::resolve_path(request.url(), &config.build.output) {
-        return response::respond_file(request, &path, ws_port);
+    if let Some(path) = path::resolve_path(&request_url, &config.build.output) {
+        return serve_file_with_recovery(request, &request_url, &path, config, ws_port);
     }
 
     // On-demand compilation (URL → source → compile → serve from disk)
-    let url = crate::core::UrlPath::from_browser(request.url());
+    let url = crate::core::UrlPath::from_browser(&request_url);
     let source = crate::core::GLOBAL_ADDRESS_SPACE
         .read()
         .source_for_url(&url);
 
     if let Some(source) = source {
         return match compile::compile_on_demand(&source, config) {
-            Ok(output_path) => response::respond_file(request, &output_path, ws_port),
+            Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
             Err(e) => response::respond_compile_error(request, &e, ws_port),
         };
     }
 
     response::respond_not_found(request, config, ws_port)
+}
+
+fn serve_file_with_recovery(
+    request: Request,
+    request_url: &str,
+    path: &Path,
+    config: &SiteConfig,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    match response::respond_file(request, path, ws_port)? {
+        response::FileServeResult::Served => Ok(()),
+        response::FileServeResult::Missing(request) => {
+            debug!(
+                "serve";
+                "transient missing output for {}, attempting on-demand recovery",
+                request_url
+            );
+            recover_missing_output(request, request_url, config, ws_port)
+        }
+    }
+}
+
+fn serve_file_without_recovery(request: Request, path: &Path, ws_port: Option<u16>) -> Result<()> {
+    match response::respond_file(request, path, ws_port)? {
+        response::FileServeResult::Served => Ok(()),
+        // Single recovery attempt already happened in caller path.
+        response::FileServeResult::Missing(request) => response::respond_loading(request),
+    }
+}
+
+fn recover_missing_output(
+    request: Request,
+    request_url: &str,
+    config: &SiteConfig,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    let url = crate::core::UrlPath::from_browser(request_url);
+    let source = crate::core::GLOBAL_ADDRESS_SPACE
+        .read()
+        .source_for_url(&url);
+
+    let Some(source) = source else {
+        return response::respond_not_found(request, config, ws_port);
+    };
+
+    // Force fresh compile result to avoid serving stale scheduler cache entries.
+    crate::compiler::scheduler::SCHEDULER.invalidate(&source);
+
+    match compile::compile_on_demand(&source, config) {
+        Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
+        Err(e) => response::respond_compile_error(request, &e, ws_port),
+    }
 }

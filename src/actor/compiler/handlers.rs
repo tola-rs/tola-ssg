@@ -162,6 +162,7 @@ impl CompilerActor {
         crate::debug!("watch"; "{} content files removed", count);
 
         for path in &paths {
+            crate::compiler::scheduler::SCHEDULER.invalidate(path);
             let url = GLOBAL_ADDRESS_SPACE.read().url_for_source(path).cloned();
 
             GLOBAL_ADDRESS_SPACE.write().remove_by_source(path);
@@ -346,6 +347,7 @@ impl CompilerActor {
         use crate::reload::active::ACTIVE_PAGE;
 
         crate::debug!("compile"; "full rebuild triggered");
+        set_healthy(false);
 
         if let Ok(true) = reload_config() {
             self.config = crate::config::cfg();

@@ -12,6 +12,7 @@ impl CompilerActor {
     pub(super) async fn compile_one(&mut self, path: &Path) {
         let config = Arc::clone(&self.config);
         let path = path.to_path_buf();
+        crate::compiler::scheduler::SCHEDULER.invalidate(&path);
 
         let result = tokio::task::spawn_blocking(move || {
             let outcome = crate::reload::compile::compile_page(&path, &config);
