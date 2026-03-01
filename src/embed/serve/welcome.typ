@@ -25,8 +25,8 @@
   ]
 
   #html.div(class: "links")[
-    #link("https://github.com/tola-rs/tola")[GitHub]
-    #link("https://github.com/tola-rs/tola")[Documentation]
+    #link("https://github.com/tola-rs/tola-ssg")[GitHub]
+    #link("https://github.com/tola-rs/tola-ssg")[Documentation]
   ]
 
   #html.footer[Powered by tola v__VERSION__]

@@ -95,7 +95,10 @@ fn generate_field_template_code(info: &FieldInfo) -> TokenStream {
 
         if has_inline {
             let inline_comment = info.inline_doc.as_ref().unwrap();
-            let line = format!("{}{} = {}  # {}\n", prefix, toml_name, formatted, inline_comment);
+            let line = format!(
+                "{}{} = {}  # {}\n",
+                prefix, toml_name, formatted, inline_comment
+            );
             return quote! {
                 #doc_code
                 #status_code

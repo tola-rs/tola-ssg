@@ -42,8 +42,8 @@ pub use section::{
 
 // Re-export from types/
 pub use types::{
-    ConfigDiagnostics, ConfigError, FieldPath, PathResolver, cfg, clear_clean_flag, init_config,
-    reload_config,
+    ConfigDiagnostics, ConfigError, ConfigPresence, FieldPath, PathResolver, cfg, clear_clean_flag,
+    init_config, reload_config,
 };
 
 // Internal imports from section/
@@ -79,6 +79,10 @@ pub struct SiteConfig {
     #[serde(skip)]
     pub root: PathBuf,
 
+    /// Explicitly present field/section paths from raw TOML.
+    #[serde(skip)]
+    pub presence: ConfigPresence,
+
     /// Site configuration (info, nav, preload)
     #[serde(default)]
     pub site: SiteSectionConfig,
@@ -110,6 +114,7 @@ impl Default for SiteConfig {
             cli: None,
             config_path: PathBuf::new(),
             root: PathBuf::new(),
+            presence: ConfigPresence::default(),
             site: SiteSectionConfig::default(),
             theme: ThemeSectionConfig::default(),
             build: BuildSectionConfig::default(),
@@ -241,7 +246,8 @@ impl SiteConfig {
 
     /// Parse configuration from TOML string
     pub fn from_str(content: &str) -> Result<Self> {
-        let config: Self = toml::from_str(content)?;
+        let mut config: Self = toml::from_str(content)?;
+        config.presence = ConfigPresence::from_toml(content)?;
         Ok(config)
     }
 
@@ -250,7 +256,9 @@ impl SiteConfig {
         let content =
             fs::read_to_string(path).map_err(|err| ConfigError::Io(path.to_path_buf(), err))?;
 
-        let (config, ignored) = Self::parse_with_ignored(&content)?;
+        let presence = ConfigPresence::from_toml(&content)?;
+        let (mut config, ignored) = Self::parse_with_ignored(&content)?;
+        config.presence = presence;
 
         if !ignored.is_empty() {
             Self::print_unknown_fields_warning(&ignored, path);
@@ -539,6 +547,7 @@ impl SiteConfig {
     /// Collects all validation errors and returns them at once.
     pub fn validate(&self) -> Result<()> {
         let mut diag = ConfigDiagnostics::with_allow_experimental(self.build.allow_experimental);
+        diag.set_presence(self.presence.clone());
 
         if !self.config_path.exists() {
             bail!(ConfigError::Validation("config file not found".into()));
@@ -546,6 +555,9 @@ impl SiteConfig {
 
         // Validate field status (experimental, deprecated, not_implemented)
         self.site.validate_field_status(&mut diag);
+        self.theme.validate_field_status(&mut diag);
+        self.serve.validate_field_status(&mut diag);
+        self.validate.validate_field_status(&mut diag);
         self.deploy.validate_field_status(&mut diag);
         self.build.svg.validate_field_status(&mut diag);
 
@@ -658,5 +670,22 @@ mod tests {
         let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"";
         let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
         assert!(ignored.is_empty());
+    }
+
+    #[test]
+    fn test_from_str_collects_presence() {
+        let content = r#"
+[site.info]
+title = "T"
+description = "D"
+
+[deploy.cloudflare]
+provider = "cloudflare"
+"#;
+        let config = SiteConfig::from_str(content).unwrap();
+        assert!(config.presence.contains("site"));
+        assert!(config.presence.contains("site.info.title"));
+        assert!(config.presence.contains("deploy.cloudflare"));
+        assert!(config.presence.contains("deploy.cloudflare.provider"));
     }
 }

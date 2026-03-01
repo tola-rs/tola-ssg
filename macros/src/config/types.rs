@@ -45,8 +45,25 @@ pub fn format_default_for_type(value: &str, ty: &str) -> String {
             && !ty.starts_with("Vec<")
             && !ty.ends_with("Config")
             && !ty.ends_with("Settings")
-            && !matches!(ty, "bool" | "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64")
-            => format!("\"{}\"", value),
+            && !matches!(
+                ty,
+                "bool"
+                    | "u8"
+                    | "u16"
+                    | "u32"
+                    | "u64"
+                    | "usize"
+                    | "i8"
+                    | "i16"
+                    | "i32"
+                    | "i64"
+                    | "isize"
+                    | "f32"
+                    | "f64"
+            ) =>
+        {
+            format!("\"{}\"", value)
+        }
         _ => value.to_string(),
     }
 }

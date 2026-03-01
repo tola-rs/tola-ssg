@@ -17,7 +17,7 @@
 //!     pub language: String,
 //!
 //!     /// Enable dark mode.
-//!     #[config(experimental)]
+//!     #[config(status = experimental)]
 //!     pub dark_mode: bool,
 //!
 //!     /// Internal field.
@@ -41,9 +41,9 @@
 //! - `#[config(hidden)]` - Hide from template output
 //! - `#[config(name = "x")]` - Custom TOML field name
 //! - `#[config(default = "x")]` - Default value in template
-//! - `#[config(experimental)]` - Mark as experimental
-//! - `#[config(not_implemented)]` - Mark as not implemented
-//! - `#[config(deprecated)]` - Mark as deprecated
+//! - `#[config(status = experimental)]` - Mark as experimental
+//! - `#[config(status = not_implemented)]` - Mark as not implemented
+//! - `#[config(status = deprecated)]` - Mark as deprecated
 //!
 //! # Section inference
 //!
@@ -54,7 +54,7 @@
 mod config;
 
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{DeriveInput, parse_macro_input};
 
 /// Derive macro that generates FIELDS and template()
 #[proc_macro_derive(Config, attributes(config))]

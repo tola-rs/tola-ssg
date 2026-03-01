@@ -21,8 +21,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
     let name = &input.ident;
     let fields_struct_name = syn::Ident::new(&format!("{}Fields", name), name.span());
 
-    let section =
-        get_section(&input.attrs).unwrap_or_else(|| infer_section(&name.to_string()));
+    let section = get_section(&input.attrs).unwrap_or_else(|| infer_section(&name.to_string()));
 
     let section_doc = extract_doc_comment(&input.attrs).unwrap_or_default();
 
@@ -33,17 +32,14 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
             _ => {
-                return quote! { compile_error!("Config only works on structs with named fields"); }
+                return quote! { compile_error!("Config only works on structs with named fields"); };
             }
         },
         _ => return quote! { compile_error!("Config only works on structs"); },
     };
 
     // Collect field info
-    let field_infos: Vec<FieldInfo> = fields
-        .iter()
-        .filter_map(FieldInfo::from_field)
-        .collect();
+    let field_infos: Vec<FieldInfo> = fields.iter().filter_map(FieldInfo::from_field).collect();
 
     // Generate FIELDS struct (skip fields with #[config(skip)])
     let fields_for_path: Vec<_> = field_infos.iter().filter(|f| !f.skip).collect();
@@ -71,28 +67,13 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
 
     let template_code = generate_template_code(&template_fields);
 
-    // Collect own fields (non-sub, non-skip) for status checks
-    let own_fields: Vec<_> = field_infos
-        .iter()
-        .filter(|f| !f.skip && !f.sub)
-        .collect();
-
-    // Check if we need `default` variable (for section or field status checks)
     let has_section_status = matches!(
         section_status,
         FieldStatus::NotImplemented | FieldStatus::Deprecated | FieldStatus::Experimental
     );
-    let has_field_status = field_infos.iter().any(|f| {
-        !f.skip
-            && !f.sub
-            && matches!(
-                f.status,
-                FieldStatus::NotImplemented | FieldStatus::Deprecated | FieldStatus::Experimental
-            )
-    });
-    let needs_default = (has_section_status && !own_fields.is_empty()) || has_field_status;
 
-    // Generate field status checks for special status fields
+    // Generate field status checks for special status fields.
+    // Trigger condition is explicit presence in TOML, not default-value difference.
     let status_checks: Vec<_> = field_infos
         .iter()
         .filter(|f| {
@@ -100,11 +81,12 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
                 && !f.sub
                 && matches!(
                     f.status,
-                    FieldStatus::NotImplemented | FieldStatus::Deprecated | FieldStatus::Experimental
+                    FieldStatus::NotImplemented
+                        | FieldStatus::Deprecated
+                        | FieldStatus::Experimental
                 )
         })
         .map(|f| {
-            let field_name = &f.name;
             let full_path = if section.is_empty() {
                 f.toml_name.clone()
             } else {
@@ -123,8 +105,8 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
                 _ => unreachable!(),
             };
             quote! {
-                if self.#field_name != default.#field_name {
-                    crate::config::types::check_field_status(
+                if diag.is_present(#full_path) {
+                    crate::config::types::status::check_field_status(
                         #full_path,
                         #status,
                         diag,
@@ -147,7 +129,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
         .collect();
 
     // Generate section-level status check
-    let section_status_check = if has_section_status && !own_fields.is_empty() {
+    let section_status_check = if has_section_status {
         let status_token = match section_status {
             FieldStatus::NotImplemented => {
                 quote! { crate::config::types::FieldStatus::NotImplemented }
@@ -159,29 +141,15 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
             _ => unreachable!(),
         };
 
-        let field_checks: Vec<_> = own_fields
-            .iter()
-            .map(|f| {
-                let field_name = &f.name;
-                quote! { self.#field_name != default.#field_name }
-            })
-            .collect();
-
         quote! {
-            if #(#field_checks)||* {
-                crate::config::types::check_section_status(
+            if diag.is_present_section(#section) {
+                crate::config::types::status::check_section_status(
                     #section,
                     #status_token,
                     diag,
                 );
             }
         }
-    } else {
-        quote! {}
-    };
-
-    let default_def = if needs_default {
-        quote! { let default = Self::default(); }
     } else {
         quote! {}
     };
@@ -237,7 +205,6 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
             /// Validate field status (experimental, deprecated, not_implemented).
             #[allow(unused_variables)]
             pub fn validate_field_status(&self, diag: &mut crate::config::ConfigDiagnostics) {
-                #default_def
                 #section_status_check
                 #(#status_checks)*
                 #(#nested_calls)*

@@ -5,6 +5,65 @@
 
 use super::FieldPath;
 use crate::config::ConfigDiagnostics;
+use rustc_hash::FxHashSet;
+
+/// Tracks which TOML paths were explicitly present in user config.
+///
+/// Paths are dot-separated (e.g. `deploy.cloudflare.provider`).
+#[derive(Debug, Clone, Default)]
+pub struct ConfigPresence {
+    paths: FxHashSet<String>,
+}
+
+impl ConfigPresence {
+    /// Build presence set from raw TOML content.
+    pub fn from_toml(content: &str) -> Result<Self, toml::de::Error> {
+        let value: toml::Value = toml::from_str(content)?;
+        let mut presence = Self::default();
+        presence.collect_value("", &value);
+        Ok(presence)
+    }
+
+    /// Check whether a field or section path was explicitly present.
+    #[inline]
+    pub fn contains(&self, path: &str) -> bool {
+        !path.is_empty() && self.paths.contains(path)
+    }
+
+    fn collect_value(&mut self, prefix: &str, value: &toml::Value) {
+        match value {
+            toml::Value::Table(table) => {
+                if !prefix.is_empty() {
+                    self.paths.insert(prefix.to_string());
+                }
+                for (key, child) in table {
+                    let next = if prefix.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    self.collect_value(&next, child);
+                }
+            }
+            toml::Value::Array(items) => {
+                if !prefix.is_empty() {
+                    self.paths.insert(prefix.to_string());
+                }
+                // Keep traversing table items to capture nested keys in array-of-table cases.
+                for item in items {
+                    if matches!(item, toml::Value::Table(_)) {
+                        self.collect_value(prefix, item);
+                    }
+                }
+            }
+            _ => {
+                if !prefix.is_empty() {
+                    self.paths.insert(prefix.to_string());
+                }
+            }
+        }
+    }
+}
 
 /// Field status for validation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,5 +145,34 @@ pub fn check_section_status(section: &str, status: FieldStatus, diag: &mut Confi
         FieldStatus::Experimental => {
             diag.experimental_hint(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConfigPresence;
+
+    #[test]
+    fn collect_field_and_section_paths() {
+        let toml = r#"
+[deploy]
+provider = "github"
+
+[deploy.cloudflare]
+provider = "cloudflare"
+"#;
+        let presence = ConfigPresence::from_toml(toml).unwrap();
+        assert!(presence.contains("deploy"));
+        assert!(presence.contains("deploy.provider"));
+        assert!(presence.contains("deploy.cloudflare"));
+        assert!(presence.contains("deploy.cloudflare.provider"));
+    }
+
+    #[test]
+    fn collect_scalar_fields_without_table_header() {
+        let toml = r#"title = "hello""#;
+        let presence = ConfigPresence::from_toml(toml).unwrap();
+        assert!(presence.contains("title"));
+        assert!(!presence.contains("site"));
     }
 }

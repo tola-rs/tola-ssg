@@ -147,7 +147,7 @@ impl Default for VercelDeployConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{SiteConfig, test_parse_config};
+    use crate::config::{ConfigDiagnostics, ConfigPresence, SiteConfig, test_parse_config};
     use std::path::PathBuf;
 
     #[test]
@@ -235,5 +235,20 @@ token_path = "~/.github-token""#,
     fn test_deploy_config_vercel_placeholder() {
         let config = test_parse_config("[deploy.vercel]\nprovider = \"vercel\"");
         assert_eq!(config.deploy.vercel.provider, "vercel");
+    }
+
+    #[test]
+    fn test_not_implemented_section_triggers_on_explicit_presence_even_if_default() {
+        let snippet = r#"
+[deploy.cloudflare]
+provider = "github"
+"#;
+        let config = test_parse_config(snippet);
+        let mut diag = ConfigDiagnostics::new();
+        let raw = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{snippet}");
+        diag.set_presence(ConfigPresence::from_toml(&raw).unwrap());
+
+        config.deploy.validate_field_status(&mut diag);
+        assert!(diag.has_errors());
     }
 }

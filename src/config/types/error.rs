@@ -1,6 +1,6 @@
 //! Configuration error types.
 
-use super::FieldPath;
+use super::{ConfigPresence, FieldPath};
 use owo_colors::OwoColorize;
 use std::fmt;
 use std::path::PathBuf;
@@ -90,6 +90,8 @@ pub struct ConfigDiagnostics {
     warnings: Vec<(FieldPath, String)>,
     /// Suppress experimental feature hints.
     pub allow_experimental: bool,
+    /// Explicitly present config paths collected from raw TOML.
+    presence: ConfigPresence,
 }
 
 impl ConfigDiagnostics {
@@ -104,7 +106,25 @@ impl ConfigDiagnostics {
             hints: Vec::new(),
             warnings: Vec::new(),
             allow_experimental,
+            presence: ConfigPresence::default(),
         }
+    }
+
+    /// Attach explicit field/section presence information.
+    pub fn set_presence(&mut self, presence: ConfigPresence) {
+        self.presence = presence;
+    }
+
+    /// Returns true if the given field path was explicitly present in TOML.
+    #[inline]
+    pub fn is_present(&self, path: &str) -> bool {
+        self.presence.contains(path)
+    }
+
+    /// Returns true if the given section path was explicitly present in TOML.
+    #[inline]
+    pub fn is_present_section(&self, section: &str) -> bool {
+        self.presence.contains(section)
     }
 
     pub fn error(&mut self, field: FieldPath, message: impl Into<String>) {

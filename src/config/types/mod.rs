@@ -11,10 +11,10 @@ mod error;
 mod field;
 pub mod handle;
 mod path;
-mod status;
+pub(crate) mod status;
 
 pub use error::{ConfigDiagnostics, ConfigError};
 pub use field::FieldPath;
 pub use handle::{cfg, clear_clean_flag, init_config, reload_config};
 pub use path::PathResolver;
-pub use status::{FieldStatus, check_section_status};
+pub use status::{ConfigPresence, FieldStatus};

@@ -106,7 +106,7 @@ pub struct SvgConfig {
     /// Apply vertical-align style to SVG for baseline alignment.
     /// Enables inline math to align with surrounding text.
     /// Default: false (opt-in)
-    #[config(default = "false")]
+    #[config(default = "false", status = not_implemented)]
     pub baseline_align: bool,
 }
 
@@ -212,7 +212,7 @@ fn parse_size_string(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::test_parse_config;
+    use crate::config::{ConfigDiagnostics, ConfigPresence, test_parse_config};
 
     #[test]
     fn test_defaults() {
@@ -301,5 +301,17 @@ mod tests {
     fn test_threshold_bytes() {
         let config = test_parse_config("[build.svg]\nthreshold = \"10KB\"");
         assert_eq!(config.build.svg.threshold_bytes(), 10 * 1024);
+    }
+
+    #[test]
+    fn test_baseline_align_is_not_implemented() {
+        let snippet = "[build.svg]\nbaseline_align = true";
+        let config = test_parse_config(snippet);
+        let mut diag = ConfigDiagnostics::new();
+        let raw = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{snippet}");
+        diag.set_presence(ConfigPresence::from_toml(&raw).unwrap());
+
+        config.build.svg.validate_field_status(&mut diag);
+        assert!(diag.has_errors());
     }
 }
