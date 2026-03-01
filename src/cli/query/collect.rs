@@ -10,7 +10,10 @@ use crate::cli::common::{
 };
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
+use crate::core::UrlPath;
 use crate::log;
+use crate::page::STORED_PAGES;
+use crate::utils::path::normalize_path;
 
 use super::types::{PageQueryResult, QueryMeta, QueryResult};
 
@@ -19,9 +22,8 @@ pub(super) fn query_files(
     args: &QueryArgs,
     config: &SiteConfig,
 ) -> Result<QueryResult> {
-    // Normalize root to absolute, then derive content_dir from it
-    let root = crate::utils::path::normalize_path(config.get_root());
-    let content_dir = root.join(&config.build.content);
+    // Normalize root to absolute
+    let root = normalize_path(config.get_root());
     let include_drafts = args.drafts;
     let raw_mode = args.raw;
     let label = &config.build.meta.label;
@@ -38,7 +40,7 @@ pub(super) fn query_files(
 
     // Process Typst results
     for (file, raw_meta) in typst_files.iter().zip(typst_results) {
-        if let Some(result) = process_query_result(file, raw_meta, &root, &content_dir, raw_mode) {
+        if let Some(result) = process_query_result(file, raw_meta, raw_mode, config) {
             if result.meta.is_draft() && !include_drafts {
                 continue;
             }
@@ -51,9 +53,7 @@ pub(super) fn query_files(
         .par_iter()
         .for_each(|file| match query_markdown_vdom(file, config) {
             Ok(raw_meta) => {
-                if let Some(result) =
-                    process_query_result(file, raw_meta, &root, &content_dir, raw_mode)
-                {
+                if let Some(result) = process_query_result(file, raw_meta, raw_mode, config) {
                     if result.meta.is_draft() && !include_drafts {
                         return;
                     }
@@ -72,18 +72,18 @@ pub(super) fn query_files(
 fn process_query_result(
     file: &Path,
     raw_meta: Option<JsonValue>,
-    root: &Path,
-    content_dir: &Path,
     raw_mode: bool,
+    config: &SiteConfig,
 ) -> Option<PageQueryResult> {
     let raw_meta = raw_meta?;
+    let root = normalize_path(config.get_root());
 
     let rel_path = file
-        .strip_prefix(root)
+        .strip_prefix(&root)
         .unwrap_or(file)
         .to_string_lossy()
         .to_string();
-    let url = calculate_url_path(file, content_dir);
+    let permalink = resolve_permalink(file, &raw_meta, config);
 
     let meta = if raw_mode {
         QueryMeta::Raw(raw_meta)
@@ -99,9 +99,41 @@ fn process_query_result(
 
     Some(PageQueryResult {
         path: rel_path,
-        url,
+        permalink,
         meta,
     })
+}
+
+/// Resolve output permalink for query result.
+///
+/// Priority:
+/// 1. Custom permalink from metadata (`permalink` field)
+/// 2. Source -> permalink mapping from STORED_PAGES
+/// 3. Computed default route from source path
+/// 4. Legacy fallback path calculation
+fn resolve_permalink(file: &Path, raw_meta: &JsonValue, config: &SiteConfig) -> String {
+    // Respect explicit custom permalink from metadata.
+    if let Some(custom) = raw_meta.get("permalink").and_then(|v| v.as_str()) {
+        return UrlPath::from_page(custom).to_string();
+    }
+
+    // Prefer source mapping populated by `populate_stored_pages` (includes derived permalinks).
+    let normalized = normalize_path(file);
+    if let Some(mapped) = STORED_PAGES
+        .get_permalink_by_source(&normalized)
+        .or_else(|| STORED_PAGES.get_permalink_by_source(file))
+    {
+        return mapped.to_string();
+    }
+
+    // Keep behavior aligned with build routing (slug/path_prefix aware).
+    if let Ok(compiled) = crate::compiler::page::CompiledPage::from_paths(file, config) {
+        return compiled.route.permalink.to_string();
+    }
+
+    // Last-resort fallback for unexpected path/config errors.
+    let content_dir = normalize_path(&config.build.content);
+    calculate_url_path(file, &content_dir)
 }
 
 /// Query Markdown file metadata using shared VDOM pipeline

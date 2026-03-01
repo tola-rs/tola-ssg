@@ -186,8 +186,12 @@ pub struct QueryArgs {
     #[arg(short = 'E', long)]
     pub filter_empty: bool,
 
-    /// Filter output to specific fields (comma-separated)
-    #[arg(short, long, value_delimiter = ',')]
+    /// Filter output to specific fields (comma or space separated)
+    ///
+    /// Examples:
+    /// - `--fields title,date,tags`
+    /// - `--fields title date tags`
+    #[arg(short, long, value_delimiter = ',', num_args = 1..)]
     pub fields: Option<Vec<String>>,
 
     /// Write output to file instead of stdout

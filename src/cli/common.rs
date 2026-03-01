@@ -290,11 +290,8 @@ pub fn batch_scan_typst_metadata_iterative(
                 let kind = PageKind::from_packages(scan.accessed_packages());
 
                 // Update STORED_PAGES with new metadata
-                if let Some(ref meta_json) = meta
-                    && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone())
-                    && let Some(permalink) = STORED_PAGES.get_permalink_by_source(file)
-                {
-                    STORED_PAGES.insert_page(permalink, page_meta);
+                if let Some(ref meta_json) = meta {
+                    update_stored_page_from_meta(file, meta_json, config);
                 }
 
                 if kind.is_iterative() {
@@ -315,33 +312,33 @@ pub fn batch_scan_typst_metadata_iterative(
     }
 
     // Iterative re-scan until convergence
-    let iterative_files: Vec<&PathBuf> = iterative_indices.iter().map(|&i| files[i]).collect();
     let mut prev_hash = STORED_PAGES.pages_hash();
 
     for iteration in 0..MAX_SCAN_ITERATIONS {
-        // Build inputs with current STORED_PAGES data
-        let inputs = STORED_PAGES.build_inputs(config)?;
-
-        // Re-scan iterative files with injected pages data
-        let scanner = Batcher::for_scan(root)
-            .with_inputs_obj(inputs)
-            .with_snapshot_from(&iterative_files)?;
-
-        let results = scanner.batch_scan(&iterative_files)?;
-
-        // Update metadata and STORED_PAGES
-        for (result, &idx) in results.into_iter().zip(iterative_indices.iter()) {
+        // Re-scan iterative files one-by-one so each file gets its own
+        // @tola/current context (especially `source` and current permalink).
+        for &idx in &iterative_indices {
             let file = files[idx];
+            let inputs = build_scan_inputs_with_current(file, config)?;
+            let single = [file];
+
+            let scanner = Batcher::for_scan(root)
+                .with_inputs_obj(inputs)
+                .with_snapshot_from(&single)?;
+
+            let result = scanner
+                .batch_scan(&single)?
+                .into_iter()
+                .next()
+                .expect("single-file scan should return exactly one result");
+
             match result {
                 Ok(scan) => {
                     let meta = scan.metadata(label);
 
                     // Update STORED_PAGES with new metadata
-                    if let Some(ref meta_json) = meta
-                        && let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone())
-                        && let Some(permalink) = STORED_PAGES.get_permalink_by_source(file)
-                    {
-                        STORED_PAGES.insert_page(permalink, page_meta);
+                    if let Some(ref meta_json) = meta {
+                        update_stored_page_from_meta(file, meta_json, config);
                     }
 
                     metas[idx] = meta;
@@ -368,6 +365,67 @@ pub fn batch_scan_typst_metadata_iterative(
     }
 
     Ok(metas)
+}
+
+/// Build scan inputs with both @tola/pages and file-specific @tola/current context.
+fn build_scan_inputs_with_current(file: &Path, config: &SiteConfig) -> Result<typst_batch::Inputs> {
+    let mut inputs = STORED_PAGES.build_inputs(config)?;
+    let normalized = crate::utils::path::normalize_path(file);
+
+    // Get permalink from existing mapping, or derive default route when missing.
+    let permalink = if let Some(url) = STORED_PAGES
+        .get_permalink_by_source(&normalized)
+        .or_else(|| STORED_PAGES.get_permalink_by_source(file))
+    {
+        url
+    } else if let Ok(compiled) =
+        crate::compiler::page::CompiledPage::from_paths(&normalized, config)
+    {
+        let url = compiled.route.permalink.clone();
+        STORED_PAGES.insert_source_mapping(normalized.clone(), url.clone());
+        url
+    } else {
+        // No valid route context available, return pages-only inputs.
+        return Ok(inputs);
+    };
+
+    let content_dir = crate::utils::path::normalize_path(&config.build.content);
+    let source = normalized
+        .strip_prefix(&content_dir)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let current = STORED_PAGES.build_current_context(&permalink, source.as_deref());
+    inputs.merge_json(&current)?;
+
+    Ok(inputs)
+}
+
+/// Update STORED_PAGES entry for a source file using metadata-derived permalink.
+fn update_stored_page_from_meta(file: &Path, meta_json: &JsonValue, config: &SiteConfig) {
+    let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
+        return;
+    };
+
+    let normalized = crate::utils::path::normalize_path(file);
+    let Ok(mut compiled) = crate::compiler::page::CompiledPage::from_paths(&normalized, config)
+    else {
+        return;
+    };
+
+    compiled.content_meta = Some(page_meta.clone());
+    compiled.apply_custom_permalink(config);
+    let new_permalink = compiled.route.permalink.clone();
+
+    if let Some(old_permalink) = STORED_PAGES
+        .get_permalink_by_source(&normalized)
+        .or_else(|| STORED_PAGES.get_permalink_by_source(file))
+        && old_permalink != new_permalink
+    {
+        STORED_PAGES.remove_page(&old_permalink);
+    }
+
+    STORED_PAGES.insert_page(new_permalink.clone(), page_meta);
+    STORED_PAGES.insert_source_mapping(normalized, new_permalink);
 }
 
 /// Parse metadata JSON to PageMeta, logging warning on failure.

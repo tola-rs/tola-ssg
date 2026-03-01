@@ -16,7 +16,8 @@ pub(super) fn output_results(results: &QueryResult, args: &QueryArgs) -> Result<
     }
 
     let output = if let Some(ref fields) = args.fields {
-        filter_fields(results, fields, args.filter_empty)
+        let normalized_fields = normalize_fields(fields);
+        filter_fields(results, &normalized_fields, args.filter_empty)
     } else {
         format_results(results, args.filter_empty)
     };
@@ -58,18 +59,25 @@ fn format_results(results: &QueryResult, filter_empty: bool) -> JsonValue {
     JsonValue::Array(pages)
 }
 
-/// Format a single page result with path/url first
+/// Format a single page result with path/permalink first
 fn format_page(page: &PageQueryResult, filter_empty: bool) -> JsonValue {
     let mut obj = Map::new();
 
-    // path and url always first
+    // path and permalink always first
     obj.insert("path".to_string(), JsonValue::String(page.path.clone()));
-    obj.insert("url".to_string(), JsonValue::String(page.url.clone()));
+    obj.insert(
+        "permalink".to_string(),
+        JsonValue::String(page.permalink.clone()),
+    );
 
     // Add meta fields
     let meta_value = serde_json::to_value(&page.meta).unwrap_or_default();
     if let JsonValue::Object(meta_obj) = meta_value {
         for (key, value) in meta_obj {
+            // Keep canonical top-level keys stable.
+            if matches!(key.as_str(), "path" | "permalink" | "url") {
+                continue;
+            }
             if !filter_empty || !is_empty_value(&value) {
                 obj.insert(key, value);
             }
@@ -89,7 +97,7 @@ fn is_empty_value(value: &JsonValue) -> bool {
     }
 }
 
-/// Filter to specific fields, with path/url always included first
+/// Filter to specific fields, with path/permalink always included first
 fn filter_fields(results: &QueryResult, fields: &[String], filter_empty: bool) -> JsonValue {
     let pages: Vec<JsonValue> = results
         .pages
@@ -97,20 +105,28 @@ fn filter_fields(results: &QueryResult, fields: &[String], filter_empty: bool) -
         .map(|page| {
             let mut obj = Map::new();
 
-            // path and url always first
+            // path and permalink always first
             obj.insert("path".to_string(), JsonValue::String(page.path.clone()));
-            obj.insert("url".to_string(), JsonValue::String(page.url.clone()));
+            obj.insert(
+                "permalink".to_string(),
+                JsonValue::String(page.permalink.clone()),
+            );
 
             let meta_value = serde_json::to_value(&page.meta).unwrap_or_default();
             if let JsonValue::Object(meta_obj) = meta_value {
                 for field in fields {
-                    if let Some(value) = meta_obj.get(field) {
+                    let key = canonical_field_name(field);
+                    if matches!(key, "path" | "permalink") {
+                        continue;
+                    }
+
+                    if let Some(value) = meta_obj.get(key) {
                         if !filter_empty || !is_empty_value(value) {
-                            obj.insert(field.clone(), value.clone());
+                            obj.insert(key.to_string(), value.clone());
                         }
                     } else if !filter_empty {
                         // Field explicitly requested but doesn't exist - show null when not filtering
-                        obj.insert(field.clone(), JsonValue::Null);
+                        obj.insert(key.to_string(), JsonValue::Null);
                     }
                 }
             }
@@ -120,4 +136,28 @@ fn filter_fields(results: &QueryResult, fields: &[String], filter_empty: bool) -
         .collect();
 
     JsonValue::Array(pages)
+}
+
+/// Normalize field list from CLI.
+///
+/// Supports both comma-separated and whitespace-separated inputs, e.g.
+/// - `--fields title,summary,date`
+/// - `--fields title summary date`
+fn normalize_fields(fields: &[String]) -> Vec<String> {
+    fields
+        .iter()
+        .flat_map(|field| field.split(','))
+        .flat_map(|field| field.split_whitespace())
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Canonicalize legacy field aliases.
+fn canonical_field_name(field: &str) -> &str {
+    match field {
+        "url" => "permalink",
+        _ => field,
+    }
 }

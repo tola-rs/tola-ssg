@@ -36,7 +36,7 @@ impl Serialize for QueryMeta {
 #[derive(Debug, Serialize)]
 pub struct PageQueryResult {
     pub path: String,
-    pub url: String,
+    pub permalink: String,
     #[serde(flatten)]
     pub meta: QueryMeta,
 }
