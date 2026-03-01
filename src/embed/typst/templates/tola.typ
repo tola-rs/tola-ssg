@@ -34,6 +34,66 @@
 
 #let inside-figure = state("_tola-inside-figure", false)
 
+// Inline math baseline fix (pin + measure).
+#let bounded(eq) = text(top-edge: "bounds", bottom-edge: "bounds", eq)
+#let equations-height-dict = state("eq_height_dict", (:))
+#let is-inside-pin = state("inside_pin", false)
+
+#let pin(label) = context {
+  let height = here().position().y
+  equations-height-dict.update(dict => {
+    if label in dict.keys() or height < 0.000001pt {
+      dict
+    } else {
+      dict.insert(label, height)
+      dict
+    }
+  })
+}
+
+#let add-pin(eq) = {
+  let label = repr(eq)
+  is-inside-pin.update(true)
+  $ inline(pin(label)#bounded(eq)) $
+  is-inside-pin.update(false)
+}
+
+#let to-em(pt) = str(pt / text.size.pt()) + "em"
+
+#let math-span(class: "", style: none, body) = {
+  let attrs = (role: "math")
+  if class != "" {
+    attrs.insert("class", class)
+  }
+  if style != none {
+    attrs.insert("style", style)
+  }
+  html.elem("span", body, attrs: attrs)
+}
+
+#let render-inline-math(eq, class: "") = context {
+  if is-inside-pin.get() {
+    return math-span(class: class)[#html.frame(bounded(eq))]
+  }
+
+  let label = repr(eq)
+  let cache = equations-height-dict.final()
+  if label in cache.keys() {
+    let reference-height = cache.at(label, default: none)
+    equations-height-dict.update(dict => {
+      dict.insert(label, reference-height)
+      dict
+    })
+
+    let measured-height = measure(bounded(eq)).height
+    let shift = measured-height - reference-height
+    let style = "vertical-align: -" + to-em(shift.pt()) + ";"
+    math-span(class: class, style: style)[#html.frame(bounded(eq))]
+  } else {
+    math-span(class: class)[#box(html.frame(add-pin(eq)))]
+  }
+}
+
 // ============================================================================
 // Base Template (Show Rules)
 // ============================================================================
@@ -71,7 +131,7 @@
   // - target() returns "paged" inside html.frame(), so the show rule skips
   show math.equation.where(block: false): it => context {
     if target() == "html" and not inside-figure.get() {
-      html.span(class: math-inline-class, role: "math")[#html.frame(it)]
+      render-inline-math(it, class: math-inline-class)
     } else { it }
   }
 

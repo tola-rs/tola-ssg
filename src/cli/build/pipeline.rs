@@ -145,7 +145,8 @@ fn process_assets(
         }
         if let Err(e) = process_asset(path, config, clean, false) {
             if !has_error.swap(true, Ordering::Relaxed) {
-                log!("error"; "{}: {:#}", path.display(), e);
+                let display_path = path.strip_prefix(config.get_root()).unwrap_or(path);
+                log!("error"; "{}: {:#}", display_path.display(), e);
             }
             return Err(anyhow!("Build failed"));
         }

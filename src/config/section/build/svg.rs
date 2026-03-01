@@ -11,7 +11,7 @@
 //! converter = "builtin"   # Conversion backend: builtin | magick | ffmpeg
 //! dpi = 144.0             # Rendering DPI (default: 96.0)
 //! threshold = "10KB"      # SVGs smaller than this stay inline
-//! expand_viewbox = true   # Auto-expand viewBox to include stroke (default: true)
+//! expand_viewbox = false  # Auto-expand viewBox to include stroke (default: false)
 //! baseline_align = false  # Apply vertical-align for inline SVG baseline (default: false)
 //! ```
 //!
@@ -99,8 +99,8 @@ pub struct SvgConfig {
 
     /// Auto-expand viewBox to include stroke boundaries.
     /// Prevents content clipping when converting to external files.
-    /// Default: true
-    #[config(default = "true")]
+    /// Default: false
+    #[config(default = "false")]
     pub expand_viewbox: bool,
 
     /// Apply vertical-align style to SVG for baseline alignment.
@@ -118,7 +118,7 @@ impl Default for SvgConfig {
             converter: SvgConverter::Builtin,
             dpi: 96.0,
             threshold: "0B".to_string(),
-            expand_viewbox: true,
+            expand_viewbox: false,
             baseline_align: false,
         }
     }
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(config.build.svg.format, SvgFormat::SVG);
         assert_eq!(config.build.svg.converter, SvgConverter::Builtin);
         assert_eq!(config.build.svg.dpi, 96.0);
-        assert!(config.build.svg.expand_viewbox);
+        assert!(!config.build.svg.expand_viewbox);
         assert!(!config.build.svg.baseline_align);
     }
 

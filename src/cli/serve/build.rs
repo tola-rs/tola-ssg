@@ -172,13 +172,15 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     };
     use crate::compiler::scheduler::SCHEDULER;
     use crate::core::GLOBAL_ADDRESS_SPACE;
+    let root = config.get_root();
 
     // Drain compilation failures from scheduler cache
     let failures = SCHEDULER.drain_failures();
     if !failures.is_empty() {
         let max = config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
         for (path, msg) in failures.iter().take(max) {
-            log!("error"; "{}", path.display());
+            let display_path = path.strip_prefix(root).unwrap_or(path);
+            log!("error"; "{}", display_path.display());
             eprintln!("{}", msg);
         }
         let remaining = failures.len().saturating_sub(max);
@@ -203,14 +205,15 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     // Persist warnings and errors for cache restore / browser replay
     let mut diagnostics = PersistedDiagnostics::new();
     for (path, msg) in failures.iter() {
-        let path_str = path.to_string_lossy().into_owned();
+        let display_path = path.strip_prefix(root).unwrap_or(path);
+        let path_str = display_path.to_string_lossy().into_owned();
         diagnostics.push_error(PersistedError::new(path_str, "", msg.clone()));
     }
     for warning in warnings.iter() {
         let path = warning.path.as_deref().unwrap_or_default();
         diagnostics.push_warning(PersistedWarning::new(path, warning.to_string()));
     }
-    if let Err(e) = persist_diagnostics(&diagnostics, config.get_root()) {
+    if let Err(e) = persist_diagnostics(&diagnostics, root) {
         crate::debug!("build"; "failed to persist diagnostics: {}", e);
     }
 

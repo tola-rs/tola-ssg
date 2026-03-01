@@ -84,6 +84,16 @@ pub fn process_result(
             DiagnosticSeverity::Warning,
             FilterType::Package(PackageKind::AllPreview),
         ),
+        DiagnosticFilter::new(
+            DiagnosticSeverity::Warning,
+            FilterType::MessageContains("layout did not converge within".into()),
+        ),
+        DiagnosticFilter::new(
+            DiagnosticSeverity::Warning,
+            FilterType::MessageContains(
+                "check if any states or queries are updating themselves".into(),
+            ),
+        ),
     ]);
 
     // Extract parts
