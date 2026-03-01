@@ -165,10 +165,10 @@ mod tests {
 
     #[test]
     fn test_icon() {
-        let config = test_parse_config("[site.header]\nicon = \"images/favicon.avif\"");
+        let config = test_parse_config("[site.header]\nicon = \"images/favicon.webp\"");
         assert_eq!(
             config.site.header.icon,
-            Some(PathBuf::from("images/favicon.avif"))
+            Some(PathBuf::from("images/favicon.webp"))
         );
     }
 

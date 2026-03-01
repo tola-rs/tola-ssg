@@ -7,7 +7,7 @@
 //! ```toml
 //! [build.svg]
 //! external = true         # true = separate files, false = embedded in HTML
-//! format = "avif"         # Output format: svg | avif | png | jpg | webp
+//! format = "svg"          # Output format: svg | png | jpg | webp
 //! converter = "builtin"   # Conversion backend: builtin | magick | ffmpeg
 //! dpi = 144.0             # Rendering DPI (default: 96.0)
 //! threshold = "10KB"      # SVGs smaller than this stay inline
@@ -19,7 +19,7 @@
 //!
 //! - `external = false` -> SVG embedded in HTML (other options ignored)
 //! - `external = true, format = "svg"` -> Extract as SVG file (no conversion)
-//! - `external = true, format = "avif"` -> Convert to AVIF using `converter`
+//! - `external = true, format = "png|jpg|webp"` -> Convert to raster image using `converter`
 
 use macros::Config;
 use serde::{Deserialize, Serialize};
@@ -30,10 +30,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "lowercase")]
 pub enum SvgFormat {
     /// Keep as SVG (no rasterization).
-    SVG,
-    /// AVIF format (default, best compression).
     #[default]
-    AVIF,
+    SVG,
     /// PNG format.
     PNG,
     /// JPEG format.
@@ -47,7 +45,6 @@ impl SvgFormat {
     pub fn extension(&self) -> &'static str {
         match self {
             Self::SVG => "svg",
-            Self::AVIF => "avif",
             Self::PNG => "png",
             Self::JPG => "jpg",
             Self::WEBP => "webp",
@@ -64,7 +61,7 @@ impl SvgFormat {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SvgConverter {
-    /// Use built-in Rust libraries (resvg + ravif).
+    /// Use built-in Rust libraries.
     #[default]
     Builtin,
     /// Use ImageMagick (`magick` command).
@@ -82,8 +79,8 @@ pub struct SvgConfig {
 
     /// Output format for extracted SVGs.
     /// - `svg`: Keep as optimized SVG (no rasterization)
-    /// - `avif`/`png`/`jpg`/`webp`: Convert to raster image
-    #[config(default = "avif")]
+    /// - `png`/`jpg`/`webp`: Convert to raster image
+    #[config(default = "svg")]
     pub format: SvgFormat,
 
     /// Conversion backend for rasterization.
@@ -117,7 +114,7 @@ impl Default for SvgConfig {
     fn default() -> Self {
         Self {
             external: false,
-            format: SvgFormat::AVIF,
+            format: SvgFormat::SVG,
             converter: SvgConverter::Builtin,
             dpi: 96.0,
             threshold: "0B".to_string(),
@@ -221,7 +218,7 @@ mod tests {
     fn test_defaults() {
         let config = test_parse_config("");
         assert!(!config.build.svg.external);
-        assert_eq!(config.build.svg.format, SvgFormat::AVIF);
+        assert_eq!(config.build.svg.format, SvgFormat::SVG);
         assert_eq!(config.build.svg.converter, SvgConverter::Builtin);
         assert_eq!(config.build.svg.dpi, 96.0);
         assert!(config.build.svg.expand_viewbox);
@@ -232,7 +229,6 @@ mod tests {
     fn test_format_parsing() {
         let cases = [
             ("svg", SvgFormat::SVG),
-            ("avif", SvgFormat::AVIF),
             ("png", SvgFormat::PNG),
             ("jpg", SvgFormat::JPG),
             ("webp", SvgFormat::WEBP),
@@ -259,7 +255,6 @@ mod tests {
     #[test]
     fn test_format_extension() {
         assert_eq!(SvgFormat::SVG.extension(), "svg");
-        assert_eq!(SvgFormat::AVIF.extension(), "avif");
         assert_eq!(SvgFormat::PNG.extension(), "png");
         assert_eq!(SvgFormat::JPG.extension(), "jpg");
         assert_eq!(SvgFormat::WEBP.extension(), "webp");
@@ -268,7 +263,6 @@ mod tests {
     #[test]
     fn test_needs_rasterization() {
         assert!(!SvgFormat::SVG.needs_rasterization());
-        assert!(SvgFormat::AVIF.needs_rasterization());
         assert!(SvgFormat::PNG.needs_rasterization());
     }
 
@@ -286,7 +280,7 @@ mod tests {
         let config = test_parse_config("[build.svg]\nexternal = true\nformat = \"svg\"");
         assert!(config.build.svg.is_svg_output());
 
-        let config = test_parse_config("[build.svg]\nexternal = true\nformat = \"avif\"");
+        let config = test_parse_config("[build.svg]\nexternal = true\nformat = \"png\"");
         assert!(!config.build.svg.is_svg_output());
 
         let config = test_parse_config("[build.svg]\nexternal = false\nformat = \"svg\"");

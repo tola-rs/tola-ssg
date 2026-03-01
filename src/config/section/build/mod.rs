@@ -19,7 +19,7 @@
 //! [build.svg]
 //! external = true             # Extract to separate files (false = embed in HTML)
 //! converter = "builtin"       # Conversion tool: builtin | magick | ffmpeg | none
-//! format = "avif"             # Output format: avif | png | jpg | webp
+//! format = "svg"             # Output format: svg | png | jpg | webp
 //! dpi = 144.0                 # Rendering DPI (default: 96.0)
 //! ```
 //!

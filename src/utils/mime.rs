@@ -39,7 +39,6 @@ pub mod types {
     pub const JPEG: &str = "image/jpeg";
     pub const GIF: &str = "image/gif";
     pub const WEBP: &str = "image/webp";
-    pub const AVIF: &str = "image/avif";
     pub const SVG: &str = "image/svg+xml";
     pub const ICO: &str = "image/x-icon";
     pub const BMP: &str = "image/bmp";
@@ -99,7 +98,6 @@ pub fn from_extension(ext: Option<&str>) -> &'static str {
         Some("jpg" | "jpeg") => types::JPEG,
         Some("gif") => types::GIF,
         Some("webp") => types::WEBP,
-        Some("avif") => types::AVIF,
         Some("ico") => types::ICO,
         Some("bmp") => types::BMP,
         Some("tif" | "tiff") => types::TIFF,
@@ -150,7 +148,6 @@ pub fn for_icon(path: &Path) -> &'static str {
         Some(ext) => match ext.as_str() {
             "png" => types::PNG,
             "svg" => types::SVG,
-            "avif" => types::AVIF,
             "webp" => types::WEBP,
             "gif" => types::GIF,
             "jpg" | "jpeg" => types::JPEG,

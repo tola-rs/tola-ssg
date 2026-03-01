@@ -8,10 +8,8 @@
 //! ```text
 //! typst_batch::HtmlDocument
 //!         │
-//!         ▼ from_typst_html()
 //! Document<TolaSite::Raw>  (Frames rendered as SVG in parallel)
 //!         │
-//!         ▼ (Indexer transform)
 //! Document<Indexed>
 //! ```
 //!

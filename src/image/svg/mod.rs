@@ -6,7 +6,7 @@
 //! # Modules
 //!
 //! - [`optimize`]: SVG optimization using usvg (viewBox adjustment, minification)
-//! - [`convert`]: Format conversion (SVG -> AVIF/PNG/WebP/JPG)
+//! - [`convert`]: Format conversion (SVG -> PNG/WebP/JPG)
 //! - [`extract`]: File extraction logic (content-hash based naming)
 //! - [`bounds`]: Stroke-inclusive bounding box calculation
 //!
@@ -15,19 +15,16 @@
 //! ```text
 //! SVG content (from VDOM)
 //!         │
-//!         ▼
 //!    ┌──────────┐
-//!    │ optimize │ ──► usvg optimization + viewBox expansion
+//!    │ optimize │ -> usvg optimization + viewBox expansion
 //!    └────┬─────┘
 //!         │
-//!         ▼
 //!    ┌─────────┐
-//!    │ convert │ ──► AVIF/PNG/WebP (builtin/magick/ffmpeg)
+//!    │ convert │ -> PNG/WebP/JPG (builtin/magick/ffmpeg)
 //!    └────┬────┘
 //!         │
-//!         ▼
 //!    ┌─────────┐
-//!    │ extract │ ──► Write to .tola/ with content-hash filename
+//!    │ extract │ -> Write to .tola/ with content-hash filename
 //!    └─────────┘
 //! ```
 

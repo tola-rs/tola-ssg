@@ -66,7 +66,7 @@ impl ExtractContext {
 
 /// Result of SVG extraction
 pub struct ExtractResult {
-    /// Relative path to the extracted file (e.g., `.tola/svg-a1b2c3d4e5f6.avif`).
+    /// Relative path to the extracted file (e.g., `.tola/svg-a1b2c3d4e5f6.png`).
     pub relative_path: String,
     /// Absolute path to the extracted file.
     pub absolute_path: PathBuf,
@@ -78,7 +78,7 @@ pub struct ExtractResult {
 ///
 /// # Process
 /// 1. Optimize SVG using usvg
-/// 2. Convert to target format (AVIF/PNG/etc.) if needed
+/// 2. Convert to target format (PNG/JPG/WebP) if needed
 /// 3. Generate content-hash filename
 /// 4. Write to `.tola/` subdirectory (skip if exists)
 /// 5. Return relative path for HTML replacement
@@ -152,7 +152,7 @@ mod tests {
     fn test_extract_context_tola_dir() {
         let ctx = ExtractContext::new(
             PathBuf::from("/public/posts/hello"),
-            SvgFormat::AVIF,
+            SvgFormat::PNG,
             SvgConverter::Builtin,
             96.0,
             0,
@@ -165,7 +165,7 @@ mod tests {
     fn test_should_inline() {
         let ctx = ExtractContext::new(
             PathBuf::from("/public"),
-            SvgFormat::AVIF,
+            SvgFormat::PNG,
             SvgConverter::Builtin,
             96.0,
             10 * 1024, // 10KB threshold
@@ -178,7 +178,7 @@ mod tests {
         // No threshold = never inline
         let ctx_no_threshold = ExtractContext::new(
             PathBuf::from("/public"),
-            SvgFormat::AVIF,
+            SvgFormat::PNG,
             SvgConverter::Builtin,
             96.0,
             0,

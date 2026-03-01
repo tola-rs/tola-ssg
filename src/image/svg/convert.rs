@@ -1,6 +1,6 @@
 //! SVG format conversion.
 //!
-//! Converts SVG to raster formats (AVIF, PNG, WebP, JPG) using various backends.
+//! Converts SVG to raster formats (PNG, WebP, JPG) using various backends.
 
 use anyhow::{Context, Result};
 
@@ -73,30 +73,15 @@ fn convert_builtin(
     // TODO: Add resvg dependency for proper rendering
     // For now, return error suggesting to use magick/ffmpeg
     match format {
-        SvgFormat::AVIF => {
-            // Try to render and encode
-            render_and_encode_avif(&tree, width, height, scale, quality)
-        }
         SvgFormat::PNG => render_and_encode_png(&tree, width, height, scale),
         _ => {
+            let _ = quality;
             anyhow::bail!(
                 "Builtin converter does not support {} format yet. Use magick or ffmpeg.",
                 format.extension()
             )
         }
     }
-}
-
-/// Render SVG tree and encode to AVIF
-fn render_and_encode_avif(
-    tree: &usvg::Tree,
-    width: u32,
-    height: u32,
-    scale: f32,
-    quality: u8,
-) -> Result<Vec<u8>> {
-    let pixels = render_svg_to_rgba(tree, width, height, scale)?;
-    encode_avif(&pixels, width as usize, height as usize, quality)
 }
 
 /// Render SVG tree and encode to PNG
@@ -135,21 +120,6 @@ fn render_svg_to_rgba(
     )
 }
 
-/// Encode RGBA pixels to AVIF using ravif
-fn encode_avif(data: &[u8], width: usize, height: usize, quality: u8) -> Result<Vec<u8>> {
-    let mut pixels = Vec::with_capacity(width * height);
-    for chunk in data.chunks_exact(4) {
-        pixels.push(ravif::RGBA8::new(chunk[0], chunk[1], chunk[2], chunk[3]));
-    }
-
-    let encoded = ravif::Encoder::new()
-        .with_quality(quality as f32)
-        .with_speed(4)
-        .encode_rgba(ravif::Img::new(&pixels, width, height))?;
-
-    Ok(encoded.avif_file)
-}
-
 /// Convert using ImageMagick
 fn convert_magick(svg_data: &[u8], format: &SvgFormat, dpi: f32) -> Result<Vec<u8>> {
     let density = dpi.to_string();
@@ -174,7 +144,6 @@ fn convert_magick(svg_data: &[u8], format: &SvgFormat, dpi: f32) -> Result<Vec<u
 /// Convert using FFmpeg
 fn convert_ffmpeg(svg_data: &[u8], format: &SvgFormat) -> Result<Vec<u8>> {
     let format_args: &[&str] = match format {
-        SvgFormat::AVIF => &["-c:v", "libsvtav1", "-pix_fmt", "yuva420p", "-f", "avif"],
         SvgFormat::PNG => &["-f", "image2pipe", "-c:v", "png"],
         SvgFormat::WEBP => &["-c:v", "libwebp", "-f", "webp"],
         SvgFormat::JPG => &["-c:v", "mjpeg", "-f", "image2pipe"],
