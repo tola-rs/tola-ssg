@@ -14,7 +14,7 @@ use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::freshness::ContentHash;
 use crate::page::CompiledPage;
-use crate::page::{PAGE_LINKS, STORED_PAGES};
+use crate::page::{PAGE_LINKS, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::slug::slugify_path;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -322,15 +322,11 @@ fn process_iterative_page(
     page.apply_custom_permalink(ctx.config);
 
     // Keep source->permalink mapping consistent across iterative passes.
-    // Without this, pages that derive permalink from runtime context can leave
-    // stale entries and appear duplicated in @tola/pages.
-    if let Some(old_permalink) = STORED_PAGES.get_permalink_by_source(&source)
-        && old_permalink != page.route.permalink
-    {
-        STORED_PAGES.remove_page(&old_permalink);
-        PAGE_LINKS.record(&old_permalink, vec![]);
-    }
-    STORED_PAGES.insert_source_mapping(source, page.route.permalink.clone());
+    STORED_PAGES.sync_source_permalink(
+        &source,
+        page.route.permalink.clone(),
+        StaleLinkPolicy::Clear,
+    );
 
     // Update STORED_PAGES with metadata from compile phase
     if let Some(ref meta) = page.content_meta {
@@ -388,17 +384,15 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
 
     for page in scanned {
         let Some(meta) = &page.meta else { continue };
-        let Ok(mut compiled) = CompiledPage::from_paths(&page.path, config) else {
+        let Some(permalink) = STORED_PAGES.apply_meta_for_source(
+            &page.path,
+            meta.clone(),
+            config,
+            StaleLinkPolicy::Keep,
+        ) else {
             continue;
         };
-
-        compiled.content_meta = Some(meta.clone());
-        compiled.apply_custom_permalink(config);
-
-        let permalink = compiled.route.permalink.clone();
-        STORED_PAGES.insert_page(permalink.clone(), meta.clone());
         STORED_PAGES.insert_headings(permalink.clone(), page.headings.clone());
-        STORED_PAGES.insert_source_mapping(page.path.clone(), permalink.clone());
         page_permalinks.push((permalink, page));
     }
 
@@ -640,14 +634,7 @@ fn finalize_static_page(
     page.apply_custom_permalink(ctx.config); // Apply custom permalink FIRST
     page.compiled_html = Some(result.html);
 
-    // Update source mapping if permalink changed (e.g., permalink uses pages())
-    if let Some(old_permalink) = STORED_PAGES.get_permalink_by_source(&path)
-        && old_permalink != page.route.permalink
-    {
-        // Remove old permalink entry and update source mapping
-        STORED_PAGES.remove_page(&old_permalink);
-        STORED_PAGES.insert_source_mapping(path.clone(), page.route.permalink.clone());
-    }
+    STORED_PAGES.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
 
     // Cache VDOM with the CORRECT permalink (after apply_custom_permalink)
     if let Some(vdom) = result.indexed_vdom {

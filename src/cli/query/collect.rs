@@ -118,11 +118,7 @@ fn resolve_permalink(file: &Path, raw_meta: &JsonValue, config: &SiteConfig) -> 
     }
 
     // Prefer source mapping populated by `populate_stored_pages` (includes derived permalinks).
-    let normalized = normalize_path(file);
-    if let Some(mapped) = STORED_PAGES
-        .get_permalink_by_source(&normalized)
-        .or_else(|| STORED_PAGES.get_permalink_by_source(file))
-    {
+    if let Some(mapped) = STORED_PAGES.get_permalink_by_source(file) {
         return mapped.to_string();
     }
 

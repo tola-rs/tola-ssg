@@ -9,12 +9,13 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHasher};
 use serde::Serialize;
 
-use super::PageMeta;
 use super::links::PAGE_LINKS;
+use super::{CompiledPage, PageMeta};
 use crate::compiler::page::ScannedHeading;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::package::{InjectSpec, build_base_inputs};
+use crate::utils::path::normalize_path;
 
 /// Global page data store
 pub static STORED_PAGES: LazyLock<StoredPageMap> = LazyLock::new(StoredPageMap::new);
@@ -50,6 +51,15 @@ impl StoredPage {
             .as_deref()
             .unwrap_or_else(|| self.permalink.as_str())
     }
+}
+
+/// Controls whether stale backlink graph entries are cleared when permalink changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleLinkPolicy {
+    /// Keep existing link graph entries for old permalink.
+    Keep,
+    /// Clear link graph entries for old permalink.
+    Clear,
 }
 
 /// Thread-safe storage for site-wide page data
@@ -94,7 +104,19 @@ impl StoredPageMap {
     ///
     /// Cleans up pages, headings, and source_to_url in one operation.
     pub fn remove_by_source(&self, source: &Path) {
-        if let Some(permalink) = self.source_to_url.write().remove(source) {
+        let normalized = normalize_path(source);
+        let permalink = {
+            let mut source_to_url = self.source_to_url.write();
+            let removed = source_to_url
+                .remove(&normalized)
+                .or_else(|| source_to_url.remove(source));
+            if source != normalized.as_path() {
+                source_to_url.remove(source);
+            }
+            removed
+        };
+
+        if let Some(permalink) = permalink {
             self.pages.write().remove(&permalink);
             self.headings.write().remove(&permalink);
         }
@@ -109,12 +131,63 @@ impl StoredPageMap {
 
     /// Insert source file path to permalink mapping.
     pub fn insert_source_mapping(&self, source: PathBuf, permalink: UrlPath) {
-        self.source_to_url.write().insert(source, permalink);
+        let normalized = normalize_path(&source);
+        let mut source_to_url = self.source_to_url.write();
+        source_to_url.insert(normalized.clone(), permalink);
+        if source != normalized {
+            source_to_url.remove(&source);
+        }
     }
 
     /// Get permalink by source file path.
     pub fn get_permalink_by_source(&self, source: &Path) -> Option<UrlPath> {
-        self.source_to_url.read().get(source).cloned()
+        let normalized = normalize_path(source);
+        let source_to_url = self.source_to_url.read();
+        source_to_url
+            .get(normalized.as_path())
+            .cloned()
+            .or_else(|| source_to_url.get(source).cloned())
+    }
+
+    /// Keep source->permalink mapping consistent and optionally clear stale backlink data.
+    ///
+    /// If an existing mapping points to a different permalink, the old stored page is removed.
+    pub fn sync_source_permalink(
+        &self,
+        source: &Path,
+        new_permalink: UrlPath,
+        stale_link_policy: StaleLinkPolicy,
+    ) {
+        if let Some(old_permalink) = self.get_permalink_by_source(source)
+            && old_permalink != new_permalink
+        {
+            self.remove_page(&old_permalink);
+            if matches!(stale_link_policy, StaleLinkPolicy::Clear) {
+                PAGE_LINKS.record(&old_permalink, vec![]);
+            }
+        }
+        self.insert_source_mapping(source.to_path_buf(), new_permalink);
+    }
+
+    /// Apply parsed metadata to a source file and update page storage in one step.
+    ///
+    /// Returns the resolved permalink on success. Returns `None` when route
+    /// resolution fails (e.g. source path is outside content directory).
+    pub fn apply_meta_for_source(
+        &self,
+        source: &Path,
+        meta: PageMeta,
+        config: &SiteConfig,
+        stale_link_policy: StaleLinkPolicy,
+    ) -> Option<UrlPath> {
+        let mut compiled = CompiledPage::from_paths(source, config).ok()?;
+        compiled.content_meta = Some(meta.clone());
+        compiled.apply_custom_permalink(config);
+
+        let permalink = compiled.route.permalink;
+        self.sync_source_permalink(source, permalink.clone(), stale_link_policy);
+        self.insert_page(permalink.clone(), meta);
+        Some(permalink)
     }
 
     /// Get headings for a page.
@@ -243,6 +316,8 @@ impl StoredPageMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     fn make_page(url: &str, title: &str, date: Option<&str>, draft: bool) -> (UrlPath, PageMeta) {
         (
@@ -385,5 +460,74 @@ mod tests {
         assert_eq!(page["custom_field"], "custom_value");
         assert_eq!(page["number"], 42);
         assert_eq!(page["permalink"], "/custom/");
+    }
+
+    #[test]
+    fn test_insert_and_lookup_source_mapping_normalizes_path() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let file = content_dir.join("post.typ");
+        fs::write(&file, "= Hello").unwrap();
+
+        let alias = content_dir.join(".").join("post.typ");
+        let permalink = UrlPath::from_page("/post/");
+        let store = StoredPageMap::new();
+
+        store.insert_source_mapping(alias.clone(), permalink.clone());
+
+        assert_eq!(
+            store.get_permalink_by_source(&file),
+            Some(permalink.clone())
+        );
+        assert_eq!(store.get_permalink_by_source(&alias), Some(permalink));
+    }
+
+    #[test]
+    fn test_apply_meta_for_source_removes_stale_permalink() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let file = content_dir.join("sample.typ");
+        fs::write(&file, "= Hello").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        let store = StoredPageMap::new();
+        let old_permalink = UrlPath::from_page("/sample/");
+        store.insert_page(
+            old_permalink.clone(),
+            PageMeta {
+                title: Some("Old".to_string()),
+                ..Default::default()
+            },
+        );
+        store.insert_source_mapping(file.clone(), old_permalink.clone());
+
+        let meta = PageMeta {
+            title: Some("New".to_string()),
+            permalink: Some("/custom/sample/".to_string()),
+            ..Default::default()
+        };
+
+        let new_permalink = store
+            .apply_meta_for_source(&file, meta, &config, StaleLinkPolicy::Keep)
+            .expect("meta apply should succeed");
+
+        assert_eq!(new_permalink, UrlPath::from_page("/custom/sample/"));
+        assert_eq!(
+            store.get_permalink_by_source(&file),
+            Some(UrlPath::from_page("/custom/sample/"))
+        );
+
+        let pages = store.get_pages_with_drafts();
+        assert!(
+            pages
+                .iter()
+                .any(|p| p.permalink == UrlPath::from_page("/custom/sample/"))
+        );
+        assert!(!pages.iter().any(|p| p.permalink == old_permalink));
     }
 }

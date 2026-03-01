@@ -7,7 +7,7 @@ use crate::compiler::page::compile;
 use crate::compiler::page::{PageResult, collect_warnings, scan_single_page};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE};
-use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, STORED_PAGES};
+use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::slug::slugify_path;
 use anyhow::Result;
 use std::path::Path;
@@ -85,21 +85,15 @@ pub fn process_page(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
-    // Permalink can change after compile (e.g. custom permalink from metadata).
-    // Remove stale entry for this source to avoid duplicate pages in @tola/pages.
-    if let Some(old_permalink) = STORED_PAGES.get_permalink_by_source(path)
-        && old_permalink != page.route.permalink
-    {
-        STORED_PAGES.remove_page(&old_permalink);
-        PAGE_LINKS.record(&old_permalink, vec![]);
-    }
+    // Keep source->permalink mapping consistent, clearing stale backlink entries
+    // when permalink changes.
+    STORED_PAGES.sync_source_permalink(path, page.route.permalink.clone(), StaleLinkPolicy::Clear);
 
     // Update global site data
     STORED_PAGES.insert_page(
         page.route.permalink.clone(),
         page.content_meta.clone().unwrap_or_default(),
     );
-    STORED_PAGES.insert_source_mapping(path.to_path_buf(), page.route.permalink.clone());
 
     // Register to AddressSpace for hot-reload tracking
     GLOBAL_ADDRESS_SPACE.write().register_page(

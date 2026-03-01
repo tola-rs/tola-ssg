@@ -7,9 +7,8 @@ use typst_batch::prelude::*;
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::{Typst, TypstBatcher};
 use crate::config::SiteConfig;
-use crate::package::Phase;
-use crate::package::TolaPackage;
-use crate::page::{PageKind, PageMeta};
+use crate::package::{InjectSpec, Phase, build_base_inputs};
+use crate::page::{PageKind, PageMeta, STORED_PAGES};
 
 /// Result of Typst draft filtering, includes batcher for reuse
 pub struct TypstFilterResult<'a> {
@@ -43,22 +42,13 @@ impl<'a> TypstFilterResult<'a> {
     }
 }
 
-fn build_scan_inputs(root: &Path, config: Option<&SiteConfig>) -> Option<typst_batch::Inputs> {
-    let mut combined = serde_json::Map::new();
-    combined.insert(
-        Phase::input_key().to_string(),
-        serde_json::json!(Phase::Filter.as_str()),
-    );
-
-    // Keep @tola/site available during scan phase so expressions like
-    // `info.extra.foo` don't fail before visible compilation.
-    if let Some(config) = config {
-        let site_info_json = serde_json::to_value(&config.site.info)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        combined.insert(TolaPackage::Site.input_key(), site_info_json);
-    }
-
-    typst_batch::Inputs::from_json_with_content(&serde_json::Value::Object(combined), root).ok()
+fn build_scan_inputs(config: Option<&SiteConfig>) -> Option<typst_batch::Inputs> {
+    config.and_then(|cfg| {
+        // Filter phase: only inject phase + optional site info.
+        // pages/current remain intentionally unavailable in this stage.
+        let spec = InjectSpec::filter().with_site(true);
+        build_base_inputs(cfg, &STORED_PAGES, spec).ok()
+    })
 }
 
 fn filter_drafts_impl<'a>(
@@ -72,7 +62,7 @@ fn filter_drafts_impl<'a>(
     }
 
     let mut builder = Compiler::new(root).into_batch();
-    builder = match build_scan_inputs(root, config) {
+    builder = match build_scan_inputs(config) {
         Some(inputs) => builder.with_inputs_obj(inputs),
         None => builder.with_inputs([(Phase::input_key(), Phase::Filter.as_str())]),
     };

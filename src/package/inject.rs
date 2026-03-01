@@ -128,10 +128,7 @@ pub fn build_inputs_for_source(
     let normalized = normalize_path(source_path);
 
     // Resolve permalink from source mapping first. If absent, derive from route.
-    let permalink = if let Some(url) = store
-        .get_permalink_by_source(&normalized)
-        .or_else(|| store.get_permalink_by_source(source_path))
-    {
+    let permalink = if let Some(url) = store.get_permalink_by_source(source_path) {
         url
     } else {
         let page =

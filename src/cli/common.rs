@@ -15,7 +15,7 @@ use crate::compiler::page::scan;
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
 use crate::package::{InjectSpec, build_base_inputs, build_inputs_for_source};
-use crate::page::{PageKind, PageMeta, STORED_PAGES};
+use crate::page::{PageKind, PageMeta, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
 
@@ -378,27 +378,7 @@ fn update_stored_page_from_meta(file: &Path, meta_json: &JsonValue, config: &Sit
     let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
         return;
     };
-
-    let normalized = crate::utils::path::normalize_path(file);
-    let Ok(mut compiled) = crate::compiler::page::CompiledPage::from_paths(&normalized, config)
-    else {
-        return;
-    };
-
-    compiled.content_meta = Some(page_meta.clone());
-    compiled.apply_custom_permalink(config);
-    let new_permalink = compiled.route.permalink.clone();
-
-    if let Some(old_permalink) = STORED_PAGES
-        .get_permalink_by_source(&normalized)
-        .or_else(|| STORED_PAGES.get_permalink_by_source(file))
-        && old_permalink != new_permalink
-    {
-        STORED_PAGES.remove_page(&old_permalink);
-    }
-
-    STORED_PAGES.insert_page(new_permalink.clone(), page_meta);
-    STORED_PAGES.insert_source_mapping(normalized, new_permalink);
+    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
 }
 
 /// Parse metadata JSON to PageMeta, logging warning on failure.
@@ -418,7 +398,6 @@ fn parse_page_meta(meta_json: JsonValue, file: &Path) -> Option<PageMeta> {
 /// Must be called before `batch_scan_typst_metadata_iterative`
 pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     use crate::compiler::collect_all_files;
-    use crate::compiler::page::CompiledPage;
 
     let root = crate::utils::path::normalize_path(config.get_root());
     let content_dir = root.join(&config.build.content);
@@ -435,13 +414,9 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     for (file, meta_json) in typst_files.iter().zip(typst_metas) {
         if let Some(meta_json) = meta_json
             && let Some(page_meta) = parse_page_meta(meta_json, file)
-            && let Ok(mut compiled) = CompiledPage::from_paths(file, config)
         {
-            compiled.content_meta = Some(page_meta.clone());
-            compiled.apply_custom_permalink(config);
-            let permalink = compiled.route.permalink.clone();
-            STORED_PAGES.insert_page(permalink.clone(), page_meta);
-            STORED_PAGES.insert_source_mapping((*file).clone(), permalink);
+            let _ =
+                STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
         }
     }
 
@@ -450,13 +425,9 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
         if let Ok(result) = scan_markdown_file(file, config)
             && let Some(meta_json) = result.raw_meta
             && let Some(page_meta) = parse_page_meta(meta_json, file)
-            && let Ok(mut compiled) = CompiledPage::from_paths(file, config)
         {
-            compiled.content_meta = Some(page_meta.clone());
-            compiled.apply_custom_permalink(config);
-            let permalink = compiled.route.permalink.clone();
-            STORED_PAGES.insert_page(permalink.clone(), page_meta);
-            STORED_PAGES.insert_source_mapping((*file).clone(), permalink);
+            let _ =
+                STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
         }
     }
 
