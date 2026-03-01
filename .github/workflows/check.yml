@@ -1,0 +1,29 @@
+name: Check (Fmt + Clippy)
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  cargo-fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - run: cargo fmt --check
+
+  cargo-clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check-clippy
+          cache-on-failure: true
+
+      - run: cargo clippy --all-targets --all-features -- -D warnings

@@ -1,8 +1,14 @@
 # Build and release tola binaries for all platforms
-# Triggered on version tags (v*)
+# Triggered on version tags (v*) or manually via workflow_dispatch
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (required, e.g. v0.7.0, v0.7.0-pre.1)."
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
@@ -10,53 +16,120 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
+    name: Build ${{ matrix.target }}
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            archive: tar.gz
+            binary: tola
+            use_cachix: true
+          - target: x86_64-linux-static
+            archive: tar.gz
+            binary: tola
+            use_cachix: true
+          - target: aarch64-linux
+            archive: tar.gz
+            binary: tola
+            use_cachix: true
+          - target: aarch64-linux-static
+            archive: tar.gz
+            binary: tola
+            use_cachix: true
+          - target: aarch64-darwin
+            archive: tar.gz
+            binary: tola
+            use_cachix: true
+          - target: x86_64-windows
+            archive: zip
+            binary: tola.exe
+            use_cachix: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          fetch-depth: 0  # Fetch all history for changelog generation
+          fetch-depth: 1
 
-      # Install Nix and configure Cachix for binary caching
+      # Install Nix
       - uses: cachix/install-nix-action@v30
         with:
           nix_path: nixpkgs=channel:nixos-unstable
 
+      # Enable Cachix only for Linux/macOS targets
       - uses: cachix/cachix-action@v15
+        if: ${{ matrix.use_cachix }}
         with:
           name: tola
           signingKey: '${{ secrets.CACHIX_SIGNING_KEY }}'
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      # Build Linux/macOS targets - logs are captured by Cachix for upload
-      - name: Build and push to Cachix (Linux/macOS)
+      - name: Build and package
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p artifacts
 
-          for target in x86_64-linux x86_64-linux-static aarch64-linux aarch64-linux-static aarch64-darwin; do
-            echo "Building $target..."
-            outpath=$(nix build -j auto --no-link --print-out-paths ./#$target)
-            tar -czvf "artifacts/tola-$target.tar.gz" -C "$outpath/bin" tola
-          done
+          echo "Building ${TARGET}..."
+          outpath=$(nix build -j auto --no-link --print-out-paths "./#${TARGET}")
 
-      # Build Windows separately - silence logs to skip Cachix upload
-      - name: Build Windows (no Cachix)
+          if [ "${ARCHIVE}" = "zip" ]; then
+            (cd "$outpath/bin" && zip -9 "$OLDPWD/artifacts/tola-${TARGET}.zip" "${BINARY}")
+          else
+            tar -czvf "artifacts/tola-${TARGET}.tar.gz" -C "$outpath/bin" "${BINARY}"
+          fi
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCHIVE: ${{ matrix.archive }}
+          BINARY: ${{ matrix.binary }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # Required for changelog generation
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifact-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: Create or update release
         run: |
-          set -e
-          echo "Building x86_64-windows..."
-          outpath=$(nix build -j auto --no-link --print-out-paths ./#x86_64-windows 2>/dev/null)
-          (cd "$outpath/bin" && zip -9 "$OLDPWD/artifacts/tola-x86_64-windows.zip" tola.exe)
+          set -euo pipefail
 
-          ls -la artifacts/
+          tag="${DISPATCH_TAG:-}"
+          if [ -z "$tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
 
-      # Upload all artifacts to GitHub Release
-      - name: Create Release
-        run: |
+          # Basic validation for release tag format
+          if ! echo "$tag" | grep -qE '^v[0-9A-Za-z._-]+$'; then
+            echo "Invalid release tag: $tag"
+            echo "Expected format like v0.7.0 or v0.7.0-pre.1"
+            exit 1
+          fi
+
           # Generate SHA256 checksums
           cd artifacts
-          shasum -a 256 * > checksums.txt
+          sha256sum * > checksums.txt
           cd ..
 
           # Generate categorized release notes from commits since last tag
@@ -119,7 +192,7 @@ jobs:
               echo "" >> notes.md
             fi
 
-            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev_tag...${{ github.ref_name }}" >> notes.md
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev_tag...$tag" >> notes.md
           else
             # Fallback to commit message if no previous tag
             git log -1 --format="%B" > notes.md
@@ -127,15 +200,24 @@ jobs:
 
           # Check if this is a prerelease (contains -alpha, -beta, -rc, etc.)
           prerelease_flag=""
-          if echo "${{ github.ref_name }}" | grep -qE '\-(alpha|beta|rc|dev)'; then
+          if echo "$tag" | grep -qE '\-(alpha|beta|rc|dev|pre)'; then
             prerelease_flag="--prerelease"
           fi
 
-          # Delete existing release if it exists, then create new one
-          gh release delete ${{ github.ref_name }} --yes || true
-          gh release create ${{ github.ref_name }} artifacts/* \
-            --title "${{ github.ref_name }}" \
-            --notes-file notes.md \
-            $prerelease_flag
+          # Upsert release to avoid delete->create failure window
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" artifacts/* --clobber
+            gh release edit "$tag" \
+              --title "$tag" \
+              --notes-file notes.md \
+              $prerelease_flag
+          else
+            gh release create "$tag" artifacts/* \
+              --target "${GITHUB_SHA}" \
+              --title "$tag" \
+              --notes-file notes.md \
+              $prerelease_flag
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag || '' }}
