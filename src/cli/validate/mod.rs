@@ -13,11 +13,14 @@ use rayon::prelude::*;
 
 use super::common::collect_content_files;
 use crate::compiler::page::CompiledPage;
+use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, ResolveContext, ResolveResult};
 use crate::log;
-use crate::package::{build_visible_inputs, build_visible_inputs_for_source};
-use crate::page::{PageKind, PageMeta, STORED_PAGES, StaleLinkPolicy};
+use crate::package::build_visible_inputs;
+use crate::page::{
+    HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
+};
 use crate::utils::{plural_count, plural_s};
 
 use report::ValidationReport;
@@ -43,9 +46,6 @@ type ParsedScanResult = (
     Vec<Vec<scan::ScannedLink>>,
     Vec<(String, String)>,
 );
-
-/// Maximum iterations for metadata convergence in validate scan.
-const MAX_SCAN_ITERATIONS: usize = 5;
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
@@ -593,8 +593,9 @@ fn batch_scan_typst_unified(
                 return Ok((metas, all_links, errors));
             }
 
-            let mut prev_hash = STORED_PAGES.pages_hash();
-            for iteration in 0..MAX_SCAN_ITERATIONS {
+            let mut stability =
+                HashStabilityTracker::with_oscillation_detection(STORED_PAGES.pages_hash());
+            for iteration in 0..MAX_METADATA_SCAN_ITERATIONS {
                 for &idx in &iterative_indices {
                     let file = files[idx];
                     let rel_path = file
@@ -602,74 +603,58 @@ fn batch_scan_typst_unified(
                         .unwrap_or(file)
                         .to_string_lossy()
                         .to_string();
-                    let single = [file];
-
-                    let inputs = match build_visible_inputs_for_source(config, &STORED_PAGES, file)
-                    {
-                        Ok(inputs) => inputs,
+                    let scan = match scan_single_with_current(&root, file, config) {
+                        Ok(scan) => scan,
                         Err(e) => {
-                            errors.push((rel_path.clone(), e.to_string()));
+                            errors.push((rel_path, e.to_string()));
                             continue;
                         }
                     };
-
-                    let scanner = match Batcher::for_scan(&root)
-                        .with_inputs_obj(inputs)
-                        .with_snapshot_from(&single)
-                    {
-                        Ok(scanner) => scanner,
-                        Err(e) => {
-                            errors.push((rel_path.clone(), e.to_string()));
-                            continue;
-                        }
-                    };
-
-                    let result = match scanner.batch_scan(&single) {
-                        Ok(mut rs) => rs.pop(),
-                        Err(e) => {
-                            errors.push((rel_path.clone(), e.to_string()));
-                            None
-                        }
-                    };
-
-                    match result {
-                        Some(Ok(scan)) => {
-                            let meta = scan.metadata(label);
-                            if let Some(ref meta_json) = meta {
-                                update_stored_page_from_meta(file, meta_json, config);
-                            }
-                            metas[idx] = meta;
-                            all_links[idx] = scan
-                                .links()
-                                .into_iter()
-                                .map(|l| scan::ScannedLink {
-                                    dest: l.dest,
-                                    attr: format!("{:?}", l.source),
-                                })
-                                .collect();
-                        }
-                        Some(Err(e)) => {
-                            errors.push((rel_path.clone(), e.to_string()));
-                        }
-                        None => {
-                            errors.push((
-                                rel_path,
-                                "single-file scan returned no result".to_string(),
-                            ));
-                        }
+                    let meta = scan.metadata(label);
+                    if let Some(ref meta_json) = meta {
+                        update_stored_page_from_meta(file, meta_json, config);
                     }
+                    metas[idx] = meta;
+                    all_links[idx] = scan
+                        .links()
+                        .into_iter()
+                        .map(|l| scan::ScannedLink {
+                            dest: l.dest,
+                            attr: format!("{:?}", l.source),
+                        })
+                        .collect();
                 }
 
-                let new_hash = STORED_PAGES.pages_hash();
-                if new_hash == prev_hash {
-                    crate::debug!("validate"; "metadata converged after {} iteration(s)", iteration + 1);
-                    break;
+                match stability.decide(
+                    STORED_PAGES.pages_hash(),
+                    iteration,
+                    MAX_METADATA_SCAN_ITERATIONS,
+                ) {
+                    StabilityDecision::Converged => {
+                        crate::debug!(
+                            "validate";
+                            "metadata converged after {} iteration(s)",
+                            iteration + 1
+                        );
+                        break;
+                    }
+                    StabilityDecision::Oscillating => {
+                        crate::log!(
+                            "warning";
+                            "validate metadata oscillating (cycle detected), stopping after {} iterations",
+                            iteration + 1
+                        );
+                        break;
+                    }
+                    StabilityDecision::MaxIterationsReached => {
+                        crate::log!(
+                            "warning";
+                            "validate metadata did not converge after {} iterations",
+                            MAX_METADATA_SCAN_ITERATIONS
+                        );
+                    }
+                    StabilityDecision::Continue => {}
                 }
-
-                if iteration == MAX_SCAN_ITERATIONS - 1 {
-                    crate::log!("warning"; "validate metadata did not converge after {} iterations", MAX_SCAN_ITERATIONS);
-                }
-                prev_hash = new_hash;
             }
 
             Ok((metas, all_links, errors))

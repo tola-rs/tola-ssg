@@ -12,10 +12,13 @@ use crate::compiler::CompileContext;
 use crate::compiler::collect_all_files;
 use crate::compiler::family::Indexed;
 use crate::compiler::page::scan;
+use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
-use crate::package::{build_visible_inputs, build_visible_inputs_for_source};
-use crate::page::{PageKind, PageMeta, STORED_PAGES, StaleLinkPolicy};
+use crate::package::build_visible_inputs;
+use crate::page::{
+    HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
+};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
 
@@ -219,9 +222,6 @@ pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_bat
     }
 }
 
-/// Maximum iterations for metadata convergence
-const MAX_SCAN_ITERATIONS: usize = 5;
-
 /// Batch scan Typst files for metadata, failing on first error
 ///
 /// Simple scan without iterative support. Use for validate or when
@@ -313,64 +313,60 @@ pub fn batch_scan_typst_metadata_iterative(
     }
 
     // Iterative re-scan until convergence
-    let mut prev_hash = STORED_PAGES.pages_hash();
+    let mut stability = HashStabilityTracker::with_oscillation_detection(STORED_PAGES.pages_hash());
 
-    for iteration in 0..MAX_SCAN_ITERATIONS {
+    for iteration in 0..MAX_METADATA_SCAN_ITERATIONS {
         // Re-scan iterative files one-by-one so each file gets its own
         // @tola/current context (especially `path` and current permalink).
         for &idx in &iterative_indices {
             let file = files[idx];
-            let inputs = build_scan_inputs_with_current(file, config)?;
-            let single = [file];
-
-            let scanner = Batcher::for_scan(root)
-                .with_inputs_obj(inputs)
-                .with_snapshot_from(&single)?;
-
-            let result = scanner
-                .batch_scan(&single)?
-                .into_iter()
-                .next()
-                .expect("single-file scan should return exactly one result");
-
-            match result {
-                Ok(scan) => {
-                    let meta = scan.metadata(label);
-
-                    // Update STORED_PAGES with new metadata
-                    if let Some(ref meta_json) = meta {
-                        update_stored_page_from_meta(file, meta_json, config);
-                    }
-
-                    metas[idx] = meta;
-                }
+            let scan = match scan_single_with_current(root, file, config) {
+                Ok(scan) => scan,
                 Err(e) => {
                     let rel_path = file.strip_prefix(root).unwrap_or(file);
                     anyhow::bail!("failed to scan {}:\n{}", rel_path.display(), e);
                 }
+            };
+            let meta = scan.metadata(label);
+
+            // Update STORED_PAGES with new metadata
+            if let Some(ref meta_json) = meta {
+                update_stored_page_from_meta(file, meta_json, config);
             }
+
+            metas[idx] = meta;
         }
 
         // Check convergence
-        let new_hash = STORED_PAGES.pages_hash();
-        if new_hash == prev_hash {
-            crate::debug!("scan"; "converged after {} iteration(s)", iteration + 1);
-            break;
+        match stability.decide(
+            STORED_PAGES.pages_hash(),
+            iteration,
+            MAX_METADATA_SCAN_ITERATIONS,
+        ) {
+            StabilityDecision::Converged => {
+                crate::debug!("scan"; "converged after {} iteration(s)", iteration + 1);
+                break;
+            }
+            StabilityDecision::Oscillating => {
+                crate::log!(
+                    "warning";
+                    "scan metadata oscillating (cycle detected), stopping after {} iterations",
+                    iteration + 1
+                );
+                break;
+            }
+            StabilityDecision::MaxIterationsReached => {
+                crate::log!(
+                    "warning";
+                    "metadata did not converge after {} iterations",
+                    MAX_METADATA_SCAN_ITERATIONS
+                );
+            }
+            StabilityDecision::Continue => {}
         }
-
-        if iteration == MAX_SCAN_ITERATIONS - 1 {
-            crate::log!("warning"; "metadata did not converge after {} iterations", MAX_SCAN_ITERATIONS);
-        }
-
-        prev_hash = new_hash;
     }
 
     Ok(metas)
-}
-
-/// Build scan inputs with both @tola/pages and file-specific @tola/current context.
-fn build_scan_inputs_with_current(file: &Path, config: &SiteConfig) -> Result<typst_batch::Inputs> {
-    build_visible_inputs_for_source(config, &STORED_PAGES, file)
 }
 
 /// Update STORED_PAGES entry for a source file using metadata-derived permalink.

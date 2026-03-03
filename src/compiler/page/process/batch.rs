@@ -15,7 +15,9 @@ use crate::core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::freshness::ContentHash;
 use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
 use crate::page::CompiledPage;
-use crate::page::{PAGE_LINKS, STORED_PAGES, StaleLinkPolicy};
+use crate::page::{
+    HashStabilityTracker, PAGE_LINKS, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
+};
 use crate::utils::path::slug::slugify_path;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -209,9 +211,7 @@ pub fn rebuild_iterative_pages(
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
 
     // Iterative compilation loop
-    let mut prev_hash = STORED_PAGES.pages_hash();
-    let mut seen_hashes = rustc_hash::FxHashSet::default();
-    seen_hashes.insert(prev_hash); // Record initial state for cycle detection
+    let mut stability = HashStabilityTracker::with_oscillation_detection(STORED_PAGES.pages_hash());
     let mut pages: Vec<CompiledPage> = Vec::new();
 
     for iteration in 0..MAX_ITERATIONS {
@@ -256,25 +256,28 @@ pub fn rebuild_iterative_pages(
             .collect::<Result<Vec<_>>>()?;
 
         // Check convergence
-        let new_hash = STORED_PAGES.pages_hash();
-
-        if new_hash == prev_hash {
-            crate::debug!("iterative"; "converged after {} iteration(s)", iteration + 1);
-            break;
+        match stability.decide(STORED_PAGES.pages_hash(), iteration, MAX_ITERATIONS) {
+            StabilityDecision::Converged => {
+                crate::debug!("iterative"; "converged after {} iteration(s)", iteration + 1);
+                break;
+            }
+            StabilityDecision::Oscillating => {
+                crate::log!(
+                    "warn";
+                    "metadata oscillating (cycle detected), stopping after {} iterations",
+                    iteration + 1
+                );
+                break;
+            }
+            StabilityDecision::MaxIterationsReached => {
+                crate::log!(
+                    "warn";
+                    "metadata did not converge after {} iterations",
+                    MAX_ITERATIONS
+                );
+            }
+            StabilityDecision::Continue => {}
         }
-
-        // Check oscillation: detect cycles of any length
-        if seen_hashes.contains(&new_hash) {
-            crate::log!("warn"; "metadata oscillating (cycle detected), stopping after {} iterations", iteration + 1);
-            break;
-        }
-
-        if iteration == MAX_ITERATIONS - 1 {
-            crate::log!("warn"; "metadata did not converge after {} iterations", MAX_ITERATIONS);
-        }
-
-        seen_hashes.insert(new_hash);
-        prev_hash = new_hash;
     }
 
     // Write all pages after convergence

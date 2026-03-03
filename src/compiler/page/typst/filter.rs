@@ -4,11 +4,14 @@ use std::path::{Path, PathBuf};
 
 use typst_batch::prelude::*;
 
+use super::iterative::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current_in_store};
 use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
 use crate::compiler::page::{Typst, TypstBatcher};
 use crate::config::SiteConfig;
 use crate::package::build_filter_inputs_with_site;
-use crate::page::{PageKind, PageMeta, STORED_PAGES};
+use crate::page::{
+    HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StaleLinkPolicy, StoredPageMap,
+};
 
 /// Result of Typst draft filtering, includes batcher for reuse
 pub struct TypstFilterResult<'a> {
@@ -42,10 +45,55 @@ impl<'a> TypstFilterResult<'a> {
     }
 }
 
-fn build_scan_inputs(config: &SiteConfig) -> Option<typst_batch::Inputs> {
+fn build_scan_inputs(config: &SiteConfig, store: &StoredPageMap) -> Option<typst_batch::Inputs> {
     // Filter phase: only inject phase + optional site info.
     // pages/current remain intentionally unavailable in this stage.
-    build_filter_inputs_with_site(config, &STORED_PAGES).ok()
+    build_filter_inputs_with_site(config, store).ok()
+}
+
+fn parse_meta(meta_json: Option<serde_json::Value>) -> Option<PageMeta> {
+    meta_json.and_then(|v| serde_json::from_value(v).ok())
+}
+
+fn to_scanned_page(
+    path: &Path,
+    scan: typst_batch::ScanResult,
+    label: &str,
+    store: &StoredPageMap,
+    config: &SiteConfig,
+) -> ScannedPage {
+    let meta = parse_meta(scan.metadata(label));
+
+    // Feed metadata into local scan store so iterative re-scan can resolve
+    // dynamic fields with up-to-date pages/permalinks.
+    if let Some(meta_for_store) = meta.clone() {
+        let _ = store.apply_meta_for_source(path, meta_for_store, config, StaleLinkPolicy::Keep);
+    }
+
+    let kind = PageKind::from_packages(scan.accessed_packages());
+    let links = scan
+        .links()
+        .into_iter()
+        .filter(|link| link.is_site_root())
+        .map(|link| link.dest)
+        .collect();
+    let headings = scan
+        .headings()
+        .into_iter()
+        .map(|h| ScannedHeading {
+            level: h.level,
+            text: h.text,
+            supplement: h.supplement,
+        })
+        .collect();
+
+    ScannedPage {
+        path: path.to_path_buf(),
+        meta,
+        kind,
+        links,
+        headings,
+    }
 }
 
 fn filter_drafts_impl<'a>(
@@ -58,7 +106,11 @@ fn filter_drafts_impl<'a>(
         return TypstFilterResult::empty(0, None);
     }
 
-    let Some(inputs) = build_scan_inputs(config) else {
+    // Use an isolated store for scan-time metadata convergence.
+    // This avoids mutating global STORED_PAGES during pre-scan.
+    let store = StoredPageMap::new();
+
+    let Some(inputs) = build_scan_inputs(config, &store) else {
         return TypstFilterResult::empty(0, None);
     };
 
@@ -75,61 +127,96 @@ fn filter_drafts_impl<'a>(
         Err(_) => return TypstFilterResult::empty(0, Some(batcher)), // On batch error, include all
     };
 
-    let mut scanned = Vec::new();
-    let mut errors = Vec::new();
-    let mut draft_count = 0;
+    let mut slots: Vec<Option<ScannedPage>> = vec![None; files.len()];
+    let mut errors: Vec<Option<(PathBuf, typst_batch::CompileError)>> =
+        (0..files.len()).map(|_| None).collect();
+    let mut iterative_indices: Vec<usize> = Vec::new();
 
-    for (path, result) in files.iter().zip(scan_results) {
+    for (idx, (path, result)) in files.iter().zip(scan_results).enumerate() {
         match result {
             Ok(scan) => {
-                let meta_json = scan.metadata(label);
-                let meta: Option<PageMeta> = meta_json
-                    .as_ref()
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-                // Check if draft
-                let is_draft_page = meta.as_ref().map(|m| m.draft).unwrap_or(false);
-                if is_draft_page {
-                    draft_count += 1;
-                    continue;
+                let page = to_scanned_page(path, scan, label, &store, config);
+                if page.kind.is_iterative() {
+                    iterative_indices.push(idx);
                 }
-
-                // Determine page kind from accessed packages
-                let kind = PageKind::from_packages(scan.accessed_packages());
-
-                // Extract internal page links (site-root links only)
-                let links: Vec<String> = scan
-                    .links()
-                    .into_iter()
-                    .filter(|link| link.is_site_root())
-                    .map(|link| link.dest)
-                    .collect();
-
-                // Extract headings
-                let headings: Vec<ScannedHeading> = scan
-                    .headings()
-                    .into_iter()
-                    .map(|h| ScannedHeading {
-                        level: h.level,
-                        text: h.text,
-                        supplement: h.supplement,
-                    })
-                    .collect();
-
-                scanned.push(ScannedPage {
-                    path: (*path).clone(),
-                    meta,
-                    kind,
-                    links,
-                    headings,
-                });
+                slots[idx] = Some(page);
             }
             Err(e) => {
-                // Collect error for reporting
-                errors.push(((*path).clone(), e));
+                // Retry with per-file visible inputs so @tola/current-dependent
+                // templates can scan successfully in startup/filter paths.
+                match scan_single_with_current_in_store(root, path, config, &store) {
+                    Ok(scan) => {
+                        let page = to_scanned_page(path, scan, label, &store, config);
+                        if page.kind.is_iterative() {
+                            iterative_indices.push(idx);
+                        }
+                        slots[idx] = Some(page);
+                    }
+                    Err(_) => {
+                        errors[idx] = Some(((*path).clone(), e));
+                    }
+                }
             }
         }
     }
+
+    if !iterative_indices.is_empty() {
+        let mut stability = HashStabilityTracker::with_oscillation_detection(store.pages_hash());
+
+        for iteration in 0..MAX_METADATA_SCAN_ITERATIONS {
+            for &idx in &iterative_indices {
+                // Keep previously failed pages as errors.
+                if errors[idx].is_some() {
+                    continue;
+                }
+
+                let path = files[idx];
+                match scan_single_with_current_in_store(root, path, config, &store) {
+                    Ok(scan) => {
+                        slots[idx] = Some(to_scanned_page(path, scan, label, &store, config));
+                    }
+                    Err(e) => {
+                        slots[idx] = None;
+                        errors[idx] = Some(((*path).clone(), e));
+                    }
+                }
+            }
+
+            match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS) {
+                StabilityDecision::Converged => {
+                    crate::debug!("scan"; "converged after {} iteration(s)", iteration + 1);
+                    break;
+                }
+                StabilityDecision::Oscillating => {
+                    crate::log!(
+                        "warning";
+                        "scan metadata oscillating (cycle detected), stopping after {} iterations",
+                        iteration + 1
+                    );
+                    break;
+                }
+                StabilityDecision::MaxIterationsReached => {
+                    crate::log!(
+                        "warning";
+                        "scan metadata did not converge after {} iterations",
+                        MAX_METADATA_SCAN_ITERATIONS
+                    );
+                }
+                StabilityDecision::Continue => {}
+            }
+        }
+    }
+
+    let mut scanned = Vec::new();
+    let mut draft_count = 0usize;
+    for page in slots.into_iter().flatten() {
+        if page.meta.as_ref().is_some_and(|m| m.draft) {
+            draft_count += 1;
+            continue;
+        }
+        scanned.push(page);
+    }
+    let errors = errors.into_iter().flatten().collect();
 
     TypstFilterResult::new(draft_count, Some(batcher), scanned, errors)
 }
@@ -224,6 +311,43 @@ mod tests {
             .info
             .extra
             .insert("custom0".into(), toml::Value::String("ABC".into()));
+
+        let files = [page];
+        let refs = files.iter().collect::<Vec<_>>();
+        let result = filter_drafts_with_config(&refs, root, "tola-meta", &config);
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected scan errors: {:?}",
+            result.errors.len()
+        );
+        assert_eq!(result.scanned.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_drafts_with_config_allows_current_permalink_link() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let content_dir = root.join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let page = content_dir.join("page.typ");
+
+        fs::write(
+            &page,
+            r#"
+#import "@tola/current:0.0.0": permalink
+#metadata((title: "current-link")) <tola-meta>
+#let _x = link(permalink)[permalink]
+= Hello
+"#,
+        )
+        .unwrap();
+
+        init_typst(&[]);
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.content = content_dir;
 
         let files = [page];
         let refs = files.iter().collect::<Vec<_>>();

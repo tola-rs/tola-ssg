@@ -13,9 +13,9 @@ use macros::Config;
 use serde::{Deserialize, Serialize};
 
 /// SPA navigation configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Config)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "site.nav")]
+#[config(section = "site.nav", status = experimental)]
 pub struct NavConfig {
     /// Enable SPA navigation (link interception + DOM morphing).
     /// Limitation: inline scripts must be idempotent, otherwise repeated
@@ -29,16 +29,6 @@ pub struct NavConfig {
     /// Preload/prefetch settings.
     #[config(skip)]
     pub preload: PreloadConfig,
-}
-
-impl Default for NavConfig {
-    fn default() -> Self {
-        Self {
-            spa: false,
-            transition: TransitionConfig::default(),
-            preload: PreloadConfig::default(),
-        }
-    }
 }
 
 /// View Transitions API configuration
