@@ -272,7 +272,7 @@ Tola provides virtual packages that you can import directly in your Typst files:
 |---------|---------|
 | `@tola/site:0.0.0` | `info` — Site metadata (title, author, email, description, url, language, copyright, extra) |
 | `@tola/pages:0.0.0` | `pages()`, `by-tag(tag)`, `by-tags(..tags)`, `all-tags()` |
-| `@tola/current:0.0.0` | `path`, `parent`, `source`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages)`, `prev(pages, n)`, `next(pages, n)` |
+| `@tola/current:0.0.0` | `permalink`, `parent-permalink`, `path`, `filename`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages)`, `prev(pages, n)`, `next(pages, n)` |
 
 ```typst
 // content/index.typ — list recent posts
@@ -371,13 +371,13 @@ Sort by custom `order` field, then by date:
 <details>
 <summary>Example: Extract Date from Filename</summary>
 
-Use `source` from `@tola/current` to parse date from filename like `2025_02_27_hello.typ`:
+Use `path` and `filename` from `@tola/current` to parse date from filename like `2025_02_27_hello.typ`:
 
 ```typst
-#import "@tola/current:0.0.0": source
+#import "@tola/current:0.0.0": path, filename
 
-// source = "posts/2025_02_27_hello.typ"
-#let filename = source.split("/").last()  // "2025_02_27_hello.typ"
+// path = "posts/2025_02_27_hello.typ"
+// filename = "2025_02_27_hello.typ"
 #let parts = filename.split("_")
 #let date = parts.slice(0, 3).join("-")    // "2025-02-27"
 #let slug = parts.slice(3).join("_").replace(".typ", "")  // "hello"
@@ -388,9 +388,9 @@ You can use this pattern in your template to auto-generate dates:
 ```typst
 // templates/post.typ
 #let post-page(body) = {
-  import "@tola/current:0.0.0": source
+  import "@tola/current:0.0.0": path, filename
 
-  let filename = source.split("/").last()
+  let dir = path.split("/").slice(0, -1).join("/")
   let parts = filename.split("_")
   let auto-date = if parts.len() >= 4 {
     parts.slice(0, 3).join("-")

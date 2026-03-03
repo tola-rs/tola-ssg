@@ -269,11 +269,17 @@ impl StoredPageMap {
     ///
     /// # Arguments
     /// * `url` - The page's permalink (URL path)
-    /// * `source` - Optional source file path relative to content directory
-    pub fn build_current_context(&self, url: &UrlPath, source: Option<&str>) -> serde_json::Value {
+    /// * `path` - Optional source file path relative to content directory
+    pub fn build_current_context(&self, url: &UrlPath, path: Option<&str>) -> serde_json::Value {
         use crate::package::TolaPackage;
 
         let parent = url.parent().map(|p| p.as_str().to_string());
+        let filename = path.and_then(|s| {
+            Path::new(s)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        });
         let pages = self.pages.read();
 
         // Get link relationships as full page objects
@@ -291,9 +297,10 @@ impl StoredPageMap {
         // Wrap in __tola_current key for sys.inputs injection
         serde_json::json!({
             TolaPackage::Current.input_key(): {
-                "path": url.as_str(),
-                "parent": parent,
-                "source": source,
+                "permalink": url.as_str(),
+                "parent-permalink": parent,
+                "path": path,
+                "filename": filename,
                 "links_to": links_to,
                 "linked_by": linked_by,
                 "headings": headings,

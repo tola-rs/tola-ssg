@@ -317,7 +317,7 @@ pub fn batch_scan_typst_metadata_iterative(
 
     for iteration in 0..MAX_SCAN_ITERATIONS {
         // Re-scan iterative files one-by-one so each file gets its own
-        // @tola/current context (especially `source` and current permalink).
+        // @tola/current context (especially `path` and current permalink).
         for &idx in &iterative_indices {
             let file = files[idx];
             let inputs = build_scan_inputs_with_current(file, config)?;

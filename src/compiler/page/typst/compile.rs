@@ -40,7 +40,7 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
         .unwrap_or(usize::MAX);
 
     // Build inputs for virtual packages. If route is available, include per-page
-    // current context so templates can access @tola/current.source/path.
+    // current context so templates can access @tola/current.path/permalink.
     let inputs = if let Some(route) = ctx.route {
         build_visible_inputs_for_source(ctx.config, &STORED_PAGES, &route.source)?
     } else {

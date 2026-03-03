@@ -278,7 +278,7 @@ mod tests {
         fs::write(
             &file_path,
             r#"+++
-title = "Testing @tola/current.source"
+title = "Testing @tola/current.path"
 date = "datetime(year: 2026, month: 2, day: 25)"
 permalink = "/showcase/source-field-test/"
 +++
@@ -298,7 +298,7 @@ permalink = "/showcase/source-field-test/"
         STORED_PAGES.insert_page(
             old_permalink.clone(),
             PageMeta {
-                title: Some("Testing @tola/current.source".to_string()),
+                title: Some("Testing @tola/current.path".to_string()),
                 ..Default::default()
             },
         );
