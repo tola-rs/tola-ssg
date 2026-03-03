@@ -240,7 +240,7 @@ pub(super) fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
     // Print compiler warnings with truncation
     let warnings = drain_warnings();
     if !warnings.is_empty() {
-        print_warnings(&warnings, &config.build.diagnostics);
+        print_warnings(&warnings, &config.build.diagnostics, config.get_root());
     }
 
     // Persist VDOM cache for serve reuse
@@ -264,12 +264,13 @@ pub(super) fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
 fn print_warnings(
     warnings: &typst_batch::Diagnostics,
     config: &crate::config::section::build::DiagnosticsConfig,
+    root: &Path,
 ) {
     let max = config.max_warnings.unwrap_or(usize::MAX);
     let total = warnings.len();
 
     for item in warnings.iter().take(max) {
-        eprintln!("{}", item);
+        eprintln!("{}", crate::compiler::page::format_warning_with_prefix(item, root));
     }
 
     let hidden = total.saturating_sub(max);

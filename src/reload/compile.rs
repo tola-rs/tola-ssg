@@ -97,8 +97,12 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
 
             if let Some(vdom) = page_result.indexed_vdom {
                 // Convert warnings to strings for persistence
-                let warnings: Vec<String> =
-                    page_result.warnings.iter().map(|w| w.to_string()).collect();
+                let root = config.get_root();
+                let warnings: Vec<String> = page_result
+                    .warnings
+                    .iter()
+                    .map(|w| crate::compiler::page::format_warning_with_prefix(w, root))
+                    .collect();
 
                 CompileOutcome::Vdom {
                     path: path.to_path_buf(),

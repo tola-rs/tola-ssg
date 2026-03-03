@@ -43,7 +43,7 @@ pub use process::{
 };
 pub use typst::process_result as process_typst_result;
 pub use typst::{Typst, filter_drafts_with_config as filter_typst_drafts_with_config};
-pub use warning::{collect_warnings, drain_warnings};
+pub use warning::{collect_warnings, drain_warnings, format_warning_with_prefix, warning_relative_path};
 pub use write::{write_page_html, write_redirects};
 
 // Re-export page domain types

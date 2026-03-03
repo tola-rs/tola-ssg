@@ -4,6 +4,7 @@
 //! Call `drain_warnings()` after build to get and clear all warnings.
 
 use parking_lot::Mutex;
+use std::path::Path;
 use std::sync::LazyLock;
 use typst_batch::{DiagnosticInfo, Diagnostics};
 
@@ -25,4 +26,27 @@ pub fn collect_warnings(diagnostics: &Diagnostics) {
 pub fn drain_warnings() -> Diagnostics {
     let items = std::mem::take(&mut *WARNINGS.lock());
     Diagnostics::from_vec(items)
+}
+
+/// Get warning source path relative to site root (or `<unknown>`).
+pub fn warning_relative_path(warning: &DiagnosticInfo, root: &Path) -> String {
+    warning
+        .path
+        .as_deref()
+        .map(|path_str| {
+            let path = Path::new(path_str);
+            path.strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+/// Format warning with unified prefix:
+/// `[warning] <relative-path>`
+/// followed by the original warning body.
+pub fn format_warning_with_prefix(warning: &DiagnosticInfo, root: &Path) -> String {
+    let rel_path = warning_relative_path(warning, root);
+    format!("[warning] {rel_path}\n{warning}")
 }

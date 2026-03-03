@@ -185,18 +185,19 @@ impl BatchLogger {
             // Show warnings only when no errors (with configured limit)
             let warnings = crate::compiler::drain_warnings();
             if !warnings.is_empty() {
-                let max = crate::config::cfg()
-                    .build
-                    .diagnostics
-                    .max_warnings
-                    .unwrap_or(usize::MAX);
-                let truncated: String = warnings
-                    .iter()
-                    .take(max)
-                    .map(|w| w.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                crate::logger::status_warning(&truncated);
+                let config = crate::config::cfg();
+                let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
+                let root = config.get_root();
+                for warning in warnings.iter().take(max) {
+                    eprintln!(
+                        "{}",
+                        crate::compiler::page::format_warning_with_prefix(warning, root)
+                    );
+                }
+                let remaining = warnings.len().saturating_sub(max);
+                if remaining > 0 {
+                    eprintln!("... and {} more warning(s)", remaining);
+                }
             }
 
             if let Some(primary) = primary_reload {

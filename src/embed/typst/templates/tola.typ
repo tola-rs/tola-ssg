@@ -186,15 +186,15 @@
 
   show: tola-base
 
-  context {
-    if target() == "html" {
-      html.html[
-        #html.head[#head]
-        #html.body[#body]
-      ]
-    } else {
-      body
-    }
+  // Keep this top-level branch outside context so query/validate sees body directly.
+  let is-html = sys.inputs.format == "html"
+  if is-html {
+    html.html[
+      #html.head[#head]
+      #html.body[#body]
+    ]
+  } else {
+    body
   }
 }
 

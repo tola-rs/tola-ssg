@@ -194,7 +194,7 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     if !warnings.is_empty() {
         let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
         for item in warnings.iter().take(max) {
-            eprintln!("{}", item);
+            eprintln!("{}", compiler::page::format_warning_with_prefix(item, root));
         }
         let remaining = warnings.len().saturating_sub(max);
         if remaining > 0 {
@@ -210,8 +210,9 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
         diagnostics.push_error(PersistedError::new(path_str, "", msg.clone()));
     }
     for warning in warnings.iter() {
-        let path = warning.path.as_deref().unwrap_or_default();
-        diagnostics.push_warning(PersistedWarning::new(path, warning.to_string()));
+        let rel_path = compiler::page::warning_relative_path(warning, root);
+        let rendered = compiler::page::format_warning_with_prefix(warning, root);
+        diagnostics.push_warning(PersistedWarning::new(rel_path, rendered));
     }
     if let Err(e) = persist_diagnostics(&diagnostics, root) {
         crate::debug!("build"; "failed to persist diagnostics: {}", e);
