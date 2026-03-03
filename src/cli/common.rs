@@ -230,12 +230,18 @@ pub fn batch_scan_typst_metadata(
     files: &[&PathBuf],
     root: &Path,
     label: &str,
+    config: &SiteConfig,
 ) -> Result<Vec<Option<JsonValue>>> {
     if files.is_empty() {
         return Ok(vec![]);
     }
 
-    let scanner = Batcher::for_scan(root).with_snapshot_from(files)?;
+    // Use visible-phase inputs for metadata scan so legacy templates relying on
+    // `sys.inputs.format` keep working in query/bootstrap paths.
+    let inputs = build_visible_inputs(config, &STORED_PAGES)?;
+    let scanner = Batcher::for_scan(root)
+        .with_inputs_obj(inputs)
+        .with_snapshot_from(files)?;
 
     match scanner.batch_scan(files) {
         Ok(results) => {
@@ -246,8 +252,16 @@ pub fn batch_scan_typst_metadata(
                         metas.push(scan.metadata(label));
                     }
                     Err(e) => {
-                        let rel_path = file.strip_prefix(root).unwrap_or(file);
-                        anyhow::bail!("failed to scan {}:\n{}", rel_path.display(), e);
+                        // Retry with per-file @tola/current context so scans that
+                        // evaluate current-dependent body expressions can still
+                        // extract metadata.
+                        match scan_single_with_current(root, file, config) {
+                            Ok(scan) => metas.push(scan.metadata(label)),
+                            Err(_) => {
+                                let rel_path = file.strip_prefix(root).unwrap_or(file);
+                                anyhow::bail!("failed to scan {}:\n{}", rel_path.display(), e);
+                            }
+                        }
                     }
                 }
             }
@@ -301,8 +315,27 @@ pub fn batch_scan_typst_metadata_iterative(
                 metas.push(meta);
             }
             Err(e) => {
-                let rel_path = file.strip_prefix(root).unwrap_or(file);
-                anyhow::bail!("failed to scan {}:\n{}", rel_path.display(), e);
+                // Retry with per-file current context to handle pages that
+                // reference @tola/current in body while scanning metadata.
+                match scan_single_with_current(root, file, config) {
+                    Ok(scan) => {
+                        let meta = scan.metadata(label);
+                        let kind = PageKind::from_packages(scan.accessed_packages());
+
+                        if let Some(ref meta_json) = meta {
+                            update_stored_page_from_meta(file, meta_json, config);
+                        }
+
+                        if kind.is_iterative() {
+                            iterative_indices.push(i);
+                        }
+                        metas.push(meta);
+                    }
+                    Err(_) => {
+                        let rel_path = file.strip_prefix(root).unwrap_or(file);
+                        anyhow::bail!("failed to scan {}:\n{}", rel_path.display(), e);
+                    }
+                }
             }
         }
     }
@@ -405,7 +438,7 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Scan Typst files
-    let typst_metas = batch_scan_typst_metadata(&typst_files, &root, label)?;
+    let typst_metas = batch_scan_typst_metadata(&typst_files, &root, label, config)?;
 
     for (file, meta_json) in typst_files.iter().zip(typst_metas) {
         if let Some(meta_json) = meta_json

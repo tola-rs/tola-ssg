@@ -129,13 +129,13 @@
 // Date Utilities
 // ============================================================================
 
-/// Parse date string to datetime (simple version).
+/// Parse date string to datetime (strict version).
 #let _parse-date(s) = {
   if s == none { return none }
   if type(s) == datetime { return s }
   let s = str(s).split("T").at(0)
   let parts = s.split("-")
-  if parts.len() != 3 { return none }
+  assert(parts.len() == 3, message: "Invalid date format: '" + s + "', expected YYYY-MM-DD")
   datetime(year: int(parts.at(0)), month: int(parts.at(1)), day: int(parts.at(2)))
 }
 

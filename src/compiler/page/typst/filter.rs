@@ -319,7 +319,7 @@ mod tests {
         assert!(
             result.errors.is_empty(),
             "unexpected scan errors: {:?}",
-            result.errors.len()
+            result.errors
         );
         assert_eq!(result.scanned.len(), 1);
     }
@@ -335,9 +335,9 @@ mod tests {
         fs::write(
             &page,
             r#"
-#import "@tola/current:0.0.0": permalink
+#import "@tola/current:0.0.0": current-permalink
 #metadata((title: "current-link")) <tola-meta>
-#let _x = link(permalink)[permalink]
+#let _x = link(current-permalink)[current-permalink]
 = Hello
 "#,
         )
@@ -356,7 +356,7 @@ mod tests {
         assert!(
             result.errors.is_empty(),
             "unexpected scan errors: {:?}",
-            result.errors.len()
+            result.errors
         );
         assert_eq!(result.scanned.len(), 1);
     }

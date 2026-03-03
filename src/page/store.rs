@@ -297,7 +297,7 @@ impl StoredPageMap {
         // Wrap in __tola_current key for sys.inputs injection
         serde_json::json!({
             TolaPackage::Current.input_key(): {
-                "permalink": url.as_str(),
+                "current-permalink": url.as_str(),
                 "parent-permalink": parent,
                 "path": path,
                 "filename": filename,

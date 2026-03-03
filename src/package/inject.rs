@@ -275,13 +275,13 @@ mod tests {
             .get(&key)
             .and_then(|v| v.get("filename"))
             .and_then(|v| v.as_str());
-        let permalink = current
+        let current_permalink = current
             .get(&key)
-            .and_then(|v| v.get("permalink"))
+            .and_then(|v| v.get("current-permalink"))
             .and_then(|v| v.as_str());
 
         assert_eq!(path, Some("post.typ"));
         assert_eq!(filename, Some("post.typ"));
-        assert_eq!(permalink, Some("/post/"));
+        assert_eq!(current_permalink, Some("/post/"));
     }
 }

@@ -22,9 +22,10 @@ pub fn respond_file(
     ws_port: Option<u16>,
 ) -> Result<FileServeResult> {
     let content_type = crate::utils::mime::from_path(path);
+    let no_cache = content_type == crate::utils::mime::types::HTML;
 
     if is_head_request(&request) {
-        send_head(request, 200, content_type)?;
+        send_head(request, 200, content_type, no_cache)?;
         return Ok(FileServeResult::Served);
     }
 
@@ -45,7 +46,7 @@ pub fn respond_file(
     };
     let body = maybe_inject_hotreload(body, content_type, ws_port);
 
-    send_body(request, 200, content_type, body)?;
+    send_body(request, 200, content_type, body, no_cache)?;
     Ok(FileServeResult::Served)
 }
 
@@ -159,15 +160,15 @@ pub fn respond_not_found(
 
     if is_head_request(&request) {
         let mime = if found { HTML } else { PLAIN };
-        return send_head(request, 404, mime);
+        return send_head(request, 404, mime, false);
     }
 
     if let Some(body) = body {
         let body = maybe_inject_hotreload(body, HTML, ws_port);
-        return send_body(request, 404, HTML, body);
+        return send_body(request, 404, HTML, body, false);
     }
 
-    send_body(request, 404, PLAIN, b"404 Not Found".to_vec())
+    send_body(request, 404, PLAIN, b"404 Not Found".to_vec(), false)
 }
 
 /// Respond with 503 + auto-retry (build not ready yet)
@@ -214,7 +215,13 @@ pub fn respond_loading(request: Request) -> Result<()> {
 /// Respond with 503 Service Unavailable (server shutting down)
 pub fn respond_unavailable(request: Request) -> Result<()> {
     use crate::utils::mime::types::PLAIN;
-    send_body(request, 503, PLAIN, b"503 Service Unavailable".to_vec())
+    send_body(
+        request,
+        503,
+        PLAIN,
+        b"503 Service Unavailable".to_vec(),
+        false,
+    )
 }
 
 /// Respond with welcome page (empty content directory)
@@ -263,10 +270,20 @@ fn is_head_request(request: &Request) -> bool {
     request.method() == &Method::Head
 }
 
-fn send_head(request: Request, status: u16, content_type: &'static str) -> Result<()> {
+fn send_head(
+    request: Request,
+    status: u16,
+    content_type: &'static str,
+    no_cache: bool,
+) -> Result<()> {
     let response = Response::empty(StatusCode(status))
         .with_header(make_header("Content-Type", content_type))
         .with_header(make_header("X-Tola-Ready", "true"));
+    let response = if no_cache {
+        with_no_cache_headers(response)
+    } else {
+        response
+    };
     request.respond(response)?;
     Ok(())
 }
@@ -276,11 +293,17 @@ fn send_body(
     status: u16,
     content_type: &'static str,
     body: Vec<u8>,
+    no_cache: bool,
 ) -> Result<()> {
     let response = Response::from_data(body)
         .with_status_code(StatusCode(status))
         .with_header(make_header("Content-Type", content_type))
         .with_header(make_header("X-Tola-Ready", "true"));
+    let response = if no_cache {
+        with_no_cache_headers(response)
+    } else {
+        response
+    };
     request.respond(response)?;
     Ok(())
 }
@@ -305,7 +328,7 @@ pub fn respond_compile_error(
     let msg = crate::utils::html::escape(&error_str);
     let body = format!("<html><body><h1>Compilation Error</h1><pre>{msg}</pre></body></html>",);
     let body = maybe_inject_hotreload(body.into_bytes(), HTML, ws_port);
-    send_body(request, 500, HTML, body)
+    send_body(request, 500, HTML, body, false)
 }
 
 /// Respond with hotreload.js from memory
@@ -315,9 +338,19 @@ pub fn respond_hotreload_js(request: Request, ws_port: u16) -> Result<()> {
 
     let vars = HotreloadVars { ws_port };
     let body = HOTRELOAD_JS.render(&vars);
-    send_body(request, 200, JAVASCRIPT, body.into_bytes())
+    send_body(request, 200, JAVASCRIPT, body.into_bytes(), false)
 }
 
 fn make_header(key: &'static str, value: &'static str) -> Header {
     Header::from_bytes(key, value).unwrap()
+}
+
+fn with_no_cache_headers<R: std::io::Read>(response: Response<R>) -> Response<R> {
+    response
+        .with_header(make_header(
+            "Cache-Control",
+            "no-store, no-cache, must-revalidate, max-age=0",
+        ))
+        .with_header(make_header("Pragma", "no-cache"))
+        .with_header(make_header("Expires", "0"))
 }

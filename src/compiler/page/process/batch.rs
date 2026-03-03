@@ -108,7 +108,6 @@ pub fn build_static_pages(
         .filter(|s| s.kind.is_iterative())
         .map(|s| s.path.clone())
         .collect();
-    let has_iterative = !iterative_paths.is_empty();
 
     // Populate STORED_PAGES from scan results BEFORE compilation
     // Skip if scan already populated it (progressive serving mode)
@@ -121,22 +120,11 @@ pub fn build_static_pages(
     // This avoids duplicate warnings (scan already emitted them)
     let snapshot = scan_result.batcher.as_ref().and_then(|b| b.snapshot());
     let inputs = build_site_inputs(config)?;
-    let (batch, typst_results) = if has_iterative {
-        // Has iterative pages: use batch_compile_with_context for per-page @tola/current
-        let batch = create_batch_with_inputs(config.get_root(), &typst_paths, snapshot, inputs)?;
-        let results = compile_typst_batch_with_context(&batch, &typst_paths, config, progress)?;
-        (batch, results)
-    } else {
-        // No iterative pages: use batch_compile_each with shared inputs
-        let batch = create_batch_compiler_with_inputs(
-            config.get_root(),
-            &typst_paths,
-            snapshot,
-            Some(inputs),
-        )?;
-        let results = compile_typst_batch(&batch, &typst_paths, progress)?;
-        (batch, results)
-    };
+    // Always compile with per-file @tola/current context to keep build
+    // behavior aligned with serve and avoid scan-time under-detection when
+    // current-dependent code only appears in page body.
+    let batch = create_batch_with_inputs(config.get_root(), &typst_paths, snapshot, inputs)?;
+    let typst_results = compile_typst_batch_with_context(&batch, &typst_paths, config, progress)?;
 
     let typst_processed = process_typst_files(&ctx, &typst_paths, typst_results);
     let markdown_processed = process_markdown_files(&ctx, &markdown_paths, progress);
@@ -492,24 +480,6 @@ fn create_batch_compiler_with_snapshot<'a>(
     snapshot: Option<FileSnapshot>,
 ) -> Result<Option<TypstBatcher<'a>>> {
     create_batch_compiler_with_inputs(root, typst_paths, snapshot, None)
-}
-
-fn compile_typst_batch<'a>(
-    batch: &Option<TypstBatcher<'a>>,
-    files: &[&PathBuf],
-    progress: Option<&crate::logger::ProgressLine>,
-) -> Result<Vec<BatchCompileResult>> {
-    match batch {
-        Some(b) => b
-            .batch_compile_each(files, |path| {
-                if let Some(p) = progress {
-                    p.inc("typst");
-                }
-                crate::debug!("typst"; "compiled {}", path.display());
-            })
-            .map_err(|e| anyhow::anyhow!("{}", e)),
-        None => Ok(vec![]),
-    }
 }
 
 // ============================================================================

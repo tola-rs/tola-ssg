@@ -17,7 +17,22 @@
     // StableId -> Element mapping for O(1) lookups
     idMap: new Map(),
     ws: null,
+    wsPort: null,
+    reconnectTimer: null,
+    reconnectRetries: 0,
+    maxReconnectRetries: 30,
+    pageActive: true,
+    suppressNextClose: false,
+    suppressReloadUntil: 0,
     reconnectDelay: 1000,
+
+    closeWsSilently() {
+      if (!this.ws) return;
+      this.suppressNextClose = true;
+      try {
+        this.ws.close();
+      } catch (_) {}
+    },
 
     // Hydrate: build idMap from existing DOM
     hydrate() {
@@ -30,17 +45,35 @@
 
     // Connect to WebSocket server
     connect(port) {
-      this.ws = new WebSocket(`ws://localhost:${port}/`);
+      if (typeof port === 'number') {
+        this.wsPort = port;
+      }
+      if (!this.wsPort) return;
 
-      this.ws.onopen = () => {
+      // Avoid opening duplicate sockets while reconnecting.
+      if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsHost = window.location.hostname || 'localhost';
+      const ws = new WebSocket(`${wsScheme}://${wsHost}:${this.wsPort}/`);
+      this.ws = ws;
+
+      ws.onopen = () => {
         console.log('[tola] hot reload connected');
         this.reconnectDelay = 1000;
+        this.reconnectRetries = 0;
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
         this.hydrate();
         // Report current page to server for priority compilation
         this.reportCurrentPage();
       };
 
-      this.ws.onmessage = (e) => {
+      ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
           this.handleMessage(msg);
@@ -49,60 +82,139 @@
         }
       };
 
-      this.ws.onclose = () => {
+      ws.onclose = () => {
+        // Ignore stale sockets replaced by a newer reconnect attempt.
+        if (this.ws !== ws) return;
+        this.ws = null;
+
+        // Navigation/back-forward cache lifecycle can close sockets normally.
+        // Skip reconnect in that case; pageshow/visible will trigger reconnect.
+        if (this.suppressNextClose || !this.pageActive) {
+          this.suppressNextClose = false;
+          return;
+        }
+
         console.log('[tola] disconnected, attempting reconnect...');
         this.attemptReconnect();
       };
 
-      this.ws.onerror = (err) => {
-        console.error('[tola] WebSocket error:', err);
-      };
+      // Keep onerror silent to reduce console noise; onclose drives reconnect.
+      ws.onerror = () => {};
     },
 
-    // Attempt to reconnect with exponential backoff
+    // Attempt to reconnect with exponential backoff.
+    // Do not auto-reload the page on transient disconnects (e.g. laptop sleep).
     attemptReconnect() {
-      const maxRetries = 30; // Try for up to ~2 minutes
-      let retries = 0;
+      if (!this.wsPort) return;
+      if (this.reconnectTimer) return;
+      if (!this.pageActive) return;
+      if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      if (navigator.onLine === false) {
+        return;
+      }
+      if (this.reconnectRetries >= this.maxReconnectRetries) {
+        console.log('[tola] giving up reconnect, please refresh manually');
+        return;
+      }
 
-      const tryConnect = () => {
-        retries++;
-        console.log(`[tola] reconnect attempt ${retries}/${maxRetries}`);
+      const delay = this.reconnectRetries === 0
+        ? 500
+        : Math.min(1000 * Math.pow(1.3, this.reconnectRetries - 1), 5000);
 
-        // Try to fetch a simple resource to check if server is ready
-        // Must check X-Tola-Ready header to ensure build is complete
-        fetch(window.location.href, { method: 'HEAD' })
-          .then(r => {
-            if (r.headers.get('X-Tola-Ready') === 'true') {
-              // Server is ready, reload the page
-              console.log('[tola] server is ready, reloading...');
-              location.reload();
-            } else {
-              // Server is up but not ready yet (still building)
-              console.log('[tola] server is building, waiting...');
-              if (retries < maxRetries) {
-                setTimeout(tryConnect, 1000);
-              }
-            }
-          })
-          .catch(() => {
-            // Server not reachable yet
-            if (retries < maxRetries) {
-              const delay = Math.min(1000 * Math.pow(1.3, retries - 1), 5000);
-              setTimeout(tryConnect, delay);
-            } else {
-              console.log('[tola] giving up reconnect, please refresh manually');
-            }
-          });
-      };
+      this.reconnectRetries += 1;
+      console.log(`[tola] reconnect attempt ${this.reconnectRetries}/${this.maxReconnectRetries}`);
+      this.reconnectTimer = setTimeout(() => {
+        this.reconnectTimer = null;
+        this.connect();
+      }, delay);
+    },
 
-      // Start trying after a short delay
-      setTimeout(tryConnect, 500);
+    setupReconnectTriggers() {
+      window.addEventListener('popstate', () => {
+        this.suppressReloadUntil = Date.now() + 1200;
+      });
+
+      window.addEventListener('pagehide', () => {
+        this.pageActive = false;
+        if (this.reconnectTimer) {
+          clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = null;
+        }
+
+        // Proactively close to avoid dangling sockets during navigation.
+        this.closeWsSilently();
+      });
+
+      // beforeunload covers cases where pagehide may not be dispatched first.
+      window.addEventListener('beforeunload', () => {
+        this.pageActive = false;
+      });
+
+      window.addEventListener('pageshow', (e) => {
+        this.pageActive = true;
+        // BFCache restore can deliver stale reload events briefly after resume.
+        // Ignore reloads in a short grace window to prevent a flash.
+        if (e && e.persisted) {
+          this.suppressReloadUntil = Date.now() + 1200;
+        }
+        this.attemptReconnect();
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          this.pageActive = true;
+          this.attemptReconnect();
+        } else {
+          this.pageActive = false;
+          this.closeWsSilently();
+        }
+      });
+
+      // Freeze/resume lifecycle helps avoid suspension-time socket errors.
+      document.addEventListener('freeze', () => {
+        this.pageActive = false;
+        this.closeWsSilently();
+      });
+
+      document.addEventListener('resume', () => {
+        this.pageActive = true;
+        this.attemptReconnect();
+      });
+
+      window.addEventListener('online', () => {
+        this.pageActive = true;
+        this.attemptReconnect();
+      });
+    },
+
+    setupHistoryReloadGuard() {
+      const getNavEntries = performance && performance.getEntriesByType;
+      if (!getNavEntries) return;
+      const entries = performance.getEntriesByType('navigation');
+      if (!entries || entries.length === 0) return;
+
+      const nav = entries[0];
+      if (nav && nav.type === 'back_forward') {
+        this.suppressReloadUntil = Date.now() + 1200;
+      }
     },
 
     // Handle incoming message
     handleMessage(msg) {
       switch (msg.type) {
         case 'reload':
+          if (!this.pageActive || document.visibilityState !== 'visible') {
+            break;
+          }
+          if (Date.now() < this.suppressReloadUntil) {
+            console.log('[tola] skip stale reload after history restore');
+            break;
+          }
           console.log('[tola] reloading:', msg.reason || 'file changed');
           // If permalink changed, update URL before reload to avoid 404
           if (msg.url_change) {
@@ -518,6 +630,8 @@
   };
 
   // Initialize
+  Tola.setupHistoryReloadGuard();
+  Tola.setupReconnectTriggers();
   Tola.connect(__TOLA_WS_PORT__);
   window.Tola = Tola;
 })();

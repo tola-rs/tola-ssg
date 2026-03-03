@@ -581,10 +581,36 @@ fn batch_scan_typst_unified(
                         all_links.push(links);
                     }
                     Err(e) => {
-                        // Collect error instead of failing
-                        errors.push((rel_path, e.to_string()));
-                        metas.push(None);
-                        all_links.push(vec![]);
+                        // Retry with per-file @tola/current context so pages
+                        // using current.permalink/path in body can scan.
+                        match scan_single_with_current(&root, file, config) {
+                            Ok(scan) => {
+                                let meta = scan.metadata(label);
+                                if let Some(ref meta_json) = meta {
+                                    update_stored_page_from_meta(file, meta_json, config);
+                                }
+                                if PageKind::from_packages(scan.accessed_packages()).is_iterative()
+                                {
+                                    iterative_indices.push(index);
+                                }
+                                metas.push(meta);
+                                let links: Vec<scan::ScannedLink> = scan
+                                    .links()
+                                    .into_iter()
+                                    .map(|l| scan::ScannedLink {
+                                        dest: l.dest,
+                                        attr: format!("{:?}", l.source),
+                                    })
+                                    .collect();
+                                all_links.push(links);
+                            }
+                            Err(_) => {
+                                // Keep original compile error for diagnostics.
+                                errors.push((rel_path, e.to_string()));
+                                metas.push(None);
+                                all_links.push(vec![]);
+                            }
+                        }
                     }
                 }
             }
