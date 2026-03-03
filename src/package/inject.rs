@@ -44,7 +44,10 @@ impl InjectSpec {
             phase: Phase::Filter,
             include_site: false,
             include_pages: false,
-            include_format: false,
+            // Scan/filter phase can still execute user templates; keep `format`
+            // available so `sys.inputs.at("format", ...)` and legacy
+            // `sys.inputs.format` checks don't fail.
+            include_format: true,
         }
     }
 

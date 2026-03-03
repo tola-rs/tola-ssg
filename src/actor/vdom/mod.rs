@@ -186,6 +186,7 @@ impl VdomActor {
 
 #[cfg(test)]
 mod persistence_tests {
+    use crate::actor::messages::WsMsg;
     use crate::cache::restore_diagnostics;
     use crate::core::GLOBAL_ADDRESS_SPACE;
     use crate::core::UrlPath;
@@ -220,6 +221,41 @@ mod persistence_tests {
         assert_eq!(state.error_count(), 1, "Should have 1 persisted error");
         let error = state.first_error().unwrap();
         assert_eq!(error.error, "test error");
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_error_keeps_batch_error_without_ws_spam() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let (_tx, rx) = mpsc::channel(10);
+        let (ws_tx, mut ws_rx) = mpsc::channel(10);
+
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let path = root.join("dup.typ");
+        let url_path = UrlPath::from_page("/dup");
+        let error = "same compile error".to_string();
+
+        actor
+            .handle_error(path.clone(), url_path.clone(), error.clone())
+            .await;
+        actor.handle_error(path, url_path, error).await;
+
+        assert!(
+            actor.batch.has_errors(),
+            "duplicate errors should still mark batch as errored"
+        );
+        assert_eq!(
+            actor.error_state.error_count(),
+            1,
+            "duplicate errors should not duplicate persisted diagnostics"
+        );
+
+        let first = ws_rx.try_recv().expect("first error should be sent to WS");
+        assert!(matches!(first, WsMsg::Error { .. }));
+        assert!(
+            ws_rx.try_recv().is_err(),
+            "duplicate identical error should not send another WS error"
+        );
     }
 
     #[test]

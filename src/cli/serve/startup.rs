@@ -4,7 +4,7 @@ use anyhow::Result;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tola_vdom::CacheKey;
 
-use super::{bind_server, init_serve_build, scan_pages, serve_build};
+use super::{bind_server, init_serve_build, scan_pages, serve_build, set_scan_ready};
 use crate::address::GLOBAL_ADDRESS_SPACE;
 use crate::cache::{self, PersistedDiagnostics, PersistedError, RemovedFile};
 use crate::compiler::dependency::{self, collect_virtual_dependents};
@@ -37,6 +37,7 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     let bound_server = bind_server()?;
 
     SCHEDULER.start_workers();
+    set_scan_ready(false);
 
     let config_arc = config::cfg();
     let needs_full_build = !has_cache;
@@ -44,11 +45,18 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
         let scan_success = !needs_full_build || progressive_scan(&config_arc);
 
         if !scan_success {
+            set_scan_ready(false);
             if needs_full_build {
                 set_serving();
             }
             set_healthy(false);
             return;
+        }
+
+        // Full-build path uses progressive_scan() before serve_build(),
+        // so URL->source mapping is now available for on-demand requests.
+        if needs_full_build {
+            set_scan_ready(true);
         }
 
         let build_success = if needs_full_build {
@@ -104,13 +112,16 @@ fn progressive_scan(config: &SiteConfig) -> bool {
 fn startup_with_cache(config: &SiteConfig) -> bool {
     if let Err(e) = init_serve_build(config) {
         log!("build"; "cache startup init failed: {}", e);
+        set_scan_ready(false);
         return false;
     }
 
     if let Err(e) = scan_pages(config) {
         log!("scan"; "cache startup scan failed: {}", e);
+        set_scan_ready(false);
         return false;
     }
+    set_scan_ready(true);
 
     let root = config.get_root();
     let mut diagnostics = cache::restore_diagnostics(root).unwrap_or_default();

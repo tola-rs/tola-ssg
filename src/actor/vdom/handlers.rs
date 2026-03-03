@@ -20,31 +20,30 @@ impl VdomActor {
             .errors()
             .any(|e| e.path == rel_path_str && e.error == error);
 
-        if duplicate_same_error {
-            crate::debug!(
-                "vdom";
-                "skip duplicate compile error output: {}",
-                rel_path_str
-            );
-            return;
-        }
-
         // Check if this is the first error in the batch (before adding)
         let is_first_error = !self.batch.has_errors();
 
-        // Record for batch output
+        // Always record in batch output so watch status won't hide persistent errors.
         self.batch.push_error(&rel_path_str, &error);
 
-        // Track for persistence
-        self.error_state.push_error(PersistedError::new(
-            rel_path_str.clone(),
-            url_path.to_string(),
-            error.clone(),
-        ));
+        if duplicate_same_error {
+            crate::debug!(
+                "vdom";
+                "skip duplicate compile error persist/ws: {}",
+                rel_path_str
+            );
+        } else {
+            // Track for persistence
+            self.error_state.push_error(PersistedError::new(
+                rel_path_str.clone(),
+                url_path.to_string(),
+                error.clone(),
+            ));
 
-        // Persist immediately for crash safety
-        if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
-            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+            // Persist immediately for crash safety
+            if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
+                crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+            }
         }
 
         // Invalidate cache
@@ -53,7 +52,7 @@ impl VdomActor {
         }
 
         // Send to browser only if this is the first error (matches terminal behavior)
-        if is_first_error {
+        if is_first_error && !duplicate_same_error {
             let _ = self
                 .ws_tx
                 .send(WsMsg::Error {

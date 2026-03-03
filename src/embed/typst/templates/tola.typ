@@ -187,7 +187,7 @@
   show: tola-base
 
   // Keep this top-level branch outside context so query/validate sees body directly.
-  let is-html = sys.inputs.format == "html"
+  let is-html = sys.inputs.at("format", default: "paged") == "html"
   if is-html {
     html.html[
       #html.head[#head]

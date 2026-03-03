@@ -22,7 +22,7 @@ use crossbeam::channel;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use tiny_http::{Request, Server};
 
 /// Default WebSocket port for hot reload
@@ -32,6 +32,10 @@ pub const DEFAULT_WS_PORT: u16 = 35729;
 /// Updated by coordinator after WebSocket server binds successfully
 static ACTUAL_WS_PORT: AtomicU16 = AtomicU16::new(DEFAULT_WS_PORT);
 
+/// Startup scan readiness for progressive serving.
+/// Kept in serve module to avoid leaking serve-only state into core globals.
+static SCAN_READY: AtomicBool = AtomicBool::new(false);
+
 /// Update the actual WebSocket port (called by coordinator after binding)
 pub fn set_actual_ws_port(port: u16) {
     ACTUAL_WS_PORT.store(port, Ordering::Relaxed);
@@ -40,6 +44,14 @@ pub fn set_actual_ws_port(port: u16) {
 /// Get the actual WebSocket port
 fn get_actual_ws_port() -> u16 {
     ACTUAL_WS_PORT.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_scan_ready(ready: bool) {
+    SCAN_READY.store(ready, Ordering::SeqCst);
+}
+
+fn is_scan_ready() -> bool {
+    SCAN_READY.load(Ordering::SeqCst)
 }
 
 /// Bound server ready to accept requests
@@ -136,13 +148,9 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
         }
     }
 
-    if !crate::core::is_serving() {
-        return response::respond_loading(request);
-    }
-
-    // During startup/recovery, metadata and virtual package data may still be converging.
-    // Serve loading page until build becomes healthy to avoid transient empty data flashes.
-    if !crate::core::is_healthy() {
+    let serving = crate::core::is_serving();
+    let scan_ready = is_scan_ready();
+    if !serving && !scan_ready {
         return response::respond_loading(request);
     }
 
@@ -152,9 +160,17 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
 
     let request_url = request.url().to_string();
 
-    // Try to serve from disk (already compiled)
+    // Serve static output files as early as possible.
+    // This keeps CSS/JS/assets available during startup convergence.
     if let Some(path) = path::resolve_path(&request_url, &config.build.output) {
         return serve_file_with_recovery(request, &request_url, &path, config, ws_port);
+    }
+
+    // `HEALTHY` represents hot-reload readiness, not HTTP readiness.
+    // While unhealthy (initial/full rebuild or recovery), still allow
+    // direct on-demand compilation for requested pages.
+    if !crate::core::is_healthy() {
+        return serve_unhealthy_request(request, &request_url, config, ws_port);
     }
 
     // On-demand compilation (URL → source → compile → serve from disk)
@@ -171,6 +187,27 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
     }
 
     response::respond_not_found(request, config, ws_port)
+}
+
+fn serve_unhealthy_request(
+    request: Request,
+    request_url: &str,
+    config: &SiteConfig,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    let url = crate::core::UrlPath::from_browser(request_url);
+    let source = crate::core::GLOBAL_ADDRESS_SPACE
+        .read()
+        .source_for_url(&url);
+
+    let Some(source) = source else {
+        return response::respond_loading(request);
+    };
+
+    match compile::compile_on_demand(&source, config) {
+        Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
+        Err(e) => response::respond_compile_error(request, &e, ws_port),
+    }
 }
 
 fn serve_file_with_recovery(
