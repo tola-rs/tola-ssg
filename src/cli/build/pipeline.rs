@@ -270,7 +270,10 @@ fn print_warnings(
     let total = warnings.len();
 
     for item in warnings.iter().take(max) {
-        eprintln!("{}", crate::compiler::page::format_warning_with_prefix(item, root));
+        eprintln!(
+            "{}",
+            crate::compiler::page::format_warning_with_prefix(item, root)
+        );
     }
 
     let hidden = total.saturating_sub(max);

@@ -36,11 +36,7 @@ pub fn collect_font_dirs(config: &SiteConfig) -> Vec<&Path> {
 /// Build the entire site using two-phase compilation
 ///
 /// Pipeline: pre-hooks -> init -> collect -> compile -> iterative -> post-process -> post-hooks -> finalize
-pub fn build_site(
-    mode: BuildMode,
-    config: &SiteConfig,
-    quiet: bool,
-) -> Result<Pages> {
+pub fn build_site(mode: BuildMode, config: &SiteConfig, quiet: bool) -> Result<Pages> {
     // Initialize (must be before pre hooks to clean output dir first)
     pipeline::init_build(config)?;
     let deps_hash: ContentHash = freshness::compute_deps_hash(config);

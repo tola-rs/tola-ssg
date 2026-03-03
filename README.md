@@ -48,7 +48,6 @@ Implement `Recent Posts` easily with the `@tola/pages` virtual package:
 
 #let posts = (pages()
   .filter(p => "/posts/" in p.permalink)
-  .filter(p => p.at("draft", default: false) == false)
   .filter(p => p.at("date", default: none) != none)
   .sorted(key: p => p.date)
   .rev())
@@ -87,7 +86,7 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 - **build hooks** — Pre/post build hooks for custom scripts (e.g., esbuild, imagemin)
 - **Tailwind CSS** — Built-in CSS processor integration
 - **html/xml minification** — Optional minification for production builds
-- **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API
+- **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API (limitation: inline scripts should be idempotent; navigation may execute them more than once)
 
 ### Image & SVG (experimental, WIP)
 
@@ -244,11 +243,6 @@ format = "rss"   # "rss" | "atom"
 [site.seo.sitemap]
 enable = true
 
-[site.nav]
-spa = true    # SPA navigation (link interception + DOM morphing)
-# transition = { style = "fade", time = 200 }
-# preload = { enable = true, delay = 100 }
-
 [build]
 content = "content"
 output = "public"
@@ -298,16 +292,16 @@ Tola provides virtual packages that you can import directly in your Typst files:
 ```typst
 #import "@tola/pages:0.0.0": pages
 
-#let recent-posts = (pages()
+#let posts = (pages()
   .filter(p => "/posts/" in p.permalink)
-  .filter(p => p.at("draft", default: false) == false)
   .filter(p => p.at("date", default: none) != none)
   .sorted(key: p => p.date)
-  .rev()
-  .slice(0, calc.min(5, pages().len())))
+  .rev())
 
-#for post in recent-posts {
-  [- #link(post.permalink)[#post.title] (#post.date)]
+#let recent = posts.slice(0, calc.min(5, posts.len()))
+
+#for post in recent {
+  [- #link(post.permalink)[#post.title]]
 }
 ```
 
@@ -390,8 +384,8 @@ You can use this pattern in your template to auto-generate dates:
 #let post-page(body) = {
   import "@tola/current:0.0.0": path, filename
 
-  let dir = path.split("/").slice(0, -1).join("/")
-  let parts = filename.split("_")
+  let file = filename.replace(".typ", "")
+  let parts = file.split("_")
   let auto-date = if parts.len() >= 4 {
     parts.slice(0, 3).join("-")
   } else { none }

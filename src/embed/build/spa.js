@@ -411,19 +411,22 @@
     // Note: tola:navigate event is dispatched in finishNavigation after URL update
   }
 
-  // Execute inline scripts after morph (external scripts are skipped)
+  function createExecutableScript(templateScript) {
+    var script = document.createElement('script');
+    Array.from(templateScript.attributes).forEach(function(attr) {
+      script.setAttribute(attr.name, attr.value);
+    });
+    script.textContent = templateScript.textContent;
+    return script;
+  }
+
+  // Execute inline scripts after morph (external scripts are skipped).
+  // Limitation: inline scripts must be idempotent, otherwise repeated
+  // execution during navigation may cause issues.
   function executeInlineScripts(container) {
     var scripts = container.querySelectorAll('script:not([src])');
     scripts.forEach(function(oldScript) {
-      var newScript = document.createElement('script');
-      // Copy attributes
-      Array.from(oldScript.attributes).forEach(function(attr) {
-        newScript.setAttribute(attr.name, attr.value);
-      });
-      // Copy content
-      newScript.textContent = oldScript.textContent;
-      // Replace to execute
-      oldScript.parentNode.replaceChild(newScript, oldScript);
+      oldScript.parentNode.replaceChild(createExecutableScript(oldScript), oldScript);
     });
   }
 
@@ -468,14 +471,18 @@
         // For stylesheets: preloadNewStylesheets already handled the update, just skip
         // But we still need to mark it as processed
         if (oldEl.outerHTML !== newEl.outerHTML) {
-          if (!(newEl.tagName === 'LINK' && newEl.rel === 'stylesheet')) {
+          if (newEl.tagName === 'SCRIPT' && !newEl.src) {
+            oldEl.parentNode.replaceChild(createExecutableScript(newEl), oldEl);
+          } else if (!(newEl.tagName === 'LINK' && newEl.rel === 'stylesheet')) {
             oldEl.parentNode.replaceChild(newEl.cloneNode(true), oldEl);
           }
           // Note: stylesheets are updated by preloadNewStylesheets which removes old version
         }
       } else {
-        // Add new element (skip scripts and stylesheets - stylesheets already preloaded)
-        if (newEl.tagName !== 'SCRIPT' && !(newEl.tagName === 'LINK' && newEl.rel === 'stylesheet')) {
+        // Add new element (stylesheets already preloaded)
+        if (newEl.tagName === 'SCRIPT' && !newEl.src) {
+          oldHead.appendChild(createExecutableScript(newEl));
+        } else if (newEl.tagName !== 'SCRIPT' && !(newEl.tagName === 'LINK' && newEl.rel === 'stylesheet')) {
           oldHead.appendChild(newEl.cloneNode(true));
         }
       }
@@ -486,8 +493,9 @@
     oldElements.forEach(function(list) {
       for (var i = 0; i < list.length; i++) {
         var el = list[i];
-        // Keep: scripts, inline styles, and .tola assets
-        if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+        // Keep: external scripts, inline styles, and .tola assets
+        if (el.tagName === 'SCRIPT' && el.src) continue;
+        if (el.tagName === 'STYLE') continue;
         if (el.tagName === 'LINK' && el.href && el.href.indexOf('/.tola/') !== -1) continue;
         // Mark for removal (including orphaned stylesheets not in new head)
         toRemove.push(el);
@@ -522,7 +530,7 @@
         if (el.src) {
           return 'script:' + el.src;
         }
-        return null;
+        return 'script:inline';
       case 'STYLE':
         return null; // Don't track inline styles
       default:

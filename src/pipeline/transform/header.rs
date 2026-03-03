@@ -63,6 +63,7 @@ impl<'a> HeaderInjector<'a> {
     fn populate_head(&self, head: &mut Element<Raw>) {
         let config = self.config;
         let head_config = &config.site.header;
+        let existing_len = head.children.len();
 
         // Anti-FOUC dummy script (must be first to block rendering)
         if head_config.no_fouc {
@@ -180,6 +181,12 @@ impl<'a> HeaderInjector<'a> {
         // Open Graph / Twitter Cards (default injection if not user-defined)
         if !Self::has_og_tags(head) {
             self.inject_og_defaults(head);
+        }
+
+        // Keep all injected nodes ahead of user-defined head nodes.
+        let injected_len = head.children.len().saturating_sub(existing_len);
+        if existing_len > 0 && injected_len > 0 {
+            head.children.rotate_left(existing_len);
         }
     }
 

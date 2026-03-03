@@ -8,8 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use std::sync::LazyLock;
 
 use crate::utils::path::normalize_path;

@@ -277,9 +277,22 @@ fn scan_typst_page(path: &Path, config: &SiteConfig) -> SinglePageScanData {
     use typst_batch::prelude::*;
 
     let root = config.get_root();
-    let scan = match Scanner::new(root).scan(path) {
+    let mut scanner = Scanner::new(root);
+
+    // In watch mode, pages may import @tola/current/@tola/pages.
+    // Reuse visible-phase inputs so scan can evaluate those imports.
+    if let Ok(inputs) =
+        crate::package::build_visible_inputs_for_source(config, &crate::page::STORED_PAGES, path)
+    {
+        scanner = scanner.with_inputs_obj(inputs);
+    }
+
+    let scan = match scanner.scan(path) {
         Ok(s) => s,
-        Err(_) => return SinglePageScanData::default(),
+        Err(e) => {
+            crate::debug!("scan"; "typst heading scan failed for {}: {}", path.display(), e);
+            return SinglePageScanData::default();
+        }
     };
 
     let headings = scan

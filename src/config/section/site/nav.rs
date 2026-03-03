@@ -4,7 +4,7 @@
 //!
 //! ```toml
 //! [site.nav]
-//! spa = true
+//! spa = false
 //! transition = { style = "fade", time = 200 }
 //! preload = { enable = true, delay = 100 }
 //! ```
@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 #[config(section = "site.nav")]
 pub struct NavConfig {
     /// Enable SPA navigation (link interception + DOM morphing).
+    /// Limitation: inline scripts must be idempotent, otherwise repeated
+    /// execution during navigation may cause issues.
     pub spa: bool,
 
     /// View transition settings.
@@ -32,7 +34,7 @@ pub struct NavConfig {
 impl Default for NavConfig {
     fn default() -> Self {
         Self {
-            spa: true,
+            spa: false,
             transition: TransitionConfig::default(),
             preload: PreloadConfig::default(),
         }
@@ -99,5 +101,24 @@ impl Default for PreloadConfig {
             enable: false,
             delay: 100,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::test_parse_config;
+
+    #[test]
+    fn test_defaults() {
+        let config = test_parse_config("");
+        assert!(!config.site.nav.spa);
+        assert!(!config.site.nav.preload.enable);
+        assert_eq!(config.site.nav.preload.delay, 100);
+    }
+
+    #[test]
+    fn test_spa_enabled_by_config() {
+        let config = test_parse_config("[site.nav]\nspa = true");
+        assert!(config.site.nav.spa);
     }
 }
