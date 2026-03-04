@@ -21,6 +21,7 @@ use crate::package::build_visible_inputs;
 use crate::page::{
     HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
 };
+use crate::utils::path::route::{strip_path_prefix, strip_path_prefix_in_text};
 use crate::utils::{plural_count, plural_s};
 
 use report::ValidationReport;
@@ -107,7 +108,8 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let url_sources = crate::address::conflict::collect_url_sources(&all_pages, config);
     let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
     if !conflicts.is_empty() {
-        crate::address::conflict::print_conflicts(&conflicts);
+        let prefix = config.paths().prefix().to_string_lossy().into_owned();
+        crate::address::conflict::print_conflicts_with_prefix(&conflicts, &prefix);
         let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
         anyhow::bail!(
             "validation failed: {} conflicting url{}, {} source{}",
@@ -160,8 +162,6 @@ fn validate_all_links(
     typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
     report: &Arc<RwLock<ValidationReport>>,
 ) {
-    let validate_config = &config.validate;
-
     // Collect all nested asset source directories with their output prefixes
     let nested_assets: Vec<_> = config
         .build
@@ -193,7 +193,7 @@ fn validate_all_links(
             &source,
             file,
             links,
-            validate_config,
+            config,
             all_pages,
             report,
             root,
@@ -212,7 +212,7 @@ fn validate_all_links(
                 &result.source,
                 file,
                 &result.links,
-                validate_config,
+                config,
                 all_pages,
                 report,
                 root,
@@ -229,13 +229,16 @@ fn validate_links(
     source: &str,
     file: &std::path::Path,
     links: &[scan::ScannedLink],
-    validate_config: &crate::config::ValidateConfig,
+    config: &SiteConfig,
     all_pages: &[CompiledPage],
     report: &Arc<RwLock<ValidationReport>>,
     root: &std::path::Path,
     nested_assets: &[(String, PathBuf)],
     flatten_outputs: &[String],
 ) {
+    let prefix = config.paths().prefix().to_string_lossy().into_owned();
+    let validate_config = &config.validate;
+
     // Find the page for this file (needed for ResolveContext)
     let page = all_pages.iter().find(|p| p.route.source == *file);
 
@@ -331,14 +334,26 @@ fn validate_links(
                     attr: &link.attr,
                 };
 
+                // Mirror compile-time link normalization (prefix + slug) so
+                // validation targets match final emitted URLs.
+                let resolved_link =
+                    crate::pipeline::transform::resolve_link(&link.dest, config, &page.route)
+                        .unwrap_or_else(|_| link.dest.clone());
+
                 let space = GLOBAL_ADDRESS_SPACE.read();
+                let mut result = space.resolve(&resolved_link, &ctx);
+                // Fallback for mixed prefixed/unprefixed permalink states.
+                if matches!(result, ResolveResult::NotFound { .. }) && resolved_link != link.dest {
+                    result = space.resolve(&link.dest, &ctx);
+                }
                 handle_resolve_result(
-                    space.resolve(&link.dest, &ctx),
+                    result,
                     source,
                     &link.dest,
                     is_asset_attr,
                     validate_config,
                     report,
+                    &prefix,
                 );
             }
 
@@ -364,6 +379,7 @@ fn validate_links(
                     is_asset_attr,
                     validate_config,
                     report,
+                    &prefix,
                 );
             }
         }
@@ -378,7 +394,14 @@ fn handle_resolve_result(
     is_asset_attr: bool,
     validate_config: &crate::config::ValidateConfig,
     report: &Arc<RwLock<ValidationReport>>,
+    prefix: &str,
 ) {
+    let display_link = if link.starts_with('/') {
+        strip_path_prefix(link, prefix)
+    } else {
+        link.to_string()
+    };
+
     match result {
         ResolveResult::Found(_) | ResolveResult::External(_) => {}
 
@@ -387,14 +410,14 @@ fn handle_resolve_result(
                 if validate_config.assets.enable {
                     report.write().add_asset(
                         source.to_string(),
-                        link.to_string(),
+                        display_link.clone(),
                         "not found".to_string(),
                     );
                 }
             } else if validate_config.pages.enable {
                 report.write().add_page(
                     source.to_string(),
-                    link.to_string(),
+                    display_link.clone(),
                     "not found".to_string(),
                 );
             }
@@ -415,25 +438,31 @@ fn handle_resolve_result(
                         available.join(", ")
                     )
                 };
-                report
-                    .write()
-                    .add_page(source.to_string(), link.to_string(), msg);
+                report.write().add_page(
+                    source.to_string(),
+                    display_link.clone(),
+                    strip_path_prefix_in_text(&msg, prefix),
+                );
             }
         }
 
         ResolveResult::Warning { message, .. } => {
             if validate_config.pages.enable {
-                report
-                    .write()
-                    .add_page(source.to_string(), link.to_string(), message);
+                report.write().add_page(
+                    source.to_string(),
+                    display_link.clone(),
+                    strip_path_prefix_in_text(&message, prefix),
+                );
             }
         }
 
         ResolveResult::Error { message } => {
             if validate_config.pages.enable {
-                report
-                    .write()
-                    .add_page(source.to_string(), link.to_string(), message);
+                report.write().add_page(
+                    source.to_string(),
+                    display_link,
+                    strip_path_prefix_in_text(&message, prefix),
+                );
             }
         }
     }

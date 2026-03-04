@@ -99,31 +99,7 @@ impl ResolveResult {
 /// - base="/posts/hello/", rel="../world/" -> "/posts/world/"
 /// - base="/archive/2024/", rel="../../about/" -> "/about/"
 pub fn resolve_relative_url(base: &UrlPath, rel: &str) -> UrlPath {
-    // Split base into segments (remove empty parts from trailing slashes)
-    let mut segments: Vec<&str> = base
-        .as_str()
-        .trim_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    // Process relative path
-    for part in rel.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                segments.pop();
-            }
-            _ => segments.push(part),
-        }
-    }
-
-    // Rebuild URL
-    if segments.is_empty() {
-        UrlPath::from_page("/")
-    } else {
-        UrlPath::from_page(&format!("/{}/", segments.join("/")))
-    }
+    crate::utils::path::route::resolve_relative_url(base, rel)
 }
 
 /// Resolve a relative physical path

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 /// Theme section configuration
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "theme")]
+#[config(section = "theme", status = experimental)]
 pub struct ThemeSectionConfig {
     /// Image recolor settings.
     #[config(sub)]

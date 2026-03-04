@@ -14,6 +14,7 @@ use crate::core::UrlPath;
 use crate::log;
 use crate::page::STORED_PAGES;
 use crate::utils::path::normalize_path;
+use crate::utils::path::route::strip_path_prefix_from_page_url;
 
 use super::types::{PageQueryResult, QueryMeta, QueryResult};
 
@@ -112,24 +113,26 @@ fn process_query_result(
 /// 3. Computed default route from source path
 /// 4. Legacy fallback path calculation
 fn resolve_permalink(file: &Path, raw_meta: &JsonValue, config: &SiteConfig) -> String {
+    let prefix = config.paths().prefix().to_string_lossy().into_owned();
+
     // Respect explicit custom permalink from metadata.
     if let Some(custom) = raw_meta.get("permalink").and_then(|v| v.as_str()) {
-        return UrlPath::from_page(custom).to_string();
+        return strip_path_prefix_from_page_url(UrlPath::from_page(custom).as_ref(), &prefix);
     }
 
     // Prefer source mapping populated by `populate_stored_pages` (includes derived permalinks).
     if let Some(mapped) = STORED_PAGES.get_permalink_by_source(file) {
-        return mapped.to_string();
+        return strip_path_prefix_from_page_url(mapped.as_str(), &prefix);
     }
 
     // Keep behavior aligned with build routing (slug/path_prefix aware).
     if let Ok(compiled) = crate::compiler::page::CompiledPage::from_paths(file, config) {
-        return compiled.route.permalink.to_string();
+        return strip_path_prefix_from_page_url(compiled.route.permalink.as_str(), &prefix);
     }
 
     // Last-resort fallback for unexpected path/config errors.
     let content_dir = normalize_path(&config.build.content);
-    calculate_url_path(file, &content_dir)
+    strip_path_prefix_from_page_url(&calculate_url_path(file, &content_dir), &prefix)
 }
 
 /// Query Markdown file metadata using shared VDOM pipeline
