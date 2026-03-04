@@ -138,7 +138,8 @@ pub fn build_static_pages(
 
     let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
     if !conflicts.is_empty() {
-        crate::address::conflict::print_conflicts(&conflicts);
+        let prefix = config.paths().prefix().to_string_lossy().into_owned();
+        crate::address::conflict::print_conflicts_with_prefix(&conflicts, &prefix);
         let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
         return Err(anyhow::anyhow!(
             "build failed: {} conflicting url{}, {} source{}",

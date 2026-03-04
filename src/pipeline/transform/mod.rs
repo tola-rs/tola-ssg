@@ -18,6 +18,6 @@ mod svg;
 
 pub use body::BodyInjector;
 pub use header::HeaderInjector;
-pub use link::LinkTransform;
+pub use link::{LinkTransform, resolve_link};
 pub use media::{MediaTransform, cleanup_nobg_originals};
 pub use svg::SvgTransform;

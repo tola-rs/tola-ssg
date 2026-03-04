@@ -11,6 +11,7 @@ use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::page::StoredPageMap;
 use crate::utils::path::normalize_path;
+use crate::utils::path::route::strip_path_prefix_from_page_url;
 
 use super::{Phase, TolaPackage};
 
@@ -92,6 +93,59 @@ fn validate_spec(spec: InjectSpec, needs_current: bool) -> Result<()> {
     Ok(())
 }
 
+fn path_prefix(config: &SiteConfig) -> String {
+    config.paths().prefix().to_string_lossy().into_owned()
+}
+
+fn strip_permalink_in_page_object(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+) {
+    if let Some(permalink_value) = obj.get_mut("permalink")
+        && let Some(permalink) = permalink_value.as_str()
+    {
+        *permalink_value =
+            serde_json::Value::String(strip_path_prefix_from_page_url(permalink, prefix));
+    }
+}
+
+fn strip_pages_permalinks(value: &mut serde_json::Value, prefix: &str) {
+    let Some(arr) = value.as_array_mut() else {
+        return;
+    };
+    for page in arr {
+        if let Some(obj) = page.as_object_mut() {
+            strip_permalink_in_page_object(obj, prefix);
+        }
+    }
+}
+
+fn strip_current_context_permalinks(value: &mut serde_json::Value, prefix: &str) {
+    let key = TolaPackage::Current.input_key();
+    let Some(current) = value.get_mut(key).and_then(|v| v.as_object_mut()) else {
+        return;
+    };
+
+    if let Some(v) = current.get_mut("current-permalink")
+        && let Some(s) = v.as_str()
+    {
+        *v = serde_json::Value::String(strip_path_prefix_from_page_url(s, prefix));
+    }
+
+    if let Some(v) = current.get_mut("parent-permalink")
+        && let Some(s) = v.as_str()
+    {
+        *v = serde_json::Value::String(strip_path_prefix_from_page_url(s, prefix));
+    }
+
+    if let Some(links_to) = current.get_mut("links_to") {
+        strip_pages_permalinks(links_to, prefix);
+    }
+    if let Some(linked_by) = current.get_mut("linked_by") {
+        strip_pages_permalinks(linked_by, prefix);
+    }
+}
+
 fn build_base_inputs_impl(
     config: &SiteConfig,
     store: &StoredPageMap,
@@ -108,10 +162,9 @@ fn build_base_inputs_impl(
     }
 
     if spec.include_pages {
-        combined.insert(
-            TolaPackage::Pages.input_key(),
-            store.pages_to_json_value_with_drafts(),
-        );
+        let mut pages_payload = store.pages_to_json_value_with_drafts();
+        strip_pages_permalinks(&mut pages_payload, &path_prefix(config));
+        combined.insert(TolaPackage::Pages.input_key(), pages_payload);
     }
 
     combined.insert(
@@ -132,12 +185,14 @@ fn build_base_inputs_impl(
 
 /// Merge `@tola/current` payload into existing inputs.
 fn merge_current_context(
+    config: &SiteConfig,
     inputs: &mut typst_batch::Inputs,
     store: &StoredPageMap,
     permalink: &UrlPath,
     path_rel: Option<&str>,
 ) -> Result<()> {
-    let current_context = store.build_current_context(permalink, path_rel);
+    let mut current_context = store.build_current_context(permalink, path_rel);
+    strip_current_context_permalinks(&mut current_context, &path_prefix(config));
     inputs
         .merge_json(&current_context)
         .map_err(|e| anyhow!("failed to merge @tola/current inputs: {}", e))
@@ -187,7 +242,7 @@ fn build_inputs_for_source_impl(
     let mut inputs = build_base_inputs_impl(config, store, spec)?;
     let (permalink, path_rel) = resolve_source_context(config, store, file_path)?;
 
-    merge_current_context(&mut inputs, store, &permalink, path_rel.as_deref())?;
+    merge_current_context(config, &mut inputs, store, &permalink, path_rel.as_deref())?;
     Ok(inputs)
 }
 
@@ -224,7 +279,9 @@ pub fn build_visible_current_context_for_source(
 ) -> Result<serde_json::Value> {
     validate_spec(InjectSpec::visible(), true)?;
     let (permalink, path_rel) = resolve_source_context(config, store, file_path)?;
-    Ok(store.build_current_context(&permalink, path_rel.as_deref()))
+    let mut current = store.build_current_context(&permalink, path_rel.as_deref());
+    strip_current_context_permalinks(&mut current, &path_prefix(config));
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -282,6 +339,34 @@ mod tests {
 
         assert_eq!(path, Some("post.typ"));
         assert_eq!(filename, Some("post.typ"));
+        assert_eq!(current_permalink, Some("/post/"));
+    }
+
+    #[test]
+    fn test_build_visible_current_context_for_source_strips_configured_prefix() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let content_dir = root.join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let file_path = content_dir.join("post.typ");
+        fs::write(&file_path, "= Hello").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.content = content_dir.clone();
+        config.build.path_prefix = std::path::PathBuf::from("blog");
+
+        let store = StoredPageMap::new();
+        let current =
+            build_visible_current_context_for_source(&config, &store, &file_path).unwrap();
+
+        let key = TolaPackage::Current.input_key();
+        let current_permalink = current
+            .get(&key)
+            .and_then(|v| v.get("current-permalink"))
+            .and_then(|v| v.as_str());
+
         assert_eq!(current_permalink, Some("/post/"));
     }
 }

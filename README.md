@@ -2,8 +2,6 @@
 
 A static site generator for Typst-based websites.  \
 
-v0.7.0 is coming soon (26.02.23)
-
 ## Table of Contents
 
 - [Showcase](#showcase)
@@ -40,7 +38,9 @@ v0.7.0 is coming soon (26.02.23)
 <summary>How to make "Recent 5 Posts" with Tola's virtual package system</summary>
 
 Thanks to `typst` and `tailwindcss`, `tola` offers writing flexibility.
-Implement `Recent Posts` easily with the `@tola/pages` virtual package:
+Implement `Recent Posts` easily with the `@tola/pages` virtual package.
+This snippet is aligned with the starter virtual package article source:
+`https://github.com/tola-rs/example-sites/blob/main/starter/content/posts/virtual-packages.typ`.
 
 ```typst
 #import "@tola/pages:0.0.0": pages
@@ -88,18 +88,9 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 - **html/xml minification** — Optional minification for production builds
 - **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API (limitation: inline scripts should be idempotent; navigation may execute them more than once)
 
-### Image & SVG (experimental, WIP)
-
-- **SVG math tight bounds** — Removes extra whitespace around equations via Typst's `bounds` edge setting
-- **SVG baseline alignment** — Optional vertical-align for inline SVG math
-- **SVG viewBox expansion** — Expands viewBox to include stroke boundaries, preventing content clipping
-- **SVG dark mode adaptation** — Auto-inject CSS for SVG theme switching (enabled by default)
-- **image recolor** — SVG filter-based color adaptation for local images (png/jpg/webp), matching screenshots to site theme
-- **image background removal** — Auto-detect and remove image backgrounds
-
 ### Routing & SEO
 
-- **clean URLs** — `content/posts/hello.typ` → `/posts/hello/`
+- **clean and simple URLs** — `content/posts/hello.typ` → `/posts/hello/`
 - **custom permalinks** — Override URL via page metadata
 - **aliases** — Redirect old URLs to new locations
 - **url slugification** — Configurable slug modes (full, safe, ascii) with case options
@@ -115,7 +106,7 @@ Tola injects virtual packages at compile time, enabling cross-page data access w
 
 - `@tola/site:0.0.0` — Site configuration (`info`, `info.extra` from `[site.info]` in `tola.toml`)
 - `@tola/pages:0.0.0` — All pages metadata (title, date, permalink, tags, draft status...)
-- `@tola/current:0.0.0` — Current page info (useful in templates)
+- `@tola/current:0.0.0` — Current page context (`current-permalink`, `path`, `headings`, navigation helpers...)
 
 ```typst
 #import "@tola/pages:0.0.0": pages
@@ -129,6 +120,9 @@ Tola injects virtual packages at compile time, enabling cross-page data access w
 // Access site title
 #info.title
 ```
+
+Canonical examples are maintained in the starter article:
+`https://github.com/tola-rs/example-sites/blob/main/starter/content/posts/virtual-packages.typ`
 
 See [Virtual Packages in Usage](#virtual-packages-1) for more details.
 
@@ -260,29 +254,38 @@ command = ["tailwindcss"]
 
 ### Virtual Packages
 
-Tola provides virtual packages that you can import directly in your Typst files:
+Tola provides virtual packages that you can import directly in your Typst files.
+
+Important: use the starter article as the source of truth for API names and examples.
+Do not maintain separate hand-written variants in multiple places.
+
+- Display (rendered output):
+  [`tola-rs.github.io/example-sites/starter/posts/virtual-packages/`](https://tola-rs.github.io/example-sites/starter/posts/virtual-packages/)
+- Source file:
+  [`tola-rs/example-sites/starter/content/posts/virtual-packages.typ`](https://github.com/tola-rs/example-sites/blob/main/starter/content/posts/virtual-packages.typ)
+- Starter repository:
+  [`github.com/tola-rs/example-sites/tree/main/starter`](https://github.com/tola-rs/example-sites/tree/main/starter)
 
 | Package | Exports |
 |---------|---------|
 | `@tola/site:0.0.0` | `info` — Site metadata (title, author, email, description, url, language, copyright, extra) |
 | `@tola/pages:0.0.0` | `pages()`, `by-tag(tag)`, `by-tags(..tags)`, `all-tags()` |
-| `@tola/current:0.0.0` | `permalink`, `parent-permalink`, `path`, `filename`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages)`, `prev(pages, n)`, `next(pages, n)` |
+| `@tola/current:0.0.0` | `current-permalink`, `parent-permalink`, `path`, `filename`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages, include-root: false)`, `at-offset(sorted-pages, offset)`, `prev(sorted-pages, n: 1)`, `next(sorted-pages, n: 1)`, `take-prev(sorted-pages, n: 1)`, `take-next(sorted-pages, n: 1)` |
 
 ```typst
 // content/index.typ — list recent posts
-#import "/templates/page.typ": page
-#import "/components/ui.typ" as ui
 #import "@tola/pages:0.0.0": pages
 
-#show: page.with(title: "Home")
-
 #let posts = (pages()
-  .filter(p => "/posts/" in p.permalink and p.date != none)
+  .filter(p => "/posts/" in p.permalink)
+  .filter(p => p.at("date", default: none) != none)
   .sorted(key: p => p.date)
   .rev())
 
-#for post in posts.slice(0, calc.min(posts.len(), 5)) {
-  ui.post-card(post)
+#let recent = posts.slice(0, calc.min(posts.len(), 5))
+
+#for post in recent {
+  [- #link(post.permalink)[#post.title]]
 }
 ```
 
@@ -308,157 +311,60 @@ Tola provides virtual packages that you can import directly in your Typst files:
 </details>
 
 <details>
-<summary>Example: Pinned Posts</summary>
-
-Use page metadata `pinned: true` to mark featured posts:
-
-```typst
-// content/posts/important.typ
-#set page(meta: (pinned: true, date: "2025-01-01", title: "Important Post"))
-```
-
-```typst
-#import "@tola/pages:0.0.0": pages
-
-#let pinned = pages().filter(p => p.at("pinned", default: false) == true)
-
-#if pinned.len() > 0 [
-  == Pinned Posts
-  #for post in pinned {
-    [- #link(post.permalink)[#post.title]]
-  }
-]
-```
-
-</details>
-
-<details>
-<summary>Example: Custom Sort Order</summary>
-
-Sort by custom `order` field, then by date:
-
-```typst
-// content/docs/intro.typ
-#set page(meta: (order: 1, title: "Introduction"))
-
-// content/docs/setup.typ
-#set page(meta: (order: 2, title: "Setup Guide"))
-```
-
-```typst
-#import "@tola/pages:0.0.0": pages
-
-#let docs = (pages()
-  .filter(p => "/docs/" in p.permalink)
-  .sorted(key: p => (
-    p.at("order", default: 999),
-    p.at("date", default: "9999-99-99")
-  )))
-
-#for doc in docs {
-  [- #link(doc.permalink)[#doc.title]]
-}
-```
-
-</details>
-
-<details>
-<summary>Example: Extract Date from Filename</summary>
+<summary>Example: Filename-Derived Metadata</summary>
 
 Use `path` and `filename` from `@tola/current` to parse date from filename like `2025_02_27_hello.typ`:
 
 ```typst
 #import "@tola/current:0.0.0": path, filename
 
-// path = "posts/2025_02_27_hello.typ"
-// filename = "2025_02_27_hello.typ"
-#let parts = filename.split("_")
-#let date = parts.slice(0, 3).join("-")    // "2025-02-27"
-#let slug = parts.slice(3).join("_").replace(".typ", "")  // "hello"
-```
-
-You can use this pattern in your template to auto-generate dates:
-
-```typst
-// templates/post.typ
-#let post-page(body) = {
-  import "@tola/current:0.0.0": path, filename
-
-  let file = filename.replace(".typ", "")
-  let parts = file.split("_")
-  let auto-date = if parts.len() >= 4 {
-    parts.slice(0, 3).join("-")
-  } else { none }
-
-  // Use auto-date as fallback if no explicit date in metadata
-  // ...
+#let file = filename.replace(".typ", "").replace(".md", "")
+#let parts = file.split("_")
+#let auto-date = if parts.len() >= 4 {
+  parts.slice(0, 3).join("-")
+} else {
+  none
 }
 ```
 
 </details>
 
 <details>
-<summary>Example: Prev/Next Navigation</summary>
-
-Navigate between posts in a sorted list:
+<summary>Example: Hierarchy + Navigation Helpers</summary>
 
 ```typst
 #import "@tola/pages:0.0.0": pages
-#import "@tola/current:0.0.0": prev, next
+#import "@tola/current:0.0.0": prev, next, breadcrumbs, children, siblings
 
-#let sorted-posts = (pages()
+#let all = pages()
+#let sorted-posts = (all
   .filter(p => "/posts/" in p.permalink and p.date != none)
   .sorted(key: p => p.date))
 
 #let prev-post = prev(sorted-posts)
 #let next-post = next(sorted-posts)
-
-#html.nav(class: "flex justify-between")[
-  #if prev-post != none {
-    link(prev-post.permalink)[← #prev-post.title]
-  }
-  #if next-post != none {
-    link(next-post.permalink)[#next-post.title →]
-  }
-]
+#let crumbs = breadcrumbs(all, include-root: true)
+#let direct-children = children(all)
+#let same-level = siblings(all)
 ```
 
 </details>
 
 <details>
-<summary>Example: Breadcrumbs</summary>
-
-Generate breadcrumb navigation from URL hierarchy:
+<summary>Example: Offset Navigation Window</summary>
 
 ```typst
 #import "@tola/pages:0.0.0": pages
-#import "@tola/current:0.0.0": breadcrumbs
+#import "@tola/current:0.0.0": at-offset, take-prev, take-next
 
-#let crumbs = breadcrumbs(pages(), include-root: true)
+#let dated = (pages()
+  .filter(p => "/posts/" in p.permalink and p.date != none)
+  .sorted(key: p => p.date))
 
-#html.nav(class: "breadcrumbs")[
-  #for (i, crumb) in crumbs.enumerate() {
-    if i > 0 [ / ]
-    link(crumb.permalink)[#crumb.title]
-  }
-]
-// Output: Home / Blog / My Post
-```
-
-</details>
-
-<details>
-<summary>Example: Tag Cloud</summary>
-
-List all tags with post counts:
-
-```typst
-#import "@tola/pages:0.0.0": pages, all-tags, by-tag
-
-#for tag in all-tags() {
-  let count = by-tag(tag).len()
-  [#link("/tags/" + tag + "/")[#tag (#count)] ]
-}
+#let two-back = at-offset(dated, -2)
+#let two-forward = at-offset(dated, 2)
+#let previous = take-prev(dated, n: 2)
+#let next = take-next(dated, n: 2)
 ```
 
 </details>
@@ -527,7 +433,7 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 ```nix
 {
   inputs = {
-    tola.url = "github:tola-ssg/tola-ssg/v0.6.5";
+    tola.url = "github:tola-ssg/tola-ssg/v0.7.0";
     # ...
   };
 }
@@ -561,8 +467,6 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
   ];
 }
 ```
-
-> **Note**: The `default` package builds natively for your system. If a pre-built binary is not available in the cache for `default`, Nix will build it from source. The specific architecture packages (e.g., `aarch64-darwin`) are explicit cross-compilation targets that are likely populated in the cache.
 
 ## Note
 

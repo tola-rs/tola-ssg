@@ -9,6 +9,7 @@ use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::log;
 use crate::page::CompiledPage;
+use crate::utils::path::route::strip_path_prefix_from_page_url;
 use crate::utils::plural_s;
 
 /// URL sources map: URL -> list of source files claiming that URL
@@ -115,6 +116,11 @@ fn relativize_paths(paths: &[PathBuf], root: &Path) -> Vec<PathBuf> {
 ///   - content/b.typ
 /// ```
 pub fn print_conflicts(conflicts: &[UrlConflict]) {
+    print_conflicts_with_prefix(conflicts, "");
+}
+
+/// Print conflicts with `path_prefix` stripped for user-visible output.
+pub fn print_conflicts_with_prefix(conflicts: &[UrlConflict], prefix: &str) {
     if conflicts.is_empty() {
         return;
     }
@@ -126,7 +132,13 @@ pub fn print_conflicts(conflicts: &[UrlConflict]) {
 
     for conflict in conflicts {
         eprintln!();
-        log!("url"; "{} ({} source{})", conflict.url, conflict.sources.len(), plural_s(conflict.sources.len()));
+        log!(
+            "url";
+            "{} ({} source{})",
+            strip_path_prefix_from_page_url(conflict.url.as_str(), prefix),
+            conflict.sources.len(),
+            plural_s(conflict.sources.len())
+        );
         for source in &conflict.sources {
             eprintln!("  - {}", source.display());
         }
@@ -135,16 +147,25 @@ pub fn print_conflicts(conflicts: &[UrlConflict]) {
 
 /// Format conflicts as a string (for error messages)
 pub fn format_conflicts(conflicts: &[UrlConflict]) -> String {
+    format_conflicts_with_prefix(conflicts, "")
+}
+
+/// Format conflicts as a string with `path_prefix` stripped.
+pub fn format_conflicts_with_prefix(conflicts: &[UrlConflict], prefix: &str) -> String {
     conflicts
         .iter()
-        .map(format_single_conflict)
+        .map(|c| format_single_conflict(c, prefix))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// Format a single conflict for display
-fn format_single_conflict(conflict: &UrlConflict) -> String {
-    let mut lines = vec![format!("{} ({})", conflict.url, conflict.sources.len())];
+fn format_single_conflict(conflict: &UrlConflict, prefix: &str) -> String {
+    let mut lines = vec![format!(
+        "{} ({})",
+        strip_path_prefix_from_page_url(conflict.url.as_str(), prefix),
+        conflict.sources.len()
+    )];
     for source in &conflict.sources {
         lines.push(format!("  - {}", source.display()));
     }
@@ -293,5 +314,20 @@ mod tests {
         assert!(formatted.contains("/foo/"));
         assert!(formatted.contains("content/a.typ"));
         assert!(formatted.contains("content/b.typ"));
+    }
+
+    #[test]
+    fn test_format_conflicts_with_prefix() {
+        let conflicts = vec![UrlConflict {
+            url: UrlPath::from_page("/example-sites/starter/foo/"),
+            sources: vec![
+                PathBuf::from("content/a.typ"),
+                PathBuf::from("content/b.typ"),
+            ],
+        }];
+
+        let formatted = format_conflicts_with_prefix(&conflicts, "example-sites/starter");
+        assert!(formatted.contains("/foo/"));
+        assert!(!formatted.contains("/example-sites/starter/foo/"));
     }
 }
