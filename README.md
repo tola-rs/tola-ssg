@@ -1,6 +1,9 @@
 # tola-ssg
 
-A static site generator for Typst-based websites.  \
+A static site generator for Typst-based websites.
+
+> Note (v0.7.0): Released now. Some caching-related bugs may still exist. You can use `tola s -c`(`serve --clean`) as a workaround, but please try regular `serve` first so I can collect feedback and fix these issues in upcoming updates. Thanks for your support!
+
 
 ## Table of Contents
 
@@ -9,8 +12,9 @@ A static site generator for Typst-based websites.  \
 - [Philosophy](#philosophy)
 - [Usage](#usage)
 - [Installation](#installation)
-- [Roadmap](#roadmap-v070)
+- [Community](#community)
 - [Note](#note)
+- [Acknowledgements](#acknowledgements)
 
 ## Showcase
 
@@ -468,6 +472,11 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 }
 ```
 
+## Community
+
+- Matrix: [`#tola:matrix.org`](https://matrix.to/#/#tola:matrix.org)
+- QQ: `1065579014`
+
 ## Note
 
 > **Early development & experimental HTML export**
@@ -484,12 +493,16 @@ These are upstream limitations in Typst itself, not `tola`. As Typst's HTML back
 
 ## Documentation
 
-**Coming soon!**
-
-In the meantime:
 - Run `tola --help` and `tola <command> --help` for CLI usage
-- See [tola-rs/example-sites](https://github.com/tola-rs/example-sites) for examples
-- Open an issue if you have questions
+- See [tola-rs/example-sites](https://github.com/tola-rs/example-sites) for examples and source code
+- Open an issue if you have any question
+
+More formal documentation to follow.
+
+# Acknowledgements
+
+- [typsite](https://github.com/Glomzzz/typsite): Static site generator(SSG) for typst
+- [kodama](https://github.com/kokic/kodama): A Typst-friendly static Zettelkästen site generator.
 
 ## License
 
