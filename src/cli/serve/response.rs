@@ -295,6 +295,12 @@ fn send_body(
     body: Vec<u8>,
     no_cache: bool,
 ) -> Result<()> {
+    let body = if content_type.starts_with("text/html") {
+        crate::utils::html::ensure_doctype_bytes(body)
+    } else {
+        body
+    };
+
     let response = Response::from_data(body)
         .with_status_code(StatusCode(status))
         .with_header(make_header("Content-Type", content_type))
@@ -307,11 +313,11 @@ fn send_body(
     request.respond(response)?;
     Ok(())
 }
-
 /// Send HTML without X-Tola-Ready (for welcome pages)
 fn send_html(request: Request, body: String) -> Result<()> {
     use crate::utils::mime::types::HTML;
-    let response = Response::from_string(body).with_header(make_header("Content-Type", HTML));
+    let response = Response::from_string(crate::utils::html::ensure_doctype(body))
+        .with_header(make_header("Content-Type", HTML));
     request.respond(response)?;
     Ok(())
 }
@@ -353,4 +359,25 @@ fn with_no_cache_headers<R: std::io::Read>(response: Response<R>) -> Response<R>
         ))
         .with_header(make_header("Pragma", "no-cache"))
         .with_header(make_header("Expires", "0"))
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn prepends_doctype_to_html_bytes() {
+        let body =
+            crate::utils::html::ensure_doctype_bytes(b"<html><body>Hi</body></html>".to_vec());
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .starts_with("<!DOCTYPE html>\n<html>")
+        );
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_doctype() {
+        let body = crate::utils::html::ensure_doctype("<!DOCTYPE html>\n<html></html>".to_string());
+        assert_eq!(body.matches("<!DOCTYPE html>").count(), 1);
+    }
 }

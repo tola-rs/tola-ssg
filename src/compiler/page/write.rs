@@ -60,11 +60,22 @@ fn build_final_html(
     let hash_marker = freshness::build_hash_marker(source_hash, deps_hash);
     let html_str = String::from_utf8_lossy(html_content);
 
-    if let Some(pos) = html_str.rfind("</html>") {
-        format!("{}{}\n</html>", &html_str[..pos], hash_marker)
+    let html = if let Some(pos) = html_str.rfind("</html>") {
+        format!(
+            "{}{}
+</html>",
+            &html_str[..pos],
+            hash_marker
+        )
     } else {
-        format!("{}\n{}", html_str, hash_marker)
-    }
+        format!(
+            "{}
+{}",
+            html_str, hash_marker
+        )
+    };
+
+    crate::utils::html::ensure_doctype(html)
 }
 
 fn build_redirect_html(canonical_url: &UrlPath) -> String {
@@ -126,4 +137,26 @@ fn write_redirect_file(
     fs::write(&output_file, html)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_final_html;
+    use crate::freshness::ContentHash;
+
+    fn hash(byte: u8) -> ContentHash {
+        ContentHash::new([byte; 32])
+    }
+
+    #[test]
+    fn prepends_doctype_to_compiled_html() {
+        let html = build_final_html(b"<html><body>Hi</body></html>", &hash(1), None);
+        assert!(html.starts_with("<!DOCTYPE html>\n<html>"));
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_doctype() {
+        let html = crate::utils::html::ensure_doctype("<!DOCTYPE html>\n<html></html>".to_string());
+        assert_eq!(html.matches("<!DOCTYPE html>").count(), 1);
+    }
 }

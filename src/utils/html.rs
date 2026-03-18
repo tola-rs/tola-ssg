@@ -11,6 +11,9 @@
 
 use std::borrow::Cow;
 
+/// Standard HTML5 doctype.
+pub const HTML_DOCTYPE: &str = "<!DOCTYPE html>";
+
 // =============================================================================
 // HTML Escaping
 // =============================================================================
@@ -140,6 +143,56 @@ pub fn unescape(s: &str) -> Cow<'_, str> {
     }
 
     Cow::Owned(result)
+}
+
+// =============================================================================
+// HTML Document Helpers
+// =============================================================================
+
+/// Check whether an HTML string already starts with the standard doctype.
+#[inline]
+pub fn has_doctype(html: &str) -> bool {
+    let trimmed = html.trim_start_matches(|c: char| c.is_whitespace() || c == '﻿');
+    trimmed
+        .get(..HTML_DOCTYPE.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(HTML_DOCTYPE))
+}
+
+/// Check whether HTML bytes already start with the standard doctype.
+#[inline]
+pub fn has_doctype_bytes(body: &[u8]) -> bool {
+    let trimmed = body
+        .iter()
+        .copied()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    trimmed
+        .get(..HTML_DOCTYPE.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(HTML_DOCTYPE.as_bytes()))
+}
+
+/// Prepend the standard doctype unless it is already present.
+#[inline]
+pub fn ensure_doctype(html: String) -> String {
+    if has_doctype(&html) {
+        html
+    } else {
+        format!("{HTML_DOCTYPE}\n{html}")
+    }
+}
+
+/// Prepend the standard doctype to HTML bytes unless it is already present.
+#[inline]
+pub fn ensure_doctype_bytes(body: Vec<u8>) -> Vec<u8> {
+    if has_doctype_bytes(&body) {
+        body
+    } else {
+        let mut result = Vec::with_capacity(HTML_DOCTYPE.len() + 1 + body.len());
+        result.extend_from_slice(HTML_DOCTYPE.as_bytes());
+        result.push(b'\n');
+        result.extend_from_slice(&body);
+        result
+    }
 }
 
 // =============================================================================
