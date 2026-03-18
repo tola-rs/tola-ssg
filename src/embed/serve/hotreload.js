@@ -170,8 +170,10 @@
           this.pageActive = true;
           this.attemptReconnect();
         } else {
-          this.pageActive = false;
-          this.closeWsSilently();
+          // Keep the socket alive for ordinary tab switches so edits made while
+          // you're in the editor still patch the page in the background.
+          // Only close on real page lifecycle exits like pagehide/freeze.
+          this.pageActive = true;
         }
       });
 
