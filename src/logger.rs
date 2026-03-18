@@ -114,8 +114,10 @@ pub fn log(module: &str, message: &str) {
     let bar_count = BAR_COUNT.load(Ordering::SeqCst);
     if bar_count > 0 {
         execute!(stdout, cursor::MoveUp(bar_count as u16)).ok();
+        execute!(stdout, cursor::MoveToColumn(0)).ok();
         execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
     } else {
+        execute!(stdout, cursor::MoveToColumn(0)).ok();
         execute!(stdout, Clear(ClearType::UntilNewLine)).ok();
     }
 
@@ -231,6 +233,7 @@ impl WatchStatus {
             #[allow(clippy::cast_possible_truncation)]
             let lines = self.last_lines as u16;
             execute!(stdout, cursor::MoveUp(lines)).ok();
+            execute!(stdout, cursor::MoveToColumn(0)).ok();
             execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
         }
 
@@ -258,6 +261,7 @@ impl WatchStatus {
             #[allow(clippy::cast_possible_truncation)]
             let lines = self.last_lines as u16;
             execute!(stdout, cursor::MoveUp(lines)).ok();
+            execute!(stdout, cursor::MoveToColumn(0)).ok();
             execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
             stdout.flush().ok();
             self.last_lines = 0;
