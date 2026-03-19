@@ -124,9 +124,7 @@ impl StoredPageMap {
 
     /// Insert headings for a page.
     pub fn insert_headings(&self, permalink: UrlPath, headings: Vec<ScannedHeading>) {
-        if !headings.is_empty() {
-            self.headings.write().insert(permalink, headings);
-        }
+        self.headings.write().insert(permalink, headings);
     }
 
     /// Insert source file path to permalink mapping.
@@ -162,6 +160,7 @@ impl StoredPageMap {
             && old_permalink != new_permalink
         {
             self.remove_page(&old_permalink);
+            self.headings.write().remove(&old_permalink);
             if matches!(stale_link_policy, StaleLinkPolicy::Clear) {
                 PAGE_LINKS.record(&old_permalink, vec![]);
             }
@@ -337,14 +336,21 @@ mod tests {
         )
     }
 
+    fn store_with_pages(pages: &[(&str, &str, Option<&str>, bool)]) -> StoredPageMap {
+        let store = StoredPageMap::new();
+        for (url, title, date, draft) in pages {
+            let (url, meta) = make_page(url, title, *date, *draft);
+            store.insert_page(url, meta);
+        }
+        store
+    }
+
     #[test]
     fn test_insert_and_get_pages() {
-        let store = StoredPageMap::new();
-        let (url_a, meta_a) = make_page("/a/", "A", Some("2024-01-10"), false);
-        let (url_b, meta_b) = make_page("/b/", "B", Some("2024-01-20"), false);
-        store.insert_page(url_a, meta_a);
-        store.insert_page(url_b, meta_b);
-
+        let store = store_with_pages(&[
+            ("/a/", "A", Some("2024-01-10"), false),
+            ("/b/", "B", Some("2024-01-20"), false),
+        ]);
         let pages = store.get_pages();
         assert_eq!(pages.len(), 2);
         assert_eq!(pages[0].title(), "B"); // Newest first
@@ -352,25 +358,14 @@ mod tests {
     }
 
     #[test]
-    fn test_draft_excluded() {
-        let store = StoredPageMap::new();
-        let (url_pub, meta_pub) = make_page("/pub/", "Published", Some("2024-01-15"), false);
-        let (url_draft, meta_draft) = make_page("/draft/", "Draft", Some("2024-01-20"), true);
-        store.insert_page(url_pub, meta_pub);
-        store.insert_page(url_draft, meta_draft);
-
+    fn test_page_filters_and_json_with_drafts() {
+        let store = store_with_pages(&[
+            ("/pub/", "Published", Some("2024-01-15"), false),
+            ("/draft/", "Draft", Some("2024-01-20"), true),
+        ]);
         let pages = store.get_pages();
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].title(), "Published");
-    }
-
-    #[test]
-    fn test_get_pages_with_drafts_includes_drafts() {
-        let store = StoredPageMap::new();
-        let (url_pub, meta_pub) = make_page("/pub/", "Published", Some("2024-01-15"), false);
-        let (url_draft, meta_draft) = make_page("/draft/", "Draft", Some("2024-01-20"), true);
-        store.insert_page(url_pub, meta_pub);
-        store.insert_page(url_draft, meta_draft);
 
         let pages = store.get_pages_with_drafts();
         assert_eq!(pages.len(), 2);
@@ -384,42 +379,6 @@ mod tests {
                 .iter()
                 .any(|p| p.permalink == UrlPath::from_page("/draft/"))
         );
-    }
-
-    #[test]
-    fn test_clear() {
-        let store = StoredPageMap::new();
-        let (url, meta) = make_page("/test/", "Test", None, false);
-        store.insert_page(url, meta);
-
-        assert!(!store.is_empty());
-        store.clear();
-        assert!(store.is_empty());
-    }
-
-    #[test]
-    fn test_json_serialization() {
-        let store = StoredPageMap::new();
-        let (url, meta) = make_page("/hello/", "Hello World", Some("2024-01-15"), false);
-        store.insert_page(url, meta);
-
-        let json = store.pages_to_json_value();
-        let arr = json.as_array().unwrap();
-        assert_eq!(arr.len(), 1);
-
-        let page = &arr[0];
-        assert_eq!(page["permalink"], "/hello/");
-        assert_eq!(page["title"], "Hello World");
-        assert_eq!(page["date"], "2024-01-15");
-    }
-
-    #[test]
-    fn test_json_with_drafts_serialization() {
-        let store = StoredPageMap::new();
-        let (url_pub, meta_pub) = make_page("/pub/", "Published", Some("2024-01-15"), false);
-        let (url_draft, meta_draft) = make_page("/draft/", "Draft", Some("2024-01-20"), true);
-        store.insert_page(url_pub, meta_pub);
-        store.insert_page(url_draft, meta_draft);
 
         let json = store.pages_to_json_value_with_drafts();
         let arr = json.as_array().unwrap();
@@ -429,40 +388,49 @@ mod tests {
     }
 
     #[test]
-    fn test_title_fallback_to_permalink() {
+    fn test_clear_and_fallback_fields() {
         let store = StoredPageMap::new();
-        let url = UrlPath::from_page("/no-title/");
-        let meta = PageMeta::default(); // No title
+        let (url, meta) = make_page("/test/", "Test", None, false);
         store.insert_page(url, meta);
+        assert!(!store.is_empty());
+        store.clear();
+        assert!(store.is_empty());
 
+        let url = UrlPath::from_page("/no-title/");
+        store.insert_page(url, PageMeta::default());
         let pages = store.get_pages();
         assert_eq!(pages[0].title(), "/no-title/");
     }
 
     #[test]
-    fn test_extra_fields_serialized() {
+    fn test_json_serialization_and_extra_fields() {
         use super::super::JsonMap;
 
+        let store = store_with_pages(&[("/hello/", "Hello World", Some("2024-01-15"), false)]);
+        let json = store.pages_to_json_value();
+        let page = &json.as_array().unwrap()[0];
+        assert_eq!(page["permalink"], "/hello/");
+        assert_eq!(page["title"], "Hello World");
+        assert_eq!(page["date"], "2024-01-15");
+
         let store = StoredPageMap::new();
-        let url = UrlPath::from_page("/custom/");
         let mut extra = JsonMap::new();
         extra.insert(
             "custom_field".to_string(),
             serde_json::json!("custom_value"),
         );
         extra.insert("number".to_string(), serde_json::json!(42));
-
-        let meta = PageMeta {
-            title: Some("Custom".to_string()),
-            extra,
-            ..Default::default()
-        };
-        store.insert_page(url, meta);
+        store.insert_page(
+            UrlPath::from_page("/custom/"),
+            PageMeta {
+                title: Some("Custom".to_string()),
+                extra,
+                ..Default::default()
+            },
+        );
 
         let json = store.pages_to_json_value();
         let page = &json.as_array().unwrap()[0];
-
-        // User-defined fields should be present
         assert_eq!(page["custom_field"], "custom_value");
         assert_eq!(page["number"], 42);
         assert_eq!(page["permalink"], "/custom/");
@@ -487,6 +455,25 @@ mod tests {
             Some(permalink.clone())
         );
         assert_eq!(store.get_permalink_by_source(&alias), Some(permalink));
+    }
+
+    #[test]
+    fn test_insert_headings_replaces_with_empty_list() {
+        let store = StoredPageMap::new();
+        let permalink = UrlPath::from_page("/notes/");
+
+        store.insert_headings(
+            permalink.clone(),
+            vec![ScannedHeading {
+                level: 1,
+                text: "Intro".to_string(),
+                supplement: None,
+            }],
+        );
+        assert_eq!(store.get_headings(&permalink).len(), 1);
+
+        store.insert_headings(permalink.clone(), vec![]);
+        assert!(store.get_headings(&permalink).is_empty());
     }
 
     #[test]

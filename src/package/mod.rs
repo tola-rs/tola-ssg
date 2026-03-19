@@ -8,7 +8,7 @@
 //! # Usage in Typst
 //!
 //! ```typst
-//! #import "@tola/site:0.0.0": title, author, extra
+//! #import "@tola/site:0.0.0": info, root
 //! #import "@tola/pages:0.0.0": pages, by-tag, all-tags
 //! #import "@tola/current:0.0.0": permalink, siblings, prev
 //! ```

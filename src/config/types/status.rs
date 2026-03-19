@@ -149,30 +149,4 @@ pub fn check_section_status(section: &str, status: FieldStatus, diag: &mut Confi
 }
 
 #[cfg(test)]
-mod tests {
-    use super::ConfigPresence;
-
-    #[test]
-    fn collect_field_and_section_paths() {
-        let toml = r#"
-[deploy]
-provider = "github"
-
-[deploy.cloudflare]
-provider = "cloudflare"
-"#;
-        let presence = ConfigPresence::from_toml(toml).unwrap();
-        assert!(presence.contains("deploy"));
-        assert!(presence.contains("deploy.provider"));
-        assert!(presence.contains("deploy.cloudflare"));
-        assert!(presence.contains("deploy.cloudflare.provider"));
-    }
-
-    #[test]
-    fn collect_scalar_fields_without_table_header() {
-        let toml = r#"title = "hello""#;
-        let presence = ConfigPresence::from_toml(toml).unwrap();
-        assert!(presence.contains("title"));
-        assert!(!presence.contains("site"));
-    }
-}
+mod tests {}

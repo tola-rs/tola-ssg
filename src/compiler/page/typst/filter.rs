@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use typst_batch::prelude::*;
 
 use super::iterative::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current_in_store};
-use crate::compiler::page::format::{DraftFilter, FilterResult, ScannedHeading, ScannedPage};
-use crate::compiler::page::{Typst, TypstBatcher};
+use crate::compiler::page::TypstBatcher;
+use crate::compiler::page::format::{ScannedHeading, ScannedPage, ScannedPageLink};
 use crate::config::SiteConfig;
+use crate::core::LinkOrigin;
 use crate::package::build_filter_inputs_with_site;
 use crate::page::{
     HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StaleLinkPolicy, StoredPageMap,
@@ -74,8 +75,8 @@ fn to_scanned_page(
     let links = scan
         .links()
         .into_iter()
-        .filter(|link| link.is_site_root())
-        .map(|link| link.dest)
+        .map(|link| ScannedPageLink::new(link.dest, LinkOrigin::from(link.source)))
+        .filter(ScannedPageLink::is_page_candidate)
         .collect();
     let headings = scan
         .headings()
@@ -227,18 +228,7 @@ fn filter_drafts_impl<'a>(
 /// for pre-scan optimization
 ///
 /// Returns batcher for reuse in subsequent compilation phases
-pub fn filter_drafts<'a>(files: &[&PathBuf], root: &'a Path, label: &str) -> TypstFilterResult<'a> {
-    // Preserve API compatibility for trait-based call sites that don't carry SiteConfig.
-    // Use default config rooted at the caller's workspace to keep package resolution valid.
-    let mut config = SiteConfig::default();
-    config.set_root(root);
-    filter_drafts_impl(files, root, label, &config)
-}
-
-/// Filter Typst drafts with explicit site config injection.
-///
-/// This keeps `@tola/site` behavior consistent between filter and visible phases.
-pub fn filter_drafts_with_config<'a>(
+pub fn filter_drafts<'a>(
     files: &[&PathBuf],
     root: &'a Path,
     label: &str,
@@ -258,35 +248,15 @@ fn is_draft(scan: &typst_batch::ScanResult, label: &str) -> bool {
         .unwrap_or(false)
 }
 
-// DraftFilter trait implementation (without batcher, for generic use)
-impl DraftFilter for Typst {
-    type Extra = ();
-
-    fn filter_drafts<'a>(
-        files: Vec<&'a PathBuf>,
-        root: &'a Path,
-        label: &str,
-    ) -> FilterResult<'a, Self::Extra> {
-        let result = filter_drafts(&files, root, label);
-        // Note: batcher is discarded here. Use filter_drafts() directly to get batcher.
-        let non_draft_files: Vec<_> = result
-            .scanned
-            .iter()
-            .filter_map(|s| files.iter().find(|f| ***f == s.path).copied())
-            .collect();
-        FilterResult::new(non_draft_files, result.draft_count)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::page::typst::init::init_typst;
+    use crate::compiler::page::typst::init_runtime;
     use std::fs;
     use tempfile::TempDir;
 
     #[test]
-    fn test_filter_drafts_with_config_injects_site_extra() {
+    fn test_filter_drafts_injects_site_extra() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let page = root.join("page.typ");
@@ -302,7 +272,7 @@ mod tests {
         )
         .unwrap();
 
-        init_typst(&[]);
+        init_runtime(&[], root.to_path_buf(), Vec::new());
 
         let mut config = SiteConfig::default();
         config.set_root(root);
@@ -314,7 +284,7 @@ mod tests {
 
         let files = [page];
         let refs = files.iter().collect::<Vec<_>>();
-        let result = filter_drafts_with_config(&refs, root, "tola-meta", &config);
+        let result = filter_drafts(&refs, root, "tola-meta", &config);
 
         assert!(
             result.errors.is_empty(),
@@ -325,7 +295,41 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_drafts_with_config_allows_current_permalink_link() {
+    fn test_filter_drafts_injects_site_root() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let page = root.join("page.typ");
+
+        fs::write(
+            &page,
+            r#"
+#import "@tola/site:0.0.0": root
+#metadata((title: root)) <tola-meta>
+= Hello
+"#,
+        )
+        .unwrap();
+
+        init_runtime(&[], root.to_path_buf(), Vec::new());
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.path_prefix = std::path::PathBuf::from("sub/xxx");
+
+        let files = [page];
+        let refs = files.iter().collect::<Vec<_>>();
+        let result = filter_drafts(&refs, root, "tola-meta", &config);
+
+        assert!(
+            result.errors.is_empty(),
+            "unexpected scan errors: {:?}",
+            result.errors
+        );
+        assert_eq!(result.scanned.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_drafts_allows_current_permalink_link() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let content_dir = root.join("content");
@@ -343,7 +347,7 @@ mod tests {
         )
         .unwrap();
 
-        init_typst(&[]);
+        init_runtime(&[], root.to_path_buf(), Vec::new());
 
         let mut config = SiteConfig::default();
         config.set_root(root);
@@ -351,7 +355,7 @@ mod tests {
 
         let files = [page];
         let refs = files.iter().collect::<Vec<_>>();
-        let result = filter_drafts_with_config(&refs, root, "tola-meta", &config);
+        let result = filter_drafts(&refs, root, "tola-meta", &config);
 
         assert!(
             result.errors.is_empty(),

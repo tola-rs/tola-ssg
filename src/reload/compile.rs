@@ -9,6 +9,7 @@ use crate::compiler::family::Indexed;
 use crate::compiler::page::process_page;
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
+use crate::page::PageRoute;
 use tola_vdom::Document;
 
 /// Result of compiling a single file
@@ -17,6 +18,8 @@ pub enum CompileOutcome {
     /// Successfully compiled to VDOM
     Vdom {
         path: PathBuf,
+        route: PageRoute,
+        title: Option<String>,
         url_path: UrlPath,
         vdom: Box<Document<Indexed>>,
         /// Compilation warnings (for persistence)
@@ -62,21 +65,21 @@ pub fn compile_page(path: &Path, config: &SiteConfig) -> CompileOutcome {
     }
 }
 
-/// Compile a startup batch in parallel using the same per-file semantics as hot-reload.
+/// Compile a startup batch using the same per-file semantics as hot-reload.
 ///
 /// This is used by `serve` cache startup to ensure changed files are written to disk
 /// and draft transitions are cleaned up consistently.
+///
+/// Keep this intentionally low-concurrency. During `serve` startup we want
+/// request-driven compiles to stay responsive; a full-core rayon batch here
+/// can make the first interactive request feel like it is waiting for a
+/// rebuild even though on-demand compilation exists.
 pub fn compile_startup_batch(paths: &[PathBuf], config: &SiteConfig) -> Vec<CompileOutcome> {
-    use rayon::prelude::*;
-
-    let outcomes: Vec<_> = paths
-        .par_iter()
-        .map(|path| compile_page(path, config))
-        .collect();
-
-    // Rayon workers keep dependency records in thread-local buffers.
-    // Flush them once after the batch so dependency-driven recompiles stay correct.
-    crate::compiler::dependency::flush_thread_local_deps();
+    let mut outcomes = Vec::with_capacity(paths.len());
+    for path in paths {
+        outcomes.push(compile_page(path, config));
+        crate::compiler::dependency::flush_current_thread_deps();
+    }
 
     outcomes
 }
@@ -86,6 +89,12 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
     match process_page(BuildMode::DEVELOPMENT, path, config) {
         Ok(Some(page_result)) => {
             let permalink = page_result.permalink;
+            let route = page_result.page.route.clone();
+            let title = page_result
+                .page
+                .content_meta
+                .as_ref()
+                .and_then(|meta| meta.title.clone());
 
             if let Err(e) = crate::compiler::page::write_page_html(&page_result.page) {
                 return CompileOutcome::Error {
@@ -106,6 +115,8 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
 
                 CompileOutcome::Vdom {
                     path: path.to_path_buf(),
+                    route,
+                    title,
                     url_path: permalink,
                     vdom: Box::new(vdom),
                     warnings,
@@ -132,6 +143,13 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
 ///
 /// Returns true when a previously visible page existed and was removed.
 fn cleanup_draft_state(path: &Path, config: &SiteConfig) -> bool {
+    cleanup_removed_source_state(path, config).is_some()
+}
+
+/// Clean all runtime state for a removed or hidden source file.
+///
+/// Returns the previously visible URL if one was known.
+pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<UrlPath> {
     let normalized = crate::utils::path::normalize_path(path);
     let has_alt = normalized.as_path() != path;
 
@@ -172,7 +190,7 @@ fn cleanup_draft_state(path: &Path, config: &SiteConfig) -> bool {
     }
 
     let Some(old_url) = old_url else {
-        return false;
+        return None;
     };
 
     // Remove cached VDOM and link-graph edges for this page.
@@ -180,7 +198,7 @@ fn cleanup_draft_state(path: &Path, config: &SiteConfig) -> bool {
     crate::page::PAGE_LINKS.record(&old_url, vec![]);
 
     cleanup_output_file(config, &old_url);
-    true
+    Some(old_url)
 }
 
 fn cleanup_output_file(config: &SiteConfig, url: &UrlPath) {
@@ -327,8 +345,58 @@ mod tests {
                 .is_none()
         );
         assert!(!output_file.exists());
+        assert!(
+            crate::page::PAGE_LINKS
+                .links_to(&route.permalink)
+                .is_empty()
+        );
         assert_ne!(crate::page::STORED_PAGES.pages_hash(), hash_published);
 
+        reset_global_state();
+    }
+
+    #[test]
+    fn cleanup_removed_source_state_clears_page_links() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let page = content_dir.join("post.md");
+        fs::write(&page, "---\ntitle: Post\n---\n\n# Post\n").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir.clone();
+        config.build.output = output_dir.clone();
+
+        reset_global_state();
+
+        let route = crate::page::CompiledPage::from_paths(&page, &config)
+            .unwrap()
+            .route;
+        crate::page::STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
+        crate::page::STORED_PAGES.insert_page(
+            route.permalink.clone(),
+            crate::page::PageMeta {
+                title: Some("Post".to_string()),
+                draft: false,
+                ..Default::default()
+            },
+        );
+        crate::address::GLOBAL_ADDRESS_SPACE
+            .write()
+            .register_page(route.clone(), Some("Post".to_string()));
+        crate::page::PAGE_LINKS.record(&route.permalink, vec![UrlPath::from_page("/target/")]);
+
+        let removed = cleanup_removed_source_state(&page, &config);
+
+        assert_eq!(removed, Some(route.permalink.clone()));
+        assert!(
+            crate::page::PAGE_LINKS
+                .links_to(&route.permalink)
+                .is_empty()
+        );
         reset_global_state();
     }
 }

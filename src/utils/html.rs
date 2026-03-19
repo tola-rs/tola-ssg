@@ -477,29 +477,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_escape_plain() {
-        assert_eq!(escape("hello world"), "hello world");
-    }
-
-    #[test]
-    fn test_escape_special_chars() {
-        assert_eq!(escape("<script>"), "&lt;script&gt;");
-        assert_eq!(escape("a & b"), "a &amp; b");
-        assert_eq!(escape("say \"hi\""), "say &quot;hi&quot;");
-        assert_eq!(escape("it's"), "it&#39;s");
-    }
-
-    #[test]
-    fn test_escape_mixed() {
-        assert_eq!(
-            escape("<a href=\"#\">link & text</a>"),
-            "&lt;a href=&quot;#&quot;&gt;link &amp; text&lt;/a&gt;"
-        );
-    }
-
-    #[test]
-    fn test_escape_empty() {
-        assert_eq!(escape(""), "");
+    fn test_escape_cases() {
+        for (input, expected) in [
+            ("hello world", "hello world"),
+            ("<script>", "&lt;script&gt;"),
+            ("a & b", "a &amp; b"),
+            ("say \"hi\"", "say &quot;hi&quot;"),
+            ("it's", "it&#39;s"),
+            (
+                "<a href=\"#\">link & text</a>",
+                "&lt;a href=&quot;#&quot;&gt;link &amp; text&lt;/a&gt;",
+            ),
+            ("", ""),
+        ] {
+            assert_eq!(escape(input), expected, "{input:?}");
+        }
     }
 
     #[test]
@@ -522,32 +514,38 @@ mod tests {
     }
 
     #[test]
-    fn test_void_elements() {
-        assert!(is_void_element("br"));
-        assert!(is_void_element("hr"));
-        assert!(is_void_element("img"));
-        assert!(is_void_element("input"));
-        assert!(!is_void_element("div"));
-        assert!(!is_void_element("span"));
-        assert!(!is_void_element("a"));
-    }
+    fn test_element_classification_cases() {
+        for (tag, expected) in [
+            ("br", true),
+            ("hr", true),
+            ("img", true),
+            ("input", true),
+            ("div", false),
+            ("span", false),
+            ("a", false),
+        ] {
+            assert_eq!(is_void_element(tag), expected, "{tag}");
+        }
 
-    #[test]
-    fn test_raw_text_elements() {
-        assert!(is_raw_text_element("script"));
-        assert!(is_raw_text_element("style"));
-        assert!(!is_raw_text_element("div"));
-        assert!(!is_raw_text_element("pre"));
-    }
+        for (tag, expected) in [
+            ("script", true),
+            ("style", true),
+            ("div", false),
+            ("pre", false),
+        ] {
+            assert_eq!(is_raw_text_element(tag), expected, "{tag}");
+        }
 
-    #[test]
-    fn test_block_elements() {
-        assert!(is_block_element("div"));
-        assert!(is_block_element("p"));
-        assert!(is_block_element("h1"));
-        assert!(is_block_element("ul"));
-        assert!(!is_block_element("span"));
-        assert!(!is_block_element("a"));
+        for (tag, expected) in [
+            ("div", true),
+            ("p", true),
+            ("h1", true),
+            ("ul", true),
+            ("span", false),
+            ("a", false),
+        ] {
+            assert_eq!(is_block_element(tag), expected, "{tag}");
+        }
     }
 
     #[test]

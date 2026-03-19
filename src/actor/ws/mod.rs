@@ -19,6 +19,7 @@ mod delivery;
 
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -26,7 +27,7 @@ use tungstenite::WebSocket;
 use tungstenite::protocol::Message;
 
 use super::messages::WsMsg;
-use crate::cache::PersistedError;
+use crate::cache::{PersistedDiagnostics, PersistedError};
 use crate::core::UrlPath;
 use crate::reload::active::ACTIVE_PAGE;
 use crate::reload::message::HotReloadMessage;
@@ -44,8 +45,10 @@ pub struct WsActor {
     rx: mpsc::Receiver<WsMsg>,
     /// Connected clients (shared for broadcast + read threads)
     clients: Arc<Mutex<Vec<RegisteredClient>>>,
-    /// Pending error to send to new clients (snapshot recovery)
-    pending_error: Arc<Mutex<Option<PersistedError>>>,
+    /// Current error set to send to new clients (snapshot recovery)
+    pending_errors: Arc<Mutex<PersistedDiagnostics>>,
+    /// Stop signal for the reader thread.
+    stop_reader: Arc<AtomicBool>,
 }
 
 impl WsActor {
@@ -54,13 +57,24 @@ impl WsActor {
         Self {
             rx,
             clients: Arc::new(Mutex::new(Vec::new())),
-            pending_error: Arc::new(Mutex::new(None)),
+            pending_errors: Arc::new(Mutex::new(PersistedDiagnostics::new())),
+            stop_reader: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Set initial pending error (for snapshot recovery)
+    /// Set one initial pending error (for snapshot recovery)
     pub fn with_pending_error(self, path: String, error: String) -> Self {
-        *self.pending_error.lock() = Some(PersistedError::new(path, String::new(), error));
+        self.with_pending_errors(vec![PersistedError::new(path, String::new(), error)])
+    }
+
+    /// Set all initial pending errors (for snapshot recovery)
+    pub fn with_pending_errors(self, errors: Vec<PersistedError>) -> Self {
+        {
+            let mut pending = self.pending_errors.lock();
+            for error in errors {
+                pending.push_error(error);
+            }
+        }
         self
     }
 
@@ -68,8 +82,9 @@ impl WsActor {
     pub async fn run(mut self) {
         // Spawn a background task to poll client messages
         let clients_for_reader = Arc::clone(&self.clients);
-        std::thread::spawn(move || {
-            Self::client_reader_loop(clients_for_reader);
+        let stop_reader = Arc::clone(&self.stop_reader);
+        let reader_handle = std::thread::spawn(move || {
+            Self::client_reader_loop(clients_for_reader, stop_reader);
         });
 
         while let Some(msg) = self.rx.recv().await {
@@ -125,7 +140,7 @@ impl WsActor {
 
                 WsMsg::Error { path, error } => {
                     // Cache error for new clients (snapshot recovery)
-                    *self.pending_error.lock() = Some(PersistedError::new(
+                    self.pending_errors.lock().push_error(PersistedError::new(
                         path.clone(),
                         String::new(),
                         error.clone(),
@@ -134,10 +149,9 @@ impl WsActor {
                     self.broadcast(Message::Text(hr_msg.to_json().into()));
                 }
 
-                WsMsg::ClearError => {
-                    // Clear pending error
-                    *self.pending_error.lock() = None;
-                    let hr_msg = HotReloadMessage::clear_error();
+                WsMsg::ClearError { path } => {
+                    self.pending_errors.lock().clear_errors_for(&path);
+                    let hr_msg = HotReloadMessage::clear_error(&path);
                     self.broadcast(Message::Text(hr_msg.to_json().into()));
                 }
 
@@ -151,14 +165,42 @@ impl WsActor {
 
                 WsMsg::Shutdown => {
                     crate::debug!("ws"; "shutting down");
-                    let mut clients = self.clients.lock();
-                    for mut client in clients.drain(..) {
-                        let _ = client.ws.close(None);
-                    }
-                    ACTIVE_PAGE.clear();
                     break;
                 }
             }
         }
+
+        self.shutdown_clients();
+        self.stop_reader.store(true, Ordering::SeqCst);
+        let _ = reader_handle.join();
+    }
+
+    fn shutdown_clients(&self) {
+        let mut clients = self.clients.lock();
+        for mut client in clients.drain(..) {
+            let _ = client.ws.close(None);
+        }
+        ACTIVE_PAGE.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WsActor;
+    use crate::core::UrlPath;
+    use crate::reload::active::ACTIVE_PAGE;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn run_clears_active_pages_when_channel_closes() {
+        ACTIVE_PAGE.add(UrlPath::from_page("/stale/"));
+
+        let (tx, rx) = mpsc::channel(1);
+        drop(tx);
+
+        let actor = WsActor::new(rx);
+        actor.run().await;
+
+        assert!(ACTIVE_PAGE.get_all().is_empty());
     }
 }

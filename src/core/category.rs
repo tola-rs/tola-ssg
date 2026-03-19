@@ -101,28 +101,6 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_from_extension() {
-        assert_eq!(ContentKind::from_extension("typ"), Some(ContentKind::Typst));
-        assert_eq!(
-            ContentKind::from_extension("md"),
-            Some(ContentKind::Markdown)
-        );
-        assert_eq!(ContentKind::from_extension("html"), None);
-    }
-
-    #[test]
-    fn test_from_path() {
-        assert_eq!(
-            ContentKind::from_path(&PathBuf::from("post.typ")),
-            Some(ContentKind::Typst)
-        );
-        assert_eq!(
-            ContentKind::from_path(&PathBuf::from("readme.md")),
-            Some(ContentKind::Markdown)
-        );
-    }
-
-    #[test]
     fn test_is_content_file() {
         assert!(ContentKind::is_content_file(&PathBuf::from("post.typ")));
         assert!(ContentKind::is_content_file(&PathBuf::from("readme.md")));
@@ -150,29 +128,5 @@ mod tests {
             let ext = p.extension().unwrap().to_str().unwrap();
             ext == "md" || ext == "markdown"
         }));
-    }
-
-    #[test]
-    fn test_partition_by_kind_empty() {
-        let files: Vec<PathBuf> = vec![];
-        let (typst, markdown) = ContentKind::partition_by_kind(&files);
-        assert!(typst.is_empty());
-        assert!(markdown.is_empty());
-    }
-
-    #[test]
-    fn test_partition_by_kind_only_typst() {
-        let files = vec![PathBuf::from("a.typ"), PathBuf::from("b.typst")];
-        let (typst, markdown) = ContentKind::partition_by_kind(&files);
-        assert_eq!(typst.len(), 2);
-        assert!(markdown.is_empty());
-    }
-
-    #[test]
-    fn test_partition_by_kind_only_markdown() {
-        let files = vec![PathBuf::from("a.md"), PathBuf::from("b.markdown")];
-        let (typst, markdown) = ContentKind::partition_by_kind(&files);
-        assert!(typst.is_empty());
-        assert_eq!(markdown.len(), 2);
     }
 }

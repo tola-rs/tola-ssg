@@ -51,14 +51,19 @@ pub struct VdomActor {
     error_state: PersistedDiagnostics,
 }
 
-/// Result of VdomActor::new() - (actor, cache_entries, first_error, warnings)
-pub type VdomRestoreResult = (VdomActor, usize, Option<(String, String)>, Vec<String>);
+/// Result of VdomActor::new() - (actor, cache_entries, restored_errors, warnings)
+pub type VdomRestoreResult = (
+    VdomActor,
+    usize,
+    Vec<crate::cache::PersistedError>,
+    Vec<String>,
+);
 
 impl VdomActor {
     /// Create a new VdomActor.
     ///
     /// Attempts to restore cache and diagnostics from disk.
-    /// Returns (actor, cache_count, first_error, warnings).
+    /// Returns (actor, cache_count, restored_errors, warnings).
     pub fn new(
         rx: mpsc::Receiver<VdomMsg>,
         ws_tx: mpsc::Sender<WsMsg>,
@@ -78,10 +83,17 @@ impl VdomActor {
         // Restore diagnostics from disk
         let error_state = restore_diagnostics(&root).unwrap_or_default();
 
-        // Get first error for WsActor initialization
-        let first_error = error_state
-            .first_error()
-            .map(|e| (e.path.clone(), crate::utils::ansi_to_html(&e.error)));
+        let restored_errors: Vec<_> = error_state
+            .errors()
+            .cloned()
+            .map(|error| {
+                crate::cache::PersistedError::new(
+                    error.path,
+                    error.url_path,
+                    crate::utils::ansi_to_html(&error.error),
+                )
+            })
+            .collect();
 
         // Get warnings for display
         let warnings: Vec<String> = error_state.warnings().map(|w| w.warning.clone()).collect();
@@ -97,7 +109,7 @@ impl VdomActor {
             error_state,
         };
 
-        (actor, restored, first_error, warnings)
+        (actor, restored, restored_errors, warnings)
     }
 
     /// Run the actor event loop.
@@ -128,6 +140,8 @@ impl VdomActor {
                 VdomMsg::Skip => {}
 
                 VdomMsg::BatchEnd => self.batch.flush(),
+
+                VdomMsg::ClearDiagnostics { path } => self.handle_clear_diagnostics(path).await,
 
                 VdomMsg::Clear => {
                     crate::compiler::page::BUILD_CACHE.clear();
@@ -255,6 +269,70 @@ mod persistence_tests {
         assert!(
             ws_rx.try_recv().is_err(),
             "duplicate identical error should not send another WS error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_distinct_errors_all_sent_to_ws() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let (_tx, rx) = mpsc::channel(10);
+        let (ws_tx, mut ws_rx) = mpsc::channel(10);
+
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+
+        actor
+            .handle_error(
+                root.join("articles.typ"),
+                UrlPath::from_page("/articles"),
+                "first error".to_string(),
+            )
+            .await;
+        actor
+            .handle_error(
+                root.join("programming.typ"),
+                UrlPath::from_page("/programming"),
+                "second error".to_string(),
+            )
+            .await;
+
+        let first = ws_rx.try_recv().expect("first error should be sent");
+        let second = ws_rx.try_recv().expect("second error should be sent");
+
+        assert!(matches!(first, WsMsg::Error { .. }));
+        assert!(matches!(second, WsMsg::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_clear_diagnostics_for_path_persists_and_notifies_ws() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let (_tx, rx) = mpsc::channel(10);
+        let (ws_tx, mut ws_rx) = mpsc::channel(10);
+
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        actor
+            .handle_error(
+                root.join("clear.typ"),
+                UrlPath::from_page("/clear"),
+                "clear me".to_string(),
+            )
+            .await;
+
+        let _ = ws_rx.try_recv().expect("initial error should be sent");
+
+        actor
+            .handle_clear_diagnostics(Some(root.join("clear.typ")))
+            .await;
+
+        let cleared = ws_rx.try_recv().expect("clear_error should be sent");
+        assert!(matches!(cleared, WsMsg::ClearError { .. }));
+
+        let state = restore_diagnostics(&root).unwrap();
+        assert_eq!(
+            state.error_count(),
+            0,
+            "path clear should persist empty errors"
         );
     }
 

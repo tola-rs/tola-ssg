@@ -2,6 +2,10 @@
 
 #let _tola_site_info = sys.inputs.at("__SITE_INFO_KEY__", default: (:))
 
+/// Effective relative site root path for internal links.
+/// Examples: "/", "/sub/xxx/"
+#let root = _tola_site_info.at("root", default: "/")
+
 /// Site metadata from [site.info] section.
 /// Access via `info.title`, `info.author`, `info.extra.xxx`, etc.
 #let info = (

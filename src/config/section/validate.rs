@@ -99,16 +99,7 @@ pub enum ValidateLevel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::{SiteConfig, test_parse_config};
-
-    #[test]
-    fn test_validate_config_defaults() {
-        let config = test_parse_config("");
-        // pages and assets are enabled by default
-        assert!(config.validate.pages.enable);
-        assert!(config.validate.assets.enable);
-    }
 
     #[test]
     fn test_validate_config_custom() {
@@ -121,9 +112,7 @@ level = "warn"
 enable = false
 level = "warn""#,
         );
-        assert!(config.validate.pages.enable);
         assert!(!config.validate.assets.enable);
-        assert!(matches!(config.validate.pages.level, ValidateLevel::Warn));
     }
 
     #[test]

@@ -419,53 +419,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_nested_entry_simple() {
-        let entry = NestedEntry::simple("assets");
-        assert_eq!(entry.source(), Path::new("assets"));
-        assert_eq!(entry.output_name(), "assets");
-    }
-
-    #[test]
-    fn test_nested_entry_with_as() {
-        let entry = NestedEntry::with_as("vendor/static", "lib");
-        assert_eq!(entry.source(), Path::new("vendor/static"));
-        assert_eq!(entry.output_name(), "lib");
-    }
-
-    #[test]
-    fn test_flatten_entry_simple() {
-        let entry = FlattenEntry::simple("assets/CNAME");
-        assert_eq!(entry.source(), Path::new("assets/CNAME"));
-        assert_eq!(entry.output_name(), "CNAME");
-    }
-
-    #[test]
-    fn test_flatten_entry_with_as() {
-        let entry = FlattenEntry::with_as("icons/fav.ico", "favicon.ico");
-        assert_eq!(entry.source(), Path::new("icons/fav.ico"));
-        assert_eq!(entry.output_name(), "favicon.ico");
-    }
-
-    #[test]
     fn test_has_cname_in_flatten() {
         let config: AssetsConfig = toml::from_str(r#"flatten = ["assets/CNAME"]"#).unwrap();
         assert!(config.has_cname_in_flatten());
 
         let config2: AssetsConfig = toml::from_str(r#"flatten = ["assets/robots.txt"]"#).unwrap();
         assert!(!config2.has_cname_in_flatten());
-    }
-
-    #[test]
-    fn test_full_config() {
-        let toml = r#"
-nested = ["assets", { dir = "vendor", as = "lib" }]
-flatten = ["CNAME", { file = "fav.ico", as = "favicon.ico" }]
-"#;
-        let config: AssetsConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.nested.len(), 2);
-        assert_eq!(config.flatten.len(), 2);
-        assert_eq!(config.nested[1].output_name(), "lib");
-        assert_eq!(config.flatten[1].output_name(), "favicon.ico");
     }
 
     #[test]

@@ -78,7 +78,8 @@ macros = { package = "tola-ssg-macros", version = "0.1.4" }
 # Typst integration (via typst-batch crate)
 typst-batch = { version = "0.2.4", features = ["svg", "embed-fonts"] }
 # typst-batch = { path = "./typst-batch", features = ["svg", "embed-fonts"] }
-tola-vdom = { version = "0.2.1", features = ["parallel"] }
+# tola-vdom = { path = "./tola-vdom" }
+tola-vdom = "0.2.2"
 smallvec = "1.13"
 
 parking_lot = "0.12.5"

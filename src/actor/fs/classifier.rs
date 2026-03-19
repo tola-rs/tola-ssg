@@ -169,7 +169,10 @@ impl EventClassifier {
         changes.retain(|p, k| match k {
             ChangeKind::Created | ChangeKind::Modified => p.is_file(),
             ChangeKind::Removed => {
-                if matches!(categorize_path(p, config), FileCategory::Output) {
+                if matches!(
+                    categorize_path(p, config),
+                    FileCategory::Deps | FileCategory::Asset | FileCategory::Output
+                ) {
                     return true;
                 }
                 let tracked = space.url_for_source(p).is_some();
@@ -179,5 +182,46 @@ impl EventClassifier {
                 tracked
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rustc_hash::FxHashMap;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::utils::path::normalize_path;
+
+    fn make_config() -> (TempDir, SiteConfig) {
+        let temp = TempDir::new().unwrap();
+        let root = normalize_path(temp.path());
+
+        let mut config = SiteConfig::default();
+        config.set_root(&root);
+        config.build.content = root.join("content");
+        config.build.output = root.join("public");
+        config.config_path = root.join("tola.toml");
+
+        std::fs::create_dir_all(&config.build.content).unwrap();
+        std::fs::create_dir_all(config.paths().output_dir()).unwrap();
+
+        (temp, config)
+    }
+
+    #[test]
+    fn filter_actionable_keeps_removed_output() {
+        let (_tmp, config) = make_config();
+        let removed_output = config
+            .paths()
+            .output_dir()
+            .join("assets")
+            .join("removed.css");
+        let mut changes = FxHashMap::default();
+        changes.insert(removed_output.clone(), ChangeKind::Removed);
+
+        EventClassifier::filter_actionable(&mut changes, &config);
+
+        assert!(changes.contains_key(&removed_output));
     }
 }

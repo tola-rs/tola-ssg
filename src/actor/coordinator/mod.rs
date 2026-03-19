@@ -20,6 +20,7 @@ use super::messages::{CompilerMsg, VdomMsg, WsMsg};
 use super::vdom::VdomActor;
 use super::ws::WsActor;
 use crate::config::SiteConfig;
+use crate::reload::server::WsServerHandle;
 
 const CHANNEL_BUFFER: usize = 32;
 
@@ -27,6 +28,7 @@ const CHANNEL_BUFFER: usize = 32;
 pub struct Coordinator {
     config: Arc<SiteConfig>,
     ws_port: Option<u16>,
+    ws_server: Option<WsServerHandle>,
     shutdown_rx: Option<Receiver<()>>,
 }
 
@@ -36,6 +38,7 @@ impl Coordinator {
         Self {
             config,
             ws_port: None,
+            ws_server: None,
             shutdown_rx: None,
         }
     }
@@ -60,8 +63,9 @@ impl Coordinator {
 
         if let Some(port) = self.ws_port {
             match crate::reload::server::start_ws_server_with_channel(port, ws_tx.clone()) {
-                Ok(actual_port) => {
-                    crate::cli::serve::set_actual_ws_port(actual_port);
+                Ok(ws_server) => {
+                    crate::cli::serve::set_actual_ws_port(ws_server.port());
+                    self.ws_server = Some(ws_server);
                 }
                 Err(e) => {
                     crate::log!("actor"; "websocket server failed: {}", e);
@@ -74,13 +78,10 @@ impl Coordinator {
             .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
 
         let compiler_actor = CompilerActor::new(compiler_rx, vdom_tx.clone(), self.config.clone());
-        let (vdom_actor, restored_count, first_error, restored_warnings) =
+        let (vdom_actor, restored_count, restored_errors, restored_warnings) =
             VdomActor::new(vdom_rx, ws_tx.clone(), self.config.get_root().to_path_buf());
 
-        let ws_actor = match first_error {
-            Some((path, error)) => WsActor::new(ws_rx).with_pending_error(path, error),
-            None => WsActor::new(ws_rx),
-        };
+        let ws_actor = WsActor::new(ws_rx).with_pending_errors(restored_errors);
         crate::debug!("vdom"; "cache: {} entries", restored_count);
 
         if !restored_warnings.is_empty() {
@@ -101,15 +102,18 @@ impl Coordinator {
 
         crate::debug!("actor"; "start");
         let shutdown_rx = self.shutdown_rx.take();
-        let _ = runtime::run_actors(
+        runtime::run_actors(
             fs_actor,
             compiler_actor,
             vdom_actor,
             ws_actor,
+            self.ws_server.take(),
+            compiler_tx,
             vdom_tx,
+            ws_tx,
             shutdown_rx,
         )
-        .await;
+        .await?;
 
         crate::debug!("actor"; "stopped");
         Ok(())

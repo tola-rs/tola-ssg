@@ -167,7 +167,6 @@ impl CompiledPage {
                 output_file,
                 output_dir,
                 full_url,
-                relative,
             },
             lastmod,
             content_meta: None,
@@ -260,6 +259,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     /// Helper to create a PageRoute for testing
     fn test_route(source: &str, output_file: &str, permalink: &str, full_url: &str) -> PageRoute {
@@ -267,11 +267,6 @@ mod tests {
         let is_index = source.file_stem().map(|s| s == "index").unwrap_or(false);
         let output_file = PathBuf::from(output_file);
         let output_dir = output_file.parent().unwrap_or(Path::new("")).to_path_buf();
-        let relative = source
-            .with_extension("")
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
 
         PageRoute {
             source,
@@ -281,8 +276,27 @@ mod tests {
             output_file,
             output_dir,
             full_url: full_url.to_string(),
-            relative,
         }
+    }
+
+    fn temp_source_page(source_rel: &str, body: &str) -> (TempDir, PathBuf, SiteConfig) {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let source = content_dir.join(source_rel);
+        if let Some(parent) = source.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&source, body).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.output = dir.path().join("public");
+        config.build.content = content_dir;
+
+        (dir, source, config)
+    }
+
+    fn parse_meta(json: &str) -> PageMeta {
+        serde_json::from_str(json).unwrap()
     }
 
     #[test]
@@ -326,14 +340,13 @@ mod tests {
     }
 
     #[test]
-    fn test_page_route_fields() {
+    fn test_page_route_cases() {
         let route = test_route(
             "content/posts/hello.typ",
             "public/posts/hello/index.html",
             "/posts/hello/",
             "https://example.com/posts/hello/",
         );
-
         assert_eq!(route.source, PathBuf::from("content/posts/hello.typ"));
         assert_eq!(route.source.parent().unwrap(), Path::new("content/posts"));
         assert!(!route.is_index);
@@ -344,56 +357,37 @@ mod tests {
         assert_eq!(route.output_dir, PathBuf::from("public/posts/hello"));
         assert_eq!(route.permalink, "/posts/hello/");
         assert_eq!(route.full_url, "https://example.com/posts/hello/");
-    }
 
-    #[test]
-    fn test_page_route_index() {
-        let route = test_route(
+        let index = test_route(
             "content/index.typ",
             "public/index.html",
             "/",
             "https://example.com/",
         );
+        assert!(index.is_index);
+        assert_eq!(index.permalink, "/");
+        assert_eq!(index.full_url, "https://example.com/");
 
-        assert!(route.is_index);
-        assert_eq!(route.permalink, "/");
-        assert_eq!(route.full_url, "https://example.com/");
-    }
-
-    #[test]
-    fn test_page_route_with_prefix() {
-        let route = test_route(
+        let prefixed = test_route(
             "content/posts/hello.typ",
             "public/blog/posts/hello/index.html",
             "/blog/posts/hello/",
             "https://example.com/blog/posts/hello/",
         );
-
         assert_eq!(
-            route.output_file,
+            prefixed.output_file,
             PathBuf::from("public/blog/posts/hello/index.html")
         );
-        assert_eq!(route.permalink, "/blog/posts/hello/");
-        assert_eq!(route.full_url, "https://example.com/blog/posts/hello/");
+        assert_eq!(prefixed.permalink, "/blog/posts/hello/");
+        assert_eq!(prefixed.full_url, "https://example.com/blog/posts/hello/");
     }
 
     #[test]
     fn test_page_meta_case_mismatch() {
         // Simulate a case where output dir has uppercase (e.g. "Public")
         // but slug config enforces lowercase.
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        let posts_dir = content_dir.join("Posts");
-        fs::create_dir_all(&posts_dir).unwrap();
-
-        let source = posts_dir.join("Hello.typ");
-        fs::write(&source, "= Hello").unwrap();
-
-        let mut config = SiteConfig::default();
+        let (dir, source, mut config) = temp_source_page("Posts/Hello.typ", "= Hello");
         config.build.output = dir.path().join("Public");
-        config.build.content = content_dir;
 
         let page = CompiledPage::from_paths(source, &config).unwrap();
 
@@ -411,19 +405,8 @@ mod tests {
     #[test]
     fn test_compiled_page_absolute_output_path() {
         // Issue #38: Test that absolute output paths with uppercase preserve casing
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        let posts_dir = content_dir.join("Posts");
-        fs::create_dir_all(&posts_dir).unwrap();
-
-        let source = posts_dir.join("Hello.typ");
-        fs::write(&source, "= Hello").unwrap();
-
-        let mut config = SiteConfig::default();
+        let (dir, source, mut config) = temp_source_page("Posts/Hello.typ", "= Hello");
         config.build.output = dir.path().to_path_buf();
-        config.build.content = content_dir;
 
         let page = CompiledPage::from_paths(source, &config).unwrap();
 
@@ -432,46 +415,13 @@ mod tests {
     }
 
     #[test]
-    fn test_compiled_page_is_index() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        fs::create_dir_all(&content_dir).unwrap();
-
-        let source = content_dir.join("index.typ");
-        fs::write(&source, "= Home").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.build.output = dir.path().join("public");
-        config.build.content = content_dir;
-
+    fn test_compiled_page_index_route() {
+        let (_dir, source, config) = temp_source_page("index.typ", "= Home");
         let page = CompiledPage::from_paths(source, &config).unwrap();
 
         assert!(page.route.is_index);
         assert_eq!(page.route.permalink, "/");
-    }
-
-    #[test]
-    fn test_compiled_page_source_dir() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        let posts_dir = content_dir.join("posts");
-        fs::create_dir_all(&posts_dir).unwrap();
-
-        let source = posts_dir.join("hello.typ");
-        fs::write(&source, "= Hello").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.build.output = dir.path().join("public");
-        config.build.content = content_dir;
-
-        let page = CompiledPage::from_paths(source, &config).unwrap();
-
-        // source.parent() returns the directory containing the source file
-        assert!(page.route.source.parent().unwrap().ends_with("posts"));
+        assert!(page.route.output_file.ends_with("public/index.html"));
     }
 
     #[test]
@@ -556,8 +506,9 @@ mod tests {
 
     #[test]
     fn test_content_meta_summary_preserved_as_json() {
-        let json = r#"{"title": "Test", "summary": {"func": "text", "text": "A simple summary"}}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
+        let meta = parse_meta(
+            r#"{"title": "Test", "summary": {"func": "text", "text": "A simple summary"}}"#,
+        );
         assert_eq!(meta.title, Some("Test".to_string()));
         // summary is preserved as raw JSON, not converted to HTML
         assert_eq!(
@@ -568,7 +519,8 @@ mod tests {
 
     #[test]
     fn test_content_meta_summary_sequence_preserved() {
-        let json = r#"{
+        let meta = parse_meta(
+            r#"{
             "title": "Post",
             "summary": {
                 "func": "sequence",
@@ -578,8 +530,8 @@ mod tests {
                     {"func": "text", "text": " in summary"}
                 ]
             }
-        }"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
+        }"#,
+        );
         assert_eq!(meta.title, Some("Post".to_string()));
         // summary is preserved as raw JSON for Content reconstruction
         assert!(meta.summary.is_some());
@@ -588,40 +540,35 @@ mod tests {
     }
 
     #[test]
-    fn test_content_meta_summary_none() {
-        let json = r#"{"title": "No Summary"}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.title, Some("No Summary".to_string()));
-        assert_eq!(meta.summary, None);
-    }
-
-    #[test]
-    fn test_content_meta_summary_null() {
-        let json = r#"{"title": "Null Summary", "summary": null}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.title, Some("Null Summary".to_string()));
-        assert_eq!(meta.summary, None);
+    fn test_content_meta_missing_or_null_summary_yields_none() {
+        for json in [
+            r#"{"title": "No Summary"}"#,
+            r#"{"title": "Null Summary", "summary": null}"#,
+        ] {
+            let meta = parse_meta(json);
+            assert_eq!(meta.summary, None);
+        }
     }
 
     #[test]
     fn test_content_meta_summary_string() {
         // Plain string summary is also preserved
-        let json = r#"{"summary": "plain text"}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
+        let meta = parse_meta(r#"{"summary": "plain text"}"#);
         assert_eq!(meta.summary, Some(serde_json::json!("plain text")));
     }
 
     #[test]
     fn test_content_meta_full() {
-        let json = r#"{
+        let meta = parse_meta(
+            r#"{
             "title": "My Blog Post",
             "summary": {"func": "text", "text": "This is the summary"},
             "date": "datetime(year: 2025, month: 1, day: 15)",
             "update": "datetime(year: 2025, month: 1, day: 20)",
             "author": "Alice",
             "draft": false
-        }"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
+        }"#,
+        );
         assert_eq!(meta.title, Some("My Blog Post".to_string()));
         assert!(meta.summary.is_some());
         assert_eq!(meta.date, Some("2025-01-15".to_string()));
@@ -631,37 +578,25 @@ mod tests {
     }
 
     #[test]
-    fn test_content_meta_draft_default() {
-        let json = r#"{"title": "Draft Test"}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert!(!meta.draft); // default is false
+    fn test_content_meta_draft_cases() {
+        let default_meta = parse_meta(r#"{"title": "Draft Test"}"#);
+        assert!(!default_meta.draft);
+
+        let draft_meta = parse_meta(r#"{"title": "Draft", "draft": true}"#);
+        assert!(draft_meta.draft);
     }
 
     #[test]
-    fn test_content_meta_draft_true() {
-        let json = r#"{"title": "Draft", "draft": true}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert!(meta.draft);
-    }
-
-    #[test]
-    fn test_content_meta_tags_null() {
-        let json = r#"{"title": "Test", "tags": null}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert!(meta.tags.is_empty());
-    }
-
-    #[test]
-    fn test_content_meta_tags_missing() {
-        let json = r#"{"title": "Test"}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert!(meta.tags.is_empty());
+    fn test_content_meta_tags_default_to_empty() {
+        for json in [r#"{"title": "Test", "tags": null}"#, r#"{"title": "Test"}"#] {
+            let meta = parse_meta(json);
+            assert!(meta.tags.is_empty());
+        }
     }
 
     #[test]
     fn test_content_meta_tags_array() {
-        let json = r#"{"title": "Test", "tags": ["rust", "web"]}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
+        let meta = parse_meta(r#"{"title": "Test", "tags": ["rust", "web"]}"#);
         assert_eq!(meta.tags, vec!["rust", "web"]);
     }
 
@@ -684,33 +619,8 @@ mod tests {
     }
 
     #[test]
-    fn test_content_meta_permalink() {
-        let json = r#"{"title": "Test", "permalink": "/archive/2024/hello/"}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.permalink, Some("/archive/2024/hello/".to_string()));
-    }
-
-    #[test]
-    fn test_content_meta_permalink_missing() {
-        let json = r#"{"title": "Test"}"#;
-        let meta: PageMeta = serde_json::from_str(json).unwrap();
-        assert_eq!(meta.permalink, None);
-    }
-
-    #[test]
     fn test_apply_meta_updates_route_from_custom_permalink() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        fs::create_dir_all(&content_dir).unwrap();
-
-        let source = content_dir.join("hello.typ");
-        fs::write(&source, "= Hello").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.build.output = dir.path().join("public");
-        config.build.content = content_dir;
+        let (_dir, source, mut config) = temp_source_page("hello.typ", "= Hello");
         config.site.info.url = Some("https://example.com".to_string());
 
         let mut page = CompiledPage::from_paths(source, &config).unwrap();
@@ -747,19 +657,7 @@ mod tests {
 
     #[test]
     fn test_apply_meta_normalizes_permalink() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        fs::create_dir_all(&content_dir).unwrap();
-
-        let source = content_dir.join("hello.typ");
-        fs::write(&source, "= Hello").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.build.output = dir.path().join("public");
-        config.build.content = content_dir;
-
+        let (_dir, source, config) = temp_source_page("hello.typ", "= Hello");
         let mut page = CompiledPage::from_paths(source, &config).unwrap();
 
         // Set permalink without leading/trailing slashes.
@@ -777,19 +675,7 @@ mod tests {
 
     #[test]
     fn test_apply_meta_without_permalink_keeps_route() {
-        use tempfile::TempDir;
-
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        fs::create_dir_all(&content_dir).unwrap();
-
-        let source = content_dir.join("hello.typ");
-        fs::write(&source, "= Hello").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.build.output = dir.path().join("public");
-        config.build.content = content_dir;
-
+        let (_dir, source, config) = temp_source_page("hello.typ", "= Hello");
         let mut page = CompiledPage::from_paths(source, &config).unwrap();
         let original_permalink = page.route.permalink.clone();
 

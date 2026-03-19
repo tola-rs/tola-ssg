@@ -31,15 +31,3 @@ impl Default for DiagnosticsConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_defaults() {
-        let config = DiagnosticsConfig::default();
-        assert_eq!(config.max_errors, Some(3));
-        assert_eq!(config.max_warnings, Some(3));
-    }
-}

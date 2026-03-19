@@ -67,6 +67,12 @@ pub fn set_cached_hash(path: &Path, hash: ContentHash) {
     FRESHNESS_CACHE.set(path, hash);
 }
 
+/// Invalidate cached hash for one file
+#[inline]
+pub fn invalidate_cached_hash(path: &Path) {
+    FRESHNESS_CACHE.invalidate(path);
+}
+
 /// Clear the global freshness cache
 #[inline]
 pub fn clear_cache() {
@@ -122,5 +128,18 @@ mod tests {
 
         cache.clear();
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_public_invalidate_cached_hash() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.txt");
+        fs::write(&path, "content").unwrap();
+
+        let hash = ContentHash::new([3; 32]);
+        set_cached_hash(&path, hash);
+        invalidate_cached_hash(&path);
+
+        assert_eq!(get_cached_hash(&path), None);
     }
 }

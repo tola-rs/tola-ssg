@@ -136,15 +136,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_page_meta_default() {
-        let meta = PageMeta::default();
-        assert!(meta.title.is_none());
-        assert!(!meta.draft);
-        assert!(meta.global_header);
-        assert!(meta.tags.is_empty());
-    }
-
-    #[test]
     fn test_page_meta_deserialize() {
         let json = r#"{"title": "Hello", "draft": true, "tags": ["rust", "web"]}"#;
         let meta: PageMeta = serde_json::from_str(json).unwrap();
@@ -178,8 +169,8 @@ mod tests {
             permalink: Some("/custom/".to_string()),
             ..Default::default()
         };
-        let json = serde_json::to_string(&meta).unwrap();
-        assert!(!json.contains("permalink"));
-        assert!(json.contains("title"));
+        let json: serde_json::Value = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json.get("title"), Some(&serde_json::json!("Test")));
+        assert!(json.get("permalink").is_none());
     }
 }

@@ -149,9 +149,6 @@ impl PersistedDiagnostics {
     }
 }
 
-// === Legacy type alias for backward compatibility ===
-pub type PersistedErrorState = PersistedDiagnostics;
-
 /// Check if file content is the same as new content
 fn file_content_matches(path: &Path, content: &str) -> bool {
     path.exists() && fs::read_to_string(path).is_ok_and(|existing| existing == content)
@@ -190,16 +187,4 @@ pub fn restore_diagnostics(root: &Path) -> std::io::Result<PersistedDiagnostics>
 
     crate::debug!("persist"; "restored {} errors, {} warnings", state.error_count(), state.warning_count());
     Ok(state)
-}
-
-// === Legacy function aliases ===
-
-/// Persist compile errors (legacy alias)
-pub fn persist_errors(state: &PersistedErrorState, root: &Path) -> std::io::Result<()> {
-    persist_diagnostics(state, root)
-}
-
-/// Restore compile errors (legacy alias)
-pub fn restore_errors(root: &Path) -> std::io::Result<PersistedErrorState> {
-    restore_diagnostics(root)
 }

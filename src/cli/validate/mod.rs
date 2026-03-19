@@ -15,7 +15,9 @@ use super::common::collect_content_files;
 use crate::compiler::page::CompiledPage;
 use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
 use crate::config::SiteConfig;
-use crate::core::{ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, ResolveContext, ResolveResult};
+use crate::core::{
+    ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, LinkOrigin, ResolveContext, ResolveResult,
+};
 use crate::log;
 use crate::package::build_visible_inputs;
 use crate::page::{
@@ -52,11 +54,8 @@ type ParsedScanResult = (
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
     // Register VFS with nested asset mappings (no font warmup needed)
     let nested_mappings =
-        crate::compiler::page::typst::init::build_nested_mappings(&config.build.assets.nested);
-    crate::compiler::page::typst::init::init_vfs_with_mappings(
-        config.get_root().to_path_buf(),
-        nested_mappings,
-    );
+        crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
+    crate::compiler::page::typst::init_vfs(config.get_root().to_path_buf(), nested_mappings);
 
     let args = get_validate_args();
     let files = collect_content_files(&args.paths, &config.build.content)?;
@@ -244,10 +243,7 @@ fn validate_links(
 
     for link in links {
         // Determine if this is an asset attribute (src, poster, data, Image)
-        let is_asset_attr = matches!(
-            link.attr.as_str(),
-            "src" | "poster" | "data" | "Src" | "Poster" | "Data" | "Image"
-        );
+        let is_asset_attr = link.origin.is_asset_attr();
 
         match link.kind() {
             // External links: skip (no HTTP validation)
@@ -331,7 +327,7 @@ fn validate_links(
                 let ctx = ResolveContext {
                     current_permalink: &page.route.permalink,
                     source_path: &page.route.source,
-                    attr: &link.attr,
+                    origin: link.origin,
                 };
 
                 // Mirror compile-time link normalization (prefix + slug) so
@@ -368,7 +364,7 @@ fn validate_links(
                 let ctx = ResolveContext {
                     current_permalink: &page.route.permalink,
                     source_path: &page.route.source,
-                    attr: &link.attr,
+                    origin: link.origin,
                 };
 
                 let space = GLOBAL_ADDRESS_SPACE.read();
@@ -604,7 +600,7 @@ fn batch_scan_typst_unified(
                             .into_iter()
                             .map(|l| scan::ScannedLink {
                                 dest: l.dest,
-                                attr: format!("{:?}", l.source),
+                                origin: LinkOrigin::from(l.source),
                             })
                             .collect();
                         all_links.push(links);
@@ -628,7 +624,7 @@ fn batch_scan_typst_unified(
                                     .into_iter()
                                     .map(|l| scan::ScannedLink {
                                         dest: l.dest,
-                                        attr: format!("{:?}", l.source),
+                                        origin: LinkOrigin::from(l.source),
                                     })
                                     .collect();
                                 all_links.push(links);
@@ -675,7 +671,7 @@ fn batch_scan_typst_unified(
                         .into_iter()
                         .map(|l| scan::ScannedLink {
                             dest: l.dest,
-                            attr: format!("{:?}", l.source),
+                            origin: LinkOrigin::from(l.source),
                         })
                         .collect();
                 }

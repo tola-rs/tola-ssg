@@ -33,7 +33,7 @@ pub(super) struct BuildFiles {
 pub(super) fn init_build(config: &SiteConfig) -> Result<()> {
     // Pre-warm typst library resources with nested asset mappings
     let nested_mappings = typst::build_nested_mappings(&config.build.assets.nested);
-    typst::init_typst_with_mappings(
+    typst::init_runtime(
         &super::collect_font_dirs(config),
         config.get_root().to_path_buf(),
         nested_mappings,

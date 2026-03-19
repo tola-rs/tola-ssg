@@ -1,5 +1,6 @@
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use tungstenite::WebSocket;
@@ -12,6 +13,21 @@ use crate::reload::message::HotReloadMessage;
 use super::{RegisteredClient, WsActor};
 
 impl WsActor {
+    fn initial_client_messages(&self) -> Vec<HotReloadMessage> {
+        let mut messages = vec![
+            HotReloadMessage::connected(),
+            HotReloadMessage::clear_all_errors(),
+        ];
+        let mut errors: Vec<_> = self.pending_errors.lock().errors().cloned().collect();
+        errors.sort_by(|a, b| a.path.cmp(&b.path));
+
+        for error in errors {
+            messages.push(HotReloadMessage::error(error.path, error.error));
+        }
+
+        messages
+    }
+
     /// Add a new client connection
     pub(super) fn add_client(&self, stream: TcpStream) {
         // Keep blocking mode during handshake, switch to non-blocking after
@@ -20,20 +36,20 @@ impl WsActor {
                 // Now set non-blocking for polling reads
                 let _ = ws.get_ref().set_nonblocking(true);
 
-                // Send connected message
-                let connected_msg = HotReloadMessage::connected();
-                if let Err(e) = ws.send(Message::Text(connected_msg.to_json().into())) {
-                    crate::log!("ws"; "failed to send connected message: {}", e);
-                    return;
-                }
+                for msg in self.initial_client_messages() {
+                    let msg_type = match &msg {
+                        HotReloadMessage::Connected { .. } => "connected",
+                        HotReloadMessage::Error { .. } => "pending error",
+                        HotReloadMessage::ClearError { .. } => "clear_error",
+                        _ => "initial state",
+                    };
 
-                // Send pending error if any (snapshot recovery)
-                if let Some(ref err) = *self.pending_error.lock() {
-                    let (path, error) = err.details();
-                    let hr_msg = HotReloadMessage::error(path, error);
-                    if let Err(e) = ws.send(Message::Text(hr_msg.to_json().into())) {
-                        crate::log!("ws"; "failed to send pending error: {}", e);
-                    } else {
+                    if let Err(e) = ws.send(Message::Text(msg.to_json().into())) {
+                        crate::log!("ws"; "failed to send {} message: {}", msg_type, e);
+                        return;
+                    }
+
+                    if matches!(msg, HotReloadMessage::Error { .. }) {
                         crate::debug!("ws"; "sent pending error to new client");
                     }
                 }
@@ -53,8 +69,11 @@ impl WsActor {
     }
 
     /// Background thread to read client messages (non-blocking poll)
-    pub(super) fn client_reader_loop(clients: Arc<Mutex<Vec<RegisteredClient>>>) {
-        loop {
+    pub(super) fn client_reader_loop(
+        clients: Arc<Mutex<Vec<RegisteredClient>>>,
+        stop_reader: Arc<AtomicBool>,
+    ) {
+        while !stop_reader.load(Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             let mut clients_guard = clients.lock();
@@ -148,5 +167,60 @@ impl WsActor {
             .unwrap_or_else(|_| path.into());
         crate::debug!("ws"; "client route: {}", decoded);
         Some(UrlPath::from_page(&decoded))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::WsActor;
+    use crate::cache::PersistedError;
+    use crate::reload::message::HotReloadMessage;
+
+    #[test]
+    fn initial_client_messages_clear_stale_overlay_when_no_error() {
+        let (_tx, rx) = mpsc::channel(1);
+        let actor = WsActor::new(rx);
+
+        let messages = actor.initial_client_messages();
+
+        assert!(matches!(messages[0], HotReloadMessage::Connected { .. }));
+        assert!(matches!(
+            messages[1],
+            HotReloadMessage::ClearError { path: None }
+        ));
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn initial_client_messages_replay_all_pending_errors() {
+        let (_tx, rx) = mpsc::channel(1);
+        let actor = WsActor::new(rx).with_pending_errors(vec![
+            PersistedError::new("content/programming.typ", "", "<span>second error</span>"),
+            PersistedError::new("content/articles.typ", "", "<span>first error</span>"),
+        ]);
+
+        let messages = actor.initial_client_messages();
+
+        assert!(matches!(messages[0], HotReloadMessage::Connected { .. }));
+        assert!(matches!(
+            messages[1],
+            HotReloadMessage::ClearError { path: None }
+        ));
+        match &messages[2] {
+            HotReloadMessage::Error { path, error } => {
+                assert_eq!(path, "content/articles.typ");
+                assert_eq!(error, "<span>first error</span>");
+            }
+            other => panic!("expected error message, got {:?}", other),
+        }
+        match &messages[3] {
+            HotReloadMessage::Error { path, error } => {
+                assert_eq!(path, "content/programming.typ");
+                assert_eq!(error, "<span>second error</span>");
+            }
+            other => panic!("expected error message, got {:?}", other),
+        }
     }
 }

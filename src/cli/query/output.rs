@@ -75,7 +75,7 @@ fn format_page(page: &PageQueryResult, filter_empty: bool) -> JsonValue {
     if let JsonValue::Object(meta_obj) = meta_value {
         for (key, value) in meta_obj {
             // Keep canonical top-level keys stable.
-            if matches!(key.as_str(), "path" | "permalink" | "url") {
+            if matches!(key.as_str(), "path" | "permalink") {
                 continue;
             }
             if !filter_empty || !is_empty_value(&value) {
@@ -115,18 +115,17 @@ fn filter_fields(results: &QueryResult, fields: &[String], filter_empty: bool) -
             let meta_value = serde_json::to_value(&page.meta).unwrap_or_default();
             if let JsonValue::Object(meta_obj) = meta_value {
                 for field in fields {
-                    let key = canonical_field_name(field);
-                    if matches!(key, "path" | "permalink") {
+                    if matches!(field.as_str(), "path" | "permalink") {
                         continue;
                     }
 
-                    if let Some(value) = meta_obj.get(key) {
+                    if let Some(value) = meta_obj.get(field) {
                         if !filter_empty || !is_empty_value(value) {
-                            obj.insert(key.to_string(), value.clone());
+                            obj.insert(field.clone(), value.clone());
                         }
                     } else if !filter_empty {
                         // Field explicitly requested but doesn't exist - show null when not filtering
-                        obj.insert(key.to_string(), JsonValue::Null);
+                        obj.insert(field.clone(), JsonValue::Null);
                     }
                 }
             }
@@ -154,10 +153,31 @@ fn normalize_fields(fields: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Canonicalize legacy field aliases.
-fn canonical_field_name(field: &str) -> &str {
-    match field {
-        "url" => "permalink",
-        _ => field,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::query::types::QueryMeta;
+    use serde_json::json;
+
+    fn query_result(meta: JsonValue) -> QueryResult {
+        QueryResult {
+            pages: vec![PageQueryResult {
+                path: "content/post.typ".to_string(),
+                permalink: "/post/".to_string(),
+                meta: QueryMeta::Raw(meta),
+            }],
+        }
+    }
+
+    #[test]
+    fn requested_url_field_is_not_a_permalink_alias() {
+        let result = query_result(json!({ "title": "Post" }));
+        let fields = vec!["url".to_string()];
+
+        let output = filter_fields(&result, &fields, false);
+        let page = output.as_array().unwrap()[0].as_object().unwrap();
+
+        assert_eq!(page.get("permalink"), Some(&json!("/post/")));
+        assert_eq!(page.get("url"), Some(&JsonValue::Null));
     }
 }

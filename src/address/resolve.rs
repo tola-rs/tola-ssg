@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use super::Resource;
-use crate::core::UrlPath;
+use crate::core::{LinkOrigin, UrlPath};
 
 // ============================================================================
 // Resolve Context & Result
@@ -19,14 +19,14 @@ pub struct ResolveContext<'a> {
     pub current_permalink: &'a UrlPath,
     /// Current page's source file path
     pub source_path: &'a Path,
-    /// HTML attribute containing the link (href, src, etc.)
-    pub attr: &'a str,
+    /// Origin of the link (href, src, image, etc.)
+    pub origin: LinkOrigin,
 }
 
 impl ResolveContext<'_> {
     /// Check if this is an asset attribute (src, poster, data).
     pub fn is_asset_attr(&self) -> bool {
-        matches!(self.attr, "src" | "poster" | "data")
+        self.origin.is_asset_attr()
     }
 }
 
@@ -123,56 +123,3 @@ pub fn resolve_physical_path(base: &Path, rel: &str) -> PathBuf {
 // ============================================================================
 // Tests
 // ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::page::PageRoute;
-
-    #[test]
-    fn test_resolve_result_checks() {
-        let route = PageRoute {
-            source: PathBuf::new(),
-            permalink: UrlPath::default(),
-            output_file: PathBuf::new(),
-            is_index: false,
-            is_404: false,
-            output_dir: PathBuf::new(),
-            full_url: String::new(),
-            relative: String::new(),
-        };
-        let found = ResolveResult::Found(Resource::Page { route, title: None });
-        assert!(found.is_ok());
-        assert!(!found.is_error());
-        assert!(!found.is_warning());
-
-        let external = ResolveResult::External("https://example.com".to_string());
-        assert!(external.is_ok());
-
-        let not_found = ResolveResult::NotFound {
-            target: "/missing/".to_string(),
-            tried: vec![],
-        };
-        assert!(not_found.is_error());
-        assert!(!not_found.is_ok());
-
-        let warning = ResolveResult::Warning {
-            resolved: Some("/test/".to_string()),
-            message: "test".to_string(),
-        };
-        assert!(warning.is_warning());
-        assert!(!warning.is_error());
-    }
-
-    #[test]
-    fn test_resolve_relative_url() {
-        let base = UrlPath::from_page("/posts/hello/");
-        assert_eq!(resolve_relative_url(&base, "../world/"), "/posts/world/");
-
-        let base = UrlPath::from_page("/archive/2024/");
-        assert_eq!(resolve_relative_url(&base, "../../about/"), "/about/");
-
-        let base = UrlPath::from_page("/a/b/c/");
-        assert_eq!(resolve_relative_url(&base, "../../../"), "/");
-    }
-}

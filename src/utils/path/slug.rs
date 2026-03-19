@@ -285,74 +285,58 @@ mod tests {
     const SEP_DASH: char = '-';
     const CASE: SlugCase = SlugCase::Preserve;
 
+    fn assert_sanitize_cases(sep: char, cases: &[(&str, &str)]) {
+        for (input, expected) in cases {
+            assert_eq!(sanitize(input, sep), *expected, "{input:?}");
+        }
+    }
+
+    fn assert_transform_path_cases(
+        sep: char,
+        case: &SlugCase,
+        to_ascii: bool,
+        cases: &[(&str, &str)],
+    ) {
+        for (input, expected) in cases {
+            let result = transform_path_components(Path::new(input), sep, case, to_ascii);
+            assert_eq!(result, PathBuf::from(expected), "{input:?}");
+        }
+    }
+
+    fn assert_slugify_full_cases(sep: char, cases: &[(&str, &str)]) {
+        for (input, expected) in cases {
+            assert_eq!(slugify_full(input, sep), *expected, "{input:?}");
+        }
+    }
+
+    fn assert_apply_case_cases(case: &SlugCase, cases: &[(&str, &str)]) {
+        for (input, expected) in cases {
+            assert_eq!(apply_case(input, case), *expected, "{input:?}");
+        }
+    }
+
     // ========================================================================
     // sanitize() tests
     // ========================================================================
 
     #[test]
-    fn test_sanitize_replaces_forbidden_chars() {
-        assert_eq!(sanitize("Hello<World>", SEP_UNDERSCORE), "Hello_World");
-    }
-
-    #[test]
-    fn test_sanitize_replaces_all_forbidden_chars() {
-        // All forbidden chars replaced, consecutive separators collapsed
-        assert_eq!(
-            sanitize("a<b>c:d|e?f*g#h\\i(j)k[l]m", SEP_UNDERSCORE),
-            "a_b_c_d_e_f_g_h_i_j_k_l_m"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_replaces_whitespace() {
-        assert_eq!(sanitize("Hello World", SEP_UNDERSCORE), "Hello_World");
-    }
-
-    #[test]
-    fn test_sanitize_replaces_various_whitespace() {
-        // \t and \n are forbidden chars, replaced with separator
-        assert_eq!(
-            sanitize("Hello\tWorld\nTest", SEP_UNDERSCORE),
-            "Hello_World_Test"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_trims() {
-        assert_eq!(sanitize("  Hello World  ", SEP_UNDERSCORE), "Hello_World");
-    }
-
-    #[test]
-    fn test_sanitize_preserves_unicode() {
-        assert_eq!(sanitize("CaféWorld", SEP_UNDERSCORE), "CaféWorld");
-    }
-
-    #[test]
-    fn test_sanitize_complex_input() {
-        // Forbidden chars replaced, consecutive separators collapsed
-        assert_eq!(
-            sanitize("  Hello (World) [Test]: #anchor?  ", SEP_UNDERSCORE),
-            "Hello_World_Test_anchor"
-        );
-    }
-
-    #[test]
-    fn test_sanitize_empty_string() {
-        assert_eq!(sanitize("", SEP_UNDERSCORE), "");
-    }
-
-    #[test]
-    fn test_sanitize_only_forbidden_chars() {
-        // All forbidden chars collapse to empty string
-        assert_eq!(sanitize("<>:?*#", SEP_UNDERSCORE), "");
-    }
-
-    #[test]
-    fn test_sanitize_mixed_content() {
-        // () and # replaced with separator, consecutive collapsed
-        assert_eq!(
-            sanitize("My Article (2024) - Part #1", SEP_UNDERSCORE),
-            "My_Article_2024_-_Part_1"
+    fn test_sanitize_core_cases() {
+        assert_sanitize_cases(
+            SEP_UNDERSCORE,
+            &[
+                ("Hello<World>", "Hello_World"),
+                ("a<b>c:d|e?f*g#h\\i(j)k[l]m", "a_b_c_d_e_f_g_h_i_j_k_l_m"),
+                ("Hello World", "Hello_World"),
+                ("Hello\tWorld\nTest", "Hello_World_Test"),
+                ("  Hello World  ", "Hello_World"),
+                (
+                    "  Hello (World) [Test]: #anchor?  ",
+                    "Hello_World_Test_anchor",
+                ),
+                ("", ""),
+                ("<>:?*#", ""),
+                ("My Article (2024) - Part #1", "My_Article_2024_-_Part_1"),
+            ],
         );
     }
 
@@ -389,67 +373,33 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_sanitize_unicode_text() {
-        assert_eq!(sanitize("Café", SEP_UNDERSCORE), "Café");
-        assert_eq!(sanitize("München", SEP_UNDERSCORE), "München");
-        assert_eq!(sanitize("Über", SEP_UNDERSCORE), "Über");
-    }
-
-    #[test]
-    fn test_sanitize_unicode_with_forbidden() {
-        // Forbidden chars are replaced with separator
-        assert_eq!(sanitize("Café#World", SEP_UNDERSCORE), "Café_World");
-        assert_eq!(sanitize("Über(Mich)", SEP_UNDERSCORE), "Über_Mich");
-        assert_eq!(sanitize("Ich[Ich]", SEP_UNDERSCORE), "Ich_Ich");
-        assert_eq!(sanitize("Start：End", SEP_UNDERSCORE), "Start：End"); // Fullwidth colon ：is NOT forbidden
-        assert_eq!(sanitize("Start:End", SEP_UNDERSCORE), "Start_End"); // ASCII colon : IS forbidden
-    }
-
-    #[test]
-    fn test_sanitize_unicode_with_spaces() {
-        assert_eq!(sanitize("Café World", SEP_UNDERSCORE), "Café_World");
-        assert_eq!(sanitize("  Über Mich  ", SEP_UNDERSCORE), "Über_Mich");
-    }
-
-    #[test]
-    fn test_sanitize_japanese() {
-        assert_eq!(sanitize("こんにちは", SEP_UNDERSCORE), "こんにちは");
-        assert_eq!(sanitize("コンニチハ", SEP_UNDERSCORE), "コンニチハ");
-        assert_eq!(sanitize("日本語#テスト", SEP_UNDERSCORE), "日本語_テスト");
-    }
-
-    #[test]
-    fn test_sanitize_korean() {
-        assert_eq!(sanitize("안녕하세요", SEP_UNDERSCORE), "안녕하세요");
-        assert_eq!(sanitize("한글 테스트", SEP_UNDERSCORE), "한글_테스트");
-    }
-
-    #[test]
-    fn test_sanitize_cyrillic() {
-        assert_eq!(sanitize("Привет", SEP_UNDERSCORE), "Привет");
-        assert_eq!(sanitize("Москва#Россия", SEP_UNDERSCORE), "Москва_Россия");
-    }
-
-    #[test]
-    fn test_sanitize_european_accents() {
-        assert_eq!(sanitize("café", SEP_UNDERSCORE), "café");
-        assert_eq!(sanitize("naïve", SEP_UNDERSCORE), "naïve");
-        assert_eq!(sanitize("über", SEP_UNDERSCORE), "über");
-        assert_eq!(sanitize("señor", SEP_UNDERSCORE), "señor");
-    }
-
-    #[test]
-    fn test_sanitize_mixed_unicode_ascii() {
-        assert_eq!(sanitize("Hello Café", SEP_UNDERSCORE), "Hello_Café");
-        assert_eq!(sanitize("About Über", SEP_UNDERSCORE), "About_Über");
-        assert_eq!(sanitize("2024år", SEP_UNDERSCORE), "2024år");
-        assert_eq!(sanitize("No1", SEP_UNDERSCORE), "No1");
-    }
-
-    #[test]
-    fn test_sanitize_emoji() {
-        assert_eq!(sanitize("Hello 🎉", SEP_UNDERSCORE), "Hello_🎉");
-        assert_eq!(sanitize("测试 🚀 emoji", SEP_UNDERSCORE), "测试_🚀_emoji");
+    fn test_sanitize_unicode_cases() {
+        assert_sanitize_cases(
+            SEP_UNDERSCORE,
+            &[
+                ("Café", "Café"),
+                ("München", "München"),
+                ("Über", "Über"),
+                ("Café#World", "Café_World"),
+                ("Über(Mich)", "Über_Mich"),
+                ("Ich[Ich]", "Ich_Ich"),
+                ("Start：End", "Start：End"),
+                ("Start:End", "Start_End"),
+                ("Café World", "Café_World"),
+                ("  Über Mich  ", "Über_Mich"),
+                ("こんにちは", "こんにちは"),
+                ("日本語#テスト", "日本語_テスト"),
+                ("안녕하세요", "안녕하세요"),
+                ("한글 테스트", "한글_테스트"),
+                ("Привет", "Привет"),
+                ("Москва#Россия", "Москва_Россия"),
+                ("señor", "señor"),
+                ("Hello Café", "Hello_Café"),
+                ("2024år", "2024år"),
+                ("Hello 🎉", "Hello_🎉"),
+                ("测试 🚀 emoji", "测试_🚀_emoji"),
+            ],
+        );
     }
 
     // ========================================================================
@@ -457,94 +407,70 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_transform_path_simple() {
-        let path = Path::new("content/posts/hello-world");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/posts/hello-world"));
+    fn test_transform_path_safe_cases() {
+        assert_transform_path_cases(
+            SEP_UNDERSCORE,
+            &CASE,
+            false,
+            &[
+                ("content/posts/hello-world", "content/posts/hello-world"),
+                ("content/posts/hello<world>", "content/posts/hello_world"),
+                (
+                    "content/my posts/hello world",
+                    "content/my_posts/hello_world",
+                ),
+                ("content/Artikel/Café", "content/Artikel/Café"),
+                (
+                    "content/Artikel#1/Café[World]",
+                    "content/Artikel_1/Café_World",
+                ),
+                ("posts/2024年/第一篇 文章", "posts/2024年/第一篇_文章"),
+                ("ブログ/記事/こんにちは", "ブログ/記事/こんにちは"),
+            ],
+        );
     }
 
     #[test]
-    fn test_transform_path_with_forbidden_chars() {
-        let path = Path::new("content/posts/hello<world>");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/posts/hello_world"));
-    }
-
-    #[test]
-    fn test_transform_path_with_spaces() {
-        let path = Path::new("content/my posts/hello world");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/my_posts/hello_world"));
-    }
-
-    #[test]
-    fn test_transform_path_unicode() {
-        let path = Path::new("content/Artikel/Café");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/Artikel/Café"));
-    }
-
-    #[test]
-    fn test_transform_path_unicode_with_forbidden() {
-        let path = Path::new("content/Artikel#1/Café[World]");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/Artikel_1/Café_World"));
-    }
-
-    #[test]
-    fn test_transform_path_mixed_unicode() {
-        let path = Path::new("posts/2024年/第一篇 文章");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("posts/2024年/第一篇_文章"));
-    }
-
-    #[test]
-    fn test_transform_path_japanese() {
-        let path = Path::new("ブログ/記事/こんにちは");
-        let result = transform_path_components(path, SEP_UNDERSCORE, &CASE, false);
-        assert_eq!(result, PathBuf::from("ブログ/記事/こんにちは"));
-    }
-
-    #[test]
-    fn test_transform_path_with_hyphen_separator() {
-        let path = Path::new("content/my posts/hello world");
-        let result = transform_path_components(path, SEP_DASH, &CASE, false);
-        assert_eq!(result, PathBuf::from("content/my-posts/hello-world"));
-    }
-
-    #[test]
-    fn test_transform_path_ascii_mode() {
-        let path = Path::new("content/Artikel/Café");
-        let result = transform_path_components(path, SEP_DASH, &SlugCase::Preserve, true);
-        assert_eq!(result, PathBuf::from("content/Artikel/Cafe"));
-    }
-
-    #[test]
-    fn test_transform_path_ascii_with_case_lower() {
-        let path = Path::new("content/Artikel/Café");
-        let result = transform_path_components(path, SEP_DASH, &SlugCase::Lower, true);
-        assert_eq!(result, PathBuf::from("content/artikel/cafe"));
-    }
-
-    #[test]
-    fn test_transform_path_with_case_lower() {
-        let path = Path::new("Content/Posts/Hello World");
-        let result = transform_path_components(path, SEP_DASH, &SlugCase::Lower, false);
-        assert_eq!(result, PathBuf::from("content/posts/hello-world"));
-    }
-
-    #[test]
-    fn test_transform_path_with_case_upper() {
-        let path = Path::new("content/posts/hello world");
-        let result = transform_path_components(path, SEP_DASH, &SlugCase::Upper, false);
-        assert_eq!(result, PathBuf::from("CONTENT/POSTS/HELLO-WORLD"));
-    }
-
-    #[test]
-    fn test_transform_path_with_case_capitalize() {
-        let path = Path::new("content/posts/hello world");
-        let result = transform_path_components(path, SEP_DASH, &SlugCase::Capitalize, false);
-        assert_eq!(result, PathBuf::from("Content/Posts/Hello-World"));
+    fn test_transform_path_separator_and_case_modes() {
+        assert_transform_path_cases(
+            SEP_DASH,
+            &CASE,
+            false,
+            &[(
+                "content/my posts/hello world",
+                "content/my-posts/hello-world",
+            )],
+        );
+        assert_transform_path_cases(
+            SEP_DASH,
+            &SlugCase::Preserve,
+            true,
+            &[("content/Artikel/Café", "content/Artikel/Cafe")],
+        );
+        assert_transform_path_cases(
+            SEP_DASH,
+            &SlugCase::Lower,
+            true,
+            &[("content/Artikel/Café", "content/artikel/cafe")],
+        );
+        assert_transform_path_cases(
+            SEP_DASH,
+            &SlugCase::Lower,
+            false,
+            &[("Content/Posts/Hello World", "content/posts/hello-world")],
+        );
+        assert_transform_path_cases(
+            SEP_DASH,
+            &SlugCase::Upper,
+            false,
+            &[("content/posts/hello world", "CONTENT/POSTS/HELLO-WORLD")],
+        );
+        assert_transform_path_cases(
+            SEP_DASH,
+            &SlugCase::Capitalize,
+            false,
+            &[("content/posts/hello world", "Content/Posts/Hello-World")],
+        );
     }
 
     // ========================================================================
@@ -552,28 +478,21 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_slugify_full_basic() {
-        assert_eq!(slugify_full("Hello World", SEP_DASH), "hello-world");
-        assert_eq!(slugify_full("Hello World", SEP_UNDERSCORE), "hello_world");
-    }
-
-    #[test]
-    fn test_slugify_full_unicode_to_ascii() {
-        // Unicode -> ASCII
-        assert_eq!(slugify_full("München", SEP_DASH), "munchen");
-        assert_eq!(slugify_full("Åland", SEP_DASH), "aland");
-
-        // European accents -> ASCII
-        assert_eq!(slugify_full("café", SEP_DASH), "cafe");
-        assert_eq!(slugify_full("über", SEP_DASH), "uber");
-        assert_eq!(slugify_full("naïve", SEP_DASH), "naive");
-    }
-
-    #[test]
-    fn test_slugify_full_mixed() {
-        assert_eq!(slugify_full("Hello München", SEP_DASH), "hello-munchen");
-        // Note: 2024år -> "2024ar"
-        assert_eq!(slugify_full("2024år", SEP_DASH), "2024ar");
+    fn test_slugify_full_cases() {
+        assert_slugify_full_cases(
+            SEP_DASH,
+            &[
+                ("Hello World", "hello-world"),
+                ("München", "munchen"),
+                ("Åland", "aland"),
+                ("café", "cafe"),
+                ("über", "uber"),
+                ("naïve", "naive"),
+                ("Hello München", "hello-munchen"),
+                ("2024år", "2024ar"),
+            ],
+        );
+        assert_slugify_full_cases(SEP_UNDERSCORE, &[("Hello World", "hello_world")]);
     }
 
     // ========================================================================
@@ -581,44 +500,28 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_apply_case_lower() {
-        assert_eq!(apply_case("Hello World", &SlugCase::Lower), "hello world");
-        assert_eq!(apply_case("HELLO", &SlugCase::Lower), "hello");
-    }
-
-    #[test]
-    fn test_apply_case_upper() {
-        assert_eq!(apply_case("Hello World", &SlugCase::Upper), "HELLO WORLD");
-        assert_eq!(apply_case("hello", &SlugCase::Upper), "HELLO");
-    }
-
-    #[test]
-    fn test_apply_case_capitalize() {
-        assert_eq!(
-            apply_case("hello world", &SlugCase::Capitalize),
-            "Hello World"
+    fn test_apply_case_modes() {
+        assert_apply_case_cases(
+            &SlugCase::Lower,
+            &[("Hello World", "hello world"), ("HELLO", "hello")],
         );
-        assert_eq!(
-            apply_case("hello-world", &SlugCase::Capitalize),
-            "Hello-World"
+        assert_apply_case_cases(
+            &SlugCase::Upper,
+            &[("Hello World", "HELLO WORLD"), ("hello", "HELLO")],
         );
-        assert_eq!(
-            apply_case("hello_world", &SlugCase::Capitalize),
-            "Hello_World"
+        assert_apply_case_cases(
+            &SlugCase::Capitalize,
+            &[
+                ("hello world", "Hello World"),
+                ("hello-world", "Hello-World"),
+                ("hello_world", "Hello_World"),
+                ("HELLO WORLD", "Hello World"),
+            ],
         );
-        assert_eq!(
-            apply_case("HELLO WORLD", &SlugCase::Capitalize),
-            "Hello World"
+        assert_apply_case_cases(
+            &SlugCase::Preserve,
+            &[("Hello World", "Hello World"), ("hElLo", "hElLo")],
         );
-    }
-
-    #[test]
-    fn test_apply_case_preserve() {
-        assert_eq!(
-            apply_case("Hello World", &SlugCase::Preserve),
-            "Hello World"
-        );
-        assert_eq!(apply_case("hElLo", &SlugCase::Preserve), "hElLo");
     }
 
     #[test]

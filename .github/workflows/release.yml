@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (required, e.g. v0.7.0, v0.7.0-pre.1)."
+        description: "Existing release tag (required, e.g. v0.7.0, v0.7.0-pre.1)."
         required: true
         type: string
   push:
@@ -28,15 +28,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-linux
-            archive: tar.gz
-            binary: tola
-            use_cachix: true
           - target: x86_64-linux-static
-            archive: tar.gz
-            binary: tola
-            use_cachix: true
-          - target: aarch64-linux
             archive: tar.gz
             binary: tola
             use_cachix: true
@@ -56,6 +48,8 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 1
+          # Build the exact release tag, including manual dispatches from another branch
+          ref: ${{ github.event.inputs.tag || github.ref }}
 
       # Install Nix
       - uses: cachix/install-nix-action@v30
@@ -103,6 +97,15 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0  # Required for changelog generation
+          # Generate notes from the release tag, not from the workflow trigger commit
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v5
+        with:
+          # Use the workflow revision for scripts when rerunning an older tag
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -121,7 +124,7 @@ jobs:
           fi
 
           # Basic validation for release tag format
-          if ! echo "$tag" | grep -qE '^v[0-9A-Za-z._-]+$'; then
+          if ! echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "Invalid release tag: $tag"
             echo "Expected format like v0.7.0 or v0.7.0-pre.1"
             exit 1
@@ -132,91 +135,43 @@ jobs:
           sha256sum * > checksums.txt
           cd ..
 
-          # Generate categorized release notes from commits since last tag
-          prev_tag=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          # Refuse to publish releases for tags that are missing or mistyped
+          git rev-parse --verify "$tag^{commit}" >/dev/null
 
-          if [ -n "$prev_tag" ]; then
-            echo "## What's Changed" > notes.md
-            echo "" >> notes.md
+          python3 workflow-source/.github/scripts/release_notes.py \
+            --repo . \
+            --tag "$tag" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --output notes.md
 
-            # Collect commits
-            commits=$(git log --pretty=format:"%s" "$prev_tag"..HEAD)
-
-            # Features (feat:)
-            features=$(echo "$commits" | grep -iE '^feat(\(.+\))?:' | sed 's/^feat\([^)]*\)\?: //' || true)
-            if [ -n "$features" ]; then
-              echo "### ■ Features" >> notes.md
-              echo "$features" | while read -r line; do
-                [ -n "$line" ] && echo "- $line" >> notes.md
-              done
-              echo "" >> notes.md
-            fi
-
-            # Fixes (fix:)
-            fixes=$(echo "$commits" | grep -iE '^fix(\(.+\))?:' | sed 's/^fix\([^)]*\)\?: //' || true)
-            if [ -n "$fixes" ]; then
-              echo "### ■ Bug Fixes" >> notes.md
-              echo "$fixes" | while read -r line; do
-                [ -n "$line" ] && echo "- $line" >> notes.md
-              done
-              echo "" >> notes.md
-            fi
-
-            # Refactor (refactor:)
-            refactors=$(echo "$commits" | grep -iE '^refactor(\(.+\))?:' | sed 's/^refactor\([^)]*\)\?: //' || true)
-            if [ -n "$refactors" ]; then
-              echo "### ■ Refactor" >> notes.md
-              echo "$refactors" | while read -r line; do
-                [ -n "$line" ] && echo "- $line" >> notes.md
-              done
-              echo "" >> notes.md
-            fi
-
-            # Performance (perf:)
-            perfs=$(echo "$commits" | grep -iE '^perf(\(.+\))?:' | sed 's/^perf\([^)]*\)\?: //' || true)
-            if [ -n "$perfs" ]; then
-              echo "### ■ Performance" >> notes.md
-              echo "$perfs" | while read -r line; do
-                [ -n "$line" ] && echo "- $line" >> notes.md
-              done
-              echo "" >> notes.md
-            fi
-
-            # Other commits (exclude release, ci, chore, docs, build, style, test)
-            others=$(echo "$commits" | grep -viE '^(feat|fix|refactor|perf|release|ci|chore|docs|build|style|test)(\(.+\))?:' | grep -viE '^release ' || true)
-            if [ -n "$others" ]; then
-              echo "### ■ Other Changes" >> notes.md
-              echo "$others" | while read -r line; do
-                [ -n "$line" ] && echo "- $line" >> notes.md
-              done
-              echo "" >> notes.md
-            fi
-
-            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$prev_tag...$tag" >> notes.md
-          else
-            # Fallback to commit message if no previous tag
-            git log -1 --format="%B" > notes.md
-          fi
-
-          # Check if this is a prerelease (contains -alpha, -beta, -rc, etc.)
-          prerelease_flag=""
-          if echo "$tag" | grep -qE '\-(alpha|beta|rc|dev|pre)'; then
-            prerelease_flag="--prerelease"
+          prerelease_args=()
+          if echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            prerelease_args=(--prerelease)
           fi
 
           # Upsert release to avoid delete->create failure window
           if gh release view "$tag" >/dev/null 2>&1; then
+            existing_assets=$(gh release view "$tag" --json assets --jq '.assets[].name')
+            for stale_asset in \
+              "tola-x86_64-linux.tar.gz" \
+              "tola-aarch64-linux.tar.gz"; do
+              if echo "$existing_assets" | grep -Fxq "$stale_asset"; then
+                gh release delete-asset "$tag" "$stale_asset" --yes
+              fi
+            done
+
             gh release upload "$tag" artifacts/* --clobber
             gh release edit "$tag" \
               --title "$tag" \
               --notes-file notes.md \
-              $prerelease_flag
+              "${prerelease_args[@]}"
           else
+            # Do not let gh create a release tag from the default branch
             gh release create "$tag" artifacts/* \
-              --target "${GITHUB_SHA}" \
+              --verify-tag \
               --title "$tag" \
               --notes-file notes.md \
-              $prerelease_flag
+              "${prerelease_args[@]}"
           fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

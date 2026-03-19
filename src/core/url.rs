@@ -293,59 +293,30 @@ impl UrlChange {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_from_browser_chinese() {
-        let url = UrlPath::from_browser("/posts/%E4%B8%AD%E6%96%87/");
-        assert_eq!(url.as_str(), "/posts/中文/");
+    fn assert_from_page_cases(cases: &[(&str, &str)]) {
+        for (input, expected) in cases {
+            assert_eq!(UrlPath::from_page(input).as_str(), *expected, "{input:?}");
+        }
+    }
+
+    fn assert_from_browser_cases(cases: &[(&str, &str)]) {
+        for (input, expected) in cases {
+            assert_eq!(
+                UrlPath::from_browser(input).as_str(),
+                *expected,
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_from_browser_space() {
-        let url = UrlPath::from_browser("/posts/hello%20world/");
-        assert_eq!(url.as_str(), "/posts/hello world/");
-    }
-
-    #[test]
-    fn test_from_browser_special_chars() {
-        let url = UrlPath::from_browser("/posts/%26%3D%3F/");
-        assert_eq!(url.as_str(), "/posts/&=?/");
-    }
-
-    #[test]
-    fn test_from_browser_invalid_utf8() {
-        // Invalid UTF-8 sequence should be preserved
-        let url = UrlPath::from_browser("/posts/%FF/");
-        assert_eq!(url.as_str(), "/posts/%FF/");
-    }
-
-    #[test]
-    fn test_from_page() {
-        let url = UrlPath::from_page("/posts/hello/");
-        assert_eq!(url.as_str(), "/posts/hello/");
-    }
-
-    #[test]
-    fn test_from_page_adds_leading_slash() {
-        let url = UrlPath::from_page("posts/hello/");
-        assert_eq!(url.as_str(), "/posts/hello/");
-    }
-
-    #[test]
-    fn test_from_page_strips_query() {
-        let url = UrlPath::from_page("/posts/hello?v=1");
-        assert_eq!(url.as_str(), "/posts/hello/");
-    }
-
-    #[test]
-    fn test_from_page_strips_fragment() {
-        let url = UrlPath::from_page("/posts/hello#section");
-        assert_eq!(url.as_str(), "/posts/hello/");
-    }
-
-    #[test]
-    fn test_from_page_strips_query_and_fragment() {
-        let url = UrlPath::from_page("/posts/hello?v=1#section");
-        assert_eq!(url.as_str(), "/posts/hello/");
+    fn test_from_browser_cases() {
+        assert_from_browser_cases(&[
+            ("/posts/%E4%B8%AD%E6%96%87/", "/posts/中文/"),
+            ("/posts/hello%20world/", "/posts/hello world/"),
+            ("/posts/%26%3D%3F/", "/posts/&=?/"),
+            ("/posts/%FF/", "/posts/%FF/"),
+        ]);
     }
 
     #[test]
@@ -452,14 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn test_display() {
+    fn test_trait_string_accessors() {
         let url = UrlPath::from_page("/posts/hello/");
         assert_eq!(format!("{}", url), "/posts/hello/");
-    }
-
-    #[test]
-    fn test_as_ref() {
-        let url = UrlPath::from_page("/posts/hello/");
         let s: &str = url.as_ref();
         assert_eq!(s, "/posts/hello/");
     }
@@ -494,10 +460,15 @@ mod tests {
     }
 
     #[test]
-    fn test_from_page_chinese_with_query() {
-        // Chinese characters should be preserved (decoded) even with query
-        let url = UrlPath::from_page("/posts/中文?v=1");
-        assert_eq!(url.as_str(), "/posts/中文/");
+    fn test_from_page_normalizes_query_and_fragment_cases() {
+        assert_from_page_cases(&[
+            ("/posts/hello/", "/posts/hello/"),
+            ("posts/hello/", "/posts/hello/"),
+            ("/posts/hello?v=1", "/posts/hello/"),
+            ("/posts/hello#section", "/posts/hello/"),
+            ("/posts/hello?v=1#section", "/posts/hello/"),
+            ("/posts/中文?v=1", "/posts/中文/"),
+        ]);
     }
 
     #[test]

@@ -108,13 +108,13 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 
 Tola injects virtual packages at compile time, enabling cross-page data access without external build steps:
 
-- `@tola/site:0.0.0` — Site configuration (`info`, `info.extra` from `[site.info]` in `tola.toml`)
+- `@tola/site:0.0.0` — Site metadata and root path
 - `@tola/pages:0.0.0` — All pages metadata (title, date, permalink, tags, draft status...)
 - `@tola/current:0.0.0` — Current page context (`current-permalink`, `path`, `headings`, navigation helpers...)
 
 ```typst
 #import "@tola/pages:0.0.0": pages
-#import "@tola/site:0.0.0": info
+#import "@tola/site:0.0.0": info, root
 
 // List all posts
 #for post in pages().filter(p => "/posts/" in p.permalink) {
@@ -272,7 +272,7 @@ Do not maintain separate hand-written variants in multiple places.
 
 | Package | Exports |
 |---------|---------|
-| `@tola/site:0.0.0` | `info` — Site metadata (title, author, email, description, url, language, copyright, extra) |
+| `@tola/site:0.0.0` | `info` — Site metadata (title, author, email, description, url, language, copyright, extra); `root` — Site root path |
 | `@tola/pages:0.0.0` | `pages()`, `by-tag(tag)`, `by-tags(..tags)`, `all-tags()` |
 | `@tola/current:0.0.0` | `current-permalink`, `parent-permalink`, `path`, `filename`, `links-to`, `linked-by`, `headings`, `siblings(pages)`, `children(pages)`, `breadcrumbs(pages, include-root: false)`, `at-offset(sorted-pages, offset)`, `prev(sorted-pages, n: 1)`, `next(sorted-pages, n: 1)`, `take-prev(sorted-pages, n: 1)`, `take-next(sorted-pages, n: 1)` |
 

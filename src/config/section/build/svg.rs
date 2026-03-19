@@ -215,44 +215,6 @@ mod tests {
     use crate::config::{ConfigDiagnostics, ConfigPresence, test_parse_config};
 
     #[test]
-    fn test_defaults() {
-        let config = test_parse_config("");
-        assert!(!config.build.svg.external);
-        assert_eq!(config.build.svg.format, SvgFormat::SVG);
-        assert_eq!(config.build.svg.converter, SvgConverter::Builtin);
-        assert_eq!(config.build.svg.dpi, 96.0);
-        assert!(!config.build.svg.expand_viewbox);
-        assert!(!config.build.svg.baseline_align);
-    }
-
-    #[test]
-    fn test_format_parsing() {
-        let cases = [
-            ("svg", SvgFormat::SVG),
-            ("png", SvgFormat::PNG),
-            ("jpg", SvgFormat::JPG),
-            ("webp", SvgFormat::WEBP),
-        ];
-        for (input, expected) in cases {
-            let config = test_parse_config(&format!("[build.svg]\nformat = \"{input}\""));
-            assert_eq!(config.build.svg.format, expected, "failed for {input}");
-        }
-    }
-
-    #[test]
-    fn test_converter_parsing() {
-        let cases = [
-            ("builtin", SvgConverter::Builtin),
-            ("magick", SvgConverter::Magick),
-            ("ffmpeg", SvgConverter::Ffmpeg),
-        ];
-        for (input, expected) in cases {
-            let config = test_parse_config(&format!("[build.svg]\nconverter = \"{input}\""));
-            assert_eq!(config.build.svg.converter, expected, "failed for {input}");
-        }
-    }
-
-    #[test]
     fn test_format_extension() {
         assert_eq!(SvgFormat::SVG.extension(), "svg");
         assert_eq!(SvgFormat::PNG.extension(), "png");
@@ -261,30 +223,21 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_rasterization() {
+    fn test_output_mode_helpers() {
         assert!(!SvgFormat::SVG.needs_rasterization());
         assert!(SvgFormat::PNG.needs_rasterization());
-    }
-
-    #[test]
-    fn test_is_embedded() {
-        let config = test_parse_config("");
-        assert!(config.build.svg.is_embedded());
 
         let config = test_parse_config("[build.svg]\nexternal = true");
         assert!(!config.build.svg.is_embedded());
-    }
 
-    #[test]
-    fn test_is_svg_output() {
-        let config = test_parse_config("[build.svg]\nexternal = true\nformat = \"svg\"");
-        assert!(config.build.svg.is_svg_output());
-
-        let config = test_parse_config("[build.svg]\nexternal = true\nformat = \"png\"");
-        assert!(!config.build.svg.is_svg_output());
-
-        let config = test_parse_config("[build.svg]\nexternal = false\nformat = \"svg\"");
-        assert!(!config.build.svg.is_svg_output());
+        for (toml, expected) in [
+            ("[build.svg]\nexternal = true\nformat = \"svg\"", true),
+            ("[build.svg]\nexternal = true\nformat = \"png\"", false),
+            ("[build.svg]\nexternal = false\nformat = \"svg\"", false),
+        ] {
+            let config = test_parse_config(toml);
+            assert_eq!(config.build.svg.is_svg_output(), expected, "{toml:?}");
+        }
     }
 
     #[test]

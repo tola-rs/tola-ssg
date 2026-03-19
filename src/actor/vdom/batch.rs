@@ -74,6 +74,25 @@ impl BatchEntry {
     }
 }
 
+fn format_result_counts(
+    error_count: usize,
+    reload_count: usize,
+    unchanged_count: usize,
+    warning_count: usize,
+) -> String {
+    format!(
+        "errors: {error_count}, reloads: {reload_count}, unchanged: {unchanged_count}, warnings: {warning_count}"
+    )
+}
+
+fn format_primary_error_detail(primary_error: &BatchEntry) -> String {
+    let path = primary_error.path();
+    match primary_error.error_detail() {
+        Some(detail) if !detail.is_empty() => format!("first error: {path}\n{detail}"),
+        _ => format!("first error: {path}"),
+    }
+}
+
 /// Aggregates batch results and conflicts for unified output
 pub(super) struct BatchLogger {
     results: Vec<BatchEntry>,
@@ -170,6 +189,8 @@ impl BatchLogger {
             return;
         }
 
+        let warnings = crate::compiler::drain_warnings();
+        let warning_count = warnings.len();
         let errors: Vec<_> = self.results.iter().filter(|e| e.is_error()).collect();
         let reloads: Vec<_> = self.results.iter().filter(|e| e.is_reload()).collect();
         let unchanged: Vec<_> = self.results.iter().filter(|e| e.is_unchanged()).collect();
@@ -178,12 +199,11 @@ impl BatchLogger {
 
         if !errors.is_empty() {
             let primary_error = &errors[0];
-            let detail = primary_error.error_detail().unwrap_or("");
-            let summary = primary_error.path().to_string();
-            crate::logger::status_error(&summary, detail);
+            let summary =
+                format_result_counts(errors.len(), reloads.len(), unchanged.len(), warning_count);
+            let detail = format_primary_error_detail(primary_error);
+            crate::logger::status_error(&summary, &detail);
         } else {
-            // Show warnings only when no errors (with configured limit)
-            let warnings = crate::compiler::drain_warnings();
             if !warnings.is_empty() {
                 let config = crate::config::cfg();
                 let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
@@ -202,7 +222,7 @@ impl BatchLogger {
 
             if let Some(primary) = primary_reload {
                 let other_count = reloads.len() - 1 + unchanged.len();
-                let msg = match other_count {
+                let mut msg = match other_count {
                     0 => format!("reload: {}", primary.path()),
                     1 => {
                         let other = reloads
@@ -215,17 +235,47 @@ impl BatchLogger {
                     }
                     n => format!("reload: {}, others: {}", primary.path(), n),
                 };
+                if warning_count > 0 {
+                    msg.push_str(&format!(", warnings: {warning_count}"));
+                }
                 crate::logger::status_success(&msg);
             } else if !unchanged.is_empty() {
                 let first = unchanged[0].path();
-                let msg = match unchanged.len() {
+                let mut msg = match unchanged.len() {
                     1 => format!("unchanged: {}", first),
                     n => format!("unchanged: {}, others: {}", first, n - 1),
                 };
+                if warning_count > 0 {
+                    msg.push_str(&format!(", warnings: {warning_count}"));
+                }
                 crate::logger::status_unchanged(&msg);
+            } else if warning_count > 0 {
+                crate::logger::status_warning(&format!("warnings: {warning_count}"));
             }
         }
 
         self.results.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BatchEntry, format_primary_error_detail, format_result_counts};
+
+    #[test]
+    fn result_counts_include_all_status_buckets() {
+        assert_eq!(
+            format_result_counts(2, 3, 4, 5),
+            "errors: 2, reloads: 3, unchanged: 4, warnings: 5"
+        );
+    }
+
+    #[test]
+    fn primary_error_detail_includes_path_and_body() {
+        let entry = BatchEntry::error("content/index.typ", "error: boom");
+        assert_eq!(
+            format_primary_error_detail(&entry),
+            "first error: content/index.typ\nerror: boom"
+        );
     }
 }

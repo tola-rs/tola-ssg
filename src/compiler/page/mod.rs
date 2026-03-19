@@ -7,7 +7,7 @@
 //!
 //! # Module Structure
 //!
-//! - [`format`] - PageFormat trait for format adapters
+//! - [`format`] - Format adapter trait and pre-scan data
 //! - [`output`] - Compilation output types (PageCompileOutput, PageScanOutput)
 //! - [`cache`] - Build VDOM cache
 //! - [`warning`] - Compilation warnings collection
@@ -33,8 +33,9 @@ use crate::core::ContentKind;
 
 // Re-export types
 pub use cache::{BUILD_CACHE, IndexedDocument, cache_vdom};
-pub use format::{PageFormat, ScannedHeading, ScannedPage, filter_drafts, scan_single_page};
-pub use markdown::{Markdown, filter_markdown_drafts};
+pub use format::{
+    PageFormat, ScannedHeading, ScannedPage, ScannedPageLink, scan_pages, scan_single_page,
+};
 pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;
 pub use process::process_page;
@@ -42,7 +43,6 @@ pub use process::{
     build_address_space, build_static_pages, populate_pages, rebuild_iterative_pages,
 };
 pub use typst::process_result as process_typst_result;
-pub use typst::{Typst, filter_drafts_with_config as filter_typst_drafts_with_config};
 pub use warning::{
     collect_warnings, drain_warnings, format_warning_with_prefix, warning_relative_path,
 };
@@ -96,8 +96,8 @@ pub type CompileMetaResult = (
 /// Typst batch compiler (reusable for lock-free snapshot)
 pub type TypstBatcher<'a> = typst_batch::Batcher<'a>;
 
-/// Typst file snapshot for reuse across compilation phases
-pub type FileSnapshot = std::sync::Arc<typst_batch::FileSnapshot>;
+/// Typst source snapshot for reuse across compilation phases
+pub type FileSnapshot = std::sync::Arc<typst_batch::SourceSnapshot>;
 
 /// Result of batch compilation for a single file
 pub type BatchCompileResult =
@@ -215,7 +215,7 @@ mod tests {
 
         assert!(page.is_ok());
         let page = page.unwrap();
-        assert_eq!(page.route.relative, "test");
+        assert_eq!(page.route.permalink.as_str(), "/test/");
         assert!(page.route.output_file.ends_with("test/index.html"));
     }
 
@@ -234,6 +234,6 @@ mod tests {
 
         assert!(page.is_ok());
         let page = page.unwrap();
-        assert_eq!(page.route.relative, "posts/hello");
+        assert_eq!(page.route.permalink.as_str(), "/posts/hello/");
     }
 }

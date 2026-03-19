@@ -159,3 +159,146 @@ fn is_temp_file(path: &Path) -> bool {
         || name.ends_with('~')
         || name.starts_with('.')
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use super::*;
+
+    fn make_event(paths: Vec<&str>, kind: notify::EventKind) -> notify::Event {
+        notify::Event {
+            kind,
+            paths: paths.into_iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
+    fn modify_kind() -> notify::EventKind {
+        notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Any,
+        ))
+    }
+
+    fn create_kind() -> notify::EventKind {
+        notify::EventKind::Create(notify::event::CreateKind::File)
+    }
+
+    fn remove_kind() -> notify::EventKind {
+        notify::EventKind::Remove(notify::event::RemoveKind::File)
+    }
+
+    fn add_event(debouncer: &mut Debouncer, path: &str, kind: notify::EventKind) {
+        debouncer.add_event(&make_event(vec![path], kind));
+    }
+
+    fn assert_change_kind(debouncer: &Debouncer, path: &str, expected: ChangeKind) {
+        assert_eq!(debouncer.changes[&PathBuf::from(path)], expected);
+    }
+
+    #[test]
+    fn stores_non_temp_events_by_path() {
+        let mut debouncer = Debouncer::new();
+        assert!(!debouncer.is_ready());
+
+        add_event(&mut debouncer, "/tmp/a.typ", create_kind());
+        add_event(&mut debouncer, "/tmp/b.typ", modify_kind());
+        add_event(&mut debouncer, "/tmp/c.typ", remove_kind());
+
+        assert_eq!(debouncer.changes.len(), 3);
+        assert_change_kind(&debouncer, "/tmp/a.typ", ChangeKind::Created);
+        assert_change_kind(&debouncer, "/tmp/b.typ", ChangeKind::Modified);
+        assert_change_kind(&debouncer, "/tmp/c.typ", ChangeKind::Removed);
+    }
+
+    #[test]
+    fn ignores_temp_files_without_refreshing_debounce_window() {
+        let mut debouncer = Debouncer::new();
+
+        add_event(&mut debouncer, "/tmp/real.typ", modify_kind());
+        assert!(debouncer.last_event.is_some());
+        let first_time = debouncer.last_event.unwrap();
+
+        std::thread::sleep(Duration::from_millis(5));
+
+        debouncer.add_event(&make_event(vec!["/tmp/.swp"], modify_kind()));
+        assert_eq!(debouncer.last_event.unwrap(), first_time);
+        assert_eq!(debouncer.changes.len(), 1);
+    }
+
+    #[test]
+    fn first_create_or_modify_event_wins_for_same_path() {
+        let mut debouncer = Debouncer::new();
+
+        add_event(&mut debouncer, "/tmp/a.typ", create_kind());
+        add_event(&mut debouncer, "/tmp/a.typ", modify_kind());
+
+        assert_eq!(debouncer.changes.len(), 1);
+        assert_change_kind(&debouncer, "/tmp/a.typ", ChangeKind::Created);
+    }
+
+    #[test]
+    fn deduplicates_same_notify_event_paths() {
+        let mut debouncer = Debouncer::new();
+
+        debouncer.add_event(&make_event(vec!["/tmp/a.typ", "/tmp/a.typ"], modify_kind()));
+
+        assert_eq!(debouncer.changes.len(), 1);
+    }
+
+    #[test]
+    fn sleep_duration_without_events_is_idle() {
+        let debouncer = Debouncer::new();
+
+        assert!(debouncer.sleep_duration() >= Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn sleep_duration_after_event_tracks_debounce_window() {
+        let mut debouncer = Debouncer::new();
+        debouncer.last_event = Some(std::time::Instant::now());
+
+        let dur = debouncer.sleep_duration();
+
+        assert!(dur >= Duration::from_millis(DEBOUNCE_MS - 10));
+        assert!(dur <= Duration::from_millis(DEBOUNCE_MS + 10));
+    }
+
+    #[test]
+    fn sleep_duration_respects_rebuild_cooldown() {
+        let mut debouncer = Debouncer::new();
+        debouncer.last_event = Some(std::time::Instant::now());
+        debouncer.last_compile = Some(std::time::Instant::now());
+
+        let dur = debouncer.sleep_duration();
+
+        assert!(dur >= Duration::from_millis(REBUILD_COOLDOWN_MS - 10));
+        assert!(dur <= Duration::from_millis(REBUILD_COOLDOWN_MS + 10));
+    }
+
+    #[test]
+    fn event_state_transitions_preserve_effective_change() {
+        let mut restored = Debouncer::new();
+        add_event(&mut restored, "/tmp/a.typ", remove_kind());
+        assert_change_kind(&restored, "/tmp/a.typ", ChangeKind::Removed);
+        add_event(&mut restored, "/tmp/a.typ", create_kind());
+        assert_eq!(restored.changes.len(), 1);
+        assert_change_kind(&restored, "/tmp/a.typ", ChangeKind::Created);
+
+        let mut discarded = Debouncer::new();
+        add_event(&mut discarded, "/tmp/a.typ", create_kind());
+        assert_change_kind(&discarded, "/tmp/a.typ", ChangeKind::Created);
+        add_event(&mut discarded, "/tmp/a.typ", remove_kind());
+        assert!(
+            discarded.changes.is_empty(),
+            "created+removed should discard"
+        );
+
+        let mut upgraded = Debouncer::new();
+        add_event(&mut upgraded, "/tmp/a.typ", modify_kind());
+        add_event(&mut upgraded, "/tmp/a.typ", remove_kind());
+        assert_eq!(upgraded.changes.len(), 1);
+        assert_change_kind(&upgraded, "/tmp/a.typ", ChangeKind::Removed);
+    }
+}

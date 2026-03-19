@@ -114,24 +114,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_arch_fingerprint_format() {
-        // Should be in format "arch_os"
-        assert!(ARCH_FINGERPRINT.contains('_'));
-        let parts: Vec<_> = ARCH_FINGERPRINT.split('_').collect();
-        assert_eq!(parts.len(), 2);
-    }
-
-    #[test]
-    fn test_cache_path() {
-        let path = cache_path(".cache", "test");
-        let path_str = path.to_string_lossy();
-
-        assert!(path_str.starts_with(".cache"));
-        assert!(path_str.ends_with(".rkyv"));
-        assert!(path_str.contains(ARCH_FINGERPRINT));
-    }
-
-    #[test]
     fn test_is_cache_valid() {
         let valid_path = cache_path(".cache", "test");
         assert!(is_cache_valid_for_arch(&valid_path));

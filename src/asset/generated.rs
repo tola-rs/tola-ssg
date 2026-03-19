@@ -72,86 +72,40 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_extract_domain_strips_port() {
-        // Port should be stripped
-        assert_eq!(
-            extract_domain("https://example.com:8080"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            extract_domain("https://example.com:443/path"),
-            Some("example.com".to_string())
-        );
+    fn test_extract_domain_cases() {
+        for (input, expected) in [
+            ("https://example.com:8080", Some("example.com")),
+            ("https://example.com:443/path", Some("example.com")),
+            ("https://user:pass@example.com", Some("example.com")),
+            ("https://user@example.com", Some("example.com")),
+            ("https://example.com/path/to/page", Some("example.com")),
+            ("example.com", None),
+            ("ftp://example.com", None),
+            ("file:///path", None),
+            ("http://localhost", None),
+            ("http://localhost:3000", None),
+            ("http://127.0.0.1", None),
+            ("http://127.0.0.1:8080", None),
+            ("http://192.168.1.1", None),
+            ("http://10.0.0.1:8080", None),
+        ] {
+            assert_eq!(
+                extract_domain(input),
+                expected.map(str::to_string),
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_extract_domain_strips_auth() {
-        // Auth info should be stripped
-        assert_eq!(
-            extract_domain("https://user:pass@example.com"),
-            Some("example.com".to_string())
-        );
-        assert_eq!(
-            extract_domain("https://user@example.com"),
-            Some("example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_domain_strips_path() {
-        // Path should be stripped
-        assert_eq!(
-            extract_domain("https://example.com/path/to/page"),
-            Some("example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_domain_rejects_no_scheme() {
-        // URL without scheme should fail (url crate requires scheme)
-        assert_eq!(extract_domain("example.com"), None);
-    }
-
-    #[test]
-    fn test_extract_domain_rejects_invalid_scheme() {
-        // Non-http(s) schemes should fail
-        assert_eq!(extract_domain("ftp://example.com"), None);
-        assert_eq!(extract_domain("file:///path"), None);
-    }
-
-    #[test]
-    fn test_extract_domain_rejects_localhost() {
-        assert_eq!(extract_domain("http://localhost"), None);
-        assert_eq!(extract_domain("http://localhost:3000"), None);
-        assert_eq!(extract_domain("http://127.0.0.1"), None);
-        assert_eq!(extract_domain("http://127.0.0.1:8080"), None);
-    }
-
-    #[test]
-    fn test_extract_domain_rejects_ip() {
-        assert_eq!(extract_domain("http://192.168.1.1"), None);
-        assert_eq!(extract_domain("http://10.0.0.1:8080"), None);
-    }
-
-    #[test]
-    fn test_should_generate_cname_no_url() {
+    fn test_should_generate_cname_basic_cases() {
         let flatten: Vec<FlattenEntry> = vec![];
         let tmp = TempDir::new().unwrap();
         assert!(should_generate_cname(None, &flatten, tmp.path()).is_none());
-    }
-
-    #[test]
-    fn test_should_generate_cname_with_domain() {
-        let flatten: Vec<FlattenEntry> = vec![];
-        let tmp = TempDir::new().unwrap();
-        let result = should_generate_cname(Some("https://example.com"), &flatten, tmp.path());
-        assert_eq!(result, Some("example.com".to_string()));
-    }
-
-    #[test]
-    fn test_should_generate_cname_localhost_skipped() {
-        let flatten: Vec<FlattenEntry> = vec![];
-        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            should_generate_cname(Some("https://example.com"), &flatten, tmp.path()),
+            Some("example.com".to_string())
+        );
         assert!(
             should_generate_cname(Some("http://localhost:3000"), &flatten, tmp.path()).is_none()
         );

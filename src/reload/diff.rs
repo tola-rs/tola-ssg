@@ -8,8 +8,10 @@
 //! - `compute_diff()` - Effectful, updates cache (used by VdomActor)
 //! - `compute_diff_shared()` - Thread-safe version using `SharedCache`
 
-use crate::compiler::family::{Cache, CacheEntry, Indexed, PatchOp, SharedCache};
-use tola_vdom::algo::{DiffResult, diff};
+use crate::compiler::family::{
+    Cache, CacheEntry, DiffEdit, Indexed, SharedCache, StructuralDocument,
+};
+use tola_vdom::diff::{Outcome, diff};
 use tola_vdom::{CacheKey, Document};
 
 /// Outcome of diff computation
@@ -19,10 +21,10 @@ pub enum DiffOutcome {
     Initial,
     /// No changes detected
     Unchanged,
-    /// Patch operations to apply (includes new VDOM for cache update after broadcast).
-    /// Contains pure `PatchOp` - caller should render to `Patch` before sending to browser.
+    /// Tree edits to render and apply.
+    /// Includes the new VDOM for cache update after successful broadcast.
     /// Document is boxed to reduce enum size.
-    Patches(Vec<PatchOp>, Box<Document<Indexed>>),
+    Edits(Vec<DiffEdit>, Box<Document<Indexed>>),
     /// Structural change requires full reload
     NeedsReload { reason: String },
 }
@@ -31,29 +33,26 @@ pub enum DiffOutcome {
 // Pure Function (no side effects)
 // =============================================================================
 
-/// Compute diff between old and new VDOM (pure function)
+/// Compute diff between a cached structural VDOM and a freshly indexed VDOM.
 ///
-/// Returns diff result without modifying any state
-/// Use this when you want to check what would change
-pub fn diff_vdom(old_vdom: &Document<Indexed>, new_vdom: &Document<Indexed>) -> DiffOutcome {
-    let diff_result: DiffResult<Indexed> = diff(old_vdom, new_vdom);
-
-    if diff_result.should_reload {
-        DiffOutcome::NeedsReload {
-            reason: diff_result
-                .reload_reason
-                .unwrap_or_else(|| "complex change".to_string()),
-        }
-    } else if diff_result.ops.is_empty() {
-        DiffOutcome::Unchanged
-    } else {
-        DiffOutcome::Patches(diff_result.ops, Box::new(new_vdom.clone()))
+/// Returns diff result without modifying any state.
+pub fn diff_vdom(old_vdom: &StructuralDocument, new_vdom: &Document<Indexed>) -> DiffOutcome {
+    match diff(old_vdom, new_vdom) {
+        Outcome::Unchanged { .. } => DiffOutcome::Unchanged,
+        Outcome::Changed(changes) => DiffOutcome::Edits(changes.edits, Box::new(new_vdom.clone())),
+        Outcome::Reload(reload) => DiffOutcome::NeedsReload {
+            reason: reload.reason.to_string(),
+        },
     }
 }
 
 // =============================================================================
 // Effectful Function (modifies cache)
 // =============================================================================
+
+fn cache_entry_from_indexed(doc: &Document<Indexed>) -> CacheEntry {
+    CacheEntry::with_default_version(tola_vdom::snapshot::project(doc))
+}
 
 /// Compute diff and update cache appropriately
 ///
@@ -65,7 +64,7 @@ pub fn diff_vdom(old_vdom: &Document<Indexed>, new_vdom: &Document<Indexed>) -> 
 /// - Initial: Insert new VDOM (browser will reload anyway)
 /// - NeedsReload: Insert new VDOM (browser will reload anyway)
 /// - Unchanged: Insert new VDOM (safe, content identical)
-/// - Patches: DON'T update cache here - caller updates after successful broadcast
+/// - Edits: DON'T update cache here - caller updates after successful broadcast
 ///
 /// # Note
 /// Caller must create `CacheKey` explicitly to ensure URL normalization
@@ -77,9 +76,9 @@ pub fn compute_diff(cache: &mut Cache, key: CacheKey, new_vdom: Document<Indexed
         match &outcome {
             DiffOutcome::NeedsReload { .. } | DiffOutcome::Unchanged => {
                 // Safe to update cache - browser will reload or content is same
-                cache.insert(key, CacheEntry::with_default_version(new_vdom));
+                cache.insert(key, cache_entry_from_indexed(&new_vdom));
             }
-            DiffOutcome::Patches(..) => {
+            DiffOutcome::Edits(..) => {
                 // DON'T update cache - caller updates after successful broadcast
                 // This keeps cache in sync with what browser actually displays
             }
@@ -89,7 +88,7 @@ pub fn compute_diff(cache: &mut Cache, key: CacheKey, new_vdom: Document<Indexed
         outcome
     } else {
         // Initial - insert into cache
-        cache.insert(key, CacheEntry::with_default_version(new_vdom));
+        cache.insert(key, cache_entry_from_indexed(&new_vdom));
         DiffOutcome::Initial
     }
 }
@@ -102,7 +101,7 @@ pub fn compute_diff(cache: &mut Cache, key: CacheKey, new_vdom: Document<Indexed
 /// # Cache Update Strategy
 /// Same as `compute_diff`:
 /// - Initial/NeedsReload/Unchanged: Update cache immediately
-/// - Patches: DON'T update - caller updates after successful broadcast
+/// - Edits: DON'T update - caller updates after successful broadcast
 pub fn compute_diff_shared(
     cache: &SharedCache,
     key: CacheKey,
@@ -115,9 +114,9 @@ pub fn compute_diff_shared(
         match &outcome {
             DiffOutcome::NeedsReload { .. } | DiffOutcome::Unchanged => {
                 // Safe to update cache - browser will reload or content is same
-                cache.insert(key, CacheEntry::with_default_version(new_vdom));
+                cache.insert(key, cache_entry_from_indexed(&new_vdom));
             }
-            DiffOutcome::Patches(..) => {
+            DiffOutcome::Edits(..) => {
                 // DON'T update cache - caller updates after successful broadcast
             }
             DiffOutcome::Initial => unreachable!("old_vdom exists"),
@@ -126,7 +125,7 @@ pub fn compute_diff_shared(
         outcome
     } else {
         // Initial - insert into cache (write lock)
-        cache.insert(key, CacheEntry::with_default_version(new_vdom));
+        cache.insert(key, cache_entry_from_indexed(&new_vdom));
         DiffOutcome::Initial
     }
 }
@@ -158,7 +157,8 @@ mod tests {
     fn test_diff_vdom_unchanged() {
         let doc1 = make_indexed_doc("html");
         let doc2 = make_indexed_doc("html");
-        let outcome = diff_vdom(&doc1, &doc2);
+        let old = tola_vdom::snapshot::project(&doc1);
+        let outcome = diff_vdom(&old, &doc2);
         assert!(matches!(outcome, DiffOutcome::Unchanged));
     }
 

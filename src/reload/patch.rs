@@ -1,4 +1,4 @@
-//! Patch Operations
+//! Client patch operations.
 //!
 //! DOM patch operations for incremental hot reload updates.
 
@@ -6,19 +6,20 @@
 
 use serde::{Deserialize, Serialize};
 
-use tola_vdom::algo::{Anchor, Patch};
+use tola_vdom::diff::Anchor;
+use tola_vdom::patch::Patch;
 
 // =============================================================================
-// Patch Operation
+// Client Patch
 // =============================================================================
 
-/// Individual patch operation for DOM updates (anchor-based)
+/// Individual client-side DOM patch command.
 ///
 /// All operations use StableId for targeting. No position indices
 /// This design ensures order independence and prevents index drift
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
-pub enum PatchOp {
+pub enum ClientPatch {
     /// Replace entire element's outerHTML
     Replace {
         /// StableId (hex) of element to replace
@@ -87,7 +88,7 @@ pub enum PatchOp {
 // Constructors
 // =============================================================================
 
-impl PatchOp {
+impl ClientPatch {
     /// Create a replace operation
     pub fn replace(target: impl Into<String>, html: impl Into<String>) -> Self {
         Self::Replace {
@@ -139,21 +140,21 @@ impl PatchOp {
 }
 
 // =============================================================================
-// Conversion from VDOM Patches
+// Conversion from rendered patches
 // =============================================================================
 
-/// Convert VDOM patches to PatchOps for WebSocket transmission
-pub fn from_vdom_patches(patches: &[Patch]) -> Vec<PatchOp> {
-    patches.iter().map(patch_to_op).collect()
+/// Convert rendered patches to client-side DOM patch commands.
+pub fn from_render_patches(patches: &[Patch]) -> Vec<ClientPatch> {
+    patches.iter().map(patch_to_client).collect()
 }
 
-fn patch_to_op(patch: &Patch) -> PatchOp {
+fn patch_to_client(patch: &Patch) -> ClientPatch {
     match patch {
-        Patch::Replace { target, html } => PatchOp::Replace {
+        Patch::Replace { target, html } => ClientPatch::Replace {
             target: target.to_attr_value(),
             html: html.clone(),
         },
-        Patch::UpdateText { target, text } => PatchOp::Text {
+        Patch::UpdateText { target, text } => ClientPatch::Text {
             target: target.to_attr_value(),
             text: text.clone(),
         },
@@ -161,17 +162,17 @@ fn patch_to_op(patch: &Patch) -> PatchOp {
             target,
             html,
             is_svg,
-        } => PatchOp::Html {
+        } => ClientPatch::Html {
             target: target.to_attr_value(),
             html: html.clone(),
             is_svg: *is_svg,
         },
-        Patch::Remove { target } => PatchOp::Remove {
+        Patch::Remove { target } => ClientPatch::Remove {
             target: target.to_attr_value(),
         },
         Patch::Insert { anchor, html } => {
             let (anchor_type, anchor_id) = anchor_to_parts(anchor);
-            PatchOp::Insert {
+            ClientPatch::Insert {
                 anchor_type,
                 anchor_id,
                 html: html.clone(),
@@ -179,13 +180,13 @@ fn patch_to_op(patch: &Patch) -> PatchOp {
         }
         Patch::Move { target, to } => {
             let (anchor_type, anchor_id) = anchor_to_parts(to);
-            PatchOp::Move {
+            ClientPatch::Move {
                 target: target.to_attr_value(),
                 anchor_type,
                 anchor_id,
             }
         }
-        Patch::UpdateAttrs { target, attrs } => PatchOp::Attrs {
+        Patch::UpdateAttrs { target, attrs } => ClientPatch::Attrs {
             target: target.to_attr_value(),
             attrs: attrs
                 .iter()
@@ -211,7 +212,7 @@ fn anchor_to_parts(anchor: &Anchor) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_vdom::id::StableId;
+    use tola_vdom::identity::StableId;
 
     #[test]
     fn test_anchor_based_insert() {
@@ -222,10 +223,10 @@ mod tests {
             html: "<span>new</span>".to_string(),
         }];
 
-        let ops = from_vdom_patches(&patches);
+        let ops = from_render_patches(&patches);
         assert_eq!(ops.len(), 1);
 
-        if let PatchOp::Insert {
+        if let ClientPatch::Insert {
             anchor_type,
             anchor_id: id,
             ..
@@ -248,10 +249,10 @@ mod tests {
             to: Anchor::FirstChildOf(anchor_id),
         }];
 
-        let ops = from_vdom_patches(&patches);
+        let ops = from_render_patches(&patches);
         assert_eq!(ops.len(), 1);
 
-        if let PatchOp::Move {
+        if let ClientPatch::Move {
             target,
             anchor_type,
             anchor_id: id,

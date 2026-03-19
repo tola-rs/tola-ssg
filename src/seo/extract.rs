@@ -130,19 +130,15 @@ mod tests {
     mod extract {
         use super::*;
 
-        #[test]
-        fn text() {
-            assert_eq!(extract(&json!({"func": "text", "text": "Hello"})), "Hello");
+        fn assert_extract(input: serde_json::Value, expected: &str) {
+            assert_eq!(extract(&input), expected);
         }
 
         #[test]
-        fn space() {
-            // space alone gets trimmed to empty string
-            assert_eq!(extract(&json!({"func": "space"})), "");
-        }
+        fn basic_nodes() {
+            assert_extract(json!({"func": "text", "text": "Hello"}), "Hello");
+            assert_extract(json!({"func": "space"}), "");
 
-        #[test]
-        fn sequence() {
             let json = json!({
                 "func": "sequence",
                 "children": [
@@ -151,69 +147,58 @@ mod tests {
                     {"func": "text", "text": "World"}
                 ]
             });
-            assert_eq!(extract(&json), "Hello World");
+            assert_extract(json, "Hello World");
         }
 
         #[test]
-        fn strong() {
-            let json = json!({"func": "strong", "body": {"func": "text", "text": "bold"}});
-            assert_eq!(extract(&json), "bold");
-        }
+        fn wrapped_nodes() {
+            assert_extract(
+                json!({"func": "strong", "body": {"func": "text", "text": "bold"}}),
+                "bold",
+            );
+            assert_extract(
+                json!({"func": "styled", "child": {"func": "text", "text": "styled"}}),
+                "styled",
+            );
 
-        #[test]
-        fn link() {
             let json = json!({
                 "func": "link",
                 "dest": "https://example.com",
                 "body": {"func": "text", "text": "click"}
             });
-            assert_eq!(extract(&json), r#"<a href="https://example.com">click</a>"#);
-        }
+            assert_extract(json, r#"<a href="https://example.com">click</a>"#);
 
-        #[test]
-        fn html_elem() {
             let json = json!({
                 "func": "elem",
                 "tag": "span",
                 "attrs": {"class": "test"},
                 "body": {"func": "text", "text": "content"}
             });
-            assert_eq!(extract(&json), r#"<span class="test">content</span>"#);
-        }
+            assert_extract(json, r#"<span class="test">content</span>"#);
 
-        #[test]
-        fn html_elem_void() {
             let json =
                 json!({"func": "elem", "tag": "br", "body": {"func": "sequence", "children": []}});
-            assert_eq!(extract(&json), "<br/>");
+            assert_extract(json, "<br/>");
         }
 
         #[test]
-        fn raw_html() {
-            let json = json!({"func": "raw", "text": "<b>bold</b>", "lang": "html"});
-            assert_eq!(extract(&json), "<b>bold</b>");
+        fn raw_and_escaping_nodes() {
+            assert_extract(
+                json!({"func": "raw", "text": "<b>bold</b>", "lang": "html"}),
+                "<b>bold</b>",
+            );
+            assert_extract(
+                json!({"func": "raw", "text": "let x = 1;", "lang": "rust"}),
+                "let x = 1;",
+            );
+            assert_extract(
+                json!({"func": "text", "text": "<script>alert(1)</script>"}),
+                "&lt;script&gt;alert(1)&lt;/script&gt;",
+            );
         }
 
         #[test]
-        fn raw_code() {
-            let json = json!({"func": "raw", "text": "let x = 1;", "lang": "rust"});
-            assert_eq!(extract(&json), "let x = 1;");
-        }
-
-        #[test]
-        fn styled() {
-            let json = json!({"func": "styled", "child": {"func": "text", "text": "styled"}});
-            assert_eq!(extract(&json), "styled");
-        }
-
-        #[test]
-        fn escaping() {
-            let json = json!({"func": "text", "text": "<script>alert(1)</script>"});
-            assert_eq!(extract(&json), "&lt;script&gt;alert(1)&lt;/script&gt;");
-        }
-
-        #[test]
-        fn complex() {
+        fn complex_and_unknown_nodes() {
             let json = json!({
                 "func": "sequence",
                 "children": [
@@ -224,17 +209,12 @@ mod tests {
                     {"func": "link", "dest": "https://example.com", "body": {"func": "text", "text": "link"}}
                 ]
             });
-            assert_eq!(
-                extract(&json),
-                r#"Hello <strong>bold</strong> <a href="https://example.com">link</a>"#
+            assert_extract(
+                json,
+                r#"Hello <strong>bold</strong> <a href="https://example.com">link</a>"#,
             );
-        }
 
-        #[test]
-        fn unknown_element_returns_empty() {
-            // Unknown element with no text/body/child/children -> empty string
-            let json = json!({"func": "unknown_element", "data": 123});
-            assert_eq!(extract(&json), "");
+            assert_extract(json!({"func": "unknown_element", "data": 123}), "");
         }
     }
 
@@ -242,6 +222,19 @@ mod tests {
     mod e2e {
         use super::*;
         use tempfile::TempDir;
+
+        fn summary_source(summary: &str) -> String {
+            format!(
+                r#"
+#set page(width: 100pt, height: auto)
+#metadata((
+  title: "Test",
+  summary: [{}],
+)) <tola-meta>
+"#,
+                summary
+            )
+        }
 
         /// Compile Typst source and extract summary field as HTML.
         fn compile_and_extract(source: &str) -> Option<String> {
@@ -261,72 +254,42 @@ mod tests {
 
         #[test]
         fn plain_text_summary() {
-            let source = r#"
-#set page(width: 100pt, height: auto)
-#metadata((
-  title: "Test",
-  summary: [Hello world],
-)) <tola-meta>
-"#;
-            assert_eq!(compile_and_extract(source), Some("Hello world".into()));
-        }
-
-        #[test]
-        fn bold_text() {
-            let source = r#"
-#set page(width: 100pt, height: auto)
-#metadata((
-  title: "Test",
-  summary: [This is *bold* text],
-)) <tola-meta>
-"#;
             assert_eq!(
-                compile_and_extract(source),
-                Some("This is bold text".into())
+                compile_and_extract(&summary_source("Hello world")),
+                Some("Hello world".into())
             );
         }
 
         #[test]
-        fn italic_text() {
-            let source = r#"
-#set page(width: 100pt, height: auto)
-#metadata((
-  title: "Test",
-  summary: [This is _italic_ text],
-)) <tola-meta>
-"#;
-            assert_eq!(
-                compile_and_extract(source),
-                Some("This is italic text".into())
-            );
+        fn inline_markup_text_cases() {
+            for (summary, expected) in [
+                ("This is *bold* text", "This is bold text"),
+                ("This is _italic_ text", "This is italic text"),
+            ] {
+                assert_eq!(
+                    compile_and_extract(&summary_source(summary)),
+                    Some(expected.into()),
+                    "{summary:?}"
+                );
+            }
         }
 
         #[test]
         fn link() {
-            let source = r#"
-#set page(width: 100pt, height: auto)
-#metadata((
-  title: "Test",
-  summary: [Click #link("https://example.com")[here]],
-)) <tola-meta>
-"#;
             assert_eq!(
-                compile_and_extract(source),
+                compile_and_extract(&summary_source(
+                    r#"Click #link("https://example.com")[here]"#
+                )),
                 Some(r#"Click <a href="https://example.com">here</a>"#.into())
             );
         }
 
         #[test]
         fn mixed_content() {
-            let source = r#"
-#set page(width: 100pt, height: auto)
-#metadata((
-  title: "Test",
-  summary: [Hello *world* and _italic_ with #link("url")[link]],
-)) <tola-meta>
-"#;
             assert_eq!(
-                compile_and_extract(source),
+                compile_and_extract(&summary_source(
+                    r#"Hello *world* and _italic_ with #link("url")[link]"#,
+                )),
                 Some(r#"Hello world and italic with <a href="url">link</a>"#.into())
             );
         }

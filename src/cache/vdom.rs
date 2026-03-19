@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use rustc_hash::FxHashMap;
 
 use crate::compiler::dependency::DependencyGraph;
-use crate::compiler::family::{CacheEntry, SharedCache};
+use crate::compiler::family::{CacheEntry, SharedCache, StructuralDocument};
 use crate::core::UrlPath;
 use tola_vdom::CacheKey;
-use tola_vdom::serialize::{from_bytes_to_indexed, to_bytes};
+use tola_vdom::snapshot::{from_bytes, to_bytes};
 
 use super::CACHE_DIR;
 use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
@@ -172,11 +172,11 @@ fn build_persist_entry(
         return None;
     }
 
-    // Serialize document
+    // Encode snapshot
     let bytes = match to_bytes(&cache_entry.doc) {
         Ok(b) => b,
         Err(e) => {
-            crate::debug!("persist"; "failed to serialize {}: {}", url, e);
+            crate::debug!("persist"; "failed to snapshot {}: {}", url, e);
             return None;
         }
     };
@@ -225,7 +225,7 @@ fn build_dependency_hashes(
 fn collect_entries_to_restore(
     index: &CacheIndex,
     cache_dir: &Path,
-) -> Vec<(String, crate::compiler::family::IndexedDocument)> {
+) -> Vec<(String, StructuralDocument)> {
     index
         .entries
         .iter()
@@ -267,11 +267,8 @@ fn write_index(cache_dir: &Path, index: &CacheIndex) -> std::io::Result<()> {
     fs::write(&path, json)
 }
 
-/// Read and deserialize a single cache entry
-fn read_entry(
-    cache_dir: &Path,
-    filename: &str,
-) -> Result<crate::compiler::family::IndexedDocument, String> {
+/// Read and decode a single cache entry snapshot.
+fn read_entry(cache_dir: &Path, filename: &str) -> Result<StructuralDocument, String> {
     let path = cache_dir.join(format!("{}.vdom", filename));
 
     let bytes = fs::read(&path).map_err(|e| {
@@ -279,8 +276,8 @@ fn read_entry(
         e.to_string()
     })?;
 
-    from_bytes_to_indexed(&bytes).map_err(|e| {
-        crate::debug!("persist"; "failed to deserialize {}: {}", path.display(), e);
+    from_bytes(&bytes).map_err(|e| {
+        crate::debug!("persist"; "failed to decode snapshot {}: {}", path.display(), e);
         e.to_string()
     })
 }

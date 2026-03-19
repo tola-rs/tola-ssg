@@ -1,17 +1,24 @@
 //! Serve mode build functions.
 //!
 //! Unlike `cli::build` which uses rayon for parallel compilation,
-//! serve mode uses the scheduler's priority queue to allow on-demand
-//! requests (Active priority) to be processed before background
-//! compilation (Background priority).
+//! serve mode must preserve low-latency on-demand requests while
+//! warming up the rest of the site in the background.
 
 use anyhow::Result;
 use rayon::prelude::*;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
     asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
     freshness, hooks, log, seo,
 };
+
+// Feed warmup work in small batches so the scheduler can use a few background
+// slots without turning startup into an all-core rebuild.
+const WARMUP_BATCH_SIZE: usize = 4;
+const WARMUP_IDLE_GRACE: Duration = Duration::from_millis(1000);
+const WARMUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Initialize serve build environment
 ///
@@ -32,7 +39,7 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
     // Initialize fonts with nested asset mappings
     let font_dirs = crate::cli::build::collect_font_dirs(config);
     let nested_mappings = compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-    compiler::page::typst::init_typst_with_mappings(
+    compiler::page::typst::init_runtime(
         &font_dirs,
         config.get_root().to_path_buf(),
         nested_mappings,
@@ -89,26 +96,21 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
 
 /// Build pages using scheduler for serve mode
 ///
-/// Unlike `build_all()` which uses rayon, this uses the scheduler's priority queue
-/// This allows on-demand requests (Active priority) to be processed before
-/// background compilation (Background priority)
+/// Unlike `build_all()` which uses rayon, serve-mode warmup must not saturate
+/// all cores before the first interactive request arrives.
+///
+/// Background warmup is queued through the scheduler so on-demand requests can
+/// still deduplicate with existing work. To preserve UX, we only feed tiny
+/// batches and pause warmup while requests are active.
 pub fn serve_build(config: &SiteConfig) -> Result<()> {
-    use compiler::scheduler::SCHEDULER;
-
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
         .into_iter()
         .filter(|p| ContentKind::is_content_file(p))
         .collect();
 
-    debug!("build"; "compiling {} pages via scheduler", content_files.len());
-
-    // Submit all pages to scheduler with Background priority
-    // On-demand requests will use Active priority and be processed first
-    SCHEDULER.submit_background(content_files);
-
-    // Wait for all background tasks to complete
-    SCHEDULER.wait_all();
+    debug!("build"; "warming {} pages via scheduler", content_files.len());
+    warm_site_pages(content_files);
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
@@ -136,12 +138,45 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
     Ok(())
 }
 
+/// Continue full-site warmup in the background after interactive serving starts.
+///
+/// The startup coordinator already made request-driven serving available after
+/// scan completion, so this function must not block that path.
+pub fn start_serve_build(config: Arc<SiteConfig>) {
+    std::thread::spawn(move || {
+        if let Err(e) = serve_build(&config) {
+            log!("build"; "background warmup failed: {}", e);
+        }
+    });
+}
+
+fn warm_site_pages(content_files: Vec<std::path::PathBuf>) {
+    use crate::cli::serve::request_idle_for;
+    use compiler::scheduler::SCHEDULER;
+
+    for chunk in content_files.chunks(WARMUP_BATCH_SIZE) {
+        // Only spend cycles on full-site warmup when the request path has been
+        // quiet for a moment. This keeps startup eager work from racing the
+        // first page load or SPA navigation burst.
+        while !request_idle_for(WARMUP_IDLE_GRACE) {
+            if crate::core::is_shutdown() {
+                return;
+            }
+            std::thread::sleep(WARMUP_POLL_INTERVAL);
+        }
+
+        SCHEDULER.submit_background(chunk.to_vec());
+        SCHEDULER.wait_all();
+    }
+}
+
 /// Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
 ///
 /// This ensures iterative pages have complete data after all pages are compiled.
 /// Called after initial scheduler compilation to fix race condition where
 /// pages may have been compiled before STORED_PAGES was fully populated.
 fn recompile_virtual_users(config: &SiteConfig) {
+    use crate::cli::serve::request_idle_for;
     use crate::compiler::dependency::collect_virtual_dependents;
     use crate::reload::compile::compile_page;
 
@@ -155,6 +190,13 @@ fn recompile_virtual_users(config: &SiteConfig) {
 
     // Recompile each dependent page (compile_page handles write + cache)
     for path in &all_dependents {
+        while !request_idle_for(WARMUP_IDLE_GRACE) {
+            if crate::core::is_shutdown() {
+                return;
+            }
+            std::thread::sleep(WARMUP_POLL_INTERVAL);
+        }
+
         let outcome = compile_page(path, config);
         if let crate::reload::compile::CompileOutcome::Vdom { url_path, vdom, .. } = outcome {
             crate::compiler::page::cache_vdom(&url_path, *vdom);

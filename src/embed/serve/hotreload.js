@@ -16,6 +16,7 @@
   const Tola = {
     // StableId -> Element mapping for O(1) lookups
     idMap: new Map(),
+    errorState: new Map(),
     ws: null,
     wsPort: null,
     reconnectTimer: null,
@@ -69,7 +70,8 @@
           this.reconnectTimer = null;
         }
         this.hydrate();
-        // Report current page to server for priority compilation
+        // Report current page to the server so later hot-reload work can
+        // prioritize the page the browser is currently showing.
         this.reportCurrentPage();
       };
 
@@ -228,7 +230,6 @@
           // StableIds are globally unique (include page path hash), so we can
           // safely apply all patches - only matching elements will be affected.
           // This naturally supports htmx/dynamic content loading.
-          this.hideErrorOverlay(); // Clear any previous error
           this.applyPatches(msg.ops);
 
           // Clear SPA prefetch cache (content may have changed)
@@ -246,11 +247,18 @@
           break;
         case 'error':
           console.error('[tola] compile error:', msg.path, msg.error);
-          this.showErrorOverlay(msg.path, msg.error);
+          this.errorState.set(msg.path, msg.error);
+          this.renderErrorOverlay();
           break;
         case 'clear_error':
-          console.log('[tola] error cleared');
-          this.hideErrorOverlay();
+          if (msg.path) {
+            console.log('[tola] error cleared:', msg.path);
+            this.errorState.delete(msg.path);
+          } else {
+            console.log('[tola] all errors cleared');
+            this.errorState.clear();
+          }
+          this.renderErrorOverlay();
           break;
       }
     },
@@ -274,8 +282,18 @@
       }
     },
 
-    // Show error overlay without reloading
-    showErrorOverlay(path, error) {
+    // Render error overlay from the current error set without reloading
+    renderErrorOverlay() {
+      const entries = Array.from(this.errorState.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]));
+
+      if (entries.length === 0) {
+        this.hideErrorOverlay();
+        return;
+      }
+
+      const [path, error] = entries[0];
+      const extraCount = entries.length - 1;
       let overlay = document.getElementById('tola-error-overlay');
       if (!overlay) {
         overlay = document.createElement('div');
@@ -293,7 +311,16 @@
         `;
         document.body.appendChild(overlay);
       }
-      overlay.querySelector('.tola-error-path').textContent = path;
+
+      const title = extraCount > 0
+        ? `Compilation Errors (${entries.length})`
+        : 'Compilation Error';
+      const summary = extraCount > 0
+        ? `${path} (+${extraCount} more)`
+        : path;
+
+      overlay.querySelector('.tola-error-title').textContent = title;
+      overlay.querySelector('.tola-error-path').textContent = summary;
       // Use innerHTML since error contains HTML spans for syntax highlighting
       overlay.querySelector('.tola-error-message').innerHTML = error;
       overlay.style.display = 'flex';
@@ -313,7 +340,7 @@
       const otherOps = [];
 
       for (const op of ops) {
-        if (this.isStylesheetPatchOp(op)) {
+        if (this.isStylesheetPatch(op)) {
           cssOps.push(op);
         } else {
           otherOps.push(op);
@@ -362,7 +389,7 @@
         });
     },
 
-    isStylesheetPatchOp(op) {
+    isStylesheetPatch(op) {
       return this.isStylesheetReplaceOp(op) || this.isStylesheetAttrsOp(op);
     },
 
@@ -621,7 +648,7 @@
       return null;
     },
 
-    // Report current page URL to server for priority compilation
+    // Report current page URL to the server for active-page tracking.
     reportCurrentPage() {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         // Decode URL for server (server expects decoded URLs internally)

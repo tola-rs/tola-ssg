@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::core::UrlChange;
-pub use crate::reload::patch::PatchOp;
+pub use crate::reload::patch::ClientPatch;
 
 /// Hot reload message sent over WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub enum HotReloadMessage {
         /// Target page path (e.g., "/blog/post.html")
         path: String,
         /// Sequence of patch operations
-        ops: Vec<PatchOp>,
+        ops: Vec<ClientPatch>,
         /// Optional URL change (permalink changed)
         #[serde(skip_serializing_if = "Option::is_none")]
         url_change: Option<UrlChange>,
@@ -77,9 +77,14 @@ pub enum HotReloadMessage {
         error: String,
     },
 
-    /// Clear error overlay (compilation succeeded after error)
+    /// Clear one error or the full error overlay state
     #[serde(rename = "clear_error")]
-    ClearError,
+    ClearError {
+        /// Optional source file path to clear.
+        /// If omitted, the client clears all tracked errors before replay.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
 
 impl HotReloadMessage {
@@ -108,7 +113,7 @@ impl HotReloadMessage {
     }
 
     /// Create a patch message
-    pub fn patch(path: impl Into<String>, ops: Vec<PatchOp>) -> Self {
+    pub fn patch(path: impl Into<String>, ops: Vec<ClientPatch>) -> Self {
         Self::Patch {
             path: path.into(),
             ops,
@@ -119,7 +124,7 @@ impl HotReloadMessage {
     /// Create a patch message with URL change
     pub fn patch_with_url_change(
         path: impl Into<String>,
-        ops: Vec<PatchOp>,
+        ops: Vec<ClientPatch>,
         url_change: UrlChange,
     ) -> Self {
         Self::Patch {
@@ -144,9 +149,16 @@ impl HotReloadMessage {
         }
     }
 
-    /// Create a clear error message
-    pub fn clear_error() -> Self {
-        Self::ClearError
+    /// Create a clear error message for one source file
+    pub fn clear_error(path: impl Into<String>) -> Self {
+        Self::ClearError {
+            path: Some(path.into()),
+        }
+    }
+
+    /// Create a clear-all-errors message
+    pub const fn clear_all_errors() -> Self {
+        Self::ClearError { path: None }
     }
 
     /// Create a ping message
@@ -169,14 +181,14 @@ impl HotReloadMessage {
         serde_json::from_str(s).ok()
     }
 
-    /// Create a patch message from VDOM Patches (anchor-based)
+    /// Create a patch message from rendered patches (anchor-based)
     ///
     /// All operations use StableId for targeting. No position indices.
     /// Order of operations doesn't matter for correctness.
-    pub fn from_patches(path: &str, patches: &[tola_vdom::algo::Patch]) -> Self {
+    pub fn from_patches(path: &str, patches: &[tola_vdom::patch::Patch]) -> Self {
         Self::Patch {
             path: path.to_string(),
-            ops: crate::reload::patch::from_vdom_patches(patches),
+            ops: crate::reload::patch::from_render_patches(patches),
             url_change: None,
         }
     }
@@ -191,8 +203,8 @@ mod tests {
         let msg = HotReloadMessage::patch(
             "/index.html",
             vec![
-                PatchOp::replace("abc123", "<p>New content</p>"),
-                PatchOp::text("def456", "Updated Title"),
+                ClientPatch::replace("abc123", "<p>New content</p>"),
+                ClientPatch::text("def456", "Updated Title"),
             ],
         );
 
@@ -219,9 +231,41 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_error_message_with_path() {
+        let msg = HotReloadMessage::clear_error("content/index.typ");
+        let json = msg.to_json();
+        assert!(json.contains(r#""type":"clear_error""#));
+        assert!(json.contains(r#""path":"content/index.typ""#));
+
+        let parsed = HotReloadMessage::from_json(&json).unwrap();
+        match parsed {
+            HotReloadMessage::ClearError { path } => {
+                assert_eq!(path.as_deref(), Some("content/index.typ"));
+            }
+            _ => panic!("Expected ClearError message"),
+        }
+    }
+
+    #[test]
+    fn test_clear_all_errors_message_omits_path() {
+        let msg = HotReloadMessage::clear_all_errors();
+        let json = msg.to_json();
+        assert_eq!(json, r#"{"type":"clear_error"}"#);
+
+        let parsed = HotReloadMessage::from_json(&json).unwrap();
+        match parsed {
+            HotReloadMessage::ClearError { path } => {
+                assert!(path.is_none());
+            }
+            _ => panic!("Expected ClearError message"),
+        }
+    }
+
+    #[test]
     fn test_anchor_based_insert() {
-        use tola_vdom::algo::{Anchor, Patch};
-        use tola_vdom::id::StableId;
+        use tola_vdom::diff::Anchor;
+        use tola_vdom::identity::StableId;
+        use tola_vdom::patch::Patch;
 
         // Create test StableId using public API
         let anchor_id = StableId::for_text(0, 0x1234);
@@ -234,7 +278,7 @@ mod tests {
         let msg = HotReloadMessage::from_patches("/test.html", &patches);
         if let HotReloadMessage::Patch { ops, .. } = msg {
             assert_eq!(ops.len(), 1);
-            if let PatchOp::Insert {
+            if let ClientPatch::Insert {
                 anchor_type,
                 anchor_id: id,
                 ..
@@ -252,8 +296,9 @@ mod tests {
 
     #[test]
     fn test_anchor_based_move() {
-        use tola_vdom::algo::{Anchor, Patch};
-        use tola_vdom::id::StableId;
+        use tola_vdom::diff::Anchor;
+        use tola_vdom::identity::StableId;
+        use tola_vdom::patch::Patch;
 
         // Create test StableIds using public API
         let target_id = StableId::for_text(1, 0x1111);
@@ -267,7 +312,7 @@ mod tests {
         let msg = HotReloadMessage::from_patches("/test.html", &patches);
         if let HotReloadMessage::Patch { ops, .. } = msg {
             assert_eq!(ops.len(), 1);
-            if let PatchOp::Move {
+            if let ClientPatch::Move {
                 target,
                 anchor_type,
                 anchor_id: id,

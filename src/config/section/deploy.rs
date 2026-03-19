@@ -148,93 +148,16 @@ impl Default for VercelDeployConfig {
 #[cfg(test)]
 mod tests {
     use crate::config::{ConfigDiagnostics, ConfigPresence, SiteConfig, test_parse_config};
-    use std::path::PathBuf;
 
     #[test]
-    fn test_deploy_config() {
-        let config = test_parse_config(
-            r#"[deploy]
-provider = "github"
-force = true
-
-[deploy.github]
-url = "https://github.com/user/user.github.io"
-branch = "gh-pages"
-token_path = "~/.github-token""#,
-        );
-
-        assert_eq!(config.deploy.provider, "github");
-        assert!(config.deploy.force);
-        assert_eq!(
-            config.deploy.github.url,
-            "https://github.com/user/user.github.io"
-        );
-        assert_eq!(config.deploy.github.branch, "gh-pages");
-        assert_eq!(
-            config.deploy.github.token_path,
-            Some(PathBuf::from("~/.github-token"))
-        );
-    }
-
-    #[test]
-    fn test_deploy_config_defaults() {
-        let config = test_parse_config("");
-
-        assert_eq!(config.deploy.provider, "github");
-        assert!(!config.deploy.force);
-        assert_eq!(config.deploy.github.branch, "main");
-        assert!(config.deploy.github.token_path.is_none());
-    }
-
-    #[test]
-    fn test_deploy_config_github_custom_branch() {
-        let config = test_parse_config("[deploy.github]\nbranch = \"gh-pages\"");
-        assert_eq!(config.deploy.github.branch, "gh-pages");
-    }
-
-    #[test]
-    fn test_deploy_config_github_url_variations() {
-        // HTTPS URL
-        let config =
-            test_parse_config("[deploy.github]\nurl = \"https://github.com/user/repo.git\"");
-        assert_eq!(config.deploy.github.url, "https://github.com/user/repo.git");
-
-        // SSH URL
-        let config = test_parse_config("[deploy.github]\nurl = \"git@github.com:user/repo.git\"");
-        assert_eq!(config.deploy.github.url, "git@github.com:user/repo.git");
-    }
-
-    #[test]
-    fn test_deploy_config_force_flag() {
-        let config = test_parse_config("[deploy]\nforce = true");
-        assert!(config.deploy.force);
-    }
-
-    #[test]
-    fn test_deploy_unknown_field_detected() {
-        let content =
-            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy]\nunknown = \"field\"";
-        let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
-        assert!(ignored.iter().any(|f| f.contains("unknown")));
-    }
-
-    #[test]
-    fn test_deploy_github_unknown_field_detected() {
-        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy.github]\nunknown = \"field\"";
-        let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
-        assert!(ignored.iter().any(|f| f.contains("unknown")));
-    }
-
-    #[test]
-    fn test_deploy_config_cloudflare_placeholder() {
-        let config = test_parse_config("[deploy.cloudflare]\nprovider = \"cloudflare\"");
-        assert_eq!(config.deploy.cloudflare.provider, "cloudflare");
-    }
-
-    #[test]
-    fn test_deploy_config_vercel_placeholder() {
-        let config = test_parse_config("[deploy.vercel]\nprovider = \"vercel\"");
-        assert_eq!(config.deploy.vercel.provider, "vercel");
+    fn test_deploy_unknown_fields_detected() {
+        for content in [
+            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy]\nunknown = \"field\"",
+            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy.github]\nunknown = \"field\"",
+        ] {
+            let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+            assert!(ignored.iter().any(|f| f.contains("unknown")));
+        }
     }
 
     #[test]

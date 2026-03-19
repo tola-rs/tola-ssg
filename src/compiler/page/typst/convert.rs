@@ -258,56 +258,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_identify_family() {
-        // Test using TolaSite::identify()
-        assert_eq!(TolaSite::identify("a", &Attrs::new()), "link");
-        assert_eq!(TolaSite::identify("h1", &Attrs::new()), "heading");
-        assert_eq!(TolaSite::identify("svg", &Attrs::new()), "svg");
-        assert_eq!(TolaSite::identify("img", &Attrs::new()), "media");
-        assert_eq!(TolaSite::identify("video", &Attrs::new()), "media");
-        assert_eq!(TolaSite::identify("audio", &Attrs::new()), "media");
-
-        // Generic elements go to "none"
-        assert_eq!(TolaSite::identify("p", &Attrs::new()), "none");
-        assert_eq!(TolaSite::identify("code", &Attrs::new()), "none");
-        assert_eq!(TolaSite::identify("pre", &Attrs::new()), "none");
-        assert_eq!(TolaSite::identify("div", &Attrs::new()), "none");
-        assert_eq!(TolaSite::identify("span", &Attrs::new()), "none");
-    }
-
-    #[test]
-    fn test_parse_svg_string_basic() {
-        let svg = r#"<svg viewBox="0 0 100 100" class="test">inner content</svg>"#;
-        let (attrs, inner) = parse_svg_string(svg);
-
-        assert_eq!(attrs.len(), 2);
-        assert_eq!(attrs[0], ("viewBox".to_string(), "0 0 100 100".to_string()));
-        assert_eq!(attrs[1], ("class".to_string(), "test".to_string()));
-        assert_eq!(inner, "inner content");
-    }
-
-    #[test]
-    fn test_parse_svg_string_complex() {
-        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 595.28 841.89"><g>paths...</g></svg>"#;
-        let (attrs, inner) = parse_svg_string(svg);
-
-        assert_eq!(attrs.len(), 2);
-        assert_eq!(attrs[0].0, "xmlns");
-        assert_eq!(attrs[1].0, "viewBox");
-        assert!(inner.contains("<g>"));
-    }
-
-    #[test]
-    fn test_parse_svg_string_self_closing() {
-        let svg = r#"<svg viewBox="0 0 10 10"/>"#;
-        let (attrs, inner) = parse_svg_string(svg);
-
-        assert_eq!(attrs.len(), 1);
-        assert_eq!(attrs[0].0, "viewBox");
-        assert!(inner.is_empty());
-    }
-
-    #[test]
     fn test_normalize_vertical_align_em() {
         assert_eq!(normalize_vertical_align_em(-0.4321), Some(-0.4321));
         assert_eq!(normalize_vertical_align_em(f64::NAN), None);

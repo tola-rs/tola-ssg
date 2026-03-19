@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::address::{GLOBAL_ADDRESS_SPACE, PermalinkUpdate};
+use crate::page::PageRoute;
 use crate::reload::compile::CompileOutcome;
 
 use super::CompilerActor;
@@ -60,11 +61,13 @@ impl CompilerActor {
         let msg = match outcome {
             CompileOutcome::Vdom {
                 path,
+                route,
+                title,
                 url_path,
                 vdom,
                 warnings,
             } => {
-                let permalink_change = update_address_space(&path, &url_path);
+                let permalink_change = update_address_space(route, title);
                 crate::actor::messages::VdomMsg::Process {
                     path,
                     url_path,
@@ -89,9 +92,11 @@ impl CompilerActor {
     }
 }
 
-fn update_address_space(path: &Path, url_path: &crate::core::UrlPath) -> Option<PermalinkUpdate> {
+fn update_address_space(route: PageRoute, title: Option<String>) -> Option<PermalinkUpdate> {
+    let path = route.source.clone();
+    let url_path = route.permalink.clone();
     let mut space = GLOBAL_ADDRESS_SPACE.write();
-    let update = space.update_source_url(path, url_path);
+    let update = space.update_page_checked(route, title);
     crate::debug!(
         "permalink";
         "update({}, {}) = {:?}",
@@ -102,5 +107,55 @@ fn update_address_space(path: &Path, url_path: &crate::core::UrlPath) -> Option<
     match update {
         PermalinkUpdate::Unchanged => None,
         _ => Some(update),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_address_space;
+    use crate::address::{GLOBAL_ADDRESS_SPACE, PermalinkUpdate};
+    use crate::core::UrlPath;
+    use crate::page::PageRoute;
+    use std::path::PathBuf;
+
+    fn test_route(source: &str, permalink: &str, output: &str) -> PageRoute {
+        PageRoute {
+            source: PathBuf::from(source),
+            permalink: UrlPath::from_page(permalink),
+            output_file: PathBuf::from(output),
+            is_index: false,
+            is_404: false,
+            output_dir: PathBuf::new(),
+            full_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn update_address_space_reports_permalink_change_for_existing_source_mapping() {
+        let old_url = UrlPath::from_page("/old/");
+
+        {
+            let mut space = GLOBAL_ADDRESS_SPACE.write();
+            space.clear();
+            space.register_page(
+                test_route("content/post.typ", "/old/", "public/old/index.html"),
+                Some("Post".to_string()),
+            );
+        }
+
+        let change = update_address_space(
+            test_route("content/post.typ", "/new/", "public/new/index.html"),
+            None,
+        );
+
+        match change {
+            Some(PermalinkUpdate::Changed { old_url: old }) => {
+                assert_eq!(old, old_url);
+            }
+            other => panic!("expected permalink change, got {:?}", other),
+        }
+
+        let mut space = GLOBAL_ADDRESS_SPACE.write();
+        space.clear();
     }
 }

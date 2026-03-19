@@ -81,30 +81,30 @@ impl<'a> HeaderInjector<'a> {
 
         // Description meta (skip if user already defined one)
         if !config.site.info.description.is_empty() && !Self::has_meta_name(head, "description") {
-            let mut meta = TolaSite::element("meta", Attrs::new());
-            meta.set_attr("name", "description");
-            meta.set_attr("content", &config.site.info.description);
-            head.push_elem(meta);
+            let mut attrs = Attrs::new();
+            attrs.set("name", "description");
+            attrs.set("content", &config.site.info.description);
+            head.push_elem(TolaSite::element("meta", attrs));
         }
 
         // Icon
         if let Some(icon) = &head_config.icon
             && let Some(href) = versioned_href(icon, config)
         {
-            let mut link = TolaSite::element("link", Attrs::new());
-            link.set_attr("rel", "shortcut icon");
-            link.set_attr("href", href);
-            link.set_attr("type", mime::for_icon(icon));
-            head.push_elem(link);
+            let mut attrs = Attrs::new();
+            attrs.set("rel", "shortcut icon");
+            attrs.set("href", href);
+            attrs.set("type", mime::for_icon(icon));
+            head.push_elem(TolaSite::element("link", attrs));
         }
 
         // User-defined stylesheets
         for style in &head_config.styles {
             if let Some(href) = versioned_href(style, config) {
-                let mut link = TolaSite::element("link", Attrs::new());
-                link.set_attr("rel", "stylesheet");
-                link.set_attr("href", href);
-                head.push_elem(link);
+                let mut attrs = Attrs::new();
+                attrs.set("rel", "stylesheet");
+                attrs.set("href", href);
+                head.push_elem(TolaSite::element("link", attrs));
             }
         }
 
@@ -113,23 +113,23 @@ impl<'a> HeaderInjector<'a> {
             && let Some(path) = &config.build.hooks.css.path
             && let Ok(route) = crate::asset::route_from_source(path.clone(), config)
         {
-            let mut link = TolaSite::element("link", Attrs::new());
-            link.set_attr("rel", "stylesheet");
             // CSS output uses versioned URL based on OUTPUT file
             // (not path, since CSS processor generates different output based on scanned classes)
             let href = version::versioned_url(route.url.as_ref(), &route.output);
-            link.set_attr("href", href);
-            head.push_elem(link);
+            let mut attrs = Attrs::new();
+            attrs.set("rel", "stylesheet");
+            attrs.set("href", href);
+            head.push_elem(TolaSite::element("link", attrs));
         }
 
         // Auto-enhance CSS (SVG theme adaptation + View Transitions)
         {
             use crate::embed::css::{ENHANCE_CSS, enhance_vars};
             let href = ENHANCE_CSS.url_path_with_vars(&enhance_vars(config));
-            let mut link = TolaSite::element("link", Attrs::new());
-            link.set_attr("rel", "stylesheet");
-            link.set_attr("href", href);
-            head.push_elem(link);
+            let mut attrs = Attrs::new();
+            attrs.set("rel", "stylesheet");
+            attrs.set("href", href);
+            head.push_elem(TolaSite::element("link", attrs));
         }
 
         // Recolor CSS + JS (if enabled)
@@ -140,34 +140,34 @@ impl<'a> HeaderInjector<'a> {
             // CSS (always)
             let css_vars = recolor::css_vars(&config.theme.recolor);
             let href = recolor::RECOLOR_CSS.url_path_with_vars(&css_vars);
-            let mut link = TolaSite::element("link", Attrs::new());
-            link.set_attr("rel", "stylesheet");
-            link.set_attr("href", href);
-            head.push_elem(link);
+            let mut attrs = Attrs::new();
+            attrs.set("rel", "stylesheet");
+            attrs.set("href", href);
+            head.push_elem(TolaSite::element("link", attrs));
 
             // JS (only for dynamic mode: auto or css-var)
             if !matches!(config.theme.recolor.source, RecolorSource::Static) {
                 let js_vars = recolor::js_vars(&config.theme.recolor);
                 let src = recolor::RECOLOR_JS.url_path_with_vars(&js_vars);
-                let mut script = TolaSite::element("script", Attrs::new());
-                script.set_attr("src", src);
-                script.set_attr("defer", "");
-                head.push_elem(script);
+                let mut attrs = Attrs::new();
+                attrs.set("src", src);
+                attrs.set("defer", "");
+                head.push_elem(TolaSite::element("script", attrs));
             }
         }
 
         // Scripts
         for script in &head_config.scripts {
             if let Some(src) = versioned_href(script.path(), config) {
-                let mut script_elem = TolaSite::element("script", Attrs::new());
-                script_elem.set_attr("src", src);
+                let mut attrs = Attrs::new();
+                attrs.set("src", src);
                 if script.is_defer() {
-                    script_elem.set_attr("defer", "");
+                    attrs.set("defer", "");
                 }
                 if script.is_async() {
-                    script_elem.set_attr("async", "");
+                    attrs.set("async", "");
                 }
-                head.push_elem(script_elem);
+                head.push_elem(TolaSite::element("script", attrs));
             }
         }
 
@@ -241,18 +241,18 @@ impl<'a> HeaderInjector<'a> {
 
     /// Create a meta element with property attribute.
     fn meta_property(property: &str, content: &str) -> Element<Raw> {
-        let mut meta = TolaSite::element("meta", Attrs::new());
-        meta.set_attr("property", property);
-        meta.set_attr("content", content);
-        meta
+        let mut attrs = Attrs::new();
+        attrs.set("property", property);
+        attrs.set("content", content);
+        TolaSite::element("meta", attrs)
     }
 
     /// Create a meta element with name attribute.
     fn meta_name(name: &str, content: &str) -> Element<Raw> {
-        let mut meta = TolaSite::element("meta", Attrs::new());
-        meta.set_attr("name", name);
-        meta.set_attr("content", content);
-        meta
+        let mut attrs = Attrs::new();
+        attrs.set("name", name);
+        attrs.set("content", content);
+        TolaSite::element("meta", attrs)
     }
 }
 
@@ -279,6 +279,9 @@ impl<'a> Transform<Raw> for HeaderInjector<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::section::build::assets::NestedEntry;
+    use std::fs;
+    use tempfile::TempDir;
 
     fn make_html_doc() -> Document<Raw> {
         let mut html = TolaSite::element("html", Attrs::new());
@@ -315,5 +318,30 @@ mod tests {
         });
 
         assert!(has_title, "should have title element");
+    }
+
+    #[test]
+    fn injected_href_links_have_link_family_payloads() {
+        let dir = TempDir::new().unwrap();
+        let assets_dir = dir.path().join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        let style_path = assets_dir.join("site.css");
+        fs::write(&style_path, "body{}").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
+        config.site.header.no_fouc = false;
+        config.site.header.styles = vec![style_path];
+
+        let doc = HeaderInjector::new(&config).transform(make_html_doc());
+        let indexed = TolaSite::indexer().transform(doc);
+        let links = indexed.find_all(|elem| elem.is_tag("link") && elem.has_attr("href"));
+
+        assert!(!links.is_empty());
+        for link in links {
+            let data = ExtractFamily::<LinkFamily>::get(&link.ext).unwrap();
+            assert_eq!(data.href.as_deref(), link.get_attr("href"));
+        }
     }
 }

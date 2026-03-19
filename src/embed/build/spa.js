@@ -251,7 +251,7 @@
       }
       handleScroll(url, scrollPos);
 
-      // Report new page to hotreload server (if connected)
+      // Refresh active-page tracking for subsequent hot-reload prioritization.
       if (window.Tola && typeof window.Tola.reportCurrentPage === 'function') {
         window.Tola.reportCurrentPage();
       }

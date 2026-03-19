@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 
 use crate::cli::args::QueryArgs;
 use crate::cli::common::{
-    ParallelCollector, batch_scan_typst_metadata_iterative, calculate_url_path, scan_markdown_file,
+    ParallelCollector, batch_scan_typst_metadata_iterative, scan_markdown_file,
 };
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
@@ -84,7 +84,13 @@ fn process_query_result(
         .unwrap_or(file)
         .to_string_lossy()
         .to_string();
-    let permalink = resolve_permalink(file, &raw_meta, config);
+    let permalink = match resolve_permalink(file, &raw_meta, config) {
+        Ok(permalink) => permalink,
+        Err(e) => {
+            log!("warning"; "failed to resolve permalink for {}: {}", file.display(), e);
+            return None;
+        }
+    };
 
     let meta = if raw_mode {
         QueryMeta::Raw(raw_meta)
@@ -111,32 +117,60 @@ fn process_query_result(
 /// 1. Custom permalink from metadata (`permalink` field)
 /// 2. Source -> permalink mapping from STORED_PAGES
 /// 3. Computed default route from source path
-/// 4. Legacy fallback path calculation
-fn resolve_permalink(file: &Path, raw_meta: &JsonValue, config: &SiteConfig) -> String {
+fn resolve_permalink(file: &Path, raw_meta: &JsonValue, config: &SiteConfig) -> Result<String> {
     let prefix = config.paths().prefix().to_string_lossy().into_owned();
 
     // Respect explicit custom permalink from metadata.
     if let Some(custom) = raw_meta.get("permalink").and_then(|v| v.as_str()) {
-        return strip_path_prefix_from_page_url(UrlPath::from_page(custom).as_ref(), &prefix);
+        return Ok(strip_path_prefix_from_page_url(
+            UrlPath::from_page(custom).as_ref(),
+            &prefix,
+        ));
     }
 
     // Prefer source mapping populated by `populate_stored_pages` (includes derived permalinks).
     if let Some(mapped) = STORED_PAGES.get_permalink_by_source(file) {
-        return strip_path_prefix_from_page_url(mapped.as_str(), &prefix);
+        return Ok(strip_path_prefix_from_page_url(mapped.as_str(), &prefix));
     }
 
     // Keep behavior aligned with build routing (slug/path_prefix aware).
-    if let Ok(compiled) = crate::compiler::page::CompiledPage::from_paths(file, config) {
-        return strip_path_prefix_from_page_url(compiled.route.permalink.as_str(), &prefix);
-    }
-
-    // Last-resort fallback for unexpected path/config errors.
-    let content_dir = normalize_path(&config.build.content);
-    strip_path_prefix_from_page_url(&calculate_url_path(file, &content_dir), &prefix)
+    let compiled = crate::compiler::page::CompiledPage::from_paths(file, config)?;
+    Ok(strip_path_prefix_from_page_url(
+        compiled.route.permalink.as_str(),
+        &prefix,
+    ))
 }
 
 /// Query Markdown file metadata using shared VDOM pipeline
 fn query_markdown_vdom(file: &Path, config: &SiteConfig) -> Result<Option<JsonValue>> {
     let result = scan_markdown_file(file, config)?;
     Ok(result.raw_meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[test]
+    fn query_result_rejects_unroutable_source_without_permalink() {
+        let dir = TempDir::new().unwrap();
+        let root = normalize_path(dir.path());
+        let content_dir = root.join("content");
+        let outside_dir = root.join("templates");
+        std::fs::create_dir_all(&content_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        let source = outside_dir.join("post.typ");
+        std::fs::write(&source, "= Post").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(&root);
+        config.build.content = content_dir;
+
+        let result = process_query_result(&source, Some(json!({ "title": "Post" })), true, &config);
+
+        assert!(result.is_none());
+    }
 }

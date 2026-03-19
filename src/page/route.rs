@@ -59,8 +59,4 @@ pub struct PageRoute {
     // === URLs ===
     /// Full URL including base (e.g., https://example.com/blog/posts/hello/)
     pub full_url: String,
-
-    // === Legacy (for compatibility, consider removing) ===
-    /// Relative path without extension (for logging)
-    pub relative: String,
 }

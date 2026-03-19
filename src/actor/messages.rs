@@ -12,7 +12,7 @@ use crate::address::PermalinkUpdate;
 use crate::compiler::family::Indexed;
 use crate::core::{UrlChange, UrlPath};
 use crate::reload::queue::CompileQueue;
-use tola_vdom::{Document, algo::Patch};
+use tola_vdom::{Document, patch::Patch};
 
 // =============================================================================
 // CompilerActor Messages
@@ -77,6 +77,11 @@ pub enum VdomMsg {
     Skip,
     /// End of a compilation batch - trigger aggregated log output
     BatchEnd,
+    /// Clear persisted diagnostics for one path or all paths
+    ClearDiagnostics {
+        /// `Some(path)` clears one path, `None` clears all diagnostics
+        path: Option<PathBuf>,
+    },
     /// Clear cache
     Clear,
     /// Shutdown
@@ -107,8 +112,8 @@ pub enum WsMsg {
     },
     /// Compilation error (display overlay, no reload)
     Error { path: String, error: String },
-    /// Clear error overlay (compilation succeeded after error)
-    ClearError,
+    /// Clear error for a specific file path
+    ClearError { path: String },
     /// Add client
     AddClient(std::net::TcpStream),
     /// Client connected notification

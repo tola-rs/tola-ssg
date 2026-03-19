@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 
-use crate::compiler::page::{build_address_space, collect_content_files, filter_drafts};
+use crate::compiler::page::{build_address_space, collect_content_files};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
 use crate::page::{CompiledPage, PAGE_LINKS, STORED_PAGES};
@@ -26,8 +26,7 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
-    // Scan files to extract metadata (unified filter_drafts)
-    let scan_result = filter_drafts(config, &typst_files, &markdown_files);
+    let scan_result = crate::compiler::page::scan_pages(config, &typst_files, &markdown_files);
 
     // Report scan phase errors
     scan_result.report_errors(

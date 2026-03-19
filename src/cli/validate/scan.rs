@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::cli::common::scan_markdown_file;
 use crate::compiler::family::Indexed;
 use crate::config::SiteConfig;
-use crate::core::LinkKind;
+use crate::core::{LinkKind, LinkOrigin};
 use tola_vdom::Document;
 
 /// A link extracted from a content file
@@ -16,7 +16,7 @@ pub struct ScannedLink {
     /// Link destination.
     pub dest: String,
     /// Source attribute or element type (e.g., "href", "src", "Link").
-    pub attr: String,
+    pub origin: LinkOrigin,
 }
 
 impl ScannedLink {
@@ -90,7 +90,8 @@ fn extract_links_from_vdom(doc: &Document<Indexed>) -> Vec<ScannedLink> {
             {
                 links.push(ScannedLink {
                     dest: dest.to_string(),
-                    attr: attr.to_string(),
+                    origin: LinkOrigin::from_attr_name(attr)
+                        .expect("URL_ATTRS only contains supported link attrs"),
                 });
             }
         }

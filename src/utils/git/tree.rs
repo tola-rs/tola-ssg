@@ -150,6 +150,18 @@ mod tests {
     use std::fs::File;
     use tempfile::TempDir;
 
+    fn null_oid() -> gix::ObjectId {
+        gix::ObjectId::null(gix::hash::Kind::Sha1)
+    }
+
+    fn entry(kind: EntryKind, filename: &str) -> Entry {
+        Entry {
+            mode: kind.into(),
+            filename: filename.into(),
+            oid: null_oid(),
+        }
+    }
+
     fn with_temp_repo<F>(f: F)
     where
         F: FnOnce(&Path, &ThreadSafeRepository),
@@ -163,21 +175,9 @@ mod tests {
     #[test]
     fn test_sort_tree_entries() {
         let mut entries = vec![
-            Entry {
-                mode: EntryKind::Blob.into(),
-                filename: "foo.rs".into(),
-                oid: gix::ObjectId::null(gix::hash::Kind::Sha1),
-            },
-            Entry {
-                mode: EntryKind::Tree.into(),
-                filename: "foo".into(),
-                oid: gix::ObjectId::null(gix::hash::Kind::Sha1),
-            },
-            Entry {
-                mode: EntryKind::Blob.into(),
-                filename: "foo-bar".into(),
-                oid: gix::ObjectId::null(gix::hash::Kind::Sha1),
-            },
+            entry(EntryKind::Blob, "foo.rs"),
+            entry(EntryKind::Tree, "foo"),
+            entry(EntryKind::Blob, "foo-bar"),
         ];
 
         // Git sort order:

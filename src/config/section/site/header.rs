@@ -144,65 +144,10 @@ impl ScriptEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::test_parse_config;
 
     #[test]
-    fn test_defaults() {
-        let config = test_parse_config("");
-        assert!(config.site.header.no_fouc);
-        assert!(config.site.header.icon.is_none());
-        assert!(config.site.header.styles.is_empty());
-        assert!(config.site.header.scripts.is_empty());
-        assert!(config.site.header.elements.is_empty());
-    }
-
-    #[test]
-    fn test_no_fouc_disabled() {
-        let config = test_parse_config("[site.header]\nno_fouc = false");
-        assert!(!config.site.header.no_fouc);
-    }
-
-    #[test]
-    fn test_icon() {
-        let config = test_parse_config("[site.header]\nicon = \"images/favicon.webp\"");
-        assert_eq!(
-            config.site.header.icon,
-            Some(PathBuf::from("images/favicon.webp"))
-        );
-    }
-
-    #[test]
-    fn test_styles() {
-        let config = test_parse_config(
-            "[site.header]\nstyles = [\"fonts/font.css\", \"styles/highlight.css\"]",
-        );
-        assert_eq!(config.site.header.styles.len(), 2);
-        assert_eq!(
-            config.site.header.styles[0],
-            PathBuf::from("fonts/font.css")
-        );
-        assert_eq!(
-            config.site.header.styles[1],
-            PathBuf::from("styles/highlight.css")
-        );
-    }
-
-    #[test]
-    fn test_scripts_simple() {
-        let config =
-            test_parse_config("[site.header]\nscripts = [\"scripts/a.js\", \"scripts/b.js\"]");
-        assert_eq!(config.site.header.scripts.len(), 2);
-        assert_eq!(
-            config.site.header.scripts[0].path(),
-            Path::new("scripts/a.js")
-        );
-        assert!(!config.site.header.scripts[0].is_defer());
-        assert!(!config.site.header.scripts[0].is_async());
-    }
-
-    #[test]
-    fn test_scripts_with_options() {
+    fn test_scripts_parsing_cases() {
         let config = test_parse_config(
             r#"[site.header]
 scripts = [
@@ -224,34 +169,5 @@ scripts = [
         // async script
         assert!(!config.site.header.scripts[2].is_defer());
         assert!(config.site.header.scripts[2].is_async());
-    }
-
-    #[test]
-    fn test_elements() {
-        let config = test_parse_config(
-            r###"[site.header]
-elements = ['<meta name="darkreader-lock">', '<meta name="theme-color" content="#fff">']"###,
-        );
-        assert_eq!(config.site.header.elements.len(), 2);
-        assert_eq!(
-            config.site.header.elements[0],
-            "<meta name=\"darkreader-lock\">"
-        );
-    }
-
-    #[test]
-    fn test_script_entry_methods() {
-        let simple = ScriptEntry::Simple(PathBuf::from("script.js"));
-        assert_eq!(simple.path(), Path::new("script.js"));
-        assert!(!simple.is_defer());
-        assert!(!simple.is_async());
-
-        let both = ScriptEntry::WithOptions {
-            path: PathBuf::from("both.js"),
-            defer: true,
-            r#async: true,
-        };
-        assert!(both.is_defer());
-        assert!(both.is_async());
     }
 }

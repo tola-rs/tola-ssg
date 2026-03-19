@@ -21,7 +21,7 @@ fn ensure_typst_initialized(config: &SiteConfig) {
         let font_dirs = crate::cli::build::collect_font_dirs(config);
         let nested_mappings =
             crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-        crate::compiler::page::typst::init_typst_with_mappings(
+        crate::compiler::page::typst::init_runtime(
             &font_dirs,
             config.get_root().to_path_buf(),
             nested_mappings,
@@ -42,6 +42,8 @@ pub fn compile_on_demand(source: &Path, config: &SiteConfig) -> Result<PathBuf> 
     if is_output_fresh(source, &page.route.output_file) {
         return Ok(page.route.output_file);
     }
+
+    prepare_stale_output_recompile(source);
 
     // Delegate to scheduler with Active priority (highest)
     match SCHEDULER.compile(source.to_path_buf(), Priority::Active) {
@@ -80,4 +82,8 @@ fn is_output_fresh(source: &Path, output: &Path) -> bool {
     }
 
     true
+}
+
+fn prepare_stale_output_recompile(source: &Path) {
+    SCHEDULER.invalidate(source);
 }

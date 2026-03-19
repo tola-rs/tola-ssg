@@ -69,7 +69,7 @@ impl<'a> MediaTransform<'a> {
 
     /// Process nobg for an img element (called when nobg is inherited or explicit).
     fn process_nobg_inherited(&self, elem: &mut Element<Indexed>) {
-        let Some(src) = elem.get_attr("src") else {
+        let Some(src) = elem.get_attr("src").map(str::to_string) else {
             return;
         };
 
@@ -79,7 +79,7 @@ impl<'a> MediaTransform<'a> {
         }
 
         // Resolve source file path
-        let Some(source_path) = self.resolve_source_path(src) else {
+        let Some(source_path) = self.resolve_source_path(&src) else {
             return;
         };
 
@@ -93,7 +93,7 @@ impl<'a> MediaTransform<'a> {
         }
 
         // Generate output path and new src based on link type
-        let (output_path, new_src, original_output) = self.generate_nobg_paths(src, &source_path);
+        let (output_path, new_src, original_output) = self.generate_nobg_paths(&src, &source_path);
 
         // Track nobg reference for cleanup
         if self.track_refs {
@@ -107,7 +107,7 @@ impl<'a> MediaTransform<'a> {
         }
 
         // Update src attribute to point to processed image
-        elem.set_attr("src", new_src);
+        set_media_src(elem, new_src);
     }
 
     /// Generate output path and new src for nobg image.
@@ -252,11 +252,18 @@ impl Transform<Indexed> for MediaTransform<'_> {
             if let Some(src) = elem.get_attr("src").map(|s| s.to_string())
                 && let Ok(processed) = process_link_value(&src, self.config, self.route)
             {
-                elem.set_attr("src", processed);
+                set_media_src(elem, processed);
             }
         });
 
         doc
+    }
+}
+
+fn set_media_src(elem: &mut Element<Indexed>, src: String) {
+    elem.set_attr("src", src.clone());
+    if let Some(data) = ExtractFamily::<MediaFamily>::get_mut(&mut elem.ext) {
+        data.set_src(Some(src));
     }
 }
 
@@ -359,5 +366,39 @@ fn apply_nobg_processing(
         {
             NORMAL_REFS.insert(output_path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::family::TolaSite;
+    use tola_vdom::core::ExtractFamily;
+    use tola_vdom::families::MediaFamily;
+
+    #[test]
+    fn transform_keeps_media_payload_src_in_sync_with_attr() {
+        let config = SiteConfig::default();
+        let route = PageRoute {
+            source: PathBuf::from("content/post.typ"),
+            is_index: false,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/post/"),
+            output_file: PathBuf::from("public/post/index.html"),
+            output_dir: PathBuf::from("public/post"),
+            full_url: "https://example.com/post/".to_string(),
+        };
+        let root = TolaSite::element("main", Attrs::new()).child(TolaSite::element(
+            "img",
+            Attrs::from([("src", "./photo.png")]),
+        ));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+
+        let transformed = MediaTransform::new(&config, &route).transform(indexed);
+
+        let image = transformed.find(|elem| elem.is_tag("img")).unwrap();
+        let media = ExtractFamily::<MediaFamily>::get(&image.ext).unwrap();
+        assert_eq!(image.get_attr("src"), Some(".././photo.png"));
+        assert_eq!(media.src.as_deref(), Some(".././photo.png"));
     }
 }

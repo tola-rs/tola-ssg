@@ -54,7 +54,7 @@
 
               meta = {
                 description = packageDescription;
-                homepage = "https://github.com/kawayww/tola-ssg";
+                homepage = "https://github.com/tola-rs/tola-ssg";
                 license = lib.licenses.mit;
                 mainProgram = packageName;
               };

@@ -1,7 +1,7 @@
 //! Link and URL processor (Indexed -> Indexed).
 //!
-//! Processes all URL-related attributes:
-//! - Link family: href/src attributes (absolute, relative, fragment, external)
+//! Processes link and heading attributes:
+//! - Link family: href attributes (absolute, relative, fragment, external)
 //! - Heading family: id attribute slugification
 //!
 //! # Link Resolution
@@ -15,17 +15,13 @@
 //! | `SiteRoot` | `/about` | Prefixed and slugified |
 //! | `FileRelative` | `./img.png` | Adjusted for output structure |
 
-use rustc_hash::FxHashSet;
-use std::ffi::OsString;
-use std::sync::OnceLock;
-
 use anyhow::Result;
 use tola_vdom::prelude::*;
 
 use crate::compiler::family::{Indexed, TolaSite::FamilyKind};
 use crate::compiler::page::PageRoute;
 use crate::config::SiteConfig;
-use crate::core::LinkKind;
+use crate::core::{LinkKind, UrlPath};
 use crate::utils::path::route::split_path_fragment;
 use crate::utils::path::slug::{slugify_fragment, slugify_path};
 
@@ -33,7 +29,7 @@ use crate::utils::path::slug::{slugify_fragment, slugify_path};
 // VDOM Transform
 // =============================================================================
 
-/// Processes link href/src and heading id attributes in Indexed VDOM
+/// Processes link href and heading id attributes in Indexed VDOM
 pub struct LinkTransform<'a> {
     config: &'a SiteConfig,
     route: &'a PageRoute,
@@ -44,15 +40,30 @@ impl<'a> LinkTransform<'a> {
         Self { config, route }
     }
 
-    /// Process a URL attribute (href or src).
-    fn process_url(&self, elem: &mut Element<Indexed>, attr: &str) {
-        let Some(val) = elem.get_attr(attr).map(|s| s.to_string()) else {
+    /// Process a link href and keep indexed family data in sync.
+    fn process_href(&self, elem: &mut Element<Indexed>) {
+        let Some(value) = elem.get_attr("href").map(str::to_string) else {
             return;
         };
 
-        // Process the link
-        if let Ok(processed) = process_link_value(&val, self.config, self.route) {
-            elem.set_attr(attr, processed);
+        if let Ok(processed) = process_link_value(&value, self.config, self.route) {
+            elem.set_attr("href", processed.clone());
+            if let Some(data) = ExtractFamily::<LinkFamily>::get_mut(&mut elem.ext) {
+                data.set_href(Some(processed));
+            }
+        }
+    }
+
+    /// Slugify a heading id and keep indexed family data in sync.
+    fn process_heading_id(&self, elem: &mut Element<Indexed>) {
+        let Some(id) = elem.get_attr("id").map(str::to_string) else {
+            return;
+        };
+
+        let slugged = slugify_fragment(&id, &self.config.build.slug);
+        elem.set_attr("id", slugged.clone());
+        if let Some(data) = ExtractFamily::<HeadingFamily>::get_mut(&mut elem.ext) {
+            data.set_id(Some(slugged));
         }
     }
 }
@@ -61,18 +72,14 @@ impl Transform<Indexed> for LinkTransform<'_> {
     type To = Indexed;
 
     fn transform(self, mut doc: Document<Indexed>) -> Document<Indexed> {
-        // Link href/src
+        // Link href
         doc.modify_by::<FamilyKind::Link, _>(|elem| {
-            self.process_url(elem, "href");
-            self.process_url(elem, "src");
+            self.process_href(elem);
         });
 
         // Heading id slugify
-        let slug_config = &self.config.build.slug;
         doc.modify_by::<FamilyKind::Heading, _>(|elem| {
-            if let Some(id) = elem.get_attr("id").map(|s| s.to_string()) {
-                elem.set_attr("id", slugify_fragment(&id, slug_config));
-            }
+            self.process_heading_id(elem);
         });
 
         doc
@@ -122,6 +129,16 @@ pub fn process_link_value(value: &str, config: &SiteConfig, route: &PageRoute) -
     resolve_link(value, config, route)
 }
 
+/// Normalize a site-root page link to its final page URL.
+///
+/// This reuses the same prefix and slug rules as emitted HTML links,
+/// but returns a page-only [`UrlPath`] without any fragment.
+pub fn normalize_site_root_page_url(value: &str, config: &SiteConfig) -> UrlPath {
+    let (path, _) = split_path_fragment(value);
+    let path = path.trim_start_matches('/');
+    UrlPath::from_page(&build_prefixed_url(path, config))
+}
+
 /// Resolve site-root-relative links (/about, /posts/hello)
 fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
     let paths = config.paths();
@@ -133,11 +150,8 @@ fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
     }
 
     // Split path and fragment
-    let (path, fragment) = split_path_fragment(value);
-    let path = path.trim_start_matches('/');
-
-    // Build URL with proper prefix handling
-    let mut url = build_prefixed_url(path, config);
+    let (_, fragment) = split_path_fragment(value);
+    let mut url = normalize_site_root_page_url(value, config).to_string();
 
     // Append slugified fragment if present
     if !fragment.is_empty() {
@@ -209,35 +223,20 @@ fn path_starts_with_segment(path: &str, segment: &str) -> bool {
     path.starts_with(&with_slash)
 }
 
-// =============================================================================
-// Asset Link Detection
-// =============================================================================
-
-static ASSET_TOP_LEVELS: OnceLock<FxHashSet<OsString>> = OnceLock::new();
-
 /// Check if a path is an asset link
 fn is_asset_link(path: &str, config: &SiteConfig) -> bool {
-    let asset_top_levels = get_asset_top_levels(config);
-
     let first_component = path
         .trim_start_matches('/')
         .split('/')
         .next()
         .unwrap_or_default();
 
-    asset_top_levels.contains(first_component.as_ref() as &std::ffi::OsStr)
-}
-
-/// Get top-level asset directory names from all nested directories
-fn get_asset_top_levels(config: &SiteConfig) -> &'static FxHashSet<OsString> {
-    ASSET_TOP_LEVELS.get_or_init(|| {
-        let mut set = FxHashSet::default();
-        for entry in &config.build.assets.nested {
-            // Add the output name (what appears in URLs)
-            set.insert(OsString::from(entry.output_name()));
-        }
-        set
-    })
+    config
+        .build
+        .assets
+        .nested
+        .iter()
+        .any(|entry| entry.output_name() == first_component)
 }
 
 // =============================================================================
@@ -247,6 +246,7 @@ fn get_asset_top_levels(config: &SiteConfig) -> &'static FxHashSet<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::section::build::assets::NestedEntry;
     use crate::core::UrlPath;
     use std::path::PathBuf;
 
@@ -259,7 +259,17 @@ mod tests {
             output_file: PathBuf::from("public/test/index.html"),
             output_dir: PathBuf::from("public/test"),
             full_url: "https://example.com/test/".to_string(),
-            relative: "test".to_string(),
+        }
+    }
+
+    fn assert_resolve_cases(route: &PageRoute, cases: &[(&str, &str)]) {
+        let config = SiteConfig::default();
+        for (input, expected) in cases {
+            assert_eq!(
+                resolve_link(input, &config, route).unwrap(),
+                *expected,
+                "{input:?}"
+            );
         }
     }
 
@@ -268,73 +278,36 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_resolve_external() {
-        let config = SiteConfig::default();
+    fn test_resolve_index_cases() {
         let route = test_route(true);
-
-        assert_eq!(
-            resolve_link("https://example.com", &config, &route).unwrap(),
-            "https://example.com"
+        assert_resolve_cases(
+            &route,
+            &[
+                ("https://example.com", "https://example.com"),
+                ("mailto:user@example.com", "mailto:user@example.com"),
+                ("#section", "#section"),
+                ("#my-heading", "#my-heading"),
+                ("./img.png", "./img.png"),
+                ("../doc.pdf", "../doc.pdf"),
+            ],
         );
-        assert_eq!(
-            resolve_link("mailto:user@example.com", &config, &route).unwrap(),
-            "mailto:user@example.com"
+        let config = SiteConfig::default();
+        assert!(
+            resolve_link("/about", &config, &route)
+                .unwrap()
+                .starts_with('/')
         );
     }
 
     #[test]
-    fn test_resolve_fragment() {
-        let config = SiteConfig::default();
-        let route = test_route(true);
-
-        assert_eq!(
-            resolve_link("#section", &config, &route).unwrap(),
-            "#section"
-        );
-        assert_eq!(
-            resolve_link("#my-heading", &config, &route).unwrap(),
-            "#my-heading"
-        );
-    }
-
-    #[test]
-    fn test_resolve_site_root() {
-        let config = SiteConfig::default();
-        let route = test_route(true);
-
-        let url = resolve_link("/about", &config, &route).unwrap();
-        assert!(url.starts_with('/'));
-    }
-
-    #[test]
-    fn test_resolve_file_relative_index() {
-        let route = test_route(true);
-        let config = SiteConfig::default();
-
-        // Index files: relative paths work as-is
-        assert_eq!(
-            resolve_link("./img.png", &config, &route).unwrap(),
-            "./img.png"
-        );
-        assert_eq!(
-            resolve_link("../doc.pdf", &config, &route).unwrap(),
-            "../doc.pdf"
-        );
-    }
-
-    #[test]
-    fn test_resolve_file_relative_non_index() {
+    fn test_resolve_non_index_cases() {
         let route = test_route(false);
-        let config = SiteConfig::default();
-
-        // Non-index: paths get ../ prefix (because a.typ -> a/index.html)
-        assert_eq!(
-            resolve_link("./img.png", &config, &route).unwrap(),
-            ".././img.png"
-        );
-        assert_eq!(
-            resolve_link("../doc.pdf", &config, &route).unwrap(),
-            "../../doc.pdf"
+        assert_resolve_cases(
+            &route,
+            &[
+                ("./img.png", ".././img.png"),
+                ("../doc.pdf", "../../doc.pdf"),
+            ],
         );
     }
 
@@ -371,32 +344,53 @@ mod tests {
         assert!(process_link_value("", &config, &route).is_err());
     }
 
+    #[test]
+    fn transform_keeps_link_and_heading_payloads_in_sync_with_attrs() {
+        use crate::compiler::family::TolaSite;
+        use tola_vdom::core::ExtractFamily;
+        use tola_vdom::families::{HeadingFamily, LinkFamily};
+
+        let config = SiteConfig::default();
+        let route = test_route(true);
+        let root = TolaSite::element("main", Attrs::new())
+            .child(TolaSite::element(
+                "a",
+                Attrs::from([("href", "#My Section")]),
+            ))
+            .child(TolaSite::element("h2", Attrs::from([("id", "My Section")])));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+
+        let transformed = LinkTransform::new(&config, &route).transform(indexed);
+
+        let link = transformed.find(|elem| elem.is_tag("a")).unwrap();
+        let link_data = ExtractFamily::<LinkFamily>::get(&link.ext).unwrap();
+        assert_eq!(link.get_attr("href"), Some("#my-section"));
+        assert_eq!(link_data.href.as_deref(), Some("#my-section"));
+
+        let heading = transformed.find(|elem| elem.is_tag("h2")).unwrap();
+        let heading_data = ExtractFamily::<HeadingFamily>::get(&heading.ext).unwrap();
+        assert_eq!(heading.get_attr("id"), Some("my-section"));
+        assert_eq!(heading_data.id.as_deref(), Some("my-section"));
+    }
+
     // =========================================================================
     // Path Prefix Tests
     // =========================================================================
 
     #[test]
-    fn test_path_starts_with_segment_exact_match() {
-        assert!(path_starts_with_segment("blog", "blog"));
-        assert!(path_starts_with_segment("docs", "docs"));
-    }
-
-    #[test]
-    fn test_path_starts_with_segment_with_subpath() {
-        assert!(path_starts_with_segment("blog/post-1", "blog"));
-        assert!(path_starts_with_segment("blog/2024/post", "blog"));
-    }
-
-    #[test]
-    fn test_path_starts_with_segment_partial_no_match() {
-        assert!(!path_starts_with_segment("blogger/post", "blog"));
-        assert!(!path_starts_with_segment("blogging", "blog"));
-    }
-
-    #[test]
-    fn test_path_starts_with_segment_different_prefix() {
-        assert!(!path_starts_with_segment("about", "blog"));
-        assert!(!path_starts_with_segment("posts/blog", "blog"));
+    fn test_path_starts_with_segment_cases() {
+        for (path, prefix, expected) in [
+            ("blog", "blog", true),
+            ("docs", "docs", true),
+            ("blog/post-1", "blog", true),
+            ("blog/2024/post", "blog", true),
+            ("blogger/post", "blog", false),
+            ("blogging", "blog", false),
+            ("about", "blog", false),
+            ("posts/blog", "blog", false),
+        ] {
+            assert_eq!(path_starts_with_segment(path, prefix), expected, "{path:?}");
+        }
     }
 
     // =========================================================================
@@ -412,32 +406,35 @@ mod tests {
             output_file: PathBuf::from("public/posts/hello/index.html"),
             output_dir: PathBuf::from("public/posts/hello"),
             full_url: "https://example.com/posts/hello/".to_string(),
-            relative: "posts/hello".to_string(),
         }
     }
 
     #[test]
     fn test_resolve_non_index_relative_paths() {
         let route = test_route_non_index();
-        let config = SiteConfig::default();
+        assert_resolve_cases(
+            &route,
+            &[
+                ("./image.png", ".././image.png"),
+                ("image.png", "../image.png"),
+                ("hello/cat.svg", "../hello/cat.svg"),
+                ("../doc.pdf", "../../doc.pdf"),
+            ],
+        );
+    }
 
-        // Non-index files: all relative paths get ../ prefix
-        // This compensates for a.typ -> a/index.html (one level deeper)
-        assert_eq!(
-            resolve_link("./image.png", &config, &route).unwrap(),
-            ".././image.png"
-        );
-        assert_eq!(
-            resolve_link("image.png", &config, &route).unwrap(),
-            "../image.png"
-        );
-        assert_eq!(
-            resolve_link("hello/cat.svg", &config, &route).unwrap(),
-            "../hello/cat.svg"
-        );
-        assert_eq!(
-            resolve_link("../doc.pdf", &config, &route).unwrap(),
-            "../../doc.pdf"
-        );
+    #[test]
+    fn test_is_asset_link_uses_current_config() {
+        let mut first = SiteConfig::default();
+        first.build.assets.nested = vec![NestedEntry::Simple("images".into())];
+
+        let mut second = SiteConfig::default();
+        second.build.assets.nested = vec![NestedEntry::Simple("media".into())];
+
+        assert!(is_asset_link("/images/logo.png", &first));
+        assert!(!is_asset_link("/media/logo.png", &first));
+
+        assert!(is_asset_link("/media/logo.png", &second));
+        assert!(!is_asset_link("/images/logo.png", &second));
     }
 }

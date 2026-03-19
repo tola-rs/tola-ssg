@@ -28,9 +28,6 @@ mod types;
 // Watch root attach/re-attach lifecycle.
 mod watch_roots;
 
-#[cfg(test)]
-mod tests;
-
 use classifier::EventClassifier;
 use debouncer::Debouncer;
 use router::{events_to_messages, log_events};

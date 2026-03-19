@@ -95,6 +95,11 @@ impl AddressSpace {
     pub fn register_page(&mut self, route: PageRoute, title: Option<String>) {
         let permalink = route.permalink.clone();
         let source = route.source.clone();
+        if let Some(old_url) = self.by_source.get(&source).cloned()
+            && old_url != permalink
+        {
+            self.remove_url(&old_url);
+        }
         let resource = Resource::Page { route, title };
         self.by_url.insert(permalink.clone(), resource);
         self.by_source.insert(source, permalink);
@@ -116,9 +121,7 @@ impl AddressSpace {
         ids: impl IntoIterator<Item = String>,
     ) {
         self.headings
-            .entry(permalink.clone())
-            .or_default()
-            .extend(ids);
+            .insert(permalink.clone(), ids.into_iter().collect());
     }
 
     /// Register a single heading ID for a page.
@@ -169,6 +172,40 @@ impl AddressSpace {
         old_url
     }
 
+    /// Update a page using full route data with conflict detection.
+    ///
+    /// This is the hot-reload counterpart to `update_page`: it keeps the full
+    /// URL -> `Resource` mapping intact while still reporting permalink changes
+    /// and conflicts before mutating ownership.
+    pub fn update_page_checked(
+        &mut self,
+        route: PageRoute,
+        title: Option<String>,
+    ) -> PermalinkUpdate {
+        let source = route.source.clone();
+        let new_url = route.permalink.clone();
+        let old_url = self.by_source.get(&source).cloned();
+
+        if old_url.as_ref() != Some(&new_url)
+            && let Some(resource) = self.by_url.get(&new_url)
+        {
+            let existing_source = resource.source();
+            if existing_source != source.as_path() {
+                return PermalinkUpdate::Conflict {
+                    url: new_url,
+                    existing_source: existing_source.to_path_buf(),
+                };
+            }
+        }
+
+        self.register_page(route, title);
+
+        match old_url {
+            Some(old) if old != new_url => PermalinkUpdate::Changed { old_url: old },
+            _ => PermalinkUpdate::Unchanged,
+        }
+    }
+
     /// Update source -> URL mapping for hot-reload with conflict detection.
     ///
     /// Returns:
@@ -198,6 +235,16 @@ impl AddressSpace {
             }
         }
 
+        let moved_resource = old_url
+            .as_ref()
+            .and_then(|old| self.by_url.get(old).cloned())
+            .map(|mut resource| {
+                if let Resource::Page { route, .. } = &mut resource {
+                    route.permalink = new_url.clone();
+                }
+                resource
+            });
+
         // No conflict - proceed with update
         if let Some(ref old) = old_url {
             // Clean up old entries
@@ -206,6 +253,9 @@ impl AddressSpace {
 
         // Update mapping
         self.by_source.insert(source.to_path_buf(), new_url.clone());
+        if let Some(resource) = moved_resource {
+            self.by_url.insert(new_url.clone(), resource);
+        }
 
         match old_url {
             Some(old) => PermalinkUpdate::Changed { old_url: old },
@@ -725,7 +775,6 @@ mod tests {
             is_404: false,
             output_dir: PathBuf::new(),
             full_url: String::new(),
-            relative: String::new(),
         }
     }
 
@@ -784,6 +833,21 @@ mod tests {
         assert!(headings.contains("intro"));
         assert!(headings.contains("conclusion"));
         assert_eq!(headings.len(), 2);
+    }
+
+    #[test]
+    fn test_register_headings_replaces_existing_set() {
+        let mut space = AddressSpace::new();
+        let route = test_route("content/hello.typ", "/hello/", "public/hello/index.html");
+        let permalink = route.permalink.clone();
+        space.register_page(route, None);
+        space.register_headings(&permalink, ["intro".to_string(), "conclusion".to_string()]);
+        assert_eq!(space.headings_for(&permalink).unwrap().len(), 2);
+
+        space.register_headings(&permalink, std::iter::empty::<String>());
+
+        let headings = space.headings_for(&permalink).unwrap();
+        assert!(headings.is_empty());
     }
 
     #[test]
@@ -847,6 +911,45 @@ mod tests {
     }
 
     #[test]
+    fn update_source_url_moves_page_lookup_to_new_url() {
+        let mut space = AddressSpace::new();
+        space.register_page(
+            test_route("content/hello.typ", "/hello/", "public/hello/index.html"),
+            Some("Hello".to_string()),
+        );
+
+        let new_url = UrlPath::from_page("/world/");
+
+        let result = space.update_source_url(Path::new("content/hello.typ"), &new_url);
+
+        assert!(matches!(result, PermalinkUpdate::Changed { .. }));
+        assert_eq!(
+            space.source_for_url(&new_url),
+            Some(PathBuf::from("content/hello.typ"))
+        );
+        assert_eq!(space.source_for_url(&UrlPath::from_page("/hello/")), None);
+    }
+
+    #[test]
+    fn update_page_checked_registers_new_source_lookup() {
+        let mut space = AddressSpace::new();
+        let route = test_route("content/new.typ", "/new/", "public/new/index.html");
+        let url = route.permalink.clone();
+
+        let result = space.update_page_checked(route, Some("New".to_string()));
+
+        assert!(matches!(result, PermalinkUpdate::Unchanged));
+        assert_eq!(
+            space.source_for_url(&url),
+            Some(PathBuf::from("content/new.typ"))
+        );
+        assert_eq!(
+            space.url_for_source(Path::new("content/new.typ")),
+            Some(&url)
+        );
+    }
+
+    #[test]
     fn test_update_source_url_conflict() {
         let mut space = AddressSpace::new();
 
@@ -871,5 +974,24 @@ mod tests {
             }
             _ => panic!("Expected Conflict, got {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_register_page_replaces_stale_permalink_for_same_source() {
+        let mut space = AddressSpace::new();
+        let first = test_route("content/hello.typ", "/hello/", "public/hello/index.html");
+        let second = test_route("content/hello.typ", "/world/", "public/world/index.html");
+        let second_url = second.permalink.clone();
+
+        space.register_page(first, None);
+        space.register_page(second, Some("Hello".to_string()));
+
+        assert!(!space.contains_url(&UrlPath::from_page("/hello/")));
+        assert!(space.contains_url(&second_url));
+        assert_eq!(space.source_for_url(&UrlPath::from_page("/hello/")), None);
+        assert_eq!(
+            space.source_for_url(&second_url),
+            Some(PathBuf::from("content/hello.typ"))
+        );
     }
 }

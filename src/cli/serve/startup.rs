@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tola_vdom::CacheKey;
 
-use super::{bind_server, init_serve_build, scan_pages, serve_build, set_scan_ready};
+use super::{
+    bind_server, init_serve_build, note_request_activity, request_idle_for, scan_pages,
+    set_scan_ready, start_serve_build,
+};
 use crate::address::GLOBAL_ADDRESS_SPACE;
 use crate::cache::{self, PersistedDiagnostics, PersistedError, RemovedFile};
 use crate::compiler::dependency::{self, collect_virtual_dependents};
@@ -15,6 +20,12 @@ use crate::core::UrlPath;
 use crate::page::{PAGE_LINKS, STORED_PAGES};
 use crate::reload::compile::{self, CompileOutcome};
 use crate::{debug, log, logger};
+
+/// Keep cache-startup repair work narrow so request-driven compiles can still
+/// win the machine while startup catches up on offline changes.
+const STARTUP_COMPILE_BATCH_SIZE: usize = 1;
+const STARTUP_IDLE_GRACE: Duration = Duration::from_millis(250);
+const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Start serve with cached build support
 pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
@@ -38,6 +49,7 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
 
     SCHEDULER.start_workers();
     set_scan_ready(false);
+    note_request_activity();
 
     let config_arc = config::cfg();
     let needs_full_build = !has_cache;
@@ -53,23 +65,23 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             return;
         }
 
-        // Full-build path uses progressive_scan() before serve_build(),
-        // so URL->source mapping is now available for on-demand requests.
+        // Full-build path uses progressive_scan() before background warmup,
+        // so URL->source mapping is available for on-demand requests.
         if needs_full_build {
             set_scan_ready(true);
         }
 
-        let build_success = if needs_full_build {
-            match serve_build(&config_arc) {
-                Ok(_) => true,
-                Err(e) => {
-                    log!("build"; "initial build failed: {}", e);
-                    false
-                }
-            }
-        } else {
-            startup_with_cache(&config_arc)
-        };
+        if needs_full_build {
+            // Scan completion is enough to serve request-driven compiles.
+            // Keep the full-site warmup in a detached thread so it doesn't
+            // block the startup coordinator or interactive requests.
+            set_serving();
+            set_healthy(true);
+            start_serve_build(Arc::clone(&config_arc));
+            return;
+        }
+
+        let build_success = startup_with_cache(&config_arc);
 
         set_healthy(build_success);
 
@@ -77,7 +89,7 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             clear_clean_flag();
         }
 
-        if has_cache || needs_full_build {
+        if has_cache {
             set_serving();
         }
     });
@@ -196,7 +208,13 @@ fn startup_with_cache(config: &SiteConfig) -> bool {
     }
 
     if let Some(first_error) = diagnostics.first_error() {
-        logger::WatchStatus::new().error(&first_error.path, &first_error.error);
+        let summary = format!(
+            "errors: {}, warnings: {}",
+            diagnostics.error_count(),
+            diagnostics.warning_count()
+        );
+        let detail = format!("first error: {}\n{}", first_error.path, first_error.error);
+        logger::WatchStatus::new().error(&summary, &detail);
     }
 
     debug!(
@@ -335,55 +353,65 @@ fn compile_startup_batch(
     diagnostics: &mut PersistedDiagnostics,
 ) -> StartupCompileStats {
     let mut stats = StartupCompileStats::default();
-    let outcomes = compile::compile_startup_batch(paths, config);
+    for path_chunk in paths.chunks(STARTUP_COMPILE_BATCH_SIZE) {
+        while !request_idle_for(STARTUP_IDLE_GRACE) {
+            if crate::core::is_shutdown() {
+                return stats;
+            }
+            std::thread::sleep(STARTUP_POLL_INTERVAL);
+        }
 
-    for (input_path, outcome) in paths.iter().zip(outcomes.into_iter()) {
-        let rel_input = input_path
-            .strip_prefix(config.get_root())
-            .unwrap_or(input_path)
-            .display()
-            .to_string();
+        let outcomes = compile::compile_startup_batch(path_chunk, config);
 
-        match outcome {
-            CompileOutcome::Vdom {
-                path,
-                url_path,
-                vdom,
-                warnings,
-            } => {
-                handle_startup_vdom_outcome(
+        for (input_path, outcome) in path_chunk.iter().zip(outcomes.into_iter()) {
+            let rel_input = input_path
+                .strip_prefix(config.get_root())
+                .unwrap_or(input_path)
+                .display()
+                .to_string();
+
+            match outcome {
+                CompileOutcome::Vdom {
                     path,
                     url_path,
                     vdom,
                     warnings,
-                    cached_urls,
-                    config,
-                    diagnostics,
-                );
-                stats.success += 1;
-            }
-            CompileOutcome::Error {
-                path,
-                url_path,
-                error,
-            } => {
-                handle_startup_error_outcome(path, url_path, error, config, diagnostics);
-                stats.failed += 1;
-            }
-            CompileOutcome::Skipped => {
-                handle_startup_skipped_outcome(
-                    input_path,
-                    &rel_input,
-                    cached_urls,
-                    config,
-                    diagnostics,
-                );
-                stats.skipped += 1;
-            }
-            CompileOutcome::Reload { reason } => {
-                debug!("startup"; "startup compile requested reload: {}", reason);
-                diagnostics.clear_for(&rel_input);
-                stats.skipped += 1;
+                    ..
+                } => {
+                    handle_startup_vdom_outcome(
+                        path,
+                        url_path,
+                        vdom,
+                        warnings,
+                        cached_urls,
+                        config,
+                        diagnostics,
+                    );
+                    stats.success += 1;
+                }
+                CompileOutcome::Error {
+                    path,
+                    url_path,
+                    error,
+                } => {
+                    handle_startup_error_outcome(path, url_path, error, config, diagnostics);
+                    stats.failed += 1;
+                }
+                CompileOutcome::Skipped => {
+                    handle_startup_skipped_outcome(
+                        input_path,
+                        &rel_input,
+                        cached_urls,
+                        config,
+                        diagnostics,
+                    );
+                    stats.skipped += 1;
+                }
+                CompileOutcome::Reload { reason } => {
+                    debug!("startup"; "startup compile requested reload: {}", reason);
+                    diagnostics.clear_for(&rel_input);
+                    stats.skipped += 1;
+                }
             }
         }
     }
@@ -517,6 +545,38 @@ mod tests {
         assert!(output_file.exists());
         assert!(html.contains("Startup Modified"));
         assert_eq!(diagnostics.error_count(), 0);
+
+        reset_global_state();
+    }
+
+    #[test]
+    fn startup_batch_multiple_paths_accumulates_results_across_chunks() {
+        let dir = TempDir::new().unwrap();
+        let config = make_test_config(dir.path());
+        reset_global_state();
+
+        let first = config.build.content.join("first.md");
+        let second = config.build.content.join("second.md");
+        write_markdown(&first, "First Startup Page", false);
+        write_markdown(&second, "Second Startup Page", false);
+        let first = crate::utils::path::normalize_path(&first);
+        let second = crate::utils::path::normalize_path(&second);
+
+        let stats = compile_startup_batch(
+            &[first.clone(), second.clone()],
+            &FxHashMap::default(),
+            &config,
+            &mut PersistedDiagnostics::new(),
+        );
+
+        let first_html = output_file_for(&config, &UrlPath::from_page("/first/"));
+        let second_html = output_file_for(&config, &UrlPath::from_page("/second/"));
+
+        assert_eq!(stats.success, 2);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.skipped, 0);
+        assert!(first_html.exists());
+        assert!(second_html.exists());
 
         reset_global_state();
     }

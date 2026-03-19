@@ -149,26 +149,8 @@ impl BuildSectionConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::config::test_parse_config;
     use std::path::Path;
-
-    #[test]
-    fn test_defaults() {
-        let config = test_parse_config("");
-        assert_eq!(config.build.content, PathBuf::from("content"));
-        assert_eq!(config.build.output, PathBuf::from("public"));
-        // assets is now AssetsConfig with default nested = ["assets"]
-        assert_eq!(config.build.assets.nested.len(), 1);
-        assert_eq!(config.build.assets.nested[0].source(), Path::new("assets"));
-        assert_eq!(
-            config.build.deps,
-            vec![PathBuf::from("templates"), PathBuf::from("utils")]
-        );
-        assert_eq!(config.build.data, PathBuf::from("_data"));
-        assert!(config.build.minify);
-        assert!(config.build.path_prefix.as_os_str().is_empty());
-    }
 
     #[test]
     fn test_custom_assets() {

@@ -6,10 +6,10 @@ use rustc_hash::FxHashSet;
 
 use super::tasks::spawn_batch;
 use super::utils::{
-    format_asset_reason, is_reloadable_output_asset, log_asset_errors, process_assets,
+    cleanup_removed_assets, format_asset_reason, is_reloadable_output_asset, log_asset_errors,
+    process_assets,
 };
 use super::{ACTIVE_RECOMPILE_COOLDOWN, BackgroundTask, CompilerActor};
-use crate::address::GLOBAL_ADDRESS_SPACE;
 use crate::hooks::HookPhase;
 use crate::page::STORED_PAGES;
 use crate::reload::classify::{collect_dependents, url_to_content_path};
@@ -154,26 +154,22 @@ impl CompilerActor {
 
     /// Handle deleted content files and cleanup all related state.
     pub(super) async fn on_content_removed(&mut self, paths: Vec<PathBuf>) {
-        use crate::compiler::dependency::remove_content;
-        use crate::compiler::page::BUILD_CACHE;
-        use tola_vdom::CacheKey;
-
         let count = paths.len();
         crate::debug!("watch"; "{} content files removed", count);
 
         for path in &paths {
-            crate::compiler::scheduler::SCHEDULER.invalidate(path);
-            let url = GLOBAL_ADDRESS_SPACE.read().url_for_source(path).cloned();
-
-            GLOBAL_ADDRESS_SPACE.write().remove_by_source(path);
-            STORED_PAGES.remove_by_source(path);
-            remove_content(path);
-
-            if let Some(url) = &url {
-                BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
-                crate::reload::compile::cleanup_output_for_url(&self.config, url);
+            if let Some(url) =
+                crate::reload::compile::cleanup_removed_source_state(path, &self.config)
+            {
                 crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
             }
+
+            let _ = self
+                .vdom_tx
+                .send(crate::actor::messages::VdomMsg::ClearDiagnostics {
+                    path: Some(path.clone()),
+                })
+                .await;
         }
 
         self.recompile_virtual_users().await;
@@ -188,9 +184,12 @@ impl CompilerActor {
 
         let config = Arc::clone(&self.config);
         let count = paths.len();
+        let existing_paths: Vec<_> = paths.iter().filter(|path| path.exists()).cloned().collect();
+        let removed_count = cleanup_removed_assets(&paths, &config);
 
         let errors = tokio::task::spawn_blocking({
-            let paths = paths.clone();
+            let paths = existing_paths.clone();
+            let config = Arc::clone(&config);
             move || process_assets(&paths, &config)
         })
         .await
@@ -199,11 +198,12 @@ impl CompilerActor {
         log_asset_errors(&errors);
 
         let mut any_changed = false;
-        for path in &paths {
+        for path in &existing_paths {
             if version::update_version(path) {
                 any_changed = true;
             }
         }
+        any_changed |= removed_count > 0;
 
         if any_changed {
             self.recompile_active_pages("asset", count).await;
@@ -324,6 +324,7 @@ impl CompilerActor {
 
         clear_graph();
         version::clear();
+        crate::compiler::scheduler::SCHEDULER.clear_cache();
         let _ = self
             .vdom_tx
             .send(crate::actor::messages::VdomMsg::Clear)
@@ -340,6 +341,11 @@ impl CompilerActor {
                 set_healthy(true);
                 clear_clean_flag();
                 crate::debug!("compile"; "full rebuild complete");
+
+                let _ = self
+                    .vdom_tx
+                    .send(crate::actor::messages::VdomMsg::ClearDiagnostics { path: None })
+                    .await;
 
                 let active_urls = ACTIVE_PAGE.get_all();
                 if !active_urls.is_empty() {

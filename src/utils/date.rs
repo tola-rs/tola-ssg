@@ -290,179 +290,73 @@ pub fn parse_typst_datetime(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_typst_datetime_date_only() {
-        let input = "datetime(year: 2024, month: 6, day: 15)";
-        assert_eq!(parse_typst_datetime(input), Some("2024-06-15".to_string()));
+    fn assert_parse_typst_cases(cases: &[(&str, Option<&str>)]) {
+        for (input, expected) in cases {
+            assert_eq!(
+                parse_typst_datetime(input),
+                expected.map(str::to_string),
+                "{input:?}"
+            );
+        }
+    }
+
+    fn assert_validate_ok(cases: &[DateTimeUtc]) {
+        for dt in cases {
+            assert!(dt.validate().is_ok(), "{dt:?}");
+        }
+    }
+
+    fn assert_validate_err(cases: &[DateTimeUtc]) {
+        for dt in cases {
+            assert!(dt.validate().is_err(), "{dt:?}");
+        }
     }
 
     #[test]
-    fn test_parse_typst_datetime_with_time() {
-        let input = "datetime(\n  year: 2024,\n  month: 6,\n  day: 15,\n  hour: 14,\n  minute: 30,\n  second: 45,\n)";
-        assert_eq!(
-            parse_typst_datetime(input),
-            Some("2024-06-15T14:30:45Z".to_string())
-        );
+    fn test_parse_typst_datetime_cases() {
+        assert_parse_typst_cases(&[
+            (
+                "datetime(year: 2024, month: 6, day: 15)",
+                Some("2024-06-15"),
+            ),
+            (
+                "datetime(\n  year: 2024,\n  month: 6,\n  day: 15,\n  hour: 14,\n  minute: 30,\n  second: 45,\n)",
+                Some("2024-06-15T14:30:45Z"),
+            ),
+            ("2024-06-15", None),
+            ("datetime()", None),
+            ("datetime(year: 2024)", None),
+        ]);
     }
 
     #[test]
-    fn test_parse_typst_datetime_invalid() {
-        assert_eq!(parse_typst_datetime("2024-06-15"), None);
-        assert_eq!(parse_typst_datetime("datetime()"), None);
-        assert_eq!(parse_typst_datetime("datetime(year: 2024)"), None);
-    }
+    fn test_datetime_utc_validate_cases() {
+        assert_validate_ok(&[
+            DateTimeUtc::new(2024, 6, 15, 14, 30, 45),
+            DateTimeUtc::new(2024, 1, 1, 0, 0, 0),
+            DateTimeUtc::new(2024, 12, 31, 23, 59, 59),
+            DateTimeUtc::new(2024, 2, 29, 12, 0, 0),
+            DateTimeUtc::new(2000, 2, 29, 12, 0, 0),
+        ]);
 
-    #[test]
-    fn test_datetime_utc_new() {
-        let dt = DateTimeUtc::new(2024, 6, 15, 14, 30, 45);
-        assert_eq!(dt.year, 2024);
-        assert_eq!(dt.month, 6);
-        assert_eq!(dt.day, 15);
-        assert_eq!(dt.hour, 14);
-        assert_eq!(dt.minute, 30);
-        assert_eq!(dt.second, 45);
-    }
-
-    #[test]
-    fn test_datetime_utc_from_ymd() {
-        let dt = DateTimeUtc::from_ymd(2024, 12, 25);
-        assert_eq!(dt.year, 2024);
-        assert_eq!(dt.month, 12);
-        assert_eq!(dt.day, 25);
-        assert_eq!(dt.hour, 0);
-        assert_eq!(dt.minute, 0);
-        assert_eq!(dt.second, 0);
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_valid() {
-        // Valid date
-        assert!(DateTimeUtc::new(2024, 6, 15, 14, 30, 45).validate().is_ok());
-
-        // Edge cases - start of day
-        assert!(DateTimeUtc::new(2024, 1, 1, 0, 0, 0).validate().is_ok());
-
-        // Edge cases - end of day
-        assert!(
-            DateTimeUtc::new(2024, 12, 31, 23, 59, 59)
-                .validate()
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_invalid_month() {
-        // Month 0
-        assert!(DateTimeUtc::new(2024, 0, 15, 12, 0, 0).validate().is_err());
-
-        // Month 13
-        assert!(DateTimeUtc::new(2024, 13, 15, 12, 0, 0).validate().is_err());
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_invalid_day() {
-        // Day 0
-        assert!(DateTimeUtc::new(2024, 6, 0, 12, 0, 0).validate().is_err());
-
-        // Day 32 in a 31-day month
-        assert!(DateTimeUtc::new(2024, 1, 32, 12, 0, 0).validate().is_err());
-
-        // Day 31 in a 30-day month
-        assert!(DateTimeUtc::new(2024, 4, 31, 12, 0, 0).validate().is_err());
-
-        // Day 30 in February (leap year)
-        assert!(DateTimeUtc::new(2024, 2, 30, 12, 0, 0).validate().is_err());
-
-        // Day 29 in February (non-leap year)
-        assert!(DateTimeUtc::new(2023, 2, 29, 12, 0, 0).validate().is_err());
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_leap_year() {
-        // Leap year - Feb 29 is valid
-        assert!(DateTimeUtc::new(2024, 2, 29, 12, 0, 0).validate().is_ok());
-        assert!(DateTimeUtc::new(2000, 2, 29, 12, 0, 0).validate().is_ok()); // divisible by 400
-
-        // Non-leap year - Feb 29 is invalid
-        assert!(DateTimeUtc::new(2023, 2, 29, 12, 0, 0).validate().is_err());
-        assert!(DateTimeUtc::new(1900, 2, 29, 12, 0, 0).validate().is_err()); // divisible by 100 but not 400
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_invalid_hour() {
-        // Hour 24
-        assert!(DateTimeUtc::new(2024, 6, 15, 24, 0, 0).validate().is_err());
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_invalid_minute() {
-        // Minute 60
-        assert!(DateTimeUtc::new(2024, 6, 15, 12, 60, 0).validate().is_err());
-    }
-
-    #[test]
-    fn test_datetime_utc_validate_invalid_second() {
-        // Second 60
-        assert!(
-            DateTimeUtc::new(2024, 6, 15, 12, 30, 60)
-                .validate()
-                .is_err()
-        );
+        assert_validate_err(&[
+            DateTimeUtc::new(2024, 0, 15, 12, 0, 0),
+            DateTimeUtc::new(2024, 13, 15, 12, 0, 0),
+            DateTimeUtc::new(2024, 6, 0, 12, 0, 0),
+            DateTimeUtc::new(2024, 1, 32, 12, 0, 0),
+            DateTimeUtc::new(2024, 4, 31, 12, 0, 0),
+            DateTimeUtc::new(2024, 2, 30, 12, 0, 0),
+            DateTimeUtc::new(2023, 2, 29, 12, 0, 0),
+            DateTimeUtc::new(1900, 2, 29, 12, 0, 0),
+            DateTimeUtc::new(2024, 6, 15, 24, 0, 0),
+            DateTimeUtc::new(2024, 6, 15, 12, 60, 0),
+            DateTimeUtc::new(2024, 6, 15, 12, 30, 60),
+        ]);
     }
 
     #[test]
     fn test_datetime_utc_to_rfc2822() {
-        // Test a known date
         let dt = DateTimeUtc::new(2024, 1, 15, 10, 30, 45);
-        let rfc2822 = dt.to_rfc2822();
-
-        // Should contain date parts
-        assert!(rfc2822.contains("15"));
-        assert!(rfc2822.contains("Jan"));
-        assert!(rfc2822.contains("2024"));
-        assert!(rfc2822.contains("10:30:45"));
-        assert!(rfc2822.contains("GMT"));
-    }
-
-    #[test]
-    fn test_datetime_utc_to_rfc2822_format() {
-        let dt = DateTimeUtc::new(2024, 6, 15, 14, 30, 45);
-        let rfc2822 = dt.to_rfc2822();
-
-        // Check the general format: "Day, DD Mon YYYY HH:MM:SS GMT"
-        let parts: Vec<&str> = rfc2822.split(' ').collect();
-        assert_eq!(parts.len(), 6);
-        assert!(parts[0].ends_with(','));
-        assert_eq!(parts[5], "GMT");
-    }
-
-    #[test]
-    fn test_datetime_utc_all_months() {
-        let months = [
-            (1, "Jan"),
-            (2, "Feb"),
-            (3, "Mar"),
-            (4, "Apr"),
-            (5, "May"),
-            (6, "Jun"),
-            (7, "Jul"),
-            (8, "Aug"),
-            (9, "Sep"),
-            (10, "Oct"),
-            (11, "Nov"),
-            (12, "Dec"),
-        ];
-
-        for (month_num, month_name) in months {
-            let dt = DateTimeUtc::new(2024, month_num, 15, 12, 0, 0);
-            assert!(dt.validate().is_ok());
-            let rfc2822 = dt.to_rfc2822();
-            assert!(
-                rfc2822.contains(month_name),
-                "Month {} should contain {}",
-                month_num,
-                month_name
-            );
-        }
+        assert_eq!(dt.to_rfc2822(), "Mon, 15 Jan 2024 10:30:45 GMT");
     }
 }

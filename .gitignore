@@ -1,5 +1,6 @@
 .DS_Store
 /target
+/docs
 /example-sites
 /test_site/public
 /tola-vdom

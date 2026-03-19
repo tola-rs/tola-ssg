@@ -187,7 +187,6 @@ mod tests {
                 output_file: PathBuf::from("public/test/index.html"),
                 output_dir: PathBuf::from("public/test"),
                 full_url: format!("https://example.com{}", permalink),
-                relative: "test".to_string(),
             },
             lastmod: None,
             content_meta: None,

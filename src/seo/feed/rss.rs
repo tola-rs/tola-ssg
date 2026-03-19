@@ -129,34 +129,27 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_rss_author_valid_post() {
+    fn test_normalize_rss_author_cases() {
         let config = make_config("Site Author", "site@example.com");
-        let author = "post@example.com (Post Author)".to_string();
-        let result = normalize_rss_author(Some(&author), &config);
-        assert_eq!(result, Some("post@example.com (Post Author)".to_string()));
-    }
+        let post_author = "post@example.com (Post Author)".to_string();
+        assert_eq!(
+            normalize_rss_author(Some(&post_author), &config),
+            Some("post@example.com (Post Author)".to_string())
+        );
 
-    #[test]
-    fn test_normalize_rss_author_valid_site() {
-        let config = make_config("site@example.com (Site Author)", "unused@example.com");
-        let author = "Just a name".to_string();
-        let result = normalize_rss_author(Some(&author), &config);
-        assert_eq!(result, Some("site@example.com (Site Author)".to_string()));
-    }
+        let site_valid = make_config("site@example.com (Site Author)", "unused@example.com");
+        let plain_author = "Just a name".to_string();
+        assert_eq!(
+            normalize_rss_author(Some(&plain_author), &site_valid),
+            Some("site@example.com (Site Author)".to_string())
+        );
 
-    #[test]
-    fn test_normalize_rss_author_combined() {
-        let config = make_config("Site Author", "site@example.com");
-        let author = "Just a name".to_string();
-        let result = normalize_rss_author(Some(&author), &config);
-        assert_eq!(result, Some("site@example.com (Site Author)".to_string()));
-    }
+        assert_eq!(
+            normalize_rss_author(Some(&plain_author), &config),
+            Some("site@example.com (Site Author)".to_string())
+        );
 
-    #[test]
-    fn test_normalize_rss_author_none() {
-        let config = make_config("Site Author", "site@example.com");
-        let result = normalize_rss_author(None, &config);
-        assert_eq!(result, None);
+        assert_eq!(normalize_rss_author(None, &config), None);
     }
 
     #[test]

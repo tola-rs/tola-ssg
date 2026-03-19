@@ -121,88 +121,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_escape_xml() {
-        assert_eq!(escape_xml("hello"), "hello");
-        assert_eq!(escape_xml("<test>"), "&lt;test&gt;");
-        assert_eq!(escape_xml("a & b"), "a &amp; b");
-        assert_eq!(escape_xml(r#"say "hi""#), "say &quot;hi&quot;");
-        assert_eq!(escape_xml("it's"), "it&apos;s");
-    }
-
-    #[test]
-    fn test_escape_xml_combined() {
-        assert_eq!(
-            escape_xml("<a href=\"test\">link & 'text'</a>"),
-            "&lt;a href=&quot;test&quot;&gt;link &amp; &apos;text&apos;&lt;/a&gt;"
-        );
+    fn test_escape_xml_cases() {
+        for (input, expected) in [
+            ("hello", "hello"),
+            ("<test>", "&lt;test&gt;"),
+            ("a & b", "a &amp; b"),
+            (r#"say "hi""#, "say &quot;hi&quot;"),
+            ("it's", "it&apos;s"),
+            (
+                "<a href=\"test\">link & 'text'</a>",
+                "&lt;a href=&quot;test&quot;&gt;link &amp; &apos;text&apos;&lt;/a&gt;",
+            ),
+        ] {
+            assert_eq!(escape_xml(input), expected, "{input:?}");
+        }
     }
 
     #[test]
     fn test_sitemap_empty() {
         let sitemap = Sitemap { urls: vec![] };
         let xml = sitemap.into_xml();
-
-        assert!(xml.contains(r#"<?xml version="1.0" encoding="UTF-8"?>"#));
-        assert!(xml.contains(&format!(r#"<urlset xmlns="{SITEMAP_NS}">"#)));
-        assert!(xml.contains("</urlset>"));
-        assert!(!xml.contains("<url>"));
-    }
-
-    #[test]
-    fn test_sitemap_single_page() {
-        let sitemap = Sitemap {
-            urls: vec![UrlEntry {
-                loc: "https://example.com/".to_string(),
-                lastmod: Some("2025-01-01".to_string()),
-            }],
-        };
-        let xml = sitemap.into_xml();
-
-        assert!(xml.contains("<url>"));
-        assert!(xml.contains("<loc>https://example.com/</loc>"));
-        assert!(xml.contains("<lastmod>2025-01-01</lastmod>"));
-        assert!(xml.contains("</url>"));
-    }
-
-    #[test]
-    fn test_sitemap_multiple_pages() {
-        let sitemap = Sitemap {
-            urls: vec![
-                UrlEntry {
-                    loc: "https://example.com/".to_string(),
-                    lastmod: Some("2025-01-01".to_string()),
-                },
-                UrlEntry {
-                    loc: "https://example.com/posts/hello/".to_string(),
-                    lastmod: Some("2025-01-02".to_string()),
-                },
-                UrlEntry {
-                    loc: "https://example.com/about/".to_string(),
-                    lastmod: None,
-                },
-            ],
-        };
-        let xml = sitemap.into_xml();
-
-        assert!(xml.contains("<loc>https://example.com/</loc>"));
-        assert!(xml.contains("<loc>https://example.com/posts/hello/</loc>"));
-        assert!(xml.contains("<loc>https://example.com/about/</loc>"));
-        assert_eq!(xml.matches("<url>").count(), 3);
-        assert_eq!(xml.matches("</url>").count(), 3);
-    }
-
-    #[test]
-    fn test_sitemap_without_lastmod() {
-        let sitemap = Sitemap {
-            urls: vec![UrlEntry {
-                loc: "https://example.com/".to_string(),
-                lastmod: None,
-            }],
-        };
-        let xml = sitemap.into_xml();
-
-        assert!(xml.contains("<loc>https://example.com/</loc>"));
-        assert!(!xml.contains("<lastmod>"));
+        assert_eq!(
+            xml,
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="{SITEMAP_NS}">
+</urlset>
+"#
+            )
+        );
     }
 
     #[test]
@@ -214,8 +161,18 @@ mod tests {
             }],
         };
         let xml = sitemap.into_xml();
-
-        assert!(xml.contains("<loc>https://example.com/search?q=a&amp;b=c</loc>"));
+        assert_eq!(
+            xml,
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="{SITEMAP_NS}">
+  <url>
+    <loc>https://example.com/search?q=a&amp;b=c</loc>
+  </url>
+</urlset>
+"#
+            )
+        );
     }
 
     #[test]
@@ -233,27 +190,5 @@ mod tests {
         assert_eq!(lines[0], r#"<?xml version="1.0" encoding="UTF-8"?>"#);
         assert!(lines[1].starts_with("<urlset"));
         assert!(lines.last().unwrap().trim() == "</urlset>");
-    }
-
-    #[test]
-    fn test_url_entry_with_lastmod() {
-        let entry = UrlEntry {
-            loc: "https://example.com/".to_string(),
-            lastmod: Some("2025-01-01".to_string()),
-        };
-
-        assert_eq!(entry.loc, "https://example.com/");
-        assert_eq!(entry.lastmod, Some("2025-01-01".to_string()));
-    }
-
-    #[test]
-    fn test_url_entry_without_lastmod() {
-        let entry = UrlEntry {
-            loc: "https://example.com/".to_string(),
-            lastmod: None,
-        };
-
-        assert_eq!(entry.loc, "https://example.com/");
-        assert_eq!(entry.lastmod, None);
     }
 }

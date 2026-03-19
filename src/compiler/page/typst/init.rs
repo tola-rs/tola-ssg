@@ -36,14 +36,6 @@ impl TolaVirtualFS {
             nested_mappings,
         }
     }
-
-    /// Create a VFS without nested mappings (for lightweight operations).
-    pub fn without_mappings() -> Self {
-        Self {
-            root: PathBuf::new(),
-            nested_mappings: Vec::new(),
-        }
-    }
 }
 
 impl typst_batch::VirtualFileSystem for TolaVirtualFS {
@@ -80,7 +72,7 @@ impl typst_batch::VirtualFileSystem for TolaVirtualFS {
 // Public API
 // =============================================================================
 
-/// Initialize Typst compilation environment with nested asset mappings.
+/// Initialize the Typst compile runtime.
 ///
 /// Call once at startup. This:
 /// - Registers the virtual file system with nested asset path mappings
@@ -88,35 +80,20 @@ impl typst_batch::VirtualFileSystem for TolaVirtualFS {
 ///
 /// The `nested_mappings` parameter maps output names to source paths:
 /// - `("images", "assets/images")` maps `/images/xxx` to `assets/images/xxx`
-pub fn init_typst_with_mappings(
-    font_dirs: &[&Path],
-    root: PathBuf,
-    nested_mappings: Vec<NestedMapping>,
-) {
-    typst_batch::set_virtual_fs(TolaVirtualFS::new(root, nested_mappings));
-    typst_batch::warmup(font_dirs);
-}
-
-/// Initialize Typst compilation environment (legacy, no nested mappings).
-///
-/// Prefer `init_typst_with_mappings` for full nested asset support.
-pub fn init_typst(font_dirs: &[&Path]) {
-    typst_batch::set_virtual_fs(TolaVirtualFS::without_mappings());
+pub fn init_runtime(font_dirs: &[&Path], root: PathBuf, nested_mappings: Vec<NestedMapping>) {
+    set_vfs(root, nested_mappings);
     typst_batch::warmup(font_dirs);
 }
 
 /// Register only the virtual file system with nested mappings (no font warmup).
 ///
 /// Use for lightweight operations like query/validate that don't need fonts.
-pub fn init_vfs_with_mappings(root: PathBuf, nested_mappings: Vec<NestedMapping>) {
-    typst_batch::set_virtual_fs(TolaVirtualFS::new(root, nested_mappings));
+pub fn init_vfs(root: PathBuf, nested_mappings: Vec<NestedMapping>) {
+    set_vfs(root, nested_mappings);
 }
 
-/// Register only the virtual file system (no font warmup, no nested mappings).
-///
-/// Use for lightweight operations like query/validate that don't need fonts.
-pub fn init_vfs() {
-    typst_batch::set_virtual_fs(TolaVirtualFS::without_mappings());
+fn set_vfs(root: PathBuf, nested_mappings: Vec<NestedMapping>) {
+    typst_batch::set_virtual_fs(TolaVirtualFS::new(root, nested_mappings));
 }
 
 /// Build nested mappings from assets config.
@@ -140,15 +117,15 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_init_does_not_panic() {
+    fn init_runtime_without_mappings_does_not_panic() {
         let dir = TempDir::new().unwrap();
-        init_typst(&[dir.path()]);
+        init_runtime(&[dir.path()], dir.path().to_path_buf(), Vec::new());
     }
 
     #[test]
-    fn test_init_with_mappings_does_not_panic() {
+    fn init_runtime_with_mappings_does_not_panic() {
         let dir = TempDir::new().unwrap();
         let mappings = vec![("images".to_string(), PathBuf::from("assets/images"))];
-        init_typst_with_mappings(&[dir.path()], dir.path().to_path_buf(), mappings);
+        init_runtime(&[dir.path()], dir.path().to_path_buf(), mappings);
     }
 }

@@ -97,6 +97,22 @@ fn path_prefix(config: &SiteConfig) -> String {
     config.paths().prefix().to_string_lossy().into_owned()
 }
 
+fn site_payload(config: &SiteConfig) -> serde_json::Value {
+    let mut site = serde_json::to_value(&config.site.info)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
+
+    let root = match path_prefix(config) {
+        prefix if prefix.is_empty() => "/".to_string(),
+        prefix => format!("/{}/", prefix.trim_matches('/')),
+    };
+
+    if let Some(obj) = site.as_object_mut() {
+        obj.insert("root".to_string(), serde_json::Value::String(root));
+    }
+
+    site
+}
+
 fn strip_permalink_in_page_object(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     prefix: &str,
@@ -156,9 +172,7 @@ fn build_base_inputs_impl(
     let mut combined = serde_json::Map::new();
 
     if spec.include_site {
-        let site_info_json = serde_json::to_value(&config.site.info)
-            .unwrap_or(serde_json::Value::Object(Default::default()));
-        combined.insert(TolaPackage::Site.input_key(), site_info_json);
+        combined.insert(TolaPackage::Site.input_key(), site_payload(config));
     }
 
     if spec.include_pages {
@@ -303,6 +317,17 @@ mod tests {
     fn test_filter_spec_rejects_current_context() {
         let spec = InjectSpec::filter();
         assert!(validate_spec(spec, true).is_err());
+    }
+
+    #[test]
+    fn test_site_payload_exposes_root_from_path_prefix() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = std::path::PathBuf::from("docs/blog");
+
+        let payload = site_payload(&config);
+
+        assert_eq!(payload["root"], "/docs/blog/");
+        assert!(payload.get("title").is_some());
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod iteration;
 mod kind;
 mod links;
 mod meta;
+mod resolve;
 mod route;
 mod store;
 
@@ -13,6 +14,7 @@ pub use iteration::{HashStabilityTracker, StabilityDecision};
 pub use kind::PageKind;
 pub use links::PAGE_LINKS;
 pub use meta::PageMeta;
+pub use resolve::resolve_page_link_target;
 pub use route::PageRoute;
 pub use store::{STORED_PAGES, StaleLinkPolicy, StoredPage, StoredPageMap};
 

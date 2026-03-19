@@ -618,6 +618,42 @@ pub fn test_parse_config(extra: &str) -> SiteConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::ColorChoice;
+
+    use crate::cli::{BuildArgs, Cli, Commands};
+
+    fn test_build_args() -> BuildArgs {
+        BuildArgs {
+            clean: false,
+            minify: None,
+            css_processor: None,
+            rss: None,
+            sitemap: None,
+            site_url: None,
+            verbose: false,
+            skip_drafts: false,
+        }
+    }
+
+    fn test_cli(command: Commands) -> &'static Cli {
+        Box::leak(Box::new(Cli {
+            color: ColorChoice::Never,
+            output: None,
+            content: None,
+            config: PathBuf::from("tola.toml"),
+            command,
+        }))
+    }
+
+    fn finalize_test_config(extra: &str, command: Commands) -> SiteConfig {
+        let mut config = test_parse_config(extra);
+        config.config_path = PathBuf::from("/tmp/tola-config-tests/site/tola.toml");
+
+        let cli = test_cli(command);
+        config.cli = Some(cli);
+        config.finalize(cli);
+        config
+    }
 
     #[test]
     fn test_from_str_invalid_toml() {
@@ -641,18 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn test_site_config_default() {
-        let config = SiteConfig::default();
-
-        assert!(config.cli.is_none());
-        assert_eq!(config.config_path, PathBuf::new());
-        assert_eq!(config.site.info.title, "");
-        assert!(config.build.minify);
-        assert_eq!(config.serve.port, 5277);
-        assert_eq!(config.deploy.provider, "github");
-    }
-
-    #[test]
     fn test_unknown_fields_detected() {
         let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[unknown_section]\nfield = \"value\"";
         let (config, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
@@ -673,19 +697,56 @@ mod tests {
     }
 
     #[test]
-    fn test_from_str_collects_presence() {
-        let content = r#"
-[site.info]
-title = "T"
-description = "D"
+    fn test_finalize_build_derives_path_prefix_from_site_info_url() {
+        let config = finalize_test_config(
+            "url = \"https://example.com/docs/blog\"",
+            Commands::Build {
+                build_args: test_build_args(),
+            },
+        );
 
-[deploy.cloudflare]
-provider = "cloudflare"
-"#;
-        let config = SiteConfig::from_str(content).unwrap();
-        assert!(config.presence.contains("site"));
-        assert!(config.presence.contains("site.info.title"));
-        assert!(config.presence.contains("deploy.cloudflare"));
-        assert!(config.presence.contains("deploy.cloudflare.provider"));
+        assert_eq!(config.build.path_prefix, PathBuf::from("docs/blog"));
+    }
+
+    #[test]
+    fn test_finalize_build_leaves_path_prefix_empty_for_site_root_url() {
+        let config = finalize_test_config(
+            "url = \"https://example.com/\"",
+            Commands::Build {
+                build_args: test_build_args(),
+            },
+        );
+
+        assert!(config.build.path_prefix.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_finalize_serve_clears_path_prefix_by_default() {
+        let config = finalize_test_config(
+            "url = \"https://example.com/docs/blog\"",
+            Commands::Serve {
+                build_args: test_build_args(),
+                interface: None,
+                port: None,
+                watch: None,
+            },
+        );
+
+        assert!(config.build.path_prefix.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_finalize_serve_keeps_path_prefix_when_respect_prefix_enabled() {
+        let config = finalize_test_config(
+            "url = \"https://example.com/docs/blog\"\n[serve]\nrespect_prefix = true",
+            Commands::Serve {
+                build_args: test_build_args(),
+                interface: None,
+                port: None,
+                watch: None,
+            },
+        );
+
+        assert_eq!(config.build.path_prefix, PathBuf::from("docs/blog"));
     }
 }

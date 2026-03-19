@@ -15,14 +15,24 @@ impl CompilerActor {
             tokio::select! {
                 biased;
 
-                Some(msg) = self.rx.recv() => {
+                msg = self.rx.recv() => {
+                    let Some(msg) = msg else {
+                        abort_task(&mut background);
+                        break;
+                    };
+
+                    let is_shutdown = matches!(msg, CompilerMsg::Shutdown);
                     if matches!(msg, CompilerMsg::Compile { .. }) {
                         abort_task(&mut background);
                     }
                     background = self.dispatch(msg, background).await;
+                    if is_shutdown {
+                        abort_task(&mut background);
+                        break;
+                    }
                 }
 
-                result = wait_task(&mut background) => {
+                result = wait_task(&mut background), if background.is_some() => {
                     background = None;
                     self.on_background_done(result).await;
                 }
@@ -71,10 +81,7 @@ impl CompilerActor {
                 self.on_full_rebuild().await;
                 None
             }
-            CompilerMsg::Shutdown => {
-                crate::log!("compile"; "shutting down");
-                bg
-            }
+            CompilerMsg::Shutdown => bg,
         }
     }
 
@@ -104,5 +111,29 @@ impl CompilerActor {
             self.run_watched_post_hooks(&paths);
         }
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::config::SiteConfig;
+
+    #[tokio::test]
+    async fn exits_on_shutdown_message() {
+        let (compiler_tx, compiler_rx) = mpsc::channel(1);
+        let (vdom_tx, _vdom_rx) = mpsc::channel::<VdomMsg>(1);
+        let actor = CompilerActor::new(compiler_rx, vdom_tx, Arc::new(SiteConfig::default()));
+
+        let handle = tokio::spawn(actor.run());
+        compiler_tx.send(CompilerMsg::Shutdown).await.unwrap();
+
+        let result = tokio::time::timeout(Duration::from_millis(200), handle).await;
+        assert!(result.is_ok(), "compiler actor should exit after shutdown");
     }
 }

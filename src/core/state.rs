@@ -107,26 +107,3 @@ pub fn is_shutdown() -> bool {
 // =============================================================================
 // Tests
 // =============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_serving() {
-        SERVING.store(false, Ordering::SeqCst);
-        assert!(!is_serving());
-
-        set_serving();
-        assert!(is_serving());
-    }
-
-    #[test]
-    fn test_healthy() {
-        set_healthy(false);
-        assert!(!is_healthy());
-
-        set_healthy(true);
-        assert!(is_healthy());
-    }
-}

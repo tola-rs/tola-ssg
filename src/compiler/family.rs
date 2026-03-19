@@ -154,14 +154,20 @@ pub type Processed = TolaSite::Processed;
 // Cache Type Aliases
 // =============================================================================
 
-/// Cache entry for Indexed documents
-pub type CacheEntry = tola_vdom::CacheEntry<Indexed>;
+/// Structural document stored in the hot-reload cache.
+pub type StructuralDocument = tola_vdom::Document<tola_vdom::snapshot::Structural>;
 
-/// Non-thread-safe cache for Indexed documents
-pub type Cache = tola_vdom::VdomCache<Indexed>;
+/// Structural snapshot phase used by the hot-reload cache.
+pub type CachePhase = tola_vdom::snapshot::Structural;
 
-/// Thread-safe shared cache for Indexed documents
-pub type SharedCache = tola_vdom::SharedVdomCache<Indexed>;
+/// Cache entry for structural hot-reload documents.
+pub type CacheEntry = tola_vdom::CacheEntry<CachePhase>;
 
-/// Patch operation for Indexed phase
-pub type PatchOp = tola_vdom::algo::PatchOp<Indexed>;
+/// Non-thread-safe structural VDOM cache.
+pub type Cache = tola_vdom::VdomCache<CachePhase>;
+
+/// Thread-safe shared structural VDOM cache.
+pub type SharedCache = tola_vdom::SharedVdomCache<CachePhase>;
+
+/// Diff tree edit for Indexed phase.
+pub type DiffEdit = tola_vdom::diff::TreeEdit<Indexed>;

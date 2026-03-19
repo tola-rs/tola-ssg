@@ -102,7 +102,7 @@ pub(super) fn write_page(
     }
 
     if log_file {
-        log!("content"; "{}", page.route.relative);
+        log!("content"; "{}", page.route.source.display());
     }
 
     if let Some(parent) = page.route.output_file.parent() {

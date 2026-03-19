@@ -10,9 +10,6 @@ mod pipeline;
 mod tasks;
 mod utils;
 
-#[cfg(test)]
-mod tests;
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

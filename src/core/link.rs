@@ -15,6 +15,52 @@ pub enum LinkKind<'a> {
     FileRelative(&'a str),
 }
 
+/// Where a link came from in source or generated markup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkOrigin {
+    /// From `#link()` or other explicit link element.
+    Link,
+    /// From `href` attribute.
+    Href,
+    /// From `src` attribute.
+    Src,
+    /// From `poster` attribute.
+    Poster,
+    /// From `data` attribute.
+    Data,
+    /// From `#image()` source path.
+    Image,
+}
+
+impl LinkOrigin {
+    /// Map a known HTML URL attribute name to a link origin.
+    pub fn from_attr_name(attr: &str) -> Option<Self> {
+        match attr {
+            "href" => Some(Self::Href),
+            "src" => Some(Self::Src),
+            "poster" => Some(Self::Poster),
+            "data" => Some(Self::Data),
+            _ => None,
+        }
+    }
+
+    /// Whether this origin is asset-only rather than page navigation.
+    pub const fn is_asset_attr(self) -> bool {
+        matches!(self, Self::Src | Self::Poster | Self::Data | Self::Image)
+    }
+}
+
+impl From<typst_batch::LinkSource> for LinkOrigin {
+    fn from(source: typst_batch::LinkSource) -> Self {
+        match source {
+            typst_batch::LinkSource::Link => Self::Link,
+            typst_batch::LinkSource::Href => Self::Href,
+            typst_batch::LinkSource::Src => Self::Src,
+            typst_batch::LinkSource::Image => Self::Image,
+        }
+    }
+}
+
 impl<'a> LinkKind<'a> {
     /// Parse a link string into its syntactic kind.
     #[inline]
@@ -146,5 +192,27 @@ mod tests {
         assert!(!LinkKind::is_file_relative("https://example.com"));
         assert!(!LinkKind::is_file_relative("#section"));
         assert!(!LinkKind::is_file_relative("/about"));
+    }
+
+    #[test]
+    fn test_link_origin_asset_classification() {
+        assert!(LinkOrigin::Src.is_asset_attr());
+        assert!(LinkOrigin::Poster.is_asset_attr());
+        assert!(LinkOrigin::Data.is_asset_attr());
+        assert!(LinkOrigin::Image.is_asset_attr());
+        assert!(!LinkOrigin::Href.is_asset_attr());
+        assert!(!LinkOrigin::Link.is_asset_attr());
+    }
+
+    #[test]
+    fn test_link_origin_from_attr_name() {
+        assert_eq!(LinkOrigin::from_attr_name("href"), Some(LinkOrigin::Href));
+        assert_eq!(LinkOrigin::from_attr_name("src"), Some(LinkOrigin::Src));
+        assert_eq!(
+            LinkOrigin::from_attr_name("poster"),
+            Some(LinkOrigin::Poster)
+        );
+        assert_eq!(LinkOrigin::from_attr_name("data"), Some(LinkOrigin::Data));
+        assert_eq!(LinkOrigin::from_attr_name("class"), None);
     }
 }

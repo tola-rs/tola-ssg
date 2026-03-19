@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
 use crossbeam::channel::{self, Sender};
 use dashmap::DashMap;
@@ -39,8 +39,8 @@ pub enum CompileResult {
 
 /// Central compile scheduler with priority queue and deduplication
 pub struct CompileScheduler {
-    /// Priority queue of pending tasks
-    queue: Mutex<BinaryHeap<Task>>,
+    /// Pending tasks split by interactive vs background lanes
+    queue: Mutex<QueueState>,
     /// Pending paths -> waiters (for dedup and result broadcasting)
     pending: DashMap<PathBuf, PendingState>,
     /// In-progress paths -> waiters
@@ -53,9 +53,18 @@ pub struct CompileScheduler {
     shutdown: AtomicBool,
     /// Workers started flag
     started: AtomicBool,
+    /// Maximum number of background tasks allowed to execute concurrently.
+    /// Reserves at least one worker slot for interactive compiles when possible.
+    background_limit: AtomicUsize,
 }
 
 type Waiter = Sender<CompileResult>;
+
+struct QueueState {
+    foreground: BinaryHeap<Task>,
+    background: BinaryHeap<Task>,
+    active_background: usize,
+}
 
 struct Task {
     path: PathBuf,
@@ -92,13 +101,18 @@ impl Eq for Task {}
 impl CompileScheduler {
     pub fn new() -> Self {
         Self {
-            queue: Mutex::new(BinaryHeap::new()),
+            queue: Mutex::new(QueueState {
+                foreground: BinaryHeap::new(),
+                background: BinaryHeap::new(),
+                active_background: 0,
+            }),
             pending: DashMap::new(),
             active: DashMap::new(),
             cache: DashMap::new(),
             notify: Condvar::new(),
             shutdown: AtomicBool::new(false),
             started: AtomicBool::new(false),
+            background_limit: AtomicUsize::new(1),
         }
     }
 
@@ -110,6 +124,8 @@ impl CompileScheduler {
         let n = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
+        self.background_limit
+            .store(Self::background_worker_limit(n), AtomicOrdering::SeqCst);
         for _ in 0..n {
             std::thread::spawn(|| SCHEDULER.run_worker());
         }
@@ -118,7 +134,10 @@ impl CompileScheduler {
     /// Request compilation, wait for result.
     pub fn compile(&self, path: PathBuf, priority: Priority) -> CompileResult {
         // Fast path: cached
-        if let Some(result) = self.get_cached(&path) {
+        if let Some(result) = self
+            .get_cached(&path)
+            .and_then(Self::reusable_cached_result)
+        {
             return result;
         }
 
@@ -151,7 +170,7 @@ impl CompileScheduler {
                     waiters: vec![],
                 },
             );
-            queue.push(Task {
+            queue.background.push(Task {
                 path,
                 priority: Priority::Background,
             });
@@ -162,6 +181,7 @@ impl CompileScheduler {
     /// Invalidate cache (on file change).
     pub fn invalidate(&self, path: &Path) {
         self.cache.remove(path);
+        crate::freshness::invalidate_cached_hash(path);
     }
 
     /// Check if compiled.
@@ -172,6 +192,11 @@ impl CompileScheduler {
     /// Get cached result.
     pub fn get_cached(&self, path: &Path) -> Option<CompileResult> {
         self.cache.get(path).map(|r| r.clone())
+    }
+
+    /// Clear all cached compile results.
+    pub fn clear_cache(&self) {
+        self.cache.clear();
     }
 
     /// Signal shutdown.
@@ -201,6 +226,14 @@ impl CompileScheduler {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+
+    fn background_worker_limit(total_workers: usize) -> usize {
+        if total_workers > 1 {
+            total_workers - 1
+        } else {
+            1
+        }
+    }
 }
 
 // =============================================================================
@@ -208,6 +241,13 @@ impl CompileScheduler {
 // =============================================================================
 
 impl CompileScheduler {
+    fn reusable_cached_result(result: CompileResult) -> Option<CompileResult> {
+        match result {
+            CompileResult::Success(_) => Some(result),
+            CompileResult::Failed(_) | CompileResult::Skipped => None,
+        }
+    }
+
     fn try_join_active(&self, path: &Path, tx: Waiter) -> bool {
         if let Some(mut waiters) = self.active.get_mut(path) {
             waiters.push(tx);
@@ -241,7 +281,13 @@ impl CompileScheduler {
     }
 
     fn enqueue(&self, path: PathBuf, priority: Priority) {
-        self.queue.lock().push(Task { path, priority });
+        let mut queue = self.queue.lock();
+        let task = Task { path, priority };
+        if priority == Priority::Background {
+            queue.background.push(task);
+        } else {
+            queue.foreground.push(task);
+        }
         self.notify.notify_one();
     }
 
@@ -264,8 +310,8 @@ impl CompileScheduler {
 impl CompileScheduler {
     fn run_worker(&self) {
         while !self.is_shutdown() {
-            if let Some((path, waiters)) = self.next_task() {
-                self.execute(path, waiters);
+            if let Some((task, waiters)) = self.next_task() {
+                self.execute(task, waiters);
             }
         }
     }
@@ -274,23 +320,37 @@ impl CompileScheduler {
         self.shutdown.load(AtomicOrdering::SeqCst)
     }
 
-    fn next_task(&self) -> Option<(PathBuf, Vec<Waiter>)> {
+    fn next_task(&self) -> Option<(Task, Vec<Waiter>)> {
         let task = self.dequeue()?;
-        self.claim(task)
+        let is_background = task.priority == Priority::Background;
+        let claimed = self.claim(task);
+        if claimed.is_some() && is_background {
+            self.queue.lock().active_background += 1;
+        }
+        claimed
     }
 
     fn dequeue(&self) -> Option<Task> {
         let mut queue = self.queue.lock();
-        while queue.is_empty() {
+        while !queue.has_ready_task(self.background_limit()) {
             if self.is_shutdown() {
                 return None;
             }
             self.notify.wait(&mut queue);
         }
-        queue.pop()
+
+        if let Some(task) = queue.foreground.pop() {
+            return Some(task);
+        }
+
+        if queue.active_background < self.background_limit() {
+            return queue.background.pop();
+        }
+
+        None
     }
 
-    fn claim(&self, task: Task) -> Option<(PathBuf, Vec<Waiter>)> {
+    fn claim(&self, task: Task) -> Option<(Task, Vec<Waiter>)> {
         // Atomically claim from pending
         let waiters = match self.pending.entry(task.path.clone()) {
             Entry::Occupied(e) => {
@@ -303,7 +363,10 @@ impl CompileScheduler {
         };
 
         // Already cached? Notify immediately
-        if let Some(result) = self.get_cached(&task.path) {
+        if let Some(result) = self
+            .get_cached(&task.path)
+            .and_then(Self::reusable_cached_result)
+        {
             Self::broadcast(&waiters, result);
             return None;
         }
@@ -314,10 +377,11 @@ impl CompileScheduler {
             return None;
         }
 
-        Some((task.path, waiters))
+        Some((task, waiters))
     }
 
-    fn execute(&self, path: PathBuf, waiters: Vec<Waiter>) {
+    fn execute(&self, task: Task, waiters: Vec<Waiter>) {
+        let path = task.path.clone();
         self.active.insert(path.clone(), waiters);
 
         // Catch panics to ensure waiters always receive a result
@@ -331,7 +395,17 @@ impl CompileScheduler {
             .map(|(_, w)| w)
             .unwrap_or_default();
 
-        self.cache.insert(path, result.clone());
+        if matches!(result, CompileResult::Success(_)) {
+            self.cache.insert(path, result.clone());
+        } else {
+            self.cache.remove(&path);
+        }
+        if task.priority == Priority::Background {
+            let mut queue = self.queue.lock();
+            queue.active_background = queue.active_background.saturating_sub(1);
+            drop(queue);
+            self.notify.notify_all();
+        }
         Self::broadcast(&waiters, result);
     }
 
@@ -372,16 +446,14 @@ impl CompileScheduler {
             cache_vdom(&result.permalink, vdom);
         }
 
-        if let Some(mut space) = crate::core::GLOBAL_ADDRESS_SPACE.try_write() {
-            space.update_page(
-                result.page.route.clone(),
-                result
-                    .page
-                    .content_meta
-                    .as_ref()
-                    .and_then(|m| m.title.clone()),
-            );
-        }
+        crate::core::GLOBAL_ADDRESS_SPACE.write().update_page(
+            result.page.route.clone(),
+            result
+                .page
+                .content_meta
+                .as_ref()
+                .and_then(|m| m.title.clone()),
+        );
 
         CompileResult::Success(result.page.route.output_file)
     }
@@ -390,5 +462,72 @@ impl CompileScheduler {
 impl Default for CompileScheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl QueueState {
+    fn is_empty(&self) -> bool {
+        self.foreground.is_empty() && self.background.is_empty()
+    }
+
+    fn has_ready_task(&self, background_limit: usize) -> bool {
+        !self.foreground.is_empty()
+            || (!self.background.is_empty() && self.active_background < background_limit)
+    }
+}
+
+impl CompileScheduler {
+    fn background_limit(&self) -> usize {
+        self.background_limit.load(AtomicOrdering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::freshness::compute_file_hash;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn reusable_cached_result_only_accepts_success() {
+        let success = CompileResult::Success(PathBuf::from("/tmp/out.html"));
+        let failed = CompileResult::Failed("boom".into());
+        let skipped = CompileResult::Skipped;
+
+        let reused = CompileScheduler::reusable_cached_result(success);
+        assert!(
+            matches!(reused, Some(CompileResult::Success(ref path)) if path == &PathBuf::from("/tmp/out.html"))
+        );
+        assert!(CompileScheduler::reusable_cached_result(failed).is_none());
+        assert!(CompileScheduler::reusable_cached_result(skipped).is_none());
+    }
+
+    #[test]
+    fn invalidate_clears_compile_and_freshness_cache() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("page.typ");
+        fs::write(&path, "= Old").unwrap();
+
+        let old_hash = compute_file_hash(&path);
+        fs::write(&path, "= New").unwrap();
+
+        SCHEDULER.cache.insert(
+            path.clone(),
+            CompileResult::Success(PathBuf::from("/tmp/out.html")),
+        );
+        assert!(SCHEDULER.get_cached(&path).is_some());
+
+        SCHEDULER.invalidate(&path);
+
+        assert!(SCHEDULER.get_cached(&path).is_none());
+        assert_ne!(compute_file_hash(&path), old_hash);
+    }
+
+    #[test]
+    fn background_limit_reserves_one_slot_when_possible() {
+        assert_eq!(CompileScheduler::background_worker_limit(1), 1);
+        assert_eq!(CompileScheduler::background_worker_limit(2), 1);
+        assert_eq!(CompileScheduler::background_worker_limit(8), 7);
     }
 }

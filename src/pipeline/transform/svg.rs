@@ -21,9 +21,10 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use tola_vdom::families::MediaIndexed;
 use tola_vdom::prelude::*;
 
-use crate::compiler::family::{Indexed, TolaSite::FamilyKind};
+use crate::compiler::family::{Indexed, TolaSite, TolaSite::FamilyKind};
 use crate::compiler::page::PageRoute;
 use crate::config::SiteConfig;
 use crate::core::BuildMode;
@@ -129,7 +130,7 @@ impl<'a> SvgTransform<'a> {
 
         // Update viewBox attribute from optimized SVG
         if let Some(viewbox) = extract_viewbox_from_bytes(&optimized.data) {
-            elem.set_attr("viewBox", viewbox);
+            set_svg_viewbox(elem, viewbox);
         }
 
         Ok(())
@@ -165,6 +166,8 @@ impl<'a> SvgTransform<'a> {
 
     /// Replace SVG element with img element pointing to extracted file.
     fn replace_with_img(&self, elem: &mut Element<Indexed>, src: &str) {
+        let stable_id = elem.stable_id();
+
         // Clear children (SVG content no longer needed)
         elem.children.clear();
 
@@ -179,6 +182,15 @@ impl<'a> SvgTransform<'a> {
         // Set img attributes
         elem.set_attr("src", src.to_string());
         elem.set_attr("loading", "lazy");
+
+        elem.ext = TolaSite::IndexedExt::Media(MediaIndexed::new(stable_id, Some(src.to_string())));
+    }
+}
+
+fn set_svg_viewbox(elem: &mut Element<Indexed>, viewbox: String) {
+    elem.set_attr("viewBox", viewbox.clone());
+    if let Some(data) = ExtractFamily::<SvgFamily>::get_mut(&mut elem.ext) {
+        data.set_viewbox(Some(viewbox));
     }
 }
 
@@ -260,5 +272,27 @@ mod tests {
         config_extract.build.svg.external = true;
         let transform = SvgTransform::new(&config_extract, &route, BuildMode::PRODUCTION);
         assert!(transform.should_extract());
+    }
+
+    #[test]
+    fn replace_with_img_switches_family_payload_to_media() {
+        use crate::compiler::family::TolaSite;
+        use tola_vdom::core::ExtractFamily;
+        use tola_vdom::families::{MediaFamily, SvgFamily};
+
+        let root = TolaSite::element("svg", Attrs::from([("viewBox", "0 0 10 10")]));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+        let mut svg = indexed.root;
+        let config = SiteConfig::default();
+        let route = PageRoute::default();
+        let transform = SvgTransform::new(&config, &route, BuildMode::PRODUCTION);
+
+        transform.replace_with_img(&mut svg, "./asset.svg");
+
+        assert_eq!(svg.tag.as_str(), "img");
+        assert_eq!(svg.get_attr("src"), Some("./asset.svg"));
+        assert!(ExtractFamily::<SvgFamily>::get(&svg.ext).is_none());
+        let media = ExtractFamily::<MediaFamily>::get(&svg.ext).unwrap();
+        assert_eq!(media.src.as_deref(), Some("./asset.svg"));
     }
 }

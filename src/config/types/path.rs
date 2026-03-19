@@ -143,58 +143,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_output_root() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new("blog"));
-        assert_eq!(paths.output_root(), Path::new("/public"));
-    }
-
-    #[test]
-    fn test_output_dir_with_prefix() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new("blog"));
-        assert_eq!(paths.output_dir(), PathBuf::from("/public/blog"));
-    }
-
-    #[test]
-    fn test_output_dir_without_prefix() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new(""));
-        assert_eq!(paths.output_dir(), PathBuf::from("/public"));
-    }
-
-    #[test]
-    fn test_has_prefix() {
-        let with = PathResolver::new(Path::new("/public"), Path::new("blog"));
-        let without = PathResolver::new(Path::new("/public"), Path::new(""));
-
-        assert!(with.has_prefix());
-        assert!(!without.has_prefix());
-    }
-
-    #[test]
-    fn test_url_for_filename_with_prefix() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new("my-project"));
+    fn test_url_building_cases() {
+        let with_prefix = PathResolver::new(Path::new("/public"), Path::new("my-project"));
         assert_eq!(
-            paths.url_for_filename("styles.css"),
+            with_prefix.url_for_filename("styles.css"),
             "/my-project/styles.css"
         );
-    }
 
-    #[test]
-    fn test_url_for_filename_without_prefix() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new(""));
-        assert_eq!(paths.url_for_filename("styles.css"), "/styles.css");
-    }
+        let without_prefix = PathResolver::new(Path::new("/public"), Path::new(""));
+        assert_eq!(without_prefix.url_for_filename("styles.css"), "/styles.css");
 
-    #[test]
-    fn test_url_for_rel_path_with_prefix() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new("blog"));
-        assert_eq!(paths.url_for_rel_path("css/app.css"), "/blog/css/app.css");
-    }
+        let blog = PathResolver::new(Path::new("/public"), Path::new("blog"));
+        assert_eq!(blog.url_for_rel_path("css/app.css"), "/blog/css/app.css");
 
-    #[test]
-    fn test_url_for_rel_path_nested_prefix() {
-        let paths = PathResolver::new(Path::new("/public"), Path::new("sites/blog"));
+        let nested = PathResolver::new(Path::new("/public"), Path::new("sites/blog"));
         assert_eq!(
-            paths.url_for_rel_path("img/logo.png"),
+            nested.url_for_rel_path("img/logo.png"),
             "/sites/blog/img/logo.png"
         );
     }

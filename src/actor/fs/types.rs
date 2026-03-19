@@ -38,3 +38,28 @@ impl DebouncedEvents {
         (created, modified, removed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path(name: &str) -> PathBuf {
+        PathBuf::from(format!("/tmp/{name}"))
+    }
+
+    #[test]
+    fn debounced_events_split_groups_by_change_kind() {
+        let events = DebouncedEvents(vec![
+            (path("a.typ"), ChangeKind::Created),
+            (path("b.typ"), ChangeKind::Modified),
+            (path("c.typ"), ChangeKind::Removed),
+            (path("d.typ"), ChangeKind::Created),
+        ]);
+
+        let (created, modified, removed) = events.split();
+
+        assert_eq!(created.len(), 2);
+        assert_eq!(modified.len(), 1);
+        assert_eq!(removed.len(), 1);
+    }
+}

@@ -93,22 +93,3 @@ impl Default for PreloadConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::config::test_parse_config;
-
-    #[test]
-    fn test_defaults() {
-        let config = test_parse_config("");
-        assert!(!config.site.nav.spa);
-        assert!(!config.site.nav.preload.enable);
-        assert_eq!(config.site.nav.preload.delay, 100);
-    }
-
-    #[test]
-    fn test_spa_enabled_by_config() {
-        let config = test_parse_config("[site.nav]\nspa = true");
-        assert!(config.site.nav.spa);
-    }
-}

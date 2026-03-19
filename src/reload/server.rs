@@ -4,6 +4,8 @@
 //! Clients are sent to WsActor via channel for message handling.
 
 use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 
@@ -11,6 +13,21 @@ use crate::actor::messages::WsMsg;
 
 /// Maximum port retry attempts
 const MAX_PORT_RETRIES: u16 = 10;
+
+pub struct WsServerHandle {
+    port: u16,
+    stop: Arc<AtomicBool>,
+}
+
+impl WsServerHandle {
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
 
 // =============================================================================
 // Actor Mode WebSocket Server
@@ -23,13 +40,15 @@ const MAX_PORT_RETRIES: u16 = 10;
 pub fn start_ws_server_with_channel(
     base_port: u16,
     ws_tx: tokio::sync::mpsc::Sender<WsMsg>,
-) -> Result<u16> {
+) -> Result<WsServerHandle> {
     let (listener, actual_port) = try_bind_port(base_port, MAX_PORT_RETRIES)?;
     listener.set_nonblocking(true)?;
+    let stop = Arc::new(AtomicBool::new(false));
 
     // Spawn acceptor thread
+    let stop_for_thread = Arc::clone(&stop);
     std::thread::spawn(move || {
-        loop {
+        while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, addr)) => {
                     crate::debug!("reload"; "client connected: {}", addr);
@@ -56,7 +75,10 @@ pub fn start_ws_server_with_channel(
         }
     });
 
-    Ok(actual_port)
+    Ok(WsServerHandle {
+        port: actual_port,
+        stop,
+    })
 }
 
 // =============================================================================
@@ -86,4 +108,25 @@ fn try_bind_port(base_port: u16, max_retries: u16) -> Result<(TcpListener, u16)>
         max_retries,
         last_error.map(|e| e.to_string()).unwrap_or_default()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WsServerHandle;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn ws_server_handle_requests_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = WsServerHandle {
+            port: 35729,
+            stop: Arc::clone(&stop),
+        };
+
+        handle.request_stop();
+
+        assert!(stop.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(handle.port(), 35729);
+    }
 }

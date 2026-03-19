@@ -6,11 +6,11 @@ use crate::reload::active::ACTIVE_PAGE;
 use super::WsActor;
 
 impl WsActor {
-    /// Convert VDOM Patches to PatchOps for HotReloadMessage
+    /// Convert rendered patches to client patch commands.
     pub(super) fn convert_patches(
-        patches: &[tola_vdom::algo::Patch],
-    ) -> Vec<crate::reload::patch::PatchOp> {
-        crate::reload::patch::from_vdom_patches(patches)
+        patches: &[tola_vdom::patch::Patch],
+    ) -> Vec<crate::reload::patch::ClientPatch> {
+        crate::reload::patch::from_render_patches(patches)
     }
 
     /// Broadcast a message to all connected clients

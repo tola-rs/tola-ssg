@@ -243,12 +243,12 @@ mod tests {
             PathBuf::from("test.toml"),
             Error::new(ErrorKind::NotFound, "file not found"),
         );
-        let display = format!("{io_err}");
-        assert!(display.contains("IO error"));
-        assert!(display.contains("test.toml"));
+        assert_eq!(format!("{io_err}"), "IO error when reading `test.toml`");
 
         let validation_err = ConfigError::Validation("Test validation error".to_string());
-        let display = format!("{validation_err}");
-        assert!(display.contains("Test validation error"));
+        assert_eq!(
+            format!("{validation_err}"),
+            "Config validation error: Test validation error"
+        );
     }
 }

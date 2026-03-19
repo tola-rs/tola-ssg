@@ -7,7 +7,7 @@ use crate::compiler::CompileContext;
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
     BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, ScannedPage, TypstBatcher,
-    collect_warnings, filter_drafts, format_compile_error,
+    collect_warnings, format_compile_error, scan_pages,
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;
@@ -18,7 +18,7 @@ use crate::page::CompiledPage;
 use crate::page::{
     HashStabilityTracker, PAGE_LINKS, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
 };
-use crate::utils::path::slug::slugify_path;
+use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -91,7 +91,7 @@ pub fn build_static_pages(
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Always pre-scan to collect metadata and identify iterative pages
-    let scan_result = filter_drafts(config, &typst_files, &markdown_files);
+    let scan_result = scan_pages(config, &typst_files, &markdown_files);
     let drafts_skipped = scan_result.drafts_skipped;
 
     // Report scan phase errors immediately
@@ -118,7 +118,7 @@ pub fn build_static_pages(
     // Compile Typst files
     // Always create new batcher for compile, reuse only snapshot from scan
     // This avoids duplicate warnings (scan already emitted them)
-    let snapshot = scan_result.batcher.as_ref().and_then(|b| b.snapshot());
+    let snapshot = scan_result.snapshot();
     let inputs = build_site_inputs(config)?;
     // Always compile with per-file @tola/current context to keep build
     // behavior aligned with serve and avoid scan-time under-detection when
@@ -365,27 +365,22 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
     }
 
     // Second pass: populate PAGE_LINKS with resolved links
-    let slug_config = &config.build.slug;
     for (from_url, page) in &page_permalinks {
         if page.links.is_empty() {
             continue;
         }
 
-        // Convert raw link paths to UrlPaths
         let targets: Vec<UrlPath> = page
             .links
             .iter()
-            .map(|link| {
-                // Extract path without fragment
-                let (path, _) = crate::utils::path::route::split_path_fragment(link);
-                let path = path.trim_start_matches('/');
-
-                // Slugify and normalize to page URL
-                let slugified = slugify_path(path, slug_config);
-                UrlPath::from_page(&format!(
-                    "/{}/",
-                    slugified.to_string_lossy().trim_matches('/')
-                ))
+            .filter_map(|link| {
+                crate::page::resolve_page_link_target(
+                    &STORED_PAGES,
+                    from_url,
+                    &page.path,
+                    link,
+                    config,
+                )
             })
             .collect();
 
@@ -683,6 +678,11 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
     for page in pages {
         let title = page.content_meta.as_ref().and_then(|m| m.title.clone());
         space.register_page(page.route.clone(), title);
+        let heading_ids = STORED_PAGES
+            .get_headings(&page.route.permalink)
+            .into_iter()
+            .map(|heading| slugify_fragment(&heading.text, &config.build.slug));
+        space.register_headings(&page.route.permalink, heading_ids);
     }
 
     // Register global assets (nested directories)
@@ -698,5 +698,149 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
     // Register content assets (non-.typ/.md files in content directory)
     for asset in crate::asset::scan_content_assets(config) {
         space.register_asset(asset);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::ResolveResult;
+    use crate::compiler::page::{ScannedHeading, ScannedPage, ScannedPageLink};
+    use crate::core::LinkOrigin;
+    use crate::page::PageMeta;
+    use std::fs;
+    use std::sync::{Mutex, MutexGuard};
+    use tempfile::TempDir;
+
+    static GLOBAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct GlobalStateGuard {
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl GlobalStateGuard {
+        fn new() -> Self {
+            let lock = match GLOBAL_STATE_TEST_LOCK.lock() {
+                Ok(lock) => lock,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            reset_global_state();
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for GlobalStateGuard {
+        fn drop(&mut self) {
+            reset_global_state();
+        }
+    }
+
+    fn reset_global_state() {
+        STORED_PAGES.clear();
+        PAGE_LINKS.clear();
+        GLOBAL_ADDRESS_SPACE.write().clear();
+    }
+
+    #[test]
+    fn test_build_address_space_registers_heading_ids_for_fragment_resolution() {
+        let _state = GlobalStateGuard::new();
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let source = content_dir.join("post.typ");
+        fs::write(&source, "= Hello").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+        config.build.output = output_dir;
+
+        let page = CompiledPage::from_paths(&source, &config).unwrap();
+        STORED_PAGES.insert_headings(
+            page.route.permalink.clone(),
+            vec![ScannedHeading {
+                level: 1,
+                text: "Hello World".to_string(),
+                supplement: None,
+            }],
+        );
+
+        build_address_space(std::slice::from_ref(&page), &config);
+
+        {
+            let space = GLOBAL_ADDRESS_SPACE.read();
+            let ctx = crate::address::ResolveContext {
+                current_permalink: &page.route.permalink,
+                source_path: &page.route.source,
+                origin: LinkOrigin::Href,
+            };
+
+            assert!(matches!(
+                space.resolve("#hello-world", &ctx),
+                ResolveResult::Found(_)
+            ));
+            assert!(matches!(
+                space.resolve("#missing", &ctx),
+                ResolveResult::FragmentNotFound { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_populate_pages_records_relative_page_links_only() {
+        let _state = GlobalStateGuard::new();
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(content_dir.join("posts")).unwrap();
+
+        let source_a = content_dir.join("posts").join("a.md");
+        let source_b = content_dir.join("posts").join("b.md");
+        fs::write(&source_a, "# A").unwrap();
+        fs::write(&source_b, "# B").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        let scanned = vec![
+            ScannedPage {
+                path: source_a.clone(),
+                meta: Some(PageMeta {
+                    title: Some("A".to_string()),
+                    ..Default::default()
+                }),
+                kind: crate::page::PageKind::Direct,
+                links: vec![
+                    ScannedPageLink::new("../b/", LinkOrigin::Href),
+                    ScannedPageLink::new("./cat.png", LinkOrigin::Src),
+                ],
+                headings: vec![],
+            },
+            ScannedPage {
+                path: source_b.clone(),
+                meta: Some(PageMeta {
+                    title: Some("B".to_string()),
+                    ..Default::default()
+                }),
+                kind: crate::page::PageKind::Direct,
+                links: vec![],
+                headings: vec![],
+            },
+        ];
+
+        populate_pages(&scanned, &config);
+
+        let from = STORED_PAGES
+            .get_permalink_by_source(&source_a)
+            .expect("source a permalink");
+        let to = STORED_PAGES
+            .get_permalink_by_source(&source_b)
+            .expect("source b permalink");
+
+        let links = PAGE_LINKS.links_to(&from);
+        assert_eq!(links, vec![to.clone()]);
+        assert!(PAGE_LINKS.linked_by(&to).contains(&from));
     }
 }

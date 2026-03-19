@@ -12,6 +12,12 @@ use super::VdomActor;
 use super::permalink::PermalinkHandler;
 
 impl VdomActor {
+    fn persist_diagnostics_state(&self) {
+        if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
+            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+        }
+    }
+
     pub(super) async fn handle_error(&mut self, path: PathBuf, url_path: UrlPath, error: String) {
         let rel_path = self.to_relative(&path);
         let rel_path_str = rel_path.display().to_string();
@@ -19,9 +25,6 @@ impl VdomActor {
             .error_state
             .errors()
             .any(|e| e.path == rel_path_str && e.error == error);
-
-        // Check if this is the first error in the batch (before adding)
-        let is_first_error = !self.batch.has_errors();
 
         // Always record in batch output so watch status won't hide persistent errors.
         self.batch.push_error(&rel_path_str, &error);
@@ -41,9 +44,7 @@ impl VdomActor {
             ));
 
             // Persist immediately for crash safety
-            if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
-                crate::debug!("vdom"; "diagnostics persist failed: {}", e);
-            }
+            self.persist_diagnostics_state();
         }
 
         // Invalidate cache
@@ -51,8 +52,7 @@ impl VdomActor {
             BUILD_CACHE.remove(&CacheKey::new(url_path.as_str()));
         }
 
-        // Send to browser only if this is the first error (matches terminal behavior)
-        if is_first_error && !duplicate_same_error {
+        if !duplicate_same_error {
             let _ = self
                 .ws_tx
                 .send(WsMsg::Error {
@@ -77,6 +77,7 @@ impl VdomActor {
         let rel_path = self.to_relative(&path);
         let rel_path_str = rel_path.display().to_string();
         self.error_state.set_warnings(&rel_path_str, warnings);
+        self.persist_diagnostics_state();
 
         // Handle permalink conflict early (detected by CompilerActor)
         if let Some(PermalinkUpdate::Conflict {
@@ -144,6 +145,7 @@ impl VdomActor {
     async fn handle_permalink_conflict(&mut self, path: &Path, url: &UrlPath, existing: &Path) {
         let rel_path = self.to_relative(path);
         let existing_rel = self.to_relative(existing);
+        let rel_path_str = rel_path.display().to_string();
 
         self.batch
             .push_conflict(url, rel_path.clone(), existing_rel.clone());
@@ -153,13 +155,29 @@ impl VdomActor {
             url,
             existing_rel.display()
         );
-        let _ = self
-            .ws_tx
-            .send(WsMsg::Error {
-                path: rel_path.display().to_string(),
-                error,
-            })
-            .await;
+        let duplicate_same_error = self
+            .error_state
+            .errors()
+            .any(|e| e.path == rel_path_str && e.error == error);
+
+        self.batch.push_error(rel_path_str.clone(), error.clone());
+
+        if !duplicate_same_error {
+            self.error_state.push_error(PersistedError::new(
+                rel_path_str.clone(),
+                url.to_string(),
+                error.clone(),
+            ));
+            self.persist_diagnostics_state();
+
+            let _ = self
+                .ws_tx
+                .send(WsMsg::Error {
+                    path: rel_path_str,
+                    error,
+                })
+                .await;
+        }
     }
 
     async fn route_outcome(
@@ -177,8 +195,13 @@ impl VdomActor {
 
         // Clear any previous errors for this file (compilation succeeded)
         if self.error_state.clear_errors_for(&rel_path_str) {
-            // Notify browser to hide error overlay
-            let _ = self.ws_tx.send(WsMsg::ClearError).await;
+            self.persist_diagnostics_state();
+            let _ = self
+                .ws_tx
+                .send(WsMsg::ClearError {
+                    path: rel_path_str.clone(),
+                })
+                .await;
         }
 
         let priority = Some(if ACTIVE_PAGE.is_active(url_path.as_str()) {
@@ -189,8 +212,8 @@ impl VdomActor {
         let url_change = old_url.map(|old| UrlChange::new(old, url_path.clone()));
 
         match outcome {
-            DiffOutcome::Patches(ops, new_vdom) => {
-                self.handle_patches(&rel_path, url_path, ops, new_vdom, priority, url_change)
+            DiffOutcome::Edits(edits, new_vdom) => {
+                self.handle_edits(&rel_path, url_path, edits, new_vdom, priority, url_change)
                     .await;
             }
             DiffOutcome::Initial => {
@@ -208,25 +231,25 @@ impl VdomActor {
         }
     }
 
-    async fn handle_patches(
+    async fn handle_edits(
         &mut self,
         rel_path: &Path,
         url_path: UrlPath,
-        ops: Vec<crate::compiler::family::PatchOp>,
+        edits: Vec<crate::compiler::family::DiffEdit>,
         new_vdom: Box<Document<Indexed>>,
         priority: Option<crate::core::Priority>,
         url_change: Option<crate::core::UrlChange>,
     ) {
         crate::debug_do! {
-            let ops_summary: Vec<String> = ops.iter().map(|op| op.summary()).collect();
-            crate::log!("vdom"; "reload: {} ({} ops): {:?}", rel_path.display(), ops.len(), ops_summary);
+            let edit_summary: Vec<String> = edits.iter().map(|edit| edit.summary()).collect();
+            crate::log!("vdom"; "reload: {} ({} edits): {:?}", rel_path.display(), edits.len(), edit_summary);
         }
 
         self.batch
             .push_reload(rel_path.display().to_string(), priority);
 
         let config = RenderConfig::default();
-        let patches = render_patches(&ops, &config);
+        let patches = render_patches(&edits, &config);
 
         if self
             .ws_tx
@@ -239,7 +262,10 @@ impl VdomActor {
             .is_ok()
         {
             let key = CacheKey::new(url_path.as_str());
-            BUILD_CACHE.insert(key, CacheEntry::with_default_version(*new_vdom));
+            BUILD_CACHE.insert(
+                key,
+                CacheEntry::with_default_version(tola_vdom::snapshot::project(&*new_vdom)),
+            );
         }
     }
 
@@ -318,6 +344,43 @@ impl VdomActor {
                 Ok(_) => {}
                 Err(e) => {
                     crate::debug!("vdom"; "cache reload failed: {}", e);
+                }
+            }
+        }
+    }
+
+    pub(super) async fn handle_clear_diagnostics(&mut self, path: Option<PathBuf>) {
+        match path {
+            Some(path) => {
+                let rel_path = self.to_relative(&path);
+                let rel_path_str = rel_path.display().to_string();
+                let had_error = self.error_state.clear_errors_for(&rel_path_str);
+                self.error_state.clear_warnings_for(&rel_path_str);
+                self.persist_diagnostics_state();
+
+                if had_error {
+                    let _ = self
+                        .ws_tx
+                        .send(WsMsg::ClearError { path: rel_path_str })
+                        .await;
+                }
+            }
+            None => {
+                let error_paths: Vec<_> = self
+                    .error_state
+                    .errors()
+                    .map(|error| error.path.clone())
+                    .collect();
+
+                if self.error_state.is_empty() {
+                    return;
+                }
+
+                self.error_state = crate::cache::PersistedDiagnostics::new();
+                self.persist_diagnostics_state();
+
+                for path in error_paths {
+                    let _ = self.ws_tx.send(WsMsg::ClearError { path }).await;
                 }
             }
         }

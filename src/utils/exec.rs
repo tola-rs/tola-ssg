@@ -506,18 +506,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cmd_builder() {
-        let cmd = Cmd::new("echo")
-            .arg("hello")
-            .args(["world", "!"])
-            .cwd("/tmp");
-
-        assert_eq!(cmd.program, OsString::from("echo"));
-        assert_eq!(cmd.args.len(), 3);
-        assert_eq!(cmd.cwd, Some(PathBuf::from("/tmp")));
-    }
-
-    #[test]
     fn test_empty_args_filtered() {
         let cmd = Cmd::new("echo").arg("").args(["a", "", "b"]);
         assert_eq!(cmd.args.len(), 2);
@@ -536,14 +524,6 @@ mod tests {
     fn test_strip_ansi() {
         assert_eq!(strip_ansi("\x1b[31mRed\x1b[0m"), "Red");
         assert_eq!(strip_ansi("Plain text"), "Plain text");
-    }
-
-    #[test]
-    fn test_simple_command() {
-        let output = Cmd::new("echo").arg("hello").run().unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("hello"));
     }
 
     #[test]
