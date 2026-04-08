@@ -2,7 +2,7 @@
 
 A static site generator for Typst-based websites.
 
-> Note (v0.7.0): Released now. Some caching-related bugs may still exist. You can use `tola s -c`(`serve --clean`) as a workaround, but please try regular `serve` first so I can collect feedback and fix these issues in upcoming updates. Thanks for your support!
+> Note (v0.7.x): Released now. Some caching-related bugs may still exist. You can use `tola s -c`(`serve --clean`) as a workaround, but please try regular `serve` first so I can collect feedback and fix these issues in upcoming updates. Thanks for your support!
 
 
 ## Table of Contents
@@ -421,7 +421,7 @@ tola serve
 ### Cargo
 
 ```sh
-cargo install tola
+cargo install --locked tola
 ```
 
 ### Binary Release
@@ -437,7 +437,7 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 ```nix
 {
   inputs = {
-    tola.url = "github:tola-ssg/tola-ssg/v0.7.0";
+    tola.url = "github:tola-ssg/tola-ssg/v0.7.1";
     # ...
   };
 }
