@@ -436,8 +436,10 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 
 ```nix
 {
-  inputs = {
-    tola.url = "github:tola-ssg/tola-ssg/v0.7.1";
+  inputs.tola = {
+    url = "github:tola-ssg/tola-ssg/v0.7.1";
+    inputs.nixpkgs.follows = "<your nixpkgs input here>";
+    inputs.rust-overlay.follows = "<your rust-overlay input here, if you have one>";
     # ...
   };
 }
