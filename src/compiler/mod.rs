@@ -19,6 +19,7 @@ pub struct CompileContext<'a> {
     pub mode: BuildMode,
     pub config: &'a SiteConfig,
     pub route: Option<&'a PageRoute>,
+    pub current_context: Option<&'a serde_json::Value>,
     /// Whether to inject global header content (styles, scripts, elements).
     /// Default: `true`. Set to `false` for pages like 404 that need
     /// self-contained styles to avoid relative path issues.
@@ -31,12 +32,18 @@ impl<'a> CompileContext<'a> {
             mode,
             config,
             route: None,
+            current_context: None,
             global_header: true,
         }
     }
 
     pub fn with_route(mut self, route: &'a PageRoute) -> Self {
         self.route = Some(route);
+        self
+    }
+
+    pub fn with_current_context(mut self, current_context: &'a serde_json::Value) -> Self {
+        self.current_context = Some(current_context);
         self
     }
 

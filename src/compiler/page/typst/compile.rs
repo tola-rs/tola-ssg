@@ -7,7 +7,10 @@ use typst_batch::prelude::*;
 
 use crate::compiler::CompileContext;
 use crate::compiler::page::{PageCompileOutput, format_compile_error};
-use crate::package::{build_visible_inputs, build_visible_inputs_for_source};
+use crate::package::{
+    build_visible_inputs, build_visible_inputs_for_source,
+    build_visible_inputs_with_current_context,
+};
 use crate::page::{PageMeta, STORED_PAGES};
 use crate::pipeline::compile as pipeline_compile;
 
@@ -39,9 +42,12 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
         .max_errors
         .unwrap_or(usize::MAX);
 
-    // Build inputs for virtual packages. If route is available, include per-page
-    // current context so templates can access @tola/current.path/permalink.
-    let inputs = if let Some(route) = ctx.route {
+    // Build inputs for virtual packages. Single-page watch compiles can pass a
+    // scanned current context so templates see fresh @tola/current data without
+    // publishing draft page state globally.
+    let inputs = if let Some(current_context) = ctx.current_context {
+        build_visible_inputs_with_current_context(ctx.config, &STORED_PAGES, current_context)?
+    } else if let Some(route) = ctx.route {
         build_visible_inputs_for_source(ctx.config, &STORED_PAGES, &route.source)?
     } else {
         build_visible_inputs(ctx.config, &STORED_PAGES)?

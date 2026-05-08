@@ -198,6 +198,18 @@ fn build_base_inputs_impl(
 }
 
 /// Merge `@tola/current` payload into existing inputs.
+fn merge_current_context_value(
+    config: &SiteConfig,
+    inputs: &mut typst_batch::Inputs,
+    current_context: &serde_json::Value,
+) -> Result<()> {
+    let mut current_context = current_context.clone();
+    strip_current_context_permalinks(&mut current_context, &path_prefix(config));
+    inputs
+        .merge_json(&current_context)
+        .map_err(|e| anyhow!("failed to merge @tola/current inputs: {}", e))
+}
+
 fn merge_current_context(
     config: &SiteConfig,
     inputs: &mut typst_batch::Inputs,
@@ -205,11 +217,8 @@ fn merge_current_context(
     permalink: &UrlPath,
     path_rel: Option<&str>,
 ) -> Result<()> {
-    let mut current_context = store.build_current_context(permalink, path_rel);
-    strip_current_context_permalinks(&mut current_context, &path_prefix(config));
-    inputs
-        .merge_json(&current_context)
-        .map_err(|e| anyhow!("failed to merge @tola/current inputs: {}", e))
+    let current_context = store.build_current_context(permalink, path_rel);
+    merge_current_context_value(config, inputs, &current_context)
 }
 
 fn resolve_source_context(
@@ -231,9 +240,7 @@ fn resolve_source_context(
                     e
                 )
             })?;
-        let url = page.route.permalink.clone();
-        store.insert_source_mapping(normalized.clone(), url.clone());
-        url
+        page.route.permalink
     };
 
     let content_dir = normalize_path(&config.build.content);
@@ -266,6 +273,17 @@ pub fn build_visible_inputs(
     store: &StoredPageMap,
 ) -> Result<typst_batch::Inputs> {
     build_base_inputs_impl(config, store, InjectSpec::visible())
+}
+
+/// Build visible-phase base inputs and merge a caller-provided `@tola/current` payload.
+pub fn build_visible_inputs_with_current_context(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+    current_context: &serde_json::Value,
+) -> Result<typst_batch::Inputs> {
+    let mut inputs = build_base_inputs_impl(config, store, InjectSpec::visible())?;
+    merge_current_context_value(config, &mut inputs, current_context)?;
+    Ok(inputs)
 }
 
 /// Build filter-phase base inputs with site payload.

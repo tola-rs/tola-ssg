@@ -5,11 +5,14 @@
 use crate::compiler::CompileContext;
 use crate::compiler::page::compile;
 use crate::compiler::page::{
-    PageResult, ScannedHeading, ScannedPageLink, collect_warnings, scan_single_page,
+    PageResult, ScannedHeading, ScannedPageLink, SinglePageScanData, collect_warnings,
+    scan_single_page,
 };
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE, UrlPath};
+use crate::package::TolaPackage;
 use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, STORED_PAGES, StaleLinkPolicy};
+use crate::utils::path::normalize_path;
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
 use std::path::Path;
@@ -43,6 +46,89 @@ fn heading_ids<'a>(
         .map(|heading| slugify_fragment(&heading.text, &config.build.slug))
 }
 
+fn relative_source_path(path: &Path, config: &SiteConfig) -> Option<String> {
+    normalize_path(path)
+        .strip_prefix(normalize_path(&config.build.content))
+        .ok()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn filename_from_relative(path: Option<&str>) -> Option<String> {
+    path.and_then(|path| {
+        Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    })
+}
+
+fn pages_for_urls(urls: &[UrlPath]) -> Vec<crate::page::StoredPage> {
+    let pages = STORED_PAGES.get_pages_with_drafts();
+    urls.iter()
+        .filter_map(|url| pages.iter().find(|page| page.permalink == *url).cloned())
+        .collect()
+}
+
+fn current_context_from_scan(
+    source: &Path,
+    page: &CompiledPage,
+    scan_data: &SinglePageScanData,
+    config: &SiteConfig,
+) -> serde_json::Value {
+    let permalink = &page.route.permalink;
+    let path = relative_source_path(source, config);
+    let filename = filename_from_relative(path.as_deref());
+    let parent = permalink.parent().map(|parent| parent.as_str().to_string());
+    let links_to_urls: Vec<_> = scan_data
+        .links
+        .iter()
+        .filter_map(|link| {
+            crate::page::resolve_page_link_target(&STORED_PAGES, permalink, source, link, config)
+        })
+        .collect();
+    let linked_by_urls = PAGE_LINKS.linked_by(permalink);
+
+    serde_json::json!({
+        TolaPackage::Current.input_key(): {
+            "current-permalink": permalink.as_str(),
+            "parent-permalink": parent,
+            "path": path,
+            "filename": filename,
+            "links_to": pages_for_urls(&links_to_urls),
+            "linked_by": pages_for_urls(&linked_by_urls),
+            "headings": scan_data.headings,
+        }
+    })
+}
+
+fn commit_page_state(
+    source: &Path,
+    page: &CompiledPage,
+    scan_data: &SinglePageScanData,
+    config: &SiteConfig,
+) {
+    STORED_PAGES.sync_source_permalink(
+        source,
+        page.route.permalink.clone(),
+        StaleLinkPolicy::Clear,
+    );
+    STORED_PAGES.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
+    record_scanned_links(source, &page.route.permalink, &scan_data.links, config);
+
+    STORED_PAGES.insert_page(
+        page.route.permalink.clone(),
+        page.content_meta.clone().unwrap_or_default(),
+    );
+
+    // Register headings for fragment validation.
+    // Page route registration is deferred to the hot-reload routing layer so
+    // permalink changes can still be detected from old vs new URL mappings.
+    GLOBAL_ADDRESS_SPACE.write().register_headings(
+        &page.route.permalink,
+        heading_ids(&scan_data.headings, config),
+    );
+}
+
 // ============================================================================
 // Single Page Processing (watch mode)
 // ============================================================================
@@ -63,18 +149,17 @@ pub fn process_page(
     let mut page = CompiledPage::from_paths(path, config)?;
 
     // Scan to extract headings and links ===
-    // This must happen BEFORE compile so @tola/current has fresh data
+    // This must happen BEFORE compile so @tola/current has fresh data.
+    // The scan result is passed as a local compile input; global stores are
+    // committed only after compilation succeeds.
     let scan_data = scan_single_page(path, config);
     page.apply_meta(scan_data.meta.clone(), config);
 
-    // Update headings and links in global stores
-    let permalink = page.route.permalink.clone();
-    STORED_PAGES.sync_source_permalink(path, permalink.clone(), StaleLinkPolicy::Clear);
-    STORED_PAGES.insert_headings(permalink.clone(), scan_data.headings.clone());
-    record_scanned_links(path, &permalink, &scan_data.links, config);
-
     // Compile with fresh @tola/current data ===
-    let ctx = CompileContext::new(mode, config).with_route(&page.route);
+    let current_context = current_context_from_scan(path, &page, &scan_data, config);
+    let ctx = CompileContext::new(mode, config)
+        .with_route(&page.route)
+        .with_current_context(&current_context);
     let result = compile(path, &ctx)?;
 
     // Extract metadata
@@ -100,25 +185,7 @@ pub fn process_page(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
-    // Keep source->permalink mapping consistent, clearing stale backlink entries
-    // when permalink changes.
-    STORED_PAGES.sync_source_permalink(path, page.route.permalink.clone(), StaleLinkPolicy::Clear);
-    STORED_PAGES.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
-    record_scanned_links(path, &page.route.permalink, &scan_data.links, config);
-
-    // Update global site data
-    STORED_PAGES.insert_page(
-        page.route.permalink.clone(),
-        page.content_meta.clone().unwrap_or_default(),
-    );
-
-    // Register headings for fragment validation.
-    // Page route registration is deferred to the hot-reload routing layer so
-    // permalink changes can still be detected from old vs new URL mappings.
-    GLOBAL_ADDRESS_SPACE.write().register_headings(
-        &page.route.permalink,
-        heading_ids(&scan_data.headings, config),
-    );
+    commit_page_state(path, &page, &scan_data, config);
 
     let permalink = page.route.permalink.clone();
 
@@ -285,6 +352,93 @@ mod tests {
 
         // Should return an error, not panic or silently skip
         assert!(result.is_err(), "Invalid typst should return Err");
+    }
+
+    #[test]
+    fn test_process_page_error_does_not_commit_page_state() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let file_path = content_dir.join("invalid.typ");
+
+        fs::write(&file_path, "#invalid-syntax-that-will-fail").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        reset_global_state();
+
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config);
+
+        assert!(result.is_err(), "invalid page should fail compilation");
+        assert!(
+            STORED_PAGES.get_permalink_by_source(&file_path).is_none(),
+            "failed compile must not publish source permalink mapping"
+        );
+        assert!(
+            STORED_PAGES.get_pages_with_drafts().is_empty(),
+            "failed compile must not publish page metadata"
+        );
+        assert!(
+            GLOBAL_ADDRESS_SPACE.read().is_empty(),
+            "failed compile must not publish address-space state"
+        );
+
+        reset_global_state();
+    }
+
+    #[test]
+    fn test_process_page_error_keeps_existing_page_state() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let file_path = content_dir.join("invalid.typ");
+
+        fs::write(&file_path, "#invalid-syntax-that-will-fail").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        reset_global_state();
+
+        let old_permalink = UrlPath::from_page("/already-visible/");
+        STORED_PAGES.insert_page(
+            old_permalink.clone(),
+            PageMeta {
+                title: Some("Already Visible".to_string()),
+                ..Default::default()
+            },
+        );
+        STORED_PAGES.insert_source_mapping(file_path.clone(), old_permalink.clone());
+        STORED_PAGES.insert_headings(
+            old_permalink.clone(),
+            vec![ScannedHeading {
+                level: 1,
+                text: "Old Heading".to_string(),
+                supplement: None,
+            }],
+        );
+
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config);
+
+        assert!(result.is_err(), "invalid page should fail compilation");
+        assert_eq!(
+            STORED_PAGES.get_permalink_by_source(&file_path),
+            Some(old_permalink.clone()),
+            "failed recompile must keep existing source permalink mapping"
+        );
+        assert!(
+            STORED_PAGES
+                .get_pages_with_drafts()
+                .iter()
+                .any(|page| page.permalink == old_permalink),
+            "failed recompile must keep existing page metadata"
+        );
+        assert_eq!(STORED_PAGES.get_headings(&old_permalink).len(), 1);
+
+        reset_global_state();
     }
 
     #[test]

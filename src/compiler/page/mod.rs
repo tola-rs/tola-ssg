@@ -34,7 +34,8 @@ use crate::core::ContentKind;
 // Re-export types
 pub use cache::{BUILD_CACHE, IndexedDocument, cache_vdom};
 pub use format::{
-    PageFormat, ScannedHeading, ScannedPage, ScannedPageLink, scan_pages, scan_single_page,
+    PageFormat, ScannedHeading, ScannedPage, ScannedPageLink, SinglePageScanData, scan_pages,
+    scan_single_page,
 };
 pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;
