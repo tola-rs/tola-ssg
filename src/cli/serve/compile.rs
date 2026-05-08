@@ -3,7 +3,7 @@
 //! Delegates to the central CompileScheduler for priority-based compilation.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -14,19 +14,16 @@ use crate::core::Priority;
 use crate::freshness::mtime::{get_mtime, is_newer_than};
 use crate::page::CompiledPage;
 
-/// Ensure Typst is initialized (lazy, only triggered on first on-demand compile)
+/// Ensure Typst runtime inputs match the config used for this request.
 fn ensure_typst_initialized(config: &SiteConfig) {
-    static INIT: OnceLock<()> = OnceLock::new();
-    INIT.get_or_init(|| {
-        let font_dirs = crate::cli::build::collect_font_dirs(config);
-        let nested_mappings =
-            crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-        crate::compiler::page::typst::init_runtime(
-            &font_dirs,
-            config.get_root().to_path_buf(),
-            nested_mappings,
-        );
-    });
+    let font_dirs = crate::cli::build::collect_font_dirs(config);
+    let nested_mappings =
+        crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
+    crate::compiler::page::typst::init_runtime(
+        &font_dirs,
+        config.get_root().to_path_buf(),
+        nested_mappings,
+    );
 }
 
 /// Compile a single page on-demand and write it to disk
@@ -90,4 +87,46 @@ fn is_output_fresh(source: &Path, output: &Path) -> bool {
 
 fn prepare_stale_output_recompile(source: &Path) {
     SCHEDULER.invalidate(source);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::section::build::assets::NestedEntry;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn config_with_nested_asset(root: &Path, output_name: &str, source_dir: &Path) -> SiteConfig {
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.content = root.join("content");
+        config.build.assets.nested = vec![NestedEntry::Full {
+            dir: source_dir.to_path_buf(),
+            output_as: Some(output_name.to_string()),
+        }];
+        config
+    }
+
+    #[test]
+    fn typst_runtime_uses_current_config_on_each_request() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let output_name = "runtime-refresh-probe";
+        let asset_dir = first.path().join("assets");
+        fs::create_dir_all(first.path().join("content")).unwrap();
+        fs::create_dir_all(second.path().join("content")).unwrap();
+        fs::create_dir_all(&asset_dir).unwrap();
+        fs::write(asset_dir.join("probe.txt"), "first").unwrap();
+
+        let first_config = config_with_nested_asset(first.path(), output_name, &asset_dir);
+        let second_asset_dir = second.path().join("assets");
+        let second_config = config_with_nested_asset(second.path(), output_name, &second_asset_dir);
+        let virtual_path = PathBuf::from(format!("/{output_name}/probe.txt"));
+
+        ensure_typst_initialized(&first_config);
+        assert!(typst_batch::is_virtual_path(&virtual_path));
+
+        ensure_typst_initialized(&second_config);
+        assert!(!typst_batch::is_virtual_path(&virtual_path));
+    }
 }
