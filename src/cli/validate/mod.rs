@@ -20,9 +20,7 @@ use crate::core::{
 };
 use crate::log;
 use crate::package::build_visible_inputs;
-use crate::page::{
-    HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
-};
+use crate::page::{HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision};
 use crate::utils::path::route::{strip_path_prefix, strip_path_prefix_in_text};
 use crate::utils::{plural_count, plural_s};
 
@@ -724,7 +722,7 @@ fn update_stored_page_from_meta(
     let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
         return;
     };
-    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
+    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
 }
 
 /// Extract asset path from compile error.

@@ -11,7 +11,7 @@ use crate::compiler::page::{
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::package::TolaPackage;
-use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, STORED_PAGES, StaleLinkPolicy};
+use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, PageState, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::normalize_path;
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -83,13 +83,14 @@ impl PageStateCommit<'_> {
 }
 
 fn record_scanned_links(
+    state: &PageState<'_>,
     source: &Path,
     permalink: &UrlPath,
     links: &[ScannedPageLink],
     config: &SiteConfig,
 ) {
     if links.is_empty() {
-        PAGE_LINKS.record(permalink, vec![]);
+        state.clear_links(permalink);
         return;
     }
 
@@ -99,7 +100,7 @@ fn record_scanned_links(
             crate::page::resolve_page_link_target(&STORED_PAGES, permalink, source, link, config)
         })
         .collect();
-    PAGE_LINKS.record(permalink, targets);
+    state.record_links(permalink, targets);
 }
 
 fn heading_ids<'a>(
@@ -172,13 +173,16 @@ fn commit_page_state(
     scan_data: &SinglePageScanData,
     config: &SiteConfig,
 ) {
-    STORED_PAGES.sync_source_permalink(
+    let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+    state.sync_source_permalink(source, page.route.permalink.clone(), StaleLinkPolicy::Clear);
+    state.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
+    record_scanned_links(
+        &state,
         source,
-        page.route.permalink.clone(),
-        StaleLinkPolicy::Clear,
+        &page.route.permalink,
+        &scan_data.links,
+        config,
     );
-    STORED_PAGES.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
-    record_scanned_links(source, &page.route.permalink, &scan_data.links, config);
 
     STORED_PAGES.insert_page(
         page.route.permalink.clone(),

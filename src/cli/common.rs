@@ -16,9 +16,7 @@ use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_wit
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
 use crate::package::build_visible_inputs;
-use crate::page::{
-    HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
-};
+use crate::page::{HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
 
@@ -407,7 +405,7 @@ fn update_stored_page_from_meta(file: &Path, meta_json: &JsonValue, config: &Sit
     let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
         return;
     };
-    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
+    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
 }
 
 /// Parse metadata JSON to PageMeta, logging warning on failure.
@@ -444,8 +442,7 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
         if let Some(meta_json) = meta_json
             && let Some(page_meta) = parse_page_meta(meta_json, file)
         {
-            let _ =
-                STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
+            let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
         }
     }
 
@@ -455,8 +452,7 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
             && let Some(meta_json) = result.raw_meta
             && let Some(page_meta) = parse_page_meta(meta_json, file)
         {
-            let _ =
-                STORED_PAGES.apply_meta_for_source(file, page_meta, config, StaleLinkPolicy::Keep);
+            let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
         }
     }
 

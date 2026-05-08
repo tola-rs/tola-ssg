@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
-use crate::page::StoredPageMap;
+use crate::page::{PAGE_LINKS, PageState, StoredPageMap};
 use crate::utils::path::normalize_path;
 use crate::utils::path::route::strip_path_prefix_from_page_url;
 
@@ -217,7 +217,8 @@ fn merge_current_context(
     permalink: &UrlPath,
     path_rel: Option<&str>,
 ) -> Result<()> {
-    let current_context = store.build_current_context(permalink, path_rel);
+    let current_context =
+        PageState::new(store, &PAGE_LINKS).build_current_context(permalink, path_rel);
     merge_current_context_value(config, inputs, &current_context)
 }
 
@@ -311,7 +312,8 @@ pub fn build_visible_current_context_for_source(
 ) -> Result<serde_json::Value> {
     validate_spec(InjectSpec::visible(), true)?;
     let (permalink, path_rel) = resolve_source_context(config, store, file_path)?;
-    let mut current = store.build_current_context(&permalink, path_rel.as_deref());
+    let mut current =
+        PageState::new(store, &PAGE_LINKS).build_current_context(&permalink, path_rel.as_deref());
     strip_current_context_permalinks(&mut current, &path_prefix(config));
     Ok(current)
 }

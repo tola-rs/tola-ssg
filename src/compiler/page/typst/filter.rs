@@ -10,9 +10,7 @@ use crate::compiler::page::format::{ScannedHeading, ScannedPage, ScannedPageLink
 use crate::config::SiteConfig;
 use crate::core::LinkOrigin;
 use crate::package::build_filter_inputs_with_site;
-use crate::page::{
-    HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StaleLinkPolicy, StoredPageMap,
-};
+use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
 
 /// Result of Typst draft filtering, includes batcher for reuse
 pub struct TypstFilterResult<'a> {
@@ -68,7 +66,7 @@ fn to_scanned_page(
     // Feed metadata into local scan store so iterative re-scan can resolve
     // dynamic fields with up-to-date pages/permalinks.
     if let Some(meta_for_store) = meta.clone() {
-        let _ = store.apply_meta_for_source(path, meta_for_store, config, StaleLinkPolicy::Keep);
+        let _ = store.apply_meta_for_source(path, meta_for_store, config);
     }
 
     let kind = PageKind::from_packages(scan.accessed_packages());

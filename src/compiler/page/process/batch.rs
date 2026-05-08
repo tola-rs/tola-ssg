@@ -16,7 +16,7 @@ use crate::freshness::ContentHash;
 use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
 use crate::page::CompiledPage;
 use crate::page::{
-    HashStabilityTracker, PAGE_LINKS, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
+    HashStabilityTracker, PAGE_LINKS, PageState, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
 };
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -308,7 +308,8 @@ fn process_iterative_page(
     page.apply_meta(result.meta, ctx.config);
 
     // Keep source->permalink mapping consistent across iterative passes.
-    STORED_PAGES.sync_source_permalink(
+    let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+    state.sync_source_permalink(
         &source,
         page.route.permalink.clone(),
         StaleLinkPolicy::Clear,
@@ -365,20 +366,18 @@ fn build_site_inputs(config: &SiteConfig) -> Result<typst_batch::Inputs> {
 
 /// Populate STORED_PAGES and PAGE_LINKS from pre-scan results
 pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
+    let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+
     // First pass: collect all page permalinks and metadata
     let mut page_permalinks: Vec<(UrlPath, &ScannedPage)> = Vec::new();
 
     for page in scanned {
         let Some(meta) = &page.meta else { continue };
-        let Some(permalink) = STORED_PAGES.apply_meta_for_source(
-            &page.path,
-            meta.clone(),
-            config,
-            StaleLinkPolicy::Keep,
-        ) else {
+        let Some(permalink) = STORED_PAGES.apply_meta_for_source(&page.path, meta.clone(), config)
+        else {
             continue;
         };
-        STORED_PAGES.insert_headings(permalink.clone(), page.headings.clone());
+        state.insert_headings(permalink.clone(), page.headings.clone());
         page_permalinks.push((permalink, page));
     }
 
@@ -402,7 +401,7 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
             })
             .collect();
 
-        PAGE_LINKS.record(from_url, targets);
+        state.record_links(from_url, targets);
     }
 }
 
@@ -578,11 +577,8 @@ fn finalize_static_page(
     }
 
     if ctx.rebuilds_global_state() {
-        STORED_PAGES.sync_source_permalink(
-            &path,
-            page.route.permalink.clone(),
-            StaleLinkPolicy::Keep,
-        );
+        let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+        state.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
         STORED_PAGES.insert_page(
             page.route.permalink.clone(),
             page.content_meta.clone().unwrap_or_default(),
@@ -965,7 +961,6 @@ mod tests {
                     ..Default::default()
                 },
                 &config,
-                StaleLinkPolicy::Keep,
             )
             .unwrap();
 

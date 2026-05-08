@@ -9,7 +9,6 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHasher};
 use serde::Serialize;
 
-use super::links::PAGE_LINKS;
 use super::{CompiledPage, PageMeta};
 use crate::compiler::page::ScannedHeading;
 use crate::config::SiteConfig;
@@ -51,15 +50,6 @@ impl StoredPage {
             .as_deref()
             .unwrap_or_else(|| self.permalink.as_str())
     }
-}
-
-/// Controls whether stale backlink graph entries are cleared when permalink changes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StaleLinkPolicy {
-    /// Keep existing link graph entries for old permalink.
-    Keep,
-    /// Clear link graph entries for old permalink.
-    Clear,
 }
 
 /// Thread-safe storage for site-wide page data
@@ -147,25 +137,21 @@ impl StoredPageMap {
             .or_else(|| source_to_url.get(source).cloned())
     }
 
-    /// Keep source->permalink mapping consistent and optionally clear stale backlink data.
+    /// Keep source->permalink mapping consistent.
     ///
     /// If an existing mapping points to a different permalink, the old stored page is removed.
-    pub fn sync_source_permalink(
-        &self,
-        source: &Path,
-        new_permalink: UrlPath,
-        stale_link_policy: StaleLinkPolicy,
-    ) {
+    ///
+    /// Returns the old permalink when it changed.
+    pub fn sync_source_permalink(&self, source: &Path, new_permalink: UrlPath) -> Option<UrlPath> {
         if let Some(old_permalink) = self.get_permalink_by_source(source)
             && old_permalink != new_permalink
         {
             self.remove_page(&old_permalink);
-            self.headings.write().remove(&old_permalink);
-            if matches!(stale_link_policy, StaleLinkPolicy::Clear) {
-                PAGE_LINKS.record(&old_permalink, vec![]);
-            }
+            self.insert_source_mapping(source.to_path_buf(), new_permalink);
+            return Some(old_permalink);
         }
         self.insert_source_mapping(source.to_path_buf(), new_permalink);
+        None
     }
 
     /// Apply parsed metadata to a source file and update page storage in one step.
@@ -177,13 +163,12 @@ impl StoredPageMap {
         source: &Path,
         meta: PageMeta,
         config: &SiteConfig,
-        stale_link_policy: StaleLinkPolicy,
     ) -> Option<UrlPath> {
         let compiled =
             CompiledPage::from_paths_with_meta(source, config, Some(meta.clone())).ok()?;
 
         let permalink = compiled.route.permalink;
-        self.sync_source_permalink(source, permalink.clone(), stale_link_policy);
+        self.sync_source_permalink(source, permalink.clone());
         self.insert_page(permalink.clone(), meta);
         Some(permalink)
     }
@@ -260,51 +245,6 @@ impl StoredPageMap {
     /// - Phase set to "compile" to indicate compile phase
     pub fn build_inputs(&self, config: &SiteConfig) -> anyhow::Result<typst_batch::Inputs> {
         build_visible_inputs(config, self)
-    }
-
-    /// Build current page context for `@tola/current` virtual package.
-    ///
-    /// Returns JSON with `__tola_current` key for injection into `sys.inputs`.
-    ///
-    /// # Arguments
-    /// * `url` - The page's permalink (URL path)
-    /// * `path` - Optional source file path relative to content directory
-    pub fn build_current_context(&self, url: &UrlPath, path: Option<&str>) -> serde_json::Value {
-        use crate::package::TolaPackage;
-
-        let parent = url.parent().map(|p| p.as_str().to_string());
-        let filename = path.and_then(|s| {
-            Path::new(s)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(str::to_string)
-        });
-        let pages = self.pages.read();
-
-        // Get link relationships as full page objects
-        let links_to_urls = PAGE_LINKS.links_to(url);
-        let linked_by_urls = PAGE_LINKS.linked_by(url);
-
-        let links_to: Vec<&StoredPage> =
-            links_to_urls.iter().filter_map(|u| pages.get(u)).collect();
-        let linked_by: Vec<&StoredPage> =
-            linked_by_urls.iter().filter_map(|u| pages.get(u)).collect();
-
-        // Get headings for this page
-        let headings = self.get_headings(url);
-
-        // Wrap in __tola_current key for sys.inputs injection
-        serde_json::json!({
-            TolaPackage::Current.input_key(): {
-                "current-permalink": url.as_str(),
-                "parent-permalink": parent,
-                "path": path,
-                "filename": filename,
-                "links_to": links_to,
-                "linked_by": linked_by,
-                "headings": headings,
-            }
-        })
     }
 
     #[allow(dead_code)]
@@ -506,7 +446,7 @@ mod tests {
         };
 
         let new_permalink = store
-            .apply_meta_for_source(&file, meta, &config, StaleLinkPolicy::Keep)
+            .apply_meta_for_source(&file, meta, &config)
             .expect("meta apply should succeed");
 
         assert_eq!(new_permalink, UrlPath::from_page("/custom/sample/"));
