@@ -262,6 +262,39 @@ mod tests {
     }
 
     #[test]
+    fn hotreload_js_handles_every_serialized_message_type() {
+        fn serialized_type(message: HotReloadMessage) -> String {
+            let json = message.to_json();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["type"].as_str().unwrap().to_string()
+        }
+
+        let runtime = include_str!("../embed/serve/hotreload.js");
+        let messages = [
+            HotReloadMessage::reload(),
+            HotReloadMessage::patch("/index.html", vec![]),
+            HotReloadMessage::Css {
+                target: "style[data-tola-css-target=\"main\"]".to_string(),
+                content: "body { color: red; }".to_string(),
+            },
+            HotReloadMessage::Ping { ts: 1 },
+            HotReloadMessage::Pong { ts: 1 },
+            HotReloadMessage::connected(),
+            HotReloadMessage::error("content/index.typ", "compile error"),
+            HotReloadMessage::clear_all_errors(),
+        ];
+
+        for message in messages {
+            let ty = serialized_type(message);
+            let expected_case = format!("case '{}':", ty);
+            assert!(
+                runtime.contains(&expected_case),
+                "hotreload.js does not handle serialized message type: {ty}"
+            );
+        }
+    }
+
+    #[test]
     fn test_anchor_based_insert() {
         use tola_vdom::diff::Anchor;
         use tola_vdom::identity::StableId;

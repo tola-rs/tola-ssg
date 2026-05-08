@@ -201,14 +201,24 @@ impl VdomActor {
 #[cfg(test)]
 mod persistence_tests {
     use crate::actor::messages::WsMsg;
+    use crate::address::PermalinkUpdate;
     use crate::cache::restore_diagnostics;
+    use crate::compiler::family::{IndexedDocument, Raw, TolaSite};
     use crate::core::GLOBAL_ADDRESS_SPACE;
     use crate::core::UrlPath;
     use std::fs;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+    use tola_vdom::Element;
+    use tola_vdom::transform::Transform;
 
     use super::{VdomActor, VdomMsg};
+
+    fn make_indexed_doc(tag: &str) -> IndexedDocument {
+        let root: Element<Raw> = Element::new(tag);
+        let raw_doc = tola_vdom::Document::new(root);
+        TolaSite::indexer().transform(raw_doc)
+    }
 
     #[tokio::test]
     async fn test_error_persistence_on_shutdown() {
@@ -301,6 +311,41 @@ mod persistence_tests {
 
         assert!(matches!(first, WsMsg::Error { .. }));
         assert!(matches!(second, WsMsg::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_permalink_conflict_error_sent_to_ws_as_escaped_html() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let (_tx, rx) = mpsc::channel(10);
+        let (ws_tx, mut ws_rx) = mpsc::channel(10);
+
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let existing_source = root.join("content/<script>alert(1)</script>.typ");
+
+        actor
+            .handle_process(
+                root.join("content/current.typ"),
+                UrlPath::from_page("/current"),
+                make_indexed_doc("html"),
+                Some(PermalinkUpdate::Conflict {
+                    url: UrlPath::from_page("/current"),
+                    existing_source,
+                }),
+                vec![],
+            )
+            .await;
+
+        let msg = ws_rx
+            .try_recv()
+            .expect("permalink conflict should send a websocket error");
+        match msg {
+            WsMsg::Error { error, .. } => {
+                assert!(error.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+                assert!(!error.contains("<script>"));
+            }
+            _ => panic!("expected WsMsg::Error"),
+        }
     }
 
     #[tokio::test]

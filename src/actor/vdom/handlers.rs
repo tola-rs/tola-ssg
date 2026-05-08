@@ -174,7 +174,7 @@ impl VdomActor {
                 .ws_tx
                 .send(WsMsg::Error {
                     path: rel_path_str,
-                    error,
+                    error: crate::utils::ansi_to_html(&error),
                 })
                 .await;
         }

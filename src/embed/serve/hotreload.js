@@ -242,6 +242,14 @@
             this.updateUrl(msg.url_change);
           }
           break;
+        case 'css':
+          this.applyCssMessage(msg);
+          break;
+        case 'ping':
+          this.sendMessage({ type: 'pong', ts: msg.ts });
+          break;
+        case 'pong':
+          break;
         case 'connected':
           console.log('[tola] server version:', msg.version);
           break;
@@ -263,6 +271,12 @@
       }
     },
 
+    sendMessage(message) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(message));
+      }
+    },
+
     // Update browser URL bar without reload (seamless permalink change)
     updateUrl(urlChange) {
       // Decode URL for comparison (server sends decoded URLs)
@@ -280,6 +294,92 @@
         // Report new route to server for targeted push
         this.reportCurrentPage();
       }
+    },
+
+    applyCssMessage(msg) {
+      if (!msg || typeof msg.target !== 'string' || typeof msg.content !== 'string') {
+        return;
+      }
+
+      const targets = this.findCssTargets(msg.target);
+      if (targets.length === 0) {
+        this.upsertManagedStyle(msg.target, msg.content);
+        return;
+      }
+
+      for (const target of targets) {
+        if (target.tagName === 'STYLE') {
+          target.textContent = msg.content;
+        } else if (target.tagName === 'LINK' && target.rel === 'stylesheet') {
+          this.replaceStylesheetWithStyle(target, msg.target, msg.content);
+        }
+      }
+    },
+
+    findCssTargets(target) {
+      const targets = [];
+      try {
+        document.querySelectorAll(target).forEach((node) => {
+          if (this.isCssNode(node)) {
+            targets.push(node);
+          }
+        });
+      } catch (_) {}
+
+      document.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
+        if (this.hrefMatches(link, target) && !targets.includes(link)) {
+          targets.push(link);
+        }
+      });
+
+      document.querySelectorAll('style[data-tola-css-target]').forEach((style) => {
+        if (style.dataset.tolaCssTarget === target && !targets.includes(style)) {
+          targets.push(style);
+        }
+      });
+
+      return targets;
+    },
+
+    isCssNode(node) {
+      return !!(node && (
+        node.tagName === 'STYLE'
+        || (node.tagName === 'LINK' && node.rel === 'stylesheet')
+      ));
+    },
+
+    hrefMatches(link, target) {
+      const href = link.getAttribute('href') || '';
+      if (href === target || link.href === target) {
+        return true;
+      }
+      try {
+        return new URL(href, window.location.href).href === new URL(target, window.location.href).href;
+      } catch (_) {
+        return false;
+      }
+    },
+
+    replaceStylesheetWithStyle(link, target, content) {
+      const style = document.createElement('style');
+      style.dataset.tolaCssTarget = target;
+      style.textContent = content;
+      link.replaceWith(style);
+    },
+
+    upsertManagedStyle(target, content) {
+      let style = null;
+      document.querySelectorAll('style[data-tola-css-target]').forEach((candidate) => {
+        if (!style && candidate.dataset.tolaCssTarget === target) {
+          style = candidate;
+        }
+      });
+      if (!style) {
+        style = document.createElement('style');
+        style.dataset.tolaCssTarget = target;
+        document.head.appendChild(style);
+      }
+      style.textContent = content;
     },
 
     // Render error overlay from the current error set without reloading
@@ -650,11 +750,9 @@
 
     // Report current page URL to the server for active-page tracking.
     reportCurrentPage() {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        // Decode URL for server (server expects decoded URLs internally)
-        const urlPath = decodeURIComponent(window.location.pathname);
-        this.ws.send(JSON.stringify({ type: 'page', path: urlPath }));
-      }
+      // Decode URL for server (server expects decoded URLs internally)
+      const urlPath = decodeURIComponent(window.location.pathname);
+      this.sendMessage({ type: 'page', path: urlPath });
     }
   };
 
