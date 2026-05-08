@@ -13,7 +13,6 @@ mod store;
 pub use compiled::{CompiledPage, Pages};
 pub use iteration::{HashStabilityTracker, StabilityDecision};
 pub use kind::PageKind;
-pub use links::PAGE_LINKS;
 pub use meta::PageMeta;
 pub use resolve::resolve_page_link_target;
 pub use route::PageRoute;

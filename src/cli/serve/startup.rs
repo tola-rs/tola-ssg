@@ -17,7 +17,7 @@ use crate::compiler::page::{BUILD_CACHE, cache_vdom};
 use crate::compiler::scheduler::SCHEDULER;
 use crate::config::{self, SiteConfig, clear_clean_flag};
 use crate::core::UrlPath;
-use crate::page::{PAGE_LINKS, STORED_PAGES};
+use crate::page::{PageState, STORED_PAGES};
 use crate::reload::compile::{self, CompileOutcome};
 use crate::{debug, log, logger};
 
@@ -268,7 +268,7 @@ fn cleanup_removed_files(
 
 fn cleanup_url_artifacts(config: &SiteConfig, url: &UrlPath) {
     BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
-    PAGE_LINKS.record(url, vec![]);
+    PageState::new(&STORED_PAGES).clear_links(url);
     compile::cleanup_output_for_url(config, url);
 }
 
@@ -440,7 +440,6 @@ mod tests {
 
     fn reset_global_state() {
         BUILD_CACHE.clear();
-        PAGE_LINKS.clear();
         STORED_PAGES.clear();
         GLOBAL_ADDRESS_SPACE.write().clear();
         dependency::clear_graph();
@@ -488,7 +487,7 @@ mod tests {
         let output_file = output_file_for(&config, &old_url);
         fs::create_dir_all(output_file.parent().unwrap()).unwrap();
         fs::write(&output_file, "stale output").unwrap();
-        PAGE_LINKS.record(&old_url, vec![UrlPath::from_page("/target/")]);
+        PageState::new(&STORED_PAGES).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
 
         let rel = config.root_relative(&source).display().to_string();
         let mut diagnostics = PersistedDiagnostics::new();
@@ -509,7 +508,7 @@ mod tests {
         assert_eq!(stats.failed, 0);
         assert_eq!(stats.skipped, 1);
         assert!(!output_file.exists(), "stale output should be removed");
-        assert!(PAGE_LINKS.links_to(&old_url).is_empty());
+        assert!(PageState::new(&STORED_PAGES).links_to(&old_url).is_empty());
         assert_eq!(diagnostics.error_count(), 0);
         assert_eq!(diagnostics.warning_count(), 0);
 
@@ -592,7 +591,7 @@ mod tests {
         let output_file = output_file_for(&config, &url);
         fs::create_dir_all(output_file.parent().unwrap()).unwrap();
         fs::write(&output_file, "stale output").unwrap();
-        PAGE_LINKS.record(&url, vec![UrlPath::from_page("/target/")]);
+        PageState::new(&STORED_PAGES).record_links(&url, vec![UrlPath::from_page("/target/")]);
 
         let rel = source
             .strip_prefix(config.get_root())
@@ -610,7 +609,7 @@ mod tests {
         cleanup_removed_files(&removed, &config, &mut diagnostics);
 
         assert!(!output_file.exists());
-        assert!(PAGE_LINKS.links_to(&url).is_empty());
+        assert!(PageState::new(&STORED_PAGES).links_to(&url).is_empty());
         assert_eq!(diagnostics.error_count(), 0);
         assert_eq!(diagnostics.warning_count(), 0);
 
@@ -633,7 +632,7 @@ mod tests {
         let old_output = output_file_for(&config, &old_url);
         fs::create_dir_all(old_output.parent().unwrap()).unwrap();
         fs::write(&old_output, "stale old output").unwrap();
-        PAGE_LINKS.record(&old_url, vec![UrlPath::from_page("/target/")]);
+        PageState::new(&STORED_PAGES).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
 
         let mut cached_urls = FxHashMap::default();
         cached_urls.insert(source.clone(), old_url.clone());
@@ -657,7 +656,7 @@ mod tests {
             !old_output.exists(),
             "old permalink output should be removed"
         );
-        assert!(PAGE_LINKS.links_to(&old_url).is_empty());
+        assert!(PageState::new(&STORED_PAGES).links_to(&old_url).is_empty());
 
         reset_global_state();
     }

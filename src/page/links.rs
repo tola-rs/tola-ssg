@@ -6,15 +6,11 @@
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::sync::LazyLock;
 
 use crate::core::UrlPath;
 
 type UrlSet = FxHashSet<UrlPath>;
 type UrlSetMap = FxHashMap<UrlPath, UrlSet>;
-
-/// Global page link graph
-pub static PAGE_LINKS: LazyLock<PageLinkGraph> = LazyLock::new(PageLinkGraph::new);
 
 /// Bidirectional page link graph
 ///

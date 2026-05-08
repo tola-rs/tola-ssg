@@ -9,7 +9,7 @@ use crate::compiler::family::Indexed;
 use crate::compiler::page::{PageStateTicket, process_page, process_page_with_ticket};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
-use crate::page::PageRoute;
+use crate::page::{PageRoute, PageState, STORED_PAGES};
 use tola_vdom::Document;
 
 /// Result of compiling a single file
@@ -188,13 +188,13 @@ pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<
         .read()
         .url_for_source(path)
         .cloned()
-        .or_else(|| crate::page::STORED_PAGES.get_permalink_by_source(path));
+        .or_else(|| STORED_PAGES.get_permalink_by_source(path));
     let old_url = if old_url.is_none() && has_alt {
         crate::address::GLOBAL_ADDRESS_SPACE
             .read()
             .url_for_source(&normalized)
             .cloned()
-            .or_else(|| crate::page::STORED_PAGES.get_permalink_by_source(&normalized))
+            .or_else(|| STORED_PAGES.get_permalink_by_source(&normalized))
     } else {
         old_url
     };
@@ -207,9 +207,9 @@ pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<
             space.remove_by_source(&normalized);
         }
     }
-    crate::page::STORED_PAGES.remove_by_source(path);
+    STORED_PAGES.remove_by_source(path);
     if has_alt {
-        crate::page::STORED_PAGES.remove_by_source(&normalized);
+        STORED_PAGES.remove_by_source(&normalized);
     }
     crate::compiler::dependency::remove_content(path);
     if has_alt {
@@ -226,7 +226,7 @@ pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<
 
     // Remove cached VDOM and link-graph edges for this page.
     crate::compiler::page::BUILD_CACHE.remove(&tola_vdom::CacheKey::new(old_url.as_str()));
-    crate::page::PAGE_LINKS.record(&old_url, vec![]);
+    PageState::new(&STORED_PAGES).clear_links(&old_url);
 
     cleanup_output_file(config, &old_url);
     Some(old_url)
@@ -270,8 +270,7 @@ mod tests {
     fn reset_global_state() {
         crate::compiler::page::BUILD_CACHE.clear();
         crate::compiler::dependency::clear_graph();
-        crate::page::PAGE_LINKS.clear();
-        crate::page::STORED_PAGES.clear();
+        STORED_PAGES.clear();
         crate::address::GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
@@ -327,19 +326,15 @@ mod tests {
         fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
         let draft_outcome = compile_page(&page, &config);
         assert!(matches!(draft_outcome, CompileOutcome::Skipped));
-        assert!(
-            crate::page::STORED_PAGES
-                .get_permalink_by_source(&page)
-                .is_none()
-        );
+        assert!(STORED_PAGES.get_permalink_by_source(&page).is_none());
         assert!(!output_file.exists());
 
         // Simulate previously published state for this source.
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        crate::page::STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
-        crate::page::STORED_PAGES.insert_page(
+        STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
+        STORED_PAGES.insert_page(
             route.permalink.clone(),
             crate::page::PageMeta {
                 title: Some("Post".to_string()),
@@ -355,7 +350,7 @@ mod tests {
         }
         fs::write(&output_file, "stale html").unwrap();
 
-        let hash_published = crate::page::STORED_PAGES.pages_hash();
+        let hash_published = STORED_PAGES.pages_hash();
 
         // Compile as draft again; stale published state must be cleaned.
         let back_to_draft = compile_page(&page, &config);
@@ -364,11 +359,7 @@ mod tests {
             "expected Skipped when removing published page, got: {:?}",
             back_to_draft
         );
-        assert!(
-            crate::page::STORED_PAGES
-                .get_permalink_by_source(&page)
-                .is_none()
-        );
+        assert!(STORED_PAGES.get_permalink_by_source(&page).is_none());
         assert!(
             crate::address::GLOBAL_ADDRESS_SPACE
                 .read()
@@ -377,11 +368,11 @@ mod tests {
         );
         assert!(!output_file.exists());
         assert!(
-            crate::page::PAGE_LINKS
+            PageState::new(&STORED_PAGES)
                 .links_to(&route.permalink)
                 .is_empty()
         );
-        assert_ne!(crate::page::STORED_PAGES.pages_hash(), hash_published);
+        assert_ne!(STORED_PAGES.pages_hash(), hash_published);
 
         reset_global_state();
     }
@@ -406,8 +397,8 @@ mod tests {
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        crate::page::STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
-        crate::page::STORED_PAGES.insert_page(
+        STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
+        STORED_PAGES.insert_page(
             route.permalink.clone(),
             crate::page::PageMeta {
                 title: Some("Post".to_string()),
@@ -418,13 +409,14 @@ mod tests {
         crate::address::GLOBAL_ADDRESS_SPACE
             .write()
             .register_page(route.clone(), Some("Post".to_string()));
-        crate::page::PAGE_LINKS.record(&route.permalink, vec![UrlPath::from_page("/target/")]);
+        PageState::new(&STORED_PAGES)
+            .record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
 
         let removed = cleanup_removed_source_state(&page, &config);
 
         assert_eq!(removed, Some(route.permalink.clone()));
         assert!(
-            crate::page::PAGE_LINKS
+            PageState::new(&STORED_PAGES)
                 .links_to(&route.permalink)
                 .is_empty()
         );
@@ -451,8 +443,8 @@ mod tests {
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        crate::page::STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
-        crate::page::STORED_PAGES.insert_page(
+        STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
+        STORED_PAGES.insert_page(
             route.permalink.clone(),
             crate::page::PageMeta {
                 title: Some("Post".to_string()),
@@ -472,7 +464,7 @@ mod tests {
 
         assert!(matches!(outcome, CompileOutcome::Skipped));
         assert_eq!(
-            crate::page::STORED_PAGES.get_permalink_by_source(&page),
+            STORED_PAGES.get_permalink_by_source(&page),
             Some(route.permalink.clone())
         );
         assert!(

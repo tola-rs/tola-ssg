@@ -9,6 +9,7 @@ use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHasher};
 use serde::Serialize;
 
+use super::links::PageLinkGraph;
 use super::{CompiledPage, PageMeta};
 use crate::compiler::page::ScannedHeading;
 use crate::config::SiteConfig;
@@ -64,6 +65,8 @@ pub struct StoredPageMap {
     headings: RwLock<FxHashMap<UrlPath, Vec<ScannedHeading>>>,
     /// Source file path to permalink mapping (for @tola/current lookup).
     source_to_url: RwLock<FxHashMap<PathBuf, UrlPath>>,
+    /// Link graph owned by the same page-state lifetime as stored pages.
+    links: PageLinkGraph,
 }
 
 impl StoredPageMap {
@@ -75,6 +78,11 @@ impl StoredPageMap {
         self.pages.write().clear();
         self.headings.write().clear();
         self.source_to_url.write().clear();
+        self.links.clear();
+    }
+
+    pub(super) fn links(&self) -> &PageLinkGraph {
+        &self.links
     }
 
     /// Insert or update a page.

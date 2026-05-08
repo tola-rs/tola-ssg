@@ -1,14 +1,14 @@
 //! Quick page scanning for progressive serving.
 //!
 //! Scans all content files, extracts metadata, and builds URL mappings
-//! in `GLOBAL_ADDRESS_SPACE` and `STORED_PAGES` without full compilation.
+//! in `GLOBAL_ADDRESS_SPACE` and page state without full compilation.
 
 use anyhow::Result;
 
 use crate::compiler::page::{build_address_space, collect_content_files};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
-use crate::page::{CompiledPage, PAGE_LINKS, STORED_PAGES};
+use crate::page::{CompiledPage, STORED_PAGES};
 
 /// Scan all content files and populate global state
 ///
@@ -16,12 +16,11 @@ use crate::page::{CompiledPage, PAGE_LINKS, STORED_PAGES};
 /// frontmatter parsing for .md) and populates:
 /// - `GLOBAL_ADDRESS_SPACE`: URL ↔ Source mapping (with custom permalinks)
 /// - `STORED_PAGES`: Page metadata for `@tola/pages` virtual package
-/// - `PAGE_LINKS`: Internal link graph
+/// - page link graph used by `@tola/current`
 ///
 /// Requires Typst to be initialized before calling
 pub fn scan_pages(config: &SiteConfig) -> Result<()> {
     STORED_PAGES.clear();
-    PAGE_LINKS.clear();
 
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
@@ -43,7 +42,7 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
         .filter_map(|s| CompiledPage::from_paths_with_meta(&s.path, config, s.meta.clone()).ok())
         .collect();
 
-    // Populate STORED_PAGES and PAGE_LINKS
+    // Populate page metadata and link graph.
     crate::compiler::page::populate_pages(&scanned, config);
 
     // Populate GLOBAL_ADDRESS_SPACE

@@ -1,6 +1,5 @@
 use std::path::Path;
 
-use super::links::PageLinkGraph;
 use super::{StoredPage, StoredPageMap};
 use crate::compiler::page::ScannedHeading;
 use crate::core::UrlPath;
@@ -16,12 +15,11 @@ pub enum StaleLinkPolicy {
 
 pub struct PageState<'a> {
     pages: &'a StoredPageMap,
-    links: &'a PageLinkGraph,
 }
 
 impl<'a> PageState<'a> {
-    pub fn new(pages: &'a StoredPageMap, links: &'a PageLinkGraph) -> Self {
-        Self { pages, links }
+    pub fn new(pages: &'a StoredPageMap) -> Self {
+        Self { pages }
     }
 
     pub fn sync_source_permalink(
@@ -34,7 +32,7 @@ impl<'a> PageState<'a> {
         if matches!(stale_link_policy, StaleLinkPolicy::Clear)
             && let Some(old_permalink) = old_permalink
         {
-            self.links.record(&old_permalink, vec![]);
+            self.clear_links(&old_permalink);
         }
     }
 
@@ -49,8 +47,8 @@ impl<'a> PageState<'a> {
                 .map(str::to_string)
         });
 
-        let links_to = self.pages_for_urls(&self.links.links_to(url));
-        let linked_by = self.pages_for_urls(&self.links.linked_by(url));
+        let links_to = self.pages_for_urls(&self.links_to(url));
+        let linked_by = self.pages_for_urls(&self.linked_by(url));
         let headings = self.pages.get_headings(url);
 
         serde_json::json!({
@@ -78,11 +76,19 @@ impl<'a> PageState<'a> {
     }
 
     pub fn record_links(&self, from: &UrlPath, targets: Vec<UrlPath>) {
-        self.links.record(from, targets);
+        self.pages.links().record(from, targets);
     }
 
     pub fn clear_links(&self, page: &UrlPath) {
-        self.links.record(page, vec![]);
+        self.record_links(page, vec![]);
+    }
+
+    pub fn links_to(&self, page: &UrlPath) -> Vec<UrlPath> {
+        self.pages.links().links_to(page)
+    }
+
+    pub fn linked_by(&self, page: &UrlPath) -> Vec<UrlPath> {
+        self.pages.links().linked_by(page)
     }
 }
 
@@ -97,8 +103,7 @@ mod tests {
     #[test]
     fn sync_source_permalink_clears_stale_links_from_owned_graph() {
         let pages = StoredPageMap::new();
-        let links = PageLinkGraph::new();
-        let state = PageState::new(&pages, &links);
+        let state = PageState::new(&pages);
 
         let source = PathBuf::from("/site/content/post.md");
         let old = UrlPath::from_page("/old/");
@@ -113,7 +118,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        links.record(&old, vec![target.clone()]);
+        state.record_links(&old, vec![target.clone()]);
 
         state.sync_source_permalink(&source, new.clone(), StaleLinkPolicy::Clear);
 
@@ -124,15 +129,14 @@ mod tests {
                 .iter()
                 .all(|p| p.permalink != old)
         );
-        assert!(links.links_to(&old).is_empty());
-        assert!(links.linked_by(&target).is_empty());
+        assert!(state.links_to(&old).is_empty());
+        assert!(state.linked_by(&target).is_empty());
     }
 
     #[test]
     fn current_context_reads_links_from_owned_graph() {
         let pages = StoredPageMap::new();
-        let links = PageLinkGraph::new();
-        let state = PageState::new(&pages, &links);
+        let state = PageState::new(&pages);
 
         let current = UrlPath::from_page("/current/");
         let target = UrlPath::from_page("/target/");
@@ -159,8 +163,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        links.record(&current, vec![target.clone()]);
-        links.record(&source, vec![current.clone()]);
+        state.record_links(&current, vec![target.clone()]);
+        state.record_links(&source, vec![current.clone()]);
 
         let context = state.build_current_context(&current, Some("current.md"));
         let payload = &context[TolaPackage::Current.input_key()];

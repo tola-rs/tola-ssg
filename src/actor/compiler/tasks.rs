@@ -99,7 +99,6 @@ mod tests {
 
     fn reset_global_state() {
         crate::page::STORED_PAGES.clear();
-        crate::page::PAGE_LINKS.clear();
         crate::address::GLOBAL_ADDRESS_SPACE.write().clear();
     }
 

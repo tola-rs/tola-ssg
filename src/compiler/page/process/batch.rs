@@ -16,7 +16,7 @@ use crate::freshness::ContentHash;
 use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
 use crate::page::CompiledPage;
 use crate::page::{
-    HashStabilityTracker, PAGE_LINKS, PageState, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
+    HashStabilityTracker, PageState, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
 };
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -103,7 +103,6 @@ pub fn build_static_pages(
 ) -> Result<MetadataResult> {
     if global_state.rebuilds_global_state() {
         STORED_PAGES.clear();
-        PAGE_LINKS.clear();
     }
 
     let ctx = BuildContext::new(mode, config, clean, deps_hash, global_state);
@@ -308,7 +307,7 @@ fn process_iterative_page(
     page.apply_meta(result.meta, ctx.config);
 
     // Keep source->permalink mapping consistent across iterative passes.
-    let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+    let state = PageState::new(&STORED_PAGES);
     state.sync_source_permalink(
         &source,
         page.route.permalink.clone(),
@@ -364,9 +363,9 @@ fn build_site_inputs(config: &SiteConfig) -> Result<typst_batch::Inputs> {
     build_visible_inputs(config, &STORED_PAGES)
 }
 
-/// Populate STORED_PAGES and PAGE_LINKS from pre-scan results
+/// Populate page metadata and link graph from pre-scan results.
 pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
-    let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+    let state = PageState::new(&STORED_PAGES);
 
     // First pass: collect all page permalinks and metadata
     let mut page_permalinks: Vec<(UrlPath, &ScannedPage)> = Vec::new();
@@ -381,7 +380,7 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
         page_permalinks.push((permalink, page));
     }
 
-    // Second pass: populate PAGE_LINKS with resolved links
+    // Second pass: populate resolved links.
     for (from_url, page) in &page_permalinks {
         if page.links.is_empty() {
             continue;
@@ -577,7 +576,7 @@ fn finalize_static_page(
     }
 
     if ctx.rebuilds_global_state() {
-        let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+        let state = PageState::new(&STORED_PAGES);
         state.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
         STORED_PAGES.insert_page(
             page.route.permalink.clone(),
@@ -753,7 +752,6 @@ mod tests {
 
     fn reset_global_state() {
         STORED_PAGES.clear();
-        PAGE_LINKS.clear();
         GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
@@ -892,9 +890,10 @@ mod tests {
             .get_permalink_by_source(&source_b)
             .expect("source b permalink");
 
-        let links = PAGE_LINKS.links_to(&from);
+        let state = PageState::new(&STORED_PAGES);
+        let links = state.links_to(&from);
         assert_eq!(links, vec![to.clone()]);
-        assert!(PAGE_LINKS.linked_by(&to).contains(&from));
+        assert!(state.linked_by(&to).contains(&from));
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::compiler::page::{
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::package::TolaPackage;
-use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, PageState, STORED_PAGES, StaleLinkPolicy};
+use crate::page::{CompiledPage, PageMeta, PageState, STORED_PAGES, StaleLinkPolicy};
 use crate::utils::path::normalize_path;
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -152,7 +152,7 @@ fn current_context_from_scan(
             crate::page::resolve_page_link_target(&STORED_PAGES, permalink, source, link, config)
         })
         .collect();
-    let linked_by_urls = PAGE_LINKS.linked_by(permalink);
+    let linked_by_urls = PageState::new(&STORED_PAGES).linked_by(permalink);
 
     serde_json::json!({
         TolaPackage::Current.input_key(): {
@@ -173,7 +173,7 @@ fn commit_page_state(
     scan_data: &SinglePageScanData,
     config: &SiteConfig,
 ) {
-    let state = PageState::new(&STORED_PAGES, &PAGE_LINKS);
+    let state = PageState::new(&STORED_PAGES);
     state.sync_source_permalink(source, page.route.permalink.clone(), StaleLinkPolicy::Clear);
     state.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
     record_scanned_links(
@@ -337,7 +337,6 @@ mod tests {
 
     fn reset_global_state() {
         STORED_PAGES.clear();
-        PAGE_LINKS.clear();
         GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
