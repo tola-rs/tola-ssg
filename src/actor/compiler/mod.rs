@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::messages::{CompilerMsg, VdomMsg};
+use crate::compiler::page::PageStateEpoch;
 use crate::config::SiteConfig;
 use crate::reload::compile::CompileOutcome;
 
@@ -35,6 +36,7 @@ pub struct CompilerActor {
     pub(super) vdom_tx: mpsc::Sender<VdomMsg>,
     pub(super) config: Arc<SiteConfig>,
     pub(super) last_active_recompile: Option<Instant>,
+    pub(super) page_epoch: PageStateEpoch,
 }
 
 impl CompilerActor {
@@ -48,6 +50,7 @@ impl CompilerActor {
             vdom_tx,
             config,
             last_active_recompile: None,
+            page_epoch: PageStateEpoch::new(),
         }
     }
 }

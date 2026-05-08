@@ -52,6 +52,7 @@ impl CompilerActor {
                 Arc::clone(&self.config),
                 pages_hash,
                 watched_post_paths,
+                self.page_epoch.ticket(),
             ))
         }
     }

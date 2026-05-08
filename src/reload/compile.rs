@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::compiler::family::Indexed;
-use crate::compiler::page::process_page;
+use crate::compiler::page::{PageStateTicket, process_page, process_page_with_ticket};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::page::PageRoute;
@@ -45,6 +45,22 @@ pub enum CompileOutcome {
 /// - Returns a unified outcome type
 /// - Applies draft-transition cleanup when a page becomes non-visible
 pub fn compile_page(path: &Path, config: &SiteConfig) -> CompileOutcome {
+    compile_page_inner(path, config, None)
+}
+
+pub fn compile_page_with_ticket(
+    path: &Path,
+    config: &SiteConfig,
+    ticket: &PageStateTicket,
+) -> CompileOutcome {
+    compile_page_inner(path, config, Some(ticket))
+}
+
+fn compile_page_inner(
+    path: &Path,
+    config: &SiteConfig,
+    ticket: Option<&PageStateTicket>,
+) -> CompileOutcome {
     let ext = path.extension().and_then(|e| e.to_str());
 
     match ext {
@@ -54,7 +70,7 @@ pub fn compile_page(path: &Path, config: &SiteConfig) -> CompileOutcome {
             if !path.starts_with(&config.build.content) {
                 return CompileOutcome::Skipped;
             }
-            compile_content_file(path, config)
+            compile_content_file(path, config, ticket)
         }
         Some("css" | "js" | "html") => CompileOutcome::Reload {
             reason: format!("asset changed: {}", path.display()),
@@ -85,8 +101,17 @@ pub fn compile_startup_batch(paths: &[PathBuf], config: &SiteConfig) -> Vec<Comp
 }
 
 /// Compile a single content file (Typst or Markdown) to VDOM
-fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
-    match process_page(BuildMode::DEVELOPMENT, path, config) {
+fn compile_content_file(
+    path: &Path,
+    config: &SiteConfig,
+    ticket: Option<&PageStateTicket>,
+) -> CompileOutcome {
+    let result = match ticket {
+        Some(ticket) => process_page_with_ticket(BuildMode::DEVELOPMENT, path, config, ticket),
+        None => process_page(BuildMode::DEVELOPMENT, path, config),
+    };
+
+    match result {
         Ok(Some(page_result)) => {
             let permalink = page_result.permalink;
             let route = page_result.page.route.clone();
@@ -126,7 +151,13 @@ fn compile_content_file(path: &Path, config: &SiteConfig) -> CompileOutcome {
             }
         }
         Ok(None) => {
-            if cleanup_draft_state(path, config) {
+            let cleaned = match ticket {
+                Some(ticket) => ticket
+                    .commit(|| cleanup_draft_state(path, config))
+                    .unwrap_or(false),
+                None => cleanup_draft_state(path, config),
+            };
+            if cleaned {
                 crate::debug!("watch"; "page became draft: {}", path.display());
             }
             CompileOutcome::Skipped
@@ -397,6 +428,60 @@ mod tests {
                 .links_to(&route.permalink)
                 .is_empty()
         );
+        reset_global_state();
+    }
+
+    #[test]
+    fn test_compile_page_with_stale_ticket_does_not_cleanup_draft_state() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let page = content_dir.join("post.md");
+        fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+        config.build.output = output_dir;
+
+        reset_global_state();
+
+        let route = crate::page::CompiledPage::from_paths(&page, &config)
+            .unwrap()
+            .route;
+        crate::page::STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
+        crate::page::STORED_PAGES.insert_page(
+            route.permalink.clone(),
+            crate::page::PageMeta {
+                title: Some("Post".to_string()),
+                draft: false,
+                ..Default::default()
+            },
+        );
+        crate::address::GLOBAL_ADDRESS_SPACE
+            .write()
+            .register_page(route.clone(), Some("Post".to_string()));
+
+        let epoch = crate::compiler::page::PageStateEpoch::new();
+        let ticket = epoch.ticket();
+        epoch.advance();
+
+        let outcome = compile_page_with_ticket(&page, &config, &ticket);
+
+        assert!(matches!(outcome, CompileOutcome::Skipped));
+        assert_eq!(
+            crate::page::STORED_PAGES.get_permalink_by_source(&page),
+            Some(route.permalink.clone())
+        );
+        assert!(
+            crate::address::GLOBAL_ADDRESS_SPACE
+                .read()
+                .url_for_source(&crate::utils::path::normalize_path(&page))
+                .is_some()
+        );
+
         reset_global_state();
     }
 }

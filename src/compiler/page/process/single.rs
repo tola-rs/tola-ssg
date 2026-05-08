@@ -15,7 +15,72 @@ use crate::page::{CompiledPage, PAGE_LINKS, PageMeta, STORED_PAGES, StaleLinkPol
 use crate::utils::path::normalize_path;
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
+use parking_lot::Mutex;
 use std::path::Path;
+use std::sync::Arc;
+
+#[derive(Clone, Default)]
+pub struct PageStateEpoch {
+    value: Arc<Mutex<u64>>,
+}
+
+impl PageStateEpoch {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn ticket(&self) -> PageStateTicket {
+        PageStateTicket {
+            epoch: self.clone(),
+            value: *self.value.lock(),
+        }
+    }
+
+    pub fn advance(&self) {
+        *self.value.lock() += 1;
+    }
+}
+
+#[derive(Clone)]
+pub struct PageStateTicket {
+    epoch: PageStateEpoch,
+    value: u64,
+}
+
+impl PageStateTicket {
+    pub(crate) fn commit<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
+        let current = self.epoch.value.lock();
+        if *current != self.value {
+            return None;
+        }
+        Some(write())
+    }
+}
+
+enum PageStateCommit<'a> {
+    Always,
+    Ticket(&'a PageStateTicket),
+}
+
+impl PageStateCommit<'_> {
+    fn commit(
+        self,
+        source: &Path,
+        page: &CompiledPage,
+        scan_data: &SinglePageScanData,
+        config: &SiteConfig,
+    ) -> bool {
+        match self {
+            Self::Always => {
+                commit_page_state(source, page, scan_data, config);
+                true
+            }
+            Self::Ticket(ticket) => ticket
+                .commit(|| commit_page_state(source, page, scan_data, config))
+                .is_some(),
+        }
+    }
+}
 
 fn record_scanned_links(
     source: &Path,
@@ -146,6 +211,24 @@ pub fn process_page(
     path: &Path,
     config: &SiteConfig,
 ) -> Result<Option<PageResult>> {
+    process_page_inner(mode, path, config, PageStateCommit::Always)
+}
+
+pub fn process_page_with_ticket(
+    mode: BuildMode,
+    path: &Path,
+    config: &SiteConfig,
+    ticket: &PageStateTicket,
+) -> Result<Option<PageResult>> {
+    process_page_inner(mode, path, config, PageStateCommit::Ticket(ticket))
+}
+
+fn process_page_inner(
+    mode: BuildMode,
+    path: &Path,
+    config: &SiteConfig,
+    commit: PageStateCommit<'_>,
+) -> Result<Option<PageResult>> {
     let mut page = CompiledPage::from_paths(path, config)?;
 
     // Scan to extract headings and links ===
@@ -185,7 +268,9 @@ pub fn process_page(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
-    commit_page_state(path, &page, &scan_data, config);
+    if !commit.commit(path, &page, &scan_data, config) {
+        return Ok(None);
+    }
 
     let permalink = page.route.permalink.clone();
 
@@ -545,6 +630,41 @@ permalink = "/showcase/source-field-test/"
             .cloned()
             .unwrap_or_default();
         assert!(headings.contains("hello-world"));
+
+        reset_global_state();
+    }
+
+    #[test]
+    fn test_process_page_with_stale_ticket_does_not_commit_page_state() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        let file_path = content_dir.join("post.md");
+
+        fs::write(&file_path, "+++\ntitle = \"Post\"\n+++\n\n# Post\n").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        reset_global_state();
+
+        let epoch = PageStateEpoch::new();
+        let ticket = epoch.ticket();
+        epoch.advance();
+
+        let result = process_page_with_ticket(BuildMode::DEVELOPMENT, &file_path, &config, &ticket)
+            .expect("stale page compile should not fail");
+
+        assert!(result.is_none(), "stale page compile must be discarded");
+        assert!(
+            STORED_PAGES.get_permalink_by_source(&file_path).is_none(),
+            "stale page compile must not publish source permalink mapping"
+        );
+        assert!(
+            STORED_PAGES.get_pages_with_drafts().is_empty(),
+            "stale page compile must not publish page metadata"
+        );
 
         reset_global_state();
     }

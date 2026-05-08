@@ -11,4 +11,4 @@ pub use batch::{
     GlobalStateMode, build_address_space, build_static_pages, populate_pages,
     rebuild_iterative_pages,
 };
-pub use single::process_page;
+pub use single::{PageStateEpoch, PageStateTicket, process_page, process_page_with_ticket};

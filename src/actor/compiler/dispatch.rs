@@ -22,7 +22,8 @@ impl CompilerActor {
                     };
 
                     let is_shutdown = matches!(msg, CompilerMsg::Shutdown);
-                    if matches!(msg, CompilerMsg::Compile { .. }) {
+                    if background.is_some() && interrupts_background(&msg) {
+                        self.page_epoch.advance();
                         abort_task(&mut background);
                     }
                     background = self.dispatch(msg, background).await;
@@ -44,7 +45,7 @@ impl CompilerActor {
     async fn dispatch(
         &mut self,
         msg: CompilerMsg,
-        mut bg: Option<BackgroundTask>,
+        bg: Option<BackgroundTask>,
     ) -> Option<BackgroundTask> {
         match msg {
             CompilerMsg::Compile {
@@ -72,12 +73,10 @@ impl CompilerActor {
                 bg
             }
             CompilerMsg::RetryScan { changed_paths } => {
-                abort_task(&mut bg);
                 self.on_retry_scan(changed_paths).await;
                 None
             }
             CompilerMsg::FullRebuild => {
-                abort_task(&mut bg);
                 self.on_full_rebuild().await;
                 None
             }
@@ -112,6 +111,19 @@ impl CompilerActor {
         }
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
     }
+}
+
+fn interrupts_background(msg: &CompilerMsg) -> bool {
+    matches!(
+        msg,
+        CompilerMsg::Compile { .. }
+            | CompilerMsg::CompileDependents(_)
+            | CompilerMsg::ContentCreated(_)
+            | CompilerMsg::ContentRemoved(_)
+            | CompilerMsg::RetryScan { .. }
+            | CompilerMsg::FullRebuild
+            | CompilerMsg::Shutdown
+    )
 }
 
 #[cfg(test)]
