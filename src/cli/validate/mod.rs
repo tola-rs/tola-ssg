@@ -12,12 +12,11 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 
 use super::common::collect_content_files;
+use crate::address::SiteIndex;
 use crate::compiler::page::CompiledPage;
 use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
 use crate::config::SiteConfig;
-use crate::core::{
-    ContentKind, GLOBAL_ADDRESS_SPACE, LinkKind, LinkOrigin, ResolveContext, ResolveResult,
-};
+use crate::core::{ContentKind, LinkKind, LinkOrigin, ResolveContext, ResolveResult};
 use crate::log;
 use crate::package::build_visible_inputs;
 use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
@@ -50,7 +49,7 @@ type ParsedScanResult = (
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
-    let store = StoredPageMap::new();
+    let state = SiteIndex::new();
 
     // Register VFS with nested asset mappings (no font warmup needed)
     let nested_mappings =
@@ -87,7 +86,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
 
     // Build AddressSpace for validation (unified scan: metadata + links + errors)
     let (all_pages, typst_links) = if check_pages || check_assets {
-        let (pages, links, compile_errors) = build_address_space(config, &store)?;
+        let (pages, links, compile_errors) = build_address_space(config, &state)?;
 
         // Add compile errors to report as asset errors
         // Extract path from "file not found (searched at /abs/path)" -> "/relative/path"
@@ -124,7 +123,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
         &files,
         &root,
         config,
-        &store,
+        &state,
         &all_pages,
         &typst_links,
         &report,
@@ -165,11 +164,12 @@ fn validate_all_links(
     files: &[PathBuf],
     root: &std::path::Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     all_pages: &[CompiledPage],
     typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
     report: &Arc<RwLock<ValidationReport>>,
 ) {
+    let store = state.pages();
     // Collect all nested asset source directories with their output prefixes
     let nested_assets: Vec<_> = config
         .build
@@ -207,6 +207,7 @@ fn validate_all_links(
             root,
             &nested_assets,
             &flatten_outputs,
+            state,
         );
     }
 
@@ -226,6 +227,7 @@ fn validate_all_links(
                 root,
                 &nested_assets,
                 &flatten_outputs,
+                state,
             );
         }
     });
@@ -243,6 +245,7 @@ fn validate_links(
     root: &std::path::Path,
     nested_assets: &[(String, PathBuf)],
     flatten_outputs: &[String],
+    state: &SiteIndex,
 ) {
     let prefix = config.paths().prefix().to_string_lossy().into_owned();
     let validate_config = &config.validate;
@@ -345,7 +348,7 @@ fn validate_links(
                     crate::pipeline::transform::resolve_link(&link.dest, config, &page.route)
                         .unwrap_or_else(|_| link.dest.clone());
 
-                let space = GLOBAL_ADDRESS_SPACE.read();
+                let space = state.address().read();
                 let mut result = space.resolve(&resolved_link, &ctx);
                 // Fallback for mixed prefixed/unprefixed permalink states.
                 if matches!(result, ResolveResult::NotFound { .. }) && resolved_link != link.dest {
@@ -376,7 +379,7 @@ fn validate_links(
                     origin: link.origin,
                 };
 
-                let space = GLOBAL_ADDRESS_SPACE.read();
+                let space = state.address().read();
                 handle_resolve_result(
                     space.resolve(&link.dest, &ctx),
                     source,
@@ -478,12 +481,13 @@ fn handle_resolve_result(
 /// - pages: All compiled pages
 /// - typst_links: HashMap<PathBuf, Vec<ScannedLink>> for Typst files
 /// - compile_errors: Vec<(source_path, error_message)> for compile failures
-fn build_address_space(config: &SiteConfig, store: &StoredPageMap) -> Result<AddressSpaceResult> {
+fn build_address_space(config: &SiteConfig, state: &SiteIndex) -> Result<AddressSpaceResult> {
     use rayon::prelude::*;
 
     use crate::cli::common::scan_markdown_file;
 
-    store.clear();
+    state.clear();
+    let store = state.pages();
 
     let content_files = crate::compiler::collect_all_files(&config.build.content);
     let label = &config.build.meta.label;
@@ -549,7 +553,7 @@ fn build_address_space(config: &SiteConfig, store: &StoredPageMap) -> Result<Add
     pages.extend(markdown_pages);
 
     // Build the global address space
-    crate::compiler::page::build_address_space(&pages, config, store);
+    crate::compiler::page::build_address_space(&pages, config, state);
 
     Ok((pages, typst_links, compile_errors))
 }

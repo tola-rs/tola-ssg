@@ -16,8 +16,8 @@ mod recompile;
 use anyhow::Result;
 use std::path::Path;
 
-use crate::page::StoredPageMap;
 use crate::{
+    address::SiteIndex,
     compiler::page::Pages,
     config::SiteConfig,
     core::BuildMode,
@@ -40,7 +40,7 @@ pub fn collect_font_dirs(config: &SiteConfig) -> Vec<&Path> {
 pub fn build_site(
     mode: BuildMode,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     quiet: bool,
 ) -> Result<Pages> {
     // Initialize (must be before pre hooks to clean output dir first)
@@ -56,7 +56,7 @@ pub fn build_site(
 
     // Compile content + process assets (parallel)
     let metadata =
-        pipeline::compile_and_process(mode, config, store, &files, deps_hash, progress.as_ref())?;
+        pipeline::compile_and_process(mode, config, state, &files, deps_hash, progress.as_ref())?;
 
     // Log drafts skipped
     if !quiet && metadata.stats.has_skipped_drafts() {
@@ -68,7 +68,7 @@ pub fn build_site(
     }
 
     // Rebuild iterative pages with complete metadata
-    let pages = pipeline::rebuild_iterative_pages(mode, config, store, deps_hash, &metadata)?;
+    let pages = pipeline::rebuild_iterative_pages(mode, config, state, deps_hash, &metadata)?;
 
     if let Some(p) = progress {
         p.finish();
@@ -81,7 +81,7 @@ pub fn build_site(
     hooks::run_post_hooks(config, mode, true)?;
 
     // Finalize
-    pipeline::finalize_build(config, quiet)?;
+    pipeline::finalize_build(config, state, quiet)?;
 
     Ok(pages)
 }

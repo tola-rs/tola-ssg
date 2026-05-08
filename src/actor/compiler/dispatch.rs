@@ -102,7 +102,7 @@ impl CompilerActor {
         hash_before: u64,
         watched_post_paths: Option<Vec<PathBuf>>,
     ) {
-        if self.store.pages_hash() != hash_before {
+        if self.state.pages().pages_hash() != hash_before {
             self.recompile_virtual_users().await;
         }
         if let Some(paths) = watched_post_paths {
@@ -133,8 +133,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::address::SiteIndex;
     use crate::config::SiteConfig;
-    use crate::page::StoredPageMap;
 
     #[tokio::test]
     async fn exits_on_shutdown_message() {
@@ -144,7 +144,7 @@ mod tests {
             compiler_rx,
             vdom_tx,
             Arc::new(SiteConfig::default()),
-            Arc::new(StoredPageMap::new()),
+            Arc::new(SiteIndex::new()),
         );
 
         let handle = tokio::spawn(actor.run());

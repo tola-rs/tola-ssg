@@ -18,9 +18,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::messages::{CompilerMsg, VdomMsg};
+use crate::address::SiteIndex;
 use crate::compiler::page::PageStateEpoch;
 use crate::config::SiteConfig;
-use crate::page::StoredPageMap;
 use crate::reload::compile::CompileOutcome;
 
 pub(super) struct BatchResult {
@@ -36,7 +36,7 @@ pub struct CompilerActor {
     pub(super) rx: mpsc::Receiver<CompilerMsg>,
     pub(super) vdom_tx: mpsc::Sender<VdomMsg>,
     pub(super) config: Arc<SiteConfig>,
-    pub(super) store: Arc<StoredPageMap>,
+    pub(super) state: Arc<SiteIndex>,
     pub(super) last_active_recompile: Option<Instant>,
     pub(super) page_epoch: PageStateEpoch,
 }
@@ -46,13 +46,13 @@ impl CompilerActor {
         rx: mpsc::Receiver<CompilerMsg>,
         vdom_tx: mpsc::Sender<VdomMsg>,
         config: Arc<SiteConfig>,
-        store: Arc<StoredPageMap>,
+        state: Arc<SiteIndex>,
     ) -> Self {
         Self {
             rx,
             vdom_tx,
             config,
-            store,
+            state,
             last_active_recompile: None,
             page_epoch: PageStateEpoch::new(),
         }

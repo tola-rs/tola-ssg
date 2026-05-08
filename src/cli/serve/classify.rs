@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::address::{GLOBAL_ADDRESS_SPACE, Resource};
+use crate::address::Resource;
+use crate::address::SiteIndex;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
-use crate::page::StoredPageMap;
 use crate::utils::path::normalize_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub(super) fn classify_served_output(
     request_url: &str,
     output_path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
 ) -> ServedOutputKind {
     let output_path = normalize_path(output_path);
 
@@ -33,11 +33,11 @@ pub(super) fn classify_served_output(
     }
 
     let url = UrlPath::from_browser(request_url);
-    if let Some(kind) = classify_page_output(&url, &output_path) {
+    if let Some(kind) = classify_page_output(&url, &output_path, state) {
         return kind;
     }
 
-    if is_alias_redirect_output(&url, &output_path, config, store) {
+    if is_alias_redirect_output(&url, &output_path, config, state) {
         return ServedOutputKind::RedirectHtml;
     }
 
@@ -58,8 +58,12 @@ fn is_not_found_output(output_path: &Path, config: &SiteConfig) -> bool {
     normalize_path(&config.build.output.join("404.html")) == output_path
 }
 
-fn classify_page_output(url: &UrlPath, output_path: &Path) -> Option<ServedOutputKind> {
-    let space = GLOBAL_ADDRESS_SPACE.read();
+fn classify_page_output(
+    url: &UrlPath,
+    output_path: &Path,
+    state: &SiteIndex,
+) -> Option<ServedOutputKind> {
+    let space = state.address().read();
     let resource = space.get_by_url(url)?;
 
     match resource {
@@ -85,11 +89,11 @@ fn is_alias_redirect_output(
     url: &UrlPath,
     output_path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
 ) -> bool {
     let output_dir = config.paths().output_dir();
 
-    store.get_pages().into_iter().any(|page| {
+    state.pages().get_pages().into_iter().any(|page| {
         page.meta.aliases.iter().any(|alias| {
             let alias_url = UrlPath::from_page(alias);
             alias_url == *url

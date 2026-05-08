@@ -22,12 +22,12 @@ mod reload;
 mod seo;
 mod utils;
 
+use address::SiteIndex;
 use anyhow::Result;
 use clap::{ColorChoice, Parser};
 use cli::{Cli, Commands, build::build_site};
 use config::{SiteConfig, init_config};
 use core::BuildMode;
-use page::StoredPageMap;
 use seo::{feed::build_feed, sitemap::build_sitemap};
 
 fn main() -> Result<()> {
@@ -61,14 +61,14 @@ fn main() -> Result<()> {
 
 /// Build site and optionally generate rss/sitemap in parallel
 fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<()> {
-    let store = StoredPageMap::new();
-    let _pages = build_site(mode, config, &store, false)?;
+    let state = SiteIndex::new();
+    let _pages = build_site(mode, config, &state, false)?;
 
     // Generate SEO files in parallel (feed, sitemap)
     // Note: OG tags are injected during VDOM pipeline (see HeaderInjector)
     let (feed_result, sitemap_result) = rayon::join(
-        || build_feed(config, &store),
-        || build_sitemap(config, &store),
+        || build_feed(config, state.pages()),
+        || build_sitemap(config, state.pages()),
     );
 
     feed_result?;

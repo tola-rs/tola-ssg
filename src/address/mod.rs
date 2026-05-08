@@ -28,9 +28,7 @@
 //! # Usage
 //!
 //! ```ignore
-//! use crate::address::GLOBAL_ADDRESS_SPACE;
-//!
-//! let space = GLOBAL_ADDRESS_SPACE.read();
+//! let space = state.address().read();
 //!
 //! // Resolve any link
 //! let result = space.resolve("/about/", &context);
@@ -50,15 +48,37 @@ mod resolve;
 mod resource;
 mod space;
 
-use std::sync::LazyLock;
-
 use parking_lot::RwLock;
+
+use crate::page::StoredPageMap;
 
 // Re-export public types
 pub use resolve::{ResolveContext, ResolveResult, resolve_physical_path};
 pub use resource::Resource;
 pub use space::{AddressSpace, PermalinkUpdate};
 
-/// Global site address space
-pub static GLOBAL_ADDRESS_SPACE: LazyLock<RwLock<AddressSpace>> =
-    LazyLock::new(|| RwLock::new(AddressSpace::new()));
+/// Page metadata and address mappings for one site invocation.
+#[derive(Debug, Default)]
+pub struct SiteIndex {
+    pages: StoredPageMap,
+    address: RwLock<AddressSpace>,
+}
+
+impl SiteIndex {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pages(&self) -> &StoredPageMap {
+        &self.pages
+    }
+
+    pub fn address(&self) -> &RwLock<AddressSpace> {
+        &self.address
+    }
+
+    pub fn clear(&self) {
+        self.pages.clear();
+        self.address.write().clear();
+    }
+}

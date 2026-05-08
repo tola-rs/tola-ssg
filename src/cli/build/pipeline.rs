@@ -8,17 +8,17 @@ use std::{
 };
 
 use crate::{
+    address::SiteIndex,
     asset::process_asset,
     compiler::page::Pages,
     compiler::page::typst,
     compiler::{collect_all_files, drain_warnings},
     config::SiteConfig,
-    core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, is_shutdown},
+    core::{BuildMode, ContentKind, is_shutdown},
     freshness::{self, ContentHash},
     log,
     logger::ProgressLine,
     package::generate_lsp_stubs,
-    page::StoredPageMap,
 };
 
 /// Collected files for the build
@@ -104,7 +104,7 @@ pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<Progres
 pub(super) fn compile_and_process(
     mode: BuildMode,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     files: &BuildFiles,
     deps_hash: ContentHash,
     progress: Option<&ProgressLine>,
@@ -117,7 +117,7 @@ pub(super) fn compile_and_process(
             crate::compiler::page::build_static_pages(
                 mode,
                 config,
-                store,
+                state,
                 clean,
                 Some(deps_hash),
                 crate::compiler::page::GlobalStateMode::Rebuild,
@@ -163,7 +163,7 @@ fn process_assets(
 pub(super) fn rebuild_iterative_pages(
     mode: BuildMode,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     deps_hash: ContentHash,
     metadata: &crate::compiler::page::MetadataResult,
 ) -> Result<Pages> {
@@ -175,7 +175,7 @@ pub(super) fn rebuild_iterative_pages(
         mode,
         &metadata.iterative_paths,
         config,
-        store,
+        state.pages(),
         config.build.clean,
         Some(deps_hash),
         metadata.snapshot.clone(),
@@ -242,7 +242,7 @@ fn copy_html_404(config: &SiteConfig) -> Result<()> {
 }
 
 /// Finalize build (warnings, cache, logging)
-pub(super) fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
+pub(super) fn finalize_build(config: &SiteConfig, state: &SiteIndex, quiet: bool) -> Result<()> {
     // Print compiler warnings with truncation
     let warnings = drain_warnings();
     if !warnings.is_empty() {
@@ -250,7 +250,7 @@ pub(super) fn finalize_build(config: &SiteConfig, quiet: bool) -> Result<()> {
     }
 
     // Persist VDOM cache for serve reuse
-    let source_paths = GLOBAL_ADDRESS_SPACE.read().source_paths();
+    let source_paths = state.address().read().source_paths();
     if let Err(e) = crate::cache::persist_cache(
         &crate::compiler::page::BUILD_CACHE,
         &source_paths,

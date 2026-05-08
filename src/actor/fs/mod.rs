@@ -15,6 +15,7 @@ use notify::RecommendedWatcher;
 use tokio::sync::mpsc;
 
 use super::messages::CompilerMsg;
+use crate::address::SiteIndex;
 use crate::config::SiteConfig;
 
 // Business classification pipeline (raw changes -> actionable events).
@@ -47,6 +48,8 @@ pub struct FsActor {
     debouncer: Debouncer,
     /// Site configuration for file classification
     config: Arc<SiteConfig>,
+    /// Site index for event recovery and active-page routing
+    state: Arc<SiteIndex>,
 }
 
 impl FsActor {
@@ -59,6 +62,7 @@ impl FsActor {
         paths: Vec<PathBuf>,
         compiler_tx: mpsc::Sender<CompilerMsg>,
         config: Arc<SiteConfig>,
+        state: Arc<SiteIndex>,
     ) -> notify::Result<Self> {
         // Create sync channel for notify (it doesn't support async)
         let (notify_tx, notify_rx) = std::sync::mpsc::channel();
@@ -81,6 +85,7 @@ impl FsActor {
             compiler_tx,
             debouncer: Debouncer::new(),
             config,
+            state,
         })
     }
 
@@ -90,6 +95,7 @@ impl FsActor {
         let notify_rx = self.notify_rx;
         let compiler_tx = self.compiler_tx.clone();
         let config = Arc::clone(&self.config);
+        let state = Arc::clone(&self.state);
         let mut debouncer = self.debouncer;
         let mut watcher = self.watcher;
         let mut watch_roots = self.watch_roots;
@@ -118,7 +124,7 @@ impl FsActor {
                     // Ensure watcher roots remain attached.
                     watch_roots.maintain(&mut watcher);
                     // Classify recovered events and route messages.
-                    if process_changes(&mut debouncer, &compiler_tx, &config).await.is_err() {
+                    if process_changes(&mut debouncer, &compiler_tx, &config, &state).await.is_err() {
                         break;
                     }
                 }
@@ -146,6 +152,7 @@ async fn process_changes(
     debouncer: &mut Debouncer,
     compiler_tx: &mpsc::Sender<CompilerMsg>,
     config: &SiteConfig,
+    state: &SiteIndex,
 ) -> Result<(), ()> {
     // Must be serving to process events (check BEFORE taking to preserve events)
     if !crate::core::is_serving() {
@@ -172,13 +179,13 @@ async fn process_changes(
     }
 
     // Classify events (business logic)
-    let Some(events) = EventClassifier::classify(raw_events, config) else {
+    let Some(events) = EventClassifier::classify(raw_events, config, state) else {
         return Ok(());
     };
 
     log_events(&events);
 
-    let messages = events_to_messages(events, config);
+    let messages = events_to_messages(events, config, state);
     if messages.is_empty() {
         return Ok(());
     }

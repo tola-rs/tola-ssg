@@ -1,6 +1,6 @@
 //! Server lifecycle management.
 
-use crate::page::StoredPageMap;
+use crate::address::SiteIndex;
 use crate::{actor::Coordinator, config::SiteConfig, core::register_server, log};
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
@@ -56,7 +56,7 @@ pub fn register_server_for_shutdown(server: Arc<Server>, shutdown_tx: Sender<()>
 /// Spawn the actor system for file watching and hot reload
 pub fn spawn_actors(
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
     watch_enabled: bool,
     ws_port: Option<u16>,
     shutdown_rx: Receiver<()>,
@@ -66,13 +66,13 @@ pub fn spawn_actors(
     }
 
     Some(thread::spawn(move || {
-        run_actor_system(config, store, ws_port, shutdown_rx);
+        run_actor_system(config, state, ws_port, shutdown_rx);
     }))
 }
 
 fn run_actor_system(
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
     ws_port: Option<u16>,
     shutdown_rx: Receiver<()>,
 ) {
@@ -84,7 +84,7 @@ fn run_actor_system(
 
     rt.block_on(async {
         let mut coordinator =
-            Coordinator::with_config(config, store).with_shutdown_signal(shutdown_rx);
+            Coordinator::with_config(config, state).with_shutdown_signal(shutdown_rx);
         if let Some(port) = ws_port {
             coordinator = coordinator.with_ws_port(port);
         }

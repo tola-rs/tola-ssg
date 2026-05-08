@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::address::SiteIndex;
 use crate::compiler::page::PageStateTicket;
 use crate::config::SiteConfig;
-use crate::page::StoredPageMap;
 use crate::reload::compile::{CompileOutcome, compile_page, compile_page_with_ticket};
 
 use super::{BackgroundTask, BatchResult};
@@ -12,13 +12,13 @@ use super::{BackgroundTask, BatchResult};
 pub(super) fn spawn_batch(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
     pages_hash: u64,
     watched_post_paths: Option<Vec<PathBuf>>,
     ticket: PageStateTicket,
 ) -> BackgroundTask {
     tokio::spawn(async move {
-        let outcomes = compile_batch_with_ticket(paths, config, store, ticket).await;
+        let outcomes = compile_batch_with_ticket(paths, config, state, ticket).await;
         BatchResult {
             outcomes,
             pages_hash,
@@ -31,24 +31,24 @@ pub(super) fn spawn_batch(
 pub(super) async fn compile_batch(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
 ) -> Vec<CompileOutcome> {
-    compile_batch_inner(paths, config, store, None).await
+    compile_batch_inner(paths, config, state, None).await
 }
 
 pub(super) async fn compile_batch_with_ticket(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
     ticket: PageStateTicket,
 ) -> Vec<CompileOutcome> {
-    compile_batch_inner(paths, config, store, Some(ticket)).await
+    compile_batch_inner(paths, config, state, Some(ticket)).await
 }
 
 async fn compile_batch_inner(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
     ticket: Option<PageStateTicket>,
 ) -> Vec<CompileOutcome> {
     use rayon::prelude::*;
@@ -60,8 +60,8 @@ async fn compile_batch_inner(
         let results: Vec<_> = paths
             .par_iter()
             .map(|path| match &ticket {
-                Some(ticket) => compile_page_with_ticket(path, &config, &store, ticket),
-                None => compile_page(path, &config, &store),
+                Some(ticket) => compile_page_with_ticket(path, &config, &state, ticket),
+                None => compile_page(path, &config, &state),
             })
             .collect();
         crate::compiler::dependency::flush_thread_local_deps();
@@ -102,9 +102,8 @@ mod tests {
     use crate::compiler::page::PageStateEpoch;
     use crate::core::UrlPath;
 
-    fn reset_global_state(store: &StoredPageMap) {
-        store.clear();
-        crate::address::GLOBAL_ADDRESS_SPACE.write().clear();
+    fn reset_state(state: &SiteIndex) {
+        state.clear();
     }
 
     #[tokio::test]
@@ -122,8 +121,8 @@ mod tests {
         config.build.content = content_dir;
         config.build.output = output_dir;
 
-        let store = Arc::new(StoredPageMap::new());
-        reset_global_state(&store);
+        let state = Arc::new(SiteIndex::new());
+        reset_state(&state);
 
         let epoch = PageStateEpoch::new();
         let ticket = epoch.ticket();
@@ -132,20 +131,21 @@ mod tests {
         let outcomes = compile_batch_with_ticket(
             vec![page.clone()],
             Arc::new(config),
-            Arc::clone(&store),
+            Arc::clone(&state),
             ticket,
         )
         .await;
 
         assert!(matches!(outcomes.as_slice(), [CompileOutcome::Skipped]));
-        assert!(store.get_permalink_by_source(&page).is_none());
+        assert!(state.pages().get_permalink_by_source(&page).is_none());
         assert!(
-            store
+            state
+                .pages()
                 .get_pages_with_drafts()
                 .iter()
                 .all(|page| page.permalink != UrlPath::from_page("/post/"))
         );
 
-        reset_global_state(&store);
+        reset_state(&state);
     }
 }

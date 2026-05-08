@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::address::{GLOBAL_ADDRESS_SPACE, PermalinkUpdate};
+use crate::address::{PermalinkUpdate, SiteIndex};
 use crate::page::PageRoute;
 use crate::reload::compile::CompileOutcome;
 
@@ -12,12 +12,12 @@ impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
         let config = Arc::clone(&self.config);
-        let store = Arc::clone(&self.store);
+        let state = Arc::clone(&self.state);
         let path = path.to_path_buf();
         crate::compiler::scheduler::SCHEDULER.invalidate(&path);
 
         let result = tokio::task::spawn_blocking(move || {
-            let outcome = crate::reload::compile::compile_page(&path, &config, &store);
+            let outcome = crate::reload::compile::compile_page(&path, &config, &state);
             // spawn_blocking threads are not rayon workers.
             crate::compiler::dependency::flush_current_thread_deps();
             outcome
@@ -33,7 +33,7 @@ impl CompilerActor {
     /// Compile multiple files in parallel (blocking).
     pub(super) async fn compile_batch_blocking(&mut self, paths: Vec<PathBuf>) {
         let outcomes =
-            compile_batch(paths, Arc::clone(&self.config), Arc::clone(&self.store)).await;
+            compile_batch(paths, Arc::clone(&self.config), Arc::clone(&self.state)).await;
         for outcome in outcomes {
             self.route(outcome).await;
         }
@@ -69,7 +69,7 @@ impl CompilerActor {
                 vdom,
                 warnings,
             } => {
-                let permalink_change = update_address_space(route, title);
+                let permalink_change = update_address_space(&self.state, route, title);
                 crate::actor::messages::VdomMsg::Process {
                     path,
                     url_path,
@@ -94,10 +94,14 @@ impl CompilerActor {
     }
 }
 
-fn update_address_space(route: PageRoute, title: Option<String>) -> Option<PermalinkUpdate> {
+fn update_address_space(
+    state: &SiteIndex,
+    route: PageRoute,
+    title: Option<String>,
+) -> Option<PermalinkUpdate> {
     let path = route.source.clone();
     let url_path = route.permalink.clone();
-    let mut space = GLOBAL_ADDRESS_SPACE.write();
+    let mut space = state.address().write();
     let update = space.update_page_checked(route, title);
     crate::debug!(
         "permalink";
@@ -115,7 +119,7 @@ fn update_address_space(route: PageRoute, title: Option<String>) -> Option<Perma
 #[cfg(test)]
 mod tests {
     use super::update_address_space;
-    use crate::address::{GLOBAL_ADDRESS_SPACE, PermalinkUpdate};
+    use crate::address::{PermalinkUpdate, SiteIndex};
     use crate::core::UrlPath;
     use crate::page::PageRoute;
     use std::path::PathBuf;
@@ -134,10 +138,11 @@ mod tests {
 
     #[test]
     fn update_address_space_reports_permalink_change_for_existing_source_mapping() {
+        let state = SiteIndex::new();
         let old_url = UrlPath::from_page("/old/");
 
         {
-            let mut space = GLOBAL_ADDRESS_SPACE.write();
+            let mut space = state.address().write();
             space.clear();
             space.register_page(
                 test_route("content/post.typ", "/old/", "public/old/index.html"),
@@ -146,6 +151,7 @@ mod tests {
         }
 
         let change = update_address_space(
+            &state,
             test_route("content/post.typ", "/new/", "public/new/index.html"),
             None,
         );
@@ -157,7 +163,7 @@ mod tests {
             other => panic!("expected permalink change, got {:?}", other),
         }
 
-        let mut space = GLOBAL_ADDRESS_SPACE.write();
+        let mut space = state.address().write();
         space.clear();
     }
 }

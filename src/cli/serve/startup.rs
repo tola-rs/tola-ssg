@@ -10,14 +10,14 @@ use super::{
     bind_server, init_serve_build, note_request_activity, request_idle_for, scan_pages,
     set_scan_ready, start_serve_build,
 };
-use crate::address::GLOBAL_ADDRESS_SPACE;
+use crate::address::SiteIndex;
 use crate::cache::{self, PersistedDiagnostics, PersistedError, RemovedFile};
 use crate::compiler::dependency::{self, collect_virtual_dependents};
 use crate::compiler::page::{BUILD_CACHE, cache_vdom};
 use crate::compiler::scheduler::SCHEDULER;
 use crate::config::{self, SiteConfig, clear_clean_flag};
 use crate::core::UrlPath;
-use crate::page::{PageState, StoredPageMap};
+use crate::page::PageState;
 use crate::reload::compile::{self, CompileOutcome};
 use crate::{debug, log, logger};
 
@@ -30,7 +30,7 @@ const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Start serve with cached build support
 pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     use crate::core::{set_healthy, set_serving};
-    let store = Arc::new(StoredPageMap::new());
+    let state = Arc::new(SiteIndex::new());
 
     if config.build.clean
         && let Err(e) = cache::clear_cache_dir(config.get_root())
@@ -53,10 +53,10 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     note_request_activity();
 
     let config_arc = config::cfg();
-    let scan_store = Arc::clone(&store);
+    let scan_state = Arc::clone(&state);
     let needs_full_build = !has_cache;
     std::thread::spawn(move || {
-        let scan_success = !needs_full_build || progressive_scan(&config_arc, &scan_store);
+        let scan_success = !needs_full_build || progressive_scan(&config_arc, &scan_state);
 
         if !scan_success {
             set_scan_ready(false);
@@ -79,11 +79,11 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             // block the startup coordinator or interactive requests.
             set_serving();
             set_healthy(true);
-            start_serve_build(Arc::clone(&config_arc), Arc::clone(&scan_store));
+            start_serve_build(Arc::clone(&config_arc), Arc::clone(&scan_state));
             return;
         }
 
-        let build_success = startup_with_cache(&config_arc, &scan_store);
+        let build_success = startup_with_cache(&config_arc, &scan_state);
 
         set_healthy(build_success);
 
@@ -96,10 +96,10 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
         }
     });
 
-    bound_server.run(store)
+    bound_server.run(state)
 }
 
-fn progressive_scan(config: &SiteConfig, store: &StoredPageMap) -> bool {
+fn progressive_scan(config: &SiteConfig, state: &SiteIndex) -> bool {
     use crate::core::is_shutdown;
 
     if let Err(e) = init_serve_build(config) {
@@ -111,7 +111,7 @@ fn progressive_scan(config: &SiteConfig, store: &StoredPageMap) -> bool {
         return false;
     }
 
-    if let Err(e) = scan_pages(config, store) {
+    if let Err(e) = scan_pages(config, state) {
         debug!("scan"; "failed: {}", e);
         return false;
     }
@@ -123,14 +123,14 @@ fn progressive_scan(config: &SiteConfig, store: &StoredPageMap) -> bool {
     true
 }
 
-fn startup_with_cache(config: &SiteConfig, store: &StoredPageMap) -> bool {
+fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
     if let Err(e) = init_serve_build(config) {
         log!("build"; "cache startup init failed: {}", e);
         set_scan_ready(false);
         return false;
     }
 
-    if let Err(e) = scan_pages(config, store) {
+    if let Err(e) = scan_pages(config, state) {
         log!("scan"; "cache startup scan failed: {}", e);
         set_scan_ready(false);
         return false;
@@ -167,7 +167,7 @@ fn startup_with_cache(config: &SiteConfig, store: &StoredPageMap) -> bool {
         modified.modified.len()
     );
 
-    cleanup_removed_files(&modified.removed, config, store, &mut diagnostics);
+    cleanup_removed_files(&modified.removed, config, state, &mut diagnostics);
 
     for path in modified.created {
         files_to_compile.insert(path);
@@ -179,26 +179,26 @@ fn startup_with_cache(config: &SiteConfig, store: &StoredPageMap) -> bool {
     let mut compile_targets: Vec<_> = files_to_compile.into_iter().collect();
     compile_targets.sort();
 
-    let pages_hash = store.pages_hash();
+    let pages_hash = state.pages().pages_hash();
     let mut stats = StartupCompileStats::default();
     if !compile_targets.is_empty() {
         stats = compile_startup_batch(
             &compile_targets,
             &modified.cached_urls_by_source,
             config,
-            store,
+            state,
             &mut diagnostics,
         );
     }
 
-    if store.pages_hash() != pages_hash {
+    if state.pages().pages_hash() != pages_hash {
         let dependents = collect_virtual_dependents();
         if !dependents.is_empty() {
             let virtual_stats = compile_startup_batch(
                 &dependents.into_iter().collect::<Vec<_>>(),
                 &FxHashMap::default(),
                 config,
-                store,
+                state,
                 &mut diagnostics,
             );
             stats.success += virtual_stats.success;
@@ -250,7 +250,7 @@ struct StartupCompileStats {
 fn cleanup_removed_files(
     removed: &[RemovedFile],
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     diagnostics: &mut PersistedDiagnostics,
 ) {
     if removed.is_empty() {
@@ -259,21 +259,19 @@ fn cleanup_removed_files(
 
     for item in removed {
         SCHEDULER.invalidate(&item.source_path);
-        GLOBAL_ADDRESS_SPACE
-            .write()
-            .remove_by_source(&item.source_path);
-        store.remove_by_source(&item.source_path);
+        state.address().write().remove_by_source(&item.source_path);
+        state.pages().remove_by_source(&item.source_path);
         dependency::remove_content(&item.source_path);
-        cleanup_url_artifacts(config, store, &item.url_path);
+        cleanup_url_artifacts(config, state, &item.url_path);
 
         let rel = relative_source_path(config, &item.source_path);
         diagnostics.clear_for(&rel);
     }
 }
 
-fn cleanup_url_artifacts(config: &SiteConfig, store: &StoredPageMap, url: &UrlPath) {
+fn cleanup_url_artifacts(config: &SiteConfig, state: &SiteIndex, url: &UrlPath) {
     BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
-    PageState::new(store).clear_links(url);
+    PageState::new(state.pages()).clear_links(url);
     compile::cleanup_output_for_url(config, url);
 }
 
@@ -281,10 +279,10 @@ fn cleanup_cached_url(
     cached_urls: &FxHashMap<PathBuf, UrlPath>,
     source_path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
 ) {
     if let Some(old_url) = cached_urls.get(source_path) {
-        cleanup_url_artifacts(config, store, old_url);
+        cleanup_url_artifacts(config, state, old_url);
     }
 }
 
@@ -293,12 +291,12 @@ fn cleanup_cached_url_if_changed(
     source_path: &Path,
     new_url: &UrlPath,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
 ) {
     if let Some(old_url) = cached_urls.get(source_path)
         && old_url != new_url
     {
-        cleanup_url_artifacts(config, store, old_url);
+        cleanup_url_artifacts(config, state, old_url);
     }
 }
 
@@ -316,10 +314,10 @@ fn handle_startup_vdom_outcome(
     warnings: Vec<String>,
     cached_urls: &FxHashMap<PathBuf, UrlPath>,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     diagnostics: &mut PersistedDiagnostics,
 ) {
-    cleanup_cached_url_if_changed(cached_urls, &path, &url_path, config, store);
+    cleanup_cached_url_if_changed(cached_urls, &path, &url_path, config, state);
     cache_vdom(&url_path, *vdom);
 
     let rel = relative_source_path(config, &path);
@@ -348,10 +346,10 @@ fn handle_startup_skipped_outcome(
     rel_input: &str,
     cached_urls: &FxHashMap<PathBuf, UrlPath>,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     diagnostics: &mut PersistedDiagnostics,
 ) {
-    cleanup_cached_url(cached_urls, input_path, config, store);
+    cleanup_cached_url(cached_urls, input_path, config, state);
     diagnostics.clear_for(rel_input);
 }
 
@@ -359,7 +357,7 @@ fn compile_startup_batch(
     paths: &[PathBuf],
     cached_urls: &FxHashMap<PathBuf, UrlPath>,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     diagnostics: &mut PersistedDiagnostics,
 ) -> StartupCompileStats {
     let mut stats = StartupCompileStats::default();
@@ -371,7 +369,7 @@ fn compile_startup_batch(
             std::thread::sleep(STARTUP_POLL_INTERVAL);
         }
 
-        let outcomes = compile::compile_startup_batch(path_chunk, config, store);
+        let outcomes = compile::compile_startup_batch(path_chunk, config, state);
 
         for (input_path, outcome) in path_chunk.iter().zip(outcomes.into_iter()) {
             let rel_input = input_path
@@ -395,7 +393,7 @@ fn compile_startup_batch(
                         warnings,
                         cached_urls,
                         config,
-                        store,
+                        state,
                         diagnostics,
                     );
                     stats.success += 1;
@@ -414,7 +412,7 @@ fn compile_startup_batch(
                         &rel_input,
                         cached_urls,
                         config,
-                        store,
+                        state,
                         diagnostics,
                     );
                     stats.skipped += 1;
@@ -450,10 +448,9 @@ mod tests {
         config
     }
 
-    fn reset_global_state(store: &StoredPageMap) {
+    fn reset_global_state(state: &SiteIndex) {
         BUILD_CACHE.clear();
-        store.clear();
-        GLOBAL_ADDRESS_SPACE.write().clear();
+        state.clear();
         dependency::clear_graph();
         freshness::clear_cache();
     }
@@ -489,8 +486,8 @@ mod tests {
     fn startup_batch_skipped_draft_cleans_cached_output() {
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
-        let store = StoredPageMap::new();
-        reset_global_state(&store);
+        let state = SiteIndex::new();
+        reset_global_state(&state);
 
         let source = config.build.content.join("post.md");
         write_markdown(&source, "Draft Post", true);
@@ -500,7 +497,7 @@ mod tests {
         let output_file = output_file_for(&config, &old_url);
         fs::create_dir_all(output_file.parent().unwrap()).unwrap();
         fs::write(&output_file, "stale output").unwrap();
-        PageState::new(&store).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
+        PageState::new(state.pages()).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
 
         let rel = config.root_relative(&source).display().to_string();
         let mut diagnostics = PersistedDiagnostics::new();
@@ -514,7 +511,7 @@ mod tests {
             std::slice::from_ref(&source),
             &cached_urls,
             &config,
-            &store,
+            &state,
             &mut diagnostics,
         );
 
@@ -522,19 +519,19 @@ mod tests {
         assert_eq!(stats.failed, 0);
         assert_eq!(stats.skipped, 1);
         assert!(!output_file.exists(), "stale output should be removed");
-        assert!(PageState::new(&store).links_to(&old_url).is_empty());
+        assert!(PageState::new(state.pages()).links_to(&old_url).is_empty());
         assert_eq!(diagnostics.error_count(), 0);
         assert_eq!(diagnostics.warning_count(), 0);
 
-        reset_global_state(&store);
+        reset_global_state(&state);
     }
 
     #[test]
     fn startup_batch_success_writes_updated_html() {
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
-        let store = StoredPageMap::new();
-        reset_global_state(&store);
+        let state = SiteIndex::new();
+        reset_global_state(&state);
 
         let source = config.build.content.join("post.md");
         write_markdown(&source, "Startup Modified", false);
@@ -548,7 +545,7 @@ mod tests {
             std::slice::from_ref(&source),
             &FxHashMap::default(),
             &config,
-            &store,
+            &state,
             &mut diagnostics,
         );
 
@@ -561,15 +558,15 @@ mod tests {
         assert!(html.contains("Startup Modified"));
         assert_eq!(diagnostics.error_count(), 0);
 
-        reset_global_state(&store);
+        reset_global_state(&state);
     }
 
     #[test]
     fn startup_batch_multiple_paths_accumulates_results_across_chunks() {
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
-        let store = StoredPageMap::new();
-        reset_global_state(&store);
+        let state = SiteIndex::new();
+        reset_global_state(&state);
 
         let first = config.build.content.join("first.md");
         let second = config.build.content.join("second.md");
@@ -582,7 +579,7 @@ mod tests {
             &[first.clone(), second.clone()],
             &FxHashMap::default(),
             &config,
-            &store,
+            &state,
             &mut PersistedDiagnostics::new(),
         );
 
@@ -595,22 +592,22 @@ mod tests {
         assert!(first_html.exists());
         assert!(second_html.exists());
 
-        reset_global_state(&store);
+        reset_global_state(&state);
     }
 
     #[test]
     fn cleanup_removed_files_removes_output_and_diagnostics() {
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
-        let store = StoredPageMap::new();
-        reset_global_state(&store);
+        let state = SiteIndex::new();
+        reset_global_state(&state);
 
         let source = crate::utils::path::normalize_path(&config.build.content.join("removed.md"));
         let url = UrlPath::from_page("/removed/");
         let output_file = output_file_for(&config, &url);
         fs::create_dir_all(output_file.parent().unwrap()).unwrap();
         fs::write(&output_file, "stale output").unwrap();
-        PageState::new(&store).record_links(&url, vec![UrlPath::from_page("/target/")]);
+        PageState::new(state.pages()).record_links(&url, vec![UrlPath::from_page("/target/")]);
 
         let rel = source
             .strip_prefix(config.get_root())
@@ -625,22 +622,22 @@ mod tests {
             source_path: source,
             url_path: url.clone(),
         }];
-        cleanup_removed_files(&removed, &config, &store, &mut diagnostics);
+        cleanup_removed_files(&removed, &config, &state, &mut diagnostics);
 
         assert!(!output_file.exists());
-        assert!(PageState::new(&store).links_to(&url).is_empty());
+        assert!(PageState::new(state.pages()).links_to(&url).is_empty());
         assert_eq!(diagnostics.error_count(), 0);
         assert_eq!(diagnostics.warning_count(), 0);
 
-        reset_global_state(&store);
+        reset_global_state(&state);
     }
 
     #[test]
     fn startup_batch_permalink_change_cleans_old_output() {
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
-        let store = StoredPageMap::new();
-        reset_global_state(&store);
+        let state = SiteIndex::new();
+        reset_global_state(&state);
 
         let source = config.build.content.join("post.md");
         write_markdown_with_permalink(&source, "Permalink Changed", "/new-url/");
@@ -652,7 +649,7 @@ mod tests {
         let old_output = output_file_for(&config, &old_url);
         fs::create_dir_all(old_output.parent().unwrap()).unwrap();
         fs::write(&old_output, "stale old output").unwrap();
-        PageState::new(&store).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
+        PageState::new(state.pages()).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
 
         let mut cached_urls = FxHashMap::default();
         cached_urls.insert(source.clone(), old_url.clone());
@@ -662,7 +659,7 @@ mod tests {
             std::slice::from_ref(&source),
             &cached_urls,
             &config,
-            &store,
+            &state,
             &mut diagnostics,
         );
 
@@ -677,8 +674,8 @@ mod tests {
             !old_output.exists(),
             "old permalink output should be removed"
         );
-        assert!(PageState::new(&store).links_to(&old_url).is_empty());
+        assert!(PageState::new(state.pages()).links_to(&old_url).is_empty());
 
-        reset_global_state(&store);
+        reset_global_state(&state);
     }
 }

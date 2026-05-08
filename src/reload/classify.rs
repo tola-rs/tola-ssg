@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use rustc_hash::FxHashSet;
 
 // Re-export for convenience
+use crate::address::SiteIndex;
 use crate::compiler::dependency::get_dependents;
 use crate::config::SiteConfig;
 pub use crate::core::{ContentKind, FileCategory};
@@ -78,7 +79,11 @@ impl ClassifyResult {
 /// - Categorizes each file
 /// - Resolves dependency relationships
 /// - Returns prioritized compilation queue
-pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResult {
+pub fn classify_changes(
+    paths: &[PathBuf],
+    config: &SiteConfig,
+    state: &SiteIndex,
+) -> ClassifyResult {
     let mut classified = Vec::new();
     let mut config_changed = false;
     let mut deps_changed = Vec::new();
@@ -132,7 +137,7 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
         // Check if there are active pages that should be prioritized
         for active_url in ACTIVE_PAGE.get_all() {
             // Convert URL to file path and set as active priority
-            if let Some(active_path) = url_to_content_path(active_url.as_str(), config) {
+            if let Some(active_path) = url_to_content_path(active_url.as_str(), state) {
                 queue.set_active(active_path);
             }
         }
@@ -156,12 +161,11 @@ pub fn classify_changes(paths: &[PathBuf], config: &SiteConfig) -> ClassifyResul
 ///
 /// Uses the same path source as the dependency graph (PageRoute.source),
 /// ensuring consistent path matching in set_active()
-pub fn url_to_content_path(url: &str, _config: &SiteConfig) -> Option<PathBuf> {
-    use crate::address::GLOBAL_ADDRESS_SPACE;
+pub fn url_to_content_path(url: &str, state: &SiteIndex) -> Option<PathBuf> {
     use crate::core::UrlPath;
 
     let url_path = UrlPath::from_page(url);
-    let space = GLOBAL_ADDRESS_SPACE.read();
+    let space = state.address().read();
 
     space
         .get_by_url(&url_path)
@@ -182,6 +186,7 @@ pub fn collect_dependents(changed_files: &[PathBuf]) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::address::SiteIndex;
     use crate::config::SiteConfig;
     use crate::utils::path::normalize_path;
     use tempfile::TempDir;
@@ -222,7 +227,8 @@ mod tests {
         std::fs::create_dir_all(parent).unwrap();
         std::fs::write(&output_file, "body{}").unwrap();
 
-        let result = classify_changes(std::slice::from_ref(&output_file), &config);
+        let state = SiteIndex::new();
+        let result = classify_changes(std::slice::from_ref(&output_file), &config, &state);
         assert_eq!(result.output_changed, vec![output_file]);
         assert!(result.asset_changed.is_empty());
         assert!(result.compile_queue.is_empty());

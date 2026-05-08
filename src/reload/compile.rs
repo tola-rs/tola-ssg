@@ -5,11 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::address::SiteIndex;
 use crate::compiler::family::Indexed;
 use crate::compiler::page::{PageStateTicket, process_page, process_page_with_ticket};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
-use crate::page::{PageRoute, PageState, StoredPageMap};
+use crate::page::{PageRoute, PageState};
 use tola_vdom::Document;
 
 /// Result of compiling a single file
@@ -44,23 +45,23 @@ pub enum CompileOutcome {
 /// - Calls the existing `process_page` with Development driver for .typ files
 /// - Returns a unified outcome type
 /// - Applies draft-transition cleanup when a page becomes non-visible
-pub fn compile_page(path: &Path, config: &SiteConfig, store: &StoredPageMap) -> CompileOutcome {
-    compile_page_inner(path, config, store, None)
+pub fn compile_page(path: &Path, config: &SiteConfig, state: &SiteIndex) -> CompileOutcome {
+    compile_page_inner(path, config, state, None)
 }
 
 pub fn compile_page_with_ticket(
     path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     ticket: &PageStateTicket,
 ) -> CompileOutcome {
-    compile_page_inner(path, config, store, Some(ticket))
+    compile_page_inner(path, config, state, Some(ticket))
 }
 
 fn compile_page_inner(
     path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
     let ext = path.extension().and_then(|e| e.to_str());
@@ -72,7 +73,7 @@ fn compile_page_inner(
             if !path.starts_with(&config.build.content) {
                 return CompileOutcome::Skipped;
             }
-            compile_content_file(path, config, store, ticket)
+            compile_content_file(path, config, state, ticket)
         }
         Some("css" | "js" | "html") => CompileOutcome::Reload {
             reason: format!("asset changed: {}", path.display()),
@@ -95,11 +96,11 @@ fn compile_page_inner(
 pub fn compile_startup_batch(
     paths: &[PathBuf],
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
 ) -> Vec<CompileOutcome> {
     let mut outcomes = Vec::with_capacity(paths.len());
     for path in paths {
-        outcomes.push(compile_page(path, config, store));
+        outcomes.push(compile_page(path, config, state));
         crate::compiler::dependency::flush_current_thread_deps();
     }
 
@@ -110,14 +111,14 @@ pub fn compile_startup_batch(
 fn compile_content_file(
     path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
     let result = match ticket {
         Some(ticket) => {
-            process_page_with_ticket(BuildMode::DEVELOPMENT, path, config, store, ticket)
+            process_page_with_ticket(BuildMode::DEVELOPMENT, path, config, state, ticket)
         }
-        None => process_page(BuildMode::DEVELOPMENT, path, config, store),
+        None => process_page(BuildMode::DEVELOPMENT, path, config, state),
     };
 
     match result {
@@ -162,9 +163,9 @@ fn compile_content_file(
         Ok(None) => {
             let cleaned = match ticket {
                 Some(ticket) => ticket
-                    .commit(|| cleanup_draft_state(path, config, store))
+                    .commit(|| cleanup_draft_state(path, config, state))
                     .unwrap_or(false),
-                None => cleanup_draft_state(path, config, store),
+                None => cleanup_draft_state(path, config, state),
             };
             if cleaned {
                 crate::debug!("watch"; "page became draft: {}", path.display());
@@ -182,8 +183,8 @@ fn compile_content_file(
 /// Clean runtime/global state for pages that are now drafts.
 ///
 /// Returns true when a previously visible page existed and was removed.
-fn cleanup_draft_state(path: &Path, config: &SiteConfig, store: &StoredPageMap) -> bool {
-    cleanup_removed_source_state(path, config, store).is_some()
+fn cleanup_draft_state(path: &Path, config: &SiteConfig, state: &SiteIndex) -> bool {
+    cleanup_removed_source_state(path, config, state).is_some()
 }
 
 /// Clean all runtime state for a removed or hidden source file.
@@ -192,37 +193,39 @@ fn cleanup_draft_state(path: &Path, config: &SiteConfig, store: &StoredPageMap) 
 pub fn cleanup_removed_source_state(
     path: &Path,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
 ) -> Option<UrlPath> {
     let normalized = crate::utils::path::normalize_path(path);
     let has_alt = normalized.as_path() != path;
 
-    let old_url = crate::address::GLOBAL_ADDRESS_SPACE
+    let old_url = state
+        .address()
         .read()
         .url_for_source(path)
         .cloned()
-        .or_else(|| store.get_permalink_by_source(path));
+        .or_else(|| state.pages().get_permalink_by_source(path));
     let old_url = if old_url.is_none() && has_alt {
-        crate::address::GLOBAL_ADDRESS_SPACE
+        state
+            .address()
             .read()
             .url_for_source(&normalized)
             .cloned()
-            .or_else(|| store.get_permalink_by_source(&normalized))
+            .or_else(|| state.pages().get_permalink_by_source(&normalized))
     } else {
         old_url
     };
 
     // Remove stale runtime state regardless of whether the page had a URL mapping.
     {
-        let mut space = crate::address::GLOBAL_ADDRESS_SPACE.write();
+        let mut space = state.address().write();
         space.remove_by_source(path);
         if has_alt {
             space.remove_by_source(&normalized);
         }
     }
-    store.remove_by_source(path);
+    state.pages().remove_by_source(path);
     if has_alt {
-        store.remove_by_source(&normalized);
+        state.pages().remove_by_source(&normalized);
     }
     crate::compiler::dependency::remove_content(path);
     if has_alt {
@@ -239,7 +242,7 @@ pub fn cleanup_removed_source_state(
 
     // Remove cached VDOM and link-graph edges for this page.
     crate::compiler::page::BUILD_CACHE.remove(&tola_vdom::CacheKey::new(old_url.as_str()));
-    PageState::new(store).clear_links(&old_url);
+    PageState::new(state.pages()).clear_links(&old_url);
 
     cleanup_output_file(config, &old_url);
     Some(old_url)
@@ -280,11 +283,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn reset_global_state(store: &StoredPageMap) {
+    fn reset_state(state: &SiteIndex) {
         crate::compiler::page::BUILD_CACHE.clear();
         crate::compiler::dependency::clear_graph();
-        store.clear();
-        crate::address::GLOBAL_ADDRESS_SPACE.write().clear();
+        state.clear();
     }
 
     #[test]
@@ -313,9 +315,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
-        let store = StoredPageMap::new();
+        let state = SiteIndex::new();
 
-        let outcome = compile_page(&template, &config, &store);
+        let outcome = compile_page(&template, &config, &state);
         assert!(matches!(outcome, CompileOutcome::Skipped));
     }
 
@@ -333,13 +335,14 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir.clone();
         config.build.output = output_dir.clone();
-        let store = StoredPageMap::new();
+        let state = SiteIndex::new();
+        let store = state.pages();
 
-        reset_global_state(&store);
+        reset_state(&state);
 
         // Start as draft (no previously published state): should be skipped.
         fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
-        let draft_outcome = compile_page(&page, &config, &store);
+        let draft_outcome = compile_page(&page, &config, &state);
         assert!(matches!(draft_outcome, CompileOutcome::Skipped));
         assert!(store.get_permalink_by_source(&page).is_none());
         assert!(!output_file.exists());
@@ -357,7 +360,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        crate::address::GLOBAL_ADDRESS_SPACE
+        state
+            .address()
             .write()
             .register_page(route.clone(), Some("Post".to_string()));
         if let Some(parent) = output_file.parent() {
@@ -368,24 +372,19 @@ mod tests {
         let hash_published = store.pages_hash();
 
         // Compile as draft again; stale published state must be cleaned.
-        let back_to_draft = compile_page(&page, &config, &store);
+        let back_to_draft = compile_page(&page, &config, &state);
         assert!(
             matches!(back_to_draft, CompileOutcome::Skipped),
             "expected Skipped when removing published page, got: {:?}",
             back_to_draft
         );
         assert!(store.get_permalink_by_source(&page).is_none());
-        assert!(
-            crate::address::GLOBAL_ADDRESS_SPACE
-                .read()
-                .url_for_source(&page)
-                .is_none()
-        );
+        assert!(state.address().read().url_for_source(&page).is_none());
         assert!(!output_file.exists());
-        assert!(PageState::new(&store).links_to(&route.permalink).is_empty());
+        assert!(PageState::new(store).links_to(&route.permalink).is_empty());
         assert_ne!(store.pages_hash(), hash_published);
 
-        reset_global_state(&store);
+        reset_state(&state);
     }
 
     #[test]
@@ -402,9 +401,10 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir.clone();
         config.build.output = output_dir.clone();
-        let store = StoredPageMap::new();
+        let state = SiteIndex::new();
+        let store = state.pages();
 
-        reset_global_state(&store);
+        reset_state(&state);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
@@ -418,16 +418,17 @@ mod tests {
                 ..Default::default()
             },
         );
-        crate::address::GLOBAL_ADDRESS_SPACE
+        state
+            .address()
             .write()
             .register_page(route.clone(), Some("Post".to_string()));
-        PageState::new(&store).record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
+        PageState::new(store).record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
 
-        let removed = cleanup_removed_source_state(&page, &config, &store);
+        let removed = cleanup_removed_source_state(&page, &config, &state);
 
         assert_eq!(removed, Some(route.permalink.clone()));
-        assert!(PageState::new(&store).links_to(&route.permalink).is_empty());
-        reset_global_state(&store);
+        assert!(PageState::new(store).links_to(&route.permalink).is_empty());
+        reset_state(&state);
     }
 
     #[test]
@@ -444,9 +445,10 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         config.build.output = output_dir;
-        let store = StoredPageMap::new();
+        let state = SiteIndex::new();
+        let store = state.pages();
 
-        reset_global_state(&store);
+        reset_state(&state);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
@@ -460,7 +462,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        crate::address::GLOBAL_ADDRESS_SPACE
+        state
+            .address()
             .write()
             .register_page(route.clone(), Some("Post".to_string()));
 
@@ -468,7 +471,7 @@ mod tests {
         let ticket = epoch.ticket();
         epoch.advance();
 
-        let outcome = compile_page_with_ticket(&page, &config, &store, &ticket);
+        let outcome = compile_page_with_ticket(&page, &config, &state, &ticket);
 
         assert!(matches!(outcome, CompileOutcome::Skipped));
         assert_eq!(
@@ -476,12 +479,13 @@ mod tests {
             Some(route.permalink.clone())
         );
         assert!(
-            crate::address::GLOBAL_ADDRESS_SPACE
+            state
+                .address()
                 .read()
                 .url_for_source(&crate::utils::path::normalize_path(&page))
                 .is_some()
         );
 
-        reset_global_state(&store);
+        reset_state(&state);
     }
 }

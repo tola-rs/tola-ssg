@@ -5,13 +5,13 @@ use crate::core::{BuildMode, ContentKind};
 
 /// Recompile modified files in parallel. Returns (path, error) for failures
 pub fn recompile_files(files: &[PathBuf], mode: BuildMode) -> Vec<(String, String)> {
+    use crate::address::SiteIndex;
     use crate::compiler::page::process_page;
     use crate::config::cfg;
-    use crate::page::StoredPageMap;
 
     let config = cfg();
-    let store = StoredPageMap::new();
-    if let Err(e) = crate::cli::common::populate_stored_pages(&config, &store) {
+    let state = SiteIndex::new();
+    if let Err(e) = crate::cli::common::populate_stored_pages(&config, state.pages()) {
         return vec![("page store".to_string(), e.to_string())];
     }
 
@@ -33,7 +33,7 @@ pub fn recompile_files(files: &[PathBuf], mode: BuildMode) -> Vec<(String, Strin
                 .display()
                 .to_string();
 
-            match process_page(mode, file, &config, &store) {
+            match process_page(mode, file, &config, &state) {
                 Ok(Some(result)) => {
                     if let Some(vdom) = result.indexed_vdom {
                         crate::compiler::page::cache_vdom(&result.permalink, vdom);

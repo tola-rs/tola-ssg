@@ -9,10 +9,9 @@ use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::page::StoredPageMap;
 use crate::{
-    asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
-    freshness, hooks, log, seo,
+    address::SiteIndex, asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind,
+    debug, embed, freshness, hooks, log, seo,
 };
 
 // Feed warmup work in small batches so the scheduler can use a few background
@@ -103,7 +102,7 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
 /// Background warmup is queued through the scheduler so on-demand requests can
 /// still deduplicate with existing work. To preserve UX, we only feed tiny
 /// batches and pause warmup while requests are active.
-pub fn serve_build(config: &SiteConfig, store: Arc<StoredPageMap>) -> Result<()> {
+pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
         .into_iter()
@@ -111,11 +110,11 @@ pub fn serve_build(config: &SiteConfig, store: Arc<StoredPageMap>) -> Result<()>
         .collect();
 
     debug!("build"; "warming {} pages via scheduler", content_files.len());
-    warm_site_pages(content_files, Arc::new(config.clone()), Arc::clone(&store));
+    warm_site_pages(content_files, Arc::new(config.clone()), Arc::clone(&state));
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
-    recompile_virtual_users(config, &store);
+    recompile_virtual_users(config, &state);
 
     // Post-processing (flatten assets already done in init_serve_build)
     // CNAME already done in init_serve_build
@@ -124,12 +123,12 @@ pub fn serve_build(config: &SiteConfig, store: Arc<StoredPageMap>) -> Result<()>
     hooks::run_post_hooks(config, BuildMode::DEVELOPMENT, true)?;
 
     // Finalize: print warnings and persist cache
-    finalize_serve_build(config)?;
+    finalize_serve_build(config, &state)?;
 
     // Generate feed and sitemap
     let (rss_result, sitemap_result) = rayon::join(
-        || seo::feed::build_feed(config, &store),
-        || seo::sitemap::build_sitemap(config, &store),
+        || seo::feed::build_feed(config, state.pages()),
+        || seo::sitemap::build_sitemap(config, state.pages()),
     );
 
     rss_result?;
@@ -143,9 +142,9 @@ pub fn serve_build(config: &SiteConfig, store: Arc<StoredPageMap>) -> Result<()>
 ///
 /// The startup coordinator already made request-driven serving available after
 /// scan completion, so this function must not block that path.
-pub fn start_serve_build(config: Arc<SiteConfig>, store: Arc<StoredPageMap>) {
+pub fn start_serve_build(config: Arc<SiteConfig>, state: Arc<SiteIndex>) {
     std::thread::spawn(move || {
-        if let Err(e) = serve_build(&config, store) {
+        if let Err(e) = serve_build(&config, state) {
             log!("build"; "background warmup failed: {}", e);
         }
     });
@@ -154,7 +153,7 @@ pub fn start_serve_build(config: Arc<SiteConfig>, store: Arc<StoredPageMap>) {
 fn warm_site_pages(
     content_files: Vec<std::path::PathBuf>,
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
 ) {
     use crate::cli::serve::request_idle_for;
     use compiler::scheduler::SCHEDULER;
@@ -170,7 +169,7 @@ fn warm_site_pages(
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        SCHEDULER.submit_background(chunk.to_vec(), Arc::clone(&config), Arc::clone(&store));
+        SCHEDULER.submit_background(chunk.to_vec(), Arc::clone(&config), Arc::clone(&state));
         SCHEDULER.wait_all();
     }
 }
@@ -180,7 +179,7 @@ fn warm_site_pages(
 /// This ensures iterative pages have complete data after all pages are compiled.
 /// Called after initial scheduler compilation to fix race condition where
 /// pages may have been compiled before page metadata was fully populated.
-fn recompile_virtual_users(config: &SiteConfig, store: &StoredPageMap) {
+fn recompile_virtual_users(config: &SiteConfig, state: &SiteIndex) {
     use crate::cli::serve::request_idle_for;
     use crate::compiler::dependency::collect_virtual_dependents;
     use crate::reload::compile::compile_page;
@@ -202,7 +201,7 @@ fn recompile_virtual_users(config: &SiteConfig, store: &StoredPageMap) {
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        let outcome = compile_page(path, config, store);
+        let outcome = compile_page(path, config, state);
         if let crate::reload::compile::CompileOutcome::Vdom { url_path, vdom, .. } = outcome {
             crate::compiler::page::cache_vdom(&url_path, *vdom);
         }
@@ -213,12 +212,11 @@ fn recompile_virtual_users(config: &SiteConfig, store: &StoredPageMap) {
 }
 
 /// Finalize serve build: print warnings/errors and persist cache
-fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
+fn finalize_serve_build(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
     use crate::cache::{
         PersistedDiagnostics, PersistedError, PersistedWarning, persist_diagnostics,
     };
     use crate::compiler::scheduler::SCHEDULER;
-    use crate::core::GLOBAL_ADDRESS_SPACE;
     let root = config.get_root();
 
     // Drain compilation failures from scheduler cache
@@ -266,7 +264,7 @@ fn finalize_serve_build(config: &SiteConfig) -> Result<()> {
     }
 
     // Persist VDOM cache for serve reuse
-    let source_paths = GLOBAL_ADDRESS_SPACE.read().source_paths();
+    let source_paths = state.address().read().source_paths();
     if let Err(e) = crate::cache::persist_cache(
         &compiler::page::BUILD_CACHE,
         &source_paths,

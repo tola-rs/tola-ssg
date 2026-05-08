@@ -7,7 +7,7 @@ mod priority;
 mod state;
 mod url;
 
-pub use crate::address::{GLOBAL_ADDRESS_SPACE, ResolveContext, ResolveResult};
+pub use crate::address::{ResolveContext, ResolveResult};
 
 pub use category::{ContentKind, FileCategory};
 pub use driver::BuildMode;

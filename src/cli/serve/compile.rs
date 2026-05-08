@@ -7,12 +7,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::address::SiteIndex;
 use crate::compiler::dependency::global as dep_graph;
 use crate::compiler::scheduler::{CompileResult, SCHEDULER};
 use crate::config::SiteConfig;
 use crate::core::Priority;
 use crate::freshness::mtime::{get_mtime, is_newer_than};
-use crate::page::{CompiledPage, StoredPageMap};
+use crate::page::CompiledPage;
 
 /// Ensure Typst runtime inputs match the config used for this request.
 fn ensure_typst_initialized(config: &SiteConfig) {
@@ -33,7 +34,7 @@ fn ensure_typst_initialized(config: &SiteConfig) {
 pub fn compile_on_demand(
     source: &Path,
     config: &SiteConfig,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
 ) -> Result<PathBuf> {
     ensure_typst_initialized(config);
 
@@ -51,7 +52,7 @@ pub fn compile_on_demand(
         source.to_path_buf(),
         Priority::Active,
         Arc::new(config.clone()),
-        store,
+        state,
     ) {
         CompileResult::Success(output) => Ok(output),
         CompileResult::Failed(error) => Err(anyhow::anyhow!("{}", error)),

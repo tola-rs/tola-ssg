@@ -4,6 +4,7 @@ use rustc_hash::FxHashSet;
 
 use super::types::DebouncedEvents;
 use crate::actor::messages::CompilerMsg;
+use crate::address::SiteIndex;
 use crate::config::SiteConfig;
 use crate::reload::classify::classify_changes;
 
@@ -16,7 +17,11 @@ pub(super) fn log_events(events: &DebouncedEvents) {
 }
 
 /// Convert DebouncedEvents to CompilerMsg(s)
-pub(super) fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -> Vec<CompilerMsg> {
+pub(super) fn events_to_messages(
+    events: DebouncedEvents,
+    config: &SiteConfig,
+    state: &SiteIndex,
+) -> Vec<CompilerMsg> {
     use crate::reload::classify::{FileCategory, categorize_path};
 
     let (created, modified, removed) = events.split();
@@ -36,7 +41,7 @@ pub(super) fn events_to_messages(events: DebouncedEvents, config: &SiteConfig) -
     );
 
     // Classify modified files plus created/removed deps and assets through the existing pipeline.
-    let result = classify_changes(&classify_paths, config);
+    let result = classify_changes(&classify_paths, config, state);
 
     if result.config_changed {
         return vec![CompilerMsg::FullRebuild];
@@ -116,6 +121,7 @@ mod tests {
     use super::super::classifier::EventClassifier;
     use super::super::types::{ChangeKind, DebouncedEvents};
     use super::*;
+    use crate::address::SiteIndex;
     use crate::config::section::build::{HookConfig, WatchMode};
     use crate::utils::path::normalize_path;
 
@@ -150,7 +156,8 @@ mod tests {
             (output_html.clone(), ChangeKind::Created),
         ]);
 
-        let messages = events_to_messages(events, &config);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
         let output_msg = messages.into_iter().find_map(|msg| match msg {
             CompilerMsg::OutputChange(paths) => Some(paths),
             _ => None,
@@ -169,7 +176,8 @@ mod tests {
         let asset = config.get_root().join("assets/styles/tailwind.css");
         let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
 
-        let messages = events_to_messages(events, &config);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
 
         assert!(
             messages
@@ -191,7 +199,8 @@ mod tests {
         let asset = config.get_root().join("assets/styles/tailwind.css");
         let events = DebouncedEvents(vec![(asset.clone(), ChangeKind::Created)]);
 
-        let messages = events_to_messages(events, &config);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
         let asset_msg = messages.into_iter().find_map(|msg| match msg {
             CompilerMsg::AssetChange(paths) => Some(paths),
             _ => None,
@@ -215,8 +224,10 @@ mod tests {
         let mut raw = FxHashMap::default();
         raw.insert(removed_dep, ChangeKind::Removed);
 
-        let events = EventClassifier::classify(raw, &config).expect("expected actionable event");
-        let messages = events_to_messages(events, &config);
+        let state = SiteIndex::new();
+        let events =
+            EventClassifier::classify(raw, &config, &state).expect("expected actionable event");
+        let messages = events_to_messages(events, &config, &state);
 
         assert!(
             messages
@@ -241,7 +252,8 @@ mod tests {
 
         let asset = config.get_root().join("assets/styles/tailwind.css");
         let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
-        let messages = events_to_messages(events, &config);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
 
         assert!(
             messages

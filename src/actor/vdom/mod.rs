@@ -22,18 +22,19 @@ mod handlers;
 mod permalink;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
 use batch::BatchLogger;
 
 use super::messages::{VdomMsg, WsMsg};
+use crate::address::SiteIndex;
 use crate::cache::{
     PersistedDiagnostics, persist_cache, persist_diagnostics, restore_cache,
     restore_dependency_graph, restore_diagnostics,
 };
 use crate::compiler::page::BUILD_CACHE;
-use crate::core::GLOBAL_ADDRESS_SPACE;
 
 /// VDOM Actor - converts AST to VDOM and computes diffs
 ///
@@ -47,6 +48,7 @@ pub struct VdomActor {
     rx: mpsc::Receiver<VdomMsg>,
     ws_tx: mpsc::Sender<WsMsg>,
     root: PathBuf,
+    state: Arc<SiteIndex>,
     batch: BatchLogger,
     error_state: PersistedDiagnostics,
 }
@@ -68,6 +70,7 @@ impl VdomActor {
         rx: mpsc::Receiver<VdomMsg>,
         ws_tx: mpsc::Sender<WsMsg>,
         root: PathBuf,
+        state: Arc<SiteIndex>,
     ) -> VdomRestoreResult {
         // Restore cache from disk into BUILD_CACHE (shared with scheduler)
         let restored = restore_cache(&BUILD_CACHE, &root).unwrap_or_else(|e| {
@@ -105,6 +108,7 @@ impl VdomActor {
             rx,
             ws_tx,
             root,
+            state,
             batch: BatchLogger::new(),
             error_state,
         };
@@ -182,7 +186,7 @@ impl VdomActor {
     }
 
     fn persist_state(&self) {
-        let source_paths = GLOBAL_ADDRESS_SPACE.read().source_paths();
+        let source_paths = self.state.address().read().source_paths();
         match persist_cache(&BUILD_CACHE, &source_paths, &self.root) {
             Ok(n) => crate::debug!("vdom"; "persisted {} cache entries", n),
             Err(e) => crate::debug!("vdom"; "cache persist failed: {}", e),
@@ -201,12 +205,12 @@ impl VdomActor {
 #[cfg(test)]
 mod persistence_tests {
     use crate::actor::messages::WsMsg;
-    use crate::address::PermalinkUpdate;
+    use crate::address::{PermalinkUpdate, SiteIndex};
     use crate::cache::restore_diagnostics;
     use crate::compiler::family::{IndexedDocument, Raw, TolaSite};
-    use crate::core::GLOBAL_ADDRESS_SPACE;
     use crate::core::UrlPath;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
     use tola_vdom::Element;
@@ -226,8 +230,9 @@ mod persistence_tests {
         let root = dir.path().to_path_buf();
         let (tx, rx) = mpsc::channel(10);
         let (ws_tx, _ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
 
-        let (actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let (actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone(), state);
         let actor_handle = tokio::spawn(actor.run());
 
         tx.send(VdomMsg::Error {
@@ -253,8 +258,9 @@ mod persistence_tests {
         let root = dir.path().to_path_buf();
         let (_tx, rx) = mpsc::channel(10);
         let (ws_tx, mut ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
 
-        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone(), state);
         let path = root.join("dup.typ");
         let url_path = UrlPath::from_page("/dup");
         let error = "same compile error".to_string();
@@ -288,8 +294,9 @@ mod persistence_tests {
         let root = dir.path().to_path_buf();
         let (_tx, rx) = mpsc::channel(10);
         let (ws_tx, mut ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
 
-        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone(), state);
 
         actor
             .handle_error(
@@ -319,8 +326,9 @@ mod persistence_tests {
         let root = dir.path().to_path_buf();
         let (_tx, rx) = mpsc::channel(10);
         let (ws_tx, mut ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
 
-        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone(), state);
         let existing_source = root.join("content/<script>alert(1)</script>.typ");
 
         actor
@@ -354,8 +362,9 @@ mod persistence_tests {
         let root = dir.path().to_path_buf();
         let (_tx, rx) = mpsc::channel(10);
         let (ws_tx, mut ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
 
-        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone());
+        let (mut actor, _, _, _) = VdomActor::new(rx, ws_tx, root.clone(), state);
         actor
             .handle_error(
                 root.join("clear.typ"),
@@ -395,14 +404,15 @@ mod persistence_tests {
         )
         .unwrap();
 
-        GLOBAL_ADDRESS_SPACE.write().clear();
+        let state = Arc::new(SiteIndex::new());
+        state.address().write().clear();
 
         let (_tx, rx) = mpsc::channel(1);
         let (ws_tx, _ws_rx) = mpsc::channel(1);
-        let _ = VdomActor::new(rx, ws_tx, root);
+        let _ = VdomActor::new(rx, ws_tx, root, Arc::clone(&state));
 
         assert!(
-            GLOBAL_ADDRESS_SPACE.read().is_empty(),
+            state.address().read().is_empty(),
             "AddressSpace should be rebuilt by scan_pages, not partially restored from cache"
         );
     }

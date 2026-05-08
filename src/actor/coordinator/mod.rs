@@ -19,8 +19,8 @@ use super::fs::FsActor;
 use super::messages::{CompilerMsg, VdomMsg, WsMsg};
 use super::vdom::VdomActor;
 use super::ws::WsActor;
+use crate::address::SiteIndex;
 use crate::config::SiteConfig;
-use crate::page::StoredPageMap;
 use crate::reload::server::WsServerHandle;
 
 const CHANNEL_BUFFER: usize = 32;
@@ -28,7 +28,7 @@ const CHANNEL_BUFFER: usize = 32;
 /// Coordinator - wires up and runs the actor system.
 pub struct Coordinator {
     config: Arc<SiteConfig>,
-    store: Arc<StoredPageMap>,
+    state: Arc<SiteIndex>,
     ws_port: Option<u16>,
     ws_server: Option<WsServerHandle>,
     shutdown_rx: Option<Receiver<()>>,
@@ -36,10 +36,10 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Create from Arc<SiteConfig>.
-    pub fn with_config(config: Arc<SiteConfig>, store: Arc<StoredPageMap>) -> Self {
+    pub fn with_config(config: Arc<SiteConfig>, state: Arc<SiteIndex>) -> Self {
         Self {
             config,
-            store,
+            state,
             ws_port: None,
             ws_server: None,
             shutdown_rx: None,
@@ -77,17 +77,26 @@ impl Coordinator {
         }
 
         let watch_paths = watch_paths::collect_watch_paths(&self.config);
-        let fs_actor = FsActor::new(watch_paths, compiler_tx.clone(), self.config.clone())
-            .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
+        let fs_actor = FsActor::new(
+            watch_paths,
+            compiler_tx.clone(),
+            self.config.clone(),
+            self.state.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
 
         let compiler_actor = CompilerActor::new(
             compiler_rx,
             vdom_tx.clone(),
             self.config.clone(),
-            self.store.clone(),
+            self.state.clone(),
         );
-        let (vdom_actor, restored_count, restored_errors, restored_warnings) =
-            VdomActor::new(vdom_rx, ws_tx.clone(), self.config.get_root().to_path_buf());
+        let (vdom_actor, restored_count, restored_errors, restored_warnings) = VdomActor::new(
+            vdom_rx,
+            ws_tx.clone(),
+            self.config.get_root().to_path_buf(),
+            self.state.clone(),
+        );
 
         let ws_actor = WsActor::new(ws_rx).with_pending_errors(restored_errors);
         crate::debug!("vdom"; "cache: {} entries", restored_count);

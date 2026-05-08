@@ -21,7 +21,7 @@ impl CompilerActor {
         changed_paths: Vec<PathBuf>,
     ) -> Option<BackgroundTask> {
         let start = Instant::now();
-        let pages_hash = self.store.pages_hash();
+        let pages_hash = self.state.pages().pages_hash();
 
         // Run pre hooks before compilation so dependent assets are up to date.
         let watched_post_paths = self.collect_watched_post_paths(&changed_paths);
@@ -49,7 +49,7 @@ impl CompilerActor {
             Some(spawn_batch(
                 affected,
                 Arc::clone(&self.config),
-                Arc::clone(&self.store),
+                Arc::clone(&self.state),
                 pages_hash,
                 watched_post_paths,
                 self.page_epoch.ticket(),
@@ -144,7 +144,7 @@ impl CompilerActor {
         let count = paths.len();
         crate::debug!("watch"; "{} new content files", count);
 
-        let pages_hash = self.store.pages_hash();
+        let pages_hash = self.state.pages().pages_hash();
 
         for path in &paths {
             self.compile_one(path).await;
@@ -162,7 +162,7 @@ impl CompilerActor {
             if let Some(url) = crate::reload::compile::cleanup_removed_source_state(
                 path,
                 &self.config,
-                &self.store,
+                &self.state,
             ) {
                 crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
             }
@@ -294,7 +294,7 @@ impl CompilerActor {
         );
 
         for url in active_urls {
-            if let Some(path) = url_to_content_path(url.as_str(), &self.config) {
+            if let Some(path) = url_to_content_path(url.as_str(), &self.state) {
                 self.compile_one(&path).await;
             }
         }
@@ -334,9 +334,9 @@ impl CompilerActor {
             .await;
 
         let config = Arc::clone(&self.config);
-        let store = Arc::clone(&self.store);
+        let state = Arc::clone(&self.state);
         let result = tokio::task::spawn_blocking(move || {
-            crate::cli::build::build_site(BuildMode::DEVELOPMENT, &config, &store, true)
+            crate::cli::build::build_site(BuildMode::DEVELOPMENT, &config, &state, true)
         })
         .await;
 
@@ -359,7 +359,7 @@ impl CompilerActor {
                         active_urls.len()
                     );
                     for url in active_urls {
-                        if let Some(path) = url_to_content_path(url.as_str(), &self.config) {
+                        if let Some(path) = url_to_content_path(url.as_str(), &self.state) {
                             self.compile_one(&path).await;
                         }
                     }
@@ -394,8 +394,8 @@ impl CompilerActor {
         crate::debug!("compile"; "retry scan triggered");
 
         let config = Arc::clone(&self.config);
-        let store = Arc::clone(&self.store);
-        let result = tokio::task::spawn_blocking(move || scan_pages(&config, &store)).await;
+        let state = Arc::clone(&self.state);
+        let result = tokio::task::spawn_blocking(move || scan_pages(&config, &state)).await;
 
         match result {
             Ok(Ok(_)) => {
@@ -415,7 +415,7 @@ impl CompilerActor {
 
                 let active_urls = ACTIVE_PAGE.get_all();
                 for url in active_urls {
-                    if let Some(path) = url_to_content_path(url.as_str(), &self.config)
+                    if let Some(path) = url_to_content_path(url.as_str(), &self.state)
                         && !content_files.contains(&path)
                     {
                         self.compile_one(&path).await;

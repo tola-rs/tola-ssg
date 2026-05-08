@@ -2,6 +2,7 @@
 
 use typst_batch::prelude::*;
 
+use crate::address::SiteIndex;
 use crate::asset::scan_global_assets;
 use crate::compiler::CompileContext;
 use crate::compiler::page::write::write_page;
@@ -11,7 +12,7 @@ use crate::compiler::page::{
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::config::SiteConfig;
-use crate::core::{BuildMode, ContentKind, GLOBAL_ADDRESS_SPACE, UrlPath};
+use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::freshness::ContentHash;
 use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
 use crate::page::CompiledPage;
@@ -99,16 +100,17 @@ impl GlobalStateMode {
 pub fn build_static_pages(
     mode: BuildMode,
     config: &SiteConfig,
-    store: &StoredPageMap,
+    state: &SiteIndex,
     clean: bool,
     deps_hash: Option<ContentHash>,
     global_state: GlobalStateMode,
     progress: Option<&crate::logger::ProgressLine>,
 ) -> Result<MetadataResult> {
     if global_state.rebuilds_global_state() {
-        store.clear();
+        state.clear();
     }
 
+    let store = state.pages();
     let ctx = BuildContext::new(mode, config, store, clean, deps_hash, global_state);
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
@@ -183,7 +185,7 @@ pub fn build_static_pages(
     )?;
 
     if global_state.rebuilds_global_state() {
-        build_address_space(&pages, config, store);
+        build_address_space(&pages, config, state);
     }
 
     let snapshot = batch.and_then(|b: TypstBatcher| b.snapshot());
@@ -681,14 +683,15 @@ fn write_single_page(
 // Address Space
 // ============================================================================
 
-/// Build the global address space from page metadata
+/// Build the address space from page metadata.
 ///
-/// This populates `GLOBAL_ADDRESS_SPACE` with all pages and assets,
-/// enabling internal link validation
+/// This populates the site state's address space with all pages and assets,
+/// enabling internal link validation.
 ///
 /// Uses the pure `asset::scan` module for directory traversal
-pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, store: &StoredPageMap) {
-    let mut space = GLOBAL_ADDRESS_SPACE.write();
+pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &SiteIndex) {
+    let store = state.pages();
+    let mut space = state.address().write();
     space.clear();
 
     // Use primary nested entry's output name as assets prefix
@@ -743,7 +746,7 @@ mod tests {
     static GLOBAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct GlobalStateGuard {
-        store: StoredPageMap,
+        state: SiteIndex,
         _lock: MutexGuard<'static, ()>,
     }
 
@@ -753,25 +756,28 @@ mod tests {
                 Ok(lock) => lock,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let store = StoredPageMap::new();
-            reset_global_state(&store);
-            Self { store, _lock: lock }
+            let state = SiteIndex::new();
+            reset_global_state(&state);
+            Self { state, _lock: lock }
+        }
+
+        fn state(&self) -> &SiteIndex {
+            &self.state
         }
 
         fn store(&self) -> &StoredPageMap {
-            &self.store
+            self.state.pages()
         }
     }
 
     impl Drop for GlobalStateGuard {
         fn drop(&mut self) {
-            reset_global_state(&self.store);
+            reset_global_state(&self.state);
         }
     }
 
-    fn reset_global_state(store: &StoredPageMap) {
-        store.clear();
-        GLOBAL_ADDRESS_SPACE.write().clear();
+    fn reset_global_state(state: &SiteIndex) {
+        state.clear();
     }
 
     fn markdown_site(dir: &TempDir) -> SiteConfig {
@@ -814,6 +820,7 @@ mod tests {
     #[test]
     fn test_build_address_space_registers_heading_ids_for_fragment_resolution() {
         let state = GlobalStateGuard::new();
+        let site = state.state();
         let store = state.store();
         let dir = TempDir::new().unwrap();
         let content_dir = dir.path().join("content");
@@ -838,10 +845,10 @@ mod tests {
             }],
         );
 
-        build_address_space(std::slice::from_ref(&page), &config, store);
+        build_address_space(std::slice::from_ref(&page), &config, site);
 
         {
-            let space = GLOBAL_ADDRESS_SPACE.read();
+            let space = site.address().read();
             let ctx = crate::address::ResolveContext {
                 current_permalink: &page.route.permalink,
                 source_path: &page.route.source,
@@ -920,6 +927,7 @@ mod tests {
     #[test]
     fn test_build_static_pages_rebuilds_global_state_even_when_serving() {
         let state = GlobalStateGuard::new();
+        let site = state.state();
         let store = state.store();
         crate::core::set_serving();
 
@@ -938,7 +946,7 @@ mod tests {
         build_static_pages(
             BuildMode::DEVELOPMENT,
             &config,
-            store,
+            site,
             false,
             None,
             GlobalStateMode::Rebuild,
@@ -958,7 +966,7 @@ mod tests {
                 .all(|page| page.permalink != UrlPath::from_page("/stale/"))
         );
         assert_eq!(
-            GLOBAL_ADDRESS_SPACE
+            site.address()
                 .read()
                 .source_for_url(&UrlPath::from_page("/fresh/")),
             Some(crate::utils::path::normalize_path(&fresh_source))
@@ -968,6 +976,7 @@ mod tests {
     #[test]
     fn test_build_static_pages_reuse_scanned_does_not_mutate_page_state() {
         let state = GlobalStateGuard::new();
+        let site = state.state();
         let store = state.store();
 
         let dir = TempDir::new().unwrap();
@@ -990,7 +999,7 @@ mod tests {
         build_static_pages(
             BuildMode::DEVELOPMENT,
             &config,
-            store,
+            site,
             false,
             None,
             GlobalStateMode::ReuseScanned,

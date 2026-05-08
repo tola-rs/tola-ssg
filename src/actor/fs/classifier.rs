@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use rustc_hash::FxHashMap;
 
 use super::types::{ChangeKind, DebouncedEvents};
+use crate::address::{AddressSpace, SiteIndex};
 use crate::config::SiteConfig;
 use crate::utils::path::normalize_path;
 
@@ -16,13 +17,14 @@ impl EventClassifier {
     pub(super) fn classify(
         raw: FxHashMap<PathBuf, ChangeKind>,
         config: &SiteConfig,
+        state: &SiteIndex,
     ) -> Option<DebouncedEvents> {
         let mut changes = raw;
 
         Self::correct_by_existence(&mut changes);
-        Self::recover_from_dir_events(&mut changes);
-        Self::promote_untracked(&mut changes, config);
-        Self::filter_actionable(&mut changes, config);
+        Self::recover_from_dir_events(&mut changes, state);
+        Self::promote_untracked(&mut changes, config, state);
+        Self::filter_actionable(&mut changes, config, state);
 
         if changes.is_empty() {
             return None;
@@ -64,9 +66,7 @@ impl EventClassifier {
     /// event. Scan modified directories to detect:
     /// - Tracked files that disappeared → Removed
     /// - Untracked files that appeared  → Created
-    fn recover_from_dir_events(changes: &mut FxHashMap<PathBuf, ChangeKind>) {
-        use crate::address::GLOBAL_ADDRESS_SPACE;
-
+    fn recover_from_dir_events(changes: &mut FxHashMap<PathBuf, ChangeKind>, state: &SiteIndex) {
         let modified_dirs: Vec<PathBuf> = changes
             .iter()
             .filter(|(_, k)| **k == ChangeKind::Modified)
@@ -78,7 +78,7 @@ impl EventClassifier {
             return;
         }
 
-        let space = GLOBAL_ADDRESS_SPACE.read();
+        let space = state.address().read();
 
         for dir in &modified_dirs {
             Self::detect_disappeared(&space, dir, changes);
@@ -88,7 +88,7 @@ impl EventClassifier {
 
     /// Detect tracked files that no longer exist in a directory.
     fn detect_disappeared(
-        space: &crate::address::AddressSpace,
+        space: &AddressSpace,
         dir: &Path,
         changes: &mut FxHashMap<PathBuf, ChangeKind>,
     ) {
@@ -102,7 +102,7 @@ impl EventClassifier {
 
     /// Detect new files that exist in a directory but aren't tracked.
     fn detect_appeared(
-        space: &crate::address::AddressSpace,
+        space: &AddressSpace,
         dir: &Path,
         changes: &mut FxHashMap<PathBuf, ChangeKind>,
     ) {
@@ -130,11 +130,14 @@ impl EventClassifier {
     /// IMPORTANT: Only promote content files. Deps files (templates, utils) and
     /// Asset files should remain as Modified so they can be processed correctly
     /// by classify_changes().
-    fn promote_untracked(changes: &mut FxHashMap<PathBuf, ChangeKind>, config: &SiteConfig) {
-        use crate::address::GLOBAL_ADDRESS_SPACE;
+    fn promote_untracked(
+        changes: &mut FxHashMap<PathBuf, ChangeKind>,
+        config: &SiteConfig,
+        state: &SiteIndex,
+    ) {
         use crate::reload::classify::{FileCategory, categorize_path};
 
-        let space = GLOBAL_ADDRESS_SPACE.read();
+        let space = state.address().read();
         let to_promote: Vec<_> = changes
             .iter()
             .filter(|(_, k)| **k == ChangeKind::Modified)
@@ -161,11 +164,11 @@ impl EventClassifier {
     pub(super) fn filter_actionable(
         changes: &mut FxHashMap<PathBuf, ChangeKind>,
         config: &SiteConfig,
+        state: &SiteIndex,
     ) {
-        use crate::address::GLOBAL_ADDRESS_SPACE;
         use crate::reload::classify::{FileCategory, categorize_path};
 
-        let space = GLOBAL_ADDRESS_SPACE.read();
+        let space = state.address().read();
         changes.retain(|p, k| match k {
             ChangeKind::Created | ChangeKind::Modified => p.is_file(),
             ChangeKind::Removed => {
@@ -191,6 +194,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::address::SiteIndex;
     use crate::utils::path::normalize_path;
 
     fn make_config() -> (TempDir, SiteConfig) {
@@ -220,7 +224,8 @@ mod tests {
         let mut changes = FxHashMap::default();
         changes.insert(removed_output.clone(), ChangeKind::Removed);
 
-        EventClassifier::filter_actionable(&mut changes, &config);
+        let state = SiteIndex::new();
+        EventClassifier::filter_actionable(&mut changes, &config, &state);
 
         assert!(changes.contains_key(&removed_output));
     }
