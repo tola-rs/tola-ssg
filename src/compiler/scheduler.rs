@@ -8,14 +8,15 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock};
 
 use crossbeam::channel::{self, Sender};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use parking_lot::{Condvar, Mutex};
 
+use crate::config::SiteConfig;
 use crate::core::{BuildMode, Priority};
 
 // =============================================================================
@@ -71,8 +72,15 @@ struct Task {
     priority: Priority,
 }
 
+struct CompileJob {
+    path: PathBuf,
+    priority: Priority,
+    config: Arc<SiteConfig>,
+}
+
 struct PendingState {
     priority: Priority,
+    config: Arc<SiteConfig>,
     waiters: Vec<Waiter>,
 }
 
@@ -132,7 +140,12 @@ impl CompileScheduler {
     }
 
     /// Request compilation, wait for result.
-    pub fn compile(&self, path: PathBuf, priority: Priority) -> CompileResult {
+    pub fn compile(
+        &self,
+        path: PathBuf,
+        priority: Priority,
+        config: Arc<SiteConfig>,
+    ) -> CompileResult {
         // Fast path: cached
         if let Some(result) = self
             .get_cached(&path)
@@ -149,7 +162,7 @@ impl CompileScheduler {
         }
 
         // Atomically join or create pending
-        if self.join_or_create_pending(&path, priority, tx) {
+        if self.join_or_create_pending(&path, priority, config, tx) {
             self.enqueue(path, priority);
         }
 
@@ -157,7 +170,7 @@ impl CompileScheduler {
     }
 
     /// Submit paths for background compilation (fire-and-forget).
-    pub fn submit_background(&self, paths: Vec<PathBuf>) {
+    pub fn submit_background(&self, paths: Vec<PathBuf>, config: Arc<SiteConfig>) {
         let mut queue = self.queue.lock();
         for path in paths {
             if self.is_known(&path) {
@@ -167,6 +180,7 @@ impl CompileScheduler {
                 path.clone(),
                 PendingState {
                     priority: Priority::Background,
+                    config: Arc::clone(&config),
                     waiters: vec![],
                 },
             );
@@ -258,13 +272,20 @@ impl CompileScheduler {
     }
 
     /// Returns true if task needs to be enqueued.
-    fn join_or_create_pending(&self, path: &Path, priority: Priority, tx: Waiter) -> bool {
+    fn join_or_create_pending(
+        &self,
+        path: &Path,
+        priority: Priority,
+        config: Arc<SiteConfig>,
+        tx: Waiter,
+    ) -> bool {
         match self.pending.entry(path.to_path_buf()) {
             Entry::Occupied(mut e) => {
                 let state = e.get_mut();
                 state.waiters.push(tx);
                 if priority > state.priority {
                     state.priority = priority;
+                    state.config = config;
                     true // upgrade: enqueue higher priority task
                 } else {
                     false
@@ -273,6 +294,7 @@ impl CompileScheduler {
             Entry::Vacant(e) => {
                 e.insert(PendingState {
                     priority,
+                    config,
                     waiters: vec![tx],
                 });
                 true // new task
@@ -320,7 +342,7 @@ impl CompileScheduler {
         self.shutdown.load(AtomicOrdering::SeqCst)
     }
 
-    fn next_task(&self) -> Option<(Task, Vec<Waiter>)> {
+    fn next_task(&self) -> Option<(CompileJob, Vec<Waiter>)> {
         let task = self.dequeue()?;
         let is_background = task.priority == Priority::Background;
         let claimed = self.claim(task);
@@ -350,21 +372,27 @@ impl CompileScheduler {
         None
     }
 
-    fn claim(&self, task: Task) -> Option<(Task, Vec<Waiter>)> {
+    fn claim(&self, task: Task) -> Option<(CompileJob, Vec<Waiter>)> {
         // Atomically claim from pending
-        let waiters = match self.pending.entry(task.path.clone()) {
+        let pending = match self.pending.entry(task.path.clone()) {
             Entry::Occupied(e) => {
                 if e.get().priority > task.priority {
                     return None; // stale: higher priority task in queue
                 }
-                e.remove().waiters
+                e.remove()
             }
             Entry::Vacant(_) => return None, // already claimed
         };
+        let job = CompileJob {
+            path: task.path,
+            priority: pending.priority,
+            config: pending.config,
+        };
+        let waiters = pending.waiters;
 
         // Already cached? Notify immediately
         if let Some(result) = self
-            .get_cached(&task.path)
+            .get_cached(&job.path)
             .and_then(Self::reusable_cached_result)
         {
             Self::broadcast(&waiters, result);
@@ -372,22 +400,23 @@ impl CompileScheduler {
         }
 
         // Already active? Merge waiters
-        if let Some(mut existing) = self.active.get_mut(&task.path) {
+        if let Some(mut existing) = self.active.get_mut(&job.path) {
             existing.extend(waiters);
             return None;
         }
 
-        Some((task, waiters))
+        Some((job, waiters))
     }
 
-    fn execute(&self, task: Task, waiters: Vec<Waiter>) {
-        let path = task.path.clone();
+    fn execute(&self, job: CompileJob, waiters: Vec<Waiter>) {
+        let path = job.path.clone();
         self.active.insert(path.clone(), waiters);
 
         // Catch panics to ensure waiters always receive a result
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.do_compile(&path)))
-                .unwrap_or_else(|_| CompileResult::Failed("compilation panicked".into()));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.do_compile(&path, &job.config)
+        }))
+        .unwrap_or_else(|_| CompileResult::Failed("compilation panicked".into()));
 
         let waiters = self
             .active
@@ -400,7 +429,7 @@ impl CompileScheduler {
         } else {
             self.cache.remove(&path);
         }
-        if task.priority == Priority::Background {
+        if job.priority == Priority::Background {
             let mut queue = self.queue.lock();
             queue.active_background = queue.active_background.saturating_sub(1);
             drop(queue);
@@ -421,14 +450,11 @@ impl CompileScheduler {
 // =============================================================================
 
 impl CompileScheduler {
-    fn do_compile(&self, path: &Path) -> CompileResult {
+    fn do_compile(&self, path: &Path, config: &SiteConfig) -> CompileResult {
         use crate::compiler::dependency::flush_current_thread_deps;
         use crate::compiler::page::{cache_vdom, process_page, write_page_html};
-        use crate::config::cfg;
 
-        let config = cfg();
-
-        let result = match process_page(BuildMode::DEVELOPMENT, path, &config) {
+        let result = match process_page(BuildMode::DEVELOPMENT, path, config) {
             Ok(Some(r)) => r,
             Ok(None) => return CompileResult::Skipped,
             Err(e) => return CompileResult::Failed(format!("{:#}", e)),
@@ -485,8 +511,10 @@ impl CompileScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SiteConfig;
     use crate::freshness::compute_file_hash;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[test]
@@ -529,5 +557,50 @@ mod tests {
         assert_eq!(CompileScheduler::background_worker_limit(1), 1);
         assert_eq!(CompileScheduler::background_worker_limit(2), 1);
         assert_eq!(CompileScheduler::background_worker_limit(8), 7);
+    }
+
+    #[test]
+    fn priority_upgrade_claims_upgrading_config() {
+        fn config_with_root(root: &Path) -> Arc<SiteConfig> {
+            let mut config = SiteConfig::default();
+            config.set_root(root);
+            Arc::new(config)
+        }
+
+        let scheduler = CompileScheduler::new();
+        let dir = TempDir::new().unwrap();
+        let background_root = dir.path().join("background-root");
+        let active_root = dir.path().join("active-root");
+        let background_config = config_with_root(&background_root);
+        let active_config = config_with_root(&active_root);
+        let path = dir.path().join("content/page.typ");
+
+        let (background_tx, _background_rx) = channel::bounded(1);
+        assert!(scheduler.join_or_create_pending(
+            &path,
+            Priority::Background,
+            Arc::clone(&background_config),
+            background_tx,
+        ));
+
+        let (active_tx, _active_rx) = channel::bounded(1);
+        assert!(scheduler.join_or_create_pending(
+            &path,
+            Priority::Active,
+            Arc::clone(&active_config),
+            active_tx,
+        ));
+
+        let (job, waiters) = scheduler
+            .claim(Task {
+                path: path.clone(),
+                priority: Priority::Active,
+            })
+            .expect("active task should claim upgraded pending work");
+
+        assert_eq!(job.path, path);
+        assert_eq!(job.priority, Priority::Active);
+        assert_eq!(job.config.get_root(), active_root);
+        assert_eq!(waiters.len(), 2);
     }
 }

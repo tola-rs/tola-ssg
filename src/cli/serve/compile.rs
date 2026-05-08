@@ -3,7 +3,7 @@
 //! Delegates to the central CompileScheduler for priority-based compilation.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 
@@ -46,7 +46,11 @@ pub fn compile_on_demand(source: &Path, config: &SiteConfig) -> Result<PathBuf> 
     prepare_stale_output_recompile(source);
 
     // Delegate to scheduler with Active priority (highest)
-    match SCHEDULER.compile(source.to_path_buf(), Priority::Active) {
+    match SCHEDULER.compile(
+        source.to_path_buf(),
+        Priority::Active,
+        Arc::new(config.clone()),
+    ) {
         CompileResult::Success(output) => Ok(output),
         CompileResult::Failed(error) => Err(anyhow::anyhow!("{}", error)),
         CompileResult::Skipped => Err(anyhow::anyhow!(

@@ -110,7 +110,7 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
         .collect();
 
     debug!("build"; "warming {} pages via scheduler", content_files.len());
-    warm_site_pages(content_files);
+    warm_site_pages(content_files, Arc::new(config.clone()));
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
@@ -150,7 +150,7 @@ pub fn start_serve_build(config: Arc<SiteConfig>) {
     });
 }
 
-fn warm_site_pages(content_files: Vec<std::path::PathBuf>) {
+fn warm_site_pages(content_files: Vec<std::path::PathBuf>, config: Arc<SiteConfig>) {
     use crate::cli::serve::request_idle_for;
     use compiler::scheduler::SCHEDULER;
 
@@ -165,7 +165,7 @@ fn warm_site_pages(content_files: Vec<std::path::PathBuf>) {
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        SCHEDULER.submit_background(chunk.to_vec());
+        SCHEDULER.submit_background(chunk.to_vec(), Arc::clone(&config));
         SCHEDULER.wait_all();
     }
 }
