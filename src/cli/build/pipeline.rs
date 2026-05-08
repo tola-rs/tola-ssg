@@ -117,6 +117,7 @@ pub(super) fn compile_and_process(
                 config,
                 clean,
                 Some(deps_hash),
+                crate::compiler::page::GlobalStateMode::Rebuild,
                 progress,
             )
         },

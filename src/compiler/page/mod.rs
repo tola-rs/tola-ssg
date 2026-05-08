@@ -41,7 +41,8 @@ pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;
 pub use process::process_page;
 pub use process::{
-    build_address_space, build_static_pages, populate_pages, rebuild_iterative_pages,
+    GlobalStateMode, build_address_space, build_static_pages, populate_pages,
+    rebuild_iterative_pages,
 };
 pub use typst::process_result as process_typst_result;
 pub use warning::{

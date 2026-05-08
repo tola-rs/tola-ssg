@@ -28,6 +28,7 @@ struct BuildContext<'a> {
     config: &'a SiteConfig,
     clean: bool,
     deps_hash: Option<ContentHash>,
+    global_state: GlobalStateMode,
 }
 
 impl<'a> BuildContext<'a> {
@@ -36,12 +37,14 @@ impl<'a> BuildContext<'a> {
         config: &'a SiteConfig,
         clean: bool,
         deps_hash: Option<ContentHash>,
+        global_state: GlobalStateMode,
     ) -> Self {
         Self {
             mode,
             config,
             clean,
             deps_hash,
+            global_state,
         }
     }
 
@@ -56,6 +59,10 @@ impl<'a> BuildContext<'a> {
             .max_errors
             .unwrap_or(usize::MAX)
     }
+
+    fn rebuilds_global_state(&self) -> bool {
+        self.global_state.rebuilds_global_state()
+    }
 }
 
 struct BuildPageResult {
@@ -64,29 +71,42 @@ struct BuildPageResult {
     kind: crate::page::PageKind,
 }
 
+/// Global page state policy for a static page build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalStateMode {
+    /// Rebuild page storage, link graph, and address space from this build.
+    Rebuild,
+    /// Reuse page storage, link graph, and address space already produced by scan.
+    ReuseScanned,
+}
+
+impl GlobalStateMode {
+    const fn rebuilds_global_state(self) -> bool {
+        matches!(self, Self::Rebuild)
+    }
+}
+
 /// Compile all pages. Static pages are written after conflict detection passes
 ///
 /// Uses pre-scan optimization: always scans first to collect metadata and
 /// identify iterative pages, then compiles with complete STORED_PAGES data
 ///
-/// If `is_scan_completed()` is true (progressive serving mode), skips
-/// clearing/repopulating STORED_PAGES and GLOBAL_ADDRESS_SPACE since
-/// scan_pages() already did this
+/// `global_state` controls whether this build owns page storage/address-space
+/// rebuilding or reuses state that a separate scan phase already populated.
 pub fn build_static_pages(
     mode: BuildMode,
     config: &SiteConfig,
     clean: bool,
     deps_hash: Option<ContentHash>,
+    global_state: GlobalStateMode,
     progress: Option<&crate::logger::ProgressLine>,
 ) -> Result<MetadataResult> {
-    let skip_global_state = crate::core::is_serving();
-
-    if !skip_global_state {
+    if global_state.rebuilds_global_state() {
         STORED_PAGES.clear();
         PAGE_LINKS.clear();
     }
 
-    let ctx = BuildContext::new(mode, config, clean, deps_hash);
+    let ctx = BuildContext::new(mode, config, clean, deps_hash, global_state);
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
@@ -109,9 +129,8 @@ pub fn build_static_pages(
         .map(|s| s.path.clone())
         .collect();
 
-    // Populate STORED_PAGES from scan results BEFORE compilation
-    // Skip if scan already populated it (progressive serving mode)
-    if !skip_global_state {
+    // Populate STORED_PAGES from scan results BEFORE compilation.
+    if global_state.rebuilds_global_state() {
         populate_pages(&scan_result.scanned, config);
     }
 
@@ -159,8 +178,7 @@ pub fn build_static_pages(
         &config.build.output,
     )?;
 
-    // Skip rebuilding address space if scan already populated it
-    if !skip_global_state {
+    if global_state.rebuilds_global_state() {
         build_address_space(&pages, config);
     }
 
@@ -196,7 +214,7 @@ pub fn rebuild_iterative_pages(
         return Ok(vec![]);
     }
 
-    let ctx = BuildContext::new(mode, config, clean, deps_hash);
+    let ctx = BuildContext::new(mode, config, clean, deps_hash, GlobalStateMode::Rebuild);
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
 
     // Iterative compilation loop
@@ -554,15 +572,17 @@ fn finalize_static_page(
     page.apply_meta(result.meta, ctx.config); // Apply metadata/permalink FIRST
     page.compiled_html = Some(result.html);
 
-    STORED_PAGES.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
-
     // Cache VDOM with the CORRECT permalink (after apply_custom_permalink)
     if let Some(vdom) = result.indexed_vdom {
         crate::compiler::page::cache_vdom(&page.route.permalink, vdom);
     }
 
-    // Store in global data (skip if scan already populated it)
-    if !crate::core::is_serving() {
+    if ctx.rebuilds_global_state() {
+        STORED_PAGES.sync_source_permalink(
+            &path,
+            page.route.permalink.clone(),
+            StaleLinkPolicy::Keep,
+        );
         STORED_PAGES.insert_page(
             page.route.permalink.clone(),
             page.content_meta.clone().unwrap_or_default(),
@@ -741,6 +761,43 @@ mod tests {
         GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
+    fn markdown_site(dir: &TempDir) -> SiteConfig {
+        let content_dir = dir.path().join("content");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+        config.build.output = output_dir;
+        config
+    }
+
+    fn write_markdown_page(config: &SiteConfig, filename: &str, title: &str) -> PathBuf {
+        let source = config.build.content.join(filename);
+        fs::write(
+            &source,
+            format!("+++\ntitle = \"{title}\"\n+++\n\n# {title}\n"),
+        )
+        .unwrap();
+        source
+    }
+
+    fn write_markdown_page_with_permalink(
+        config: &SiteConfig,
+        filename: &str,
+        title: &str,
+        permalink: &str,
+    ) -> PathBuf {
+        let source = config.build.content.join(filename);
+        fs::write(
+            &source,
+            format!("+++\ntitle = \"{title}\"\npermalink = \"{permalink}\"\n+++\n\n# {title}\n"),
+        )
+        .unwrap();
+        source
+    }
+
     #[test]
     fn test_build_address_space_registers_heading_ids_for_fragment_resolution() {
         let _state = GlobalStateGuard::new();
@@ -842,5 +899,100 @@ mod tests {
         let links = PAGE_LINKS.links_to(&from);
         assert_eq!(links, vec![to.clone()]);
         assert!(PAGE_LINKS.linked_by(&to).contains(&from));
+    }
+
+    #[test]
+    fn test_build_static_pages_rebuilds_global_state_even_when_serving() {
+        let _state = GlobalStateGuard::new();
+        crate::core::set_serving();
+
+        let dir = TempDir::new().unwrap();
+        let config = markdown_site(&dir);
+        let fresh_source = write_markdown_page(&config, "fresh.md", "Fresh");
+
+        STORED_PAGES.insert_page(
+            UrlPath::from_page("/stale/"),
+            PageMeta {
+                title: Some("Stale".to_string()),
+                ..Default::default()
+            },
+        );
+
+        build_static_pages(
+            BuildMode::DEVELOPMENT,
+            &config,
+            false,
+            None,
+            GlobalStateMode::Rebuild,
+            None,
+        )
+        .unwrap();
+
+        let pages = STORED_PAGES.get_pages_with_drafts();
+        assert!(
+            pages
+                .iter()
+                .any(|page| page.permalink == UrlPath::from_page("/fresh/"))
+        );
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.permalink != UrlPath::from_page("/stale/"))
+        );
+        assert_eq!(
+            GLOBAL_ADDRESS_SPACE
+                .read()
+                .source_for_url(&UrlPath::from_page("/fresh/")),
+            Some(crate::utils::path::normalize_path(&fresh_source))
+        );
+    }
+
+    #[test]
+    fn test_build_static_pages_reuse_scanned_does_not_mutate_page_state() {
+        let _state = GlobalStateGuard::new();
+
+        let dir = TempDir::new().unwrap();
+        let config = markdown_site(&dir);
+        let source =
+            write_markdown_page_with_permalink(&config, "fresh.md", "Compiled", "/compiled/");
+
+        STORED_PAGES
+            .apply_meta_for_source(
+                &source,
+                PageMeta {
+                    title: Some("Scanned".to_string()),
+                    permalink: Some("/scanned/".to_string()),
+                    ..Default::default()
+                },
+                &config,
+                StaleLinkPolicy::Keep,
+            )
+            .unwrap();
+
+        build_static_pages(
+            BuildMode::DEVELOPMENT,
+            &config,
+            false,
+            None,
+            GlobalStateMode::ReuseScanned,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            STORED_PAGES.get_permalink_by_source(&source),
+            Some(UrlPath::from_page("/scanned/"))
+        );
+
+        let pages = STORED_PAGES.get_pages_with_drafts();
+        assert!(pages.iter().any(|page| {
+            page.permalink == UrlPath::from_page("/scanned/")
+                && page.meta.title.as_deref() == Some("Scanned")
+        }));
+        assert!(
+            pages
+                .iter()
+                .all(|page| page.permalink != UrlPath::from_page("/compiled/"))
+        );
     }
 }
