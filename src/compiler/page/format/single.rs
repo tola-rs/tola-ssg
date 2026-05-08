@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, LinkOrigin};
-use crate::page::PageMeta;
+use crate::page::{PageMeta, StoredPageMap};
 
 use super::{ScannedHeading, ScannedPageLink};
 
@@ -22,28 +22,30 @@ pub struct SinglePageScanData {
 /// Scan a single page to extract metadata, headings, and links.
 ///
 /// Hot reload uses this before compilation to update `@tola/current` data.
-pub fn scan_single_page(path: &Path, config: &SiteConfig) -> SinglePageScanData {
+pub fn scan_single_page(
+    path: &Path,
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> SinglePageScanData {
     let kind = match ContentKind::from_path(path) {
         Some(k) => k,
         None => return SinglePageScanData::default(),
     };
 
     match kind {
-        ContentKind::Typst => scan_typst_page(path, config),
+        ContentKind::Typst => scan_typst_page(path, config, store),
         ContentKind::Markdown => scan_markdown_page(path),
     }
 }
 
-fn scan_typst_page(path: &Path, config: &SiteConfig) -> SinglePageScanData {
+fn scan_typst_page(path: &Path, config: &SiteConfig, store: &StoredPageMap) -> SinglePageScanData {
     use typst_batch::prelude::*;
 
     let root = config.get_root();
     let label = &config.build.meta.label;
     let mut scanner = Scanner::new(root);
 
-    if let Ok(inputs) =
-        crate::package::build_visible_inputs_for_source(config, &crate::page::STORED_PAGES, path)
-    {
+    if let Ok(inputs) = crate::package::build_visible_inputs_for_source(config, store, path) {
         scanner = scanner.with_inputs_obj(inputs);
     }
 
@@ -106,6 +108,7 @@ fn scan_markdown_page(path: &Path) -> SinglePageScanData {
 mod tests {
     use super::scan_single_page;
     use crate::config::SiteConfig;
+    use crate::page::StoredPageMap;
     use std::fs;
     use tempfile::TempDir;
 
@@ -134,7 +137,8 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
 
-        let scan = scan_single_page(&source, &config);
+        let store = StoredPageMap::new();
+        let scan = scan_single_page(&source, &config, &store);
 
         assert!(scan.links.iter().any(|link| link.dest == "../about/"));
         assert!(!scan.links.iter().any(|link| link.dest == "cat.svg"));

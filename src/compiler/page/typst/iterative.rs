@@ -6,7 +6,7 @@ use typst_batch::prelude::*;
 
 use crate::config::SiteConfig;
 use crate::package::build_visible_inputs_for_source;
-use crate::page::{STORED_PAGES, StoredPageMap};
+use crate::page::StoredPageMap;
 
 /// Default maximum iterations for metadata convergence during scan.
 pub const MAX_METADATA_SCAN_ITERATIONS: usize = 5;
@@ -16,8 +16,9 @@ pub fn scan_single_with_current(
     root: &Path,
     file: &PathBuf,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> Result<typst_batch::ScanResult, typst_batch::CompileError> {
-    scan_single_with_current_in_store(root, file, config, &STORED_PAGES)
+    scan_single_with_current_in_store(root, file, config, store)
 }
 
 /// Scan a single file with per-file `@tola/current` using the provided page store.

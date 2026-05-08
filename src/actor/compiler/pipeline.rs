@@ -12,11 +12,12 @@ impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
         let config = Arc::clone(&self.config);
+        let store = Arc::clone(&self.store);
         let path = path.to_path_buf();
         crate::compiler::scheduler::SCHEDULER.invalidate(&path);
 
         let result = tokio::task::spawn_blocking(move || {
-            let outcome = crate::reload::compile::compile_page(&path, &config);
+            let outcome = crate::reload::compile::compile_page(&path, &config, &store);
             // spawn_blocking threads are not rayon workers.
             crate::compiler::dependency::flush_current_thread_deps();
             outcome
@@ -31,7 +32,8 @@ impl CompilerActor {
 
     /// Compile multiple files in parallel (blocking).
     pub(super) async fn compile_batch_blocking(&mut self, paths: Vec<PathBuf>) {
-        let outcomes = compile_batch(paths, Arc::clone(&self.config)).await;
+        let outcomes =
+            compile_batch(paths, Arc::clone(&self.config), Arc::clone(&self.store)).await;
         for outcome in outcomes {
             self.route(outcome).await;
         }

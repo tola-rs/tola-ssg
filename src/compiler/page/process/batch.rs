@@ -16,7 +16,7 @@ use crate::freshness::ContentHash;
 use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
 use crate::page::CompiledPage;
 use crate::page::{
-    HashStabilityTracker, PageState, STORED_PAGES, StabilityDecision, StaleLinkPolicy,
+    HashStabilityTracker, PageState, StabilityDecision, StaleLinkPolicy, StoredPageMap,
 };
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 struct BuildContext<'a> {
     mode: BuildMode,
     config: &'a SiteConfig,
+    store: &'a StoredPageMap,
     clean: bool,
     deps_hash: Option<ContentHash>,
     global_state: GlobalStateMode,
@@ -35,6 +36,7 @@ impl<'a> BuildContext<'a> {
     fn new(
         mode: BuildMode,
         config: &'a SiteConfig,
+        store: &'a StoredPageMap,
         clean: bool,
         deps_hash: Option<ContentHash>,
         global_state: GlobalStateMode,
@@ -42,6 +44,7 @@ impl<'a> BuildContext<'a> {
         Self {
             mode,
             config,
+            store,
             clean,
             deps_hash,
             global_state,
@@ -89,23 +92,24 @@ impl GlobalStateMode {
 /// Compile all pages. Static pages are written after conflict detection passes
 ///
 /// Uses pre-scan optimization: always scans first to collect metadata and
-/// identify iterative pages, then compiles with complete STORED_PAGES data
+/// identify iterative pages, then compiles with complete page-store data
 ///
 /// `global_state` controls whether this build owns page storage/address-space
 /// rebuilding or reuses state that a separate scan phase already populated.
 pub fn build_static_pages(
     mode: BuildMode,
     config: &SiteConfig,
+    store: &StoredPageMap,
     clean: bool,
     deps_hash: Option<ContentHash>,
     global_state: GlobalStateMode,
     progress: Option<&crate::logger::ProgressLine>,
 ) -> Result<MetadataResult> {
     if global_state.rebuilds_global_state() {
-        STORED_PAGES.clear();
+        store.clear();
     }
 
-    let ctx = BuildContext::new(mode, config, clean, deps_hash, global_state);
+    let ctx = BuildContext::new(mode, config, store, clean, deps_hash, global_state);
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
@@ -128,21 +132,22 @@ pub fn build_static_pages(
         .map(|s| s.path.clone())
         .collect();
 
-    // Populate STORED_PAGES from scan results BEFORE compilation.
+    // Populate page store from scan results BEFORE compilation.
     if global_state.rebuilds_global_state() {
-        populate_pages(&scan_result.scanned, config);
+        populate_pages(&scan_result.scanned, config, store);
     }
 
     // Compile Typst files
     // Always create new batcher for compile, reuse only snapshot from scan
     // This avoids duplicate warnings (scan already emitted them)
     let snapshot = scan_result.snapshot();
-    let inputs = build_site_inputs(config)?;
+    let inputs = build_site_inputs(config, store)?;
     // Always compile with per-file @tola/current context to keep build
     // behavior aligned with serve and avoid scan-time under-detection when
     // current-dependent code only appears in page body.
     let batch = create_batch_with_inputs(config.get_root(), &typst_paths, snapshot, inputs)?;
-    let typst_results = compile_typst_batch_with_context(&batch, &typst_paths, config, progress)?;
+    let typst_results =
+        compile_typst_batch_with_context(&batch, &typst_paths, config, store, progress)?;
 
     let typst_processed = process_typst_files(&ctx, &typst_paths, typst_results);
     let markdown_processed = process_markdown_files(&ctx, &markdown_paths, progress);
@@ -178,7 +183,7 @@ pub fn build_static_pages(
     )?;
 
     if global_state.rebuilds_global_state() {
-        build_address_space(&pages, config);
+        build_address_space(&pages, config, store);
     }
 
     let snapshot = batch.and_then(|b: TypstBatcher| b.snapshot());
@@ -198,13 +203,14 @@ const MAX_ITERATIONS: usize = 5;
 /// Recompile iterative pages with complete virtual data
 ///
 /// Uses iterative compilation to handle self-referencing metadata:
-/// - Compile with current STORED_PAGES data
+/// - Compile with current page-store data
 /// - Check if metadata changed (via hash)
 /// - Repeat until convergence or max iterations
 pub fn rebuild_iterative_pages(
     mode: BuildMode,
     paths: &[PathBuf],
     config: &SiteConfig,
+    store: &StoredPageMap,
     clean: bool,
     deps_hash: Option<ContentHash>,
     snapshot: Option<FileSnapshot>,
@@ -213,15 +219,22 @@ pub fn rebuild_iterative_pages(
         return Ok(vec![]);
     }
 
-    let ctx = BuildContext::new(mode, config, clean, deps_hash, GlobalStateMode::Rebuild);
+    let ctx = BuildContext::new(
+        mode,
+        config,
+        store,
+        clean,
+        deps_hash,
+        GlobalStateMode::Rebuild,
+    );
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
 
     // Iterative compilation loop
-    let mut stability = HashStabilityTracker::with_oscillation_detection(STORED_PAGES.pages_hash());
+    let mut stability = HashStabilityTracker::with_oscillation_detection(store.pages_hash());
     let mut pages: Vec<CompiledPage> = Vec::new();
 
     for iteration in 0..MAX_ITERATIONS {
-        let inputs = build_site_inputs(config)?;
+        let inputs = build_site_inputs(config, store)?;
 
         let batch = create_batch_compiler_with_inputs(
             config.get_root(),
@@ -229,9 +242,10 @@ pub fn rebuild_iterative_pages(
             snapshot.clone(),
             Some(inputs),
         )?;
-        let typst_results = compile_typst_batch_with_context(&batch, &typst_paths, config, None)?;
+        let typst_results =
+            compile_typst_batch_with_context(&batch, &typst_paths, config, store, None)?;
 
-        // Process results (updates STORED_PAGES)
+        // Process results and update page store.
         let max_errors = ctx.max_errors();
         let typst_pages: Vec<Result<CompiledPage>> = typst_paths
             .par_iter()
@@ -239,7 +253,8 @@ pub fn rebuild_iterative_pages(
             .map(|(path, result)| {
                 let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
-                let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
+                let compile_ctx =
+                    CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
                 let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -250,7 +265,8 @@ pub fn rebuild_iterative_pages(
             .par_iter()
             .map(|path| {
                 let page = CompiledPage::from_paths(path, ctx.config)?;
-                let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
+                let compile_ctx =
+                    CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
                 let content = compile(path, &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -262,7 +278,7 @@ pub fn rebuild_iterative_pages(
             .collect::<Result<Vec<_>>>()?;
 
         // Check convergence
-        match stability.decide(STORED_PAGES.pages_hash(), iteration, MAX_ITERATIONS) {
+        match stability.decide(store.pages_hash(), iteration, MAX_ITERATIONS) {
             StabilityDecision::Converged => {
                 crate::debug!("iterative"; "converged after {} iteration(s)", iteration + 1);
                 break;
@@ -307,16 +323,17 @@ fn process_iterative_page(
     page.apply_meta(result.meta, ctx.config);
 
     // Keep source->permalink mapping consistent across iterative passes.
-    let state = PageState::new(&STORED_PAGES);
+    let state = PageState::new(ctx.store);
     state.sync_source_permalink(
         &source,
         page.route.permalink.clone(),
         StaleLinkPolicy::Clear,
     );
 
-    // Update STORED_PAGES with metadata from compile phase
+    // Update page store with metadata from compile phase.
     if let Some(ref meta) = page.content_meta {
-        STORED_PAGES.insert_page(page.route.permalink.clone(), meta.clone());
+        ctx.store
+            .insert_page(page.route.permalink.clone(), meta.clone());
     }
 
     if let Some(vdom) = result.indexed_vdom {
@@ -359,21 +376,20 @@ fn create_batch_compiler<'a>(
 }
 
 /// Build inputs with site config and pages data
-fn build_site_inputs(config: &SiteConfig) -> Result<typst_batch::Inputs> {
-    build_visible_inputs(config, &STORED_PAGES)
+fn build_site_inputs(config: &SiteConfig, store: &StoredPageMap) -> Result<typst_batch::Inputs> {
+    build_visible_inputs(config, store)
 }
 
 /// Populate page metadata and link graph from pre-scan results.
-pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
-    let state = PageState::new(&STORED_PAGES);
+pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig, store: &StoredPageMap) {
+    let state = PageState::new(store);
 
     // First pass: collect all page permalinks and metadata
     let mut page_permalinks: Vec<(UrlPath, &ScannedPage)> = Vec::new();
 
     for page in scanned {
         let Some(meta) = &page.meta else { continue };
-        let Some(permalink) = STORED_PAGES.apply_meta_for_source(&page.path, meta.clone(), config)
-        else {
+        let Some(permalink) = store.apply_meta_for_source(&page.path, meta.clone(), config) else {
             continue;
         };
         state.insert_headings(permalink.clone(), page.headings.clone());
@@ -390,13 +406,7 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig) {
             .links
             .iter()
             .filter_map(|link| {
-                crate::page::resolve_page_link_target(
-                    &STORED_PAGES,
-                    from_url,
-                    &page.path,
-                    link,
-                    config,
-                )
+                crate::page::resolve_page_link_target(store, from_url, &page.path, link, config)
             })
             .collect();
 
@@ -431,13 +441,14 @@ fn compile_typst_batch_with_context<'a>(
     batch: &Option<TypstBatcher<'a>>,
     files: &[&PathBuf],
     config: &SiteConfig,
+    store: &StoredPageMap,
     progress: Option<&crate::logger::ProgressLine>,
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
     let current_context_by_path: rustc_hash::FxHashMap<&Path, serde_json::Value> = files
         .iter()
         .map(|p| {
-            let current = build_visible_current_context_for_source(config, &STORED_PAGES, p)?;
+            let current = build_visible_current_context_for_source(config, store, p)?;
             Ok((p.as_path(), current))
         })
         .collect::<Result<_>>()?;
@@ -510,7 +521,8 @@ fn process_typst_files(
         .map(|(path, result)| {
             let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
+            let compile_ctx =
+                CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
             let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
             finalize_static_page(ctx, page, content)
         })
@@ -526,7 +538,8 @@ fn process_markdown_files(
         .par_iter()
         .map(|path| {
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx = CompileContext::new(ctx.mode, ctx.config).with_route(&page.route);
+            let compile_ctx =
+                CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
             let content = compile(path, &compile_ctx)?;
             if let Some(p) = progress {
                 p.inc("markdown");
@@ -576,9 +589,9 @@ fn finalize_static_page(
     }
 
     if ctx.rebuilds_global_state() {
-        let state = PageState::new(&STORED_PAGES);
+        let state = PageState::new(ctx.store);
         state.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
-        STORED_PAGES.insert_page(
+        ctx.store.insert_page(
             page.route.permalink.clone(),
             page.content_meta.clone().unwrap_or_default(),
         );
@@ -674,7 +687,7 @@ fn write_single_page(
 /// enabling internal link validation
 ///
 /// Uses the pure `asset::scan` module for directory traversal
-pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
+pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, store: &StoredPageMap) {
     let mut space = GLOBAL_ADDRESS_SPACE.write();
     space.clear();
 
@@ -693,7 +706,7 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig) {
     for page in pages {
         let title = page.content_meta.as_ref().and_then(|m| m.title.clone());
         space.register_page(page.route.clone(), title);
-        let heading_ids = STORED_PAGES
+        let heading_ids = store
             .get_headings(&page.route.permalink)
             .into_iter()
             .map(|heading| slugify_fragment(&heading.text, &config.build.slug));
@@ -730,6 +743,7 @@ mod tests {
     static GLOBAL_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct GlobalStateGuard {
+        store: StoredPageMap,
         _lock: MutexGuard<'static, ()>,
     }
 
@@ -739,19 +753,24 @@ mod tests {
                 Ok(lock) => lock,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            reset_global_state();
-            Self { _lock: lock }
+            let store = StoredPageMap::new();
+            reset_global_state(&store);
+            Self { store, _lock: lock }
+        }
+
+        fn store(&self) -> &StoredPageMap {
+            &self.store
         }
     }
 
     impl Drop for GlobalStateGuard {
         fn drop(&mut self) {
-            reset_global_state();
+            reset_global_state(&self.store);
         }
     }
 
-    fn reset_global_state() {
-        STORED_PAGES.clear();
+    fn reset_global_state(store: &StoredPageMap) {
+        store.clear();
         GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
@@ -794,7 +813,8 @@ mod tests {
 
     #[test]
     fn test_build_address_space_registers_heading_ids_for_fragment_resolution() {
-        let _state = GlobalStateGuard::new();
+        let state = GlobalStateGuard::new();
+        let store = state.store();
         let dir = TempDir::new().unwrap();
         let content_dir = dir.path().join("content");
         let output_dir = dir.path().join("public");
@@ -809,7 +829,7 @@ mod tests {
         config.build.output = output_dir;
 
         let page = CompiledPage::from_paths(&source, &config).unwrap();
-        STORED_PAGES.insert_headings(
+        store.insert_headings(
             page.route.permalink.clone(),
             vec![ScannedHeading {
                 level: 1,
@@ -818,7 +838,7 @@ mod tests {
             }],
         );
 
-        build_address_space(std::slice::from_ref(&page), &config);
+        build_address_space(std::slice::from_ref(&page), &config, store);
 
         {
             let space = GLOBAL_ADDRESS_SPACE.read();
@@ -841,7 +861,8 @@ mod tests {
 
     #[test]
     fn test_populate_pages_records_relative_page_links_only() {
-        let _state = GlobalStateGuard::new();
+        let state = GlobalStateGuard::new();
+        let store = state.store();
         let dir = TempDir::new().unwrap();
         let content_dir = dir.path().join("content");
         fs::create_dir_all(content_dir.join("posts")).unwrap();
@@ -881,31 +902,32 @@ mod tests {
             },
         ];
 
-        populate_pages(&scanned, &config);
+        populate_pages(&scanned, &config, store);
 
-        let from = STORED_PAGES
+        let from = store
             .get_permalink_by_source(&source_a)
             .expect("source a permalink");
-        let to = STORED_PAGES
+        let to = store
             .get_permalink_by_source(&source_b)
             .expect("source b permalink");
 
-        let state = PageState::new(&STORED_PAGES);
-        let links = state.links_to(&from);
+        let page_state = PageState::new(store);
+        let links = page_state.links_to(&from);
         assert_eq!(links, vec![to.clone()]);
-        assert!(state.linked_by(&to).contains(&from));
+        assert!(page_state.linked_by(&to).contains(&from));
     }
 
     #[test]
     fn test_build_static_pages_rebuilds_global_state_even_when_serving() {
-        let _state = GlobalStateGuard::new();
+        let state = GlobalStateGuard::new();
+        let store = state.store();
         crate::core::set_serving();
 
         let dir = TempDir::new().unwrap();
         let config = markdown_site(&dir);
         let fresh_source = write_markdown_page(&config, "fresh.md", "Fresh");
 
-        STORED_PAGES.insert_page(
+        store.insert_page(
             UrlPath::from_page("/stale/"),
             PageMeta {
                 title: Some("Stale".to_string()),
@@ -916,6 +938,7 @@ mod tests {
         build_static_pages(
             BuildMode::DEVELOPMENT,
             &config,
+            store,
             false,
             None,
             GlobalStateMode::Rebuild,
@@ -923,7 +946,7 @@ mod tests {
         )
         .unwrap();
 
-        let pages = STORED_PAGES.get_pages_with_drafts();
+        let pages = store.get_pages_with_drafts();
         assert!(
             pages
                 .iter()
@@ -944,14 +967,15 @@ mod tests {
 
     #[test]
     fn test_build_static_pages_reuse_scanned_does_not_mutate_page_state() {
-        let _state = GlobalStateGuard::new();
+        let state = GlobalStateGuard::new();
+        let store = state.store();
 
         let dir = TempDir::new().unwrap();
         let config = markdown_site(&dir);
         let source =
             write_markdown_page_with_permalink(&config, "fresh.md", "Compiled", "/compiled/");
 
-        STORED_PAGES
+        store
             .apply_meta_for_source(
                 &source,
                 PageMeta {
@@ -966,6 +990,7 @@ mod tests {
         build_static_pages(
             BuildMode::DEVELOPMENT,
             &config,
+            store,
             false,
             None,
             GlobalStateMode::ReuseScanned,
@@ -974,11 +999,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            STORED_PAGES.get_permalink_by_source(&source),
+            store.get_permalink_by_source(&source),
             Some(UrlPath::from_page("/scanned/"))
         );
 
-        let pages = STORED_PAGES.get_pages_with_drafts();
+        let pages = store.get_pages_with_drafts();
         assert!(pages.iter().any(|page| {
             page.permalink == UrlPath::from_page("/scanned/")
                 && page.meta.title.as_deref() == Some("Scanned")

@@ -1,9 +1,12 @@
 //! Atom 1.0 feed generation.
 //!
-//! Generates Atom feeds from page metadata stored in STORED_PAGES.
+//! Generates Atom feeds from page metadata.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, core::UrlPath, log, seo::minify_xml, utils::date::DateTimeUtc};
+use crate::{
+    config::SiteConfig, core::UrlPath, log, page::StoredPageMap, seo::minify_xml,
+    utils::date::DateTimeUtc,
+};
 use anyhow::{Ok, Result};
 use atom_syndication::{
     Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,
@@ -12,8 +15,8 @@ use atom_syndication::{
 use std::fs;
 
 /// Build Atom 1.0 feed
-pub fn build_atom(config: &SiteConfig) -> Result<()> {
-    AtomFeed::build(config).write()
+pub fn build_atom(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
+    AtomFeed::build(config, store).write()
 }
 
 struct AtomFeed {
@@ -22,8 +25,8 @@ struct AtomFeed {
 }
 
 impl AtomFeed {
-    fn build(config: &SiteConfig) -> Self {
-        let pages = get_feed_pages();
+    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
+        let pages = get_feed_pages(store);
         Self {
             config: config.clone(),
             pages,

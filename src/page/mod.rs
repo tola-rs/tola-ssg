@@ -17,7 +17,7 @@ pub use meta::PageMeta;
 pub use resolve::resolve_page_link_target;
 pub use route::PageRoute;
 pub use state::{PageState, StaleLinkPolicy};
-pub use store::{STORED_PAGES, StoredPage, StoredPageMap};
+pub use store::{StoredPage, StoredPageMap};
 
 /// A JSON object map for storing arbitrary metadata fields
 pub type JsonMap = serde_json::Map<String, serde_json::Value>;

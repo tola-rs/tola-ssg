@@ -1,17 +1,20 @@
 //! RSS 2.0 feed generation.
 //!
-//! Generates RSS feeds from page metadata stored in GLOBAL_SITE_DATA.
+//! Generates RSS feeds from page metadata.
 
 use super::common::{FeedPage, get_feed_pages};
-use crate::{config::SiteConfig, core::UrlPath, log, seo::minify_xml, utils::date::DateTimeUtc};
+use crate::{
+    config::SiteConfig, core::UrlPath, log, page::StoredPageMap, seo::minify_xml,
+    utils::date::DateTimeUtc,
+};
 use anyhow::{Ok, Result, anyhow};
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
 use std::{fs, sync::LazyLock};
 
 /// Build RSS 2.0 feed
-pub fn build_rss(config: &SiteConfig) -> Result<()> {
-    RssFeed::build(config).write()
+pub fn build_rss(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
+    RssFeed::build(config, store).write()
 }
 
 struct RssFeed {
@@ -20,8 +23,8 @@ struct RssFeed {
 }
 
 impl RssFeed {
-    fn build(config: &SiteConfig) -> Self {
-        let pages = get_feed_pages();
+    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
+        let pages = get_feed_pages(store);
         Self {
             config: config.clone(),
             pages,

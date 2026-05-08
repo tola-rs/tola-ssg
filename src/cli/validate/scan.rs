@@ -8,6 +8,7 @@ use crate::cli::common::scan_markdown_file;
 use crate::compiler::family::Indexed;
 use crate::config::SiteConfig;
 use crate::core::{LinkKind, LinkOrigin};
+use crate::page::StoredPageMap;
 use tola_vdom::Document;
 
 /// A link extracted from a content file
@@ -59,8 +60,13 @@ pub struct ScanResult {
 }
 
 /// Scan a Markdown file for links
-pub fn scan_markdown(file: &Path, root: &Path, config: &SiteConfig) -> Result<ScanResult> {
-    let result = scan_markdown_file(file, config)?;
+pub fn scan_markdown(
+    file: &Path,
+    root: &Path,
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> Result<ScanResult> {
+    let result = scan_markdown_file(file, config, store)?;
 
     let source = file
         .strip_prefix(root)

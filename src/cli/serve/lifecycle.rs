@@ -1,5 +1,6 @@
 //! Server lifecycle management.
 
+use crate::page::StoredPageMap;
 use crate::{actor::Coordinator, config::SiteConfig, core::register_server, log};
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
@@ -55,6 +56,7 @@ pub fn register_server_for_shutdown(server: Arc<Server>, shutdown_tx: Sender<()>
 /// Spawn the actor system for file watching and hot reload
 pub fn spawn_actors(
     config: Arc<SiteConfig>,
+    store: Arc<StoredPageMap>,
     watch_enabled: bool,
     ws_port: Option<u16>,
     shutdown_rx: Receiver<()>,
@@ -64,11 +66,16 @@ pub fn spawn_actors(
     }
 
     Some(thread::spawn(move || {
-        run_actor_system(config, ws_port, shutdown_rx);
+        run_actor_system(config, store, ws_port, shutdown_rx);
     }))
 }
 
-fn run_actor_system(config: Arc<SiteConfig>, ws_port: Option<u16>, shutdown_rx: Receiver<()>) {
+fn run_actor_system(
+    config: Arc<SiteConfig>,
+    store: Arc<StoredPageMap>,
+    ws_port: Option<u16>,
+    shutdown_rx: Receiver<()>,
+) {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -76,7 +83,8 @@ fn run_actor_system(config: Arc<SiteConfig>, ws_port: Option<u16>, shutdown_rx: 
         .expect("Failed to create tokio runtime");
 
     rt.block_on(async {
-        let mut coordinator = Coordinator::with_config(config).with_shutdown_signal(shutdown_rx);
+        let mut coordinator =
+            Coordinator::with_config(config, store).with_shutdown_signal(shutdown_rx);
         if let Some(port) = ws_port {
             coordinator = coordinator.with_ws_port(port);
         }

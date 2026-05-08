@@ -20,7 +20,7 @@ use crate::core::{
 };
 use crate::log;
 use crate::package::build_visible_inputs;
-use crate::page::{HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision};
+use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
 use crate::utils::path::route::{strip_path_prefix, strip_path_prefix_in_text};
 use crate::utils::{plural_count, plural_s};
 
@@ -50,6 +50,8 @@ type ParsedScanResult = (
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
+    let store = StoredPageMap::new();
+
     // Register VFS with nested asset mappings (no font warmup needed)
     let nested_mappings =
         crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
@@ -85,7 +87,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
 
     // Build AddressSpace for validation (unified scan: metadata + links + errors)
     let (all_pages, typst_links) = if check_pages || check_assets {
-        let (pages, links, compile_errors) = build_address_space(config)?;
+        let (pages, links, compile_errors) = build_address_space(config, &store)?;
 
         // Add compile errors to report as asset errors
         // Extract path from "file not found (searched at /abs/path)" -> "/relative/path"
@@ -118,7 +120,15 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     }
 
     // Validate links (Typst links from unified scan, Markdown scanned separately)
-    validate_all_links(&files, &root, config, &all_pages, &typst_links, &report);
+    validate_all_links(
+        &files,
+        &root,
+        config,
+        &store,
+        &all_pages,
+        &typst_links,
+        &report,
+    );
 
     // Log page link results
     if check_pages {
@@ -155,6 +165,7 @@ fn validate_all_links(
     files: &[PathBuf],
     root: &std::path::Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
     all_pages: &[CompiledPage],
     typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
     report: &Arc<RwLock<ValidationReport>>,
@@ -204,7 +215,7 @@ fn validate_all_links(
 
     // Process Markdown files in parallel
     markdown_files.par_iter().for_each(|file| {
-        if let Ok(result) = scan_markdown(file, root, config) {
+        if let Ok(result) = scan_markdown(file, root, config, store) {
             validate_links(
                 &result.source,
                 file,
@@ -467,12 +478,12 @@ fn handle_resolve_result(
 /// - pages: All compiled pages
 /// - typst_links: HashMap<PathBuf, Vec<ScannedLink>> for Typst files
 /// - compile_errors: Vec<(source_path, error_message)> for compile failures
-fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
+fn build_address_space(config: &SiteConfig, store: &StoredPageMap) -> Result<AddressSpaceResult> {
     use rayon::prelude::*;
 
     use crate::cli::common::scan_markdown_file;
 
-    STORED_PAGES.clear();
+    store.clear();
 
     let content_files = crate::compiler::collect_all_files(&config.build.content);
     let label = &config.build.meta.label;
@@ -480,13 +491,13 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
     // Separate Typst and Markdown files
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
-    // Preload markdown metadata into STORED_PAGES so @tola/pages has complete
+    // Preload markdown metadata into the page store so @tola/pages has complete
     // cross-format context during Typst validation scans.
     for file in &markdown_files {
-        if let Ok(result) = scan_markdown_file(file, config)
+        if let Ok(result) = scan_markdown_file(file, config, store)
             && let Some(meta_json) = result.raw_meta
         {
-            update_stored_page_from_meta(file, &meta_json, config);
+            update_stored_page_from_meta(file, &meta_json, config, store);
         }
     }
 
@@ -495,7 +506,7 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
     {
         (vec![], vec![], vec![])
     } else {
-        match batch_scan_typst_unified(&typst_files, label, config) {
+        match batch_scan_typst_unified(&typst_files, label, config, store) {
             Ok((metas, links, errors)) => {
                 let parsed_metas = metas
                     .into_iter()
@@ -526,7 +537,7 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
     let markdown_pages: Vec<CompiledPage> = markdown_files
         .par_iter()
         .filter_map(|file| {
-            let meta = scan_markdown_file(file, config)
+            let meta = scan_markdown_file(file, config, store)
                 .ok()
                 .and_then(|result| result.raw_meta)
                 .and_then(|json| serde_json::from_value(json).ok());
@@ -538,7 +549,7 @@ fn build_address_space(config: &SiteConfig) -> Result<AddressSpaceResult> {
     pages.extend(markdown_pages);
 
     // Build the global address space
-    crate::compiler::page::build_address_space(&pages, config);
+    crate::compiler::page::build_address_space(&pages, config, store);
 
     Ok((pages, typst_links, compile_errors))
 }
@@ -552,6 +563,7 @@ fn batch_scan_typst_unified(
     files: &[&PathBuf],
     label: &str,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> Result<BatchScanResult> {
     use typst_batch::prelude::*;
 
@@ -563,7 +575,7 @@ fn batch_scan_typst_unified(
 
     // Validate scan follows visible-phase contract for virtual package injection.
     // It shares base inputs and adds per-file @tola/current only for iterative pages.
-    let base_inputs = build_visible_inputs(config, &STORED_PAGES)?;
+    let base_inputs = build_visible_inputs(config, store)?;
     let scanner = Batcher::for_scan(&root)
         .with_inputs_obj(base_inputs)
         .with_snapshot_from(files)?;
@@ -586,7 +598,7 @@ fn batch_scan_typst_unified(
                     Ok(scan) => {
                         let meta = scan.metadata(label);
                         if let Some(ref meta_json) = meta {
-                            update_stored_page_from_meta(file, meta_json, config);
+                            update_stored_page_from_meta(file, meta_json, config, store);
                         }
                         if PageKind::from_packages(scan.accessed_packages()).is_iterative() {
                             iterative_indices.push(index);
@@ -606,11 +618,11 @@ fn batch_scan_typst_unified(
                     Err(e) => {
                         // Retry with per-file @tola/current context so pages
                         // using current.permalink/path in body can scan.
-                        match scan_single_with_current(&root, file, config) {
+                        match scan_single_with_current(&root, file, config, store) {
                             Ok(scan) => {
                                 let meta = scan.metadata(label);
                                 if let Some(ref meta_json) = meta {
-                                    update_stored_page_from_meta(file, meta_json, config);
+                                    update_stored_page_from_meta(file, meta_json, config, store);
                                 }
                                 if PageKind::from_packages(scan.accessed_packages()).is_iterative()
                                 {
@@ -643,7 +655,7 @@ fn batch_scan_typst_unified(
             }
 
             let mut stability =
-                HashStabilityTracker::with_oscillation_detection(STORED_PAGES.pages_hash());
+                HashStabilityTracker::with_oscillation_detection(store.pages_hash());
             for iteration in 0..MAX_METADATA_SCAN_ITERATIONS {
                 for &idx in &iterative_indices {
                     let file = files[idx];
@@ -652,7 +664,7 @@ fn batch_scan_typst_unified(
                         .unwrap_or(file)
                         .to_string_lossy()
                         .to_string();
-                    let scan = match scan_single_with_current(&root, file, config) {
+                    let scan = match scan_single_with_current(&root, file, config, store) {
                         Ok(scan) => scan,
                         Err(e) => {
                             errors.push((rel_path, e.to_string()));
@@ -661,7 +673,7 @@ fn batch_scan_typst_unified(
                     };
                     let meta = scan.metadata(label);
                     if let Some(ref meta_json) = meta {
-                        update_stored_page_from_meta(file, meta_json, config);
+                        update_stored_page_from_meta(file, meta_json, config, store);
                     }
                     metas[idx] = meta;
                     all_links[idx] = scan
@@ -674,11 +686,8 @@ fn batch_scan_typst_unified(
                         .collect();
                 }
 
-                match stability.decide(
-                    STORED_PAGES.pages_hash(),
-                    iteration,
-                    MAX_METADATA_SCAN_ITERATIONS,
-                ) {
+                match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS)
+                {
                     StabilityDecision::Converged => {
                         crate::debug!(
                             "validate";
@@ -718,11 +727,12 @@ fn update_stored_page_from_meta(
     file: &std::path::Path,
     meta_json: &serde_json::Value,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) {
     let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
         return;
     };
-    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
+    let _ = store.apply_meta_for_source(file, page_meta, config);
 }
 
 /// Extract asset path from compile error.

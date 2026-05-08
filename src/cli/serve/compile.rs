@@ -12,7 +12,7 @@ use crate::compiler::scheduler::{CompileResult, SCHEDULER};
 use crate::config::SiteConfig;
 use crate::core::Priority;
 use crate::freshness::mtime::{get_mtime, is_newer_than};
-use crate::page::CompiledPage;
+use crate::page::{CompiledPage, StoredPageMap};
 
 /// Ensure Typst runtime inputs match the config used for this request.
 fn ensure_typst_initialized(config: &SiteConfig) {
@@ -30,7 +30,11 @@ fn ensure_typst_initialized(config: &SiteConfig) {
 ///
 /// Returns the output file path for serving via `respond_file`
 /// Uses High priority to ensure user requests are processed first
-pub fn compile_on_demand(source: &Path, config: &SiteConfig) -> Result<PathBuf> {
+pub fn compile_on_demand(
+    source: &Path,
+    config: &SiteConfig,
+    store: Arc<StoredPageMap>,
+) -> Result<PathBuf> {
     ensure_typst_initialized(config);
 
     let page = CompiledPage::from_paths(source, config)?;
@@ -47,6 +51,7 @@ pub fn compile_on_demand(source: &Path, config: &SiteConfig) -> Result<PathBuf> 
         source.to_path_buf(),
         Priority::Active,
         Arc::new(config.clone()),
+        store,
     ) {
         CompileResult::Success(output) => Ok(output),
         CompileResult::Failed(error) => Err(anyhow::anyhow!("{}", error)),

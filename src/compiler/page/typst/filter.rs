@@ -106,7 +106,7 @@ fn filter_drafts_impl<'a>(
     }
 
     // Use an isolated store for scan-time metadata convergence.
-    // This avoids mutating global STORED_PAGES during pre-scan.
+    // This avoids mutating page storage during pre-scan.
     let store = StoredPageMap::new();
 
     let Some(inputs) = build_scan_inputs(config, &store) else {

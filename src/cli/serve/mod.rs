@@ -15,6 +15,7 @@ pub(crate) use build::start_serve_build;
 pub use scan::scan_pages;
 pub use startup::serve_with_cache;
 
+use crate::page::StoredPageMap;
 use crate::{
     config::{SiteConfig, cfg},
     core::{ContentKind, UrlPath},
@@ -121,15 +122,16 @@ impl BoundServer {
     }
 
     /// Start the request loop (blocking).
-    pub fn run(self) -> Result<()> {
+    pub fn run(self, store: Arc<StoredPageMap>) -> Result<()> {
         let config = cfg();
         let actor_handle = lifecycle::spawn_actors(
             Arc::clone(&config),
+            Arc::clone(&store),
             config.serve.watch,
             self.ws_port,
             self.shutdown_rx,
         );
-        run_request_loop(&self.server);
+        run_request_loop(&self.server, store);
         lifecycle::wait_for_shutdown(actor_handle);
         Ok(())
     }
@@ -139,7 +141,7 @@ fn current_request_config() -> Arc<SiteConfig> {
     cfg()
 }
 
-fn run_request_loop(server: &Server) {
+fn run_request_loop(server: &Server, store: Arc<StoredPageMap>) {
     // Use thread pool to handle requests concurrently
     // This prevents on-demand compilation from blocking other requests
     let pool = rayon::ThreadPoolBuilder::new()
@@ -148,9 +150,10 @@ fn run_request_loop(server: &Server) {
         .expect("failed to create thread pool");
 
     for request in server.incoming_requests() {
+        let store = Arc::clone(&store);
         pool.spawn(move || {
             let config = current_request_config();
-            if let Err(e) = handle_request(request, &config) {
+            if let Err(e) = handle_request(request, &config, store) {
                 log!("serve"; "request error: {e}");
             }
         });
@@ -158,7 +161,7 @@ fn run_request_loop(server: &Server) {
 }
 
 /// Handle a single HTTP request
-fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
+fn handle_request(request: Request, config: &SiteConfig, store: Arc<StoredPageMap>) -> Result<()> {
     note_request_activity();
 
     // Early exit if shutdown requested
@@ -183,9 +186,9 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
     // This keeps CSS/JS/assets and already-built pages available while the site
     // is still converging.
     if let Some(path) = path::resolve_path(&request_url, &config.build.output) {
-        return match classify_served_output(&request_url, &path, config) {
+        return match classify_served_output(&request_url, &path, config, &store) {
             ServedOutputKind::PageHtml { source } => {
-                match compile::compile_on_demand(&source, config) {
+                match compile::compile_on_demand(&source, config, Arc::clone(&store)) {
                     Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
                     Err(e) => response::respond_compile_error(request, &e, ws_port),
                 }
@@ -195,7 +198,7 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
             | ServedOutputKind::RedirectHtml
             | ServedOutputKind::GeneratedHtml
             | ServedOutputKind::UnknownHtml => {
-                serve_file_with_recovery(request, &request_url, &path, config, ws_port)
+                serve_file_with_recovery(request, &request_url, &path, config, store, ws_port)
             }
         };
     }
@@ -208,7 +211,7 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
     let scan_ready = is_scan_ready();
     if !serving && !scan_ready {
         if let Some(source) = guess_source_before_scan(&request_url, config) {
-            return match compile::compile_on_demand(&source, config) {
+            return match compile::compile_on_demand(&source, config, Arc::clone(&store)) {
                 Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
                 Err(e) => response::respond_compile_error(request, &e, ws_port),
             };
@@ -220,7 +223,7 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
     // While unhealthy (initial/full rebuild or recovery), still allow
     // direct on-demand compilation for requested pages.
     if !crate::core::is_healthy() {
-        return serve_unhealthy_request(request, &request_url, config, ws_port);
+        return serve_unhealthy_request(request, &request_url, config, store, ws_port);
     }
 
     // On-demand compilation (URL → source → compile → serve from disk)
@@ -230,7 +233,7 @@ fn handle_request(request: Request, config: &SiteConfig) -> Result<()> {
         .source_for_url(&url);
 
     if let Some(source) = source {
-        return match compile::compile_on_demand(&source, config) {
+        return match compile::compile_on_demand(&source, config, store) {
             Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
             Err(e) => response::respond_compile_error(request, &e, ws_port),
         };
@@ -243,6 +246,7 @@ fn serve_unhealthy_request(
     request: Request,
     request_url: &str,
     config: &SiteConfig,
+    store: Arc<StoredPageMap>,
     ws_port: Option<u16>,
 ) -> Result<()> {
     let url = UrlPath::from_browser(request_url);
@@ -255,7 +259,7 @@ fn serve_unhealthy_request(
         return response::respond_loading(request);
     };
 
-    match compile::compile_on_demand(&source, config) {
+    match compile::compile_on_demand(&source, config, store) {
         Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
         Err(e) => response::respond_compile_error(request, &e, ws_port),
     }
@@ -312,6 +316,7 @@ fn serve_file_with_recovery(
     request_url: &str,
     path: &Path,
     config: &SiteConfig,
+    store: Arc<StoredPageMap>,
     ws_port: Option<u16>,
 ) -> Result<()> {
     match response::respond_file(request, path, ws_port)? {
@@ -322,7 +327,7 @@ fn serve_file_with_recovery(
                 "transient missing output for {}, attempting on-demand recovery",
                 request_url
             );
-            recover_missing_output(request, request_url, config, ws_port)
+            recover_missing_output(request, request_url, config, store, ws_port)
         }
     }
 }
@@ -339,6 +344,7 @@ fn recover_missing_output(
     request: Request,
     request_url: &str,
     config: &SiteConfig,
+    store: Arc<StoredPageMap>,
     ws_port: Option<u16>,
 ) -> Result<()> {
     let url = crate::core::UrlPath::from_browser(request_url);
@@ -353,7 +359,7 @@ fn recover_missing_output(
     // Force fresh compile result to avoid serving stale scheduler cache entries.
     crate::compiler::scheduler::SCHEDULER.invalidate(&source);
 
-    match compile::compile_on_demand(&source, config) {
+    match compile::compile_on_demand(&source, config, store) {
         Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
         Err(e) => response::respond_compile_error(request, &e, ws_port),
     }
@@ -367,7 +373,7 @@ mod tests {
     use crate::address::GLOBAL_ADDRESS_SPACE;
     use crate::config::{SiteConfig, cfg, init_config};
     use crate::core::UrlPath;
-    use crate::page::{PageMeta, PageRoute, STORED_PAGES};
+    use crate::page::{PageMeta, PageRoute, StoredPageMap};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -384,8 +390,8 @@ mod tests {
         config
     }
 
-    fn reset_runtime_state() {
-        STORED_PAGES.clear();
+    fn reset_runtime_state(store: &StoredPageMap) {
+        store.clear();
         GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
@@ -414,7 +420,8 @@ mod tests {
 
     #[test]
     fn classify_served_output_returns_page_html_for_canonical_page_output() {
-        reset_runtime_state();
+        let store = StoredPageMap::new();
+        reset_runtime_state(&store);
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
         let source = config.build.content.join("posts/hello.typ");
@@ -427,7 +434,7 @@ mod tests {
             Some("Hello".to_string()),
         );
 
-        let kind = classify_served_output("/posts/hello/", &output, &config);
+        let kind = classify_served_output("/posts/hello/", &output, &config, &store);
 
         assert!(
             matches!(kind, ServedOutputKind::PageHtml { source: s } if s == crate::utils::path::normalize_path(&source))
@@ -436,20 +443,22 @@ mod tests {
 
     #[test]
     fn classify_served_output_returns_asset_for_non_html_output() {
-        reset_runtime_state();
+        let store = StoredPageMap::new();
+        reset_runtime_state(&store);
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
         let asset = config.build.output.join("assets/app.css");
         write_file(&asset, "body{}");
 
-        let kind = classify_served_output("/assets/app.css", &asset, &config);
+        let kind = classify_served_output("/assets/app.css", &asset, &config, &store);
 
         assert!(matches!(kind, ServedOutputKind::Asset));
     }
 
     #[test]
     fn classify_served_output_returns_redirect_html_for_alias_output() {
-        reset_runtime_state();
+        let store = StoredPageMap::new();
+        reset_runtime_state(&store);
         let dir = TempDir::new().unwrap();
         let config = make_test_config(dir.path());
         let source = config.build.content.join("posts/hello.typ");
@@ -459,7 +468,7 @@ mod tests {
         write_file(&canonical_output, "<html><body>Hello</body></html>");
         write_file(&redirect_output, "<html><body>Redirect</body></html>");
 
-        STORED_PAGES.insert_page(
+        store.insert_page(
             UrlPath::from_page("/posts/hello/"),
             PageMeta {
                 aliases: vec!["/old/".to_string()],
@@ -467,14 +476,15 @@ mod tests {
             },
         );
 
-        let kind = classify_served_output("/old/", &redirect_output, &config);
+        let kind = classify_served_output("/old/", &redirect_output, &config, &store);
 
         assert!(matches!(kind, ServedOutputKind::RedirectHtml));
     }
 
     #[test]
     fn classify_served_output_returns_not_found_html_for_compiled_404_output() {
-        reset_runtime_state();
+        let store = StoredPageMap::new();
+        reset_runtime_state(&store);
         let dir = TempDir::new().unwrap();
         let mut config = make_test_config(dir.path());
         config.site.not_found = Some(PathBuf::from("content/404.typ"));
@@ -488,7 +498,7 @@ mod tests {
             Some("404".to_string()),
         );
 
-        let kind = classify_served_output("/404.html", &output, &config);
+        let kind = classify_served_output("/404.html", &output, &config, &store);
 
         assert!(matches!(kind, ServedOutputKind::NotFoundHtml));
     }

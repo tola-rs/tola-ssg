@@ -20,6 +20,7 @@ use super::messages::{CompilerMsg, VdomMsg, WsMsg};
 use super::vdom::VdomActor;
 use super::ws::WsActor;
 use crate::config::SiteConfig;
+use crate::page::StoredPageMap;
 use crate::reload::server::WsServerHandle;
 
 const CHANNEL_BUFFER: usize = 32;
@@ -27,6 +28,7 @@ const CHANNEL_BUFFER: usize = 32;
 /// Coordinator - wires up and runs the actor system.
 pub struct Coordinator {
     config: Arc<SiteConfig>,
+    store: Arc<StoredPageMap>,
     ws_port: Option<u16>,
     ws_server: Option<WsServerHandle>,
     shutdown_rx: Option<Receiver<()>>,
@@ -34,9 +36,10 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Create from Arc<SiteConfig>.
-    pub fn with_config(config: Arc<SiteConfig>) -> Self {
+    pub fn with_config(config: Arc<SiteConfig>, store: Arc<StoredPageMap>) -> Self {
         Self {
             config,
+            store,
             ws_port: None,
             ws_server: None,
             shutdown_rx: None,
@@ -77,7 +80,12 @@ impl Coordinator {
         let fs_actor = FsActor::new(watch_paths, compiler_tx.clone(), self.config.clone())
             .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
 
-        let compiler_actor = CompilerActor::new(compiler_rx, vdom_tx.clone(), self.config.clone());
+        let compiler_actor = CompilerActor::new(
+            compiler_rx,
+            vdom_tx.clone(),
+            self.config.clone(),
+            self.store.clone(),
+        );
         let (vdom_actor, restored_count, restored_errors, restored_warnings) =
             VdomActor::new(vdom_rx, ws_tx.clone(), self.config.get_root().to_path_buf());
 

@@ -11,7 +11,7 @@ use crate::compiler::page::{
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, GLOBAL_ADDRESS_SPACE, UrlPath};
 use crate::package::TolaPackage;
-use crate::page::{CompiledPage, PageMeta, PageState, STORED_PAGES, StaleLinkPolicy};
+use crate::page::{CompiledPage, PageMeta, PageState, StaleLinkPolicy, StoredPageMap};
 use crate::utils::path::normalize_path;
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -65,6 +65,7 @@ enum PageStateCommit<'a> {
 impl PageStateCommit<'_> {
     fn commit(
         self,
+        store: &StoredPageMap,
         source: &Path,
         page: &CompiledPage,
         scan_data: &SinglePageScanData,
@@ -72,11 +73,11 @@ impl PageStateCommit<'_> {
     ) -> bool {
         match self {
             Self::Always => {
-                commit_page_state(source, page, scan_data, config);
+                commit_page_state(store, source, page, scan_data, config);
                 true
             }
             Self::Ticket(ticket) => ticket
-                .commit(|| commit_page_state(source, page, scan_data, config))
+                .commit(|| commit_page_state(store, source, page, scan_data, config))
                 .is_some(),
         }
     }
@@ -84,6 +85,7 @@ impl PageStateCommit<'_> {
 
 fn record_scanned_links(
     state: &PageState<'_>,
+    store: &StoredPageMap,
     source: &Path,
     permalink: &UrlPath,
     links: &[ScannedPageLink],
@@ -97,7 +99,7 @@ fn record_scanned_links(
     let targets: Vec<_> = links
         .iter()
         .filter_map(|link| {
-            crate::page::resolve_page_link_target(&STORED_PAGES, permalink, source, link, config)
+            crate::page::resolve_page_link_target(store, permalink, source, link, config)
         })
         .collect();
     state.record_links(permalink, targets);
@@ -128,14 +130,15 @@ fn filename_from_relative(path: Option<&str>) -> Option<String> {
     })
 }
 
-fn pages_for_urls(urls: &[UrlPath]) -> Vec<crate::page::StoredPage> {
-    let pages = STORED_PAGES.get_pages_with_drafts();
+fn pages_for_urls(store: &StoredPageMap, urls: &[UrlPath]) -> Vec<crate::page::StoredPage> {
+    let pages = store.get_pages_with_drafts();
     urls.iter()
         .filter_map(|url| pages.iter().find(|page| page.permalink == *url).cloned())
         .collect()
 }
 
 fn current_context_from_scan(
+    store: &StoredPageMap,
     source: &Path,
     page: &CompiledPage,
     scan_data: &SinglePageScanData,
@@ -149,10 +152,10 @@ fn current_context_from_scan(
         .links
         .iter()
         .filter_map(|link| {
-            crate::page::resolve_page_link_target(&STORED_PAGES, permalink, source, link, config)
+            crate::page::resolve_page_link_target(store, permalink, source, link, config)
         })
         .collect();
-    let linked_by_urls = PageState::new(&STORED_PAGES).linked_by(permalink);
+    let linked_by_urls = PageState::new(store).linked_by(permalink);
 
     serde_json::json!({
         TolaPackage::Current.input_key(): {
@@ -160,31 +163,33 @@ fn current_context_from_scan(
             "parent-permalink": parent,
             "path": path,
             "filename": filename,
-            "links_to": pages_for_urls(&links_to_urls),
-            "linked_by": pages_for_urls(&linked_by_urls),
+            "links_to": pages_for_urls(store, &links_to_urls),
+            "linked_by": pages_for_urls(store, &linked_by_urls),
             "headings": scan_data.headings,
         }
     })
 }
 
 fn commit_page_state(
+    store: &StoredPageMap,
     source: &Path,
     page: &CompiledPage,
     scan_data: &SinglePageScanData,
     config: &SiteConfig,
 ) {
-    let state = PageState::new(&STORED_PAGES);
+    let state = PageState::new(store);
     state.sync_source_permalink(source, page.route.permalink.clone(), StaleLinkPolicy::Clear);
     state.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
     record_scanned_links(
         &state,
+        store,
         source,
         &page.route.permalink,
         &scan_data.links,
         config,
     );
 
-    STORED_PAGES.insert_page(
+    store.insert_page(
         page.route.permalink.clone(),
         page.content_meta.clone().unwrap_or_default(),
     );
@@ -214,23 +219,26 @@ pub fn process_page(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> Result<Option<PageResult>> {
-    process_page_inner(mode, path, config, PageStateCommit::Always)
+    process_page_inner(mode, path, config, store, PageStateCommit::Always)
 }
 
 pub fn process_page_with_ticket(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
     ticket: &PageStateTicket,
 ) -> Result<Option<PageResult>> {
-    process_page_inner(mode, path, config, PageStateCommit::Ticket(ticket))
+    process_page_inner(mode, path, config, store, PageStateCommit::Ticket(ticket))
 }
 
 fn process_page_inner(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
     commit: PageStateCommit<'_>,
 ) -> Result<Option<PageResult>> {
     let mut page = CompiledPage::from_paths(path, config)?;
@@ -239,12 +247,12 @@ fn process_page_inner(
     // This must happen BEFORE compile so @tola/current has fresh data.
     // The scan result is passed as a local compile input; global stores are
     // committed only after compilation succeeds.
-    let scan_data = scan_single_page(path, config);
+    let scan_data = scan_single_page(path, config, store);
     page.apply_meta(scan_data.meta.clone(), config);
 
     // Compile with fresh @tola/current data ===
-    let current_context = current_context_from_scan(path, &page, &scan_data, config);
-    let ctx = CompileContext::new(mode, config)
+    let current_context = current_context_from_scan(store, path, &page, &scan_data, config);
+    let ctx = CompileContext::new(mode, config, store)
         .with_route(&page.route)
         .with_current_context(&current_context);
     let result = compile(path, &ctx)?;
@@ -272,7 +280,7 @@ fn process_page_inner(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
-    if !commit.commit(path, &page, &scan_data, config) {
+    if !commit.commit(store, path, &page, &scan_data, config) {
         return Ok(None);
     }
 
@@ -302,10 +310,11 @@ pub fn compile_meta(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> Result<crate::compiler::page::CompileMetaResult> {
     // Build context without route - compile_meta is typically used for production
     // where globally unique StableIds aren't needed
-    let ctx = CompileContext::new(mode, config);
+    let ctx = CompileContext::new(mode, config, store);
     let result = compile(path, &ctx)?;
 
     let meta = result.meta;
@@ -335,8 +344,8 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn reset_global_state() {
-        STORED_PAGES.clear();
+    fn reset_state(store: &StoredPageMap) {
+        store.clear();
         GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
@@ -350,8 +359,9 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
+        let store = StoredPageMap::new();
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
         assert!(result.is_ok(), "compile_meta should succeed: {:?}", result);
 
         let (html, meta, _indexed_vdom) = result.unwrap();
@@ -381,8 +391,9 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
+        let store = StoredPageMap::new();
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
         assert!(result.is_ok(), "compile_meta should succeed: {:?}", result);
 
         let (html, meta, _indexed_vdom) = result.unwrap();
@@ -413,8 +424,9 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
+        let store = StoredPageMap::new();
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
         assert!(result.is_ok());
 
         let (_, meta, _indexed_vdom) = result.unwrap();
@@ -435,8 +447,9 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
+        let store = StoredPageMap::new();
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
 
         // Should return an error, not panic or silently skip
         assert!(result.is_err(), "Invalid typst should return Err");
@@ -454,18 +467,19 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_state(&store);
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config);
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &store);
 
         assert!(result.is_err(), "invalid page should fail compilation");
         assert!(
-            STORED_PAGES.get_permalink_by_source(&file_path).is_none(),
+            store.get_permalink_by_source(&file_path).is_none(),
             "failed compile must not publish source permalink mapping"
         );
         assert!(
-            STORED_PAGES.get_pages_with_drafts().is_empty(),
+            store.get_pages_with_drafts().is_empty(),
             "failed compile must not publish page metadata"
         );
         assert!(
@@ -473,7 +487,7 @@ mod tests {
             "failed compile must not publish address-space state"
         );
 
-        reset_global_state();
+        reset_state(&store);
     }
 
     #[test]
@@ -488,19 +502,20 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_state(&store);
 
         let old_permalink = UrlPath::from_page("/already-visible/");
-        STORED_PAGES.insert_page(
+        store.insert_page(
             old_permalink.clone(),
             PageMeta {
                 title: Some("Already Visible".to_string()),
                 ..Default::default()
             },
         );
-        STORED_PAGES.insert_source_mapping(file_path.clone(), old_permalink.clone());
-        STORED_PAGES.insert_headings(
+        store.insert_source_mapping(file_path.clone(), old_permalink.clone());
+        store.insert_headings(
             old_permalink.clone(),
             vec![ScannedHeading {
                 level: 1,
@@ -509,24 +524,24 @@ mod tests {
             }],
         );
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config);
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &store);
 
         assert!(result.is_err(), "invalid page should fail compilation");
         assert_eq!(
-            STORED_PAGES.get_permalink_by_source(&file_path),
+            store.get_permalink_by_source(&file_path),
             Some(old_permalink.clone()),
             "failed recompile must keep existing source permalink mapping"
         );
         assert!(
-            STORED_PAGES
+            store
                 .get_pages_with_drafts()
                 .iter()
                 .any(|page| page.permalink == old_permalink),
             "failed recompile must keep existing page metadata"
         );
-        assert_eq!(STORED_PAGES.get_headings(&old_permalink).len(), 1);
+        assert_eq!(store.get_headings(&old_permalink).len(), 1);
 
-        reset_global_state();
+        reset_state(&store);
     }
 
     #[test]
@@ -553,24 +568,25 @@ permalink = "/showcase/source-field-test/"
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_state(&store);
 
         let old_permalink = UrlPath::from_page("/showcase/2026_02_25_source-field-test/");
-        STORED_PAGES.insert_page(
+        store.insert_page(
             old_permalink.clone(),
             PageMeta {
                 title: Some("Testing @tola/current.path".to_string()),
                 ..Default::default()
             },
         );
-        STORED_PAGES.insert_source_mapping(file_path.clone(), old_permalink.clone());
+        store.insert_source_mapping(file_path.clone(), old_permalink.clone());
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config)
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &store)
             .expect("process_page should succeed");
         assert!(result.is_some(), "page should not be filtered as draft");
 
-        let mapped = STORED_PAGES.get_permalink_by_source(&file_path);
+        let mapped = store.get_permalink_by_source(&file_path);
         assert!(mapped.is_some(), "source mapping should exist");
         assert_ne!(
             mapped,
@@ -578,7 +594,7 @@ permalink = "/showcase/source-field-test/"
             "source mapping should be updated from old permalink"
         );
 
-        let pages = STORED_PAGES.get_pages_with_drafts();
+        let pages = store.get_pages_with_drafts();
         let mapped = mapped.unwrap();
         assert!(
             pages.iter().any(|p| p.permalink == mapped),
@@ -589,7 +605,7 @@ permalink = "/showcase/source-field-test/"
             "old permalink should be removed"
         );
 
-        reset_global_state();
+        reset_state(&store);
     }
 
     #[test]
@@ -614,16 +630,17 @@ permalink = "/showcase/source-field-test/"
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_state(&store);
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config)
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &store)
             .expect("process_page should succeed")
             .expect("page should not be filtered");
 
         assert_eq!(result.permalink, UrlPath::from_page("/notes/custom/"));
         assert_eq!(
-            STORED_PAGES.get_permalink_by_source(&file_path),
+            store.get_permalink_by_source(&file_path),
             Some(UrlPath::from_page("/notes/custom/"))
         );
 
@@ -634,7 +651,7 @@ permalink = "/showcase/source-field-test/"
             .unwrap_or_default();
         assert!(headings.contains("hello-world"));
 
-        reset_global_state();
+        reset_state(&store);
     }
 
     #[test]
@@ -649,26 +666,28 @@ permalink = "/showcase/source-field-test/"
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_state(&store);
 
         let epoch = PageStateEpoch::new();
         let ticket = epoch.ticket();
         epoch.advance();
 
-        let result = process_page_with_ticket(BuildMode::DEVELOPMENT, &file_path, &config, &ticket)
-            .expect("stale page compile should not fail");
+        let result =
+            process_page_with_ticket(BuildMode::DEVELOPMENT, &file_path, &config, &store, &ticket)
+                .expect("stale page compile should not fail");
 
         assert!(result.is_none(), "stale page compile must be discarded");
         assert!(
-            STORED_PAGES.get_permalink_by_source(&file_path).is_none(),
+            store.get_permalink_by_source(&file_path).is_none(),
             "stale page compile must not publish source permalink mapping"
         );
         assert!(
-            STORED_PAGES.get_pages_with_drafts().is_empty(),
+            store.get_pages_with_drafts().is_empty(),
             "stale page compile must not publish page metadata"
         );
 
-        reset_global_state();
+        reset_state(&store);
     }
 }

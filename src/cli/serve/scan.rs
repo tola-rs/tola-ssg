@@ -8,19 +8,19 @@ use anyhow::Result;
 use crate::compiler::page::{build_address_space, collect_content_files};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
-use crate::page::{CompiledPage, STORED_PAGES};
+use crate::page::{CompiledPage, StoredPageMap};
 
-/// Scan all content files and populate global state
+/// Scan all content files and populate runtime state
 ///
 /// This extracts metadata from all pages (via Typst batch_scan for .typ,
 /// frontmatter parsing for .md) and populates:
 /// - `GLOBAL_ADDRESS_SPACE`: URL ↔ Source mapping (with custom permalinks)
-/// - `STORED_PAGES`: Page metadata for `@tola/pages` virtual package
+/// - page store: Page metadata for `@tola/pages` virtual package
 /// - page link graph used by `@tola/current`
 ///
 /// Requires Typst to be initialized before calling
-pub fn scan_pages(config: &SiteConfig) -> Result<()> {
-    STORED_PAGES.clear();
+pub fn scan_pages(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
+    store.clear();
 
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
@@ -43,10 +43,10 @@ pub fn scan_pages(config: &SiteConfig) -> Result<()> {
         .collect();
 
     // Populate page metadata and link graph.
-    crate::compiler::page::populate_pages(&scanned, config);
+    crate::compiler::page::populate_pages(&scanned, config, store);
 
     // Populate GLOBAL_ADDRESS_SPACE
-    build_address_space(&pages, config);
+    build_address_space(&pages, config, store);
 
     let total = pages.len();
     if drafts_skipped > 0 {

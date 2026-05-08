@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHasher};
@@ -17,10 +16,7 @@ use crate::core::UrlPath;
 use crate::package::build_visible_inputs;
 use crate::utils::path::normalize_path;
 
-/// Global page data store
-pub static STORED_PAGES: LazyLock<StoredPageMap> = LazyLock::new(StoredPageMap::new);
-
-/// A page entry stored in the global page data
+/// A page entry stored in site page data.
 ///
 /// Combines the computed permalink with page metadata
 /// Serializes with `permalink` as top-level field and PageMeta flattened

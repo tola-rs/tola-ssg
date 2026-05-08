@@ -7,8 +7,13 @@ use crate::core::{BuildMode, ContentKind};
 pub fn recompile_files(files: &[PathBuf], mode: BuildMode) -> Vec<(String, String)> {
     use crate::compiler::page::process_page;
     use crate::config::cfg;
+    use crate::page::StoredPageMap;
 
     let config = cfg();
+    let store = StoredPageMap::new();
+    if let Err(e) = crate::cli::common::populate_stored_pages(&config, &store) {
+        return vec![("page store".to_string(), e.to_string())];
+    }
 
     crate::debug!("recompile"; "starting parallel recompile of {} files", files.len());
 
@@ -28,7 +33,7 @@ pub fn recompile_files(files: &[PathBuf], mode: BuildMode) -> Vec<(String, Strin
                 .display()
                 .to_string();
 
-            match process_page(mode, file, &config) {
+            match process_page(mode, file, &config, &store) {
                 Ok(Some(result)) => {
                     if let Some(vdom) = result.indexed_vdom {
                         crate::compiler::page::cache_vdom(&result.permalink, vdom);

@@ -18,6 +18,7 @@ use crate::{
     log,
     logger::ProgressLine,
     package::generate_lsp_stubs,
+    page::StoredPageMap,
 };
 
 /// Collected files for the build
@@ -103,6 +104,7 @@ pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<Progres
 pub(super) fn compile_and_process(
     mode: BuildMode,
     config: &SiteConfig,
+    store: &StoredPageMap,
     files: &BuildFiles,
     deps_hash: ContentHash,
     progress: Option<&ProgressLine>,
@@ -115,6 +117,7 @@ pub(super) fn compile_and_process(
             crate::compiler::page::build_static_pages(
                 mode,
                 config,
+                store,
                 clean,
                 Some(deps_hash),
                 crate::compiler::page::GlobalStateMode::Rebuild,
@@ -160,6 +163,7 @@ fn process_assets(
 pub(super) fn rebuild_iterative_pages(
     mode: BuildMode,
     config: &SiteConfig,
+    store: &StoredPageMap,
     deps_hash: ContentHash,
     metadata: &crate::compiler::page::MetadataResult,
 ) -> Result<Pages> {
@@ -171,6 +175,7 @@ pub(super) fn rebuild_iterative_pages(
         mode,
         &metadata.iterative_paths,
         config,
+        store,
         config.build.clean,
         Some(deps_hash),
         metadata.snapshot.clone(),

@@ -4,7 +4,6 @@ use std::time::Instant;
 use super::tasks::{abort_task, wait_task};
 use super::{BackgroundTask, BatchResult, CompilerActor};
 use crate::actor::messages::{CompilerMsg, VdomMsg};
-use crate::page::STORED_PAGES;
 
 impl CompilerActor {
     /// Main event loop with interruptible background compilation
@@ -103,7 +102,7 @@ impl CompilerActor {
         hash_before: u64,
         watched_post_paths: Option<Vec<PathBuf>>,
     ) {
-        if STORED_PAGES.pages_hash() != hash_before {
+        if self.store.pages_hash() != hash_before {
             self.recompile_virtual_users().await;
         }
         if let Some(paths) = watched_post_paths {
@@ -135,12 +134,18 @@ mod tests {
 
     use super::*;
     use crate::config::SiteConfig;
+    use crate::page::StoredPageMap;
 
     #[tokio::test]
     async fn exits_on_shutdown_message() {
         let (compiler_tx, compiler_rx) = mpsc::channel(1);
         let (vdom_tx, _vdom_rx) = mpsc::channel::<VdomMsg>(1);
-        let actor = CompilerActor::new(compiler_rx, vdom_tx, Arc::new(SiteConfig::default()));
+        let actor = CompilerActor::new(
+            compiler_rx,
+            vdom_tx,
+            Arc::new(SiteConfig::default()),
+            Arc::new(StoredPageMap::new()),
+        );
 
         let handle = tokio::spawn(actor.run());
         compiler_tx.send(CompilerMsg::Shutdown).await.unwrap();

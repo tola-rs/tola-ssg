@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::address::{GLOBAL_ADDRESS_SPACE, Resource};
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
-use crate::page::STORED_PAGES;
+use crate::page::StoredPageMap;
 use crate::utils::path::normalize_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub(super) fn classify_served_output(
     request_url: &str,
     output_path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> ServedOutputKind {
     let output_path = normalize_path(output_path);
 
@@ -36,7 +37,7 @@ pub(super) fn classify_served_output(
         return kind;
     }
 
-    if is_alias_redirect_output(&url, &output_path, config) {
+    if is_alias_redirect_output(&url, &output_path, config, store) {
         return ServedOutputKind::RedirectHtml;
     }
 
@@ -80,10 +81,15 @@ fn classify_page_output(url: &UrlPath, output_path: &Path) -> Option<ServedOutpu
     }
 }
 
-fn is_alias_redirect_output(url: &UrlPath, output_path: &Path, config: &SiteConfig) -> bool {
+fn is_alias_redirect_output(
+    url: &UrlPath,
+    output_path: &Path,
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> bool {
     let output_dir = config.paths().output_dir();
 
-    STORED_PAGES.get_pages().into_iter().any(|page| {
+    store.get_pages().into_iter().any(|page| {
         page.meta.aliases.iter().any(|alias| {
             let alias_url = UrlPath::from_page(alias);
             alias_url == *url

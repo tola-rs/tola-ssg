@@ -16,7 +16,7 @@ use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_wit
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
 use crate::package::build_visible_inputs;
-use crate::page::{HashStabilityTracker, PageKind, PageMeta, STORED_PAGES, StabilityDecision};
+use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
 use crate::utils::path::resolve_path;
 use tola_vdom::Document;
 
@@ -166,8 +166,12 @@ pub struct MarkdownScanResult {
 }
 
 /// Scan a Markdown file using the VDOM pipeline
-pub fn scan_markdown_file(file: &Path, config: &SiteConfig) -> Result<MarkdownScanResult> {
-    let ctx = CompileContext::new(BuildMode::PRODUCTION, config);
+pub fn scan_markdown_file(
+    file: &Path,
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> Result<MarkdownScanResult> {
+    let ctx = CompileContext::new(BuildMode::PRODUCTION, config, store);
     let result = scan(file, &ctx)?;
 
     Ok(MarkdownScanResult {
@@ -223,12 +227,13 @@ pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_bat
 /// Batch scan Typst files for metadata, failing on first error
 ///
 /// Simple scan without iterative support. Use for validate or when
-/// STORED_PAGES is already populated
+/// The page store is already populated.
 pub fn batch_scan_typst_metadata(
     files: &[&PathBuf],
     root: &Path,
     label: &str,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> Result<Vec<Option<JsonValue>>> {
     if files.is_empty() {
         return Ok(vec![]);
@@ -236,7 +241,7 @@ pub fn batch_scan_typst_metadata(
 
     // Use visible-phase inputs for metadata scan so legacy templates relying on
     // `sys.inputs.format` keep working in query/bootstrap paths.
-    let inputs = build_visible_inputs(config, &STORED_PAGES)?;
+    let inputs = build_visible_inputs(config, store)?;
     let scanner = Batcher::for_scan(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(files)?;
@@ -253,7 +258,7 @@ pub fn batch_scan_typst_metadata(
                         // Retry with per-file @tola/current context so scans that
                         // evaluate current-dependent body expressions can still
                         // extract metadata.
-                        match scan_single_with_current(root, file, config) {
+                        match scan_single_with_current(root, file, config, store) {
                             Ok(scan) => metas.push(scan.metadata(label)),
                             Err(_) => {
                                 let rel_path = file.strip_prefix(root).unwrap_or(file);
@@ -273,20 +278,21 @@ pub fn batch_scan_typst_metadata(
 
 /// Batch scan Typst files for metadata with iterative support
 ///
-/// Requires STORED_PAGES to be pre-populated with all site pages
+/// Requires the page store to be pre-populated with all site pages.
 /// Iteratively re-scans pages that use `@tola/pages` until convergence
 pub fn batch_scan_typst_metadata_iterative(
     files: &[&PathBuf],
     root: &Path,
     label: &str,
     config: &SiteConfig,
+    store: &StoredPageMap,
 ) -> Result<Vec<Option<JsonValue>>> {
     if files.is_empty() {
         return Ok(vec![]);
     }
 
     // Initial scan with visible-phase site/pages inputs.
-    let inputs = build_visible_inputs(config, &STORED_PAGES)?;
+    let inputs = build_visible_inputs(config, store)?;
     let scanner = Batcher::for_scan(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(files)?;
@@ -302,9 +308,9 @@ pub fn batch_scan_typst_metadata_iterative(
                 let meta = scan.metadata(label);
                 let kind = PageKind::from_packages(scan.accessed_packages());
 
-                // Update STORED_PAGES with new metadata
+                // Update page store with new metadata.
                 if let Some(ref meta_json) = meta {
-                    update_stored_page_from_meta(file, meta_json, config);
+                    update_stored_page_from_meta(file, meta_json, config, store);
                 }
 
                 if kind.is_iterative() {
@@ -315,13 +321,13 @@ pub fn batch_scan_typst_metadata_iterative(
             Err(e) => {
                 // Retry with per-file current context to handle pages that
                 // reference @tola/current in body while scanning metadata.
-                match scan_single_with_current(root, file, config) {
+                match scan_single_with_current(root, file, config, store) {
                     Ok(scan) => {
                         let meta = scan.metadata(label);
                         let kind = PageKind::from_packages(scan.accessed_packages());
 
                         if let Some(ref meta_json) = meta {
-                            update_stored_page_from_meta(file, meta_json, config);
+                            update_stored_page_from_meta(file, meta_json, config, store);
                         }
 
                         if kind.is_iterative() {
@@ -344,14 +350,14 @@ pub fn batch_scan_typst_metadata_iterative(
     }
 
     // Iterative re-scan until convergence
-    let mut stability = HashStabilityTracker::with_oscillation_detection(STORED_PAGES.pages_hash());
+    let mut stability = HashStabilityTracker::with_oscillation_detection(store.pages_hash());
 
     for iteration in 0..MAX_METADATA_SCAN_ITERATIONS {
         // Re-scan iterative files one-by-one so each file gets its own
         // @tola/current context (especially `path` and current permalink).
         for &idx in &iterative_indices {
             let file = files[idx];
-            let scan = match scan_single_with_current(root, file, config) {
+            let scan = match scan_single_with_current(root, file, config, store) {
                 Ok(scan) => scan,
                 Err(e) => {
                     let rel_path = file.strip_prefix(root).unwrap_or(file);
@@ -360,20 +366,16 @@ pub fn batch_scan_typst_metadata_iterative(
             };
             let meta = scan.metadata(label);
 
-            // Update STORED_PAGES with new metadata
+            // Update page store with new metadata.
             if let Some(ref meta_json) = meta {
-                update_stored_page_from_meta(file, meta_json, config);
+                update_stored_page_from_meta(file, meta_json, config, store);
             }
 
             metas[idx] = meta;
         }
 
         // Check convergence
-        match stability.decide(
-            STORED_PAGES.pages_hash(),
-            iteration,
-            MAX_METADATA_SCAN_ITERATIONS,
-        ) {
+        match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS) {
             StabilityDecision::Converged => {
                 crate::debug!("scan"; "converged after {} iteration(s)", iteration + 1);
                 break;
@@ -400,12 +402,17 @@ pub fn batch_scan_typst_metadata_iterative(
     Ok(metas)
 }
 
-/// Update STORED_PAGES entry for a source file using metadata-derived permalink.
-fn update_stored_page_from_meta(file: &Path, meta_json: &JsonValue, config: &SiteConfig) {
+/// Update the page-store entry for a source file using metadata-derived permalink.
+fn update_stored_page_from_meta(
+    file: &Path,
+    meta_json: &JsonValue,
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) {
     let Ok(page_meta) = serde_json::from_value::<PageMeta>(meta_json.clone()) else {
         return;
     };
-    let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
+    let _ = store.apply_meta_for_source(file, page_meta, config);
 }
 
 /// Parse metadata JSON to PageMeta, logging warning on failure.
@@ -419,11 +426,11 @@ fn parse_page_meta(meta_json: JsonValue, file: &Path) -> Option<PageMeta> {
     }
 }
 
-/// Populate STORED_PAGES from all content files
+/// Populate page store from all content files.
 ///
 /// Scans all Typst and Markdown files to build the global page store
 /// Must be called before `batch_scan_typst_metadata_iterative`
-pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
+pub fn populate_stored_pages(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
     use crate::compiler::collect_all_files;
 
     let root = crate::utils::path::normalize_path(config.get_root());
@@ -436,23 +443,23 @@ pub fn populate_stored_pages(config: &SiteConfig) -> Result<()> {
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Scan Typst files
-    let typst_metas = batch_scan_typst_metadata(&typst_files, &root, label, config)?;
+    let typst_metas = batch_scan_typst_metadata(&typst_files, &root, label, config, store)?;
 
     for (file, meta_json) in typst_files.iter().zip(typst_metas) {
         if let Some(meta_json) = meta_json
             && let Some(page_meta) = parse_page_meta(meta_json, file)
         {
-            let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
+            let _ = store.apply_meta_for_source(file, page_meta, config);
         }
     }
 
     // Scan Markdown files
     for file in &markdown_files {
-        if let Ok(result) = scan_markdown_file(file, config)
+        if let Ok(result) = scan_markdown_file(file, config, store)
             && let Some(meta_json) = result.raw_meta
             && let Some(page_meta) = parse_page_meta(meta_json, file)
         {
-            let _ = STORED_PAGES.apply_meta_for_source(file, page_meta, config);
+            let _ = store.apply_meta_for_source(file, page_meta, config);
         }
     }
 

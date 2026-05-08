@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::SiteConfig;
 use crate::core::BuildMode;
+use crate::page::StoredPageMap;
 use page::PageRoute;
 
 pub use page::drain_warnings;
@@ -18,6 +19,7 @@ pub use page::drain_warnings;
 pub struct CompileContext<'a> {
     pub mode: BuildMode,
     pub config: &'a SiteConfig,
+    pub store: &'a StoredPageMap,
     pub route: Option<&'a PageRoute>,
     pub current_context: Option<&'a serde_json::Value>,
     /// Whether to inject global header content (styles, scripts, elements).
@@ -27,10 +29,11 @@ pub struct CompileContext<'a> {
 }
 
 impl<'a> CompileContext<'a> {
-    pub fn new(mode: BuildMode, config: &'a SiteConfig) -> Self {
+    pub fn new(mode: BuildMode, config: &'a SiteConfig, store: &'a StoredPageMap) -> Self {
         Self {
             mode,
             config,
+            store,
             route: None,
             current_context: None,
             global_header: true,

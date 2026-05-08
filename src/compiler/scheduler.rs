@@ -18,6 +18,7 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, Priority};
+use crate::page::StoredPageMap;
 
 // =============================================================================
 // Public API
@@ -76,11 +77,13 @@ struct CompileJob {
     path: PathBuf,
     priority: Priority,
     config: Arc<SiteConfig>,
+    store: Arc<StoredPageMap>,
 }
 
 struct PendingState {
     priority: Priority,
     config: Arc<SiteConfig>,
+    store: Arc<StoredPageMap>,
     waiters: Vec<Waiter>,
 }
 
@@ -145,6 +148,7 @@ impl CompileScheduler {
         path: PathBuf,
         priority: Priority,
         config: Arc<SiteConfig>,
+        store: Arc<StoredPageMap>,
     ) -> CompileResult {
         // Fast path: cached
         if let Some(result) = self
@@ -162,7 +166,7 @@ impl CompileScheduler {
         }
 
         // Atomically join or create pending
-        if self.join_or_create_pending(&path, priority, config, tx) {
+        if self.join_or_create_pending(&path, priority, config, store, tx) {
             self.enqueue(path, priority);
         }
 
@@ -170,7 +174,12 @@ impl CompileScheduler {
     }
 
     /// Submit paths for background compilation (fire-and-forget).
-    pub fn submit_background(&self, paths: Vec<PathBuf>, config: Arc<SiteConfig>) {
+    pub fn submit_background(
+        &self,
+        paths: Vec<PathBuf>,
+        config: Arc<SiteConfig>,
+        store: Arc<StoredPageMap>,
+    ) {
         let mut queue = self.queue.lock();
         for path in paths {
             if self.is_known(&path) {
@@ -181,6 +190,7 @@ impl CompileScheduler {
                 PendingState {
                     priority: Priority::Background,
                     config: Arc::clone(&config),
+                    store: Arc::clone(&store),
                     waiters: vec![],
                 },
             );
@@ -277,6 +287,7 @@ impl CompileScheduler {
         path: &Path,
         priority: Priority,
         config: Arc<SiteConfig>,
+        store: Arc<StoredPageMap>,
         tx: Waiter,
     ) -> bool {
         match self.pending.entry(path.to_path_buf()) {
@@ -286,6 +297,7 @@ impl CompileScheduler {
                 if priority > state.priority {
                     state.priority = priority;
                     state.config = config;
+                    state.store = store;
                     true // upgrade: enqueue higher priority task
                 } else {
                     false
@@ -295,6 +307,7 @@ impl CompileScheduler {
                 e.insert(PendingState {
                     priority,
                     config,
+                    store,
                     waiters: vec![tx],
                 });
                 true // new task
@@ -387,6 +400,7 @@ impl CompileScheduler {
             path: task.path,
             priority: pending.priority,
             config: pending.config,
+            store: pending.store,
         };
         let waiters = pending.waiters;
 
@@ -414,7 +428,7 @@ impl CompileScheduler {
 
         // Catch panics to ensure waiters always receive a result
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.do_compile(&path, &job.config)
+            self.do_compile(&path, &job.config, &job.store)
         }))
         .unwrap_or_else(|_| CompileResult::Failed("compilation panicked".into()));
 
@@ -450,11 +464,11 @@ impl CompileScheduler {
 // =============================================================================
 
 impl CompileScheduler {
-    fn do_compile(&self, path: &Path, config: &SiteConfig) -> CompileResult {
+    fn do_compile(&self, path: &Path, config: &SiteConfig, store: &StoredPageMap) -> CompileResult {
         use crate::compiler::dependency::flush_current_thread_deps;
         use crate::compiler::page::{cache_vdom, process_page, write_page_html};
 
-        let result = match process_page(BuildMode::DEVELOPMENT, path, config) {
+        let result = match process_page(BuildMode::DEVELOPMENT, path, config, store) {
             Ok(Some(r)) => r,
             Ok(None) => return CompileResult::Skipped,
             Err(e) => return CompileResult::Failed(format!("{:#}", e)),
@@ -573,6 +587,8 @@ mod tests {
         let active_root = dir.path().join("active-root");
         let background_config = config_with_root(&background_root);
         let active_config = config_with_root(&active_root);
+        let background_store = Arc::new(StoredPageMap::new());
+        let active_store = Arc::new(StoredPageMap::new());
         let path = dir.path().join("content/page.typ");
 
         let (background_tx, _background_rx) = channel::bounded(1);
@@ -580,6 +596,7 @@ mod tests {
             &path,
             Priority::Background,
             Arc::clone(&background_config),
+            Arc::clone(&background_store),
             background_tx,
         ));
 
@@ -588,6 +605,7 @@ mod tests {
             &path,
             Priority::Active,
             Arc::clone(&active_config),
+            Arc::clone(&active_store),
             active_tx,
         ));
 
@@ -601,6 +619,7 @@ mod tests {
         assert_eq!(job.path, path);
         assert_eq!(job.priority, Priority::Active);
         assert_eq!(job.config.get_root(), active_root);
+        assert!(Arc::ptr_eq(&job.store, &active_store));
         assert_eq!(waiters.len(), 2);
     }
 }

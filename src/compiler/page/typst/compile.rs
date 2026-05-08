@@ -11,7 +11,7 @@ use crate::package::{
     build_visible_inputs, build_visible_inputs_for_source,
     build_visible_inputs_with_current_context,
 };
-use crate::page::{PageMeta, STORED_PAGES};
+use crate::page::PageMeta;
 use crate::pipeline::compile as pipeline_compile;
 
 use super::from_typst_html;
@@ -46,11 +46,11 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
     // scanned current context so templates see fresh @tola/current data without
     // publishing draft page state globally.
     let inputs = if let Some(current_context) = ctx.current_context {
-        build_visible_inputs_with_current_context(ctx.config, &STORED_PAGES, current_context)?
+        build_visible_inputs_with_current_context(ctx.config, ctx.store, current_context)?
     } else if let Some(route) = ctx.route {
-        build_visible_inputs_for_source(ctx.config, &STORED_PAGES, &route.source)?
+        build_visible_inputs_for_source(ctx.config, ctx.store, &route.source)?
     } else {
-        build_visible_inputs(ctx.config, &STORED_PAGES)?
+        build_visible_inputs(ctx.config, ctx.store)?
     };
 
     // Compile Typst to HtmlDocument using Builder API with inputs

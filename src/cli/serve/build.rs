@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::page::StoredPageMap;
 use crate::{
     asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind, debug, embed,
     freshness, hooks, log, seo,
@@ -102,7 +103,7 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
 /// Background warmup is queued through the scheduler so on-demand requests can
 /// still deduplicate with existing work. To preserve UX, we only feed tiny
 /// batches and pause warmup while requests are active.
-pub fn serve_build(config: &SiteConfig) -> Result<()> {
+pub fn serve_build(config: &SiteConfig, store: Arc<StoredPageMap>) -> Result<()> {
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
         .into_iter()
@@ -110,11 +111,11 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
         .collect();
 
     debug!("build"; "warming {} pages via scheduler", content_files.len());
-    warm_site_pages(content_files, Arc::new(config.clone()));
+    warm_site_pages(content_files, Arc::new(config.clone()), Arc::clone(&store));
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
-    recompile_virtual_users(config);
+    recompile_virtual_users(config, &store);
 
     // Post-processing (flatten assets already done in init_serve_build)
     // CNAME already done in init_serve_build
@@ -127,8 +128,8 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
 
     // Generate feed and sitemap
     let (rss_result, sitemap_result) = rayon::join(
-        || seo::feed::build_feed(config),
-        || seo::sitemap::build_sitemap(config),
+        || seo::feed::build_feed(config, &store),
+        || seo::sitemap::build_sitemap(config, &store),
     );
 
     rss_result?;
@@ -142,15 +143,19 @@ pub fn serve_build(config: &SiteConfig) -> Result<()> {
 ///
 /// The startup coordinator already made request-driven serving available after
 /// scan completion, so this function must not block that path.
-pub fn start_serve_build(config: Arc<SiteConfig>) {
+pub fn start_serve_build(config: Arc<SiteConfig>, store: Arc<StoredPageMap>) {
     std::thread::spawn(move || {
-        if let Err(e) = serve_build(&config) {
+        if let Err(e) = serve_build(&config, store) {
             log!("build"; "background warmup failed: {}", e);
         }
     });
 }
 
-fn warm_site_pages(content_files: Vec<std::path::PathBuf>, config: Arc<SiteConfig>) {
+fn warm_site_pages(
+    content_files: Vec<std::path::PathBuf>,
+    config: Arc<SiteConfig>,
+    store: Arc<StoredPageMap>,
+) {
     use crate::cli::serve::request_idle_for;
     use compiler::scheduler::SCHEDULER;
 
@@ -165,7 +170,7 @@ fn warm_site_pages(content_files: Vec<std::path::PathBuf>, config: Arc<SiteConfi
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        SCHEDULER.submit_background(chunk.to_vec(), Arc::clone(&config));
+        SCHEDULER.submit_background(chunk.to_vec(), Arc::clone(&config), Arc::clone(&store));
         SCHEDULER.wait_all();
     }
 }
@@ -174,8 +179,8 @@ fn warm_site_pages(content_files: Vec<std::path::PathBuf>, config: Arc<SiteConfi
 ///
 /// This ensures iterative pages have complete data after all pages are compiled.
 /// Called after initial scheduler compilation to fix race condition where
-/// pages may have been compiled before STORED_PAGES was fully populated.
-fn recompile_virtual_users(config: &SiteConfig) {
+/// pages may have been compiled before page metadata was fully populated.
+fn recompile_virtual_users(config: &SiteConfig, store: &StoredPageMap) {
     use crate::cli::serve::request_idle_for;
     use crate::compiler::dependency::collect_virtual_dependents;
     use crate::reload::compile::compile_page;
@@ -197,7 +202,7 @@ fn recompile_virtual_users(config: &SiteConfig) {
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        let outcome = compile_page(path, config);
+        let outcome = compile_page(path, config, store);
         if let crate::reload::compile::CompileOutcome::Vdom { url_path, vdom, .. } = outcome {
             crate::compiler::page::cache_vdom(&url_path, *vdom);
         }

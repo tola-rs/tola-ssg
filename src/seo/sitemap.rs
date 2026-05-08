@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, log, page::STORED_PAGES, seo::minify_xml};
+use crate::{config::SiteConfig, log, page::StoredPageMap, seo::minify_xml};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
@@ -22,9 +22,9 @@ use std::fs;
 const SITEMAP_NS: &str = "http://www.sitemaps.org/schemas/sitemap/0.9";
 
 /// Build sitemap if enabled
-pub fn build_sitemap(config: &SiteConfig) -> Result<()> {
+pub fn build_sitemap(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
     if config.site.seo.sitemap.enable {
-        let sitemap = Sitemap::build(config);
+        let sitemap = Sitemap::build(config, store);
         sitemap.write(config)?;
     }
     Ok(())
@@ -40,8 +40,8 @@ struct UrlEntry {
 }
 
 impl Sitemap {
-    fn build(config: &SiteConfig) -> Self {
-        let pages = STORED_PAGES.get_pages();
+    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
+        let pages = store.get_pages();
 
         let urls: Vec<UrlEntry> = pages
             .iter()

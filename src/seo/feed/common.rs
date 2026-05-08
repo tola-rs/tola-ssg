@@ -2,7 +2,7 @@
 
 use crate::{
     log,
-    page::{STORED_PAGES, StoredPage},
+    page::{StoredPage, StoredPageMap},
     seo::extract::extract,
 };
 
@@ -29,8 +29,8 @@ impl FeedPage {
 }
 
 /// Get all pages valid for feed inclusion (only pages with date)
-pub fn get_feed_pages() -> Vec<FeedPage> {
-    let all_pages = STORED_PAGES.get_pages();
+pub fn get_feed_pages(store: &StoredPageMap) -> Vec<FeedPage> {
+    let all_pages = store.get_pages();
     let total = all_pages.len();
 
     let feed_pages: Vec<FeedPage> = all_pages.iter().filter_map(FeedPage::from_stored).collect();

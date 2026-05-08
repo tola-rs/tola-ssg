@@ -9,7 +9,7 @@ use crate::compiler::family::Indexed;
 use crate::compiler::page::{PageStateTicket, process_page, process_page_with_ticket};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
-use crate::page::{PageRoute, PageState, STORED_PAGES};
+use crate::page::{PageRoute, PageState, StoredPageMap};
 use tola_vdom::Document;
 
 /// Result of compiling a single file
@@ -44,21 +44,23 @@ pub enum CompileOutcome {
 /// - Calls the existing `process_page` with Development driver for .typ files
 /// - Returns a unified outcome type
 /// - Applies draft-transition cleanup when a page becomes non-visible
-pub fn compile_page(path: &Path, config: &SiteConfig) -> CompileOutcome {
-    compile_page_inner(path, config, None)
+pub fn compile_page(path: &Path, config: &SiteConfig, store: &StoredPageMap) -> CompileOutcome {
+    compile_page_inner(path, config, store, None)
 }
 
 pub fn compile_page_with_ticket(
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
     ticket: &PageStateTicket,
 ) -> CompileOutcome {
-    compile_page_inner(path, config, Some(ticket))
+    compile_page_inner(path, config, store, Some(ticket))
 }
 
 fn compile_page_inner(
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
     let ext = path.extension().and_then(|e| e.to_str());
@@ -70,7 +72,7 @@ fn compile_page_inner(
             if !path.starts_with(&config.build.content) {
                 return CompileOutcome::Skipped;
             }
-            compile_content_file(path, config, ticket)
+            compile_content_file(path, config, store, ticket)
         }
         Some("css" | "js" | "html") => CompileOutcome::Reload {
             reason: format!("asset changed: {}", path.display()),
@@ -90,10 +92,14 @@ fn compile_page_inner(
 /// request-driven compiles to stay responsive; a full-core rayon batch here
 /// can make the first interactive request feel like it is waiting for a
 /// rebuild even though on-demand compilation exists.
-pub fn compile_startup_batch(paths: &[PathBuf], config: &SiteConfig) -> Vec<CompileOutcome> {
+pub fn compile_startup_batch(
+    paths: &[PathBuf],
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> Vec<CompileOutcome> {
     let mut outcomes = Vec::with_capacity(paths.len());
     for path in paths {
-        outcomes.push(compile_page(path, config));
+        outcomes.push(compile_page(path, config, store));
         crate::compiler::dependency::flush_current_thread_deps();
     }
 
@@ -104,11 +110,14 @@ pub fn compile_startup_batch(paths: &[PathBuf], config: &SiteConfig) -> Vec<Comp
 fn compile_content_file(
     path: &Path,
     config: &SiteConfig,
+    store: &StoredPageMap,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
     let result = match ticket {
-        Some(ticket) => process_page_with_ticket(BuildMode::DEVELOPMENT, path, config, ticket),
-        None => process_page(BuildMode::DEVELOPMENT, path, config),
+        Some(ticket) => {
+            process_page_with_ticket(BuildMode::DEVELOPMENT, path, config, store, ticket)
+        }
+        None => process_page(BuildMode::DEVELOPMENT, path, config, store),
     };
 
     match result {
@@ -153,9 +162,9 @@ fn compile_content_file(
         Ok(None) => {
             let cleaned = match ticket {
                 Some(ticket) => ticket
-                    .commit(|| cleanup_draft_state(path, config))
+                    .commit(|| cleanup_draft_state(path, config, store))
                     .unwrap_or(false),
-                None => cleanup_draft_state(path, config),
+                None => cleanup_draft_state(path, config, store),
             };
             if cleaned {
                 crate::debug!("watch"; "page became draft: {}", path.display());
@@ -173,14 +182,18 @@ fn compile_content_file(
 /// Clean runtime/global state for pages that are now drafts.
 ///
 /// Returns true when a previously visible page existed and was removed.
-fn cleanup_draft_state(path: &Path, config: &SiteConfig) -> bool {
-    cleanup_removed_source_state(path, config).is_some()
+fn cleanup_draft_state(path: &Path, config: &SiteConfig, store: &StoredPageMap) -> bool {
+    cleanup_removed_source_state(path, config, store).is_some()
 }
 
 /// Clean all runtime state for a removed or hidden source file.
 ///
 /// Returns the previously visible URL if one was known.
-pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<UrlPath> {
+pub fn cleanup_removed_source_state(
+    path: &Path,
+    config: &SiteConfig,
+    store: &StoredPageMap,
+) -> Option<UrlPath> {
     let normalized = crate::utils::path::normalize_path(path);
     let has_alt = normalized.as_path() != path;
 
@@ -188,13 +201,13 @@ pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<
         .read()
         .url_for_source(path)
         .cloned()
-        .or_else(|| STORED_PAGES.get_permalink_by_source(path));
+        .or_else(|| store.get_permalink_by_source(path));
     let old_url = if old_url.is_none() && has_alt {
         crate::address::GLOBAL_ADDRESS_SPACE
             .read()
             .url_for_source(&normalized)
             .cloned()
-            .or_else(|| STORED_PAGES.get_permalink_by_source(&normalized))
+            .or_else(|| store.get_permalink_by_source(&normalized))
     } else {
         old_url
     };
@@ -207,9 +220,9 @@ pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<
             space.remove_by_source(&normalized);
         }
     }
-    STORED_PAGES.remove_by_source(path);
+    store.remove_by_source(path);
     if has_alt {
-        STORED_PAGES.remove_by_source(&normalized);
+        store.remove_by_source(&normalized);
     }
     crate::compiler::dependency::remove_content(path);
     if has_alt {
@@ -226,7 +239,7 @@ pub fn cleanup_removed_source_state(path: &Path, config: &SiteConfig) -> Option<
 
     // Remove cached VDOM and link-graph edges for this page.
     crate::compiler::page::BUILD_CACHE.remove(&tola_vdom::CacheKey::new(old_url.as_str()));
-    PageState::new(&STORED_PAGES).clear_links(&old_url);
+    PageState::new(store).clear_links(&old_url);
 
     cleanup_output_file(config, &old_url);
     Some(old_url)
@@ -267,10 +280,10 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    fn reset_global_state() {
+    fn reset_global_state(store: &StoredPageMap) {
         crate::compiler::page::BUILD_CACHE.clear();
         crate::compiler::dependency::clear_graph();
-        STORED_PAGES.clear();
+        store.clear();
         crate::address::GLOBAL_ADDRESS_SPACE.write().clear();
     }
 
@@ -300,8 +313,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.content = content_dir;
+        let store = StoredPageMap::new();
 
-        let outcome = compile_page(&template, &config);
+        let outcome = compile_page(&template, &config, &store);
         assert!(matches!(outcome, CompileOutcome::Skipped));
     }
 
@@ -319,22 +333,23 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir.clone();
         config.build.output = output_dir.clone();
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_global_state(&store);
 
         // Start as draft (no previously published state): should be skipped.
         fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
-        let draft_outcome = compile_page(&page, &config);
+        let draft_outcome = compile_page(&page, &config, &store);
         assert!(matches!(draft_outcome, CompileOutcome::Skipped));
-        assert!(STORED_PAGES.get_permalink_by_source(&page).is_none());
+        assert!(store.get_permalink_by_source(&page).is_none());
         assert!(!output_file.exists());
 
         // Simulate previously published state for this source.
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
-        STORED_PAGES.insert_page(
+        store.insert_source_mapping(page.clone(), route.permalink.clone());
+        store.insert_page(
             route.permalink.clone(),
             crate::page::PageMeta {
                 title: Some("Post".to_string()),
@@ -350,16 +365,16 @@ mod tests {
         }
         fs::write(&output_file, "stale html").unwrap();
 
-        let hash_published = STORED_PAGES.pages_hash();
+        let hash_published = store.pages_hash();
 
         // Compile as draft again; stale published state must be cleaned.
-        let back_to_draft = compile_page(&page, &config);
+        let back_to_draft = compile_page(&page, &config, &store);
         assert!(
             matches!(back_to_draft, CompileOutcome::Skipped),
             "expected Skipped when removing published page, got: {:?}",
             back_to_draft
         );
-        assert!(STORED_PAGES.get_permalink_by_source(&page).is_none());
+        assert!(store.get_permalink_by_source(&page).is_none());
         assert!(
             crate::address::GLOBAL_ADDRESS_SPACE
                 .read()
@@ -367,14 +382,10 @@ mod tests {
                 .is_none()
         );
         assert!(!output_file.exists());
-        assert!(
-            PageState::new(&STORED_PAGES)
-                .links_to(&route.permalink)
-                .is_empty()
-        );
-        assert_ne!(STORED_PAGES.pages_hash(), hash_published);
+        assert!(PageState::new(&store).links_to(&route.permalink).is_empty());
+        assert_ne!(store.pages_hash(), hash_published);
 
-        reset_global_state();
+        reset_global_state(&store);
     }
 
     #[test]
@@ -391,14 +402,15 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir.clone();
         config.build.output = output_dir.clone();
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_global_state(&store);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
-        STORED_PAGES.insert_page(
+        store.insert_source_mapping(page.clone(), route.permalink.clone());
+        store.insert_page(
             route.permalink.clone(),
             crate::page::PageMeta {
                 title: Some("Post".to_string()),
@@ -409,18 +421,13 @@ mod tests {
         crate::address::GLOBAL_ADDRESS_SPACE
             .write()
             .register_page(route.clone(), Some("Post".to_string()));
-        PageState::new(&STORED_PAGES)
-            .record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
+        PageState::new(&store).record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
 
-        let removed = cleanup_removed_source_state(&page, &config);
+        let removed = cleanup_removed_source_state(&page, &config, &store);
 
         assert_eq!(removed, Some(route.permalink.clone()));
-        assert!(
-            PageState::new(&STORED_PAGES)
-                .links_to(&route.permalink)
-                .is_empty()
-        );
-        reset_global_state();
+        assert!(PageState::new(&store).links_to(&route.permalink).is_empty());
+        reset_global_state(&store);
     }
 
     #[test]
@@ -437,14 +444,15 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         config.build.output = output_dir;
+        let store = StoredPageMap::new();
 
-        reset_global_state();
+        reset_global_state(&store);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        STORED_PAGES.insert_source_mapping(page.clone(), route.permalink.clone());
-        STORED_PAGES.insert_page(
+        store.insert_source_mapping(page.clone(), route.permalink.clone());
+        store.insert_page(
             route.permalink.clone(),
             crate::page::PageMeta {
                 title: Some("Post".to_string()),
@@ -460,11 +468,11 @@ mod tests {
         let ticket = epoch.ticket();
         epoch.advance();
 
-        let outcome = compile_page_with_ticket(&page, &config, &ticket);
+        let outcome = compile_page_with_ticket(&page, &config, &store, &ticket);
 
         assert!(matches!(outcome, CompileOutcome::Skipped));
         assert_eq!(
-            STORED_PAGES.get_permalink_by_source(&page),
+            store.get_permalink_by_source(&page),
             Some(route.permalink.clone())
         );
         assert!(
@@ -474,6 +482,6 @@ mod tests {
                 .is_some()
         );
 
-        reset_global_state();
+        reset_global_state(&store);
     }
 }
