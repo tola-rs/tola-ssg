@@ -64,9 +64,10 @@ pub fn scan_markdown(
     file: &Path,
     root: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<ScanResult> {
-    let result = scan_markdown_file(file, config, store)?;
+    let result = scan_markdown_file(file, config, host, store)?;
 
     let source = file
         .strip_prefix(root)

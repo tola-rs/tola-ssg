@@ -12,9 +12,6 @@
 
 mod pipeline;
 
-use anyhow::Result;
-use std::path::Path;
-
 use crate::{
     address::SiteIndex,
     compiler::page::{Pages, WarningCollector},
@@ -24,14 +21,7 @@ use crate::{
     hooks, log,
     utils::plural_count,
 };
-
-/// Collect font directories from config for font loading
-pub fn collect_font_dirs(config: &SiteConfig) -> Vec<&Path> {
-    let mut dirs: Vec<&Path> = vec![config.build.content.as_path()];
-    dirs.extend(config.build.assets.nested_sources());
-    dirs.extend(config.build.deps.iter().map(|p| p.as_path()));
-    dirs
-}
+use anyhow::Result;
 
 /// Build the entire site using two-phase compilation
 ///
@@ -45,7 +35,7 @@ pub fn build_site(
     let warnings = WarningCollector::new();
 
     // Initialize (must be before pre hooks to clean output dir first)
-    pipeline::init_build(config)?;
+    let typst_host = pipeline::init_build(config)?;
     let deps_hash: ContentHash = freshness::compute_deps_hash(config);
 
     // Pre Hooks (after init so output dir exists and is clean)
@@ -59,6 +49,7 @@ pub fn build_site(
     let metadata = pipeline::compile_and_process(
         mode,
         config,
+        &typst_host,
         state,
         &files,
         deps_hash,
@@ -76,8 +67,15 @@ pub fn build_site(
     }
 
     // Rebuild iterative pages with complete metadata
-    let pages =
-        pipeline::rebuild_iterative_pages(mode, config, state, deps_hash, &metadata, &warnings)?;
+    let pages = pipeline::rebuild_iterative_pages(
+        mode,
+        config,
+        &typst_host,
+        state,
+        deps_hash,
+        &metadata,
+        &warnings,
+    )?;
 
     if let Some(p) = progress {
         p.finish();

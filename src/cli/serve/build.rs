@@ -13,8 +13,9 @@ use std::time::Duration;
 use crate::{
     address::SiteIndex,
     asset, compiler,
+    compiler::page::TypstHost,
     compiler::scheduler::{CompileResult, SCHEDULER},
-    config::{ConfigHandle, SiteConfig},
+    config::SiteConfig,
     core::{BuildMode, ContentKind, Priority, is_shutdown},
     debug, embed, freshness, hooks, log, seo,
 };
@@ -36,21 +37,14 @@ struct BuildWarning {
 /// 3. Clear caches for accurate change detection
 /// 4. Run pre hooks (CSS preprocessor etc.)
 /// 5. Process all assets (sync, no priority needed)
-pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
+pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
     // Clean output directory BEFORE set_serving() to avoid race condition
     // where on-demand compilation writes files that get deleted
     if config.build.clean && config.build.output.exists() {
         std::fs::remove_dir_all(&config.build.output)?;
     }
 
-    // Initialize fonts with nested asset mappings
-    let font_dirs = crate::cli::build::collect_font_dirs(config);
-    let nested_mappings = compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-    compiler::page::typst::init_runtime(
-        &font_dirs,
-        config.get_root().to_path_buf(),
-        nested_mappings,
-    );
+    let typst_host = TypstHost::for_config(config);
 
     // Ensure output directory exists
     let output_dir = config.paths().output_dir();
@@ -62,7 +56,6 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
     embed::write_embedded_assets(config, &output_dir)?;
 
     // Clear caches for accurate change detection (same as init_build)
-    typst_batch::clear_file_cache();
     freshness::clear_cache();
 
     // Run pre hooks (CSS preprocessor etc.) - IMPORTANT for Tailwind users
@@ -71,7 +64,7 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<()> {
     // Process all assets synchronously (no priority needed for assets)
     process_assets(config)?;
 
-    Ok(())
+    Ok(typst_host)
 }
 
 /// Process all assets for serve mode
@@ -109,7 +102,11 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
 /// Background warmup uses scheduler requests one page at a time so each result
 /// returns warnings explicitly while still deduplicating with on-demand work
 /// Warmup waits for request idle time before each page
-pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
+pub fn serve_build(
+    config: &SiteConfig,
+    typst_host: Arc<TypstHost>,
+    state: Arc<SiteIndex>,
+) -> Result<()> {
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
         .into_iter()
@@ -117,11 +114,16 @@ pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
         .collect();
 
     debug!("build"; "warming {} pages via scheduler", content_files.len());
-    let mut warnings = warm_site_pages(content_files, Arc::new(config.clone()), Arc::clone(&state));
+    let mut warnings = warm_site_pages(
+        content_files,
+        Arc::new(config.clone()),
+        Arc::clone(&typst_host),
+        Arc::clone(&state),
+    );
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
-    warnings.extend(recompile_virtual_users(config, &state));
+    warnings.extend(recompile_virtual_users(config, &typst_host, &state));
 
     // Post-processing (flatten assets already done in init_serve_build)
     // CNAME already done in init_serve_build
@@ -149,10 +151,13 @@ pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
 ///
 /// The startup coordinator already made request-driven serving available after
 /// scan completion, so this function must not block that path.
-pub fn start_serve_build(config: ConfigHandle, state: Arc<SiteIndex>) {
+pub fn start_serve_build(
+    config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
+    state: Arc<SiteIndex>,
+) {
     std::thread::spawn(move || {
-        let config = config.current();
-        if let Err(e) = serve_build(&config, state) {
+        if let Err(e) = serve_build(&config, typst_host, state) {
             log!("build"; "background warmup failed: {}", e);
         }
     });
@@ -161,6 +166,7 @@ pub fn start_serve_build(config: ConfigHandle, state: Arc<SiteIndex>) {
 fn warm_site_pages(
     content_files: Vec<PathBuf>,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
 ) -> Vec<BuildWarning> {
     use crate::cli::serve::request_idle_for;
@@ -181,6 +187,7 @@ fn warm_site_pages(
             path.clone(),
             Priority::Background,
             Arc::clone(&config),
+            Arc::clone(&typst_host),
             Arc::clone(&state),
         ) {
             CompileResult::Success {
@@ -202,7 +209,11 @@ fn warm_site_pages(
 /// This ensures iterative pages have complete data after all pages are compiled.
 /// Called after initial scheduler compilation to fix race condition where
 /// pages may have been compiled before page metadata was fully populated.
-fn recompile_virtual_users(config: &SiteConfig, state: &SiteIndex) -> Vec<BuildWarning> {
+fn recompile_virtual_users(
+    config: &SiteConfig,
+    typst_host: &TypstHost,
+    state: &SiteIndex,
+) -> Vec<BuildWarning> {
     use crate::cli::serve::request_idle_for;
     use crate::compiler::dependency::{collect_virtual_dependents, flush_thread_local_deps};
     use crate::compiler::page::cache_vdom;
@@ -227,7 +238,7 @@ fn recompile_virtual_users(config: &SiteConfig, state: &SiteIndex) -> Vec<BuildW
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        let outcome = compile_page(path, config, state);
+        let outcome = compile_page(path, config, typst_host, state);
         if let CompileOutcome::Vdom {
             url_path,
             vdom,

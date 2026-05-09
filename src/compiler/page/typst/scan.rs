@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use anyhow::Result;
-use typst_batch::prelude::*;
 
 use crate::compiler::CompileContext;
 use crate::compiler::page::{PageScanOutput, format_compile_error};
@@ -27,7 +26,9 @@ pub fn scan(path: &Path, ctx: &CompileContext<'_>) -> Result<PageScanOutput> {
         .unwrap_or(usize::MAX);
 
     // Compile Typst to HtmlDocument using Builder API
-    let result = Compiler::new(root)
+    let result = ctx
+        .typst_host
+        .compiler(root)
         .with_path(path)
         .compile()
         .map_err(|e| format_compile_error(&e, max_errors))?;

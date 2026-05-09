@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use crate::address::{PermalinkUpdate, SiteIndex};
 use crate::compiler::family::Indexed;
-use crate::compiler::page::{PageStateTicket, PreparedPage, commit_page_state_parts, prepare_page};
+use crate::compiler::page::{
+    PageStateTicket, PreparedPage, TypstHost, commit_page_state_parts, prepare_page,
+};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::page::PageState;
@@ -44,22 +46,29 @@ pub enum CompileOutcome {
 /// - Prepares page output with the Development driver
 /// - Returns a unified outcome type
 /// - Applies draft-transition cleanup when a page becomes non-visible
-pub fn compile_page(path: &Path, config: &SiteConfig, state: &SiteIndex) -> CompileOutcome {
-    compile_page_inner(path, config, state, None)
+pub fn compile_page(
+    path: &Path,
+    config: &SiteConfig,
+    host: &TypstHost,
+    state: &SiteIndex,
+) -> CompileOutcome {
+    compile_page_inner(path, config, host, state, None)
 }
 
 pub fn compile_page_with_ticket(
     path: &Path,
     config: &SiteConfig,
+    host: &TypstHost,
     state: &SiteIndex,
     ticket: &PageStateTicket,
 ) -> CompileOutcome {
-    compile_page_inner(path, config, state, Some(ticket))
+    compile_page_inner(path, config, host, state, Some(ticket))
 }
 
 fn compile_page_inner(
     path: &Path,
     config: &SiteConfig,
+    host: &TypstHost,
     state: &SiteIndex,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
@@ -72,7 +81,7 @@ fn compile_page_inner(
             if !path.starts_with(&config.build.content) {
                 return CompileOutcome::Skipped;
             }
-            compile_content_file(path, config, state, ticket)
+            compile_content_file(path, config, host, state, ticket)
         }
         Some("css" | "js" | "html") => CompileOutcome::Reload {
             reason: format!("asset changed: {}", path.display()),
@@ -95,11 +104,12 @@ fn compile_page_inner(
 pub fn compile_startup_batch(
     paths: &[PathBuf],
     config: &SiteConfig,
+    host: &TypstHost,
     state: &SiteIndex,
 ) -> Vec<CompileOutcome> {
     let mut outcomes = Vec::with_capacity(paths.len());
     for path in paths {
-        outcomes.push(compile_page(path, config, state));
+        outcomes.push(compile_page(path, config, host, state));
         crate::compiler::dependency::flush_current_thread_deps();
     }
 
@@ -110,10 +120,11 @@ pub fn compile_startup_batch(
 fn compile_content_file(
     path: &Path,
     config: &SiteConfig,
+    host: &TypstHost,
     state: &SiteIndex,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
-    let result = prepare_page(BuildMode::DEVELOPMENT, path, config, state);
+    let result = prepare_page(BuildMode::DEVELOPMENT, path, config, host, state);
 
     match result {
         Ok(Some(prepared)) => finish_prepared_page(path, config, state, ticket, prepared),
@@ -344,6 +355,10 @@ mod tests {
         state.clear();
     }
 
+    fn typst_host(config: &SiteConfig) -> TypstHost {
+        TypstHost::for_config(config)
+    }
+
     #[test]
     fn test_compile_outcome_variants() {
         let _ = CompileOutcome::Reload {
@@ -371,8 +386,9 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
+        let host = typst_host(&config);
 
-        let outcome = compile_page(&template, &config, &state);
+        let outcome = compile_page(&template, &config, &host, &state);
         assert!(matches!(outcome, CompileOutcome::Skipped));
     }
 
@@ -399,6 +415,7 @@ mod tests {
         let state = SiteIndex::new();
 
         reset_state(&state);
+        let host = typst_host(&config);
 
         let existing_meta = crate::page::PageMeta {
             title: Some("Existing".to_string()),
@@ -422,7 +439,7 @@ mod tests {
             address.register_page(existing_page.route.clone(), Some("Existing".to_string()));
         });
 
-        let outcome = compile_page(&incoming, &config, &state);
+        let outcome = compile_page(&incoming, &config, &host, &state);
 
         match outcome {
             CompileOutcome::Vdom {
@@ -476,11 +493,12 @@ mod tests {
         let state = SiteIndex::new();
 
         reset_state(&state);
+        let host = typst_host(&config);
 
         let output_file = UrlPath::from_page("/post/").output_html_path(&output_dir);
         fs::create_dir_all(&output_file).unwrap();
 
-        let outcome = compile_page(&page, &config, &state);
+        let outcome = compile_page(&page, &config, &host, &state);
 
         match outcome {
             CompileOutcome::Error {
@@ -502,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn test_draft_toggle_false_then_true_cleans_runtime_state() {
+    fn draft_toggle_false_then_true_cleans_page_state() {
         let dir = TempDir::new().unwrap();
         let content_dir = dir.path().join("content");
         let output_dir = dir.path().join("public");
@@ -518,10 +536,11 @@ mod tests {
         let state = SiteIndex::new();
 
         reset_state(&state);
+        let host = typst_host(&config);
 
         // Start as draft (no previously published state): should be skipped.
         fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
-        let draft_outcome = compile_page(&page, &config, &state);
+        let draft_outcome = compile_page(&page, &config, &host, &state);
         assert!(matches!(draft_outcome, CompileOutcome::Skipped));
         assert!(state.with_pages(|store| store.get_permalink_by_source(&page).is_none()));
         assert!(!output_file.exists());
@@ -550,7 +569,7 @@ mod tests {
         let hash_published = state.with_pages(|store| store.pages_hash());
 
         // Compile as draft again; stale published state must be cleaned.
-        let back_to_draft = compile_page(&page, &config, &state);
+        let back_to_draft = compile_page(&page, &config, &host, &state);
         assert!(
             matches!(back_to_draft, CompileOutcome::Skipped),
             "expected Skipped when removing published page, got: {:?}",
@@ -631,6 +650,7 @@ mod tests {
         let state = SiteIndex::new();
 
         reset_state(&state);
+        let host = typst_host(&config);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
@@ -652,7 +672,7 @@ mod tests {
         let ticket = epoch.ticket();
         epoch.advance();
 
-        let outcome = compile_page_with_ticket(&page, &config, &state, &ticket);
+        let outcome = compile_page_with_ticket(&page, &config, &host, &state, &ticket);
 
         assert!(matches!(outcome, CompileOutcome::Skipped));
         assert_eq!(

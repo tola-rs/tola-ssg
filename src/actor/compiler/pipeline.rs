@@ -13,14 +13,14 @@ use super::tasks::compile_batch;
 impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
-        let config = self.config.current();
+        let (config, typst_host) = self.current_config_and_typst_host();
         let compile_config = Arc::clone(&config);
         let state = Arc::clone(&self.state);
         let path = path.to_path_buf();
         SCHEDULER.invalidate(&path);
 
         let result = tokio::task::spawn_blocking(move || {
-            let outcome = compile_page(&path, &compile_config, &state);
+            let outcome = compile_page(&path, &compile_config, &typst_host, &state);
             // spawn_blocking threads are not rayon workers.
             flush_current_thread_deps();
             outcome
@@ -35,8 +35,14 @@ impl CompilerActor {
 
     /// Compile multiple files in parallel (blocking).
     pub(super) async fn compile_batch_blocking(&mut self, paths: Vec<PathBuf>) {
-        let config = self.config.current();
-        let outcomes = compile_batch(paths, Arc::clone(&config), Arc::clone(&self.state)).await;
+        let (config, typst_host) = self.current_config_and_typst_host();
+        let outcomes = compile_batch(
+            paths,
+            Arc::clone(&config),
+            typst_host,
+            Arc::clone(&self.state),
+        )
+        .await;
         for outcome in outcomes {
             self.route(outcome, Arc::clone(&config)).await;
         }

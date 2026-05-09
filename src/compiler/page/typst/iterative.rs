@@ -14,16 +14,18 @@ pub const MAX_METADATA_SCAN_ITERATIONS: usize = 5;
 /// Scan a single file with per-file `@tola/current` using global page store.
 pub fn scan_single_with_current(
     root: &Path,
+    host: &super::TypstHost,
     file: &PathBuf,
     config: &SiteConfig,
     store: &StoredPageMap,
 ) -> Result<typst_batch::ScanResult, typst_batch::CompileError> {
-    scan_single_with_current_in_store(root, file, config, store)
+    scan_single_with_current_in_store(root, host, file, config, store)
 }
 
 /// Scan a single file with per-file `@tola/current` using the provided page store.
 pub(super) fn scan_single_with_current_in_store(
     root: &Path,
+    host: &super::TypstHost,
     file: &PathBuf,
     config: &SiteConfig,
     store: &StoredPageMap,
@@ -37,7 +39,8 @@ pub(super) fn scan_single_with_current_in_store(
     })?;
 
     let single = [file];
-    let scanner = Batcher::for_scan(root)
+    let scanner = host
+        .batch_scanner(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(&single)?;
 

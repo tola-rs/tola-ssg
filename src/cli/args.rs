@@ -11,6 +11,14 @@ pub struct Cli {
     #[arg(long, global = true, default_value = "auto")]
     pub color: ColorChoice,
 
+    /// Path to local Typst packages.
+    #[arg(long, global = true, value_hint = clap::ValueHint::DirPath)]
+    pub package_path: Option<PathBuf>,
+
+    /// Path to the Typst package cache.
+    #[arg(long, global = true, value_hint = clap::ValueHint::DirPath)]
+    pub package_cache_path: Option<PathBuf>,
+
     /// Output directory path (relative to project root)
     #[arg(short, long, value_hint = clap::ValueHint::DirPath)]
     pub output: Option<PathBuf>,
@@ -221,5 +229,35 @@ impl Cli {
     }
     pub const fn is_fix(&self) -> bool {
         matches!(self.command, Commands::Fix)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_package_paths_with_typst_cli_names() {
+        let cli = Cli::try_parse_from([
+            "tola",
+            "build",
+            "--package-path",
+            "typst-packages",
+            "--package-cache-path",
+            "typst-cache",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.package_path, Some(PathBuf::from("typst-packages")));
+        assert_eq!(cli.package_cache_path, Some(PathBuf::from("typst-cache")));
+    }
+
+    #[test]
+    fn rejects_typst_prefixed_package_path() {
+        let err =
+            Cli::try_parse_from(["tola", "build", "--typst-package-path", "packages"]).unwrap_err();
+
+        assert!(err.to_string().contains("--typst-package-path"));
     }
 }

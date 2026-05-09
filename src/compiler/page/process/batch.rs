@@ -8,7 +8,7 @@ use crate::compiler::dependency::{flush_thread_local_deps, record_dependencies_l
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
     BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, ScannedPage, TypstBatcher,
-    WarningCollector, cache_vdom, format_compile_error, scan_pages, write_redirects,
+    TypstHost, WarningCollector, cache_vdom, format_compile_error, scan_pages, write_redirects,
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
 use crate::compiler::{CompileContext, collect_all_files};
@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 struct BuildContext<'a> {
     mode: BuildMode,
     config: &'a SiteConfig,
+    typst_host: &'a TypstHost,
     store: &'a StoredPageMap,
     clean: bool,
     deps_hash: Option<ContentHash>,
@@ -43,6 +44,7 @@ impl<'a> BuildContext<'a> {
     fn new(
         mode: BuildMode,
         config: &'a SiteConfig,
+        typst_host: &'a TypstHost,
         store: &'a StoredPageMap,
         clean: bool,
         deps_hash: Option<ContentHash>,
@@ -52,6 +54,7 @@ impl<'a> BuildContext<'a> {
         Self {
             mode,
             config,
+            typst_host,
             store,
             clean,
             deps_hash,
@@ -113,6 +116,7 @@ impl GlobalStateMode {
 pub fn build_static_pages(
     mode: BuildMode,
     config: &SiteConfig,
+    typst_host: &TypstHost,
     state: &SiteIndex,
     clean: bool,
     deps_hash: Option<ContentHash>,
@@ -126,6 +130,7 @@ pub fn build_static_pages(
             build_static_pages_with_store(
                 mode,
                 config,
+                typst_host,
                 store,
                 clean,
                 deps_hash,
@@ -144,6 +149,7 @@ pub fn build_static_pages(
             build_static_pages_with_store(
                 mode,
                 config,
+                typst_host,
                 store,
                 clean,
                 deps_hash,
@@ -158,6 +164,7 @@ pub fn build_static_pages(
 fn build_static_pages_with_store(
     mode: BuildMode,
     config: &SiteConfig,
+    typst_host: &TypstHost,
     store: &StoredPageMap,
     clean: bool,
     deps_hash: Option<ContentHash>,
@@ -168,6 +175,7 @@ fn build_static_pages_with_store(
     let ctx = BuildContext::new(
         mode,
         config,
+        typst_host,
         store,
         clean,
         deps_hash,
@@ -178,7 +186,7 @@ fn build_static_pages_with_store(
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Always pre-scan to collect metadata and identify iterative pages
-    let scan_result = scan_pages(config, &typst_files, &markdown_files);
+    let scan_result = scan_pages(config, typst_host, &typst_files, &markdown_files);
     let drafts_skipped = scan_result.drafts_skipped;
 
     // Report scan phase errors immediately
@@ -209,7 +217,13 @@ fn build_static_pages_with_store(
     // Always compile with per-file @tola/current context to keep build
     // behavior aligned with serve and avoid scan-time under-detection when
     // current-dependent code only appears in page body.
-    let batch = create_batch_with_inputs(config.get_root(), &typst_paths, snapshot, inputs)?;
+    let batch = create_batch_with_inputs(
+        config.get_root(),
+        typst_host,
+        &typst_paths,
+        snapshot,
+        inputs,
+    )?;
     let typst_results =
         compile_typst_batch_with_context(&batch, &typst_paths, config, store, progress)?;
 
@@ -273,6 +287,7 @@ pub fn rebuild_iterative_pages(
     mode: BuildMode,
     paths: &[PathBuf],
     config: &SiteConfig,
+    typst_host: &TypstHost,
     store: &StoredPageMap,
     clean: bool,
     deps_hash: Option<ContentHash>,
@@ -286,6 +301,7 @@ pub fn rebuild_iterative_pages(
     let ctx = BuildContext::new(
         mode,
         config,
+        typst_host,
         store,
         clean,
         deps_hash,
@@ -303,6 +319,7 @@ pub fn rebuild_iterative_pages(
 
         let batch = create_batch_compiler_with_inputs(
             config.get_root(),
+            typst_host,
             &typst_paths,
             snapshot.clone(),
             Some(inputs),
@@ -319,7 +336,8 @@ pub fn rebuild_iterative_pages(
                 let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
                 let compile_ctx =
-                    CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
+                    CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
+                        .with_route(&page.route);
                 let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -331,7 +349,8 @@ pub fn rebuild_iterative_pages(
             .map(|path| {
                 let page = CompiledPage::from_paths(path, ctx.config)?;
                 let compile_ctx =
-                    CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
+                    CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
+                        .with_route(&page.route);
                 let content = compile(path, &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -426,20 +445,6 @@ pub fn collect_content_files(content_dir: &Path) -> Vec<PathBuf> {
 // Batch Compilation
 // ============================================================================
 
-fn create_batch_compiler<'a>(
-    root: &'a Path,
-    typst_files: &[&'a PathBuf],
-) -> Result<Option<TypstBatcher<'a>>> {
-    if typst_files.is_empty() {
-        return Ok(None);
-    }
-    Compiler::new(root)
-        .into_batch()
-        .with_snapshot_from(typst_files)
-        .map(Some)
-        .map_err(|e| anyhow::anyhow!("{}", e))
-}
-
 /// Build inputs with site config and pages data
 fn build_site_inputs(config: &SiteConfig, store: &StoredPageMap) -> Result<typst_batch::Inputs> {
     build_visible_inputs(config, store)
@@ -480,6 +485,7 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig, store: &Stor
 /// Create batcher with inputs, optionally reusing snapshot
 fn create_batch_with_inputs<'a>(
     root: &'a Path,
+    typst_host: &TypstHost,
     paths: &[&'a PathBuf],
     snapshot: Option<FileSnapshot>,
     inputs: typst_batch::Inputs,
@@ -488,7 +494,7 @@ fn create_batch_with_inputs<'a>(
         return Ok(None);
     }
 
-    let batch = Compiler::new(root).into_batch().with_inputs_obj(inputs);
+    let batch = typst_host.batcher(root).with_inputs_obj(inputs);
 
     Ok(Some(if let Some(snap) = snapshot {
         batch.with_snapshot(snap)
@@ -536,6 +542,7 @@ fn compile_typst_batch_with_context<'a>(
 
 fn create_batch_compiler_with_inputs<'a>(
     root: &'a Path,
+    typst_host: &TypstHost,
     typst_paths: &[&'a PathBuf],
     snapshot: Option<FileSnapshot>,
     inputs: Option<typst_batch::Inputs>,
@@ -543,7 +550,7 @@ fn create_batch_compiler_with_inputs<'a>(
     if typst_paths.is_empty() {
         return Ok(None);
     }
-    let mut compiler = Compiler::new(root).into_batch();
+    let mut compiler = typst_host.batcher(root);
 
     // Inject inputs if provided
     if let Some(inp) = inputs {
@@ -557,15 +564,6 @@ fn create_batch_compiler_with_inputs<'a>(
             .with_snapshot_from(typst_paths)
             .map_err(|e| anyhow::anyhow!("{}", e))?
     }))
-}
-
-#[allow(dead_code)]
-fn create_batch_compiler_with_snapshot<'a>(
-    root: &'a Path,
-    typst_paths: &[&'a PathBuf],
-    snapshot: Option<FileSnapshot>,
-) -> Result<Option<TypstBatcher<'a>>> {
-    create_batch_compiler_with_inputs(root, typst_paths, snapshot, None)
 }
 
 // ============================================================================
@@ -584,8 +582,8 @@ fn process_typst_files(
         .map(|(path, result)| {
             let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx =
-                CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
+            let compile_ctx = CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
+                .with_route(&page.route);
             let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
             finalize_static_page(ctx, page, content)
         })
@@ -601,8 +599,8 @@ fn process_markdown_files(
         .par_iter()
         .map(|path| {
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx =
-                CompileContext::new(ctx.mode, ctx.config, ctx.store).with_route(&page.route);
+            let compile_ctx = CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
+                .with_route(&page.route);
             let content = compile(path, &compile_ctx)?;
             if let Some(p) = progress {
                 p.inc("markdown");
@@ -670,13 +668,13 @@ fn finalize_static_page(
 // ============================================================================
 
 fn collect_results(
-    typst: Vec<Result<Option<BuildPageResult>>>,
+    typst_results: Vec<Result<Option<BuildPageResult>>>,
     markdown: Vec<Result<Option<BuildPageResult>>>,
 ) -> Result<(Vec<CompiledPage>, Vec<PathBuf>)> {
     let mut pages = Vec::new();
     let mut iterative_paths = Vec::new();
 
-    for result in typst.into_iter().chain(markdown) {
+    for result in typst_results.into_iter().chain(markdown) {
         if let Some(pr) = result? {
             if pr.kind.is_iterative() {
                 iterative_paths.push(pr.path);
@@ -847,6 +845,10 @@ mod tests {
         config
     }
 
+    fn typst_host(config: &SiteConfig) -> TypstHost {
+        TypstHost::for_config(config)
+    }
+
     fn write_markdown_page(config: &SiteConfig, filename: &str, title: &str) -> PathBuf {
         let source = config.build.content.join(filename);
         fs::write(
@@ -990,6 +992,7 @@ mod tests {
         let config = markdown_site(&dir);
         let fresh_source = write_markdown_page(&config, "fresh.md", "Fresh");
         let warnings = WarningCollector::new();
+        let host = typst_host(&config);
 
         site.with_pages(|store| {
             store.insert_page(
@@ -1004,6 +1007,7 @@ mod tests {
         build_static_pages(
             BuildMode::DEVELOPMENT,
             &config,
+            &host,
             site,
             false,
             None,
@@ -1040,6 +1044,7 @@ mod tests {
         let source =
             write_markdown_page_with_permalink(&config, "fresh.md", "Compiled", "/compiled/");
         let warnings = WarningCollector::new();
+        let host = typst_host(&config);
 
         site.with_pages(|store| {
             store
@@ -1058,6 +1063,7 @@ mod tests {
         build_static_pages(
             BuildMode::DEVELOPMENT,
             &config,
+            &host,
             site,
             false,
             None,

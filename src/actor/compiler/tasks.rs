@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::address::SiteIndex;
 use crate::compiler::dependency::flush_thread_local_deps;
-use crate::compiler::page::PageStateTicket;
+use crate::compiler::page::{PageStateTicket, TypstHost};
 use crate::compiler::scheduler::SCHEDULER;
 use crate::config::SiteConfig;
 use crate::reload::compile::{CompileOutcome, compile_page, compile_page_with_ticket};
@@ -14,13 +14,15 @@ use super::{BackgroundTask, BatchResult};
 pub(super) fn spawn_batch(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
     pages_hash: u64,
     watched_post_paths: Option<Vec<PathBuf>>,
     ticket: PageStateTicket,
 ) -> BackgroundTask {
     tokio::spawn(async move {
-        let outcomes = compile_batch_with_ticket(paths, Arc::clone(&config), state, ticket).await;
+        let outcomes =
+            compile_batch_with_ticket(paths, Arc::clone(&config), typst_host, state, ticket).await;
         BatchResult {
             config,
             outcomes,
@@ -34,23 +36,26 @@ pub(super) fn spawn_batch(
 pub(super) async fn compile_batch(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
 ) -> Vec<CompileOutcome> {
-    compile_batch_inner(paths, config, state, None).await
+    compile_batch_inner(paths, config, typst_host, state, None).await
 }
 
 pub(super) async fn compile_batch_with_ticket(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
     ticket: PageStateTicket,
 ) -> Vec<CompileOutcome> {
-    compile_batch_inner(paths, config, state, Some(ticket)).await
+    compile_batch_inner(paths, config, typst_host, state, Some(ticket)).await
 }
 
 async fn compile_batch_inner(
     paths: Vec<PathBuf>,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
     ticket: Option<PageStateTicket>,
 ) -> Vec<CompileOutcome> {
@@ -63,8 +68,10 @@ async fn compile_batch_inner(
         let results: Vec<_> = paths
             .par_iter()
             .map(|path| match &ticket {
-                Some(ticket) => compile_page_with_ticket(path, &config, &state, ticket),
-                None => compile_page(path, &config, &state),
+                Some(ticket) => {
+                    compile_page_with_ticket(path, &config, &typst_host, &state, ticket)
+                }
+                None => compile_page(path, &config, &typst_host, &state),
             })
             .collect();
         flush_thread_local_deps();
@@ -132,9 +139,12 @@ mod tests {
         let ticket = epoch.ticket();
         epoch.advance();
 
+        let config = Arc::new(config);
+        let typst_host = Arc::new(TypstHost::for_config(&config));
         let outcomes = compile_batch_with_ticket(
             vec![page.clone()],
-            Arc::new(config),
+            config,
+            typst_host,
             Arc::clone(&state),
             ticket,
         )

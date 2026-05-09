@@ -18,21 +18,17 @@ use crate::utils::plural_count;
 /// Execute query command
 pub fn run_query(args: &QueryArgs, config: &SiteConfig) -> Result<()> {
     let store = StoredPageMap::new();
-
-    // Register VFS with nested asset mappings (no font warmup needed)
-    let nested_mappings =
-        crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-    crate::compiler::page::typst::init_vfs(config.get_root().to_path_buf(), nested_mappings);
+    let host = crate::compiler::page::TypstHost::for_config(config);
 
     // Populate page data first so pages() returns correct data for all pages.
-    crate::cli::common::populate_stored_pages(config, &store)?;
+    crate::cli::common::populate_stored_pages(config, &host, &store)?;
 
     let files = crate::cli::common::collect_content_files(&args.paths, &config.build.content)?;
 
     let file_count = files.len();
     log!("query"; "querying {}", plural_count(file_count, "file"));
 
-    let results = collect::query_files(&files, args, config, &store)?;
+    let results = collect::query_files(&files, args, config, &host, &store)?;
 
     log!(
         "query";

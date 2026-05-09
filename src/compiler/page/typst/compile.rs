@@ -54,7 +54,9 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
     };
 
     // Compile Typst to HtmlDocument using Builder API with inputs
-    let result = Compiler::new(root)
+    let result = ctx
+        .typst_host
+        .compiler(root)
         .with_inputs_obj(inputs)
         .with_path(path)
         .compile()

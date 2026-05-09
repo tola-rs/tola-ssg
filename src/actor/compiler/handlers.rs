@@ -52,9 +52,11 @@ impl CompilerActor {
             crate::debug!("compile"; "done in {:?}", start.elapsed());
             None
         } else {
+            let (config, typst_host) = self.current_config_and_typst_host();
             Some(spawn_batch(
                 affected,
-                self.config.current(),
+                config,
+                typst_host,
                 Arc::clone(&self.state),
                 pages_hash,
                 watched_post_paths,
@@ -396,10 +398,12 @@ impl CompilerActor {
 
         crate::debug!("compile"; "retry scan triggered");
 
-        let config = self.config.current();
+        let (config, typst_host) = self.current_config_and_typst_host();
         let scan_config = Arc::clone(&config);
+        let scan_host = Arc::clone(&typst_host);
         let state = Arc::clone(&self.state);
-        let result = tokio::task::spawn_blocking(move || scan_pages(&scan_config, &state)).await;
+        let result =
+            tokio::task::spawn_blocking(move || scan_pages(&scan_config, &scan_host, &state)).await;
 
         match result {
             Ok(Ok(_)) => {

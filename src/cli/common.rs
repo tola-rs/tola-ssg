@@ -169,9 +169,10 @@ pub struct MarkdownScanResult {
 pub fn scan_markdown_file(
     file: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<MarkdownScanResult> {
-    let ctx = CompileContext::new(BuildMode::PRODUCTION, config, store);
+    let ctx = CompileContext::new(BuildMode::PRODUCTION, config, host, store);
     let result = scan(file, &ctx)?;
 
     Ok(MarkdownScanResult {
@@ -184,7 +185,11 @@ pub fn scan_markdown_file(
 ///
 /// Does NOT set Phase - defaults to `filter`, so `pages()` in content body
 /// returns empty array silently. Used for link extraction in validate
-pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_batch::ScanResult>> {
+pub fn batch_scan_typst(
+    files: &[&PathBuf],
+    root: &Path,
+    host: &crate::compiler::page::TypstHost,
+) -> Vec<Option<typst_batch::ScanResult>> {
     if files.is_empty() {
         return vec![];
     }
@@ -194,7 +199,8 @@ pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_bat
     // Scan phase is Eval-only (no Layout), so `context { target() }` won't work.
     // Image show rules use `is-html` (sys.inputs.format) to output <img> tags,
     // which allows LinkExtractor to find image src paths for validation.
-    let scanner = match Batcher::for_scan(root)
+    let scanner = match host
+        .batch_scanner(root)
         .with_inputs([("format", "html")])
         .with_snapshot_from(files)
     {
@@ -231,6 +237,7 @@ pub fn batch_scan_typst(files: &[&PathBuf], root: &Path) -> Vec<Option<typst_bat
 pub fn batch_scan_typst_metadata(
     files: &[&PathBuf],
     root: &Path,
+    host: &crate::compiler::page::TypstHost,
     label: &str,
     config: &SiteConfig,
     store: &StoredPageMap,
@@ -242,7 +249,8 @@ pub fn batch_scan_typst_metadata(
     // Use visible-phase inputs for metadata scan so legacy templates relying on
     // `sys.inputs.format` keep working in query/bootstrap paths.
     let inputs = build_visible_inputs(config, store)?;
-    let scanner = Batcher::for_scan(root)
+    let scanner = host
+        .batch_scanner(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(files)?;
 
@@ -258,7 +266,7 @@ pub fn batch_scan_typst_metadata(
                         // Retry with per-file @tola/current context so scans that
                         // evaluate current-dependent body expressions can still
                         // extract metadata.
-                        match scan_single_with_current(root, file, config, store) {
+                        match scan_single_with_current(root, host, file, config, store) {
                             Ok(scan) => metas.push(scan.metadata(label)),
                             Err(_) => {
                                 let rel_path = file.strip_prefix(root).unwrap_or(file);
@@ -283,6 +291,7 @@ pub fn batch_scan_typst_metadata(
 pub fn batch_scan_typst_metadata_iterative(
     files: &[&PathBuf],
     root: &Path,
+    host: &crate::compiler::page::TypstHost,
     label: &str,
     config: &SiteConfig,
     store: &StoredPageMap,
@@ -293,7 +302,8 @@ pub fn batch_scan_typst_metadata_iterative(
 
     // Initial scan with visible-phase site/pages inputs.
     let inputs = build_visible_inputs(config, store)?;
-    let scanner = Batcher::for_scan(root)
+    let scanner = host
+        .batch_scanner(root)
         .with_inputs_obj(inputs)
         .with_snapshot_from(files)?;
     let initial_results = scanner.batch_scan(files)?;
@@ -321,7 +331,7 @@ pub fn batch_scan_typst_metadata_iterative(
             Err(e) => {
                 // Retry with per-file current context to handle pages that
                 // reference @tola/current in body while scanning metadata.
-                match scan_single_with_current(root, file, config, store) {
+                match scan_single_with_current(root, host, file, config, store) {
                     Ok(scan) => {
                         let meta = scan.metadata(label);
                         let kind = PageKind::from_packages(scan.accessed_packages());
@@ -357,7 +367,7 @@ pub fn batch_scan_typst_metadata_iterative(
         // @tola/current context (especially `path` and current permalink).
         for &idx in &iterative_indices {
             let file = files[idx];
-            let scan = match scan_single_with_current(root, file, config, store) {
+            let scan = match scan_single_with_current(root, host, file, config, store) {
                 Ok(scan) => scan,
                 Err(e) => {
                     let rel_path = file.strip_prefix(root).unwrap_or(file);
@@ -430,7 +440,11 @@ fn parse_page_meta(meta_json: JsonValue, file: &Path) -> Option<PageMeta> {
 ///
 /// Scans all Typst and Markdown files to build the global page store
 /// Must be called before `batch_scan_typst_metadata_iterative`
-pub fn populate_stored_pages(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
+pub fn populate_stored_pages(
+    config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
+    store: &StoredPageMap,
+) -> Result<()> {
     use crate::compiler::collect_all_files;
 
     let root = crate::utils::path::normalize_path(config.get_root());
@@ -443,7 +457,7 @@ pub fn populate_stored_pages(config: &SiteConfig, store: &StoredPageMap) -> Resu
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Scan Typst files
-    let typst_metas = batch_scan_typst_metadata(&typst_files, &root, label, config, store)?;
+    let typst_metas = batch_scan_typst_metadata(&typst_files, &root, host, label, config, store)?;
 
     for (file, meta_json) in typst_files.iter().zip(typst_metas) {
         if let Some(meta_json) = meta_json
@@ -455,7 +469,7 @@ pub fn populate_stored_pages(config: &SiteConfig, store: &StoredPageMap) -> Resu
 
     // Scan Markdown files
     for file in &markdown_files {
-        if let Ok(result) = scan_markdown_file(file, config, store)
+        if let Ok(result) = scan_markdown_file(file, config, host, store)
             && let Some(meta_json) = result.raw_meta
             && let Some(page_meta) = parse_page_meta(meta_json, file)
         {

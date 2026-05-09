@@ -341,6 +341,16 @@ impl SiteConfig {
         self.cli.unwrap()
     }
 
+    /// Get the Typst package path from the CLI, if configured.
+    pub fn package_path(&self) -> Option<&Path> {
+        self.cli.and_then(|cli| cli.package_path.as_deref())
+    }
+
+    /// Get the Typst package cache path from the CLI, if configured.
+    pub fn package_cache_path(&self) -> Option<&Path> {
+        self.cli.and_then(|cli| cli.package_cache_path.as_deref())
+    }
+
     /// Get path resolver for consistent path/URL generation.
     ///
     /// This is the single source of truth for all path operations,
@@ -638,6 +648,8 @@ mod tests {
     fn test_cli(command: Commands) -> &'static Cli {
         Box::leak(Box::new(Cli {
             color: ColorChoice::Never,
+            package_path: None,
+            package_cache_path: None,
             output: None,
             content: None,
             config: PathBuf::from("tola.toml"),
@@ -748,5 +760,26 @@ mod tests {
         );
 
         assert_eq!(config.build.path_prefix, PathBuf::from("docs/blog"));
+    }
+
+    #[test]
+    fn test_package_paths_follow_cli() {
+        let cli = Box::leak(Box::new(Cli {
+            color: ColorChoice::Never,
+            package_path: Some(PathBuf::from("packages")),
+            package_cache_path: Some(PathBuf::from("cache")),
+            output: None,
+            content: None,
+            config: PathBuf::from("tola.toml"),
+            command: Commands::Build {
+                build_args: test_build_args(),
+            },
+        }));
+
+        let mut config = SiteConfig::default();
+        config.cli = Some(cli);
+
+        assert_eq!(config.package_path(), Some(Path::new("packages")));
+        assert_eq!(config.package_cache_path(), Some(Path::new("cache")));
     }
 }

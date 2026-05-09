@@ -6,7 +6,7 @@
 use anyhow::Result;
 
 use crate::address::SiteIndex;
-use crate::compiler::page::{build_address_space, collect_content_files};
+use crate::compiler::page::{TypstHost, build_address_space, collect_content_files};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
 use crate::page::CompiledPage;
@@ -20,13 +20,14 @@ use crate::page::CompiledPage;
 /// - page link graph used by `@tola/current`
 ///
 /// Requires Typst to be initialized before calling
-pub fn scan_pages(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
+pub fn scan_pages(config: &SiteConfig, host: &TypstHost, state: &SiteIndex) -> Result<()> {
     let next = SiteIndex::new();
 
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
-    let scan_result = crate::compiler::page::scan_pages(config, &typst_files, &markdown_files);
+    let scan_result =
+        crate::compiler::page::scan_pages(config, host, &typst_files, &markdown_files);
 
     // Report scan phase errors
     scan_result.report_errors(

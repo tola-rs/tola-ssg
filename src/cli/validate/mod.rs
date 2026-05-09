@@ -13,8 +13,8 @@ use rayon::prelude::*;
 
 use super::common::collect_content_files;
 use crate::address::SiteIndex;
-use crate::compiler::page::CompiledPage;
 use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
+use crate::compiler::page::{CompiledPage, TypstHost};
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, LinkKind, LinkOrigin, ResolveContext, ResolveResult};
 use crate::log;
@@ -51,10 +51,7 @@ type ParsedScanResult = (
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let state = SiteIndex::new();
 
-    // Register VFS with nested asset mappings (no font warmup needed)
-    let nested_mappings =
-        crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-    crate::compiler::page::typst::init_vfs(config.get_root().to_path_buf(), nested_mappings);
+    let host = crate::compiler::page::TypstHost::for_config(config);
 
     let args = get_validate_args();
     let files = collect_content_files(&args.paths, &config.build.content)?;
@@ -86,7 +83,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
 
     // Build AddressSpace for validation (unified scan: metadata + links + errors)
     let (all_pages, typst_links) = if check_pages || check_assets {
-        let (pages, links, compile_errors) = build_address_space(config, &state)?;
+        let (pages, links, compile_errors) = build_address_space(config, &host, &state)?;
 
         // Add compile errors to report as asset errors
         // Extract path from "file not found (searched at /abs/path)" -> "/relative/path"
@@ -123,6 +120,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
         &files,
         &root,
         config,
+        &host,
         &state,
         &all_pages,
         &typst_links,
@@ -164,6 +162,7 @@ fn validate_all_links(
     files: &[PathBuf],
     root: &std::path::Path,
     config: &SiteConfig,
+    host: &TypstHost,
     state: &SiteIndex,
     all_pages: &[CompiledPage],
     typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
@@ -218,7 +217,7 @@ fn validate_all_links(
         markdown_files
             .par_iter()
             .filter_map(|file| {
-                scan_markdown(file, root, config, store)
+                scan_markdown(file, root, config, host, store)
                     .ok()
                     .map(|result| ((*file).clone(), result))
             })
@@ -493,7 +492,11 @@ fn handle_resolve_result(
 /// - pages: All compiled pages
 /// - typst_links: HashMap<PathBuf, Vec<ScannedLink>> for Typst files
 /// - compile_errors: Vec<(source_path, error_message)> for compile failures
-fn build_address_space(config: &SiteConfig, state: &SiteIndex) -> Result<AddressSpaceResult> {
+fn build_address_space(
+    config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
+    state: &SiteIndex,
+) -> Result<AddressSpaceResult> {
     use rayon::prelude::*;
 
     use crate::cli::common::scan_markdown_file;
@@ -510,7 +513,7 @@ fn build_address_space(config: &SiteConfig, state: &SiteIndex) -> Result<Address
             // Preload markdown metadata into the page store so @tola/pages has complete
             // cross-format context during Typst validation scans.
             for file in &markdown_files {
-                if let Ok(result) = scan_markdown_file(file, config, store)
+                if let Ok(result) = scan_markdown_file(file, config, host, store)
                     && let Some(meta_json) = result.raw_meta
                 {
                     update_stored_page_from_meta(file, &meta_json, config, store);
@@ -523,7 +526,7 @@ fn build_address_space(config: &SiteConfig, state: &SiteIndex) -> Result<Address
                     (vec![], vec![], vec![])
                 } else {
                     let (metas, links, errors) =
-                        batch_scan_typst_unified(&typst_files, label, config, store)?;
+                        batch_scan_typst_unified(&typst_files, label, config, host, store)?;
                     let parsed_metas = metas
                         .into_iter()
                         .map(|json| json.and_then(|j| serde_json::from_value(j).ok()))
@@ -548,7 +551,7 @@ fn build_address_space(config: &SiteConfig, state: &SiteIndex) -> Result<Address
             let markdown_pages: Vec<CompiledPage> = markdown_files
                 .par_iter()
                 .filter_map(|file| {
-                    let meta = scan_markdown_file(file, config, store)
+                    let meta = scan_markdown_file(file, config, host, store)
                         .ok()
                         .and_then(|result| result.raw_meta)
                         .and_then(|json| serde_json::from_value(json).ok());
@@ -576,6 +579,7 @@ fn batch_scan_typst_unified(
     files: &[&PathBuf],
     label: &str,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<BatchScanResult> {
     use typst_batch::prelude::*;
@@ -589,7 +593,8 @@ fn batch_scan_typst_unified(
     // Validate scan follows visible-phase contract for virtual package injection.
     // It shares base inputs and adds per-file @tola/current only for iterative pages.
     let base_inputs = build_visible_inputs(config, store)?;
-    let scanner = Batcher::for_scan(&root)
+    let scanner = host
+        .batch_scanner(&root)
         .with_inputs_obj(base_inputs)
         .with_snapshot_from(files)?;
 
@@ -631,7 +636,7 @@ fn batch_scan_typst_unified(
                     Err(e) => {
                         // Retry with per-file @tola/current context so pages
                         // using current.permalink/path in body can scan.
-                        match scan_single_with_current(&root, file, config, store) {
+                        match scan_single_with_current(&root, host, file, config, store) {
                             Ok(scan) => {
                                 let meta = scan.metadata(label);
                                 if let Some(ref meta_json) = meta {
@@ -677,7 +682,7 @@ fn batch_scan_typst_unified(
                         .unwrap_or(file)
                         .to_string_lossy()
                         .to_string();
-                    let scan = match scan_single_with_current(&root, file, config, store) {
+                    let scan = match scan_single_with_current(&root, host, file, config, store) {
                         Ok(scan) => scan,
                         Err(e) => {
                             errors.push((rel_path, e.to_string()));

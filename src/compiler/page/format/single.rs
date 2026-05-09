@@ -25,6 +25,7 @@ pub struct SinglePageScanData {
 pub fn scan_single_page(
     path: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> SinglePageScanData {
     let kind = match ContentKind::from_path(path) {
@@ -33,17 +34,22 @@ pub fn scan_single_page(
     };
 
     match kind {
-        ContentKind::Typst => scan_typst_page(path, config, store),
+        ContentKind::Typst => scan_typst_page(path, config, host, store),
         ContentKind::Markdown => scan_markdown_page(path),
     }
 }
 
-fn scan_typst_page(path: &Path, config: &SiteConfig, store: &StoredPageMap) -> SinglePageScanData {
+fn scan_typst_page(
+    path: &Path,
+    config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
+    store: &StoredPageMap,
+) -> SinglePageScanData {
     use typst_batch::prelude::*;
 
     let root = config.get_root();
     let label = &config.build.meta.label;
-    let mut scanner = Scanner::new(root);
+    let mut scanner = host.scanner(root);
 
     if let Ok(inputs) = crate::package::build_visible_inputs_for_source(config, store, path) {
         scanner = scanner.with_inputs_obj(inputs);
@@ -138,7 +144,8 @@ mod tests {
         config.build.content = content_dir;
 
         let store = StoredPageMap::new();
-        let scan = scan_single_page(&source, &config, &store);
+        let host = crate::compiler::page::TypstHost::for_config(&config);
+        let scan = scan_single_page(&source, &config, &host, &store);
 
         assert!(scan.links.iter().any(|link| link.dest == "../about/"));
         assert!(!scan.links.iter().any(|link| link.dest == "cat.svg"));

@@ -44,6 +44,7 @@ pub use process::{
 };
 pub use process::{PageStateEpoch, PageStateTicket};
 pub(crate) use process::{PreparedPage, commit_page_state_parts, prepare_page};
+pub use typst::TypstHost;
 pub use typst::process_result as process_typst_result;
 pub use warning::{WarningCollector, format_warning_with_prefix};
 pub use write::{write_page_html, write_redirects};

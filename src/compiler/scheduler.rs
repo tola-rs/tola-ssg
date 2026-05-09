@@ -17,6 +17,7 @@ use dashmap::mapref::entry::Entry;
 use parking_lot::{Condvar, Mutex};
 
 use crate::address::SiteIndex;
+use crate::compiler::page::TypstHost;
 use crate::config::SiteConfig;
 use crate::core::Priority;
 
@@ -80,12 +81,14 @@ struct CompileJob {
     path: PathBuf,
     priority: Priority,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
 }
 
 struct PendingState {
     priority: Priority,
     config: Arc<SiteConfig>,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
     waiters: Vec<Waiter>,
 }
@@ -151,6 +154,7 @@ impl CompileScheduler {
         path: PathBuf,
         priority: Priority,
         config: Arc<SiteConfig>,
+        typst_host: Arc<TypstHost>,
         state: Arc<SiteIndex>,
     ) -> CompileResult {
         // Fast path: cached
@@ -169,7 +173,7 @@ impl CompileScheduler {
         }
 
         // Atomically join or create pending
-        if self.join_or_create_pending(&path, priority, config, state, tx) {
+        if self.join_or_create_pending(&path, priority, config, typst_host, state, tx) {
             self.enqueue(path, priority);
         }
 
@@ -254,6 +258,7 @@ impl CompileScheduler {
         path: &Path,
         priority: Priority,
         config: Arc<SiteConfig>,
+        typst_host: Arc<TypstHost>,
         state: Arc<SiteIndex>,
         tx: Waiter,
     ) -> bool {
@@ -264,6 +269,7 @@ impl CompileScheduler {
                 if priority > pending.priority {
                     pending.priority = priority;
                     pending.config = config;
+                    pending.typst_host = typst_host;
                     pending.state = state;
                     true // upgrade: enqueue higher priority task
                 } else {
@@ -274,6 +280,7 @@ impl CompileScheduler {
                 e.insert(PendingState {
                     priority,
                     config,
+                    typst_host,
                     state,
                     waiters: vec![tx],
                 });
@@ -361,6 +368,7 @@ impl CompileScheduler {
             path: task.path,
             priority: pending.priority,
             config: pending.config,
+            typst_host: pending.typst_host,
             state: pending.state,
         };
         let waiters = pending.waiters;
@@ -389,7 +397,7 @@ impl CompileScheduler {
 
         // Catch panics to ensure waiters always receive a result
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.do_compile(&path, &job.config, &job.state)
+            self.do_compile(&path, &job.config, &job.typst_host, &job.state)
         }))
         .unwrap_or_else(|_| CompileResult::Failed("compilation panicked".into()));
 
@@ -425,12 +433,18 @@ impl CompileScheduler {
 // =============================================================================
 
 impl CompileScheduler {
-    fn do_compile(&self, path: &Path, config: &SiteConfig, state: &SiteIndex) -> CompileResult {
+    fn do_compile(
+        &self,
+        path: &Path,
+        config: &SiteConfig,
+        typst_host: &TypstHost,
+        state: &SiteIndex,
+    ) -> CompileResult {
         use crate::compiler::dependency::flush_current_thread_deps;
         use crate::compiler::page::cache_vdom;
         use crate::reload::compile::{CompileOutcome, compile_page};
 
-        let result = compile_page(path, config, state);
+        let result = compile_page(path, config, typst_host, state);
 
         // Flush dependencies recorded by compile_page to global graph
         // (scheduler workers are not rayon threads, so flush_to_global won't reach them)
@@ -551,6 +565,8 @@ mod tests {
         let active_root = dir.path().join("active-root");
         let background_config = config_with_root(&background_root);
         let active_config = config_with_root(&active_root);
+        let background_host = Arc::new(TypstHost::for_config(&background_config));
+        let active_host = Arc::new(TypstHost::for_config(&active_config));
         let background_state = Arc::new(SiteIndex::new());
         let active_state = Arc::new(SiteIndex::new());
         let path = dir.path().join("content/page.typ");
@@ -560,6 +576,7 @@ mod tests {
             &path,
             Priority::Background,
             Arc::clone(&background_config),
+            Arc::clone(&background_host),
             Arc::clone(&background_state),
             background_tx,
         ));
@@ -569,6 +586,7 @@ mod tests {
             &path,
             Priority::Active,
             Arc::clone(&active_config),
+            Arc::clone(&active_host),
             Arc::clone(&active_state),
             active_tx,
         ));
@@ -583,6 +601,7 @@ mod tests {
         assert_eq!(job.path, path);
         assert_eq!(job.priority, Priority::Active);
         assert_eq!(job.config.get_root(), active_root);
+        assert!(Arc::ptr_eq(&job.typst_host, &active_host));
         assert!(Arc::ptr_eq(&job.state, &active_state));
         assert_eq!(waiters.len(), 2);
     }

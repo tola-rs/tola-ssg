@@ -12,7 +12,7 @@ use crate::{
     asset::process_asset,
     compiler::{
         collect_all_files,
-        page::{self, MetadataResult, Pages, WarningCollector, typst},
+        page::{self, MetadataResult, Pages, TypstHost, WarningCollector},
     },
     config::{SiteConfig, section::build::DiagnosticsConfig},
     core::{BuildMode, ContentKind, is_shutdown},
@@ -32,14 +32,8 @@ pub(super) struct BuildFiles {
 }
 
 /// Initialize build environment
-pub(super) fn init_build(config: &SiteConfig) -> Result<()> {
-    // Pre-warm typst library resources with nested asset mappings
-    let nested_mappings = typst::build_nested_mappings(&config.build.assets.nested);
-    typst::init_runtime(
-        &super::collect_font_dirs(config),
-        config.get_root().to_path_buf(),
-        nested_mappings,
-    );
+pub(super) fn init_build(config: &SiteConfig) -> Result<TypstHost> {
+    let typst_host = TypstHost::for_config(config);
 
     // Generate LSP stubs for tinymist completion
     let _ = generate_lsp_stubs(config.get_root());
@@ -56,10 +50,9 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<()> {
     crate::embed::write_embedded_assets(config, &config.paths().output_dir())?;
 
     // Clear caches for accurate change detection
-    typst_batch::clear_file_cache();
     freshness::clear_cache();
 
-    Ok(())
+    Ok(typst_host)
 }
 
 /// Collect all files to process
@@ -105,6 +98,7 @@ pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<Progres
 pub(super) fn compile_and_process(
     mode: BuildMode,
     config: &SiteConfig,
+    typst_host: &TypstHost,
     state: &SiteIndex,
     files: &BuildFiles,
     deps_hash: ContentHash,
@@ -119,6 +113,7 @@ pub(super) fn compile_and_process(
             page::build_static_pages(
                 mode,
                 config,
+                typst_host,
                 state,
                 clean,
                 Some(deps_hash),
@@ -166,6 +161,7 @@ fn process_assets(
 pub(super) fn rebuild_iterative_pages(
     mode: BuildMode,
     config: &SiteConfig,
+    typst_host: &TypstHost,
     state: &SiteIndex,
     deps_hash: ContentHash,
     metadata: &MetadataResult,
@@ -180,6 +176,7 @@ pub(super) fn rebuild_iterative_pages(
             mode,
             &metadata.iterative_paths,
             config,
+            typst_host,
             pages,
             config.build.clean,
             Some(deps_hash),

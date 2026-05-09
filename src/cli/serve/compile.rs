@@ -9,23 +9,12 @@ use anyhow::Result;
 
 use crate::address::SiteIndex;
 use crate::compiler::dependency::global as dep_graph;
+use crate::compiler::page::TypstHost;
 use crate::compiler::scheduler::{CompileResult, SCHEDULER};
 use crate::config::SiteConfig;
 use crate::core::Priority;
 use crate::freshness::mtime::{get_mtime, is_newer_than};
 use crate::page::CompiledPage;
-
-/// Ensure Typst runtime inputs match the config used for this request.
-fn ensure_typst_initialized(config: &SiteConfig) {
-    let font_dirs = crate::cli::build::collect_font_dirs(config);
-    let nested_mappings =
-        crate::compiler::page::typst::build_nested_mappings(&config.build.assets.nested);
-    crate::compiler::page::typst::init_runtime(
-        &font_dirs,
-        config.get_root().to_path_buf(),
-        nested_mappings,
-    );
-}
 
 /// Compile a single page on-demand and write it to disk
 ///
@@ -34,10 +23,9 @@ fn ensure_typst_initialized(config: &SiteConfig) {
 pub fn compile_on_demand(
     source: &Path,
     config: &SiteConfig,
+    typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
 ) -> Result<PathBuf> {
-    ensure_typst_initialized(config);
-
     let page = CompiledPage::from_paths(source, config)?;
 
     // Check if output is fresh (newer than source AND all dependencies)
@@ -52,6 +40,7 @@ pub fn compile_on_demand(
         source.to_path_buf(),
         Priority::Active,
         Arc::new(config.clone()),
+        typst_host,
         state,
     ) {
         CompileResult::Success { output, .. } => Ok(output),
@@ -114,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn typst_runtime_uses_current_config_on_each_request() {
+    fn typst_host_uses_current_config_on_each_request() {
         let first = TempDir::new().unwrap();
         let second = TempDir::new().unwrap();
         let output_name = "runtime-refresh-probe";
@@ -129,10 +118,10 @@ mod tests {
         let second_config = config_with_nested_asset(second.path(), output_name, &second_asset_dir);
         let virtual_path = PathBuf::from(format!("/{output_name}/probe.txt"));
 
-        ensure_typst_initialized(&first_config);
-        assert!(typst_batch::is_virtual_path(&virtual_path));
+        let first_host = crate::compiler::page::TypstHost::for_config(&first_config);
+        assert!(first_host.is_virtual_path(&virtual_path));
 
-        ensure_typst_initialized(&second_config);
-        assert!(!typst_batch::is_virtual_path(&virtual_path));
+        let second_host = crate::compiler::page::TypstHost::for_config(&second_config);
+        assert!(!second_host.is_virtual_path(&virtual_path));
     }
 }

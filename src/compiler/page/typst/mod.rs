@@ -2,7 +2,7 @@
 //!
 //! This module contains all Typst-specific functionality:
 //!
-//! - [`init`] - Tola-specific setup (VirtualFS, warmup)
+//! - [`host`] - Tola's host-side Typst wiring
 //! - [`Typst`] - PageFormat implementation
 //! - [`convert`] - `HtmlDocument` -> tola-vdom VDOM conversion
 //! - [`filter`] - Draft filtering
@@ -10,7 +10,7 @@
 mod compile;
 pub mod convert;
 mod filter;
-pub mod init;
+pub mod host;
 mod iterative;
 mod scan;
 
@@ -25,7 +25,7 @@ use crate::compiler::CompileContext;
 pub use compile::process_result;
 pub use convert::from_typst_html;
 pub use filter::filter_drafts;
-pub use init::{build_nested_mappings, init_runtime, init_vfs};
+pub use host::TypstHost;
 pub use iterative::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
 
 // =============================================================================

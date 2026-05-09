@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::config::SiteConfig;
+use crate::{compiler::page::TypstHost, config::SiteConfig};
 
 use super::ScannedPage;
 
@@ -67,13 +67,15 @@ impl<'a> PageScanResult<'a> {
 /// Scan page files from all supported formats.
 pub fn scan_pages<'a>(
     config: &'a SiteConfig,
+    typst_host: &'a TypstHost,
     typst_files: &[&PathBuf],
     markdown_files: &[&PathBuf],
 ) -> PageScanResult<'a> {
     let root = config.get_root();
     let label = &config.build.meta.label;
 
-    let typst_result = super::super::typst::filter_drafts(typst_files, root, label, config);
+    let typst_result =
+        super::super::typst::filter_drafts(typst_files, root, typst_host, label, config);
     let md_result = super::super::markdown::filter_markdown_drafts(markdown_files, root, label);
     let drafts_skipped = typst_result.draft_count + md_result.draft_count;
 

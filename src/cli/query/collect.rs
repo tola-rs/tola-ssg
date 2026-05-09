@@ -22,6 +22,7 @@ pub(super) fn query_files(
     files: &[PathBuf],
     args: &QueryArgs,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<QueryResult> {
     // Normalize root to absolute
@@ -35,7 +36,7 @@ pub(super) fn query_files(
 
     // Batch scan Typst files (with iterative support for pages() in metadata)
     let typst_results =
-        batch_scan_typst_metadata_iterative(&typst_files, &root, label, config, store)?;
+        batch_scan_typst_metadata_iterative(&typst_files, &root, host, label, config, store)?;
 
     // Lock-free parallel collection using SegQueue
     let collector = ParallelCollector::new();
@@ -52,9 +53,8 @@ pub(super) fn query_files(
     }
 
     // Process Markdown files in parallel
-    markdown_files
-        .par_iter()
-        .for_each(|file| match query_markdown_vdom(file, config, store) {
+    markdown_files.par_iter().for_each(|file| {
+        match query_markdown_vdom(file, config, host, store) {
             Ok(raw_meta) => {
                 if let Some(result) = process_query_result(file, raw_meta, raw_mode, config, store)
                 {
@@ -67,7 +67,8 @@ pub(super) fn query_files(
             Err(e) => {
                 eprintln!("Warning: Failed to query {}: {}", file.display(), e);
             }
-        });
+        }
+    });
 
     let pages = collector.drain_with_capacity(file_count);
     Ok(QueryResult { pages })
@@ -154,9 +155,10 @@ fn resolve_permalink(
 fn query_markdown_vdom(
     file: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<Option<JsonValue>> {
-    let result = scan_markdown_file(file, config, store)?;
+    let result = scan_markdown_file(file, config, host, store)?;
     Ok(result.raw_meta)
 }
 

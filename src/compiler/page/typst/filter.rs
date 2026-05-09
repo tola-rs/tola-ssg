@@ -98,6 +98,7 @@ fn to_scanned_page(
 fn filter_drafts_impl<'a>(
     files: &[&PathBuf],
     root: &'a Path,
+    host: &'a super::TypstHost,
     label: &str,
     config: &SiteConfig,
 ) -> TypstFilterResult<'a> {
@@ -113,7 +114,7 @@ fn filter_drafts_impl<'a>(
         return TypstFilterResult::empty(0, None);
     };
 
-    let mut builder = Compiler::new(root).into_batch();
+    let mut builder = host.batcher(root);
     builder = builder.with_inputs_obj(inputs);
 
     let batcher = match builder.with_snapshot_from(files) {
@@ -143,7 +144,7 @@ fn filter_drafts_impl<'a>(
             Err(e) => {
                 // Retry with per-file visible inputs so @tola/current-dependent
                 // templates can scan successfully in startup/filter paths.
-                match scan_single_with_current_in_store(root, path, config, &store) {
+                match scan_single_with_current_in_store(root, host, path, config, &store) {
                     Ok(scan) => {
                         let page = to_scanned_page(path, scan, label, &store, config);
                         if page.kind.is_iterative() {
@@ -170,7 +171,7 @@ fn filter_drafts_impl<'a>(
                 }
 
                 let path = files[idx];
-                match scan_single_with_current_in_store(root, path, config, &store) {
+                match scan_single_with_current_in_store(root, host, path, config, &store) {
                     Ok(scan) => {
                         slots[idx] = Some(to_scanned_page(path, scan, label, &store, config));
                     }
@@ -229,10 +230,11 @@ fn filter_drafts_impl<'a>(
 pub fn filter_drafts<'a>(
     files: &[&PathBuf],
     root: &'a Path,
+    host: &'a super::TypstHost,
     label: &str,
     config: &SiteConfig,
 ) -> TypstFilterResult<'a> {
-    filter_drafts_impl(files, root, label, config)
+    filter_drafts_impl(files, root, host, label, config)
 }
 
 /// Check if a Typst scan result indicates a draft page
@@ -249,7 +251,6 @@ fn is_draft(scan: &typst_batch::ScanResult, label: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::page::typst::init_runtime;
     use std::fs;
     use tempfile::TempDir;
 
@@ -270,8 +271,6 @@ mod tests {
         )
         .unwrap();
 
-        init_runtime(&[], root.to_path_buf(), Vec::new());
-
         let mut config = SiteConfig::default();
         config.set_root(root);
         config
@@ -279,10 +278,11 @@ mod tests {
             .info
             .extra
             .insert("custom0".into(), toml::Value::String("ABC".into()));
+        let host = super::super::TypstHost::for_config(&config);
 
         let files = [page];
         let refs = files.iter().collect::<Vec<_>>();
-        let result = filter_drafts(&refs, root, "tola-meta", &config);
+        let result = filter_drafts(&refs, root, &host, "tola-meta", &config);
 
         assert!(
             result.errors.is_empty(),
@@ -308,15 +308,14 @@ mod tests {
         )
         .unwrap();
 
-        init_runtime(&[], root.to_path_buf(), Vec::new());
-
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.path_prefix = std::path::PathBuf::from("sub/xxx");
+        let host = super::super::TypstHost::for_config(&config);
 
         let files = [page];
         let refs = files.iter().collect::<Vec<_>>();
-        let result = filter_drafts(&refs, root, "tola-meta", &config);
+        let result = filter_drafts(&refs, root, &host, "tola-meta", &config);
 
         assert!(
             result.errors.is_empty(),
@@ -345,15 +344,14 @@ mod tests {
         )
         .unwrap();
 
-        init_runtime(&[], root.to_path_buf(), Vec::new());
-
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.content = content_dir;
+        let host = super::super::TypstHost::for_config(&config);
 
         let files = [page];
         let refs = files.iter().collect::<Vec<_>>();
-        let result = filter_drafts(&refs, root, "tola-meta", &config);
+        let result = filter_drafts(&refs, root, &host, "tola-meta", &config);
 
         assert!(
             result.errors.is_empty(),

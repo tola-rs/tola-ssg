@@ -13,7 +13,7 @@ use super::{
 use crate::address::SiteIndex;
 use crate::cache::{self, PersistedDiagnostics, PersistedError, RemovedFile};
 use crate::compiler::dependency::{self, collect_virtual_dependents};
-use crate::compiler::page::{BUILD_CACHE, cache_vdom};
+use crate::compiler::page::{BUILD_CACHE, TypstHost, cache_vdom};
 use crate::compiler::scheduler::SCHEDULER;
 use crate::config::{self, SiteConfig};
 use crate::core::UrlPath;
@@ -80,7 +80,8 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             // block the startup coordinator or interactive requests.
             set_serving();
             set_healthy(true);
-            start_serve_build(config_handle, Arc::clone(&scan_state));
+            let typst_host = Arc::new(TypstHost::for_config(&config_arc));
+            start_serve_build(Arc::clone(&config_arc), typst_host, Arc::clone(&scan_state));
             return;
         }
 
@@ -103,16 +104,19 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
 fn progressive_scan(config: &SiteConfig, state: &SiteIndex) -> bool {
     use crate::core::is_shutdown;
 
-    if let Err(e) = init_serve_build(config) {
-        debug!("init"; "failed: {}", e);
-        return false;
-    }
+    let typst_host = match init_serve_build(config) {
+        Ok(host) => host,
+        Err(e) => {
+            debug!("init"; "failed: {}", e);
+            return false;
+        }
+    };
 
     if is_shutdown() {
         return false;
     }
 
-    if let Err(e) = scan_pages(config, state) {
+    if let Err(e) = scan_pages(config, &typst_host, state) {
         debug!("scan"; "failed: {}", e);
         return false;
     }
@@ -125,13 +129,16 @@ fn progressive_scan(config: &SiteConfig, state: &SiteIndex) -> bool {
 }
 
 fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
-    if let Err(e) = init_serve_build(config) {
-        log!("build"; "cache startup init failed: {}", e);
-        set_scan_ready(false);
-        return false;
-    }
+    let typst_host = match init_serve_build(config) {
+        Ok(host) => host,
+        Err(e) => {
+            log!("build"; "cache startup init failed: {}", e);
+            set_scan_ready(false);
+            return false;
+        }
+    };
 
-    if let Err(e) = scan_pages(config, state) {
+    if let Err(e) = scan_pages(config, &typst_host, state) {
         log!("scan"; "cache startup scan failed: {}", e);
         set_scan_ready(false);
         return false;
@@ -187,6 +194,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
             &compile_targets,
             &modified.cached_urls_by_source,
             config,
+            &typst_host,
             state,
             &mut diagnostics,
         );
@@ -199,6 +207,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
                 &dependents.into_iter().collect::<Vec<_>>(),
                 &FxHashMap::default(),
                 config,
+                &typst_host,
                 state,
                 &mut diagnostics,
             );
@@ -360,6 +369,7 @@ fn compile_startup_batch(
     paths: &[PathBuf],
     cached_urls: &FxHashMap<PathBuf, UrlPath>,
     config: &SiteConfig,
+    typst_host: &TypstHost,
     state: &SiteIndex,
     diagnostics: &mut PersistedDiagnostics,
 ) -> StartupCompileStats {
@@ -372,7 +382,7 @@ fn compile_startup_batch(
             std::thread::sleep(STARTUP_POLL_INTERVAL);
         }
 
-        let outcomes = compile::compile_startup_batch(path_chunk, config, state);
+        let outcomes = compile::compile_startup_batch(path_chunk, config, typst_host, state);
 
         for (input_path, outcome) in path_chunk.iter().zip(outcomes.into_iter()) {
             let rel_input = input_path
@@ -458,6 +468,10 @@ mod tests {
         freshness::clear_cache();
     }
 
+    fn typst_host(config: &SiteConfig) -> TypstHost {
+        TypstHost::for_config(config)
+    }
+
     fn write_markdown(path: &Path, heading: &str, draft: bool) {
         let draft_line = if draft { "draft: true\n" } else { "" };
         fs::write(
@@ -511,11 +525,13 @@ mod tests {
 
         let mut cached_urls = FxHashMap::default();
         cached_urls.insert(source.clone(), old_url.clone());
+        let host = typst_host(&config);
 
         let stats = compile_startup_batch(
             std::slice::from_ref(&source),
             &cached_urls,
             &config,
+            &host,
             &state,
             &mut diagnostics,
         );
@@ -545,11 +561,13 @@ mod tests {
         let rel = config.root_relative(&source).display().to_string();
         let mut diagnostics = PersistedDiagnostics::new();
         diagnostics.push_error(PersistedError::new(&rel, "/post/", "old compile error"));
+        let host = typst_host(&config);
 
         let stats = compile_startup_batch(
             std::slice::from_ref(&source),
             &FxHashMap::default(),
             &config,
+            &host,
             &state,
             &mut diagnostics,
         );
@@ -579,11 +597,13 @@ mod tests {
         write_markdown(&second, "Second Startup Page", false);
         let first = crate::utils::path::normalize_path(&first);
         let second = crate::utils::path::normalize_path(&second);
+        let host = typst_host(&config);
 
         let stats = compile_startup_batch(
             &[first.clone(), second.clone()],
             &FxHashMap::default(),
             &config,
+            &host,
             &state,
             &mut PersistedDiagnostics::new(),
         );
@@ -663,11 +683,13 @@ mod tests {
         let mut cached_urls = FxHashMap::default();
         cached_urls.insert(source.clone(), old_url.clone());
         let mut diagnostics = PersistedDiagnostics::new();
+        let host = typst_host(&config);
 
         let stats = compile_startup_batch(
             std::slice::from_ref(&source),
             &cached_urls,
             &config,
+            &host,
             &state,
             &mut diagnostics,
         );

@@ -11,12 +11,13 @@ use std::path::{Path, PathBuf};
 use crate::config::SiteConfig;
 use crate::core::BuildMode;
 use crate::page::StoredPageMap;
-use page::PageRoute;
+use page::{PageRoute, TypstHost};
 
 /// Context for the compilation pipeline
 pub struct CompileContext<'a> {
     pub mode: BuildMode,
     pub config: &'a SiteConfig,
+    pub typst_host: &'a TypstHost,
     pub store: &'a StoredPageMap,
     pub route: Option<&'a PageRoute>,
     pub current_context: Option<&'a serde_json::Value>,
@@ -27,10 +28,16 @@ pub struct CompileContext<'a> {
 }
 
 impl<'a> CompileContext<'a> {
-    pub fn new(mode: BuildMode, config: &'a SiteConfig, store: &'a StoredPageMap) -> Self {
+    pub fn new(
+        mode: BuildMode,
+        config: &'a SiteConfig,
+        typst_host: &'a TypstHost,
+        store: &'a StoredPageMap,
+    ) -> Self {
         Self {
             mode,
             config,
+            typst_host,
             store,
             route: None,
             current_context: None,

@@ -212,9 +212,10 @@ fn process_page(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     state: &SiteIndex,
 ) -> Result<Option<PageResult>> {
-    let Some(prepared) = prepare_page_inner(mode, path, config, state)? else {
+    let Some(prepared) = prepare_page_inner(mode, path, config, host, state)? else {
         return Ok(None);
     };
 
@@ -233,15 +234,17 @@ pub fn prepare_page(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     state: &SiteIndex,
 ) -> Result<Option<PreparedPage>> {
-    prepare_page_inner(mode, path, config, state)
+    prepare_page_inner(mode, path, config, host, state)
 }
 
 fn prepare_page_inner(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     state: &SiteIndex,
 ) -> Result<Option<PreparedPage>> {
     state.with_pages(|store| {
@@ -251,12 +254,12 @@ fn prepare_page_inner(
         // This must happen BEFORE compile so @tola/current has fresh data.
         // The scan result is passed as a local compile input; global stores are
         // committed only after compilation succeeds.
-        let scan_data = scan_single_page(path, config, store);
+        let scan_data = scan_single_page(path, config, host, store);
         page.apply_meta(scan_data.meta.clone(), config);
 
         // Compile with fresh @tola/current data ===
         let current_context = current_context_from_scan(store, path, &page, &scan_data, config);
-        let ctx = CompileContext::new(mode, config, store)
+        let ctx = CompileContext::new(mode, config, host, store)
             .with_route(&page.route)
             .with_current_context(&current_context);
         let result = compile(path, &ctx)?;
@@ -313,11 +316,12 @@ pub fn compile_meta(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<CompileMetaResult> {
     // Build context without route - compile_meta is typically used for production
     // where globally unique StableIds aren't needed
-    let ctx = CompileContext::new(mode, config, store);
+    let ctx = CompileContext::new(mode, config, host, store);
     let result = compile(path, &ctx)?;
 
     let meta = result.meta;
@@ -348,6 +352,10 @@ mod tests {
         state.clear();
     }
 
+    fn typst_host(config: &SiteConfig) -> crate::compiler::page::TypstHost {
+        crate::compiler::page::TypstHost::for_config(config)
+    }
+
     #[test]
     fn test_compile_meta_no_label() {
         let dir = TempDir::new().unwrap();
@@ -359,8 +367,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         let store = StoredPageMap::new();
+        let host = crate::compiler::page::TypstHost::for_config(&config);
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &host, &store);
         assert!(result.is_ok(), "compile_meta should succeed: {:?}", result);
 
         let (html, meta, _indexed_vdom) = result.unwrap();
@@ -391,8 +400,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         let store = StoredPageMap::new();
+        let host = crate::compiler::page::TypstHost::for_config(&config);
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &host, &store);
         assert!(result.is_ok(), "compile_meta should succeed: {:?}", result);
 
         let (html, meta, _indexed_vdom) = result.unwrap();
@@ -424,8 +434,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         let store = StoredPageMap::new();
+        let host = crate::compiler::page::TypstHost::for_config(&config);
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &host, &store);
         assert!(result.is_ok());
 
         let (_, meta, _indexed_vdom) = result.unwrap();
@@ -447,8 +458,9 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         let store = StoredPageMap::new();
+        let host = crate::compiler::page::TypstHost::for_config(&config);
 
-        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &store);
+        let result = compile_meta(BuildMode::DEVELOPMENT, &file_path, &config, &host, &store);
 
         // Should return an error, not panic or silently skip
         assert!(result.is_err(), "Invalid typst should return Err");
@@ -467,10 +479,11 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
+        let host = typst_host(&config);
 
         reset_state(&state);
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &state);
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &host, &state);
 
         assert!(result.is_err(), "invalid page should fail compilation");
         assert!(
@@ -502,6 +515,7 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
+        let host = typst_host(&config);
 
         reset_state(&state);
 
@@ -525,7 +539,7 @@ mod tests {
             );
         });
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &state);
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &host, &state);
 
         assert!(result.is_err(), "invalid page should fail compilation");
         assert_eq!(
@@ -575,6 +589,7 @@ permalink = "/showcase/source-field-test/"
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
+        let host = typst_host(&config);
 
         reset_state(&state);
 
@@ -590,7 +605,7 @@ permalink = "/showcase/source-field-test/"
             store.insert_source_mapping(file_path.clone(), old_permalink.clone());
         });
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &state)
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &host, &state)
             .expect("process_page should succeed");
         assert!(result.is_some(), "page should not be filtered as draft");
 
@@ -639,10 +654,11 @@ permalink = "/showcase/source-field-test/"
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
+        let host = typst_host(&config);
 
         reset_state(&state);
 
-        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &state)
+        let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &host, &state)
             .expect("process_page should succeed")
             .expect("page should not be filtered");
 
