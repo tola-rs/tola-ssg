@@ -7,9 +7,11 @@
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::address::PermalinkUpdate;
 use crate::compiler::family::Indexed;
+use crate::config::SiteConfig;
 use crate::core::{UrlChange, UrlPath};
 use crate::reload::queue::CompileQueue;
 use tola_vdom::{Document, patch::Patch};
@@ -56,6 +58,7 @@ pub enum CompilerMsg {
 pub enum VdomMsg {
     /// Process compiled VDOM
     Process {
+        config: Arc<SiteConfig>,
         path: PathBuf,
         url_path: UrlPath,
         /// Boxed to reduce enum size (Document<Indexed> is ~520 bytes)
@@ -76,7 +79,7 @@ pub enum VdomMsg {
     /// File skipped
     Skip,
     /// End of a compilation batch - trigger aggregated log output
-    BatchEnd,
+    BatchEnd { config: Arc<SiteConfig> },
     /// Clear persisted diagnostics for one path or all paths
     ClearDiagnostics {
         /// `Some(path)` clears one path, `None` clears all diagnostics

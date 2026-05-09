@@ -42,7 +42,8 @@ impl CompilerActor {
         crate::debug!("compile"; "{} direct, {} affected", direct.len(), affected.len());
 
         if affected.is_empty() {
-            self.finish_batch(pages_hash, watched_post_paths).await;
+            self.finish_batch(self.config.current(), pages_hash, watched_post_paths)
+                .await;
             crate::debug!("compile"; "done in {:?}", start.elapsed());
             None
         } else {
@@ -159,7 +160,8 @@ impl CompilerActor {
             self.compile_one(path).await;
         }
 
-        self.finish_batch(pages_hash, None).await;
+        self.finish_batch(self.config.current(), pages_hash, None)
+            .await;
     }
 
     /// Handle deleted content files and cleanup all related state.
@@ -186,7 +188,9 @@ impl CompilerActor {
         self.recompile_virtual_users().await;
         let _ = self
             .vdom_tx
-            .send(crate::actor::messages::VdomMsg::BatchEnd)
+            .send(crate::actor::messages::VdomMsg::BatchEnd {
+                config: self.config.current(),
+            })
             .await;
     }
 
@@ -310,7 +314,9 @@ impl CompilerActor {
 
         let _ = self
             .vdom_tx
-            .send(crate::actor::messages::VdomMsg::BatchEnd)
+            .send(crate::actor::messages::VdomMsg::BatchEnd {
+                config: self.config.current(),
+            })
             .await;
     }
 
@@ -429,7 +435,9 @@ impl CompilerActor {
                 set_healthy(true);
                 let _ = self
                     .vdom_tx
-                    .send(crate::actor::messages::VdomMsg::BatchEnd)
+                    .send(crate::actor::messages::VdomMsg::BatchEnd {
+                        config: self.config.current(),
+                    })
                     .await;
             }
             Ok(Err(e)) => {

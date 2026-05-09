@@ -10,12 +10,13 @@ impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
         let config = self.config.current();
+        let compile_config = Arc::clone(&config);
         let state = Arc::clone(&self.state);
         let path = path.to_path_buf();
         crate::compiler::scheduler::SCHEDULER.invalidate(&path);
 
         let result = tokio::task::spawn_blocking(move || {
-            let outcome = crate::reload::compile::compile_page(&path, &config, &state);
+            let outcome = crate::reload::compile::compile_page(&path, &compile_config, &state);
             // spawn_blocking threads are not rayon workers.
             crate::compiler::dependency::flush_current_thread_deps();
             outcome
@@ -23,16 +24,17 @@ impl CompilerActor {
         .await;
 
         match result {
-            Ok(outcome) => self.route(outcome).await,
+            Ok(outcome) => self.route(outcome, config).await,
             Err(e) => crate::log!("compile"; "error: {}", e),
         }
     }
 
     /// Compile multiple files in parallel (blocking).
     pub(super) async fn compile_batch_blocking(&mut self, paths: Vec<PathBuf>) {
-        let outcomes = compile_batch(paths, self.config.current(), Arc::clone(&self.state)).await;
+        let config = self.config.current();
+        let outcomes = compile_batch(paths, Arc::clone(&config), Arc::clone(&self.state)).await;
         for outcome in outcomes {
-            self.route(outcome).await;
+            self.route(outcome, Arc::clone(&config)).await;
         }
     }
 
@@ -56,7 +58,11 @@ impl CompilerActor {
     }
 
     /// Route compilation outcome to VdomActor.
-    pub(super) async fn route(&mut self, outcome: CompileOutcome) {
+    pub(super) async fn route(
+        &mut self,
+        outcome: CompileOutcome,
+        config: Arc<crate::config::SiteConfig>,
+    ) {
         let msg = match outcome {
             CompileOutcome::Vdom {
                 path,
@@ -65,6 +71,7 @@ impl CompilerActor {
                 permalink_change,
                 warnings,
             } => crate::actor::messages::VdomMsg::Process {
+                config,
                 path,
                 url_path,
                 vdom,

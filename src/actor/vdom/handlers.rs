@@ -65,6 +65,7 @@ impl VdomActor {
 
     pub(super) async fn handle_process(
         &mut self,
+        config: std::sync::Arc<crate::config::SiteConfig>,
         path: PathBuf,
         url_path: UrlPath,
         new_vdom: Document<Indexed>,
@@ -132,7 +133,7 @@ impl VdomActor {
 
         // Handle permalink change side effects (cleanup old output file, record for logging)
         if let Some(ref old) = old_url {
-            PermalinkHandler::cleanup_old_output(old);
+            PermalinkHandler::cleanup_old_output(&config, old);
             // Record permalink change for batch output
             let rel_path = self.to_relative(&path);
             self.batch

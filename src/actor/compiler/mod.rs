@@ -20,10 +20,11 @@ use tokio::task::JoinHandle;
 use super::messages::{CompilerMsg, VdomMsg};
 use crate::address::SiteIndex;
 use crate::compiler::page::PageStateEpoch;
-use crate::config::ConfigHandle;
+use crate::config::{ConfigHandle, SiteConfig};
 use crate::reload::compile::CompileOutcome;
 
 pub(super) struct BatchResult {
+    pub(super) config: Arc<SiteConfig>,
     pub(super) outcomes: Vec<CompileOutcome>,
     pub(super) pages_hash: u64,
     pub(super) watched_post_paths: Option<Vec<PathBuf>>,

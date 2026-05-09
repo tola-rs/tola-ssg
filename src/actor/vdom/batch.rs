@@ -159,10 +159,10 @@ impl BatchLogger {
     }
 
     /// Output all conflicts and results, then clear.
-    pub(super) fn flush(&mut self) {
+    pub(super) fn flush(&mut self, config: &crate::config::SiteConfig) {
         self.output_permalink_changes();
         self.output_conflicts();
-        self.output_results();
+        self.output_results(config);
     }
 
     fn output_permalink_changes(&mut self) {
@@ -184,7 +184,7 @@ impl BatchLogger {
         self.conflicts.clear();
     }
 
-    fn output_results(&mut self) {
+    fn output_results(&mut self, config: &crate::config::SiteConfig) {
         if self.results.is_empty() {
             return;
         }
@@ -205,7 +205,6 @@ impl BatchLogger {
             crate::logger::status_error(&summary, &detail);
         } else {
             if !warnings.is_empty() {
-                let config = crate::config::cfg();
                 let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
                 let root = config.get_root();
                 for warning in warnings.iter().take(max) {

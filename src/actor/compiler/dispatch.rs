@@ -88,10 +88,10 @@ impl CompilerActor {
         let start = Instant::now();
 
         for outcome in result.outcomes {
-            self.route(outcome).await;
+            self.route(outcome, result.config.clone()).await;
         }
 
-        self.finish_batch(result.pages_hash, result.watched_post_paths)
+        self.finish_batch(result.config, result.pages_hash, result.watched_post_paths)
             .await;
         crate::debug!("compile"; "background done in {:?}", start.elapsed());
     }
@@ -99,6 +99,7 @@ impl CompilerActor {
     /// Finalize a compilation batch
     pub(super) async fn finish_batch(
         &mut self,
+        config: std::sync::Arc<crate::config::SiteConfig>,
         hash_before: u64,
         watched_post_paths: Option<Vec<PathBuf>>,
     ) {
@@ -108,7 +109,7 @@ impl CompilerActor {
         if let Some(paths) = watched_post_paths {
             self.run_watched_post_hooks(&paths);
         }
-        let _ = self.vdom_tx.send(VdomMsg::BatchEnd).await;
+        let _ = self.vdom_tx.send(VdomMsg::BatchEnd { config }).await;
     }
 }
 

@@ -18,8 +18,9 @@ pub(super) fn spawn_batch(
     ticket: PageStateTicket,
 ) -> BackgroundTask {
     tokio::spawn(async move {
-        let outcomes = compile_batch_with_ticket(paths, config, state, ticket).await;
+        let outcomes = compile_batch_with_ticket(paths, Arc::clone(&config), state, ticket).await;
         BatchResult {
+            config,
             outcomes,
             pages_hash,
             watched_post_paths,
@@ -83,6 +84,7 @@ pub(super) fn abort_task(task: &mut Option<BackgroundTask>) {
 pub(super) async fn wait_task(task: &mut Option<BackgroundTask>) -> BatchResult {
     match task.take() {
         Some(handle) => handle.await.unwrap_or(BatchResult {
+            config: Arc::new(SiteConfig::default()),
             outcomes: vec![],
             pages_hash: 0,
             watched_post_paths: None,

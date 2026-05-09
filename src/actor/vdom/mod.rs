@@ -123,13 +123,14 @@ impl VdomActor {
         while let Some(msg) = self.rx.recv().await {
             match msg {
                 VdomMsg::Process {
+                    config,
                     path,
                     url_path,
                     vdom,
                     permalink_change,
                     warnings,
                 } => {
-                    self.handle_process(path, url_path, *vdom, permalink_change, warnings)
+                    self.handle_process(config, path, url_path, *vdom, permalink_change, warnings)
                         .await
                 }
 
@@ -143,7 +144,7 @@ impl VdomActor {
 
                 VdomMsg::Skip => {}
 
-                VdomMsg::BatchEnd => self.batch.flush(),
+                VdomMsg::BatchEnd { config } => self.batch.flush(&config),
 
                 VdomMsg::ClearDiagnostics { path } => self.handle_clear_diagnostics(path).await,
 
@@ -333,6 +334,7 @@ mod persistence_tests {
 
         actor
             .handle_process(
+                Arc::new(crate::config::SiteConfig::default()),
                 root.join("content/current.typ"),
                 UrlPath::from_page("/current"),
                 make_indexed_doc("html"),
