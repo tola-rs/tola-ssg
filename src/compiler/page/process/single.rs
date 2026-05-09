@@ -2,7 +2,7 @@
 //!
 //! Handles compiling individual content files (Typst, Markdown) and extracting metadata.
 
-use crate::address::SiteIndex;
+use crate::address::{AddressSpace, SiteIndex};
 use crate::compiler::CompileContext;
 use crate::compiler::page::compile;
 use crate::compiler::page::{
@@ -55,32 +55,6 @@ impl PageStateTicket {
             return None;
         }
         Some(write())
-    }
-}
-
-enum PageStateCommit<'a> {
-    Always,
-    Ticket(&'a PageStateTicket),
-}
-
-impl PageStateCommit<'_> {
-    fn commit(
-        self,
-        state: &SiteIndex,
-        source: &Path,
-        page: &CompiledPage,
-        scan_data: &SinglePageScanData,
-        config: &SiteConfig,
-    ) -> bool {
-        match self {
-            Self::Always => {
-                commit_page_state(state, source, page, scan_data, config);
-                true
-            }
-            Self::Ticket(ticket) => ticket
-                .commit(|| commit_page_state(state, source, page, scan_data, config))
-                .is_some(),
-        }
     }
 }
 
@@ -178,7 +152,19 @@ fn commit_page_state(
     scan_data: &SinglePageScanData,
     config: &SiteConfig,
 ) {
-    let store = state.pages();
+    state.edit(|store, address| {
+        commit_page_state_parts(store, address, source, page, scan_data, config);
+    });
+}
+
+pub(crate) fn commit_page_state_parts(
+    store: &StoredPageMap,
+    address: &mut AddressSpace,
+    source: &Path,
+    page: &CompiledPage,
+    scan_data: &SinglePageScanData,
+    config: &SiteConfig,
+) {
     let page_state = PageState::new(store);
     page_state.sync_source_permalink(source, page.route.permalink.clone(), StaleLinkPolicy::Clear);
     page_state.insert_headings(page.route.permalink.clone(), scan_data.headings.clone());
@@ -196,13 +182,18 @@ fn commit_page_state(
         page.content_meta.clone().unwrap_or_default(),
     );
 
-    // Register headings for fragment validation.
-    // Page route registration is deferred to the hot-reload routing layer so
-    // permalink changes can still be detected from old vs new URL mappings.
-    state.address().write().register_headings(
+    // Register headings for fragment validation. Full page route registration
+    // is owned by the caller because hot reload must check permalink conflicts
+    // before publishing page metadata.
+    address.register_headings(
         &page.route.permalink,
         heading_ids(&scan_data.headings, config),
     );
+}
+
+pub struct PreparedPage {
+    pub result: PageResult,
+    pub scan_data: SinglePageScanData,
 }
 
 // ============================================================================
@@ -223,26 +214,36 @@ pub fn process_page(
     config: &SiteConfig,
     state: &SiteIndex,
 ) -> Result<Option<PageResult>> {
-    process_page_inner(mode, path, config, state, PageStateCommit::Always)
+    let Some(prepared) = prepare_page_inner(mode, path, config, state)? else {
+        return Ok(None);
+    };
+
+    commit_page_state(
+        state,
+        path,
+        &prepared.result.page,
+        &prepared.scan_data,
+        config,
+    );
+
+    Ok(Some(prepared.result))
 }
 
-pub fn process_page_with_ticket(
+pub fn prepare_page(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
     state: &SiteIndex,
-    ticket: &PageStateTicket,
-) -> Result<Option<PageResult>> {
-    process_page_inner(mode, path, config, state, PageStateCommit::Ticket(ticket))
+) -> Result<Option<PreparedPage>> {
+    prepare_page_inner(mode, path, config, state)
 }
 
-fn process_page_inner(
+fn prepare_page_inner(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,
     state: &SiteIndex,
-    commit: PageStateCommit<'_>,
-) -> Result<Option<PageResult>> {
+) -> Result<Option<PreparedPage>> {
     let store = state.pages();
     let mut page = CompiledPage::from_paths(path, config)?;
 
@@ -283,17 +284,16 @@ fn process_page_inner(
     let warnings = result.warnings.clone();
     collect_warnings(&result.warnings);
 
-    if !commit.commit(state, path, &page, &scan_data, config) {
-        return Ok(None);
-    }
-
     let permalink = page.route.permalink.clone();
 
-    Ok(Some(PageResult {
-        page,
-        indexed_vdom: result.indexed_vdom,
-        permalink,
-        warnings,
+    Ok(Some(PreparedPage {
+        result: PageResult {
+            page,
+            indexed_vdom: result.indexed_vdom,
+            permalink,
+            warnings,
+        },
+        scan_data,
     }))
 }
 
@@ -486,7 +486,7 @@ mod tests {
             "failed compile must not publish page metadata"
         );
         assert!(
-            state.address().read().is_empty(),
+            state.read(|_, address| address.is_empty()),
             "failed compile must not publish address-space state"
         );
 
@@ -650,51 +650,13 @@ permalink = "/showcase/source-field-test/"
             Some(UrlPath::from_page("/notes/custom/"))
         );
 
-        let headings = state
-            .address()
-            .read()
-            .headings_for(&UrlPath::from_page("/notes/custom/"))
-            .cloned()
-            .unwrap_or_default();
+        let headings = state.read(|_, address| {
+            address
+                .headings_for(&UrlPath::from_page("/notes/custom/"))
+                .cloned()
+                .unwrap_or_default()
+        });
         assert!(headings.contains("hello-world"));
-
-        reset_state(&state);
-    }
-
-    #[test]
-    fn test_process_page_with_stale_ticket_does_not_commit_page_state() {
-        let dir = TempDir::new().unwrap();
-        let content_dir = dir.path().join("content");
-        fs::create_dir_all(&content_dir).unwrap();
-        let file_path = content_dir.join("post.md");
-
-        fs::write(&file_path, "+++\ntitle = \"Post\"\n+++\n\n# Post\n").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.set_root(dir.path());
-        config.build.content = content_dir;
-        let state = SiteIndex::new();
-        let store = state.pages();
-
-        reset_state(&state);
-
-        let epoch = PageStateEpoch::new();
-        let ticket = epoch.ticket();
-        epoch.advance();
-
-        let result =
-            process_page_with_ticket(BuildMode::DEVELOPMENT, &file_path, &config, &state, &ticket)
-                .expect("stale page compile should not fail");
-
-        assert!(result.is_none(), "stale page compile must be discarded");
-        assert!(
-            store.get_permalink_by_source(&file_path).is_none(),
-            "stale page compile must not publish source permalink mapping"
-        );
-        assert!(
-            store.get_pages_with_drafts().is_empty(),
-            "stale page compile must not publish page metadata"
-        );
 
         reset_state(&state);
     }

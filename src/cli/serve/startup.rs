@@ -260,8 +260,10 @@ fn cleanup_removed_files(
 
     for item in removed {
         SCHEDULER.invalidate(&item.source_path);
-        state.address().write().remove_by_source(&item.source_path);
-        state.pages().remove_by_source(&item.source_path);
+        state.edit(|pages, address| {
+            address.remove_by_source(&item.source_path);
+            pages.remove_by_source(&item.source_path);
+        });
         dependency::remove_content(&item.source_path);
         cleanup_url_artifacts(config, state, &item.url_path);
 

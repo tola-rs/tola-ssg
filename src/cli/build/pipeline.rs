@@ -250,7 +250,7 @@ pub(super) fn finalize_build(config: &SiteConfig, state: &SiteIndex, quiet: bool
     }
 
     // Persist VDOM cache for serve reuse
-    let source_paths = state.address().read().source_paths();
+    let source_paths = state.read(|_, address| address.source_paths());
     if let Err(e) = crate::cache::persist_cache(
         &crate::compiler::page::BUILD_CACHE,
         &source_paths,

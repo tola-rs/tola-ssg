@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::address::{PermalinkUpdate, SiteIndex};
-use crate::page::PageRoute;
 use crate::reload::compile::CompileOutcome;
 
 use super::CompilerActor;
@@ -62,21 +60,17 @@ impl CompilerActor {
         let msg = match outcome {
             CompileOutcome::Vdom {
                 path,
-                route,
-                title,
                 url_path,
                 vdom,
+                permalink_change,
                 warnings,
-            } => {
-                let permalink_change = update_address_space(&self.state, route, title);
-                crate::actor::messages::VdomMsg::Process {
-                    path,
-                    url_path,
-                    vdom,
-                    permalink_change,
-                    warnings,
-                }
-            }
+            } => crate::actor::messages::VdomMsg::Process {
+                path,
+                url_path,
+                vdom,
+                permalink_change,
+                warnings,
+            },
             CompileOutcome::Reload { reason } => crate::actor::messages::VdomMsg::Reload { reason },
             CompileOutcome::Skipped => crate::actor::messages::VdomMsg::Skip,
             CompileOutcome::Error {
@@ -90,79 +84,5 @@ impl CompilerActor {
             },
         };
         let _ = self.vdom_tx.send(msg).await;
-    }
-}
-
-fn update_address_space(
-    state: &SiteIndex,
-    route: PageRoute,
-    title: Option<String>,
-) -> Option<PermalinkUpdate> {
-    let path = route.source.clone();
-    let url_path = route.permalink.clone();
-    let mut space = state.address().write();
-    let update = space.update_page_checked(route, title);
-    crate::debug!(
-        "permalink";
-        "update({}, {}) = {:?}",
-        path.display(),
-        url_path,
-        update
-    );
-    match update {
-        PermalinkUpdate::Unchanged => None,
-        _ => Some(update),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::update_address_space;
-    use crate::address::{PermalinkUpdate, SiteIndex};
-    use crate::core::UrlPath;
-    use crate::page::PageRoute;
-    use std::path::PathBuf;
-
-    fn test_route(source: &str, permalink: &str, output: &str) -> PageRoute {
-        PageRoute {
-            source: PathBuf::from(source),
-            permalink: UrlPath::from_page(permalink),
-            output_file: PathBuf::from(output),
-            is_index: false,
-            is_404: false,
-            output_dir: PathBuf::new(),
-            full_url: String::new(),
-        }
-    }
-
-    #[test]
-    fn update_address_space_reports_permalink_change_for_existing_source_mapping() {
-        let state = SiteIndex::new();
-        let old_url = UrlPath::from_page("/old/");
-
-        {
-            let mut space = state.address().write();
-            space.clear();
-            space.register_page(
-                test_route("content/post.typ", "/old/", "public/old/index.html"),
-                Some("Post".to_string()),
-            );
-        }
-
-        let change = update_address_space(
-            &state,
-            test_route("content/post.typ", "/new/", "public/new/index.html"),
-            None,
-        );
-
-        match change {
-            Some(PermalinkUpdate::Changed { old_url: old }) => {
-                assert_eq!(old, old_url);
-            }
-            other => panic!("expected permalink change, got {:?}", other),
-        }
-
-        let mut space = state.address().write();
-        space.clear();
     }
 }

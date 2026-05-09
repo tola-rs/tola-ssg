@@ -690,46 +690,46 @@ fn write_single_page(
 ///
 /// Uses the pure `asset::scan` module for directory traversal
 pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &SiteIndex) {
-    let store = state.pages();
-    let mut space = state.address().write();
-    space.clear();
+    state.edit(|store, space| {
+        space.clear();
 
-    // Use primary nested entry's output name as assets prefix
-    let assets_prefix = config
-        .build
-        .assets
-        .nested
-        .first()
-        .map(|e| e.output_name())
-        .unwrap_or("assets");
-    space.set_assets_prefix(assets_prefix);
-    space.set_slug_config(config.build.slug.clone());
+        // Use primary nested entry's output name as assets prefix
+        let assets_prefix = config
+            .build
+            .assets
+            .nested
+            .first()
+            .map(|e| e.output_name())
+            .unwrap_or("assets");
+        space.set_assets_prefix(assets_prefix);
+        space.set_slug_config(config.build.slug.clone());
 
-    // Register pages
-    for page in pages {
-        let title = page.content_meta.as_ref().and_then(|m| m.title.clone());
-        space.register_page(page.route.clone(), title);
-        let heading_ids = store
-            .get_headings(&page.route.permalink)
-            .into_iter()
-            .map(|heading| slugify_fragment(&heading.text, &config.build.slug));
-        space.register_headings(&page.route.permalink, heading_ids);
-    }
+        // Register pages
+        for page in pages {
+            let title = page.content_meta.as_ref().and_then(|m| m.title.clone());
+            space.register_page(page.route.clone(), title);
+            let heading_ids = store
+                .get_headings(&page.route.permalink)
+                .into_iter()
+                .map(|heading| slugify_fragment(&heading.text, &config.build.slug));
+            space.register_headings(&page.route.permalink, heading_ids);
+        }
 
-    // Register global assets (nested directories)
-    for asset in scan_global_assets(config) {
-        space.register_asset(asset);
-    }
+        // Register global assets (nested directories)
+        for asset in scan_global_assets(config) {
+            space.register_asset(asset);
+        }
 
-    // Register flatten assets (individual files at output root)
-    for asset in crate::asset::scan_flatten_assets(config) {
-        space.register_asset(asset);
-    }
+        // Register flatten assets (individual files at output root)
+        for asset in crate::asset::scan_flatten_assets(config) {
+            space.register_asset(asset);
+        }
 
-    // Register content assets (non-.typ/.md files in content directory)
-    for asset in crate::asset::scan_content_assets(config) {
-        space.register_asset(asset);
-    }
+        // Register content assets (non-.typ/.md files in content directory)
+        for asset in crate::asset::scan_content_assets(config) {
+            space.register_asset(asset);
+        }
+    });
 }
 
 #[cfg(test)]
@@ -847,8 +847,7 @@ mod tests {
 
         build_address_space(std::slice::from_ref(&page), &config, site);
 
-        {
-            let space = site.address().read();
+        site.read(|_, space| {
             let ctx = crate::address::ResolveContext {
                 current_permalink: &page.route.permalink,
                 source_path: &page.route.source,
@@ -863,7 +862,7 @@ mod tests {
                 space.resolve("#missing", &ctx),
                 ResolveResult::FragmentNotFound { .. }
             ));
-        }
+        });
     }
 
     #[test]
@@ -966,9 +965,7 @@ mod tests {
                 .all(|page| page.permalink != UrlPath::from_page("/stale/"))
         );
         assert_eq!(
-            site.address()
-                .read()
-                .source_for_url(&UrlPath::from_page("/fresh/")),
+            site.read(|_, address| address.source_for_url(&UrlPath::from_page("/fresh/"))),
             Some(crate::utils::path::normalize_path(&fresh_source))
         );
     }

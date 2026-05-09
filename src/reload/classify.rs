@@ -165,11 +165,12 @@ pub fn url_to_content_path(url: &str, state: &SiteIndex) -> Option<PathBuf> {
     use crate::core::UrlPath;
 
     let url_path = UrlPath::from_page(url);
-    let space = state.address().read();
 
-    space
-        .get_by_url(&url_path)
-        .map(|resource| resource.source().to_path_buf())
+    state.read(|_, space| {
+        space
+            .get_by_url(&url_path)
+            .map(|resource| resource.source().to_path_buf())
+    })
 }
 
 /// Collect all content files that depend on the changed files

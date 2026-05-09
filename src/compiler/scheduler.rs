@@ -18,7 +18,7 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::address::SiteIndex;
 use crate::config::SiteConfig;
-use crate::core::{BuildMode, Priority};
+use crate::core::Priority;
 
 // =============================================================================
 // Public API
@@ -466,36 +466,25 @@ impl CompileScheduler {
 impl CompileScheduler {
     fn do_compile(&self, path: &Path, config: &SiteConfig, state: &SiteIndex) -> CompileResult {
         use crate::compiler::dependency::flush_current_thread_deps;
-        use crate::compiler::page::{cache_vdom, process_page, write_page_html};
+        use crate::compiler::page::cache_vdom;
+        use crate::reload::compile::{CompileOutcome, compile_page};
 
-        let result = match process_page(BuildMode::DEVELOPMENT, path, config, state) {
-            Ok(Some(r)) => r,
-            Ok(None) => return CompileResult::Skipped,
-            Err(e) => return CompileResult::Failed(format!("{:#}", e)),
-        };
+        let result = compile_page(path, config, state);
 
-        // Flush dependencies recorded by process_page to global graph
+        // Flush dependencies recorded by compile_page to global graph
         // (scheduler workers are not rayon threads, so flush_to_global won't reach them)
         flush_current_thread_deps();
 
-        if let Err(e) = write_page_html(&result.page) {
-            return CompileResult::Failed(format!("write failed: {:#}", e));
+        match result {
+            CompileOutcome::Vdom { url_path, vdom, .. } => {
+                let output_file = url_path.output_html_path(&config.paths().output_dir());
+                cache_vdom(&url_path, *vdom);
+                CompileResult::Success(output_file)
+            }
+            CompileOutcome::Error { error, .. } => CompileResult::Failed(error),
+            CompileOutcome::Reload { reason } => CompileResult::Failed(reason),
+            CompileOutcome::Skipped => CompileResult::Skipped,
         }
-
-        if let Some(vdom) = result.indexed_vdom {
-            cache_vdom(&result.permalink, vdom);
-        }
-
-        state.address().write().update_page(
-            result.page.route.clone(),
-            result
-                .page
-                .content_meta
-                .as_ref()
-                .and_then(|m| m.title.clone()),
-        );
-
-        CompileResult::Success(result.page.route.output_file)
     }
 }
 

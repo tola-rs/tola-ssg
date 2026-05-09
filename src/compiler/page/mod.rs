@@ -43,7 +43,8 @@ pub use process::{
     GlobalStateMode, build_address_space, build_static_pages, populate_pages,
     rebuild_iterative_pages,
 };
-pub use process::{PageStateEpoch, PageStateTicket, process_page, process_page_with_ticket};
+pub use process::{PageStateEpoch, PageStateTicket, process_page};
+pub(crate) use process::{PreparedPage, commit_page_state_parts, prepare_page};
 pub use typst::process_result as process_typst_result;
 pub use warning::{
     collect_warnings, drain_warnings, format_warning_with_prefix, warning_relative_path,

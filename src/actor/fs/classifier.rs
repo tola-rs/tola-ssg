@@ -78,12 +78,12 @@ impl EventClassifier {
             return;
         }
 
-        let space = state.address().read();
-
-        for dir in &modified_dirs {
-            Self::detect_disappeared(&space, dir, changes);
-            Self::detect_appeared(&space, dir, changes);
-        }
+        state.read(|_, space| {
+            for dir in &modified_dirs {
+                Self::detect_disappeared(space, dir, changes);
+                Self::detect_appeared(space, dir, changes);
+            }
+        });
     }
 
     /// Detect tracked files that no longer exist in a directory.
@@ -137,20 +137,21 @@ impl EventClassifier {
     ) {
         use crate::reload::classify::{FileCategory, categorize_path};
 
-        let space = state.address().read();
-        let to_promote: Vec<_> = changes
-            .iter()
-            .filter(|(_, k)| **k == ChangeKind::Modified)
-            .filter(|(p, _)| space.url_for_source(p).is_none())
-            // Don't promote deps/asset files - they need to stay Modified for proper handling
-            .filter(|(p, _)| {
-                !matches!(
-                    categorize_path(p, config),
-                    FileCategory::Deps | FileCategory::Asset
-                )
-            })
-            .map(|(p, _)| p.clone())
-            .collect();
+        let to_promote: Vec<_> = state.read(|_, space| {
+            changes
+                .iter()
+                .filter(|(_, k)| **k == ChangeKind::Modified)
+                .filter(|(p, _)| space.url_for_source(p).is_none())
+                // Don't promote deps/asset files - they need to stay Modified for proper handling
+                .filter(|(p, _)| {
+                    !matches!(
+                        categorize_path(p, config),
+                        FileCategory::Deps | FileCategory::Asset
+                    )
+                })
+                .map(|(p, _)| p.clone())
+                .collect()
+        });
 
         for path in to_promote {
             changes.insert(path, ChangeKind::Created);
@@ -168,22 +169,23 @@ impl EventClassifier {
     ) {
         use crate::reload::classify::{FileCategory, categorize_path};
 
-        let space = state.address().read();
-        changes.retain(|p, k| match k {
-            ChangeKind::Created | ChangeKind::Modified => p.is_file(),
-            ChangeKind::Removed => {
-                if matches!(
-                    categorize_path(p, config),
-                    FileCategory::Deps | FileCategory::Asset | FileCategory::Output
-                ) {
-                    return true;
+        state.read(|_, space| {
+            changes.retain(|p, k| match k {
+                ChangeKind::Created | ChangeKind::Modified => p.is_file(),
+                ChangeKind::Removed => {
+                    if matches!(
+                        categorize_path(p, config),
+                        FileCategory::Deps | FileCategory::Asset | FileCategory::Output
+                    ) {
+                        return true;
+                    }
+                    let tracked = space.url_for_source(p).is_some();
+                    if !tracked {
+                        crate::debug!("watch"; "filter removed (not tracked): {}", p.display());
+                    }
+                    tracked
                 }
-                let tracked = space.url_for_source(p).is_some();
-                if !tracked {
-                    crate::debug!("watch"; "filter removed (not tracked): {}", p.display());
-                }
-                tracked
-            }
+            });
         });
     }
 }

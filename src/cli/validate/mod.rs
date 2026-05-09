@@ -348,12 +348,16 @@ fn validate_links(
                     crate::pipeline::transform::resolve_link(&link.dest, config, &page.route)
                         .unwrap_or_else(|_| link.dest.clone());
 
-                let space = state.address().read();
-                let mut result = space.resolve(&resolved_link, &ctx);
-                // Fallback for mixed prefixed/unprefixed permalink states.
-                if matches!(result, ResolveResult::NotFound { .. }) && resolved_link != link.dest {
-                    result = space.resolve(&link.dest, &ctx);
-                }
+                let result = state.read(|_, space| {
+                    let mut result = space.resolve(&resolved_link, &ctx);
+                    // Fallback for mixed prefixed/unprefixed permalink states.
+                    if matches!(result, ResolveResult::NotFound { .. })
+                        && resolved_link != link.dest
+                    {
+                        result = space.resolve(&link.dest, &ctx);
+                    }
+                    result
+                });
                 handle_resolve_result(
                     result,
                     source,
@@ -379,9 +383,9 @@ fn validate_links(
                     origin: link.origin,
                 };
 
-                let space = state.address().read();
+                let result = state.read(|_, space| space.resolve(&link.dest, &ctx));
                 handle_resolve_result(
-                    space.resolve(&link.dest, &ctx),
+                    result,
                     source,
                     &link.dest,
                     is_asset_attr,

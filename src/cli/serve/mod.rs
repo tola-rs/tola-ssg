@@ -228,7 +228,7 @@ fn handle_request(request: Request, config: &SiteConfig, state: Arc<SiteIndex>) 
 
     // On-demand compilation (URL → source → compile → serve from disk)
     let url = crate::core::UrlPath::from_browser(&request_url);
-    let source = state.address().read().source_for_url(&url);
+    let source = state.read(|_, address| address.source_for_url(&url));
 
     if let Some(source) = source {
         return match compile::compile_on_demand(&source, config, state) {
@@ -249,9 +249,7 @@ fn serve_unhealthy_request(
 ) -> Result<()> {
     let url = UrlPath::from_browser(request_url);
     let source = state
-        .address()
-        .read()
-        .source_for_url(&url)
+        .read(|_, address| address.source_for_url(&url))
         .or_else(|| guess_source_before_scan(request_url, config));
 
     let Some(source) = source else {
@@ -347,7 +345,7 @@ fn recover_missing_output(
     ws_port: Option<u16>,
 ) -> Result<()> {
     let url = crate::core::UrlPath::from_browser(request_url);
-    let source = state.address().read().source_for_url(&url);
+    let source = state.read(|_, address| address.source_for_url(&url));
 
     let Some(source) = source else {
         return response::respond_not_found(request, config, ws_port);
@@ -425,10 +423,12 @@ mod tests {
         write_file(&source, "= Hello");
         write_file(&output, "<html><body>Hello</body></html>");
 
-        state.address().write().register_page(
-            page_route(&source, &output, "/posts/hello/", false),
-            Some("Hello".to_string()),
-        );
+        state.edit(|_, address| {
+            address.register_page(
+                page_route(&source, &output, "/posts/hello/", false),
+                Some("Hello".to_string()),
+            );
+        });
 
         let kind = classify_served_output("/posts/hello/", &output, &config, &state);
 
@@ -489,10 +489,12 @@ mod tests {
         write_file(&source, "= Not Found");
         write_file(&output, "<html><body>404</body></html>");
 
-        state.address().write().register_page(
-            page_route(&source, &output, "/404.html/", true),
-            Some("404".to_string()),
-        );
+        state.edit(|_, address| {
+            address.register_page(
+                page_route(&source, &output, "/404.html/", true),
+                Some("404".to_string()),
+            );
+        });
 
         let kind = classify_served_output("/404.html", &output, &config, &state);
 

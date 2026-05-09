@@ -5,12 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::address::SiteIndex;
+use crate::address::{PermalinkUpdate, SiteIndex};
 use crate::compiler::family::Indexed;
-use crate::compiler::page::{PageStateTicket, process_page, process_page_with_ticket};
+use crate::compiler::page::{PageStateTicket, PreparedPage, commit_page_state_parts, prepare_page};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
-use crate::page::{PageRoute, PageState};
+use crate::page::PageState;
 use tola_vdom::Document;
 
 /// Result of compiling a single file
@@ -19,10 +19,9 @@ pub enum CompileOutcome {
     /// Successfully compiled to VDOM
     Vdom {
         path: PathBuf,
-        route: PageRoute,
-        title: Option<String>,
         url_path: UrlPath,
         vdom: Box<Document<Indexed>>,
+        permalink_change: Option<PermalinkUpdate>,
         /// Compilation warnings (for persistence)
         warnings: Vec<String>,
     },
@@ -42,7 +41,7 @@ pub enum CompileOutcome {
 ///
 /// This function:
 /// - Routes by file extension
-/// - Calls the existing `process_page` with Development driver for .typ files
+/// - Prepares page output with the Development driver
 /// - Returns a unified outcome type
 /// - Applies draft-transition cleanup when a page becomes non-visible
 pub fn compile_page(path: &Path, config: &SiteConfig, state: &SiteIndex) -> CompileOutcome {
@@ -114,52 +113,10 @@ fn compile_content_file(
     state: &SiteIndex,
     ticket: Option<&PageStateTicket>,
 ) -> CompileOutcome {
-    let result = match ticket {
-        Some(ticket) => {
-            process_page_with_ticket(BuildMode::DEVELOPMENT, path, config, state, ticket)
-        }
-        None => process_page(BuildMode::DEVELOPMENT, path, config, state),
-    };
+    let result = prepare_page(BuildMode::DEVELOPMENT, path, config, state);
 
     match result {
-        Ok(Some(page_result)) => {
-            let permalink = page_result.permalink;
-            let route = page_result.page.route.clone();
-            let title = page_result
-                .page
-                .content_meta
-                .as_ref()
-                .and_then(|meta| meta.title.clone());
-
-            if let Err(e) = crate::compiler::page::write_page_html(&page_result.page) {
-                return CompileOutcome::Error {
-                    path: path.to_path_buf(),
-                    url_path: Some(permalink),
-                    error: format!("failed to write HTML: {}", e),
-                };
-            }
-
-            if let Some(vdom) = page_result.indexed_vdom {
-                // Convert warnings to strings for persistence
-                let root = config.get_root();
-                let warnings: Vec<String> = page_result
-                    .warnings
-                    .iter()
-                    .map(|w| crate::compiler::page::format_warning_with_prefix(w, root))
-                    .collect();
-
-                CompileOutcome::Vdom {
-                    path: path.to_path_buf(),
-                    route,
-                    title,
-                    url_path: permalink,
-                    vdom: Box::new(vdom),
-                    warnings,
-                }
-            } else {
-                CompileOutcome::Skipped
-            }
-        }
+        Ok(Some(prepared)) => finish_prepared_page(path, config, state, ticket, prepared),
         Ok(None) => {
             let cleaned = match ticket {
                 Some(ticket) => ticket
@@ -180,6 +137,102 @@ fn compile_content_file(
     }
 }
 
+enum CommitPreparedError {
+    Conflict(PermalinkUpdate),
+    Write(String),
+}
+
+fn finish_prepared_page(
+    path: &Path,
+    config: &SiteConfig,
+    state: &SiteIndex,
+    ticket: Option<&PageStateTicket>,
+    prepared: PreparedPage,
+) -> CompileOutcome {
+    let commit_result = match ticket {
+        Some(ticket) => {
+            match ticket.commit(|| write_and_commit_prepared(path, config, state, &prepared)) {
+                Some(result) => result,
+                None => return CompileOutcome::Skipped,
+            }
+        }
+        None => write_and_commit_prepared(path, config, state, &prepared),
+    };
+
+    let permalink = prepared.result.permalink;
+    let permalink_change = match commit_result {
+        Ok(update) => update,
+        Err(CommitPreparedError::Conflict(update)) => Some(update),
+        Err(CommitPreparedError::Write(error)) => {
+            return CompileOutcome::Error {
+                path: path.to_path_buf(),
+                url_path: Some(permalink),
+                error,
+            };
+        }
+    };
+
+    let Some(vdom) = prepared.result.indexed_vdom else {
+        return CompileOutcome::Skipped;
+    };
+
+    let root = config.get_root();
+    let warnings: Vec<String> = prepared
+        .result
+        .warnings
+        .iter()
+        .map(|w| crate::compiler::page::format_warning_with_prefix(w, root))
+        .collect();
+
+    CompileOutcome::Vdom {
+        path: path.to_path_buf(),
+        url_path: permalink,
+        vdom: Box::new(vdom),
+        permalink_change,
+        warnings,
+    }
+}
+
+fn write_and_commit_prepared(
+    path: &Path,
+    config: &SiteConfig,
+    state: &SiteIndex,
+    prepared: &PreparedPage,
+) -> Result<Option<PermalinkUpdate>, CommitPreparedError> {
+    let route = prepared.result.page.route.clone();
+    let title = prepared
+        .result
+        .page
+        .content_meta
+        .as_ref()
+        .and_then(|meta| meta.title.clone());
+
+    state.edit(|store, address| {
+        let update = address.check_page_update(&route);
+        if matches!(update, PermalinkUpdate::Conflict { .. }) {
+            return Err(CommitPreparedError::Conflict(update));
+        }
+
+        crate::compiler::page::write_page_html(&prepared.result.page)
+            .map_err(|e| CommitPreparedError::Write(format!("failed to write HTML: {}", e)))?;
+
+        let applied = address.update_page_checked(route, title);
+        commit_page_state_parts(
+            store,
+            address,
+            path,
+            &prepared.result.page,
+            &prepared.scan_data,
+            config,
+        );
+
+        Ok(match applied {
+            PermalinkUpdate::Unchanged => None,
+            update => Some(update),
+        })
+    })
+}
+
 /// Clean runtime/global state for pages that are now drafts.
 ///
 /// Returns true when a previously visible page existed and was removed.
@@ -198,35 +251,38 @@ pub fn cleanup_removed_source_state(
     let normalized = crate::utils::path::normalize_path(path);
     let has_alt = normalized.as_path() != path;
 
-    let old_url = state
-        .address()
-        .read()
-        .url_for_source(path)
-        .cloned()
-        .or_else(|| state.pages().get_permalink_by_source(path));
-    let old_url = if old_url.is_none() && has_alt {
-        state
-            .address()
-            .read()
-            .url_for_source(&normalized)
+    let old_url = state.read(|pages, address| {
+        address
+            .url_for_source(path)
             .cloned()
-            .or_else(|| state.pages().get_permalink_by_source(&normalized))
+            .or_else(|| pages.get_permalink_by_source(path))
+    });
+    let old_url = if old_url.is_none() && has_alt {
+        state.read(|pages, address| {
+            address
+                .url_for_source(&normalized)
+                .cloned()
+                .or_else(|| pages.get_permalink_by_source(&normalized))
+        })
     } else {
         old_url
     };
 
     // Remove stale runtime state regardless of whether the page had a URL mapping.
-    {
-        let mut space = state.address().write();
-        space.remove_by_source(path);
+    state.edit(|pages, address| {
+        address.remove_by_source(path);
         if has_alt {
-            space.remove_by_source(&normalized);
+            address.remove_by_source(&normalized);
         }
-    }
-    state.pages().remove_by_source(path);
-    if has_alt {
-        state.pages().remove_by_source(&normalized);
-    }
+        pages.remove_by_source(path);
+        if has_alt {
+            pages.remove_by_source(&normalized);
+        }
+        if let Some(old_url) = &old_url {
+            PageState::new(pages).clear_links(old_url);
+        }
+    });
+
     crate::compiler::dependency::remove_content(path);
     if has_alt {
         crate::compiler::dependency::remove_content(&normalized);
@@ -242,7 +298,6 @@ pub fn cleanup_removed_source_state(
 
     // Remove cached VDOM and link-graph edges for this page.
     crate::compiler::page::BUILD_CACHE.remove(&tola_vdom::CacheKey::new(old_url.as_str()));
-    PageState::new(state.pages()).clear_links(&old_url);
 
     cleanup_output_file(config, &old_url);
     Some(old_url)
@@ -322,6 +377,131 @@ mod tests {
     }
 
     #[test]
+    fn permalink_conflict_does_not_commit_page_state_or_output() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let existing = content_dir.join("existing.md");
+        let incoming = content_dir.join("incoming.md");
+        fs::write(&existing, "+++\ntitle = \"Existing\"\n+++\n\n# Existing\n").unwrap();
+        fs::write(
+            &incoming,
+            "+++\ntitle = \"Incoming\"\npermalink = \"/taken/\"\n+++\n\n# Incoming\n",
+        )
+        .unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+        config.build.output = output_dir.clone();
+        let state = SiteIndex::new();
+        let store = state.pages();
+
+        reset_state(&state);
+
+        let existing_meta = crate::page::PageMeta {
+            title: Some("Existing".to_string()),
+            permalink: Some("/taken/".to_string()),
+            ..Default::default()
+        };
+        let existing_page = crate::page::CompiledPage::from_paths_with_meta(
+            &existing,
+            &config,
+            Some(existing_meta),
+        )
+        .unwrap();
+        store.insert_source_mapping(existing.clone(), existing_page.route.permalink.clone());
+        store.insert_page(
+            existing_page.route.permalink.clone(),
+            existing_page.content_meta.clone().unwrap_or_default(),
+        );
+        state.edit(|_, address| {
+            address.register_page(existing_page.route.clone(), Some("Existing".to_string()));
+        });
+
+        let outcome = compile_page(&incoming, &config, &state);
+
+        match outcome {
+            CompileOutcome::Vdom {
+                permalink_change:
+                    Some(PermalinkUpdate::Conflict {
+                        url,
+                        existing_source,
+                    }),
+                ..
+            } => {
+                assert_eq!(url, UrlPath::from_page("/taken/"));
+                assert_eq!(
+                    existing_source,
+                    crate::utils::path::normalize_path(&existing)
+                );
+            }
+            other => panic!("expected permalink conflict, got: {:?}", other),
+        }
+
+        assert!(store.get_permalink_by_source(&incoming).is_none());
+        assert!(state.read(|_, address| address.url_for_source(&incoming).is_none()));
+        assert!(
+            !store
+                .get_pages_with_drafts()
+                .iter()
+                .any(|page| page.meta.title.as_deref() == Some("Incoming"))
+        );
+        assert!(
+            !UrlPath::from_page("/taken/")
+                .output_html_path(&output_dir)
+                .exists()
+        );
+
+        reset_state(&state);
+    }
+
+    #[test]
+    fn write_failure_does_not_commit_page_state() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let page = content_dir.join("post.md");
+        fs::write(&page, "+++\ntitle = \"Post\"\n+++\n\n# Post\n").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+        config.build.output = output_dir.clone();
+        let state = SiteIndex::new();
+        let store = state.pages();
+
+        reset_state(&state);
+
+        let output_file = UrlPath::from_page("/post/").output_html_path(&output_dir);
+        fs::create_dir_all(&output_file).unwrap();
+
+        let outcome = compile_page(&page, &config, &state);
+
+        match outcome {
+            CompileOutcome::Error {
+                url_path: Some(url),
+                error,
+                ..
+            } => {
+                assert_eq!(url, UrlPath::from_page("/post/"));
+                assert!(error.contains("failed to write HTML"));
+            }
+            other => panic!("expected write error, got: {:?}", other),
+        }
+
+        assert!(store.get_permalink_by_source(&page).is_none());
+        assert!(store.get_pages_with_drafts().is_empty());
+        assert!(state.read(|_, address| address.url_for_source(&page).is_none()));
+
+        reset_state(&state);
+    }
+
+    #[test]
     fn test_draft_toggle_false_then_true_cleans_runtime_state() {
         let dir = TempDir::new().unwrap();
         let content_dir = dir.path().join("content");
@@ -360,10 +540,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        state
-            .address()
-            .write()
-            .register_page(route.clone(), Some("Post".to_string()));
+        state.edit(|_, address| address.register_page(route.clone(), Some("Post".to_string())));
         if let Some(parent) = output_file.parent() {
             fs::create_dir_all(parent).unwrap();
         }
@@ -379,7 +556,7 @@ mod tests {
             back_to_draft
         );
         assert!(store.get_permalink_by_source(&page).is_none());
-        assert!(state.address().read().url_for_source(&page).is_none());
+        assert!(state.read(|_, address| address.url_for_source(&page).is_none()));
         assert!(!output_file.exists());
         assert!(PageState::new(store).links_to(&route.permalink).is_empty());
         assert_ne!(store.pages_hash(), hash_published);
@@ -418,10 +595,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        state
-            .address()
-            .write()
-            .register_page(route.clone(), Some("Post".to_string()));
+        state.edit(|_, address| address.register_page(route.clone(), Some("Post".to_string())));
         PageState::new(store).record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
 
         let removed = cleanup_removed_source_state(&page, &config, &state);
@@ -462,10 +636,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        state
-            .address()
-            .write()
-            .register_page(route.clone(), Some("Post".to_string()));
+        state.edit(|_, address| address.register_page(route.clone(), Some("Post".to_string())));
 
         let epoch = crate::compiler::page::PageStateEpoch::new();
         let ticket = epoch.ticket();
@@ -478,13 +649,11 @@ mod tests {
             store.get_permalink_by_source(&page),
             Some(route.permalink.clone())
         );
-        assert!(
-            state
-                .address()
-                .read()
+        assert!(state.read(|_, address| {
+            address
                 .url_for_source(&crate::utils::path::normalize_path(&page))
                 .is_some()
-        );
+        }));
 
         reset_state(&state);
     }

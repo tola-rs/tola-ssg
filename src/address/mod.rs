@@ -28,16 +28,16 @@
 //! # Usage
 //!
 //! ```ignore
-//! let space = state.address().read();
+//! state.read(|_, space| {
+//!     // Resolve any link
+//!     let result = space.resolve("/about/", &context);
 //!
-//! // Resolve any link
-//! let result = space.resolve("/about/", &context);
+//!     // Check if a URL exists
+//!     if space.contains_url("/posts/hello/") { ... }
 //!
-//! // Check if a URL exists
-//! if space.contains_url("/posts/hello/") { ... }
-//!
-//! // Find URL for a source file
-//! if let Some(url) = space.url_for_source(&path) { ... }
+//!     // Find URL for a source file
+//!     if let Some(url) = space.url_for_source(&path) { ... }
+//! });
 //! ```
 
 // Allow dead code - infrastructure for hot reload (Phase 5) and link validation
@@ -73,12 +73,20 @@ impl SiteIndex {
         &self.pages
     }
 
-    pub fn address(&self) -> &RwLock<AddressSpace> {
-        &self.address
+    pub fn read<T>(&self, read: impl FnOnce(&StoredPageMap, &AddressSpace) -> T) -> T {
+        let address = self.address.read();
+        read(&self.pages, &address)
+    }
+
+    pub fn edit<T>(&self, edit: impl FnOnce(&StoredPageMap, &mut AddressSpace) -> T) -> T {
+        let mut address = self.address.write();
+        edit(&self.pages, &mut address)
     }
 
     pub fn clear(&self) {
-        self.pages.clear();
-        self.address.write().clear();
+        self.edit(|pages, address| {
+            pages.clear();
+            address.clear();
+        });
     }
 }

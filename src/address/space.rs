@@ -182,6 +182,17 @@ impl AddressSpace {
         route: PageRoute,
         title: Option<String>,
     ) -> PermalinkUpdate {
+        let update = self.check_page_update(&route);
+        if matches!(update, PermalinkUpdate::Conflict { .. }) {
+            return update;
+        }
+
+        self.register_page(route, title);
+        update
+    }
+
+    /// Check a page update without mutating the address space.
+    pub fn check_page_update(&self, route: &PageRoute) -> PermalinkUpdate {
         let source = route.source.clone();
         let new_url = route.permalink.clone();
         let old_url = self.by_source.get(&source).cloned();
@@ -197,8 +208,6 @@ impl AddressSpace {
                 };
             }
         }
-
-        self.register_page(route, title);
 
         match old_url {
             Some(old) if old != new_url => PermalinkUpdate::Changed { old_url: old },

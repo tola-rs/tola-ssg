@@ -63,26 +63,27 @@ fn classify_page_output(
     output_path: &Path,
     state: &SiteIndex,
 ) -> Option<ServedOutputKind> {
-    let space = state.address().read();
-    let resource = space.get_by_url(url)?;
+    state.read(|_, space| {
+        let resource = space.get_by_url(url)?;
 
-    match resource {
-        Resource::Page { route, .. } => {
-            let route_output = normalize_path(&route.output_file);
-            if route_output != output_path {
-                return None;
-            }
+        match resource {
+            Resource::Page { route, .. } => {
+                let route_output = normalize_path(&route.output_file);
+                if route_output != output_path {
+                    return None;
+                }
 
-            if route.is_404 {
-                Some(ServedOutputKind::NotFoundHtml)
-            } else {
-                Some(ServedOutputKind::PageHtml {
-                    source: normalize_path(&route.source),
-                })
+                if route.is_404 {
+                    Some(ServedOutputKind::NotFoundHtml)
+                } else {
+                    Some(ServedOutputKind::PageHtml {
+                        source: normalize_path(&route.source),
+                    })
+                }
             }
+            Resource::Asset { .. } => Some(ServedOutputKind::Asset),
         }
-        Resource::Asset { .. } => Some(ServedOutputKind::Asset),
-    }
+    })
 }
 
 fn is_alias_redirect_output(

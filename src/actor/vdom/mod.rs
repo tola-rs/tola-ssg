@@ -186,7 +186,7 @@ impl VdomActor {
     }
 
     fn persist_state(&self) {
-        let source_paths = self.state.address().read().source_paths();
+        let source_paths = self.state.read(|_, address| address.source_paths());
         match persist_cache(&BUILD_CACHE, &source_paths, &self.root) {
             Ok(n) => crate::debug!("vdom"; "persisted {} cache entries", n),
             Err(e) => crate::debug!("vdom"; "cache persist failed: {}", e),
@@ -405,14 +405,14 @@ mod persistence_tests {
         .unwrap();
 
         let state = Arc::new(SiteIndex::new());
-        state.address().write().clear();
+        state.edit(|_, address| address.clear());
 
         let (_tx, rx) = mpsc::channel(1);
         let (ws_tx, _ws_rx) = mpsc::channel(1);
         let _ = VdomActor::new(rx, ws_tx, root, Arc::clone(&state));
 
         assert!(
-            state.address().read().is_empty(),
+            state.read(|_, address| address.is_empty()),
             "AddressSpace should be rebuilt by scan_pages, not partially restored from cache"
         );
     }
