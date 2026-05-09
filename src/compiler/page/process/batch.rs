@@ -2,22 +2,27 @@
 
 use typst_batch::prelude::*;
 
-use crate::address::SiteIndex;
-use crate::asset::scan_global_assets;
-use crate::compiler::CompileContext;
+use crate::address::{SiteIndex, conflict};
+use crate::asset::{scan_content_assets, scan_flatten_assets, scan_global_assets};
+use crate::compiler::dependency::{flush_thread_local_deps, record_dependencies_local};
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
     BatchCompileResult, CompileStats, FileSnapshot, MetadataResult, ScannedPage, TypstBatcher,
-    collect_warnings, format_compile_error, scan_pages,
+    WarningCollector, cache_vdom, format_compile_error, scan_pages, write_redirects,
 };
 use crate::compiler::page::{PageCompileOutput, compile, process_typst_result};
+use crate::compiler::{CompileContext, collect_all_files};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::freshness::ContentHash;
-use crate::package::{build_visible_current_context_for_source, build_visible_inputs};
+use crate::logger::ProgressLine;
+use crate::package::{
+    build_visible_current_context_for_source, build_visible_inputs, package_sentinel,
+};
 use crate::page::CompiledPage;
 use crate::page::{
     HashStabilityTracker, PageState, StabilityDecision, StaleLinkPolicy, StoredPageMap,
+    resolve_page_link_target,
 };
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -31,6 +36,7 @@ struct BuildContext<'a> {
     clean: bool,
     deps_hash: Option<ContentHash>,
     global_state: GlobalStateMode,
+    warnings: &'a WarningCollector,
 }
 
 impl<'a> BuildContext<'a> {
@@ -41,6 +47,7 @@ impl<'a> BuildContext<'a> {
         clean: bool,
         deps_hash: Option<ContentHash>,
         global_state: GlobalStateMode,
+        warnings: &'a WarningCollector,
     ) -> Self {
         Self {
             mode,
@@ -49,6 +56,7 @@ impl<'a> BuildContext<'a> {
             clean,
             deps_hash,
             global_state,
+            warnings,
         }
     }
 
@@ -109,7 +117,8 @@ pub fn build_static_pages(
     clean: bool,
     deps_hash: Option<ContentHash>,
     global_state: GlobalStateMode,
-    progress: Option<&crate::logger::ProgressLine>,
+    warnings: &WarningCollector,
+    progress: Option<&ProgressLine>,
 ) -> Result<MetadataResult> {
     if global_state.rebuilds_global_state() {
         let next = SiteIndex::new();
@@ -121,6 +130,7 @@ pub fn build_static_pages(
                 clean,
                 deps_hash,
                 global_state,
+                warnings,
                 progress,
             )
         })?;
@@ -138,6 +148,7 @@ pub fn build_static_pages(
                 clean,
                 deps_hash,
                 global_state,
+                warnings,
                 progress,
             )
         })
@@ -151,9 +162,18 @@ fn build_static_pages_with_store(
     clean: bool,
     deps_hash: Option<ContentHash>,
     global_state: GlobalStateMode,
-    progress: Option<&crate::logger::ProgressLine>,
+    warnings: &WarningCollector,
+    progress: Option<&ProgressLine>,
 ) -> Result<StaticBuild> {
-    let ctx = BuildContext::new(mode, config, store, clean, deps_hash, global_state);
+    let ctx = BuildContext::new(
+        mode,
+        config,
+        store,
+        clean,
+        deps_hash,
+        global_state,
+        warnings,
+    );
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
@@ -199,14 +219,14 @@ fn build_static_pages_with_store(
     // Collect results - iterative pages already compiled with complete data
     let (pages, _) = collect_results(typst_processed, markdown_processed)?;
 
-    crate::compiler::dependency::flush_thread_local_deps();
+    flush_thread_local_deps();
 
-    let url_sources = crate::address::conflict::collect_url_sources(&pages, config);
+    let url_sources = conflict::collect_url_sources(&pages, config);
 
-    let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
+    let conflicts = conflict::detect_conflicts(&url_sources, config.get_root());
     if !conflicts.is_empty() {
         let prefix = config.paths().prefix().to_string_lossy().into_owned();
-        crate::address::conflict::print_conflicts_with_prefix(&conflicts, &prefix);
+        conflict::print_conflicts_with_prefix(&conflicts, &prefix);
         let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
         return Err(anyhow::anyhow!(
             "build failed: {} conflicting url{}, {} source{}",
@@ -257,6 +277,7 @@ pub fn rebuild_iterative_pages(
     clean: bool,
     deps_hash: Option<ContentHash>,
     snapshot: Option<FileSnapshot>,
+    warnings: &WarningCollector,
 ) -> Result<Vec<CompiledPage>> {
     if paths.is_empty() {
         return Ok(vec![]);
@@ -269,6 +290,7 @@ pub fn rebuild_iterative_pages(
         clean,
         deps_hash,
         GlobalStateMode::Rebuild,
+        warnings,
     );
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
 
@@ -350,7 +372,7 @@ pub fn rebuild_iterative_pages(
     let output_dir = &ctx.config.build.output;
     for page in &pages {
         write_page(page, true, ctx.deps_hash, false)?;
-        crate::compiler::page::write_redirects(page, output_dir)?;
+        write_redirects(page, output_dir)?;
     }
 
     Ok(pages)
@@ -380,10 +402,10 @@ fn process_iterative_page(
     }
 
     if let Some(vdom) = result.indexed_vdom {
-        crate::compiler::page::cache_vdom(&page.route.permalink, vdom);
+        cache_vdom(&page.route.permalink, vdom);
     }
 
-    collect_warnings(&result.warnings);
+    ctx.warnings.collect(&result.warnings);
 
     page.compiled_html = Some(result.html);
     Ok(page)
@@ -394,7 +416,7 @@ fn process_iterative_page(
 // ============================================================================
 
 pub fn collect_content_files(content_dir: &Path) -> Vec<PathBuf> {
-    crate::compiler::collect_all_files(content_dir)
+    collect_all_files(content_dir)
         .into_iter()
         .filter(|p| ContentKind::from_path(p).is_some())
         .collect()
@@ -448,9 +470,7 @@ pub fn populate_pages(scanned: &[ScannedPage], config: &SiteConfig, store: &Stor
         let targets: Vec<UrlPath> = page
             .links
             .iter()
-            .filter_map(|link| {
-                crate::page::resolve_page_link_target(store, from_url, &page.path, link, config)
-            })
+            .filter_map(|link| resolve_page_link_target(store, from_url, &page.path, link, config))
             .collect();
 
         state.record_links(from_url, targets);
@@ -485,7 +505,7 @@ fn compile_typst_batch_with_context<'a>(
     files: &[&PathBuf],
     config: &SiteConfig,
     store: &StoredPageMap,
-    progress: Option<&crate::logger::ProgressLine>,
+    progress: Option<&ProgressLine>,
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
     let current_context_by_path: rustc_hash::FxHashMap<&Path, serde_json::Value> = files
@@ -609,14 +629,14 @@ fn finalize_static_page(
     // Include virtual package sentinels for @tola/* packages
     let mut deps = result.accessed_files;
     for pkg in &result.accessed_packages {
-        if let Some(sentinel) = crate::package::package_sentinel(pkg) {
+        if let Some(sentinel) = package_sentinel(pkg) {
             deps.push(sentinel);
         }
     }
-    crate::compiler::dependency::record_dependencies_local(&path, deps);
+    record_dependencies_local(&path, deps);
 
     // Collect warnings
-    collect_warnings(&result.warnings);
+    ctx.warnings.collect(&result.warnings);
 
     // Skip drafts
     if result.meta.as_ref().is_some_and(|m| m.draft) {
@@ -628,7 +648,7 @@ fn finalize_static_page(
 
     // Cache VDOM with the CORRECT permalink (after apply_custom_permalink)
     if let Some(vdom) = result.indexed_vdom {
-        crate::compiler::page::cache_vdom(&page.route.permalink, vdom);
+        cache_vdom(&page.route.permalink, vdom);
     }
 
     if ctx.rebuilds_global_state() {
@@ -713,8 +733,6 @@ fn write_single_page(
     deps_hash: Option<ContentHash>,
     output_dir: &Path,
 ) -> Result<()> {
-    use crate::compiler::page::write_redirects;
-
     write_page(page, clean, deps_hash, false)?;
     write_redirects(page, output_dir)?;
     Ok(())
@@ -762,12 +780,12 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &
         }
 
         // Register flatten assets (individual files at output root)
-        for asset in crate::asset::scan_flatten_assets(config) {
+        for asset in scan_flatten_assets(config) {
             space.register_asset(asset);
         }
 
         // Register content assets (non-.typ/.md files in content directory)
-        for asset in crate::asset::scan_content_assets(config) {
+        for asset in scan_content_assets(config) {
             space.register_asset(asset);
         }
     });
@@ -971,6 +989,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config = markdown_site(&dir);
         let fresh_source = write_markdown_page(&config, "fresh.md", "Fresh");
+        let warnings = WarningCollector::new();
 
         site.with_pages(|store| {
             store.insert_page(
@@ -989,6 +1008,7 @@ mod tests {
             false,
             None,
             GlobalStateMode::Rebuild,
+            &warnings,
             None,
         )
         .unwrap();
@@ -1019,6 +1039,7 @@ mod tests {
         let config = markdown_site(&dir);
         let source =
             write_markdown_page_with_permalink(&config, "fresh.md", "Compiled", "/compiled/");
+        let warnings = WarningCollector::new();
 
         site.with_pages(|store| {
             store
@@ -1041,6 +1062,7 @@ mod tests {
             false,
             None,
             GlobalStateMode::ReuseScanned,
+            &warnings,
             None,
         )
         .unwrap();

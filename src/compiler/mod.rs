@@ -13,8 +13,6 @@ use crate::core::BuildMode;
 use crate::page::StoredPageMap;
 use page::PageRoute;
 
-pub use page::drain_warnings;
-
 /// Context for the compilation pipeline
 pub struct CompileContext<'a> {
     pub mode: BuildMode,

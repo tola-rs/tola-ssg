@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::reload::compile::CompileOutcome;
+use crate::actor::messages::VdomMsg;
+use crate::compiler::dependency::{collect_virtual_dependents, flush_current_thread_deps};
+use crate::compiler::scheduler::SCHEDULER;
+use crate::config::SiteConfig;
+use crate::reload::compile::{CompileOutcome, compile_page};
 
 use super::CompilerActor;
 use super::tasks::compile_batch;
@@ -13,12 +17,12 @@ impl CompilerActor {
         let compile_config = Arc::clone(&config);
         let state = Arc::clone(&self.state);
         let path = path.to_path_buf();
-        crate::compiler::scheduler::SCHEDULER.invalidate(&path);
+        SCHEDULER.invalidate(&path);
 
         let result = tokio::task::spawn_blocking(move || {
-            let outcome = crate::reload::compile::compile_page(&path, &compile_config, &state);
+            let outcome = compile_page(&path, &compile_config, &state);
             // spawn_blocking threads are not rayon workers.
-            crate::compiler::dependency::flush_current_thread_deps();
+            flush_current_thread_deps();
             outcome
         })
         .await;
@@ -40,8 +44,6 @@ impl CompilerActor {
 
     /// Recompile pages using @tola/* virtual packages.
     pub(super) async fn recompile_virtual_users(&mut self) {
-        use crate::compiler::dependency::collect_virtual_dependents;
-
         let all_dependents = collect_virtual_dependents();
 
         if !all_dependents.is_empty() {
@@ -58,11 +60,7 @@ impl CompilerActor {
     }
 
     /// Route compilation outcome to VdomActor.
-    pub(super) async fn route(
-        &mut self,
-        outcome: CompileOutcome,
-        config: Arc<crate::config::SiteConfig>,
-    ) {
+    pub(super) async fn route(&mut self, outcome: CompileOutcome, config: Arc<SiteConfig>) {
         let msg = match outcome {
             CompileOutcome::Vdom {
                 path,
@@ -70,7 +68,7 @@ impl CompilerActor {
                 vdom,
                 permalink_change,
                 warnings,
-            } => crate::actor::messages::VdomMsg::Process {
+            } => VdomMsg::Process {
                 config,
                 path,
                 url_path,
@@ -78,13 +76,13 @@ impl CompilerActor {
                 permalink_change,
                 warnings,
             },
-            CompileOutcome::Reload { reason } => crate::actor::messages::VdomMsg::Reload { reason },
-            CompileOutcome::Skipped => crate::actor::messages::VdomMsg::Skip,
+            CompileOutcome::Reload { reason } => VdomMsg::Reload { reason },
+            CompileOutcome::Skipped => VdomMsg::Skip,
             CompileOutcome::Error {
                 path,
                 url_path,
                 error,
-            } => crate::actor::messages::VdomMsg::Error {
+            } => VdomMsg::Error {
                 path,
                 url_path: url_path.unwrap_or_default(),
                 error,

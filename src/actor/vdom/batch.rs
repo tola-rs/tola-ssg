@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
 
-use crate::core::UrlPath;
+use crate::config::SiteConfig;
+use crate::core::{Priority, UrlPath};
 
 /// Batch entry status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +19,11 @@ struct BatchEntry {
     path: String,
     status: BatchStatus,
     error: Option<String>,
-    priority: Option<crate::core::Priority>,
+    priority: Option<Priority>,
 }
 
 impl BatchEntry {
-    fn reload(path: impl Into<String>, priority: Option<crate::core::Priority>) -> Self {
+    fn reload(path: impl Into<String>, priority: Option<Priority>) -> Self {
         Self {
             path: path.into(),
             status: BatchStatus::Reload,
@@ -31,7 +32,7 @@ impl BatchEntry {
         }
     }
 
-    fn unchanged(path: impl Into<String>, priority: Option<crate::core::Priority>) -> Self {
+    fn unchanged(path: impl Into<String>, priority: Option<Priority>) -> Self {
         Self {
             path: path.into(),
             status: BatchStatus::Unchanged,
@@ -66,7 +67,7 @@ impl BatchEntry {
     }
 
     fn is_primary(&self) -> bool {
-        self.priority == Some(crate::core::Priority::Active)
+        self.priority == Some(Priority::Active)
     }
 
     fn error_detail(&self) -> Option<&str> {
@@ -98,6 +99,7 @@ pub(super) struct BatchLogger {
     results: Vec<BatchEntry>,
     conflicts: FxHashMap<UrlPath, Vec<PathBuf>>,
     permalink_changes: Vec<(PathBuf, UrlPath, UrlPath)>, // (path, old_url, new_url)
+    warnings: Vec<String>,
 }
 
 impl BatchLogger {
@@ -106,30 +108,30 @@ impl BatchLogger {
             results: Vec::new(),
             conflicts: FxHashMap::default(),
             permalink_changes: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
     /// Record a successful reload.
-    pub(super) fn push_reload(
-        &mut self,
-        path: impl Into<String>,
-        priority: Option<crate::core::Priority>,
-    ) {
+    pub(super) fn push_reload(&mut self, path: impl Into<String>, priority: Option<Priority>) {
         self.results.push(BatchEntry::reload(path, priority));
     }
 
     /// Record an unchanged result.
-    pub(super) fn push_unchanged(
-        &mut self,
-        path: impl Into<String>,
-        priority: Option<crate::core::Priority>,
-    ) {
+    pub(super) fn push_unchanged(&mut self, path: impl Into<String>, priority: Option<Priority>) {
         self.results.push(BatchEntry::unchanged(path, priority));
     }
 
     /// Record an error.
     pub(super) fn push_error(&mut self, path: impl Into<String>, error: impl Into<String>) {
         self.results.push(BatchEntry::error(path, error));
+    }
+
+    pub(super) fn push_warnings<I>(&mut self, warnings: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        self.warnings.extend(warnings);
     }
 
     /// Check if there are any errors in the current batch.
@@ -159,7 +161,7 @@ impl BatchLogger {
     }
 
     /// Output all conflicts and results, then clear.
-    pub(super) fn flush(&mut self, config: &crate::config::SiteConfig) {
+    pub(super) fn flush(&mut self, config: &SiteConfig) {
         self.output_permalink_changes();
         self.output_conflicts();
         self.output_results(config);
@@ -184,13 +186,12 @@ impl BatchLogger {
         self.conflicts.clear();
     }
 
-    fn output_results(&mut self, config: &crate::config::SiteConfig) {
+    fn output_results(&mut self, config: &SiteConfig) {
         if self.results.is_empty() {
             return;
         }
 
-        let warnings = crate::compiler::drain_warnings();
-        let warning_count = warnings.len();
+        let warning_count = self.warnings.len();
         let errors: Vec<_> = self.results.iter().filter(|e| e.is_error()).collect();
         let reloads: Vec<_> = self.results.iter().filter(|e| e.is_reload()).collect();
         let unchanged: Vec<_> = self.results.iter().filter(|e| e.is_unchanged()).collect();
@@ -204,16 +205,12 @@ impl BatchLogger {
             let detail = format_primary_error_detail(primary_error);
             crate::logger::status_error(&summary, &detail);
         } else {
-            if !warnings.is_empty() {
+            if !self.warnings.is_empty() {
                 let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
-                let root = config.get_root();
-                for warning in warnings.iter().take(max) {
-                    eprintln!(
-                        "{}",
-                        crate::compiler::page::format_warning_with_prefix(warning, root)
-                    );
+                for warning in self.warnings.iter().take(max) {
+                    eprintln!("{warning}");
                 }
-                let remaining = warnings.len().saturating_sub(max);
+                let remaining = self.warnings.len().saturating_sub(max);
                 if remaining > 0 {
                     eprintln!("... and {} more warning(s)", remaining);
                 }
@@ -254,6 +251,7 @@ impl BatchLogger {
         }
 
         self.results.clear();
+        self.warnings.clear();
     }
 }
 

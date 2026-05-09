@@ -4,15 +4,19 @@
 
 use crate::address::{AddressSpace, SiteIndex};
 use crate::compiler::CompileContext;
+use crate::compiler::dependency::record_dependencies_local;
 use crate::compiler::page::compile;
 use crate::compiler::page::{
-    PageResult, ScannedHeading, ScannedPageLink, SinglePageScanData, collect_warnings,
+    CompileMetaResult, PageResult, ScannedHeading, ScannedPageLink, SinglePageScanData,
     scan_single_page,
 };
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, UrlPath};
-use crate::package::TolaPackage;
-use crate::page::{CompiledPage, PageMeta, PageState, StaleLinkPolicy, StoredPageMap};
+use crate::package::{TolaPackage, package_sentinel};
+use crate::page::{
+    CompiledPage, PageMeta, PageState, StaleLinkPolicy, StoredPage, StoredPageMap,
+    resolve_page_link_target,
+};
 use crate::utils::path::normalize_path;
 use crate::utils::path::slug::slugify_fragment;
 use anyhow::Result;
@@ -73,9 +77,7 @@ fn record_scanned_links(
 
     let targets: Vec<_> = links
         .iter()
-        .filter_map(|link| {
-            crate::page::resolve_page_link_target(store, permalink, source, link, config)
-        })
+        .filter_map(|link| resolve_page_link_target(store, permalink, source, link, config))
         .collect();
     state.record_links(permalink, targets);
 }
@@ -105,7 +107,7 @@ fn filename_from_relative(path: Option<&str>) -> Option<String> {
     })
 }
 
-fn pages_for_urls(store: &StoredPageMap, urls: &[UrlPath]) -> Vec<crate::page::StoredPage> {
+fn pages_for_urls(store: &StoredPageMap, urls: &[UrlPath]) -> Vec<StoredPage> {
     let pages = store.get_pages_with_drafts();
     urls.iter()
         .filter_map(|url| pages.iter().find(|page| page.permalink == *url).cloned())
@@ -126,9 +128,7 @@ fn current_context_from_scan(
     let links_to_urls: Vec<_> = scan_data
         .links
         .iter()
-        .filter_map(|link| {
-            crate::page::resolve_page_link_target(store, permalink, source, link, config)
-        })
+        .filter_map(|link| resolve_page_link_target(store, permalink, source, link, config))
         .collect();
     let linked_by_urls = PageState::new(store).linked_by(permalink);
 
@@ -272,17 +272,16 @@ fn prepare_page_inner(
         // Record dependencies (thread-local for parallel safety)
         let mut deps = result.accessed_files;
         for pkg in &result.accessed_packages {
-            if let Some(sentinel) = crate::package::package_sentinel(pkg) {
+            if let Some(sentinel) = package_sentinel(pkg) {
                 deps.push(sentinel);
             }
         }
-        crate::compiler::dependency::record_dependencies_local(path, deps);
+        record_dependencies_local(path, deps);
 
         page.apply_meta(content_meta, config);
         page.compiled_html = Some(result.html);
 
         let warnings = result.warnings.clone();
-        collect_warnings(&result.warnings);
 
         let permalink = page.route.permalink.clone();
 
@@ -315,7 +314,7 @@ pub fn compile_meta(
     path: &Path,
     config: &SiteConfig,
     store: &StoredPageMap,
-) -> Result<crate::compiler::page::CompileMetaResult> {
+) -> Result<CompileMetaResult> {
     // Build context without route - compile_meta is typically used for production
     // where globally unique StableIds aren't needed
     let ctx = CompileContext::new(mode, config, store);
@@ -323,16 +322,13 @@ pub fn compile_meta(
 
     let meta = result.meta;
 
-    crate::compiler::dependency::record_dependencies_local(path, result.accessed_files);
+    record_dependencies_local(path, result.accessed_files);
 
     // Return indexed_vdom to caller for caching decision
     // (decouples compiler from hotreload)
     let indexed_vdom = result.indexed_vdom;
 
     let html = result.html;
-
-    // Collect warnings after all other uses of result (to avoid partial move)
-    collect_warnings(&result.warnings);
 
     Ok((html, meta, indexed_vdom))
 }

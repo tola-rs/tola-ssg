@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::{
     address::SiteIndex,
-    compiler::page::Pages,
+    compiler::page::{Pages, WarningCollector},
     config::SiteConfig,
     core::BuildMode,
     freshness::{self, ContentHash},
@@ -42,6 +42,8 @@ pub fn build_site(
     state: &SiteIndex,
     quiet: bool,
 ) -> Result<Pages> {
+    let warnings = WarningCollector::new();
+
     // Initialize (must be before pre hooks to clean output dir first)
     pipeline::init_build(config)?;
     let deps_hash: ContentHash = freshness::compute_deps_hash(config);
@@ -54,8 +56,15 @@ pub fn build_site(
     let progress = pipeline::create_progress(&files, quiet);
 
     // Compile content + process assets (parallel)
-    let metadata =
-        pipeline::compile_and_process(mode, config, state, &files, deps_hash, progress.as_ref())?;
+    let metadata = pipeline::compile_and_process(
+        mode,
+        config,
+        state,
+        &files,
+        deps_hash,
+        &warnings,
+        progress.as_ref(),
+    )?;
 
     // Log drafts skipped
     if !quiet && metadata.stats.has_skipped_drafts() {
@@ -67,7 +76,8 @@ pub fn build_site(
     }
 
     // Rebuild iterative pages with complete metadata
-    let pages = pipeline::rebuild_iterative_pages(mode, config, state, deps_hash, &metadata)?;
+    let pages =
+        pipeline::rebuild_iterative_pages(mode, config, state, deps_hash, &metadata, &warnings)?;
 
     if let Some(p) = progress {
         p.finish();
@@ -80,7 +90,7 @@ pub fn build_site(
     hooks::run_post_hooks(config, mode, true)?;
 
     // Finalize
-    pipeline::finalize_build(config, state, quiet)?;
+    pipeline::finalize_build(config, state, &warnings, quiet)?;
 
     Ok(pages)
 }

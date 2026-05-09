@@ -10,14 +10,19 @@ use super::utils::{
     process_assets,
 };
 use super::{ACTIVE_RECOMPILE_COOLDOWN, BackgroundTask, CompilerActor};
+use crate::actor::messages::VdomMsg;
+use crate::config::SiteConfig;
 use crate::hooks::HookPhase;
+use crate::page::CompiledPage;
 use crate::reload::classify::{collect_dependents, url_to_content_path};
+use crate::reload::compile::cleanup_removed_source_state;
+use crate::reload::queue::CompileQueue;
 
 impl CompilerActor {
     /// Handle compile request: run hooks first, then compile.
     pub(super) async fn on_compile(
         &mut self,
-        queue: crate::reload::queue::CompileQueue,
+        queue: CompileQueue,
         changed_paths: Vec<PathBuf>,
     ) -> Option<BackgroundTask> {
         let start = Instant::now();
@@ -100,7 +105,7 @@ impl CompilerActor {
 
     fn invalidate_output_versions_after_hooks(
         &self,
-        config: &crate::config::SiteConfig,
+        config: &SiteConfig,
         phase: HookPhase,
         executed: usize,
     ) -> bool {
@@ -133,7 +138,7 @@ impl CompilerActor {
         }
 
         let config = self.config.current();
-        let Ok(page) = crate::page::CompiledPage::from_paths(path, &config) else {
+        let Ok(page) = CompiledPage::from_paths(path, &config) else {
             return false;
         };
 
@@ -171,15 +176,13 @@ impl CompilerActor {
         let config = self.config.current();
 
         for path in &paths {
-            if let Some(url) =
-                crate::reload::compile::cleanup_removed_source_state(path, &config, &self.state)
-            {
+            if let Some(url) = cleanup_removed_source_state(path, &config, &self.state) {
                 crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
             }
 
             let _ = self
                 .vdom_tx
-                .send(crate::actor::messages::VdomMsg::ClearDiagnostics {
+                .send(VdomMsg::ClearDiagnostics {
                     path: Some(path.clone()),
                 })
                 .await;
@@ -188,7 +191,7 @@ impl CompilerActor {
         self.recompile_virtual_users().await;
         let _ = self
             .vdom_tx
-            .send(crate::actor::messages::VdomMsg::BatchEnd {
+            .send(VdomMsg::BatchEnd {
                 config: self.config.current(),
             })
             .await;
@@ -224,10 +227,7 @@ impl CompilerActor {
             self.recompile_active_pages("asset", count).await;
         } else if !errors.is_empty() {
             let reason = format_asset_reason(count, errors.len());
-            let _ = self
-                .vdom_tx
-                .send(crate::actor::messages::VdomMsg::Reload { reason })
-                .await;
+            let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
         }
     }
 
@@ -314,7 +314,7 @@ impl CompilerActor {
 
         let _ = self
             .vdom_tx
-            .send(crate::actor::messages::VdomMsg::BatchEnd {
+            .send(VdomMsg::BatchEnd {
                 config: self.config.current(),
             })
             .await;
@@ -328,6 +328,7 @@ impl CompilerActor {
     pub(super) async fn on_full_rebuild(&mut self) {
         use crate::asset::version;
         use crate::compiler::dependency::clear_graph;
+        use crate::compiler::scheduler::SCHEDULER;
         use crate::core::{BuildMode, set_healthy};
         use crate::reload::active::ACTIVE_PAGE;
 
@@ -338,11 +339,8 @@ impl CompilerActor {
 
         clear_graph();
         version::clear();
-        crate::compiler::scheduler::SCHEDULER.clear_cache();
-        let _ = self
-            .vdom_tx
-            .send(crate::actor::messages::VdomMsg::Clear)
-            .await;
+        SCHEDULER.clear_cache();
+        let _ = self.vdom_tx.send(VdomMsg::Clear).await;
 
         let config = self.config.current();
         let state = Arc::clone(&self.state);
@@ -359,7 +357,7 @@ impl CompilerActor {
 
                 let _ = self
                     .vdom_tx
-                    .send(crate::actor::messages::VdomMsg::ClearDiagnostics { path: None })
+                    .send(VdomMsg::ClearDiagnostics { path: None })
                     .await;
 
                 let active_urls = ACTIVE_PAGE.get_all();
@@ -379,18 +377,12 @@ impl CompilerActor {
             Ok(Err(e)) => {
                 crate::debug!("compile"; "full rebuild failed: {}", e);
                 let reason = format!("rebuild failed: {}", e);
-                let _ = self
-                    .vdom_tx
-                    .send(crate::actor::messages::VdomMsg::Reload { reason })
-                    .await;
+                let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
             }
             Err(e) => {
                 crate::debug!("compile"; "spawn_blocking error: {}", e);
                 let reason = format!("internal error: {}", e);
-                let _ = self
-                    .vdom_tx
-                    .send(crate::actor::messages::VdomMsg::Reload { reason })
-                    .await;
+                let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
             }
         }
     }
@@ -435,7 +427,7 @@ impl CompilerActor {
                 set_healthy(true);
                 let _ = self
                     .vdom_tx
-                    .send(crate::actor::messages::VdomMsg::BatchEnd {
+                    .send(VdomMsg::BatchEnd {
                         config: self.config.current(),
                     })
                     .await;

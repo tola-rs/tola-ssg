@@ -30,7 +30,10 @@ pub static SCHEDULER: LazyLock<CompileScheduler> = LazyLock::new(CompileSchedule
 /// Result of a compilation
 #[derive(Debug, Clone)]
 pub enum CompileResult {
-    Success(PathBuf),
+    Success {
+        output: PathBuf,
+        warnings: Vec<String>,
+    },
     Failed(String),
     Skipped,
 }
@@ -173,35 +176,6 @@ impl CompileScheduler {
         Self::recv(rx)
     }
 
-    /// Submit paths for background compilation (fire-and-forget).
-    pub fn submit_background(
-        &self,
-        paths: Vec<PathBuf>,
-        config: Arc<SiteConfig>,
-        state: Arc<SiteIndex>,
-    ) {
-        let mut queue = self.queue.lock();
-        for path in paths {
-            if self.is_known(&path) {
-                continue;
-            }
-            self.pending.insert(
-                path.clone(),
-                PendingState {
-                    priority: Priority::Background,
-                    config: Arc::clone(&config),
-                    state: Arc::clone(&state),
-                    waiters: vec![],
-                },
-            );
-            queue.background.push(Task {
-                path,
-                priority: Priority::Background,
-            });
-        }
-        self.notify.notify_all();
-    }
-
     /// Invalidate cache (on file change).
     pub fn invalidate(&self, path: &Path) {
         self.cache.remove(path);
@@ -244,13 +218,6 @@ impl CompileScheduler {
         failures
     }
 
-    /// Wait for all tasks to complete.
-    pub fn wait_all(&self) {
-        while !self.queue.lock().is_empty() || !self.pending.is_empty() || !self.active.is_empty() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
     fn background_worker_limit(total_workers: usize) -> usize {
         if total_workers > 1 {
             total_workers - 1
@@ -267,7 +234,7 @@ impl CompileScheduler {
 impl CompileScheduler {
     fn reusable_cached_result(result: CompileResult) -> Option<CompileResult> {
         match result {
-            CompileResult::Success(_) => Some(result),
+            CompileResult::Success { .. } => Some(result),
             CompileResult::Failed(_) | CompileResult::Skipped => None,
         }
     }
@@ -324,12 +291,6 @@ impl CompileScheduler {
             queue.foreground.push(task);
         }
         self.notify.notify_one();
-    }
-
-    fn is_known(&self, path: &Path) -> bool {
-        self.cache.contains_key(path)
-            || self.active.contains_key(path)
-            || self.pending.contains_key(path)
     }
 
     fn recv(rx: channel::Receiver<CompileResult>) -> CompileResult {
@@ -438,7 +399,7 @@ impl CompileScheduler {
             .map(|(_, w)| w)
             .unwrap_or_default();
 
-        if matches!(result, CompileResult::Success(_)) {
+        if matches!(result, CompileResult::Success { .. }) {
             self.cache.insert(path, result.clone());
         } else {
             self.cache.remove(&path);
@@ -476,10 +437,18 @@ impl CompileScheduler {
         flush_current_thread_deps();
 
         match result {
-            CompileOutcome::Vdom { url_path, vdom, .. } => {
+            CompileOutcome::Vdom {
+                url_path,
+                vdom,
+                warnings,
+                ..
+            } => {
                 let output_file = url_path.output_html_path(&config.paths().output_dir());
                 cache_vdom(&url_path, *vdom);
-                CompileResult::Success(output_file)
+                CompileResult::Success {
+                    output: output_file,
+                    warnings,
+                }
             }
             CompileOutcome::Error { error, .. } => CompileResult::Failed(error),
             CompileOutcome::Reload { reason } => CompileResult::Failed(reason),
@@ -522,13 +491,16 @@ mod tests {
 
     #[test]
     fn reusable_cached_result_only_accepts_success() {
-        let success = CompileResult::Success(PathBuf::from("/tmp/out.html"));
+        let success = CompileResult::Success {
+            output: PathBuf::from("/tmp/out.html"),
+            warnings: vec![],
+        };
         let failed = CompileResult::Failed("boom".into());
         let skipped = CompileResult::Skipped;
 
         let reused = CompileScheduler::reusable_cached_result(success);
         assert!(
-            matches!(reused, Some(CompileResult::Success(ref path)) if path == &PathBuf::from("/tmp/out.html"))
+            matches!(reused, Some(CompileResult::Success { ref output, .. }) if output == &PathBuf::from("/tmp/out.html"))
         );
         assert!(CompileScheduler::reusable_cached_result(failed).is_none());
         assert!(CompileScheduler::reusable_cached_result(skipped).is_none());
@@ -545,7 +517,10 @@ mod tests {
 
         SCHEDULER.cache.insert(
             path.clone(),
-            CompileResult::Success(PathBuf::from("/tmp/out.html")),
+            CompileResult::Success {
+                output: PathBuf::from("/tmp/out.html"),
+                warnings: vec![],
+            },
         );
         assert!(SCHEDULER.get_cached(&path).is_some());
 

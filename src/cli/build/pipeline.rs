@@ -10,10 +10,11 @@ use std::{
 use crate::{
     address::SiteIndex,
     asset::process_asset,
-    compiler::page::Pages,
-    compiler::page::typst,
-    compiler::{collect_all_files, drain_warnings},
-    config::SiteConfig,
+    compiler::{
+        collect_all_files,
+        page::{self, MetadataResult, Pages, WarningCollector, typst},
+    },
+    config::{SiteConfig, section::build::DiagnosticsConfig},
     core::{BuildMode, ContentKind, is_shutdown},
     freshness::{self, ContentHash},
     log,
@@ -107,20 +108,22 @@ pub(super) fn compile_and_process(
     state: &SiteIndex,
     files: &BuildFiles,
     deps_hash: ContentHash,
+    warnings: &WarningCollector,
     progress: Option<&ProgressLine>,
-) -> Result<crate::compiler::page::MetadataResult> {
+) -> Result<MetadataResult> {
     let clean = config.build.clean;
     let has_error = AtomicBool::new(false);
 
     let (metadata_result, assets_result) = rayon::join(
         || {
-            crate::compiler::page::build_static_pages(
+            page::build_static_pages(
                 mode,
                 config,
                 state,
                 clean,
                 Some(deps_hash),
-                crate::compiler::page::GlobalStateMode::Rebuild,
+                page::GlobalStateMode::Rebuild,
+                warnings,
                 progress,
             )
         },
@@ -165,14 +168,15 @@ pub(super) fn rebuild_iterative_pages(
     config: &SiteConfig,
     state: &SiteIndex,
     deps_hash: ContentHash,
-    metadata: &crate::compiler::page::MetadataResult,
+    metadata: &MetadataResult,
+    warnings: &WarningCollector,
 ) -> Result<Pages> {
     if !metadata.has_iterative_pages() {
         return Ok(Pages { items: vec![] });
     }
 
     match state.with_pages(|pages| {
-        crate::compiler::page::rebuild_iterative_pages(
+        page::rebuild_iterative_pages(
             mode,
             &metadata.iterative_paths,
             config,
@@ -180,6 +184,7 @@ pub(super) fn rebuild_iterative_pages(
             config.build.clean,
             Some(deps_hash),
             metadata.snapshot.clone(),
+            warnings,
         )
     }) {
         Ok(pages) => Ok(Pages { items: pages }),
@@ -244,20 +249,23 @@ fn copy_html_404(config: &SiteConfig) -> Result<()> {
 }
 
 /// Finalize build (warnings, cache, logging)
-pub(super) fn finalize_build(config: &SiteConfig, state: &SiteIndex, quiet: bool) -> Result<()> {
+pub(super) fn finalize_build(
+    config: &SiteConfig,
+    state: &SiteIndex,
+    warnings: &WarningCollector,
+    quiet: bool,
+) -> Result<()> {
     // Print compiler warnings with truncation
-    let warnings = drain_warnings();
-    if !warnings.is_empty() {
-        print_warnings(&warnings, &config.build.diagnostics, config.get_root());
+    let drained = warnings.drain();
+    if !drained.is_empty() {
+        print_warnings(&drained, &config.build.diagnostics, config.get_root());
     }
 
     // Persist VDOM cache for serve reuse
     let source_paths = state.read(|_, address| address.source_paths());
-    if let Err(e) = crate::cache::persist_cache(
-        &crate::compiler::page::BUILD_CACHE,
-        &source_paths,
-        config.get_root(),
-    ) {
+    if let Err(e) =
+        crate::cache::persist_cache(&page::BUILD_CACHE, &source_paths, config.get_root())
+    {
         crate::debug!("build"; "failed to persist vdom cache: {}", e);
     }
 
@@ -269,19 +277,12 @@ pub(super) fn finalize_build(config: &SiteConfig, state: &SiteIndex, quiet: bool
 }
 
 /// Print warnings with max_warnings limit
-fn print_warnings(
-    warnings: &typst_batch::Diagnostics,
-    config: &crate::config::section::build::DiagnosticsConfig,
-    root: &Path,
-) {
+fn print_warnings(warnings: &typst_batch::Diagnostics, config: &DiagnosticsConfig, root: &Path) {
     let max = config.max_warnings.unwrap_or(usize::MAX);
     let total = warnings.len();
 
     for item in warnings.iter().take(max) {
-        eprintln!(
-            "{}",
-            crate::compiler::page::format_warning_with_prefix(item, root)
-        );
+        eprintln!("{}", page::format_warning_with_prefix(item, root));
     }
 
     let hidden = total.saturating_sub(max);

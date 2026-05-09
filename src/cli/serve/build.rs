@@ -6,23 +6,26 @@
 
 use anyhow::Result;
 use rayon::prelude::*;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
     address::SiteIndex,
     asset, compiler,
+    compiler::scheduler::{CompileResult, SCHEDULER},
     config::{ConfigHandle, SiteConfig},
-    core::BuildMode,
-    core::ContentKind,
+    core::{BuildMode, ContentKind, Priority, is_shutdown},
     debug, embed, freshness, hooks, log, seo,
 };
 
-// Feed warmup work in small batches so the scheduler can use a few background
-// slots without turning startup into an all-core rebuild.
-const WARMUP_BATCH_SIZE: usize = 4;
 const WARMUP_IDLE_GRACE: Duration = Duration::from_millis(1000);
 const WARMUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct BuildWarning {
+    source: PathBuf,
+    message: String,
+}
 
 /// Initialize serve build environment
 ///
@@ -103,9 +106,9 @@ fn process_assets(config: &SiteConfig) -> Result<()> {
 /// Unlike `build_all()` which uses rayon, serve-mode warmup must not saturate
 /// all cores before the first interactive request arrives.
 ///
-/// Background warmup is queued through the scheduler so on-demand requests can
-/// still deduplicate with existing work. To preserve UX, we only feed tiny
-/// batches and pause warmup while requests are active.
+/// Background warmup uses scheduler requests one page at a time so each result
+/// returns warnings explicitly while still deduplicating with on-demand work
+/// Warmup waits for request idle time before each page
 pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
@@ -114,11 +117,11 @@ pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
         .collect();
 
     debug!("build"; "warming {} pages via scheduler", content_files.len());
-    warm_site_pages(content_files, Arc::new(config.clone()), Arc::clone(&state));
+    let mut warnings = warm_site_pages(content_files, Arc::new(config.clone()), Arc::clone(&state));
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
-    recompile_virtual_users(config, &state);
+    warnings.extend(recompile_virtual_users(config, &state));
 
     // Post-processing (flatten assets already done in init_serve_build)
     // CNAME already done in init_serve_build
@@ -127,7 +130,7 @@ pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
     hooks::run_post_hooks(config, BuildMode::DEVELOPMENT, true)?;
 
     // Finalize: print warnings and persist cache
-    finalize_serve_build(config, &state)?;
+    finalize_serve_build(config, &state, &warnings)?;
 
     // Generate feed and sitemap
     let (rss_result, sitemap_result) = rayon::join(
@@ -156,27 +159,42 @@ pub fn start_serve_build(config: ConfigHandle, state: Arc<SiteIndex>) {
 }
 
 fn warm_site_pages(
-    content_files: Vec<std::path::PathBuf>,
+    content_files: Vec<PathBuf>,
     config: Arc<SiteConfig>,
     state: Arc<SiteIndex>,
-) {
+) -> Vec<BuildWarning> {
     use crate::cli::serve::request_idle_for;
-    use compiler::scheduler::SCHEDULER;
 
-    for chunk in content_files.chunks(WARMUP_BATCH_SIZE) {
+    let mut warnings = Vec::new();
+    for path in content_files {
         // Only spend cycles on full-site warmup when the request path has been
-        // quiet for a moment. This keeps startup eager work from racing the
-        // first page load or SPA navigation burst.
+        // quiet for a moment. This keeps startup eager work from racing page
+        // loads or SPA navigation bursts.
         while !request_idle_for(WARMUP_IDLE_GRACE) {
-            if crate::core::is_shutdown() {
-                return;
+            if is_shutdown() {
+                return warnings;
             }
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
-        SCHEDULER.submit_background(chunk.to_vec(), Arc::clone(&config), Arc::clone(&state));
-        SCHEDULER.wait_all();
+        match SCHEDULER.compile(
+            path.clone(),
+            Priority::Background,
+            Arc::clone(&config),
+            Arc::clone(&state),
+        ) {
+            CompileResult::Success {
+                warnings: items, ..
+            } => {
+                warnings.extend(items.into_iter().map(|message| BuildWarning {
+                    source: path.clone(),
+                    message,
+                }));
+            }
+            CompileResult::Failed(_) | CompileResult::Skipped => {}
+        }
     }
+    warnings
 }
 
 /// Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
@@ -184,44 +202,61 @@ fn warm_site_pages(
 /// This ensures iterative pages have complete data after all pages are compiled.
 /// Called after initial scheduler compilation to fix race condition where
 /// pages may have been compiled before page metadata was fully populated.
-fn recompile_virtual_users(config: &SiteConfig, state: &SiteIndex) {
+fn recompile_virtual_users(config: &SiteConfig, state: &SiteIndex) -> Vec<BuildWarning> {
     use crate::cli::serve::request_idle_for;
-    use crate::compiler::dependency::collect_virtual_dependents;
-    use crate::reload::compile::compile_page;
+    use crate::compiler::dependency::{collect_virtual_dependents, flush_thread_local_deps};
+    use crate::compiler::page::cache_vdom;
+    use crate::reload::compile::{CompileOutcome, compile_page};
 
     let all_dependents = collect_virtual_dependents();
 
     if all_dependents.is_empty() {
-        return;
+        return Vec::new();
     }
 
     debug!("build"; "recompiling {} virtual package users", all_dependents.len());
 
+    let mut warnings = Vec::new();
+
     // Recompile each dependent page (compile_page handles write + cache)
     for path in &all_dependents {
         while !request_idle_for(WARMUP_IDLE_GRACE) {
-            if crate::core::is_shutdown() {
-                return;
+            if is_shutdown() {
+                return warnings;
             }
             std::thread::sleep(WARMUP_POLL_INTERVAL);
         }
 
         let outcome = compile_page(path, config, state);
-        if let crate::reload::compile::CompileOutcome::Vdom { url_path, vdom, .. } = outcome {
-            crate::compiler::page::cache_vdom(&url_path, *vdom);
+        if let CompileOutcome::Vdom {
+            url_path,
+            vdom,
+            warnings: items,
+            ..
+        } = outcome
+        {
+            cache_vdom(&url_path, *vdom);
+            warnings.extend(items.into_iter().map(|message| BuildWarning {
+                source: path.clone(),
+                message,
+            }));
         }
     }
 
     // Flush dependencies recorded during recompilation
-    crate::compiler::dependency::flush_thread_local_deps();
+    flush_thread_local_deps();
+    warnings
 }
 
 /// Finalize serve build: print warnings/errors and persist cache
-fn finalize_serve_build(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
+fn finalize_serve_build(
+    config: &SiteConfig,
+    state: &SiteIndex,
+    warnings: &[BuildWarning],
+) -> Result<()> {
     use crate::cache::{
-        PersistedDiagnostics, PersistedError, PersistedWarning, persist_diagnostics,
+        PersistedDiagnostics, PersistedError, PersistedWarning, persist_cache, persist_diagnostics,
     };
-    use crate::compiler::scheduler::SCHEDULER;
     let root = config.get_root();
 
     // Drain compilation failures from scheduler cache
@@ -240,11 +275,10 @@ fn finalize_serve_build(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
     }
 
     // Print compiler warnings with configured limits
-    let warnings = compiler::drain_warnings();
     if !warnings.is_empty() {
         let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
         for item in warnings.iter().take(max) {
-            eprintln!("{}", compiler::page::format_warning_with_prefix(item, root));
+            eprintln!("{}", item.message);
         }
         let remaining = warnings.len().saturating_sub(max);
         if remaining > 0 {
@@ -260,9 +294,13 @@ fn finalize_serve_build(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
         diagnostics.push_error(PersistedError::new(path_str, "", msg.clone()));
     }
     for warning in warnings.iter() {
-        let rel_path = compiler::page::warning_relative_path(warning, root);
-        let rendered = compiler::page::format_warning_with_prefix(warning, root);
-        diagnostics.push_warning(PersistedWarning::new(rel_path, rendered));
+        let rel_path = warning
+            .source
+            .strip_prefix(root)
+            .unwrap_or(&warning.source)
+            .to_string_lossy()
+            .into_owned();
+        diagnostics.push_warning(PersistedWarning::new(rel_path, warning.message.clone()));
     }
     if let Err(e) = persist_diagnostics(&diagnostics, root) {
         crate::debug!("build"; "failed to persist diagnostics: {}", e);
@@ -270,7 +308,7 @@ fn finalize_serve_build(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
 
     // Persist VDOM cache for serve reuse
     let source_paths = state.read(|_, address| address.source_paths());
-    if let Err(e) = crate::cache::persist_cache(
+    if let Err(e) = persist_cache(
         &compiler::page::BUILD_CACHE,
         &source_paths,
         config.get_root(),

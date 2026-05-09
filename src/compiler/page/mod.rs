@@ -45,9 +45,7 @@ pub use process::{
 pub use process::{PageStateEpoch, PageStateTicket};
 pub(crate) use process::{PreparedPage, commit_page_state_parts, prepare_page};
 pub use typst::process_result as process_typst_result;
-pub use warning::{
-    collect_warnings, drain_warnings, format_warning_with_prefix, warning_relative_path,
-};
+pub use warning::{WarningCollector, format_warning_with_prefix};
 pub use write::{write_page_html, write_redirects};
 
 // Re-export page domain types

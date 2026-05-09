@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::address::SiteIndex;
+use crate::compiler::dependency::flush_thread_local_deps;
 use crate::compiler::page::PageStateTicket;
+use crate::compiler::scheduler::SCHEDULER;
 use crate::config::SiteConfig;
 use crate::reload::compile::{CompileOutcome, compile_page, compile_page_with_ticket};
 
@@ -54,7 +56,7 @@ async fn compile_batch_inner(
 ) -> Vec<CompileOutcome> {
     use rayon::prelude::*;
     for path in &paths {
-        crate::compiler::scheduler::SCHEDULER.invalidate(path);
+        SCHEDULER.invalidate(path);
     }
 
     tokio::task::spawn_blocking(move || {
@@ -65,7 +67,7 @@ async fn compile_batch_inner(
                 None => compile_page(path, &config, &state),
             })
             .collect();
-        crate::compiler::dependency::flush_thread_local_deps();
+        flush_thread_local_deps();
         results
     })
     .await

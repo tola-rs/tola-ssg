@@ -1,10 +1,13 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::actor::messages::WsMsg;
-use crate::cache::{PersistedError, persist_diagnostics, restore_cache};
-use crate::compiler::family::{CacheEntry, Indexed};
+use crate::address::PermalinkUpdate;
+use crate::cache::{PersistedDiagnostics, PersistedError, persist_diagnostics, restore_cache};
+use crate::compiler::family::{CacheEntry, DiffEdit, Indexed};
 use crate::compiler::page::BUILD_CACHE;
-use crate::core::UrlPath;
+use crate::config::SiteConfig;
+use crate::core::{Priority, UrlChange, UrlPath};
 use crate::reload::diff::{DiffOutcome, compute_diff_shared};
 use tola_vdom::prelude::*;
 
@@ -65,18 +68,17 @@ impl VdomActor {
 
     pub(super) async fn handle_process(
         &mut self,
-        config: std::sync::Arc<crate::config::SiteConfig>,
+        config: Arc<SiteConfig>,
         path: PathBuf,
         url_path: UrlPath,
         new_vdom: Document<Indexed>,
-        permalink_change: Option<crate::address::PermalinkUpdate>,
+        permalink_change: Option<PermalinkUpdate>,
         warnings: Vec<String>,
     ) {
-        use crate::address::PermalinkUpdate;
-
         // Store warnings for this path
         let rel_path = self.to_relative(&path);
         let rel_path_str = rel_path.display().to_string();
+        self.batch.push_warnings(warnings.iter().cloned());
         self.error_state.set_warnings(&rel_path_str, warnings);
         self.persist_diagnostics_state();
 
@@ -188,7 +190,6 @@ impl VdomActor {
         outcome: DiffOutcome,
         old_url: Option<UrlPath>,
     ) {
-        use crate::core::{Priority, UrlChange};
         use crate::reload::active::ACTIVE_PAGE;
 
         let rel_path = self.to_relative(path);
@@ -236,10 +237,10 @@ impl VdomActor {
         &mut self,
         rel_path: &Path,
         url_path: UrlPath,
-        edits: Vec<crate::compiler::family::DiffEdit>,
+        edits: Vec<DiffEdit>,
         new_vdom: Box<Document<Indexed>>,
-        priority: Option<crate::core::Priority>,
-        url_change: Option<crate::core::UrlChange>,
+        priority: Option<Priority>,
+        url_change: Option<UrlChange>,
     ) {
         crate::debug_do! {
             let edit_summary: Vec<String> = edits.iter().map(|edit| edit.summary()).collect();
@@ -274,8 +275,8 @@ impl VdomActor {
         &mut self,
         rel_path: &Path,
         url_path: UrlPath,
-        priority: Option<crate::core::Priority>,
-        url_change: Option<crate::core::UrlChange>,
+        priority: Option<Priority>,
+        url_change: Option<UrlChange>,
     ) {
         crate::debug!("vdom"; "initial {}", rel_path.display());
         self.batch
@@ -294,8 +295,8 @@ impl VdomActor {
         &mut self,
         rel_path: &Path,
         url_path: UrlPath,
-        priority: Option<crate::core::Priority>,
-        url_change: Option<crate::core::UrlChange>,
+        priority: Option<Priority>,
+        url_change: Option<UrlChange>,
     ) {
         if let Some(change) = url_change {
             // Permalink changed but content unchanged
@@ -320,8 +321,8 @@ impl VdomActor {
         rel_path: &Path,
         url_path: UrlPath,
         reason: String,
-        priority: Option<crate::core::Priority>,
-        url_change: Option<crate::core::UrlChange>,
+        priority: Option<Priority>,
+        url_change: Option<UrlChange>,
     ) {
         crate::debug!("vdom"; "reload: {}: {}", rel_path.display(), reason);
         self.batch
@@ -377,7 +378,7 @@ impl VdomActor {
                     return;
                 }
 
-                self.error_state = crate::cache::PersistedDiagnostics::new();
+                self.error_state = PersistedDiagnostics::new();
                 self.persist_diagnostics_state();
 
                 for path in error_paths {

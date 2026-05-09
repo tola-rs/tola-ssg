@@ -54,7 +54,7 @@ pub fn compile_on_demand(
         Arc::new(config.clone()),
         state,
     ) {
-        CompileResult::Success(output) => Ok(output),
+        CompileResult::Success { output, .. } => Ok(output),
         CompileResult::Failed(error) => Err(anyhow::anyhow!("{}", error)),
         CompileResult::Skipped => Err(anyhow::anyhow!(
             "page skipped (draft?): {}",
