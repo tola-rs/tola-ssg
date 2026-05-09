@@ -180,7 +180,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
     let mut compile_targets: Vec<_> = files_to_compile.into_iter().collect();
     compile_targets.sort();
 
-    let pages_hash = state.pages().pages_hash();
+    let pages_hash = state.with_pages(|pages| pages.pages_hash());
     let mut stats = StartupCompileStats::default();
     if !compile_targets.is_empty() {
         stats = compile_startup_batch(
@@ -192,7 +192,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
         );
     }
 
-    if state.pages().pages_hash() != pages_hash {
+    if state.with_pages(|pages| pages.pages_hash()) != pages_hash {
         let dependents = collect_virtual_dependents();
         if !dependents.is_empty() {
             let virtual_stats = compile_startup_batch(
@@ -274,7 +274,7 @@ fn cleanup_removed_files(
 
 fn cleanup_url_artifacts(config: &SiteConfig, state: &SiteIndex, url: &UrlPath) {
     BUILD_CACHE.remove(&CacheKey::new(url.as_str()));
-    PageState::new(state.pages()).clear_links(url);
+    state.with_pages(|pages| PageState::new(pages).clear_links(url));
     compile::cleanup_output_for_url(config, url);
 }
 
@@ -500,7 +500,9 @@ mod tests {
         let output_file = output_file_for(&config, &old_url);
         fs::create_dir_all(output_file.parent().unwrap()).unwrap();
         fs::write(&output_file, "stale output").unwrap();
-        PageState::new(state.pages()).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
+        state.with_pages(|pages| {
+            PageState::new(pages).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
+        });
 
         let rel = config.root_relative(&source).display().to_string();
         let mut diagnostics = PersistedDiagnostics::new();
@@ -522,7 +524,7 @@ mod tests {
         assert_eq!(stats.failed, 0);
         assert_eq!(stats.skipped, 1);
         assert!(!output_file.exists(), "stale output should be removed");
-        assert!(PageState::new(state.pages()).links_to(&old_url).is_empty());
+        assert!(state.with_pages(|pages| PageState::new(pages).links_to(&old_url).is_empty()));
         assert_eq!(diagnostics.error_count(), 0);
         assert_eq!(diagnostics.warning_count(), 0);
 
@@ -610,7 +612,9 @@ mod tests {
         let output_file = output_file_for(&config, &url);
         fs::create_dir_all(output_file.parent().unwrap()).unwrap();
         fs::write(&output_file, "stale output").unwrap();
-        PageState::new(state.pages()).record_links(&url, vec![UrlPath::from_page("/target/")]);
+        state.with_pages(|pages| {
+            PageState::new(pages).record_links(&url, vec![UrlPath::from_page("/target/")]);
+        });
 
         let rel = source
             .strip_prefix(config.get_root())
@@ -628,7 +632,7 @@ mod tests {
         cleanup_removed_files(&removed, &config, &state, &mut diagnostics);
 
         assert!(!output_file.exists());
-        assert!(PageState::new(state.pages()).links_to(&url).is_empty());
+        assert!(state.with_pages(|pages| PageState::new(pages).links_to(&url).is_empty()));
         assert_eq!(diagnostics.error_count(), 0);
         assert_eq!(diagnostics.warning_count(), 0);
 
@@ -652,7 +656,9 @@ mod tests {
         let old_output = output_file_for(&config, &old_url);
         fs::create_dir_all(old_output.parent().unwrap()).unwrap();
         fs::write(&old_output, "stale old output").unwrap();
-        PageState::new(state.pages()).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
+        state.with_pages(|pages| {
+            PageState::new(pages).record_links(&old_url, vec![UrlPath::from_page("/target/")]);
+        });
 
         let mut cached_urls = FxHashMap::default();
         cached_urls.insert(source.clone(), old_url.clone());
@@ -677,7 +683,7 @@ mod tests {
             !old_output.exists(),
             "old permalink output should be removed"
         );
-        assert!(PageState::new(state.pages()).links_to(&old_url).is_empty());
+        assert!(state.with_pages(|pages| PageState::new(pages).links_to(&old_url).is_empty()));
 
         reset_global_state(&state);
     }

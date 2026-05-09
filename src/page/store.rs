@@ -77,6 +77,19 @@ impl StoredPageMap {
         self.links.clear();
     }
 
+    pub(crate) fn replace_with(&self, next: Self) {
+        let StoredPageMap {
+            pages,
+            headings,
+            source_to_url,
+            links,
+        } = next;
+        *self.pages.write() = pages.into_inner();
+        *self.headings.write() = headings.into_inner();
+        *self.source_to_url.write() = source_to_url.into_inner();
+        self.links.replace_with(links);
+    }
+
     pub(super) fn links(&self) -> &PageLinkGraph {
         &self.links
     }

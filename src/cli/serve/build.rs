@@ -131,8 +131,8 @@ pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
 
     // Generate feed and sitemap
     let (rss_result, sitemap_result) = rayon::join(
-        || seo::feed::build_feed(config, state.pages()),
-        || seo::sitemap::build_sitemap(config, state.pages()),
+        || state.with_pages(|pages| seo::feed::build_feed(config, pages)),
+        || state.with_pages(|pages| seo::sitemap::build_sitemap(config, pages)),
     );
 
     rss_result?;

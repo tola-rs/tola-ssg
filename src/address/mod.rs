@@ -60,6 +60,8 @@ pub use space::{AddressSpace, PermalinkUpdate};
 /// Page metadata and address mappings for one site invocation.
 #[derive(Debug, Default)]
 pub struct SiteIndex {
+    /// Gates whole-index publication against page-store readers and writers.
+    publish: RwLock<()>,
     pages: StoredPageMap,
     address: RwLock<AddressSpace>,
 }
@@ -69,16 +71,19 @@ impl SiteIndex {
         Self::default()
     }
 
-    pub fn pages(&self) -> &StoredPageMap {
-        &self.pages
-    }
-
     pub fn read<T>(&self, read: impl FnOnce(&StoredPageMap, &AddressSpace) -> T) -> T {
+        let _publish = self.publish.read();
         let address = self.address.read();
         read(&self.pages, &address)
     }
 
+    pub fn with_pages<T>(&self, access: impl FnOnce(&StoredPageMap) -> T) -> T {
+        let _publish = self.publish.read();
+        access(&self.pages)
+    }
+
     pub fn edit<T>(&self, edit: impl FnOnce(&StoredPageMap, &mut AddressSpace) -> T) -> T {
+        let _publish = self.publish.write();
         let mut address = self.address.write();
         edit(&self.pages, &mut address)
     }
@@ -88,5 +93,13 @@ impl SiteIndex {
             pages.clear();
             address.clear();
         });
+    }
+
+    /// Replace page and address data as one published snapshot.
+    pub fn replace_with(&self, next: Self) {
+        let _publish = self.publish.write();
+        let SiteIndex { pages, address, .. } = next;
+        self.pages.replace_with(pages);
+        *self.address.write() = address.into_inner();
     }
 }

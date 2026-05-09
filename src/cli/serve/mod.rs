@@ -464,13 +464,15 @@ mod tests {
         write_file(&canonical_output, "<html><body>Hello</body></html>");
         write_file(&redirect_output, "<html><body>Redirect</body></html>");
 
-        state.pages().insert_page(
-            UrlPath::from_page("/posts/hello/"),
-            PageMeta {
-                aliases: vec!["/old/".to_string()],
-                ..Default::default()
-            },
-        );
+        state.with_pages(|pages| {
+            pages.insert_page(
+                UrlPath::from_page("/posts/hello/"),
+                PageMeta {
+                    aliases: vec!["/old/".to_string()],
+                    ..Default::default()
+                },
+            );
+        });
 
         let kind = classify_served_output("/old/", &redirect_output, &config, &state);
 

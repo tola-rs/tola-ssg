@@ -244,57 +244,58 @@ fn prepare_page_inner(
     config: &SiteConfig,
     state: &SiteIndex,
 ) -> Result<Option<PreparedPage>> {
-    let store = state.pages();
-    let mut page = CompiledPage::from_paths(path, config)?;
+    state.with_pages(|store| {
+        let mut page = CompiledPage::from_paths(path, config)?;
 
-    // Scan to extract headings and links ===
-    // This must happen BEFORE compile so @tola/current has fresh data.
-    // The scan result is passed as a local compile input; global stores are
-    // committed only after compilation succeeds.
-    let scan_data = scan_single_page(path, config, store);
-    page.apply_meta(scan_data.meta.clone(), config);
+        // Scan to extract headings and links ===
+        // This must happen BEFORE compile so @tola/current has fresh data.
+        // The scan result is passed as a local compile input; global stores are
+        // committed only after compilation succeeds.
+        let scan_data = scan_single_page(path, config, store);
+        page.apply_meta(scan_data.meta.clone(), config);
 
-    // Compile with fresh @tola/current data ===
-    let current_context = current_context_from_scan(store, path, &page, &scan_data, config);
-    let ctx = CompileContext::new(mode, config, store)
-        .with_route(&page.route)
-        .with_current_context(&current_context);
-    let result = compile(path, &ctx)?;
+        // Compile with fresh @tola/current data ===
+        let current_context = current_context_from_scan(store, path, &page, &scan_data, config);
+        let ctx = CompileContext::new(mode, config, store)
+            .with_route(&page.route)
+            .with_current_context(&current_context);
+        let result = compile(path, &ctx)?;
 
-    // Extract metadata
-    let content_meta: Option<PageMeta> = result.meta;
+        // Extract metadata
+        let content_meta: Option<PageMeta> = result.meta;
 
-    // Skip drafts
-    if content_meta.as_ref().is_some_and(|m| m.draft) {
-        return Ok(None);
-    }
-
-    // Record dependencies (thread-local for parallel safety)
-    let mut deps = result.accessed_files;
-    for pkg in &result.accessed_packages {
-        if let Some(sentinel) = crate::package::package_sentinel(pkg) {
-            deps.push(sentinel);
+        // Skip drafts
+        if content_meta.as_ref().is_some_and(|m| m.draft) {
+            return Ok(None);
         }
-    }
-    crate::compiler::dependency::record_dependencies_local(path, deps);
 
-    page.apply_meta(content_meta, config);
-    page.compiled_html = Some(result.html);
+        // Record dependencies (thread-local for parallel safety)
+        let mut deps = result.accessed_files;
+        for pkg in &result.accessed_packages {
+            if let Some(sentinel) = crate::package::package_sentinel(pkg) {
+                deps.push(sentinel);
+            }
+        }
+        crate::compiler::dependency::record_dependencies_local(path, deps);
 
-    let warnings = result.warnings.clone();
-    collect_warnings(&result.warnings);
+        page.apply_meta(content_meta, config);
+        page.compiled_html = Some(result.html);
 
-    let permalink = page.route.permalink.clone();
+        let warnings = result.warnings.clone();
+        collect_warnings(&result.warnings);
 
-    Ok(Some(PreparedPage {
-        result: PageResult {
-            page,
-            indexed_vdom: result.indexed_vdom,
-            permalink,
-            warnings,
-        },
-        scan_data,
-    }))
+        let permalink = page.route.permalink.clone();
+
+        Ok(Some(PreparedPage {
+            result: PageResult {
+                page,
+                indexed_vdom: result.indexed_vdom,
+                permalink,
+                warnings,
+            },
+            scan_data,
+        }))
+    })
 }
 
 // ============================================================================
@@ -470,7 +471,6 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
@@ -478,11 +478,11 @@ mod tests {
 
         assert!(result.is_err(), "invalid page should fail compilation");
         assert!(
-            store.get_permalink_by_source(&file_path).is_none(),
+            state.with_pages(|store| store.get_permalink_by_source(&file_path).is_none()),
             "failed compile must not publish source permalink mapping"
         );
         assert!(
-            store.get_pages_with_drafts().is_empty(),
+            state.with_pages(|store| store.get_pages_with_drafts().is_empty()),
             "failed compile must not publish page metadata"
         );
         assert!(
@@ -506,44 +506,50 @@ mod tests {
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
         let old_permalink = UrlPath::from_page("/already-visible/");
-        store.insert_page(
-            old_permalink.clone(),
-            PageMeta {
-                title: Some("Already Visible".to_string()),
-                ..Default::default()
-            },
-        );
-        store.insert_source_mapping(file_path.clone(), old_permalink.clone());
-        store.insert_headings(
-            old_permalink.clone(),
-            vec![ScannedHeading {
-                level: 1,
-                text: "Old Heading".to_string(),
-                supplement: None,
-            }],
-        );
+        state.with_pages(|store| {
+            store.insert_page(
+                old_permalink.clone(),
+                PageMeta {
+                    title: Some("Already Visible".to_string()),
+                    ..Default::default()
+                },
+            );
+            store.insert_source_mapping(file_path.clone(), old_permalink.clone());
+            store.insert_headings(
+                old_permalink.clone(),
+                vec![ScannedHeading {
+                    level: 1,
+                    text: "Old Heading".to_string(),
+                    supplement: None,
+                }],
+            );
+        });
 
         let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &state);
 
         assert!(result.is_err(), "invalid page should fail compilation");
         assert_eq!(
-            store.get_permalink_by_source(&file_path),
+            state.with_pages(|store| store.get_permalink_by_source(&file_path)),
             Some(old_permalink.clone()),
             "failed recompile must keep existing source permalink mapping"
         );
         assert!(
-            store
-                .get_pages_with_drafts()
-                .iter()
-                .any(|page| page.permalink == old_permalink),
+            state.with_pages(|store| {
+                store
+                    .get_pages_with_drafts()
+                    .iter()
+                    .any(|page| page.permalink == old_permalink)
+            }),
             "failed recompile must keep existing page metadata"
         );
-        assert_eq!(store.get_headings(&old_permalink).len(), 1);
+        assert_eq!(
+            state.with_pages(|store| store.get_headings(&old_permalink).len()),
+            1
+        );
 
         reset_state(&state);
     }
@@ -573,25 +579,26 @@ permalink = "/showcase/source-field-test/"
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
         let old_permalink = UrlPath::from_page("/showcase/2026_02_25_source-field-test/");
-        store.insert_page(
-            old_permalink.clone(),
-            PageMeta {
-                title: Some("Testing @tola/current.path".to_string()),
-                ..Default::default()
-            },
-        );
-        store.insert_source_mapping(file_path.clone(), old_permalink.clone());
+        state.with_pages(|store| {
+            store.insert_page(
+                old_permalink.clone(),
+                PageMeta {
+                    title: Some("Testing @tola/current.path".to_string()),
+                    ..Default::default()
+                },
+            );
+            store.insert_source_mapping(file_path.clone(), old_permalink.clone());
+        });
 
         let result = process_page(BuildMode::DEVELOPMENT, &file_path, &config, &state)
             .expect("process_page should succeed");
         assert!(result.is_some(), "page should not be filtered as draft");
 
-        let mapped = store.get_permalink_by_source(&file_path);
+        let mapped = state.with_pages(|store| store.get_permalink_by_source(&file_path));
         assert!(mapped.is_some(), "source mapping should exist");
         assert_ne!(
             mapped,
@@ -599,7 +606,7 @@ permalink = "/showcase/source-field-test/"
             "source mapping should be updated from old permalink"
         );
 
-        let pages = store.get_pages_with_drafts();
+        let pages = state.with_pages(|store| store.get_pages_with_drafts());
         let mapped = mapped.unwrap();
         assert!(
             pages.iter().any(|p| p.permalink == mapped),
@@ -636,7 +643,6 @@ permalink = "/showcase/source-field-test/"
         config.set_root(dir.path());
         config.build.content = content_dir;
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
@@ -646,7 +652,7 @@ permalink = "/showcase/source-field-test/"
 
         assert_eq!(result.permalink, UrlPath::from_page("/notes/custom/"));
         assert_eq!(
-            store.get_permalink_by_source(&file_path),
+            state.with_pages(|store| store.get_permalink_by_source(&file_path)),
             Some(UrlPath::from_page("/notes/custom/"))
         );
 

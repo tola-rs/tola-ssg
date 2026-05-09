@@ -11,7 +11,9 @@ pub fn recompile_files(files: &[PathBuf], mode: BuildMode) -> Vec<(String, Strin
 
     let config = cfg();
     let state = SiteIndex::new();
-    if let Err(e) = crate::cli::common::populate_stored_pages(&config, state.pages()) {
+    if let Err(e) =
+        state.with_pages(|pages| crate::cli::common::populate_stored_pages(&config, pages))
+    {
         return vec![("page store".to_string(), e.to_string())];
     }
 

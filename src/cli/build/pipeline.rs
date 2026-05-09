@@ -171,15 +171,17 @@ pub(super) fn rebuild_iterative_pages(
         return Ok(Pages { items: vec![] });
     }
 
-    match crate::compiler::page::rebuild_iterative_pages(
-        mode,
-        &metadata.iterative_paths,
-        config,
-        state.pages(),
-        config.build.clean,
-        Some(deps_hash),
-        metadata.snapshot.clone(),
-    ) {
+    match state.with_pages(|pages| {
+        crate::compiler::page::rebuild_iterative_pages(
+            mode,
+            &metadata.iterative_paths,
+            config,
+            pages,
+            config.build.clean,
+            Some(deps_hash),
+            metadata.snapshot.clone(),
+        )
+    }) {
         Ok(pages) => Ok(Pages { items: pages }),
         Err(e) => {
             log!("error"; "compile failed: {:#}", e);

@@ -169,7 +169,6 @@ fn validate_all_links(
     typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
     report: &Arc<RwLock<ValidationReport>>,
 ) {
-    let store = state.pages();
     // Collect all nested asset source directories with their output prefixes
     let nested_assets: Vec<_> = config
         .build
@@ -214,23 +213,32 @@ fn validate_all_links(
     // Separate Markdown files and scan them
     let (_, markdown_files) = ContentKind::partition_by_kind(files);
 
-    // Process Markdown files in parallel
-    markdown_files.par_iter().for_each(|file| {
-        if let Ok(result) = scan_markdown(file, root, config, store) {
-            validate_links(
-                &result.source,
-                file,
-                &result.links,
-                config,
-                all_pages,
-                report,
-                root,
-                &nested_assets,
-                &flatten_outputs,
-                state,
-            );
-        }
+    // Process Markdown files in parallel.
+    let markdown_results: Vec<_> = state.with_pages(|store| {
+        markdown_files
+            .par_iter()
+            .filter_map(|file| {
+                scan_markdown(file, root, config, store)
+                    .ok()
+                    .map(|result| ((*file).clone(), result))
+            })
+            .collect()
     });
+
+    for (file, result) in markdown_results {
+        validate_links(
+            &result.source,
+            &file,
+            &result.links,
+            config,
+            all_pages,
+            report,
+            root,
+            &nested_assets,
+            &flatten_outputs,
+            state,
+        );
+    }
 }
 
 /// Validate links from a single file
@@ -490,71 +498,68 @@ fn build_address_space(config: &SiteConfig, state: &SiteIndex) -> Result<Address
 
     use crate::cli::common::scan_markdown_file;
 
-    state.clear();
-    let store = state.pages();
-
     let content_files = crate::compiler::collect_all_files(&config.build.content);
     let label = &config.build.meta.label;
 
     // Separate Typst and Markdown files
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
-    // Preload markdown metadata into the page store so @tola/pages has complete
-    // cross-format context during Typst validation scans.
-    for file in &markdown_files {
-        if let Ok(result) = scan_markdown_file(file, config, store)
-            && let Some(meta_json) = result.raw_meta
-        {
-            update_stored_page_from_meta(file, &meta_json, config, store);
-        }
-    }
-
-    // Batch scan Typst files for metadata AND links (unified scan)
-    let (typst_metas, typst_links_vec, compile_errors): ParsedScanResult = if typst_files.is_empty()
-    {
-        (vec![], vec![], vec![])
-    } else {
-        match batch_scan_typst_unified(&typst_files, label, config, store) {
-            Ok((metas, links, errors)) => {
-                let parsed_metas = metas
-                    .into_iter()
-                    .map(|json| json.and_then(|j| serde_json::from_value(j).ok()))
-                    .collect();
-                (parsed_metas, links, errors)
+    state.clear();
+    let (pages, typst_links, compile_errors) =
+        state.with_pages(|store| -> Result<AddressSpaceResult> {
+            // Preload markdown metadata into the page store so @tola/pages has complete
+            // cross-format context during Typst validation scans.
+            for file in &markdown_files {
+                if let Ok(result) = scan_markdown_file(file, config, store)
+                    && let Some(meta_json) = result.raw_meta
+                {
+                    update_stored_page_from_meta(file, &meta_json, config, store);
+                }
             }
-            Err(e) => {
-                // Fatal error (not per-file), bail
-                return Err(e);
+
+            // Batch scan Typst files for metadata AND links (unified scan)
+            let (typst_metas, typst_links_vec, compile_errors): ParsedScanResult =
+                if typst_files.is_empty() {
+                    (vec![], vec![], vec![])
+                } else {
+                    let (metas, links, errors) =
+                        batch_scan_typst_unified(&typst_files, label, config, store)?;
+                    let parsed_metas = metas
+                        .into_iter()
+                        .map(|json| json.and_then(|j| serde_json::from_value(j).ok()))
+                        .collect();
+                    (parsed_metas, links, errors)
+                };
+
+            // Build CompiledPage for Typst files and collect links
+            let mut pages: Vec<CompiledPage> =
+                Vec::with_capacity(typst_files.len() + markdown_files.len());
+            let mut typst_links: HashMap<PathBuf, Vec<scan::ScannedLink>> =
+                HashMap::with_capacity(typst_files.len());
+
+            for ((file, meta), links) in typst_files.iter().zip(typst_metas).zip(typst_links_vec) {
+                if let Ok(page) = CompiledPage::from_paths_with_meta(file, config, meta) {
+                    typst_links.insert(page.route.source.clone(), links);
+                    pages.push(page);
+                }
             }
-        }
-    };
 
-    // Build CompiledPage for Typst files and collect links
-    let mut pages: Vec<CompiledPage> = Vec::with_capacity(typst_files.len() + markdown_files.len());
-    let mut typst_links: HashMap<PathBuf, Vec<scan::ScannedLink>> =
-        HashMap::with_capacity(typst_files.len());
+            // Process Markdown files in parallel
+            let markdown_pages: Vec<CompiledPage> = markdown_files
+                .par_iter()
+                .filter_map(|file| {
+                    let meta = scan_markdown_file(file, config, store)
+                        .ok()
+                        .and_then(|result| result.raw_meta)
+                        .and_then(|json| serde_json::from_value(json).ok());
 
-    for ((file, meta), links) in typst_files.iter().zip(typst_metas).zip(typst_links_vec) {
-        if let Ok(page) = CompiledPage::from_paths_with_meta(file, config, meta) {
-            typst_links.insert(page.route.source.clone(), links);
-            pages.push(page);
-        }
-    }
+                    CompiledPage::from_paths_with_meta(*file, config, meta).ok()
+                })
+                .collect();
 
-    // Process Markdown files in parallel
-    let markdown_pages: Vec<CompiledPage> = markdown_files
-        .par_iter()
-        .filter_map(|file| {
-            let meta = scan_markdown_file(file, config, store)
-                .ok()
-                .and_then(|result| result.raw_meta)
-                .and_then(|json| serde_json::from_value(json).ok());
-
-            CompiledPage::from_paths_with_meta(*file, config, meta).ok()
-        })
-        .collect();
-
-    pages.extend(markdown_pages);
+            pages.extend(markdown_pages);
+            Ok((pages, typst_links, compile_errors))
+        })?;
 
     // Build the global address space
     crate::compiler::page::build_address_space(&pages, config, state);

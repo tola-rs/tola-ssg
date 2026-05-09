@@ -102,7 +102,7 @@ impl CompilerActor {
         hash_before: u64,
         watched_post_paths: Option<Vec<PathBuf>>,
     ) {
-        if self.state.pages().pages_hash() != hash_before {
+        if self.state.with_pages(|pages| pages.pages_hash()) != hash_before {
             self.recompile_virtual_users().await;
         }
         if let Some(paths) = watched_post_paths {

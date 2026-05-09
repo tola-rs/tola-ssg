@@ -21,7 +21,7 @@ use crate::page::CompiledPage;
 ///
 /// Requires Typst to be initialized before calling
 pub fn scan_pages(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
-    state.clear();
+    let next = SiteIndex::new();
 
     let content_files = collect_content_files(&config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
@@ -44,10 +44,11 @@ pub fn scan_pages(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
         .collect();
 
     // Populate page metadata and link graph.
-    crate::compiler::page::populate_pages(&scanned, config, state.pages());
+    next.with_pages(|store| crate::compiler::page::populate_pages(&scanned, config, store));
 
     // Populate address space.
-    build_address_space(&pages, config, state);
+    build_address_space(&pages, config, &next);
+    state.replace_with(next);
 
     let total = pages.len();
     if drafts_skipped > 0 {

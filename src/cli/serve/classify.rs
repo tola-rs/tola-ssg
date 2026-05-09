@@ -94,11 +94,13 @@ fn is_alias_redirect_output(
 ) -> bool {
     let output_dir = config.paths().output_dir();
 
-    state.pages().get_pages().into_iter().any(|page| {
-        page.meta.aliases.iter().any(|alias| {
-            let alias_url = UrlPath::from_page(alias);
-            alias_url == *url
-                && normalize_path(&alias_url.output_html_path(&output_dir)) == output_path
+    state.with_pages(|pages| {
+        pages.get_pages().into_iter().any(|page| {
+            page.meta.aliases.iter().any(|alias| {
+                let alias_url = UrlPath::from_page(alias);
+                alias_url == *url
+                    && normalize_path(&alias_url.output_html_path(&output_dir)) == output_path
+            })
         })
     })
 }

@@ -21,7 +21,7 @@ impl CompilerActor {
         changed_paths: Vec<PathBuf>,
     ) -> Option<BackgroundTask> {
         let start = Instant::now();
-        let pages_hash = self.state.pages().pages_hash();
+        let pages_hash = self.state.with_pages(|pages| pages.pages_hash());
 
         // Run pre hooks before compilation so dependent assets are up to date.
         let watched_post_paths = self.collect_watched_post_paths(&changed_paths);
@@ -153,7 +153,7 @@ impl CompilerActor {
         let count = paths.len();
         crate::debug!("watch"; "{} new content files", count);
 
-        let pages_hash = self.state.pages().pages_hash();
+        let pages_hash = self.state.with_pages(|pages| pages.pages_hash());
 
         for path in &paths {
             self.compile_one(path).await;

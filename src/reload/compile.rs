@@ -397,7 +397,6 @@ mod tests {
         config.build.content = content_dir;
         config.build.output = output_dir.clone();
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
@@ -412,11 +411,13 @@ mod tests {
             Some(existing_meta),
         )
         .unwrap();
-        store.insert_source_mapping(existing.clone(), existing_page.route.permalink.clone());
-        store.insert_page(
-            existing_page.route.permalink.clone(),
-            existing_page.content_meta.clone().unwrap_or_default(),
-        );
+        state.with_pages(|store| {
+            store.insert_source_mapping(existing.clone(), existing_page.route.permalink.clone());
+            store.insert_page(
+                existing_page.route.permalink.clone(),
+                existing_page.content_meta.clone().unwrap_or_default(),
+            );
+        });
         state.edit(|_, address| {
             address.register_page(existing_page.route.clone(), Some("Existing".to_string()));
         });
@@ -441,14 +442,14 @@ mod tests {
             other => panic!("expected permalink conflict, got: {:?}", other),
         }
 
-        assert!(store.get_permalink_by_source(&incoming).is_none());
+        assert!(state.with_pages(|store| store.get_permalink_by_source(&incoming).is_none()));
         assert!(state.read(|_, address| address.url_for_source(&incoming).is_none()));
-        assert!(
+        assert!(state.with_pages(|store| {
             !store
                 .get_pages_with_drafts()
                 .iter()
                 .any(|page| page.meta.title.as_deref() == Some("Incoming"))
-        );
+        }));
         assert!(
             !UrlPath::from_page("/taken/")
                 .output_html_path(&output_dir)
@@ -473,7 +474,6 @@ mod tests {
         config.build.content = content_dir;
         config.build.output = output_dir.clone();
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
@@ -494,8 +494,8 @@ mod tests {
             other => panic!("expected write error, got: {:?}", other),
         }
 
-        assert!(store.get_permalink_by_source(&page).is_none());
-        assert!(store.get_pages_with_drafts().is_empty());
+        assert!(state.with_pages(|store| store.get_permalink_by_source(&page).is_none()));
+        assert!(state.with_pages(|store| store.get_pages_with_drafts().is_empty()));
         assert!(state.read(|_, address| address.url_for_source(&page).is_none()));
 
         reset_state(&state);
@@ -516,7 +516,6 @@ mod tests {
         config.build.content = content_dir.clone();
         config.build.output = output_dir.clone();
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
@@ -524,29 +523,31 @@ mod tests {
         fs::write(&page, "---\ntitle: Post\ndraft: true\n---\n\n# Post\n").unwrap();
         let draft_outcome = compile_page(&page, &config, &state);
         assert!(matches!(draft_outcome, CompileOutcome::Skipped));
-        assert!(store.get_permalink_by_source(&page).is_none());
+        assert!(state.with_pages(|store| store.get_permalink_by_source(&page).is_none()));
         assert!(!output_file.exists());
 
         // Simulate previously published state for this source.
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        store.insert_source_mapping(page.clone(), route.permalink.clone());
-        store.insert_page(
-            route.permalink.clone(),
-            crate::page::PageMeta {
-                title: Some("Post".to_string()),
-                draft: false,
-                ..Default::default()
-            },
-        );
+        state.with_pages(|store| {
+            store.insert_source_mapping(page.clone(), route.permalink.clone());
+            store.insert_page(
+                route.permalink.clone(),
+                crate::page::PageMeta {
+                    title: Some("Post".to_string()),
+                    draft: false,
+                    ..Default::default()
+                },
+            );
+        });
         state.edit(|_, address| address.register_page(route.clone(), Some("Post".to_string())));
         if let Some(parent) = output_file.parent() {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(&output_file, "stale html").unwrap();
 
-        let hash_published = store.pages_hash();
+        let hash_published = state.with_pages(|store| store.pages_hash());
 
         // Compile as draft again; stale published state must be cleaned.
         let back_to_draft = compile_page(&page, &config, &state);
@@ -555,11 +556,13 @@ mod tests {
             "expected Skipped when removing published page, got: {:?}",
             back_to_draft
         );
-        assert!(store.get_permalink_by_source(&page).is_none());
+        assert!(state.with_pages(|store| store.get_permalink_by_source(&page).is_none()));
         assert!(state.read(|_, address| address.url_for_source(&page).is_none()));
         assert!(!output_file.exists());
-        assert!(PageState::new(store).links_to(&route.permalink).is_empty());
-        assert_ne!(store.pages_hash(), hash_published);
+        assert!(
+            state.with_pages(|store| PageState::new(store).links_to(&route.permalink).is_empty())
+        );
+        assert_ne!(state.with_pages(|store| store.pages_hash()), hash_published);
 
         reset_state(&state);
     }
@@ -579,29 +582,35 @@ mod tests {
         config.build.content = content_dir.clone();
         config.build.output = output_dir.clone();
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        store.insert_source_mapping(page.clone(), route.permalink.clone());
-        store.insert_page(
-            route.permalink.clone(),
-            crate::page::PageMeta {
-                title: Some("Post".to_string()),
-                draft: false,
-                ..Default::default()
-            },
-        );
+        state.with_pages(|store| {
+            store.insert_source_mapping(page.clone(), route.permalink.clone());
+            store.insert_page(
+                route.permalink.clone(),
+                crate::page::PageMeta {
+                    title: Some("Post".to_string()),
+                    draft: false,
+                    ..Default::default()
+                },
+            );
+        });
         state.edit(|_, address| address.register_page(route.clone(), Some("Post".to_string())));
-        PageState::new(store).record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
+        state.with_pages(|store| {
+            PageState::new(store)
+                .record_links(&route.permalink, vec![UrlPath::from_page("/target/")]);
+        });
 
         let removed = cleanup_removed_source_state(&page, &config, &state);
 
         assert_eq!(removed, Some(route.permalink.clone()));
-        assert!(PageState::new(store).links_to(&route.permalink).is_empty());
+        assert!(
+            state.with_pages(|store| PageState::new(store).links_to(&route.permalink).is_empty())
+        );
         reset_state(&state);
     }
 
@@ -620,22 +629,23 @@ mod tests {
         config.build.content = content_dir;
         config.build.output = output_dir;
         let state = SiteIndex::new();
-        let store = state.pages();
 
         reset_state(&state);
 
         let route = crate::page::CompiledPage::from_paths(&page, &config)
             .unwrap()
             .route;
-        store.insert_source_mapping(page.clone(), route.permalink.clone());
-        store.insert_page(
-            route.permalink.clone(),
-            crate::page::PageMeta {
-                title: Some("Post".to_string()),
-                draft: false,
-                ..Default::default()
-            },
-        );
+        state.with_pages(|store| {
+            store.insert_source_mapping(page.clone(), route.permalink.clone());
+            store.insert_page(
+                route.permalink.clone(),
+                crate::page::PageMeta {
+                    title: Some("Post".to_string()),
+                    draft: false,
+                    ..Default::default()
+                },
+            );
+        });
         state.edit(|_, address| address.register_page(route.clone(), Some("Post".to_string())));
 
         let epoch = crate::compiler::page::PageStateEpoch::new();
@@ -646,7 +656,7 @@ mod tests {
 
         assert!(matches!(outcome, CompileOutcome::Skipped));
         assert_eq!(
-            store.get_permalink_by_source(&page),
+            state.with_pages(|store| store.get_permalink_by_source(&page)),
             Some(route.permalink.clone())
         );
         assert!(state.read(|_, address| {

@@ -67,8 +67,8 @@ fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<()> {
     // Generate SEO files in parallel (feed, sitemap)
     // Note: OG tags are injected during VDOM pipeline (see HeaderInjector)
     let (feed_result, sitemap_result) = rayon::join(
-        || build_feed(config, state.pages()),
-        || build_sitemap(config, state.pages()),
+        || state.with_pages(|pages| build_feed(config, pages)),
+        || state.with_pages(|pages| build_sitemap(config, pages)),
     );
 
     feed_result?;

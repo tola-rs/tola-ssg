@@ -34,6 +34,15 @@ impl PageLinkGraph {
         self.linked_by.write().clear();
     }
 
+    pub(super) fn replace_with(&self, next: Self) {
+        let PageLinkGraph {
+            links_to,
+            linked_by,
+        } = next;
+        *self.links_to.write() = links_to.into_inner();
+        *self.linked_by.write() = linked_by.into_inner();
+    }
+
     /// Record outgoing links from a page.
     ///
     /// Replaces any existing links for this page.

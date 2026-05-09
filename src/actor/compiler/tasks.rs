@@ -137,14 +137,13 @@ mod tests {
         .await;
 
         assert!(matches!(outcomes.as_slice(), [CompileOutcome::Skipped]));
-        assert!(state.pages().get_permalink_by_source(&page).is_none());
-        assert!(
-            state
-                .pages()
+        assert!(state.with_pages(|pages| pages.get_permalink_by_source(&page).is_none()));
+        assert!(state.with_pages(|pages| {
+            pages
                 .get_pages_with_drafts()
                 .iter()
                 .all(|page| page.permalink != UrlPath::from_page("/post/"))
-        );
+        }));
 
         reset_state(&state);
     }
