@@ -11,5 +11,5 @@ pub use batch::{
     GlobalStateMode, build_address_space, build_static_pages, populate_pages,
     rebuild_iterative_pages,
 };
-pub use single::{PageStateEpoch, PageStateTicket, process_page};
+pub use single::{PageStateEpoch, PageStateTicket};
 pub(crate) use single::{PreparedPage, commit_page_state_parts, prepare_page};

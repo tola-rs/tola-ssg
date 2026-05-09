@@ -67,11 +67,6 @@ pub const fn config_handle() -> ConfigHandle {
 }
 
 #[inline]
-pub fn cfg() -> Arc<SiteConfig> {
-    ConfigHandle::global().current()
-}
-
-#[inline]
 pub fn init_config(config: SiteConfig) -> Arc<SiteConfig> {
     use std::fs;
 

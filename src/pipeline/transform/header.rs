@@ -125,7 +125,8 @@ impl<'a> HeaderInjector<'a> {
         // Auto-enhance CSS (SVG theme adaptation + View Transitions)
         {
             use crate::embed::css::{ENHANCE_CSS, enhance_vars};
-            let href = ENHANCE_CSS.url_path_with_vars(&enhance_vars(config));
+            let href =
+                ENHANCE_CSS.url_path_with_vars(&config.build.path_prefix, &enhance_vars(config));
             let mut attrs = Attrs::new();
             attrs.set("rel", "stylesheet");
             attrs.set("href", href);
@@ -139,7 +140,8 @@ impl<'a> HeaderInjector<'a> {
 
             // CSS (always)
             let css_vars = recolor::css_vars(&config.theme.recolor);
-            let href = recolor::RECOLOR_CSS.url_path_with_vars(&css_vars);
+            let href =
+                recolor::RECOLOR_CSS.url_path_with_vars(&config.build.path_prefix, &css_vars);
             let mut attrs = Attrs::new();
             attrs.set("rel", "stylesheet");
             attrs.set("href", href);
@@ -148,7 +150,8 @@ impl<'a> HeaderInjector<'a> {
             // JS (only for dynamic mode: auto or css-var)
             if !matches!(config.theme.recolor.source, RecolorSource::Static) {
                 let js_vars = recolor::js_vars(&config.theme.recolor);
-                let src = recolor::RECOLOR_JS.url_path_with_vars(&js_vars);
+                let src =
+                    recolor::RECOLOR_JS.url_path_with_vars(&config.build.path_prefix, &js_vars);
                 let mut attrs = Attrs::new();
                 attrs.set("src", src);
                 attrs.set("defer", "");

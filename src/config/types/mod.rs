@@ -15,6 +15,6 @@ pub(crate) mod status;
 
 pub use error::{ConfigDiagnostics, ConfigError};
 pub use field::FieldPath;
-pub use handle::{ConfigHandle, cfg, config_handle, init_config};
+pub use handle::{ConfigHandle, config_handle, init_config};
 pub use path::PathResolver;
 pub use status::{ConfigPresence, FieldStatus};

@@ -57,7 +57,7 @@ impl<'a> BodyInjector<'a> {
             let vars = SpaVars::from_config(self.config);
 
             // Inject as raw HTML text node (script tag)
-            let script_tag = SPA_JS.external_tag_with_vars(&vars);
+            let script_tag = SPA_JS.external_tag_with_vars(&self.config.build.path_prefix, &vars);
             body.push(Node::Text(Text::raw(script_tag)));
         }
     }

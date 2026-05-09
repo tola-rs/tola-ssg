@@ -208,7 +208,7 @@ pub struct PreparedPage {
 ///
 /// Note: This function does NOT write the HTML file to disk
 /// The caller should decide whether to write based on diff results
-pub fn process_page(
+fn process_page(
     mode: BuildMode,
     path: &Path,
     config: &SiteConfig,

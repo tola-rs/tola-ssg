@@ -11,7 +11,6 @@
 //! - **Finalize** - Cache persistence, warnings, logging
 
 mod pipeline;
-mod recompile;
 
 use anyhow::Result;
 use std::path::Path;

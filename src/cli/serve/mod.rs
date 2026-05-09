@@ -17,7 +17,7 @@ pub use startup::serve_with_cache;
 
 use crate::address::SiteIndex;
 use crate::{
-    config::{SiteConfig, cfg, config_handle},
+    config::{SiteConfig, config_handle},
     core::{ContentKind, UrlPath},
     debug, log,
 };
@@ -93,7 +93,7 @@ pub struct BoundServer {
 /// entering the request loop, while still being able to respond to requests
 /// with a 503 response
 pub fn bind_server() -> Result<BoundServer> {
-    let config = cfg();
+    let config = config_handle().current();
     let (server, addr) = lifecycle::bind_with_retry(config.serve.interface, config.serve.port)?;
     let server = Arc::new(server);
 
@@ -123,9 +123,10 @@ impl BoundServer {
 
     /// Start the request loop (blocking).
     pub fn run(self, state: Arc<SiteIndex>) -> Result<()> {
-        let config = cfg();
+        let handle = config_handle();
+        let config = handle.current();
         let actor_handle = lifecycle::spawn_actors(
-            config_handle(),
+            handle,
             Arc::clone(&state),
             config.serve.watch,
             self.ws_port,
@@ -137,10 +138,6 @@ impl BoundServer {
     }
 }
 
-fn current_request_config() -> Arc<SiteConfig> {
-    cfg()
-}
-
 fn run_request_loop(server: &Server, state: Arc<SiteIndex>) {
     // Use thread pool to handle requests concurrently
     // This prevents on-demand compilation from blocking other requests
@@ -149,10 +146,11 @@ fn run_request_loop(server: &Server, state: Arc<SiteIndex>) {
         .build()
         .expect("failed to create thread pool");
 
+    let config_handle = config_handle();
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
         pool.spawn(move || {
-            let config = current_request_config();
+            let config = config_handle.current();
             if let Err(e) = handle_request(request, &config, state) {
                 log!("serve"; "request error: {e}");
             }
@@ -175,7 +173,7 @@ fn handle_request(request: Request, config: &SiteConfig, state: Arc<SiteIndex>) 
     if let Some(port) = ws_port {
         use crate::embed::serve::{HOTRELOAD_JS, HotreloadVars};
         let vars = HotreloadVars { ws_port: port };
-        if request.url() == HOTRELOAD_JS.url_path_with_vars(&vars) {
+        if request.url() == HOTRELOAD_JS.url_path_with_vars(&config.build.path_prefix, &vars) {
             return response::respond_hotreload_js(request, port);
         }
     }
@@ -189,8 +187,15 @@ fn handle_request(request: Request, config: &SiteConfig, state: Arc<SiteIndex>) 
         return match classify_served_output(&request_url, &path, config, &state) {
             ServedOutputKind::PageHtml { source } => {
                 match compile::compile_on_demand(&source, config, Arc::clone(&state)) {
-                    Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
-                    Err(e) => response::respond_compile_error(request, &e, ws_port),
+                    Ok(output_path) => {
+                        serve_file_without_recovery(request, &output_path, config, ws_port)
+                    }
+                    Err(e) => response::respond_compile_error(
+                        request,
+                        &e,
+                        &config.build.path_prefix,
+                        ws_port,
+                    ),
                 }
             }
             ServedOutputKind::NotFoundHtml => response::respond_not_found(request, config, ws_port),
@@ -212,8 +217,12 @@ fn handle_request(request: Request, config: &SiteConfig, state: Arc<SiteIndex>) 
     if !serving && !scan_ready {
         if let Some(source) = guess_source_before_scan(&request_url, config) {
             return match compile::compile_on_demand(&source, config, Arc::clone(&state)) {
-                Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
-                Err(e) => response::respond_compile_error(request, &e, ws_port),
+                Ok(output_path) => {
+                    serve_file_without_recovery(request, &output_path, config, ws_port)
+                }
+                Err(e) => {
+                    response::respond_compile_error(request, &e, &config.build.path_prefix, ws_port)
+                }
             };
         }
         return response::respond_loading(request);
@@ -232,8 +241,10 @@ fn handle_request(request: Request, config: &SiteConfig, state: Arc<SiteIndex>) 
 
     if let Some(source) = source {
         return match compile::compile_on_demand(&source, config, state) {
-            Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
-            Err(e) => response::respond_compile_error(request, &e, ws_port),
+            Ok(output_path) => serve_file_without_recovery(request, &output_path, config, ws_port),
+            Err(e) => {
+                response::respond_compile_error(request, &e, &config.build.path_prefix, ws_port)
+            }
         };
     }
 
@@ -257,8 +268,8 @@ fn serve_unhealthy_request(
     };
 
     match compile::compile_on_demand(&source, config, state) {
-        Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
-        Err(e) => response::respond_compile_error(request, &e, ws_port),
+        Ok(output_path) => serve_file_without_recovery(request, &output_path, config, ws_port),
+        Err(e) => response::respond_compile_error(request, &e, &config.build.path_prefix, ws_port),
     }
 }
 
@@ -316,7 +327,7 @@ fn serve_file_with_recovery(
     state: Arc<SiteIndex>,
     ws_port: Option<u16>,
 ) -> Result<()> {
-    match response::respond_file(request, path, ws_port)? {
+    match response::respond_file(request, path, &config.build.path_prefix, ws_port)? {
         response::FileServeResult::Served => Ok(()),
         response::FileServeResult::Missing(request) => {
             debug!(
@@ -329,8 +340,13 @@ fn serve_file_with_recovery(
     }
 }
 
-fn serve_file_without_recovery(request: Request, path: &Path, ws_port: Option<u16>) -> Result<()> {
-    match response::respond_file(request, path, ws_port)? {
+fn serve_file_without_recovery(
+    request: Request,
+    path: &Path,
+    config: &SiteConfig,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    match response::respond_file(request, path, &config.build.path_prefix, ws_port)? {
         response::FileServeResult::Served => Ok(()),
         // Single recovery attempt already happened in caller path.
         response::FileServeResult::Missing(request) => response::respond_loading(request),
@@ -355,23 +371,21 @@ fn recover_missing_output(
     crate::compiler::scheduler::SCHEDULER.invalidate(&source);
 
     match compile::compile_on_demand(&source, config, state) {
-        Ok(output_path) => serve_file_without_recovery(request, &output_path, ws_port),
-        Err(e) => response::respond_compile_error(request, &e, ws_port),
+        Ok(output_path) => serve_file_without_recovery(request, &output_path, config, ws_port),
+        Err(e) => response::respond_compile_error(request, &e, &config.build.path_prefix, ws_port),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::classify::{ServedOutputKind, classify_served_output};
-    use super::current_request_config;
     use super::guess_source_before_scan;
     use crate::address::SiteIndex;
-    use crate::config::{SiteConfig, cfg, init_config};
+    use crate::config::SiteConfig;
     use crate::core::UrlPath;
     use crate::page::{PageMeta, PageRoute};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn make_test_config(root: &Path) -> SiteConfig {
@@ -387,10 +401,6 @@ mod tests {
 
     fn reset_runtime_state(state: &SiteIndex) {
         state.clear();
-    }
-
-    fn reset_global_config(config: SiteConfig) -> Arc<SiteConfig> {
-        init_config(config)
     }
 
     fn write_file(path: &Path, body: &str) {
@@ -501,22 +511,6 @@ mod tests {
         let kind = classify_served_output("/404.html", &output, &config, &state);
 
         assert!(matches!(kind, ServedOutputKind::NotFoundHtml));
-    }
-
-    #[test]
-    fn current_request_config_reads_latest_global_snapshot() {
-        let dir = TempDir::new().unwrap();
-        let mut first = make_test_config(dir.path());
-        first.serve.watch = false;
-        let _ = reset_global_config(first);
-        assert!(!current_request_config().serve.watch);
-
-        let mut second = make_test_config(dir.path());
-        second.serve.watch = true;
-        let _ = reset_global_config(second);
-
-        assert!(cfg().serve.watch);
-        assert!(current_request_config().serve.watch);
     }
 
     #[test]

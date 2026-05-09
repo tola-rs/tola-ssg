@@ -19,6 +19,7 @@ pub enum FileServeResult {
 pub fn respond_file(
     request: Request,
     path: &Path,
+    path_prefix: &Path,
     ws_port: Option<u16>,
 ) -> Result<FileServeResult> {
     let content_type = crate::utils::mime::from_path(path);
@@ -44,7 +45,7 @@ pub fn respond_file(
             return Err(e).with_context(|| format!("Failed to read {}", path.display()));
         }
     };
-    let body = maybe_inject_hotreload(body, content_type, ws_port);
+    let body = maybe_inject_hotreload(body, content_type, path_prefix, ws_port);
 
     send_body(request, 200, content_type, body, no_cache)?;
     Ok(FileServeResult::Served)
@@ -164,7 +165,7 @@ pub fn respond_not_found(
     }
 
     if let Some(body) = body {
-        let body = maybe_inject_hotreload(body, HTML, ws_port);
+        let body = maybe_inject_hotreload(body, HTML, &config.build.path_prefix, ws_port);
         return send_body(request, 404, HTML, body, false);
     }
 
@@ -326,6 +327,7 @@ fn send_html(request: Request, body: String) -> Result<()> {
 pub fn respond_compile_error(
     request: Request,
     error: &anyhow::Error,
+    path_prefix: &Path,
     ws_port: Option<u16>,
 ) -> Result<()> {
     use crate::utils::mime::types::HTML;
@@ -333,7 +335,7 @@ pub fn respond_compile_error(
     let error_str = format!("{error:#}");
     let msg = crate::utils::html::escape(&error_str);
     let body = format!("<html><body><h1>Compilation Error</h1><pre>{msg}</pre></body></html>",);
-    let body = maybe_inject_hotreload(body.into_bytes(), HTML, ws_port);
+    let body = maybe_inject_hotreload(body.into_bytes(), HTML, path_prefix, ws_port);
     send_body(request, 500, HTML, body, false)
 }
 

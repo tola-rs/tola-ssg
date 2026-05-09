@@ -42,7 +42,7 @@ pub use section::{
 
 // Re-export from types/
 pub use types::{
-    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, PathResolver, cfg,
+    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, PathResolver,
     config_handle, init_config,
 };
 

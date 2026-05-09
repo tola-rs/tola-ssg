@@ -2,6 +2,7 @@
 
 use crate::config::SiteConfig;
 use std::fs;
+use std::path::Path;
 
 /// Check if the content directory is effectively empty
 pub fn is_content_empty(config: &SiteConfig) -> bool {
@@ -35,18 +36,23 @@ pub fn is_content_empty(config: &SiteConfig) -> bool {
 }
 
 /// Maybe inject hotreload script if content is HTML and ws_port is set
-pub fn maybe_inject_hotreload(body: Vec<u8>, content_type: &str, ws_port: Option<u16>) -> Vec<u8> {
+pub fn maybe_inject_hotreload(
+    body: Vec<u8>,
+    content_type: &str,
+    path_prefix: &Path,
+    ws_port: Option<u16>,
+) -> Vec<u8> {
     match (content_type.starts_with("text/html"), ws_port) {
-        (true, Some(port)) => inject_hotreload_script(&body, port),
+        (true, Some(port)) => inject_hotreload_script(&body, path_prefix, port),
         _ => body,
     }
 }
 
 /// Inject hotreload script before `</body>` tag
-fn inject_hotreload_script(content: &[u8], ws_port: u16) -> Vec<u8> {
+fn inject_hotreload_script(content: &[u8], path_prefix: &Path, ws_port: u16) -> Vec<u8> {
     use crate::embed::serve::{HOTRELOAD_JS, HotreloadVars};
 
-    let script = HOTRELOAD_JS.external_tag_with_vars(&HotreloadVars { ws_port });
+    let script = HOTRELOAD_JS.external_tag_with_vars(path_prefix, &HotreloadVars { ws_port });
     let script_bytes = script.as_bytes();
 
     // Byte pattern for </body> - most generators use lowercase

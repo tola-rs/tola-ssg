@@ -1,7 +1,6 @@
 //! Page compilation and processing.
 //!
 //! - [`compile`] / [`scan`] - Unified entry points for any content format
-//! - [`process_page`] - Single page compilation for watch mode
 //! - [`build_static_pages`] - Compile all pages, write static after conflict check
 //! - [`rebuild_iterative_pages`] - Recompile iterative pages with complete data
 //!
@@ -43,7 +42,7 @@ pub use process::{
     GlobalStateMode, build_address_space, build_static_pages, populate_pages,
     rebuild_iterative_pages,
 };
-pub use process::{PageStateEpoch, PageStateTicket, process_page};
+pub use process::{PageStateEpoch, PageStateTicket};
 pub(crate) use process::{PreparedPage, commit_page_state_parts, prepare_page};
 pub use typst::process_result as process_typst_result;
 pub use warning::{
