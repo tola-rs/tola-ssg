@@ -1,7 +1,7 @@
 //! Server lifecycle management.
 
 use crate::address::SiteIndex;
-use crate::{actor::Coordinator, config::SiteConfig, core::register_server, log};
+use crate::{actor::Coordinator, config::ConfigHandle, core::register_server, log};
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
 use std::{
@@ -55,7 +55,7 @@ pub fn register_server_for_shutdown(server: Arc<Server>, shutdown_tx: Sender<()>
 
 /// Spawn the actor system for file watching and hot reload
 pub fn spawn_actors(
-    config: Arc<SiteConfig>,
+    config: ConfigHandle,
     state: Arc<SiteIndex>,
     watch_enabled: bool,
     ws_port: Option<u16>,
@@ -71,7 +71,7 @@ pub fn spawn_actors(
 }
 
 fn run_actor_system(
-    config: Arc<SiteConfig>,
+    config: ConfigHandle,
     state: Arc<SiteIndex>,
     ws_port: Option<u16>,
     shutdown_rx: Receiver<()>,

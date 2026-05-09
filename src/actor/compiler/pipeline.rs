@@ -11,7 +11,7 @@ use super::tasks::compile_batch;
 impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
-        let config = Arc::clone(&self.config);
+        let config = self.config.current();
         let state = Arc::clone(&self.state);
         let path = path.to_path_buf();
         crate::compiler::scheduler::SCHEDULER.invalidate(&path);
@@ -32,8 +32,7 @@ impl CompilerActor {
 
     /// Compile multiple files in parallel (blocking).
     pub(super) async fn compile_batch_blocking(&mut self, paths: Vec<PathBuf>) {
-        let outcomes =
-            compile_batch(paths, Arc::clone(&self.config), Arc::clone(&self.state)).await;
+        let outcomes = compile_batch(paths, self.config.current(), Arc::clone(&self.state)).await;
         for outcome in outcomes {
             self.route(outcome).await;
         }

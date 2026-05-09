@@ -10,7 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
-    address::SiteIndex, asset, compiler, config::SiteConfig, core::BuildMode, core::ContentKind,
+    address::SiteIndex,
+    asset, compiler,
+    config::{ConfigHandle, SiteConfig},
+    core::BuildMode,
+    core::ContentKind,
     debug, embed, freshness, hooks, log, seo,
 };
 
@@ -142,8 +146,9 @@ pub fn serve_build(config: &SiteConfig, state: Arc<SiteIndex>) -> Result<()> {
 ///
 /// The startup coordinator already made request-driven serving available after
 /// scan completion, so this function must not block that path.
-pub fn start_serve_build(config: Arc<SiteConfig>, state: Arc<SiteIndex>) {
+pub fn start_serve_build(config: ConfigHandle, state: Arc<SiteIndex>) {
     std::thread::spawn(move || {
+        let config = config.current();
         if let Err(e) = serve_build(&config, state) {
             log!("build"; "background warmup failed: {}", e);
         }

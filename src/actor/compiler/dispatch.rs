@@ -134,7 +134,7 @@ mod tests {
 
     use super::*;
     use crate::address::SiteIndex;
-    use crate::config::SiteConfig;
+    use crate::config::config_handle;
 
     #[tokio::test]
     async fn exits_on_shutdown_message() {
@@ -143,7 +143,7 @@ mod tests {
         let actor = CompilerActor::new(
             compiler_rx,
             vdom_tx,
-            Arc::new(SiteConfig::default()),
+            config_handle(),
             Arc::new(SiteIndex::new()),
         );
 

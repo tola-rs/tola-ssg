@@ -42,8 +42,8 @@ pub use section::{
 
 // Re-export from types/
 pub use types::{
-    ConfigDiagnostics, ConfigError, ConfigPresence, FieldPath, PathResolver, cfg, clear_clean_flag,
-    init_config, reload_config,
+    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, PathResolver, cfg,
+    config_handle, init_config,
 };
 
 // Internal imports from section/

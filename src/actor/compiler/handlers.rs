@@ -48,7 +48,7 @@ impl CompilerActor {
         } else {
             Some(spawn_batch(
                 affected,
-                Arc::clone(&self.config),
+                self.config.current(),
                 Arc::clone(&self.state),
                 pages_hash,
                 watched_post_paths,
@@ -64,18 +64,20 @@ impl CompilerActor {
     fn run_watched_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
         use crate::hooks;
 
+        let config = self.config.current();
         let refs = Self::path_refs(changed_paths);
-        let executed = hooks::run_watched_pre_hooks(&self.config, &refs);
-        self.invalidate_output_versions_after_hooks(HookPhase::Pre, executed)
+        let executed = hooks::run_watched_pre_hooks(&config, &refs);
+        self.invalidate_output_versions_after_hooks(&config, HookPhase::Pre, executed)
     }
 
     /// Run watched post hooks and return whether hook outputs may have changed.
     pub(super) fn run_watched_post_hooks(&self, changed_paths: &[PathBuf]) -> bool {
         use crate::hooks;
 
+        let config = self.config.current();
         let refs = Self::path_refs(changed_paths);
-        let executed = hooks::run_watched_post_hooks(&self.config, &refs);
-        self.invalidate_output_versions_after_hooks(HookPhase::Post, executed)
+        let executed = hooks::run_watched_post_hooks(&config, &refs);
+        self.invalidate_output_versions_after_hooks(&config, HookPhase::Post, executed)
     }
 
     /// Capture changed paths for post hooks only when a watched post hook exists.
@@ -86,22 +88,28 @@ impl CompilerActor {
             return None;
         }
 
+        let config = self.config.current();
         let refs = Self::path_refs(changed_paths);
-        hooks::has_watched_post_hooks(&self.config, &refs).then(|| changed_paths.to_vec())
+        hooks::has_watched_post_hooks(&config, &refs).then(|| changed_paths.to_vec())
     }
 
     fn path_refs(paths: &[PathBuf]) -> Vec<&Path> {
         paths.iter().map(|p| p.as_path()).collect()
     }
 
-    fn invalidate_output_versions_after_hooks(&self, phase: HookPhase, executed: usize) -> bool {
+    fn invalidate_output_versions_after_hooks(
+        &self,
+        config: &crate::config::SiteConfig,
+        phase: HookPhase,
+        executed: usize,
+    ) -> bool {
         use crate::asset::version;
 
         if executed == 0 {
             return false;
         }
 
-        let removed = version::invalidate_under(self.config.paths().output_dir().as_path());
+        let removed = version::invalidate_under(config.paths().output_dir().as_path());
         crate::debug!(
             phase.as_str();
             "{} watched hooks executed: {}, invalidated output versions: {}",
@@ -123,7 +131,8 @@ impl CompilerActor {
             return false;
         }
 
-        let Ok(page) = crate::page::CompiledPage::from_paths(path, &self.config) else {
+        let config = self.config.current();
+        let Ok(page) = crate::page::CompiledPage::from_paths(path, &config) else {
             return false;
         };
 
@@ -157,13 +166,12 @@ impl CompilerActor {
     pub(super) async fn on_content_removed(&mut self, paths: Vec<PathBuf>) {
         let count = paths.len();
         crate::debug!("watch"; "{} content files removed", count);
+        let config = self.config.current();
 
         for path in &paths {
-            if let Some(url) = crate::reload::compile::cleanup_removed_source_state(
-                path,
-                &self.config,
-                &self.state,
-            ) {
+            if let Some(url) =
+                crate::reload::compile::cleanup_removed_source_state(path, &config, &self.state)
+            {
                 crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
             }
 
@@ -185,7 +193,7 @@ impl CompilerActor {
     pub(super) async fn on_asset_change(&mut self, paths: Vec<PathBuf>) {
         use crate::asset::version;
 
-        let config = Arc::clone(&self.config);
+        let config = self.config.current();
         let count = paths.len();
         let existing_paths: Vec<_> = paths.iter().filter(|path| path.exists()).cloned().collect();
         let removed_count = cleanup_removed_assets(&paths, &config);
@@ -314,16 +322,13 @@ impl CompilerActor {
     pub(super) async fn on_full_rebuild(&mut self) {
         use crate::asset::version;
         use crate::compiler::dependency::clear_graph;
-        use crate::config::{clear_clean_flag, reload_config};
         use crate::core::{BuildMode, set_healthy};
         use crate::reload::active::ACTIVE_PAGE;
 
         crate::debug!("compile"; "full rebuild triggered");
         set_healthy(false);
 
-        if let Ok(true) = reload_config() {
-            self.config = crate::config::cfg();
-        }
+        let _ = self.config.reload();
 
         clear_graph();
         version::clear();
@@ -333,7 +338,7 @@ impl CompilerActor {
             .send(crate::actor::messages::VdomMsg::Clear)
             .await;
 
-        let config = Arc::clone(&self.config);
+        let config = self.config.current();
         let state = Arc::clone(&self.state);
         let result = tokio::task::spawn_blocking(move || {
             crate::cli::build::build_site(BuildMode::DEVELOPMENT, &config, &state, true)
@@ -343,7 +348,7 @@ impl CompilerActor {
         match result {
             Ok(Ok(_)) => {
                 set_healthy(true);
-                clear_clean_flag();
+                self.config.clear_clean_flag();
                 crate::debug!("compile"; "full rebuild complete");
 
                 let _ = self
@@ -393,9 +398,10 @@ impl CompilerActor {
 
         crate::debug!("compile"; "retry scan triggered");
 
-        let config = Arc::clone(&self.config);
+        let config = self.config.current();
+        let scan_config = Arc::clone(&config);
         let state = Arc::clone(&self.state);
-        let result = tokio::task::spawn_blocking(move || scan_pages(&config, &state)).await;
+        let result = tokio::task::spawn_blocking(move || scan_pages(&scan_config, &state)).await;
 
         match result {
             Ok(Ok(_)) => {
@@ -403,9 +409,7 @@ impl CompilerActor {
 
                 let content_files: Vec<_> = changed_paths
                     .iter()
-                    .filter(|p| {
-                        matches!(categorize_path(p, &self.config), FileCategory::Content(_))
-                    })
+                    .filter(|p| matches!(categorize_path(p, &config), FileCategory::Content(_)))
                     .cloned()
                     .collect();
 

@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use super::messages::{CompilerMsg, VdomMsg};
 use crate::address::SiteIndex;
 use crate::compiler::page::PageStateEpoch;
-use crate::config::SiteConfig;
+use crate::config::ConfigHandle;
 use crate::reload::compile::CompileOutcome;
 
 pub(super) struct BatchResult {
@@ -35,7 +35,7 @@ pub(super) const ACTIVE_RECOMPILE_COOLDOWN: Duration = Duration::from_millis(250
 pub struct CompilerActor {
     pub(super) rx: mpsc::Receiver<CompilerMsg>,
     pub(super) vdom_tx: mpsc::Sender<VdomMsg>,
-    pub(super) config: Arc<SiteConfig>,
+    pub(super) config: ConfigHandle,
     pub(super) state: Arc<SiteIndex>,
     pub(super) last_active_recompile: Option<Instant>,
     pub(super) page_epoch: PageStateEpoch,
@@ -45,7 +45,7 @@ impl CompilerActor {
     pub fn new(
         rx: mpsc::Receiver<CompilerMsg>,
         vdom_tx: mpsc::Sender<VdomMsg>,
-        config: Arc<SiteConfig>,
+        config: ConfigHandle,
         state: Arc<SiteIndex>,
     ) -> Self {
         Self {

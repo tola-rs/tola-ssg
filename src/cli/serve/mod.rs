@@ -17,7 +17,7 @@ pub use startup::serve_with_cache;
 
 use crate::address::SiteIndex;
 use crate::{
-    config::{SiteConfig, cfg},
+    config::{SiteConfig, cfg, config_handle},
     core::{ContentKind, UrlPath},
     debug, log,
 };
@@ -125,7 +125,7 @@ impl BoundServer {
     pub fn run(self, state: Arc<SiteIndex>) -> Result<()> {
         let config = cfg();
         let actor_handle = lifecycle::spawn_actors(
-            Arc::clone(&config),
+            config_handle(),
             Arc::clone(&state),
             config.serve.watch,
             self.ws_port,

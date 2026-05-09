@@ -8,7 +8,6 @@
 //! Watcher → Debouncer (pure timing) → Classifier (business logic) → CompilerMsg
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use notify::RecommendedWatcher;
@@ -16,7 +15,7 @@ use tokio::sync::mpsc;
 
 use super::messages::CompilerMsg;
 use crate::address::SiteIndex;
-use crate::config::SiteConfig;
+use crate::config::{ConfigHandle, SiteConfig};
 
 // Business classification pipeline (raw changes -> actionable events).
 mod classifier;
@@ -46,8 +45,8 @@ pub struct FsActor {
     compiler_tx: mpsc::Sender<CompilerMsg>,
     /// Debouncer state
     debouncer: Debouncer,
-    /// Site configuration for file classification
-    config: Arc<SiteConfig>,
+    /// Reloadable site configuration
+    config: ConfigHandle,
     /// Site index for event recovery and active-page routing
     state: Arc<SiteIndex>,
 }
@@ -59,9 +58,8 @@ impl FsActor {
     /// performs initial build. This eliminates the "vacuum period".
     #[rustfmt::skip]
     pub fn new(
-        paths: Vec<PathBuf>,
         compiler_tx: mpsc::Sender<CompilerMsg>,
-        config: Arc<SiteConfig>,
+        config: ConfigHandle,
         state: Arc<SiteIndex>,
     ) -> notify::Result<Self> {
         // Create sync channel for notify (it doesn't support async)
@@ -73,7 +71,8 @@ impl FsActor {
         })?;
 
         // Start watching all existing roots (missing roots will be re-attached later)
-        let mut watch_roots = WatchRoots::new(paths);
+        let current_config = config.current();
+        let mut watch_roots = WatchRoots::from_config(&current_config);
         watch_roots.attach_existing(&mut watcher)?;
 
         // Events are now buffering in notify_rx while caller does initial build
@@ -94,7 +93,7 @@ impl FsActor {
         // Extract fields before consuming self
         let notify_rx = self.notify_rx;
         let compiler_tx = self.compiler_tx.clone();
-        let config = Arc::clone(&self.config);
+        let config = self.config;
         let state = Arc::clone(&self.state);
         let mut debouncer = self.debouncer;
         let mut watcher = self.watcher;
@@ -122,9 +121,10 @@ impl FsActor {
                 Some(event) = async_rx.recv() => debouncer.add_event(&event),
                 _ = tokio::time::sleep(debouncer.sleep_duration()) => {
                     // Ensure watcher roots remain attached.
-                    watch_roots.maintain(&mut watcher);
+                    let current_config = config.current();
+                    watch_roots.sync_config(&mut watcher, &current_config);
                     // Classify recovered events and route messages.
-                    if process_changes(&mut debouncer, &compiler_tx, &config, &state).await.is_err() {
+                    if process_changes(&mut debouncer, &compiler_tx, &current_config, &state).await.is_err() {
                         break;
                     }
                 }

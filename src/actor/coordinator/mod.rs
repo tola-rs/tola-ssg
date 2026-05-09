@@ -6,7 +6,6 @@
 //! - Runs them concurrently
 
 mod runtime;
-mod watch_paths;
 
 use std::sync::Arc;
 
@@ -20,14 +19,14 @@ use super::messages::{CompilerMsg, VdomMsg, WsMsg};
 use super::vdom::VdomActor;
 use super::ws::WsActor;
 use crate::address::SiteIndex;
-use crate::config::SiteConfig;
+use crate::config::ConfigHandle;
 use crate::reload::server::WsServerHandle;
 
 const CHANNEL_BUFFER: usize = 32;
 
 /// Coordinator - wires up and runs the actor system.
 pub struct Coordinator {
-    config: Arc<SiteConfig>,
+    config: ConfigHandle,
     state: Arc<SiteIndex>,
     ws_port: Option<u16>,
     ws_server: Option<WsServerHandle>,
@@ -35,8 +34,8 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
-    /// Create from Arc<SiteConfig>.
-    pub fn with_config(config: Arc<SiteConfig>, state: Arc<SiteIndex>) -> Self {
+    /// Create from the reloadable config handle.
+    pub fn with_config(config: ConfigHandle, state: Arc<SiteIndex>) -> Self {
         Self {
             config,
             state,
@@ -76,25 +75,20 @@ impl Coordinator {
             }
         }
 
-        let watch_paths = watch_paths::collect_watch_paths(&self.config);
-        let fs_actor = FsActor::new(
-            watch_paths,
-            compiler_tx.clone(),
-            self.config.clone(),
-            self.state.clone(),
-        )
-        .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
+        let current_config = self.config.current();
+        let fs_actor = FsActor::new(compiler_tx.clone(), self.config, self.state.clone())
+            .map_err(|e| anyhow::anyhow!("watcher failed: {}", e))?;
 
         let compiler_actor = CompilerActor::new(
             compiler_rx,
             vdom_tx.clone(),
-            self.config.clone(),
+            self.config,
             self.state.clone(),
         );
         let (vdom_actor, restored_count, restored_errors, restored_warnings) = VdomActor::new(
             vdom_rx,
             ws_tx.clone(),
-            self.config.get_root().to_path_buf(),
+            current_config.get_root().to_path_buf(),
             self.state.clone(),
         );
 
@@ -104,6 +98,7 @@ impl Coordinator {
         if !restored_warnings.is_empty() {
             let max = self
                 .config
+                .current()
                 .build
                 .diagnostics
                 .max_warnings

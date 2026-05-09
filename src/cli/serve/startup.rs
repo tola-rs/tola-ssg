@@ -15,7 +15,7 @@ use crate::cache::{self, PersistedDiagnostics, PersistedError, RemovedFile};
 use crate::compiler::dependency::{self, collect_virtual_dependents};
 use crate::compiler::page::{BUILD_CACHE, cache_vdom};
 use crate::compiler::scheduler::SCHEDULER;
-use crate::config::{self, SiteConfig, clear_clean_flag};
+use crate::config::{self, SiteConfig};
 use crate::core::UrlPath;
 use crate::page::PageState;
 use crate::reload::compile::{self, CompileOutcome};
@@ -52,10 +52,11 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     set_scan_ready(false);
     note_request_activity();
 
-    let config_arc = config::cfg();
+    let config_handle = config::config_handle();
     let scan_state = Arc::clone(&state);
     let needs_full_build = !has_cache;
     std::thread::spawn(move || {
+        let config_arc = config_handle.current();
         let scan_success = !needs_full_build || progressive_scan(&config_arc, &scan_state);
 
         if !scan_success {
@@ -79,7 +80,7 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             // block the startup coordinator or interactive requests.
             set_serving();
             set_healthy(true);
-            start_serve_build(Arc::clone(&config_arc), Arc::clone(&scan_state));
+            start_serve_build(config_handle, Arc::clone(&scan_state));
             return;
         }
 
@@ -88,7 +89,7 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
         set_healthy(build_success);
 
         if build_success {
-            clear_clean_flag();
+            config_handle.clear_clean_flag();
         }
 
         if has_cache {
