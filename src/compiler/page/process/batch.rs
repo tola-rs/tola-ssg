@@ -17,7 +17,7 @@ use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::freshness::ContentHash;
 use crate::logger::ProgressLine;
 use crate::package::{
-    build_visible_current_context_for_source, build_visible_inputs, package_sentinel,
+    build_visible_current_inputs_for_source, build_visible_inputs, package_sentinel,
 };
 use crate::page::CompiledPage;
 use crate::page::{
@@ -214,7 +214,7 @@ fn build_static_pages_with_store(
     // This avoids duplicate warnings (scan already emitted them)
     let snapshot = scan_result.snapshot();
     let inputs = build_site_inputs(config, store)?;
-    // Always compile with per-file @tola/current context to keep build
+    // Always compile with per-file @tola/current inputs to keep build
     // behavior aligned with serve and avoid scan-time under-detection when
     // current-dependent code only appears in page body.
     let batch = create_batch_with_inputs(
@@ -225,7 +225,7 @@ fn build_static_pages_with_store(
         inputs,
     )?;
     let typst_results =
-        compile_typst_batch_with_context(&batch, &typst_paths, config, store, progress)?;
+        compile_typst_batch_with_current_inputs(&batch, &typst_paths, config, store, progress)?;
 
     let typst_processed = process_typst_files(&ctx, &typst_paths, typst_results);
     let markdown_processed = process_markdown_files(&ctx, &markdown_paths, progress);
@@ -325,7 +325,7 @@ pub fn rebuild_iterative_pages(
             Some(inputs),
         )?;
         let typst_results =
-            compile_typst_batch_with_context(&batch, &typst_paths, config, store, None)?;
+            compile_typst_batch_with_current_inputs(&batch, &typst_paths, config, store, None)?;
 
         // Process results and update page store.
         let max_errors = ctx.max_errors();
@@ -505,8 +505,8 @@ fn create_batch_with_inputs<'a>(
     }))
 }
 
-/// Compile with per-file context for @tola/current
-fn compile_typst_batch_with_context<'a>(
+/// Compile with per-file `@tola/current` inputs.
+fn compile_typst_batch_with_current_inputs<'a>(
     batch: &Option<TypstBatcher<'a>>,
     files: &[&PathBuf],
     config: &SiteConfig,
@@ -514,29 +514,34 @@ fn compile_typst_batch_with_context<'a>(
     progress: Option<&ProgressLine>,
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
-    let current_context_by_path: rustc_hash::FxHashMap<&Path, serde_json::Value> = files
+    let current_inputs_by_path: rustc_hash::FxHashMap<&Path, typst_batch::Inputs> = files
         .iter()
         .map(|p| {
-            let current = build_visible_current_context_for_source(config, store, p)?;
+            let current = build_visible_current_inputs_for_source(config, store, p)?;
             Ok((p.as_path(), current))
         })
         .collect::<Result<_>>()?;
 
-    b.batch_compile_with_context(files, |path| {
-        if let Some(p) = progress {
-            p.inc("typst");
-        }
-        crate::debug!("typst"; "compiled {}", path.display());
-        current_context_by_path
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing precomputed @tola/current context for {}",
-                    path.display()
-                )
-            })
-    })
+    b.batch_compile_with_inputs_each(
+        files,
+        |path| {
+            current_inputs_by_path
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing precomputed @tola/current inputs for {}",
+                        path.display()
+                    )
+                })
+        },
+        |path| {
+            if let Some(p) = progress {
+                p.inc("typst");
+            }
+            crate::debug!("typst"; "compiled {}", path.display());
+        },
+    )
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
 

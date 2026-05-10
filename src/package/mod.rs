@@ -18,7 +18,7 @@ mod phase;
 mod tola;
 
 pub use inject::{
-    build_filter_inputs_with_site, build_visible_current_context_for_source, build_visible_inputs,
+    build_filter_inputs_with_site, build_visible_current_inputs_for_source, build_visible_inputs,
     build_visible_inputs_for_source, build_visible_inputs_with_current_context,
 };
 pub use phase::Phase;

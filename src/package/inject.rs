@@ -316,6 +316,17 @@ pub fn build_visible_current_context_for_source(
     Ok(current)
 }
 
+/// Build visible-phase `@tola/current` inputs for a specific source.
+pub fn build_visible_current_inputs_for_source(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+    file_path: &Path,
+) -> Result<typst_batch::Inputs> {
+    let current = build_visible_current_context_for_source(config, store, file_path)?;
+    typst_batch::Inputs::from_json(&current)
+        .map_err(|e| anyhow!("failed to build @tola/current inputs: {}", e))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;

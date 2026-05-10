@@ -79,7 +79,7 @@ impl TypstHost {
         package_path: Option<&Path>,
         package_cache_path: Option<&Path>,
     ) -> Self {
-        let fonts = typst_batch::warmup(font_dirs);
+        let fonts = Arc::new(FontStore::with_paths(font_dirs).preload());
         Self {
             files: file_resolver(root, nested_mappings, package_path, package_cache_path),
             file_cache: Arc::new(SharedFileCache::new()),
