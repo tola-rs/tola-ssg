@@ -474,6 +474,15 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 }
 ```
 
+If you need extra typst packages inside a nix sandbox(internet is not available):
+
+```nix
+inputs.tola.packages.${pkgs.system}.default.withPackages (ps: [ ps.metalogo ])
+```
+
+It sets `TYPST_PACKAGE_CACHE_PATH` for `tola`, so users can use packages via `@preview/...`.
+(`tola` itself does not depend on the typst CLI at all)
+
 ## Community
 
 - Matrix: [`#tola:matrix.org`](https://matrix.to/#/#tola:matrix.org)

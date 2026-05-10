@@ -36,7 +36,43 @@
           libPath = lib.optionalString pkgs.stdenv.isDarwin
             (lib.makeLibraryPath [ pkgs.libiconvReal ]);
 
-          mkTolaPackage = targetPkgs:
+          typstPackageCache = selectPackages:
+            let
+              selectedPackages = selectPackages pkgs.typst.packages;
+              packagePaths = lib.concatMap (
+                pkg: [ pkg ] ++ pkg.propagatedBuildInputs
+              ) selectedPackages;
+            in
+            pkgs.buildEnv {
+              name = "${packageName}-typst-package-cache";
+              paths = packagePaths;
+              pathsToLink = [ "/lib/typst-packages" ];
+              postBuild = ''
+                export TYPST_LIB_DIR="$out/lib/typst/packages"
+                mkdir -p "$out/lib/typst-packages"
+                mkdir -p "$TYPST_LIB_DIR"
+                mv "$out/lib/typst-packages" "$TYPST_LIB_DIR/preview"
+              '';
+            };
+
+          wrapWithTypstPackages = basePackage: selectPackages:
+            let
+              packageCache = typstPackageCache selectPackages;
+            in
+            pkgs.symlinkJoin {
+              name = "${basePackage.name}-with-typst-packages";
+              paths = [ basePackage ];
+              nativeBuildInputs = [ pkgs.makeWrapper ];
+              postBuild = ''
+                wrapProgram $out/bin/${packageName} \
+                  --set TYPST_PACKAGE_CACHE_PATH ${packageCache}/lib/typst/packages
+              '';
+              passthru = {
+                withPackages = selectPackages': wrapWithTypstPackages basePackage selectPackages';
+              };
+            };
+
+          mkBaseTolaPackage = targetPkgs:
             targetPkgs.rustPlatform.buildRustPackage {
               pname = packageName;
               version = packageVersion;
@@ -60,6 +96,16 @@
               };
             };
 
+          mkTolaPackageWithPackages = targetPkgs:
+            let
+              basePackage = mkBaseTolaPackage targetPkgs;
+            in
+            basePackage.overrideAttrs (_: {
+              passthru = (basePackage.passthru or { }) // {
+                withPackages = selectPackages: wrapWithTypstPackages basePackage selectPackages;
+              };
+            });
+
           crossTargets = {
             x86_64-linux = pkgs.pkgsCross.gnu64;
             x86_64-linux-static = pkgs.pkgsCross.gnu64.pkgsStatic;
@@ -72,9 +118,9 @@
           };
 
           packages = {
-            default = mkTolaPackage pkgs;
-            static = mkTolaPackage pkgs.pkgsStatic;
-          } // lib.mapAttrs (_: targetPkgs: mkTolaPackage targetPkgs) crossTargets;
+            default = mkTolaPackageWithPackages pkgs;
+            static = mkTolaPackageWithPackages pkgs.pkgsStatic;
+          } // lib.mapAttrs (_: targetPkgs: mkTolaPackageWithPackages targetPkgs) crossTargets;
         in
         {
           inherit packages;
