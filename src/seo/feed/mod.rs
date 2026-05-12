@@ -13,18 +13,22 @@ pub mod atom;
 mod common;
 pub mod rss;
 
+use common::{FeedPage, get_feed_pages};
+
 /// Build all configured feeds.
 pub fn build_feed(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
+    let pages = get_feed_pages(store);
+
     for feed in config.site.seo.feed_outputs() {
-        build_one(config, feed, store)?;
+        build_one(config, feed, &pages)?;
     }
     Ok(())
 }
 
-fn build_one(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Result<()> {
+fn build_one(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<()> {
     match feed.format {
-        FeedFormat::Rss => rss::build_rss(config, feed, store),
-        FeedFormat::Atom => atom::build_atom(config, feed, store),
+        FeedFormat::Rss => rss::build_rss(config, feed, pages),
+        FeedFormat::Atom => atom::build_atom(config, feed, pages),
     }
 }
 

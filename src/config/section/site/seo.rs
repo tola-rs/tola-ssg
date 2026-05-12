@@ -16,6 +16,15 @@ pub enum FeedFormat {
     Atom,
 }
 
+impl FeedFormat {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Rss => "rss",
+            Self::Atom => "atom",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Config, PartialEq, Eq)]
 #[serde(default)]
 #[config(section = "site.seo.feeds")]

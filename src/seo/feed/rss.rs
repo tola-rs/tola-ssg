@@ -2,41 +2,35 @@
 //!
 //! Generates RSS feeds from page metadata.
 
-use super::common::{FeedPage, get_feed_pages};
+use super::common::{FeedPage, write_feed};
 use crate::{
     config::{FeedConfig, SiteConfig},
     core::UrlPath,
-    log,
-    page::StoredPageMap,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result, anyhow};
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
-use std::{fs, sync::LazyLock};
+use std::sync::LazyLock;
 
 /// Build RSS 2.0 feed
-pub fn build_rss(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Result<()> {
-    RssFeed::build(config, feed, store).write()
-}
-
-struct RssFeed {
-    config: SiteConfig,
-    feed: FeedConfig,
-    pages: Vec<FeedPage>,
-}
-
-impl RssFeed {
-    fn build(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Self {
-        let pages = get_feed_pages(store);
-        Self {
-            config: config.clone(),
-            feed: feed.clone(),
-            pages,
-        }
+pub fn build_rss(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<()> {
+    RssFeed {
+        config,
+        feed,
+        pages,
     }
+    .write()
+}
 
-    fn into_xml(self) -> Result<String> {
+struct RssFeed<'a> {
+    config: &'a SiteConfig,
+    feed: &'a FeedConfig,
+    pages: &'a [FeedPage],
+}
+
+impl RssFeed<'_> {
+    fn to_xml(&self) -> Result<String> {
         let items: Vec<_> = self
             .pages
             .iter()
@@ -59,19 +53,7 @@ impl RssFeed {
     }
 
     fn write(self) -> Result<()> {
-        let output_dir = self.config.paths().output_dir();
-        let feed_path = self.feed.path.clone();
-        let xml = self.into_xml()?;
-        // Resolve feed path relative to output_dir (with path_prefix)
-        let rss_path = output_dir.join(&feed_path);
-
-        if let Some(parent) = rss_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&rss_path, xml)?;
-
-        log!("rss"; "{}", rss_path.file_name().unwrap_or_default().to_string_lossy());
-        Ok(())
+        write_feed(self.config, self.feed, self.to_xml()?)
     }
 }
 

@@ -1,10 +1,13 @@
 //! Common utilities for feed generation.
 
 use crate::{
+    config::{FeedConfig, SiteConfig},
     log,
     page::{StoredPage, StoredPageMap},
     seo::extract::extract,
 };
+use anyhow::Result;
+use std::fs;
 
 /// A page validated for feed inclusion (requires title and date)
 #[derive(Debug, Clone)]
@@ -42,4 +45,16 @@ pub fn get_feed_pages(store: &StoredPageMap) -> Vec<FeedPage> {
     }
 
     feed_pages
+}
+
+pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, xml: String) -> Result<()> {
+    let output_path = config.paths().output_dir().join(&feed.path);
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&output_path, xml)?;
+
+    log!(feed.format.as_str(); "{}", output_path.file_name().unwrap_or_default().to_string_lossy());
+    Ok(())
 }

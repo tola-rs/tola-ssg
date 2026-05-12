@@ -2,12 +2,10 @@
 //!
 //! Generates Atom feeds from page metadata.
 
-use super::common::{FeedPage, get_feed_pages};
+use super::common::{FeedPage, write_feed};
 use crate::{
     config::{FeedConfig, SiteConfig},
     core::UrlPath,
-    log,
-    page::StoredPageMap,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result};
@@ -15,30 +13,25 @@ use atom_syndication::{
     Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,
     Person, PersonBuilder, Text,
 };
-use std::fs;
 
 /// Build Atom 1.0 feed
-pub fn build_atom(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Result<()> {
-    AtomFeed::build(config, feed, store).write()
-}
-
-struct AtomFeed {
-    config: SiteConfig,
-    feed: FeedConfig,
-    pages: Vec<FeedPage>,
-}
-
-impl AtomFeed {
-    fn build(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Self {
-        let pages = get_feed_pages(store);
-        Self {
-            config: config.clone(),
-            feed: feed.clone(),
-            pages,
-        }
+pub fn build_atom(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<()> {
+    AtomFeed {
+        config,
+        feed,
+        pages,
     }
+    .write()
+}
 
-    fn into_xml(self) -> Result<String> {
+struct AtomFeed<'a> {
+    config: &'a SiteConfig,
+    feed: &'a FeedConfig,
+    pages: &'a [FeedPage],
+}
+
+impl AtomFeed<'_> {
+    fn to_xml(&self) -> Result<String> {
         let site_url = self.config.site.info.url.as_deref();
         let base_url = UrlPath::from_page("/").canonical_url(site_url);
         let feed_path = format!("/{}", self.feed.path.to_string_lossy().replace('\\', "/"));
@@ -103,19 +96,7 @@ impl AtomFeed {
     }
 
     fn write(self) -> Result<()> {
-        let output_dir = self.config.paths().output_dir();
-        let feed_path = self.feed.path.clone();
-        let xml = self.into_xml()?;
-        // Resolve feed path relative to output_dir (with path_prefix)
-        let atom_path = output_dir.join(&feed_path);
-
-        if let Some(parent) = atom_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&atom_path, xml)?;
-
-        log!("atom"; "{}", atom_path.file_name().unwrap_or_default().to_string_lossy());
-        Ok(())
+        write_feed(self.config, self.feed, self.to_xml()?)
     }
 }
 
