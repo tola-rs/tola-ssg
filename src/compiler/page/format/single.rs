@@ -2,9 +2,11 @@
 
 use std::path::Path;
 
+use typst_batch::WithInputs;
+
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, LinkOrigin};
-use crate::page::{PageMeta, StoredPageMap};
+use crate::page::{PageKind, PageMeta, StoredPageMap};
 
 use super::{ScannedHeading, ScannedPageLink};
 
@@ -39,28 +41,53 @@ pub fn scan_single_page(
     }
 }
 
-fn scan_typst_page(
+/// Scan only enough page data to classify direct vs iterative compilation.
+pub fn scan_page_kind(
     path: &Path,
     config: &SiteConfig,
     host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
-) -> SinglePageScanData {
-    use typst_batch::prelude::*;
+) -> Option<PageKind> {
+    match ContentKind::from_path(path)? {
+        ContentKind::Typst => {
+            let scan = scan_typst(path, config, host, store)?;
+            Some(PageKind::from_packages(scan.accessed_packages()))
+        }
+        ContentKind::Markdown => Some(PageKind::Direct),
+    }
+}
 
+fn scan_typst(
+    path: &Path,
+    config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
+    store: &StoredPageMap,
+) -> Option<typst_batch::ScanResult> {
     let root = config.get_root();
-    let label = &config.build.meta.label;
     let mut scanner = host.scanner(root);
 
     if let Ok(inputs) = crate::package::build_visible_inputs_for_source(config, store, path) {
         scanner = scanner.with_inputs_obj(inputs);
     }
 
-    let scan = match scanner.scan(path) {
-        Ok(s) => s,
+    match scanner.scan(path) {
+        Ok(scan) => Some(scan),
         Err(e) => {
-            crate::debug!("scan"; "typst heading scan failed for {}: {}", path.display(), e);
-            return SinglePageScanData::default();
+            crate::debug!("scan"; "typst page scan failed for {}: {}", path.display(), e);
+            None
         }
+    }
+}
+
+fn scan_typst_page(
+    path: &Path,
+    config: &SiteConfig,
+    host: &crate::compiler::page::TypstHost,
+    store: &StoredPageMap,
+) -> SinglePageScanData {
+    let label = &config.build.meta.label;
+    let Some(scan) = scan_typst(path, config, host, store) else {
+        return SinglePageScanData::default();
     };
 
     let meta = scan
@@ -112,9 +139,9 @@ fn scan_markdown_page(path: &Path) -> SinglePageScanData {
 
 #[cfg(test)]
 mod tests {
-    use super::scan_single_page;
+    use super::{scan_page_kind, scan_single_page};
     use crate::config::SiteConfig;
-    use crate::page::StoredPageMap;
+    use crate::page::{PageKind, StoredPageMap};
     use std::fs;
     use tempfile::TempDir;
 
@@ -149,5 +176,57 @@ mod tests {
 
         assert!(scan.links.iter().any(|link| link.dest == "../about/"));
         assert!(!scan.links.iter().any(|link| link.dest == "cat.svg"));
+    }
+
+    #[test]
+    fn scan_page_kind_keeps_plain_typst_direct() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let source = content_dir.join("page.typ");
+        fs::write(&source, "= Hello").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        let store = StoredPageMap::new();
+        let host = crate::compiler::page::TypstHost::for_config(&config);
+
+        assert_eq!(
+            scan_page_kind(&source, &config, &host, &store),
+            Some(PageKind::Direct)
+        );
+    }
+
+    #[test]
+    fn scan_page_kind_detects_iterative_typst_packages() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let source = content_dir.join("page.typ");
+        fs::write(
+            &source,
+            r#"
+#import "@tola/current:0.0.0": current-permalink
+#let _probe = current-permalink
+= Hello
+"#,
+        )
+        .unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.content = content_dir;
+
+        let store = StoredPageMap::new();
+        let host = crate::compiler::page::TypstHost::for_config(&config);
+
+        assert_eq!(
+            scan_page_kind(&source, &config, &host, &store),
+            Some(PageKind::Iterative)
+        );
     }
 }

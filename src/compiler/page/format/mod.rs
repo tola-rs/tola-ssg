@@ -8,4 +8,4 @@ mod single;
 pub use adapter::PageFormat;
 pub use batch::scan_pages;
 pub use scanned::{ScannedHeading, ScannedPage, ScannedPageLink};
-pub use single::{SinglePageScanData, scan_single_page};
+pub use single::{SinglePageScanData, scan_page_kind, scan_single_page};

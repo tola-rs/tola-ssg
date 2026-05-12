@@ -16,7 +16,7 @@ pub use scan::scan_pages;
 pub use startup::serve_with_cache;
 
 use crate::address::SiteIndex;
-use crate::compiler::page::TypstHost;
+use crate::compiler::page::{TypstHost, scan_page_kind};
 use crate::{
     config::{SiteConfig, config_handle},
     core::{ContentKind, UrlPath},
@@ -245,6 +245,24 @@ fn handle_request(
             ServedOutputKind::NotFoundHtml => {
                 response::respond_not_found(request, config_ref, ws_port)
             }
+            ServedOutputKind::GeneratedHtml | ServedOutputKind::UnknownHtml if !is_scan_ready() => {
+                if let Some(source) = guess_source_before_scan(&request_url, config_ref) {
+                    if !can_compile_before_scan(&source, &config, &typst_hosts, &state) {
+                        return response::respond_loading(request);
+                    }
+                    compile_and_serve_source(request, &source, config, &typst_hosts, state, ws_port)
+                } else {
+                    serve_file_with_recovery(
+                        request,
+                        &request_url,
+                        &path,
+                        Arc::clone(&config),
+                        &typst_hosts,
+                        state,
+                        ws_port,
+                    )
+                }
+            }
             ServedOutputKind::Asset
             | ServedOutputKind::RedirectHtml
             | ServedOutputKind::GeneratedHtml
@@ -268,22 +286,17 @@ fn handle_request(
     let scan_ready = is_scan_ready();
     if !serving && !scan_ready {
         if let Some(source) = guess_source_before_scan(&request_url, config_ref) {
-            return match compile_source_on_demand(
+            if !can_compile_before_scan(&source, &config, &typst_hosts, &state) {
+                return response::respond_loading(request);
+            }
+            return compile_and_serve_source(
+                request,
                 &source,
-                &config,
+                config,
                 &typst_hosts,
-                Arc::clone(&state),
-            ) {
-                Ok(output_path) => {
-                    serve_file_without_recovery(request, &output_path, config_ref, ws_port)
-                }
-                Err(e) => response::respond_compile_error(
-                    request,
-                    &e,
-                    &config_ref.build.path_prefix,
-                    ws_port,
-                ),
-            };
+                state,
+                ws_port,
+            );
         }
         return response::respond_loading(request);
     }
@@ -300,14 +313,7 @@ fn handle_request(
     let source = state.read(|_, address| address.source_for_url(&url));
 
     if let Some(source) = source {
-        return match compile_source_on_demand(&source, &config, &typst_hosts, state) {
-            Ok(output_path) => {
-                serve_file_without_recovery(request, &output_path, config_ref, ws_port)
-            }
-            Err(e) => {
-                response::respond_compile_error(request, &e, &config_ref.build.path_prefix, ws_port)
-            }
-        };
+        return compile_and_serve_source(request, &source, config, &typst_hosts, state, ws_port);
     }
 
     response::respond_not_found(request, config_ref, ws_port)
@@ -325,13 +331,29 @@ fn serve_unhealthy_request(
     let config_ref = config.as_ref();
     let source = state
         .read(|_, address| address.source_for_url(&url))
-        .or_else(|| guess_source_before_scan(request_url, config_ref));
+        .or_else(|| {
+            let source = guess_source_before_scan(request_url, config_ref)?;
+            (is_scan_ready() || can_compile_before_scan(&source, &config, &typst_hosts, &state))
+                .then_some(source)
+        });
 
     let Some(source) = source else {
         return response::respond_loading(request);
     };
 
-    match compile_source_on_demand(&source, &config, &typst_hosts, state) {
+    compile_and_serve_source(request, &source, config, &typst_hosts, state, ws_port)
+}
+
+fn compile_and_serve_source(
+    request: Request,
+    source: &Path,
+    config: Arc<SiteConfig>,
+    typst_hosts: &TypstHostCache,
+    state: Arc<SiteIndex>,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    let config_ref = config.as_ref();
+    match compile_source_on_demand(source, &config, typst_hosts, state) {
         Ok(output_path) => serve_file_without_recovery(request, &output_path, config_ref, ws_port),
         Err(e) => {
             response::respond_compile_error(request, &e, &config_ref.build.path_prefix, ws_port)
@@ -383,6 +405,22 @@ fn push_content_candidate(matches: &mut Vec<PathBuf>, candidate: PathBuf) {
     if candidate.is_file() && ContentKind::is_content_file(&candidate) {
         matches.push(crate::utils::path::normalize_path(&candidate));
     }
+}
+
+fn can_compile_before_scan(
+    source: &Path,
+    config: &Arc<SiteConfig>,
+    typst_hosts: &TypstHostCache,
+    state: &SiteIndex,
+) -> bool {
+    if ContentKind::from_path(source) == Some(ContentKind::Markdown) {
+        return true;
+    }
+
+    let typst_host = typst_host_for(config, typst_hosts);
+    state.with_pages(|store| {
+        scan_page_kind(source, config, &typst_host, store).is_some_and(|kind| kind.is_direct())
+    })
 }
 
 fn serve_file_with_recovery(
