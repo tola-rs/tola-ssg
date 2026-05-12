@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, log, page::StoredPageMap, seo::minify_xml};
+use crate::{config::SiteConfig, log, page::StoredPageMap};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
@@ -90,9 +90,8 @@ impl Sitemap {
             .output_dir()
             .join(&config.site.seo.sitemap.path);
         let xml = self.into_xml();
-        let xml = minify_xml(xml.as_bytes(), config.build.minify);
 
-        fs::write(&sitemap_path, &*xml)
+        fs::write(&sitemap_path, xml)
             .with_context(|| format!("Failed to write sitemap to {}", sitemap_path.display()))?;
 
         log!("sitemap"; "{}", sitemap_path.file_name().unwrap_or_default().to_string_lossy());

@@ -8,7 +8,6 @@ use crate::{
     core::UrlPath,
     log,
     page::StoredPageMap,
-    seo::minify_xml,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result};
@@ -104,18 +103,16 @@ impl AtomFeed {
     }
 
     fn write(self) -> Result<()> {
-        let minify = self.config.build.minify;
         let output_dir = self.config.paths().output_dir();
         let feed_path = self.feed.path.clone();
         let xml = self.into_xml()?;
-        let xml = minify_xml(xml.as_bytes(), minify);
         // Resolve feed path relative to output_dir (with path_prefix)
         let atom_path = output_dir.join(&feed_path);
 
         if let Some(parent) = atom_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&atom_path, &*xml)?;
+        fs::write(&atom_path, xml)?;
 
         log!("atom"; "{}", atom_path.file_name().unwrap_or_default().to_string_lossy());
         Ok(())
