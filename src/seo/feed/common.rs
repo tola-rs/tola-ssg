@@ -7,7 +7,7 @@ use crate::{
     seo::extract::extract,
 };
 use anyhow::Result;
-use std::fs;
+use std::{fs, path::Path};
 
 /// A page validated for feed inclusion (requires title and date)
 #[derive(Debug, Clone)]
@@ -18,6 +18,17 @@ pub struct FeedPage {
     pub summary: Option<String>,
     pub feed_body: Option<String>,
     pub author: Option<String>,
+}
+
+pub struct FeedPages {
+    pub pages: Vec<FeedPage>,
+    pub excluded: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOutcome {
+    Written,
+    Unchanged,
 }
 
 impl FeedPage {
@@ -34,29 +45,70 @@ impl FeedPage {
 }
 
 /// Get all pages valid for feed inclusion (only pages with date)
-pub fn get_feed_pages(store: &StoredPageMap) -> Vec<FeedPage> {
+pub fn collect_feed_pages(store: &StoredPageMap) -> FeedPages {
     let all_pages = store.get_pages();
     let total = all_pages.len();
 
-    let feed_pages: Vec<FeedPage> = all_pages.iter().filter_map(FeedPage::from_stored).collect();
+    let pages: Vec<FeedPage> = all_pages.iter().filter_map(FeedPage::from_stored).collect();
+    let excluded = total - pages.len();
 
-    // Log excluded pages count (Zola-style strict filtering)
-    let excluded = total - feed_pages.len();
-    if excluded > 0 {
-        log!("feed"; "excluded {} pages without date (only pages with date are included)", excluded);
-    }
-
-    feed_pages
+    FeedPages { pages, excluded }
 }
 
-pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, xml: String) -> Result<()> {
+fn write_if_changed(path: &Path, content: &str) -> Result<WriteOutcome> {
+    if let Ok(existing) = fs::read(path)
+        && existing == content.as_bytes()
+    {
+        return Ok(WriteOutcome::Unchanged);
+    }
+
+    fs::write(path, content)?;
+    Ok(WriteOutcome::Written)
+}
+
+pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, xml: &str) -> Result<WriteOutcome> {
     let output_path = config.paths().output_dir().join(&feed.path);
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&output_path, xml)?;
 
-    log!(feed.format.as_str(); "{}", output_path.file_name().unwrap_or_default().to_string_lossy());
-    Ok(())
+    let outcome = write_if_changed(&output_path, xml)?;
+    if outcome == WriteOutcome::Written {
+        log!(
+            "feed";
+            "{}: {}",
+            feed.format.as_str(),
+            output_path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+    Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WriteOutcome, write_if_changed};
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn write_if_changed_skips_identical_content() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("feed.xml");
+
+        assert_eq!(
+            write_if_changed(&path, "<rss/>").unwrap(),
+            WriteOutcome::Written
+        );
+        assert_eq!(
+            write_if_changed(&path, "<rss/>").unwrap(),
+            WriteOutcome::Unchanged
+        );
+        assert_eq!(
+            write_if_changed(&path, "<feed/>").unwrap(),
+            WriteOutcome::Written
+        );
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "<feed/>");
+    }
 }

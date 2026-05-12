@@ -237,11 +237,12 @@ impl CompilerActor {
     pub(super) async fn on_output_change(&mut self, paths: Vec<PathBuf>) {
         use crate::asset::version;
 
+        let config = self.config.current();
         let total = paths.len();
         let mut unique = FxHashSet::default();
         let output_assets: Vec<PathBuf> = paths
             .into_iter()
-            .filter(|path| is_reloadable_output_asset(path))
+            .filter(|path| is_reloadable_output_asset(path, &config))
             .filter(|path| unique.insert(path.clone()))
             .collect();
 

@@ -127,19 +127,52 @@ mod tests {
     }
 
     #[test]
-    fn reloadable_output_asset_excludes_html() {
-        assert!(is_reloadable_output_asset(Path::new(
-            "/public/assets/app.css"
-        )));
-        assert!(is_reloadable_output_asset(Path::new(
-            "/public/assets/app.js"
-        )));
-        assert!(!is_reloadable_output_asset(Path::new(
-            "/public/page/index.html"
-        )));
-        assert!(!is_reloadable_output_asset(Path::new(
-            "/public/page/index.htm"
-        )));
+    fn reloadable_output_asset_excludes_html_and_seo_outputs() {
+        let mut config = SiteConfig::default();
+        config.build.output = PathBuf::from("/public");
+        config.site.seo.feeds = vec![
+            crate::config::FeedConfig {
+                format: crate::config::FeedFormat::Rss,
+                path: "feed.xml".into(),
+                features: vec![],
+            },
+            crate::config::FeedConfig {
+                format: crate::config::FeedFormat::Atom,
+                path: "atom.xml".into(),
+                features: vec![],
+            },
+        ];
+        config.site.seo.sitemap.enable = true;
+        config.site.seo.sitemap.path = "sitemap.xml".into();
+
+        assert!(is_reloadable_output_asset(
+            Path::new("/public/assets/app.css"),
+            &config
+        ));
+        assert!(is_reloadable_output_asset(
+            Path::new("/public/assets/app.js"),
+            &config
+        ));
+        assert!(!is_reloadable_output_asset(
+            Path::new("/public/page/index.html"),
+            &config
+        ));
+        assert!(!is_reloadable_output_asset(
+            Path::new("/public/page/index.htm"),
+            &config
+        ));
+        assert!(!is_reloadable_output_asset(
+            Path::new("/public/feed.xml"),
+            &config
+        ));
+        assert!(!is_reloadable_output_asset(
+            Path::new("/public/atom.xml"),
+            &config
+        ));
+        assert!(!is_reloadable_output_asset(
+            Path::new("/public/sitemap.xml"),
+            &config
+        ));
     }
 }
 
@@ -149,14 +182,33 @@ pub(super) fn log_asset_errors(errors: &[(PathBuf, String)]) {
     }
 }
 
-pub(super) fn is_reloadable_output_asset(path: &Path) -> bool {
-    !matches!(
+pub(super) fn is_reloadable_output_asset(path: &Path, config: &SiteConfig) -> bool {
+    if matches!(
         path.extension()
             .and_then(|ext| ext.to_str())
             .map(|ext| ext.to_ascii_lowercase())
             .as_deref(),
         Some("html" | "htm")
-    )
+    ) {
+        return false;
+    }
+
+    !is_seo_output(path, config)
+}
+
+fn is_seo_output(path: &Path, config: &SiteConfig) -> bool {
+    let path = crate::utils::path::normalize_path(path);
+    let output = config.paths().output_dir();
+
+    config
+        .site
+        .seo
+        .feed_outputs()
+        .iter()
+        .any(|feed| path == crate::utils::path::normalize_path(&output.join(&feed.path)))
+        || (config.site.seo.sitemap.enable
+            && path
+                == crate::utils::path::normalize_path(&output.join(&config.site.seo.sitemap.path)))
 }
 
 pub(super) fn format_asset_reason(total: usize, error_count: usize) -> String {

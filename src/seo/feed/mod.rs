@@ -13,22 +13,40 @@ pub mod atom;
 mod common;
 pub mod rss;
 
-use common::{FeedPage, get_feed_pages};
+use common::{FeedPage, WriteOutcome, collect_feed_pages, write_feed};
 
 /// Build all configured feeds.
 pub fn build_feed(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
-    let pages = get_feed_pages(store);
-
-    for feed in config.site.seo.feed_outputs() {
-        build_one(config, feed, &pages)?;
+    let outputs = config.site.seo.feed_outputs();
+    if outputs.is_empty() {
+        return Ok(());
     }
+
+    let feed_pages = collect_feed_pages(store);
+    let mut written_outputs = 0usize;
+
+    for feed in outputs {
+        let xml = render_one(config, feed, &feed_pages.pages)?;
+        if write_feed(config, feed, &xml)? == WriteOutcome::Written {
+            written_outputs += 1;
+        }
+    }
+
+    if written_outputs > 0 && feed_pages.excluded > 0 {
+        crate::log!(
+            "feed";
+            "excluded {} pages without date (only pages with date are included)",
+            feed_pages.excluded
+        );
+    }
+
     Ok(())
 }
 
-fn build_one(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<()> {
+fn render_one(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<String> {
     match feed.format {
-        FeedFormat::Rss => rss::build_rss(config, feed, pages),
-        FeedFormat::Atom => atom::build_atom(config, feed, pages),
+        FeedFormat::Rss => rss::render(config, feed, pages),
+        FeedFormat::Atom => atom::render(config, feed, pages),
     }
 }
 
@@ -93,6 +111,18 @@ mod tests {
         assert!(rss.contains("<title>Post</title>"));
         assert!(atom.contains("<feed"));
         assert!(atom.contains("<title>Post</title>"));
+    }
+
+    #[test]
+    fn skips_when_no_feed_outputs_are_configured() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("public");
+        let mut config = config_with_feeds(output.clone());
+        config.site.seo.feeds.clear();
+        let store = store_with_page(None);
+
+        build_feed(&config, &store).unwrap();
+        assert!(!output.exists());
     }
 
     #[test]

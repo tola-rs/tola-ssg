@@ -19,6 +19,10 @@ use anyhow::Result;
 
 /// Build configured SEO output files from the current page index.
 pub fn build_outputs(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
+    if !config.site.seo.has_feed_outputs() && !config.site.seo.sitemap.enable {
+        return Ok(());
+    }
+
     let (feed_result, sitemap_result) = rayon::join(
         || state.with_pages(|pages| feed::build_feed(config, pages)),
         || state.with_pages(|pages| sitemap::build_sitemap(config, pages)),

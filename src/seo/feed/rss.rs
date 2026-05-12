@@ -2,7 +2,7 @@
 //!
 //! Generates RSS feeds from page metadata.
 
-use super::common::{FeedPage, write_feed};
+use super::common::FeedPage;
 use crate::{
     config::{FeedConfig, FeedFeature, SiteConfig},
     core::UrlPath,
@@ -13,14 +13,14 @@ use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
 use std::sync::LazyLock;
 
-/// Build RSS 2.0 feed
-pub fn build_rss(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<()> {
+/// Render an RSS 2.0 feed.
+pub(super) fn render(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<String> {
     RssFeed {
         config,
         feed,
         pages,
     }
-    .write()
+    .to_xml()
 }
 
 struct RssFeed<'a> {
@@ -56,10 +56,6 @@ impl RssFeed<'_> {
             .validate()
             .map_err(|e| anyhow!("RSS validation failed: {e}"))?;
         Ok(channel.to_string())
-    }
-
-    fn write(self) -> Result<()> {
-        write_feed(self.config, self.feed, self.to_xml()?)
     }
 }
 

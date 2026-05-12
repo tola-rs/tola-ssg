@@ -2,7 +2,7 @@
 //!
 //! Generates Atom feeds from page metadata.
 
-use super::common::{FeedPage, write_feed};
+use super::common::FeedPage;
 use crate::{
     config::{FeedConfig, FeedFeature, SiteConfig},
     core::UrlPath,
@@ -14,14 +14,14 @@ use atom_syndication::{
     LinkBuilder, Person, PersonBuilder, Text,
 };
 
-/// Build Atom 1.0 feed
-pub fn build_atom(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<()> {
+/// Render an Atom 1.0 feed.
+pub(super) fn render(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<String> {
     AtomFeed {
         config,
         feed,
         pages,
     }
-    .write()
+    .to_xml()
 }
 
 struct AtomFeed<'a> {
@@ -99,10 +99,6 @@ impl AtomFeed<'_> {
             .build();
 
         Ok(feed.to_string())
-    }
-
-    fn write(self) -> Result<()> {
-        write_feed(self.config, self.feed, self.to_xml()?)
     }
 }
 
