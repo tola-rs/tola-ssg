@@ -16,6 +16,7 @@ pub struct FeedPage {
     pub date: String,
     pub permalink: String,
     pub summary: Option<String>,
+    pub feed_body: Option<String>,
     pub author: Option<String>,
 }
 
@@ -26,6 +27,7 @@ impl FeedPage {
             date: page.meta.date.clone()?,
             permalink: page.permalink.to_string(),
             summary: page.meta.summary.as_ref().map(extract),
+            feed_body: page.feed_body.clone(),
             author: page.meta.author.clone(),
         })
     }

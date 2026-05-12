@@ -2,8 +2,8 @@
 //!
 //! Generates syndication feeds from compiled page metadata:
 //!
-//! - **RSS 2.0**: Standard feed format (`rss.xml`)
-//! - **Atom 1.0**: Modern feed format (`atom.xml`)
+//! - **RSS 2.0**: Standard feed format
+//! - **Atom 1.0**: Modern feed format
 
 use crate::config::{FeedConfig, FeedFormat, SiteConfig};
 use crate::page::StoredPageMap;
@@ -35,6 +35,7 @@ fn build_one(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::FeedFeature;
     use crate::core::UrlPath;
     use crate::page::{PageMeta, StoredPageMap};
     use std::fs;
@@ -50,18 +51,20 @@ mod tests {
             FeedConfig {
                 path: "feed.xml".into(),
                 format: FeedFormat::Rss,
+                features: vec![],
             },
             FeedConfig {
                 path: "atom.xml".into(),
                 format: FeedFormat::Atom,
+                features: vec![],
             },
         ];
         config
     }
 
-    fn store_with_page() -> StoredPageMap {
+    fn store_with_page(feed_body: Option<String>) -> StoredPageMap {
         let store = StoredPageMap::new();
-        store.insert_page(
+        store.insert_page_with_feed_body(
             UrlPath::from_page("/post/"),
             PageMeta {
                 title: Some("Post".to_string()),
@@ -69,6 +72,7 @@ mod tests {
                 summary: Some(serde_json::json!("Summary")),
                 ..Default::default()
             },
+            feed_body,
         );
         store
     }
@@ -78,7 +82,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let output = temp.path().join("public");
         let config = config_with_feeds(output.clone());
-        let store = store_with_page();
+        let store = store_with_page(None);
 
         build_feed(&config, &store).unwrap();
 
@@ -89,5 +93,41 @@ mod tests {
         assert!(rss.contains("<title>Post</title>"));
         assert!(atom.contains("<feed"));
         assert!(atom.contains("<title>Post</title>"));
+    }
+
+    #[test]
+    fn full_text_feature_writes_full_entry_content() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("public");
+        let mut config = config_with_feeds(output.clone());
+        config.site.seo.feeds[0].features = vec![FeedFeature::FullText];
+        config.site.seo.feeds[1].features = vec![FeedFeature::FullText];
+        let store = store_with_page(Some("<article><p>Full text</p></article>".to_string()));
+
+        build_feed(&config, &store).unwrap();
+
+        let rss = fs::read_to_string(output.join("feed.xml")).unwrap();
+        let atom = fs::read_to_string(output.join("atom.xml")).unwrap();
+
+        let rss = ::rss::Channel::read_from(rss.as_bytes()).unwrap();
+        let rss_item = rss.items().first().unwrap();
+        assert_eq!(rss_item.description(), Some("Summary"));
+        assert_eq!(
+            rss_item.content(),
+            Some("<article><p>Full text</p></article>")
+        );
+
+        let atom = atom_syndication::Feed::read_from(atom.as_bytes()).unwrap();
+        let atom_entry = atom.entries().first().unwrap();
+        assert_eq!(
+            atom_entry.summary().map(atom_syndication::Text::as_str),
+            Some("Summary")
+        );
+        let atom_content = atom_entry.content().unwrap();
+        assert_eq!(atom_content.content_type(), Some("html"));
+        assert_eq!(
+            atom_content.value(),
+            Some("<article><p>Full text</p></article>")
+        );
     }
 }

@@ -66,6 +66,8 @@ pub struct CompiledPage {
     pub content_meta: Option<PageMeta>,
     /// Pre-compiled HTML content (Lib mode only, None for CLI mode)
     pub compiled_html: Option<Vec<u8>>,
+    /// Rendered body fragment used by full-text feeds.
+    pub feed_body: Option<String>,
 }
 
 impl CompiledPage {
@@ -171,6 +173,7 @@ impl CompiledPage {
             lastmod,
             content_meta: None,
             compiled_html: None,
+            feed_body: None,
         })
     }
 
@@ -315,6 +318,7 @@ mod tests {
             lastmod: Some(time),
             content_meta: None,
             compiled_html: None,
+            feed_body: None,
         };
 
         let ymd = page.lastmod_ymd().unwrap();
@@ -334,6 +338,7 @@ mod tests {
             lastmod: None,
             content_meta: None,
             compiled_html: None,
+            feed_body: None,
         };
 
         assert_eq!(page.lastmod_ymd(), None);
@@ -445,6 +450,7 @@ mod tests {
                     lastmod: None,
                     content_meta: None,
                     compiled_html: None,
+                    feed_body: None,
                 },
                 CompiledPage {
                     route: test_route(
@@ -456,6 +462,7 @@ mod tests {
                     lastmod: None,
                     content_meta: None,
                     compiled_html: None,
+                    feed_body: None,
                 },
             ],
         };
@@ -478,6 +485,7 @@ mod tests {
                     lastmod: None,
                     content_meta: None,
                     compiled_html: None,
+                    feed_body: None,
                 },
                 CompiledPage {
                     route: test_route(
@@ -489,6 +497,7 @@ mod tests {
                     lastmod: None,
                     content_meta: None,
                     compiled_html: None,
+                    feed_body: None,
                 },
             ],
         };

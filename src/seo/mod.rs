@@ -2,7 +2,7 @@
 //!
 //! Generates auxiliary files and injects metadata for search engines and social media:
 //!
-//! - **Feed**: RSS/Atom feeds for blog readers (`rss.xml`, `atom.xml`)
+//! - **Feed**: configured RSS/Atom feeds for blog readers
 //! - **Sitemap**: Search engine indexing (`sitemap.xml`)
 //! - **OG Tags**: Open Graph meta tags for social media sharing
 //!

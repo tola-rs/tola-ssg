@@ -335,9 +335,14 @@ pub fn rebuild_iterative_pages(
             .map(|(path, result)| {
                 let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
-                let compile_ctx =
-                    CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                        .with_route(&page.route);
+                let compile_ctx = CompileContext::new(
+                    ctx.mode,
+                    ctx.config,
+                    ctx.typst_host,
+                    ctx.store,
+                    super::feed_body_mode(ctx.config),
+                )
+                .with_route(&page.route);
                 let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -348,9 +353,14 @@ pub fn rebuild_iterative_pages(
             .par_iter()
             .map(|path| {
                 let page = CompiledPage::from_paths(path, ctx.config)?;
-                let compile_ctx =
-                    CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                        .with_route(&page.route);
+                let compile_ctx = CompileContext::new(
+                    ctx.mode,
+                    ctx.config,
+                    ctx.typst_host,
+                    ctx.store,
+                    super::feed_body_mode(ctx.config),
+                )
+                .with_route(&page.route);
                 let content = compile(path, &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -405,6 +415,7 @@ fn process_iterative_page(
 ) -> Result<CompiledPage> {
     let source = page.route.source.clone();
     page.apply_meta(result.meta, ctx.config);
+    page.feed_body = result.feed_body;
 
     // Keep source->permalink mapping consistent across iterative passes.
     let state = PageState::new(ctx.store);
@@ -416,8 +427,11 @@ fn process_iterative_page(
 
     // Update page store with metadata from compile phase.
     if let Some(ref meta) = page.content_meta {
-        ctx.store
-            .insert_page(page.route.permalink.clone(), meta.clone());
+        ctx.store.insert_page_with_feed_body(
+            page.route.permalink.clone(),
+            meta.clone(),
+            page.feed_body.clone(),
+        );
     }
 
     if let Some(vdom) = result.indexed_vdom {
@@ -587,8 +601,14 @@ fn process_typst_files(
         .map(|(path, result)| {
             let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx = CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                .with_route(&page.route);
+            let compile_ctx = CompileContext::new(
+                ctx.mode,
+                ctx.config,
+                ctx.typst_host,
+                ctx.store,
+                super::feed_body_mode(ctx.config),
+            )
+            .with_route(&page.route);
             let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
             finalize_static_page(ctx, page, content)
         })
@@ -604,8 +624,14 @@ fn process_markdown_files(
         .par_iter()
         .map(|path| {
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx = CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                .with_route(&page.route);
+            let compile_ctx = CompileContext::new(
+                ctx.mode,
+                ctx.config,
+                ctx.typst_host,
+                ctx.store,
+                super::feed_body_mode(ctx.config),
+            )
+            .with_route(&page.route);
             let content = compile(path, &compile_ctx)?;
             if let Some(p) = progress {
                 p.inc("markdown");
@@ -647,6 +673,7 @@ fn finalize_static_page(
     }
 
     page.apply_meta(result.meta, ctx.config); // Apply metadata/permalink FIRST
+    page.feed_body = result.feed_body;
     page.compiled_html = Some(result.html);
 
     // Cache VDOM with the CORRECT permalink (after apply_custom_permalink)
@@ -657,9 +684,10 @@ fn finalize_static_page(
     if ctx.rebuilds_global_state() {
         let state = PageState::new(ctx.store);
         state.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
-        ctx.store.insert_page(
+        ctx.store.insert_page_with_feed_body(
             page.route.permalink.clone(),
             page.content_meta.clone().unwrap_or_default(),
+            page.feed_body.clone(),
         );
     }
 

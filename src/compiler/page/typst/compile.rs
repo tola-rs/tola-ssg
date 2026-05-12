@@ -119,6 +119,7 @@ pub fn process_result(
 
     Ok(PageCompileOutput {
         html: output.html,
+        feed_body: output.feed_body,
         indexed_vdom: output.indexed,
         meta,
         accessed_files: accessed.files,

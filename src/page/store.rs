@@ -1,4 +1,4 @@
-//! Global page storage for virtual package injection and RSS/sitemap.
+//! Global page storage for virtual package injection and feed/sitemap output.
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -24,6 +24,9 @@ use crate::utils::path::normalize_path;
 pub struct StoredPage {
     /// The page's permalink (URL path).
     pub permalink: UrlPath,
+    /// Rendered body fragment for feed output.
+    #[serde(skip_serializing)]
+    pub feed_body: Option<String>,
     /// Page metadata from `<tola-meta>` (flattened in JSON output).
     #[serde(flatten)]
     pub meta: PageMeta,
@@ -31,7 +34,19 @@ pub struct StoredPage {
 
 impl StoredPage {
     pub fn new(permalink: UrlPath, meta: PageMeta) -> Self {
-        Self { permalink, meta }
+        Self {
+            permalink,
+            feed_body: None,
+            meta,
+        }
+    }
+
+    pub fn with_feed_body(permalink: UrlPath, meta: PageMeta, feed_body: Option<String>) -> Self {
+        Self {
+            permalink,
+            feed_body,
+            meta,
+        }
     }
 
     /// Check if this page is a draft.
@@ -96,9 +111,20 @@ impl StoredPageMap {
 
     /// Insert or update a page.
     pub fn insert_page(&self, permalink: UrlPath, meta: PageMeta) {
-        self.pages
-            .write()
-            .insert(permalink.clone(), StoredPage::new(permalink, meta));
+        self.insert_page_with_feed_body(permalink, meta, None);
+    }
+
+    /// Insert or update a page with rendered body for feed output.
+    pub fn insert_page_with_feed_body(
+        &self,
+        permalink: UrlPath,
+        meta: PageMeta,
+        feed_body: Option<String>,
+    ) {
+        self.pages.write().insert(
+            permalink.clone(),
+            StoredPage::with_feed_body(permalink, meta, feed_body),
+        );
     }
 
     /// Remove a page by permalink.

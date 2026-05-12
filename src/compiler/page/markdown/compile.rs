@@ -41,6 +41,7 @@ pub fn compile(path: &Path, ctx: &CompileContext<'_>) -> Result<PageCompileOutpu
 
     Ok(PageCompileOutput {
         html: output.html,
+        feed_body: output.feed_body,
         indexed_vdom: output.indexed,
         meta,
         accessed_files: vec![path.to_path_buf()],

@@ -4,14 +4,14 @@
 
 use super::common::{FeedPage, write_feed};
 use crate::{
-    config::{FeedConfig, SiteConfig},
+    config::{FeedConfig, FeedFeature, SiteConfig},
     core::UrlPath,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result};
 use atom_syndication::{
-    Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,
-    Person, PersonBuilder, Text,
+    ContentBuilder, Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link,
+    LinkBuilder, Person, PersonBuilder, Text,
 };
 
 /// Build Atom 1.0 feed
@@ -40,7 +40,13 @@ impl AtomFeed<'_> {
         let entries: Vec<Entry> = self
             .pages
             .iter()
-            .filter_map(|page| page_to_atom_entry(page, &self.config))
+            .filter_map(|page| {
+                page_to_atom_entry(
+                    page,
+                    &self.config,
+                    self.feed.has_feature(FeedFeature::FullText),
+                )
+            })
             .collect();
 
         // Find the most recent update time for feed updated field
@@ -100,7 +106,11 @@ impl AtomFeed<'_> {
     }
 }
 
-fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
+fn page_to_atom_entry(
+    page: &FeedPage,
+    config: &SiteConfig,
+    include_full_text: bool,
+) -> Option<Entry> {
     let updated_str = DateTimeUtc::parse(&page.date)?.to_rfc3339();
     let updated: FixedDateTime = updated_str.parse().ok()?;
 
@@ -120,6 +130,16 @@ fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
         .map(|name| vec![PersonBuilder::default().name(name.clone()).build()])
         .unwrap_or_default();
 
+    let content = include_full_text
+        .then(|| page.feed_body.clone())
+        .flatten()
+        .map(|html| {
+            ContentBuilder::default()
+                .value(html)
+                .content_type("html".to_string())
+                .build()
+        });
+
     Some(
         EntryBuilder::default()
             .title(Text::plain(page.title.clone()))
@@ -127,6 +147,7 @@ fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
             .updated(updated)
             .links(vec![entry_link])
             .summary(page.summary.clone().map(Text::plain))
+            .content(content)
             .authors(authors)
             .build(),
     )
@@ -155,13 +176,34 @@ mod tests {
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
             summary: Some("A test summary".to_string()),
+            feed_body: None,
             author: Some("Post Author".to_string()),
         };
 
-        let entry = page_to_atom_entry(&page, &config).expect("should create entry");
+        let entry = page_to_atom_entry(&page, &config, false).expect("should create entry");
         assert_eq!(entry.title().as_str(), "Test Post");
         assert_eq!(entry.id(), "https://example.com/test/");
         assert!(entry.updated().to_rfc3339().starts_with("2024-01-15"));
+        assert_eq!(entry.content(), None);
+    }
+
+    #[test]
+    fn test_page_to_atom_entry_full_text() {
+        let config = make_config();
+        let page = FeedPage {
+            title: "Test Post".to_string(),
+            date: "2024-01-15".to_string(),
+            permalink: "/test/".to_string(),
+            summary: Some("A test summary".to_string()),
+            feed_body: Some("<article><p>Full text</p></article>".to_string()),
+            author: Some("Post Author".to_string()),
+        };
+
+        let entry = page_to_atom_entry(&page, &config, true).expect("should create entry");
+        assert_eq!(entry.summary().map(Text::as_str), Some("A test summary"));
+        let content = entry.content().expect("should include full text");
+        assert_eq!(content.content_type(), Some("html"));
+        assert_eq!(content.value(), Some("<article><p>Full text</p></article>"));
     }
 
     #[test]
@@ -172,10 +214,11 @@ mod tests {
             date: "invalid-date".to_string(),
             permalink: "/test/".to_string(),
             summary: None,
+            feed_body: None,
             author: None,
         };
 
         // Invalid date should return None
-        assert!(page_to_atom_entry(&page, &config).is_none());
+        assert!(page_to_atom_entry(&page, &config, false).is_none());
     }
 }

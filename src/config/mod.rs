@@ -23,7 +23,7 @@
 //! |--------------------|----------------------------------------------|
 //! | `[site.info]`      | Site metadata (title, author, url, extra)    |
 //! | `[site.nav]`       | SPA navigation, transition, preload settings |
-//! | `[build]`          | Build paths, svg, css, feed, sitemap, etc.   |
+//! | `[build]`          | Build paths, svg, css, assets, etc.          |
 //! | `[serve]`          | Development server (port, interface, watch)  |
 //! | `[deploy]`         | Deployment targets (GitHub, Cloudflare)      |
 //! | `[validate]`       | Link and asset validation settings           |
@@ -38,8 +38,8 @@ use util::{extract_url_path, find_config_file};
 
 // Re-export from section/
 pub use section::{
-    AssetsConfig, BuildSectionConfig, DeployConfig, FeedConfig, FeedFormat, SlugCase, SlugConfig,
-    SlugMode, SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
+    AssetsConfig, BuildSectionConfig, DeployConfig, FeedConfig, FeedFeature, FeedFormat, SlugCase,
+    SlugConfig, SlugMode, SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
 };
 
 // Re-export from types/
@@ -602,6 +602,7 @@ impl SiteConfig {
         self.site
             .header
             .validate(&self.build.assets, self.get_root(), &mut diag);
+        self.site.seo.validate(&mut diag);
 
         // Command-specific validation
         self.validate_command_specific(&mut diag)?;

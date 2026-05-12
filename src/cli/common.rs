@@ -8,11 +8,11 @@ use crossbeam::queue::SegQueue;
 use serde_json::Value as JsonValue;
 use typst_batch::prelude::*;
 
-use crate::compiler::CompileContext;
 use crate::compiler::collect_all_files;
 use crate::compiler::family::Indexed;
 use crate::compiler::page::scan;
 use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
+use crate::compiler::{CompileContext, FeedBodyMode};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
 use crate::package::build_visible_inputs;
@@ -172,7 +172,13 @@ pub fn scan_markdown_file(
     host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<MarkdownScanResult> {
-    let ctx = CompileContext::new(BuildMode::PRODUCTION, config, host, store);
+    let ctx = CompileContext::new(
+        BuildMode::PRODUCTION,
+        config,
+        host,
+        store,
+        FeedBodyMode::Skip,
+    );
     let result = scan(file, &ctx)?;
 
     Ok(MarkdownScanResult {

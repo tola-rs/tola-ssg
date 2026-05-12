@@ -13,6 +13,18 @@ use crate::core::BuildMode;
 use crate::page::StoredPageMap;
 use page::{PageRoute, TypstHost};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedBodyMode {
+    Skip,
+    Render,
+}
+
+impl FeedBodyMode {
+    pub const fn should_render(self) -> bool {
+        matches!(self, Self::Render)
+    }
+}
+
 /// Context for the compilation pipeline
 pub struct CompileContext<'a> {
     pub mode: BuildMode,
@@ -25,6 +37,7 @@ pub struct CompileContext<'a> {
     /// Default: `true`. Set to `false` for pages like 404 that need
     /// self-contained styles to avoid relative path issues.
     pub global_header: bool,
+    pub feed_body: FeedBodyMode,
 }
 
 impl<'a> CompileContext<'a> {
@@ -33,6 +46,7 @@ impl<'a> CompileContext<'a> {
         config: &'a SiteConfig,
         typst_host: &'a TypstHost,
         store: &'a StoredPageMap,
+        feed_body: FeedBodyMode,
     ) -> Self {
         Self {
             mode,
@@ -42,6 +56,7 @@ impl<'a> CompileContext<'a> {
             route: None,
             current_context: None,
             global_header: true,
+            feed_body,
         }
     }
 

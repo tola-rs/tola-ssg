@@ -25,6 +25,28 @@ impl FeedFormat {
     }
 }
 
+/// Optional feed output feature.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FeedFeature {
+    /// Include full entry HTML in addition to the summary.
+    FullText,
+}
+
+impl FeedFeature {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FullText => "full-text",
+        }
+    }
+
+    pub const fn requires_feed_body(self) -> bool {
+        match self {
+            Self::FullText => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Config, PartialEq, Eq)]
 #[serde(default)]
 #[config(section = "site.seo.feeds")]
@@ -33,6 +55,8 @@ pub struct FeedConfig {
     pub path: PathBuf,
     #[config(default = "rss", inline_doc = "Feed format: rss | atom")]
     pub format: FeedFormat,
+    /// Optional feed features.
+    pub features: Vec<FeedFeature>,
 }
 
 impl Default for FeedConfig {
@@ -40,11 +64,22 @@ impl Default for FeedConfig {
         Self {
             path: "feed.xml".into(),
             format: FeedFormat::Rss,
+            features: Vec::new(),
         }
     }
 }
 
 impl FeedConfig {
+    pub fn has_feature(&self, feature: FeedFeature) -> bool {
+        self.features.contains(&feature)
+    }
+
+    pub fn needs_feed_body(&self) -> bool {
+        self.features
+            .iter()
+            .any(|feature| feature.requires_feed_body())
+    }
+
     pub fn toml_array_table() -> String {
         format!("[[{}]]", Self::TEMPLATE_SECTION)
     }
@@ -68,6 +103,14 @@ impl FeedConfig {
             toml::Value::try_from(default.path)
                 .map(|v| v.to_string())
                 .unwrap_or_default()
+        ));
+        out.push_str(&format!(
+            "# {} = {}  # {}\n",
+            toml_key(Self::FIELDS.features),
+            toml::Value::try_from(default.features)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            FeedFeature::FullText.as_str()
         ));
         out
     }
@@ -126,6 +169,14 @@ impl SeoConfig {
         self.feeds.clear();
     }
 
+    pub fn needs_feed_body(&self) -> bool {
+        self.feeds.iter().any(FeedConfig::needs_feed_body)
+    }
+
+    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
+        self.validate_features(diag);
+    }
+
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         for (idx, feed) in self.feeds.iter().enumerate() {
             validate_output_path(
@@ -138,6 +189,25 @@ impl SeoConfig {
         }
         validate_output_path(&self.sitemap.path, 0, 1, SitemapConfig::FIELDS.path, diag);
         validate_feed_path_collisions(self, diag);
+    }
+
+    fn validate_features(&self, diag: &mut ConfigDiagnostics) {
+        for (feed_idx, feed) in self.feeds.iter().enumerate() {
+            let mut seen: Vec<(FeedFeature, usize)> = Vec::new();
+            for (feature_idx, feature) in feed.features.iter().copied().enumerate() {
+                if let Some((_, prev_idx)) = seen.iter().find(|(seen, _)| *seen == feature) {
+                    diag.error(
+                        FeedConfig::FIELDS.features,
+                        format!(
+                            "[{feed_idx}] feature '{}' duplicates feature [{prev_idx}]",
+                            feature.as_str()
+                        ),
+                    );
+                } else {
+                    seen.push((feature, feature_idx));
+                }
+            }
+        }
     }
 }
 
@@ -199,7 +269,7 @@ fn validate_output_path(
 #[cfg(test)]
 mod tests {
     use super::{FeedConfig, SitemapConfig};
-    use crate::config::{FeedFormat, test_parse_config};
+    use crate::config::{FeedFeature, FeedFormat, test_parse_config};
     use std::path::PathBuf;
 
     fn feed_entry(format: &str, path: &str) -> String {
@@ -237,6 +307,42 @@ path = "{path}"
         assert_eq!(config.site.seo.feeds[0].path, PathBuf::from("feed.xml"));
         assert_eq!(config.site.seo.feeds[1].format, FeedFormat::Atom);
         assert_eq!(config.site.seo.feeds[1].path, PathBuf::from("atom.xml"));
+    }
+
+    #[test]
+    fn parses_feed_features() {
+        let config = test_parse_config(&format!(
+            r#"
+{}
+format = "rss"
+path = "feed.xml"
+features = ["full-text"]
+"#,
+            FeedConfig::toml_array_table()
+        ));
+
+        assert_eq!(
+            config.site.seo.feeds[0].features,
+            vec![FeedFeature::FullText]
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_feed_features() {
+        let config = test_parse_config(&format!(
+            r#"
+{}
+format = "rss"
+path = "feed.xml"
+features = ["full-text", "full-text"]
+"#,
+            FeedConfig::toml_array_table()
+        ));
+        let mut diag = crate::config::ConfigDiagnostics::new();
+
+        config.site.seo.validate(&mut diag);
+
+        assert!(diag.has_errors());
     }
 
     #[test]

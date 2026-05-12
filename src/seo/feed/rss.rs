@@ -4,7 +4,7 @@
 
 use super::common::{FeedPage, write_feed};
 use crate::{
-    config::{FeedConfig, SiteConfig},
+    config::{FeedConfig, FeedFeature, SiteConfig},
     core::UrlPath,
     utils::date::DateTimeUtc,
 };
@@ -34,7 +34,13 @@ impl RssFeed<'_> {
         let items: Vec<_> = self
             .pages
             .iter()
-            .filter_map(|page| page_to_rss_item(page, &self.config))
+            .filter_map(|page| {
+                page_to_rss_item(
+                    page,
+                    &self.config,
+                    self.feed.has_feature(FeedFeature::FullText),
+                )
+            })
             .collect();
 
         let channel = ChannelBuilder::default()
@@ -57,7 +63,11 @@ impl RssFeed<'_> {
     }
 }
 
-fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
+fn page_to_rss_item(
+    page: &FeedPage,
+    config: &SiteConfig,
+    include_full_text: bool,
+) -> Option<rss::Item> {
     let pub_date = DateTimeUtc::parse(&page.date).map(DateTimeUtc::to_rfc2822)?;
 
     let permalink = UrlPath::from_page(&page.permalink);
@@ -74,6 +84,7 @@ fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
             .link(Some(link.clone()))
             .guid(GuidBuilder::default().permalink(true).value(link).build())
             .description(description)
+            .content(include_full_text.then(|| page.feed_body.clone()).flatten())
             .pub_date(pub_date)
             .author(author)
             .build(),
@@ -148,13 +159,32 @@ mod tests {
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
             summary: Some("A test summary".to_string()),
+            feed_body: None,
             author: None,
         };
 
-        let item = page_to_rss_item(&page, &config).expect("should create item");
+        let item = page_to_rss_item(&page, &config, false).expect("should create item");
         assert_eq!(item.title(), Some("Test Post"));
         assert_eq!(item.link(), Some("https://example.com/test/"));
         assert_eq!(item.description(), Some("A test summary"));
+        assert_eq!(item.content(), None);
+    }
+
+    #[test]
+    fn test_page_to_rss_item_full_text() {
+        let config = make_config("Test Author", "test@example.com");
+        let page = FeedPage {
+            title: "Test Post".to_string(),
+            date: "2024-01-15".to_string(),
+            permalink: "/test/".to_string(),
+            summary: Some("A test summary".to_string()),
+            feed_body: Some("<article><p>Full text</p></article>".to_string()),
+            author: None,
+        };
+
+        let item = page_to_rss_item(&page, &config, true).expect("should create item");
+        assert_eq!(item.description(), Some("A test summary"));
+        assert_eq!(item.content(), Some("<article><p>Full text</p></article>"));
     }
 
     #[test]
@@ -165,10 +195,11 @@ mod tests {
             date: "invalid-date".to_string(),
             permalink: "/test/".to_string(),
             summary: None,
+            feed_body: None,
             author: None,
         };
 
         // Invalid date format should return None
-        assert!(page_to_rss_item(&page, &config).is_none());
+        assert!(page_to_rss_item(&page, &config, false).is_none());
     }
 }

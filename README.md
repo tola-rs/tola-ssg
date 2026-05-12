@@ -237,6 +237,7 @@ auto_og = true   # Auto-inject default OG tags (site_name, locale, description, 
 [[site.seo.feeds]]
 format = "rss"   # "rss" | "atom"
 path = "feed.xml"
+features = ["full-text"]
 
 [site.seo.sitemap]
 enable = true

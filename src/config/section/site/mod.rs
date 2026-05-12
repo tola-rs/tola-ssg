@@ -30,6 +30,7 @@
 //! [[site.seo.feeds]]
 //! format = "rss"
 //! path = "feed.xml"
+//! features = ["full-text"]
 //!
 //! [site.seo.sitemap]
 //! enable = true
@@ -46,7 +47,7 @@ mod seo;
 pub use header::HeaderConfig;
 pub use info::SiteInfoConfig;
 pub use nav::{NavConfig, TransitionStyle};
-pub use seo::{FeedConfig, FeedFormat, SeoConfig};
+pub use seo::{FeedConfig, FeedFeature, FeedFormat, SeoConfig};
 
 use macros::Config;
 use serde::{Deserialize, Serialize};

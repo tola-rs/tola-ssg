@@ -191,6 +191,7 @@ mod tests {
             lastmod: None,
             content_meta: None,
             compiled_html: None,
+            feed_body: None,
         }
     }
 
