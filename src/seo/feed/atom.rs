@@ -4,7 +4,11 @@
 
 use super::common::{FeedPage, get_feed_pages};
 use crate::{
-    config::SiteConfig, core::UrlPath, log, page::StoredPageMap, seo::minify_xml,
+    config::{FeedConfig, SiteConfig},
+    core::UrlPath,
+    log,
+    page::StoredPageMap,
+    seo::minify_xml,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result};
@@ -15,20 +19,22 @@ use atom_syndication::{
 use std::fs;
 
 /// Build Atom 1.0 feed
-pub fn build_atom(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
-    AtomFeed::build(config, store).write()
+pub fn build_atom(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Result<()> {
+    AtomFeed::build(config, feed, store).write()
 }
 
 struct AtomFeed {
     config: SiteConfig,
+    feed: FeedConfig,
     pages: Vec<FeedPage>,
 }
 
 impl AtomFeed {
-    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
+    fn build(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Self {
         let pages = get_feed_pages(store);
         Self {
             config: config.clone(),
+            feed: feed.clone(),
             pages,
         }
     }
@@ -36,16 +42,7 @@ impl AtomFeed {
     fn into_xml(self) -> Result<String> {
         let site_url = self.config.site.info.url.as_deref();
         let base_url = UrlPath::from_page("/").canonical_url(site_url);
-        let feed_path = format!(
-            "/{}",
-            self.config
-                .site
-                .seo
-                .feed
-                .path
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
+        let feed_path = format!("/{}", self.feed.path.to_string_lossy().replace('\\', "/"));
         let feed_url = UrlPath::from_asset(&feed_path).canonical_url(site_url);
 
         let entries: Vec<Entry> = self
@@ -109,7 +106,7 @@ impl AtomFeed {
     fn write(self) -> Result<()> {
         let minify = self.config.build.minify;
         let output_dir = self.config.paths().output_dir();
-        let feed_path = self.config.site.seo.feed.path.clone();
+        let feed_path = self.feed.path.clone();
         let xml = self.into_xml()?;
         let xml = minify_xml(xml.as_bytes(), minify);
         // Resolve feed path relative to output_dir (with path_prefix)

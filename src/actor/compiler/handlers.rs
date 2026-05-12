@@ -191,6 +191,7 @@ impl CompilerActor {
         }
 
         self.recompile_virtual_users().await;
+        self.write_seo_outputs(self.config.current()).await;
         let _ = self
             .vdom_tx
             .send(VdomMsg::BatchEnd {
@@ -375,6 +376,7 @@ impl CompilerActor {
                         }
                     }
                 }
+                self.write_seo_outputs(self.config.current()).await;
             }
             Ok(Err(e)) => {
                 crate::debug!("compile"; "full rebuild failed: {}", e);

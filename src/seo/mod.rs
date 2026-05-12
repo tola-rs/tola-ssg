@@ -14,7 +14,21 @@ pub mod feed;
 pub mod og;
 pub mod sitemap;
 
+use crate::{address::SiteIndex, config::SiteConfig};
+use anyhow::Result;
 use std::borrow::Cow;
+
+/// Build configured SEO output files from the current page index.
+pub fn build_outputs(config: &SiteConfig, state: &SiteIndex) -> Result<()> {
+    let (feed_result, sitemap_result) = rayon::join(
+        || state.with_pages(|pages| feed::build_feed(config, pages)),
+        || state.with_pages(|pages| sitemap::build_sitemap(config, pages)),
+    );
+
+    feed_result?;
+    sitemap_result?;
+    Ok(())
+}
 
 /// Minify XML content if enabled
 pub fn minify_xml(content: &[u8], enabled: bool) -> Cow<'_, [u8]> {

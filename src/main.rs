@@ -28,7 +28,6 @@ use clap::{ColorChoice, Parser};
 use cli::{Cli, Commands, build::build_site};
 use config::{SiteConfig, init_config};
 use core::BuildMode;
-use seo::{feed::build_feed, sitemap::build_sitemap};
 
 fn main() -> Result<()> {
     // Setup global Ctrl+C handler (before any blocking operations)
@@ -59,19 +58,11 @@ fn main() -> Result<()> {
     }
 }
 
-/// Build site and optionally generate rss/sitemap in parallel
+/// Build site and optionally generate feed/sitemap outputs in parallel
 fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<()> {
     let state = SiteIndex::new();
     let _pages = build_site(mode, config, &state, false)?;
 
-    // Generate SEO files in parallel (feed, sitemap)
-    // Note: OG tags are injected during VDOM pipeline (see HeaderInjector)
-    let (feed_result, sitemap_result) = rayon::join(
-        || state.with_pages(|pages| build_feed(config, pages)),
-        || state.with_pages(|pages| build_sitemap(config, pages)),
-    );
-
-    feed_result?;
-    sitemap_result?;
-    Ok(())
+    // OG tags are injected during VDOM pipeline (see HeaderInjector).
+    seo::build_outputs(config, &state)
 }

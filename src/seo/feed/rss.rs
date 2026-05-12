@@ -4,7 +4,11 @@
 
 use super::common::{FeedPage, get_feed_pages};
 use crate::{
-    config::SiteConfig, core::UrlPath, log, page::StoredPageMap, seo::minify_xml,
+    config::{FeedConfig, SiteConfig},
+    core::UrlPath,
+    log,
+    page::StoredPageMap,
+    seo::minify_xml,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result, anyhow};
@@ -13,20 +17,22 @@ use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
 use std::{fs, sync::LazyLock};
 
 /// Build RSS 2.0 feed
-pub fn build_rss(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
-    RssFeed::build(config, store).write()
+pub fn build_rss(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Result<()> {
+    RssFeed::build(config, feed, store).write()
 }
 
 struct RssFeed {
     config: SiteConfig,
+    feed: FeedConfig,
     pages: Vec<FeedPage>,
 }
 
 impl RssFeed {
-    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
+    fn build(config: &SiteConfig, feed: &FeedConfig, store: &StoredPageMap) -> Self {
         let pages = get_feed_pages(store);
         Self {
             config: config.clone(),
+            feed: feed.clone(),
             pages,
         }
     }
@@ -56,7 +62,7 @@ impl RssFeed {
     fn write(self) -> Result<()> {
         let minify = self.config.build.minify;
         let output_dir = self.config.paths().output_dir();
-        let feed_path = self.config.site.seo.feed.path.clone();
+        let feed_path = self.feed.path.clone();
         let xml = self.into_xml()?;
         let xml = minify_xml(xml.as_bytes(), minify);
         // Resolve feed path relative to output_dir (with path_prefix)

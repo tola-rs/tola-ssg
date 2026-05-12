@@ -39,16 +39,19 @@ pub use meta::MetaConfig;
 pub use slug::{SlugCase, SlugConfig, SlugMode};
 pub use svg::{SvgConfig, SvgConverter, SvgFormat};
 
-use crate::config::{ConfigDiagnostics, FieldPath};
+use crate::config::ConfigDiagnostics;
+use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
+#[config(section = "build")]
 pub struct BuildSectionConfig {
     /// URL path prefix for subdirectory deployment.
     /// Automatically extracted from `[base].url` path component.
     #[serde(skip)]
+    #[config(skip)]
     pub path_prefix: PathBuf,
 
     /// Content source directory (Typst files).
@@ -71,10 +74,12 @@ pub struct BuildSectionConfig {
 
     /// Clean output directory before building (CLI only).
     #[serde(skip)]
+    #[config(skip)]
     pub clean: bool,
 
     /// Skip draft pages during build (CLI only).
     #[serde(skip)]
+    #[config(skip)]
     pub skip_drafts: bool,
 
     /// URL slugification settings.
@@ -132,7 +137,7 @@ impl BuildSectionConfig {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| dep.display().to_string());
                 diag.hint(
-                    FieldPath::new("build.deps"),
+                    Self::FIELDS.deps,
                     format!("directory '{}' not found, skipping", rel_path),
                 );
             }

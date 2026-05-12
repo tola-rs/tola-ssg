@@ -109,7 +109,25 @@ impl CompilerActor {
         if let Some(paths) = watched_post_paths {
             self.run_watched_post_hooks(&paths);
         }
+        self.write_seo_outputs(std::sync::Arc::clone(&config)).await;
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd { config }).await;
+    }
+
+    pub(super) async fn write_seo_outputs(
+        &self,
+        config: std::sync::Arc<crate::config::SiteConfig>,
+    ) {
+        if !config.site.seo.has_feed_outputs() && !config.site.seo.sitemap.enable {
+            return;
+        }
+
+        let state = std::sync::Arc::clone(&self.state);
+        match tokio::task::spawn_blocking(move || crate::seo::build_outputs(&config, &state)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => crate::log!("warning"; "failed to write SEO outputs: {}", e),
+            Err(e) => crate::debug!("compile"; "SEO output task failed: {}", e),
+        }
     }
 }
 

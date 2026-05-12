@@ -134,14 +134,7 @@ pub fn serve_build(
     // Finalize: print warnings and persist cache
     finalize_serve_build(config, &state, &warnings)?;
 
-    // Generate feed and sitemap
-    let (rss_result, sitemap_result) = rayon::join(
-        || state.with_pages(|pages| seo::feed::build_feed(config, pages)),
-        || state.with_pages(|pages| seo::sitemap::build_sitemap(config, pages)),
-    );
-
-    rss_result?;
-    sitemap_result?;
+    seo::build_outputs(config, &state)?;
 
     debug!("build"; "done");
     Ok(())

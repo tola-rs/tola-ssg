@@ -32,12 +32,14 @@ pub mod section;
 pub mod types;
 mod util;
 
+#[cfg(test)]
+use section::site::SiteInfoConfig;
 use util::{extract_url_path, find_config_file};
 
 // Re-export from section/
 pub use section::{
-    AssetsConfig, BuildSectionConfig, DeployConfig, FeedFormat, SlugCase, SlugConfig, SlugMode,
-    SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
+    AssetsConfig, BuildSectionConfig, DeployConfig, FeedConfig, FeedFormat, SlugCase, SlugConfig,
+    SlugMode, SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
 };
 
 // Re-export from types/
@@ -416,7 +418,7 @@ impl SiteConfig {
 
     /// Apply build arguments from CLI.
     ///
-    /// `is_serve`: If true, rss/sitemap default to disabled for faster local preview.
+    /// `is_serve`: If true, feed/sitemap output defaults to disabled for faster local preview.
     fn apply_build_args(&mut self, args: &BuildArgs, is_serve: bool) {
         // Set verbose mode globally
         crate::logger::set_verbose(args.verbose);
@@ -435,15 +437,32 @@ impl SiteConfig {
             self.site.info.url = Some(url.clone());
         }
 
+        if let Some(message) = self.missing_feed_config_warning(args) {
+            log!("warning"; "{message}");
+        }
+
         if is_serve {
-            // Serve: disable feed/sitemap by default, enable only if explicitly requested
-            self.site.seo.feed.enable = args.rss.unwrap_or(false);
+            // Serve: disable feed/sitemap by default, keep configured feeds only when requested.
+            if args.feed != Some(true) {
+                self.site.seo.clear_feed_outputs();
+            }
             self.site.seo.sitemap.enable = args.sitemap.unwrap_or(false);
         } else {
-            // Build/Deploy: respect config, override only if CLI flag provided
-            Self::update_option(&mut self.site.seo.feed.enable, args.rss.as_ref());
+            // Build/Deploy: respect configured feeds, allow explicit disabling.
+            if args.feed == Some(false) {
+                self.site.seo.clear_feed_outputs();
+            }
             Self::update_option(&mut self.site.seo.sitemap.enable, args.sitemap.as_ref());
         }
+    }
+
+    fn missing_feed_config_warning(&self, args: &BuildArgs) -> Option<String> {
+        (args.feed == Some(true) && !self.site.seo.has_feed_outputs()).then(|| {
+            format!(
+                "--feed was requested but no {} outputs are configured",
+                FeedConfig::toml_array_table()
+            )
+        })
     }
 
     /// Apply serve-specific options.
@@ -503,7 +522,7 @@ impl SiteConfig {
             .iter()
             .map(|p| crate::utils::path::normalize_path(&root.join(p)))
             .collect();
-        // Note: feed.path and sitemap.path are kept as relative filenames.
+        // Note: feed and sitemap paths are kept as relative filenames.
         // They are resolved to output_dir() at write time to include path_prefix.
 
         // Normalize optional paths
@@ -547,6 +566,7 @@ impl SiteConfig {
 
         // Validate assets paths (must be relative)
         self.build.assets.validate_paths(&mut diag);
+        self.site.seo.validate_paths(&mut diag);
 
         diag.into_result()
             .map_err(|e| ConfigError::Diagnostics(e).into())
@@ -574,7 +594,7 @@ impl SiteConfig {
         // Validate each section
         self.site
             .info
-            .validate(self.site.seo.feed.enable, &mut diag);
+            .validate(self.site.seo.has_feed_outputs(), &mut diag);
         self.build.validate(&mut diag);
         self.build.hooks.validate(&mut diag);
         self.build.svg.validate(&mut diag);
@@ -607,11 +627,20 @@ impl SiteConfig {
 // Test Helpers (available to all modules via `use crate::config::test_*`)
 // ============================================================================
 
+/// Build TOML with minimal required site info fields for tests.
+#[cfg(test)]
+pub fn test_config_source(extra: &str) -> String {
+    format!(
+        "[{}]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}",
+        SiteInfoConfig::TEMPLATE_SECTION
+    )
+}
+
 /// Parse config with minimal required `[site.info]` fields
 /// Panics if there are unknown fields (to catch config typos in tests)
 #[cfg(test)]
 pub fn test_parse_config(extra: &str) -> SiteConfig {
-    let config = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}");
+    let config = test_config_source(extra);
     let (parsed, ignored) = SiteConfig::parse_with_ignored(&config).unwrap();
     assert!(
         ignored.is_empty(),
@@ -637,7 +666,7 @@ mod tests {
             clean: false,
             minify: None,
             css_processor: None,
-            rss: None,
+            feed: None,
             sitemap: None,
             site_url: None,
             verbose: false,
@@ -690,8 +719,8 @@ mod tests {
 
     #[test]
     fn test_unknown_fields_detected() {
-        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[unknown_section]\nfield = \"value\"";
-        let (config, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+        let content = test_config_source("[unknown_section]\nfield = \"value\"");
+        let (config, ignored) = SiteConfig::parse_with_ignored(&content).unwrap();
 
         // Config should parse successfully
         assert_eq!(config.site.info.title, "Test");
@@ -703,8 +732,8 @@ mod tests {
 
     #[test]
     fn test_no_unknown_fields() {
-        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"";
-        let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+        let content = test_config_source("");
+        let (_, ignored) = SiteConfig::parse_with_ignored(&content).unwrap();
         assert!(ignored.is_empty());
     }
 
@@ -750,7 +779,10 @@ mod tests {
     #[test]
     fn test_finalize_serve_keeps_path_prefix_when_respect_prefix_enabled() {
         let config = finalize_test_config(
-            "url = \"https://example.com/docs/blog\"\n[serve]\nrespect_prefix = true",
+            &format!(
+                "url = \"https://example.com/docs/blog\"\n[{}]\nrespect_prefix = true",
+                section::ServeConfig::TEMPLATE_SECTION
+            ),
             Commands::Serve {
                 build_args: test_build_args(),
                 interface: None,
@@ -760,6 +792,117 @@ mod tests {
         );
 
         assert_eq!(config.build.path_prefix, PathBuf::from("docs/blog"));
+    }
+
+    #[test]
+    fn test_finalize_build_feed_flag_does_not_create_default_feed() {
+        let mut build_args = test_build_args();
+        build_args.feed = Some(true);
+
+        let config = finalize_test_config("", Commands::Build { build_args });
+
+        assert!(config.site.seo.feeds.is_empty());
+    }
+
+    #[test]
+    fn test_missing_feed_config_warning_requires_feed_flag() {
+        let mut build_args = test_build_args();
+        build_args.feed = Some(true);
+        let config = test_parse_config("");
+
+        assert_eq!(
+            config.missing_feed_config_warning(&build_args),
+            Some(format!(
+                "--feed was requested but no {} outputs are configured",
+                FeedConfig::toml_array_table()
+            ))
+        );
+
+        build_args.feed = None;
+        assert_eq!(config.missing_feed_config_warning(&build_args), None);
+
+        build_args.feed = Some(false);
+        assert_eq!(config.missing_feed_config_warning(&build_args), None);
+
+        build_args.feed = Some(true);
+        let config = test_parse_config(&format!(
+            r#"
+{}
+format = "rss"
+path = "feed.xml"
+"#,
+            FeedConfig::toml_array_table()
+        ));
+        assert_eq!(config.missing_feed_config_warning(&build_args), None);
+    }
+
+    #[test]
+    fn test_finalize_build_can_disable_configured_feeds() {
+        let mut build_args = test_build_args();
+        build_args.feed = Some(false);
+
+        let config = finalize_test_config(
+            &format!(
+                r#"
+{}
+format = "rss"
+path = "feed.xml"
+"#,
+                FeedConfig::toml_array_table()
+            ),
+            Commands::Build { build_args },
+        );
+
+        assert!(config.site.seo.feeds.is_empty());
+    }
+
+    #[test]
+    fn test_finalize_serve_disables_configured_feeds_by_default() {
+        let config = finalize_test_config(
+            &format!(
+                r#"
+{}
+format = "rss"
+path = "feed.xml"
+"#,
+                FeedConfig::toml_array_table()
+            ),
+            Commands::Serve {
+                build_args: test_build_args(),
+                interface: None,
+                port: None,
+                watch: None,
+            },
+        );
+
+        assert!(config.site.seo.feeds.is_empty());
+    }
+
+    #[test]
+    fn test_finalize_serve_feed_flag_preserves_configured_feeds() {
+        let mut build_args = test_build_args();
+        build_args.feed = Some(true);
+
+        let config = finalize_test_config(
+            &format!(
+                r#"
+{}
+format = "atom"
+path = "atom.xml"
+"#,
+                FeedConfig::toml_array_table()
+            ),
+            Commands::Serve {
+                build_args,
+                interface: None,
+                port: None,
+                watch: None,
+            },
+        );
+
+        assert_eq!(config.site.seo.feeds.len(), 1);
+        assert_eq!(config.site.seo.feeds[0].format, FeedFormat::Atom);
+        assert_eq!(config.site.seo.feeds[0].path, PathBuf::from("atom.xml"));
     }
 
     #[test]

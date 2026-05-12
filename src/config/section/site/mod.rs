@@ -27,8 +27,8 @@
 //! [site.seo]
 //! auto_og = true
 //!
-//! [site.seo.feed]
-//! enable = true
+//! [[site.seo.feeds]]
+//! format = "rss"
 //! path = "feed.xml"
 //!
 //! [site.seo.sitemap]

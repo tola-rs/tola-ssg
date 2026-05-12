@@ -234,9 +234,9 @@ elements = ['<meta name="darkreader-lock">'] # Extra special html elements
 [site.seo]
 auto_og = true   # Auto-inject default OG tags (site_name, locale, description, type, twitter:card)
 
-[site.seo.feed]
-enable = true
+[[site.seo.feeds]]
 format = "rss"   # "rss" | "atom"
+path = "feed.xml"
 
 [site.seo.sitemap]
 enable = true

@@ -8,7 +8,7 @@ use std::{fs, path::Path};
 use crate::config::section::{
     AssetsConfig, AssetsValidateConfig, PagesValidateConfig, ServeConfig,
     build::CssProcessorConfig,
-    site::{HeaderConfig, SeoConfig, SiteInfoConfig},
+    site::{FeedConfig, HeaderConfig, SeoConfig, SiteInfoConfig},
 };
 use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL, TolaTypstVars};
 
@@ -29,35 +29,37 @@ pub fn generate_config_template() -> String {
     ));
     out.push_str("# https://github.com/tola-rs/tola-ssg\n\n");
 
-    // [site.info] section
+    // Site metadata section
     out.push_str(&SiteInfoConfig::template_with_header());
     out.push('\n');
 
-    // [site.seo] section (auto_og, feed, sitemap)
+    // SEO section
     out.push_str(&SeoConfig::template_with_header());
     out.push('\n');
+    out.push_str(&FeedConfig::commented_template());
+    out.push('\n');
 
-    // [site.header] section
+    // Header assets section
     out.push_str(&HeaderConfig::template_with_header());
     out.push('\n');
 
-    // [build.assets] section
+    // Static assets section
     out.push_str(&AssetsConfig::template_with_header());
     out.push('\n');
 
-    // [build.hooks.css] section
+    // CSS hook section
     out.push_str(&CssProcessorConfig::template_with_header());
     out.push('\n');
 
-    // [serve] section
+    // Development server section
     out.push_str(&ServeConfig::template_with_header());
     out.push('\n');
 
-    // [validate.pages] section
+    // Page validation section
     out.push_str(&PagesValidateConfig::template_with_header());
     out.push('\n');
 
-    // [validate.assets] section
+    // Asset validation section
     out.push_str(&AssetsValidateConfig::template_with_header());
 
     out
@@ -140,8 +142,8 @@ mod tests {
         assert!(config_path.exists());
 
         let content = fs::read_to_string(&config_path).unwrap();
-        assert!(content.contains("[site.info]"));
-        assert!(content.contains("[site.seo.feed]"));
+        assert!(content.contains(&format!("[{}]", SiteInfoConfig::TEMPLATE_SECTION)));
+        assert!(content.contains(&FeedConfig::toml_array_table()));
     }
 
     #[test]

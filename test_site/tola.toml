@@ -24,10 +24,9 @@ flatten = []
 [site.seo]
 auto_og = true
 
-[site.seo.feed]
-enable = false
-path = "feed.xml"
-format = "rss"
+# [[site.seo.feeds]]
+# format = "rss"
+# path = "feed.xml"
 
 [site.seo.sitemap]
 enable = false
