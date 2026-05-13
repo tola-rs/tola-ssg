@@ -3,9 +3,12 @@
 use std::path::Path;
 
 use crate::config::SiteConfig;
-use crate::core::{ContentKind, UrlPath};
+use crate::core::ContentKind;
 
-use super::{AssetKind, AssetRoute};
+use super::AssetRoute;
+use super::route::{
+    route_from_content_source, route_from_flatten_source, route_from_nested_source,
+};
 
 /// Scan global assets directory
 ///
@@ -24,7 +27,6 @@ use super::{AssetKind, AssetRoute};
 /// This function only reads the filesystem and returns data
 /// It does not modify any state
 pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
-    let output_root = config.paths().output_dir();
     let assets_config = &config.build.assets;
     let mut results = Vec::new();
 
@@ -35,15 +37,7 @@ pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
             continue;
         }
 
-        let prefix = entry.output_name();
-        scan_global_recursive(
-            &mut results,
-            assets_dir,
-            assets_dir,
-            &output_root,
-            prefix,
-            assets_config,
-        );
+        scan_global_recursive(&mut results, assets_dir, config, assets_config);
     }
 
     results
@@ -55,9 +49,7 @@ pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 fn scan_global_recursive(
     results: &mut Vec<AssetRoute>,
     dir: &Path,
-    base: &Path,
-    output_root: &Path,
-    prefix: &str,
+    config: &SiteConfig,
     assets_config: &crate::config::AssetsConfig,
 ) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -67,23 +59,16 @@ fn scan_global_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            scan_global_recursive(results, &path, base, output_root, prefix, assets_config);
+            scan_global_recursive(results, &path, config, assets_config);
         } else {
             // Skip flatten files (they only output to root directory)
             if assets_config.is_flatten(&path) {
                 continue;
             }
 
-            let rel = path.strip_prefix(base).unwrap_or(&path);
-            let url = UrlPath::from_asset(&format!("/{}/{}", prefix, rel.display()));
-            let output = output_root.join(prefix).join(rel);
-
-            results.push(AssetRoute {
-                source: path,
-                url,
-                output,
-                kind: AssetKind::Global,
-            });
+            if let Some(route) = route_from_nested_source(&path, config) {
+                results.push(route);
+            }
         }
     }
 }
@@ -107,7 +92,6 @@ fn scan_global_recursive(
 ///
 /// This function only reads the filesystem and returns data
 pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
-    let output_root = config.paths().output_dir();
     let mut results = Vec::new();
 
     for entry in &config.build.assets.flatten {
@@ -116,23 +100,15 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
             continue;
         }
 
-        // Flatten files go directly to output root
-        let output_name = entry.output_name();
-        let url = UrlPath::from_asset(&format!("/{}", output_name));
-        let output = output_root.join(output_name);
-
-        results.push(AssetRoute {
-            source: source.to_path_buf(),
-            url,
-            output,
-            kind: AssetKind::Global, // Flatten files are treated as global
-        });
+        if let Some(route) = route_from_flatten_source(source, config) {
+            results.push(route);
+        }
     }
 
     results
 }
 
-/// Scan content assets (non-.typ/.md files in content directory)
+/// Scan content assets (non-page files in content directory)
 ///
 /// Returns all non-content files found in the content directory
 /// with their computed URLs and output paths.
@@ -154,24 +130,18 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 /// This function only reads the filesystem and returns data
 pub fn scan_content_assets(config: &SiteConfig) -> Vec<AssetRoute> {
     let content_dir = &config.build.content;
-    let output_root = config.paths().output_dir();
 
     if !content_dir.exists() {
         return vec![];
     }
 
     let mut results = Vec::new();
-    scan_content_recursive(&mut results, content_dir, content_dir, &output_root);
+    scan_content_recursive(&mut results, content_dir, config);
     results
 }
 
 /// Recursive helper for scanning content assets
-fn scan_content_recursive(
-    results: &mut Vec<AssetRoute>,
-    dir: &Path,
-    content_root: &Path,
-    output_root: &Path,
-) {
+fn scan_content_recursive(results: &mut Vec<AssetRoute>, dir: &Path, config: &SiteConfig) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -180,24 +150,16 @@ fn scan_content_recursive(
         let path = entry.path();
 
         if path.is_dir() {
-            scan_content_recursive(results, &path, content_root, output_root);
+            scan_content_recursive(results, &path, config);
         } else {
-            // Skip content files (.typ, .md) - they are pages, not assets
+            // Skip page sources; they are compiled, not copied as assets.
             if ContentKind::from_path(&path).is_some() {
                 continue;
             }
 
-            // Compute URL and output path
-            let rel_path = path.strip_prefix(content_root).unwrap_or(&path);
-            let url = UrlPath::from_asset(&format!("/{}", rel_path.display()));
-            let output = output_root.join(rel_path);
-
-            results.push(AssetRoute {
-                source: path,
-                url,
-                output,
-                kind: AssetKind::Content,
-            });
+            if let Some(route) = route_from_content_source(&path, config) {
+                results.push(route);
+            }
         }
     }
 }
@@ -205,6 +167,7 @@ fn scan_content_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::AssetKind;
     use std::fs;
     use tempfile::TempDir;
 
@@ -386,5 +349,44 @@ mod tests {
         let flatten_assets = scan_flatten_assets(&config);
         assert_eq!(flatten_assets.len(), 1);
         assert_eq!(flatten_assets[0].url, "/CNAME");
+    }
+
+    #[test]
+    fn scan_content_assets_default_disabled() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        fs::write(content_dir.join("index.typ"), "= Home").unwrap();
+        fs::write(content_dir.join("logo.png"), "image").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.output = dir.path().join("public");
+
+        assert!(scan_content_assets(&config).is_empty());
+    }
+
+    #[test]
+    fn scan_content_assets_enabled_with_prefix_output() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(content_dir.join("posts/hello")).unwrap();
+        fs::write(content_dir.join("posts/hello.typ"), "= Hello").unwrap();
+        fs::write(content_dir.join("posts/hello/image.png"), "image").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir.clone();
+        config.build.output = dir.path().join("public");
+        config.build.path_prefix = "docs/blog".into();
+        config.build.assets.colocated = true;
+
+        let assets = scan_content_assets(&config);
+
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].url, "/posts/hello/image.png");
+        assert_eq!(
+            assets[0].output,
+            dir.path().join("public/docs/blog/posts/hello/image.png")
+        );
     }
 }

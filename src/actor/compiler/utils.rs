@@ -10,7 +10,11 @@ pub(super) fn process_assets(paths: &[PathBuf], config: &SiteConfig) -> Vec<(Pat
         .filter_map(|path| {
             let result = if config.build.assets.contains_source(path) {
                 process_asset(path, config, false, true)
-            } else if path.starts_with(&config.build.content) {
+            } else if config
+                .build
+                .assets
+                .contains_colocated_source(path, &config.build.content)
+            {
                 process_rel_asset(path, config, false, true)
             } else {
                 process_asset(path, config, false, true)
@@ -44,23 +48,9 @@ pub(super) fn cleanup_removed_assets(paths: &[PathBuf], config: &SiteConfig) -> 
 }
 
 fn output_path_for_asset(path: &Path, config: &SiteConfig) -> Option<PathBuf> {
-    let output = config.paths().output_dir();
-
-    if let Some(entry) = config
-        .build
-        .assets
-        .flatten
-        .iter()
-        .find(|entry| path == entry.source())
-    {
-        return Some(output.join(entry.output_name()));
-    }
-
-    config.build.assets.nested.iter().find_map(|entry| {
-        path.strip_prefix(entry.source())
-            .ok()
-            .map(|relative| output.join(entry.output_name()).join(relative))
-    })
+    crate::asset::route_from_source(path.to_path_buf(), config)
+        .ok()
+        .map(|route| route.output)
 }
 
 fn remove_output_file(output: &Path) -> bool {

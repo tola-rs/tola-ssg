@@ -16,6 +16,7 @@
 //!     "assets/CNAME",                        # -> output/CNAME
 //!     { file = "icons/fav.ico", as = "favicon.ico" },
 //! ]
+//! colocated = false
 //! ```
 
 use rustc_hash::FxHashMap;
@@ -90,6 +91,11 @@ pub struct AssetsConfig {
     /// - `"assets/CNAME"` -> `/CNAME`
     /// - `{ file = "icons/fav.ico", as = "favicon.ico" }` -> `/favicon.ico`
     pub flatten: Vec<FlattenEntry>,
+
+    /// Content-local assets.
+    /// `false` disables implicit content asset copying.
+    /// `true` allows every non-content file under `build.content`.
+    pub colocated: bool,
 }
 
 impl Default for AssetsConfig {
@@ -97,6 +103,7 @@ impl Default for AssetsConfig {
         Self {
             nested: vec![NestedEntry::Simple("assets".into())],
             flatten: vec![],
+            colocated: false,
         }
     }
 }
@@ -122,6 +129,14 @@ impl AssetsConfig {
     pub fn contains_source(&self, source: &Path) -> bool {
         self.nested.iter().any(|e| source.starts_with(e.source()))
             || self.flatten.iter().any(|e| source == e.source())
+    }
+
+    /// Check if a source path is allowed as a colocated content asset.
+    pub fn contains_colocated_source(&self, source: &Path, content_root: &Path) -> bool {
+        let Ok(relative) = source.strip_prefix(content_root) else {
+            return false;
+        };
+        self.colocated && !relative.as_os_str().is_empty()
     }
 
     /// Find which nested entry contains the source path.
@@ -237,7 +252,16 @@ impl AssetsConfig {
             );
         }
 
-        // Check output name conflict
+        if is_reserved_output(entry.output_name(), crate::asset::SYSTEM_ASSET_DIR) {
+            diag.error(
+                Self::FIELDS.nested,
+                format!(
+                    "[{idx}] output name '{}' is reserved for generated assets",
+                    entry.output_name()
+                ),
+            );
+        }
+
         outputs.check_and_insert(
             entry.output_name(),
             "nested",
@@ -264,7 +288,16 @@ impl AssetsConfig {
             );
         }
 
-        // Check output name conflict
+        if is_reserved_output(entry.output_name(), crate::asset::SYSTEM_ASSET_DIR) {
+            diag.error(
+                Self::FIELDS.flatten,
+                format!(
+                    "[{idx}] output name '{}' is reserved for generated assets",
+                    entry.output_name()
+                ),
+            );
+        }
+
         outputs.check_and_insert(
             entry.output_name(),
             "flatten",
@@ -274,6 +307,13 @@ impl AssetsConfig {
             diag,
         );
     }
+}
+
+fn is_reserved_output(name: &str, reserved: &str) -> bool {
+    name == reserved
+        || name
+            .strip_prefix(reserved)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 // ============================================================================
@@ -425,6 +465,36 @@ mod tests {
 
         let config2: AssetsConfig = toml::from_str(r#"flatten = ["assets/robots.txt"]"#).unwrap();
         assert!(!config2.has_cname_in_flatten());
+    }
+
+    #[test]
+    fn test_colocated_default_false() {
+        let config = AssetsConfig::default();
+
+        assert!(!config.colocated);
+    }
+
+    #[test]
+    fn test_colocated_bool_true() {
+        let config: AssetsConfig = toml::from_str(r#"colocated = true"#).unwrap();
+
+        assert!(config.colocated);
+    }
+
+    #[test]
+    fn test_reserved_generated_asset_namespace_is_rejected() {
+        let config: AssetsConfig = toml::from_str(
+            r#"
+nested = [{ dir = "assets", as = ".tola" }]
+flatten = [{ file = "favicon.ico", as = ".tola/favicon.ico" }]
+"#,
+        )
+        .unwrap();
+        let mut diag = ConfigDiagnostics::new();
+
+        config.validate(&mut diag);
+
+        assert_eq!(diag.len(), 2);
     }
 
     #[test]

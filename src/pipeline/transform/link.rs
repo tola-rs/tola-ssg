@@ -142,12 +142,8 @@ pub fn normalize_site_root_page_url(value: &str, config: &SiteConfig) -> UrlPath
 
 /// Resolve site-root-relative links (/about, /posts/hello)
 fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
-    let paths = config.paths();
-
-    // Asset links: just add prefix, no slugification
-    if is_asset_link(value, config) {
-        let path = value.trim_start_matches('/');
-        return Ok(paths.url_for_rel_path(path));
+    if let Some(href) = crate::asset::resolve_asset_href(value, config) {
+        return Ok(href);
     }
 
     // Split path and fragment
@@ -187,18 +183,7 @@ fn resolve_file_relative(value: &str, route: &PageRoute) -> String {
 
 /// Check if a path is an asset link
 fn is_asset_link(path: &str, config: &SiteConfig) -> bool {
-    let first_component = path
-        .trim_start_matches('/')
-        .split('/')
-        .next()
-        .unwrap_or_default();
-
-    config
-        .build
-        .assets
-        .nested
-        .iter()
-        .any(|entry| entry.output_name() == first_component)
+    crate::asset::is_asset_url(path, config)
 }
 
 // =============================================================================
@@ -208,9 +193,11 @@ fn is_asset_link(path: &str, config: &SiteConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::section::build::assets::NestedEntry;
+    use crate::config::section::build::assets::{FlattenEntry, NestedEntry};
     use crate::core::UrlPath;
+    use std::fs;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     fn test_route(is_index: bool) -> PageRoute {
         PageRoute {
@@ -399,5 +386,78 @@ mod tests {
 
         assert!(is_asset_link("/media/logo.png", &second));
         assert!(!is_asset_link("/images/logo.png", &second));
+    }
+
+    #[test]
+    fn generated_asset_links_are_not_page_links() {
+        let config = SiteConfig::default();
+        let route = test_route(true);
+
+        assert_eq!(
+            resolve_link("/.tola/enhance.css", &config, &route).unwrap(),
+            "/.tola/enhance.css"
+        );
+    }
+
+    #[test]
+    fn prefixed_generated_asset_links_are_preserved() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        let route = test_route(true);
+
+        assert_eq!(
+            resolve_link("/docs/blog/.tola/enhance.css", &config, &route).unwrap(),
+            "/docs/blog/.tola/enhance.css"
+        );
+    }
+
+    #[test]
+    fn flatten_asset_links_keep_query_and_fragment() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        config.build.assets.flatten = vec![FlattenEntry::Simple("favicon.ico".into())];
+        let route = test_route(true);
+
+        assert_eq!(
+            resolve_link("/favicon.ico?v=1#icon", &config, &route).unwrap(),
+            "/docs/blog/favicon.ico?v=1#icon"
+        );
+    }
+
+    #[test]
+    fn colocated_asset_links_use_asset_url_rules() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(content_dir.join("posts/hello")).unwrap();
+        fs::write(content_dir.join("posts/hello/image.png"), "image").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        config.build.assets.colocated = true;
+        let route = test_route(true);
+
+        assert_eq!(
+            resolve_link("/posts/hello/image.png", &config, &route).unwrap(),
+            "/docs/blog/posts/hello/image.png"
+        );
+    }
+
+    #[test]
+    fn missing_colocated_asset_with_extension_is_not_pageified() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        config.build.assets.colocated = true;
+        let route = test_route(true);
+
+        assert_eq!(
+            resolve_link("/posts/hello/missing.png", &config, &route).unwrap(),
+            "/docs/blog/posts/hello/missing.png"
+        );
     }
 }

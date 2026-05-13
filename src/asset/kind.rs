@@ -5,6 +5,6 @@
 pub enum AssetKind {
     /// Global asset from assets/ directory.
     Global,
-    /// Content asset from content/ directory (non-.typ/.md files).
+    /// Content asset from content/ directory (non-page files).
     Content,
 }

@@ -166,25 +166,6 @@ fn validate_all_links(
     typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
     report: &Arc<RwLock<ValidationReport>>,
 ) {
-    // Collect all nested asset source directories with their output prefixes
-    let nested_assets: Vec<_> = config
-        .build
-        .assets
-        .nested
-        .iter()
-        .map(|e| (e.output_name().to_string(), root.join(e.source())))
-        .collect();
-
-    // Collect all flatten files (for asset link validation)
-    let flatten_outputs: Vec<_> = config
-        .build
-        .assets
-        .flatten
-        .iter()
-        .filter(|e| e.source().exists())
-        .map(|e| e.output_name().to_string())
-        .collect();
-
     // Process Typst links (already scanned in build_address_space)
     for (file, links) in typst_links {
         let source = file
@@ -193,18 +174,7 @@ fn validate_all_links(
             .to_string_lossy()
             .to_string();
 
-        validate_links(
-            &source,
-            file,
-            links,
-            config,
-            all_pages,
-            report,
-            root,
-            &nested_assets,
-            &flatten_outputs,
-            state,
-        );
+        validate_links(&source, file, links, config, all_pages, report, state);
     }
 
     // Separate Markdown files and scan them
@@ -230,9 +200,6 @@ fn validate_all_links(
             config,
             all_pages,
             report,
-            root,
-            &nested_assets,
-            &flatten_outputs,
             state,
         );
     }
@@ -247,9 +214,6 @@ fn validate_links(
     config: &SiteConfig,
     all_pages: &[CompiledPage],
     report: &Arc<RwLock<ValidationReport>>,
-    root: &std::path::Path,
-    nested_assets: &[(String, PathBuf)],
-    flatten_outputs: &[String],
     state: &SiteIndex,
 ) {
     let validate_config = &config.validate;
@@ -267,67 +231,27 @@ fn validate_links(
 
             // Site-root links: could be page OR static asset
             LinkKind::SiteRoot(path) => {
-                // For asset attributes, check all static assets directories
-                if is_asset_attr {
-                    let trimmed = path.trim_start_matches('/');
-
-                    // Check nested assets: /images/xxx -> find entry with output_name "images"
-                    let in_nested = nested_assets.iter().any(|(output_name, abs_source)| {
-                        // Exact match: /images -> output_name "images"
-                        if trimmed == output_name {
-                            return abs_source.exists();
-                        }
-                        // Prefix with slash: /images/xxx -> output_name "images", rest "xxx"
-                        if let Some(rest) = trimmed.strip_prefix(output_name)
-                            && let Some(rest) = rest.strip_prefix('/')
-                        {
-                            return abs_source.join(rest).exists();
-                        }
-                        false
-                    });
-
-                    // Check flatten outputs (e.g., /favicon.ico -> "favicon.ico")
-                    let in_flatten = flatten_outputs.iter().any(|name| trimmed == name);
-
-                    if in_nested || in_flatten {
+                if crate::asset::is_asset_url(path, config) {
+                    if crate::asset::asset_url_exists(path, config) {
                         continue;
                     }
 
-                    // Asset not found via nested/flatten - check if it exists in source
-                    // and suggest the correct path
                     if validate_config.assets.enable {
-                        // Check if path matches a nested source directory
-                        // e.g., /assets/images/photo.webp -> should be /images/photo.webp
-                        let suggestion =
-                            nested_assets.iter().find_map(|(output_name, abs_source)| {
-                                // Get relative source path by stripping root
-                                let rel_source = abs_source.strip_prefix(root).ok()?;
-                                let source_str = rel_source.to_string_lossy();
-                                // trimmed: "assets/images/photo.webp", source_str: "assets/images"
-                                let rest = trimmed.strip_prefix(source_str.as_ref())?;
-                                let rest = rest.trim_start_matches('/');
-                                let file_path = abs_source.join(rest);
-                                if file_path.exists() {
-                                    let correct = if rest.is_empty() {
-                                        format!("/{}", output_name)
-                                    } else {
-                                        format!("/{}/{}", output_name, rest)
-                                    };
-                                    return Some(correct);
-                                }
-                                None
-                            });
-
-                        let reason = if let Some(correct_path) = suggestion {
-                            format!("maybe should be `{}`", correct_path)
-                        } else {
-                            "not found".to_string()
-                        };
-
                         report.write().add_asset(
                             source.to_string(),
                             format!("`{}`", link.dest),
-                            reason,
+                            "not found".to_string(),
+                        );
+                    }
+                    continue;
+                }
+
+                if is_asset_attr {
+                    if validate_config.assets.enable {
+                        report.write().add_asset(
+                            source.to_string(),
+                            format!("`{}`", link.dest),
+                            "not found".to_string(),
                         );
                     }
                     continue;

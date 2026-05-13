@@ -202,7 +202,7 @@ pub(super) fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
     // Auto-generate CNAME if needed
     crate::asset::process_cname(config)?;
 
-    // Copy content assets (non-.typ/.md files in content directory)
+    // Copy content assets (non-page files in content directory)
     crate::asset::process_content_assets(config, clean)?;
 
     // Copy HTML 404 page if configured
@@ -311,7 +311,7 @@ fn log_build_result(output: &Path) -> Result<()> {
         .count();
 
     if file_count == 0 {
-        log!("warn"; "output is empty, check if content has .typ or .md files");
+        log!("warn"; "output is empty, check if content has page files");
     }
 
     Ok(())

@@ -11,9 +11,8 @@ use std::sync::LazyLock;
 use dashmap::DashSet;
 use tola_vdom::prelude::*;
 
-use super::link::process_link_value;
 use crate::address::resolve_physical_path;
-use crate::compiler::family::{Indexed, TolaSite::FamilyKind};
+use crate::compiler::family::Indexed;
 use crate::compiler::page::PageRoute;
 use crate::config::SiteConfig;
 use crate::config::section::theme::RecolorTarget;
@@ -129,13 +128,13 @@ impl<'a> MediaTransform<'a> {
                 let parent = Path::new(trimmed).parent().unwrap_or(Path::new(""));
                 let output_path = self
                     .config
-                    .build
-                    .output
+                    .paths()
+                    .output_dir()
                     .join(parent)
                     .join(format!("{}.nobg.png", stem));
                 let new_src = format!("/{}/{}.nobg.png", parent.display(), stem);
                 // Use src path for consistency with compute_output_path
-                let original_output = self.config.build.output.join(trimmed);
+                let original_output = self.config.paths().output_dir().join(trimmed);
                 (output_path, new_src, original_output)
             }
             _ => {
@@ -227,7 +226,7 @@ impl<'a> MediaTransform<'a> {
         match LinkKind::parse(src) {
             LinkKind::SiteRoot(path) => {
                 let trimmed = path.trim_start_matches('/');
-                Some(self.config.build.output.join(trimmed))
+                Some(self.config.paths().output_dir().join(trimmed))
             }
             LinkKind::FileRelative(path) => {
                 let filename = Path::new(path).file_name()?;
@@ -247,17 +246,47 @@ impl Transform<Indexed> for MediaTransform<'_> {
             && self.config.theme.recolor.target == RecolorTarget::Auto;
         process_classes(&mut doc.root, &self, ClassState::default(), auto_inject);
 
-        // Process src attributes (URL resolution)
-        doc.modify_by::<FamilyKind::Media, _>(|elem| {
-            if let Some(src) = elem.get_attr("src").map(|s| s.to_string())
-                && let Ok(processed) = process_link_value(&src, self.config, self.route)
-            {
-                set_media_src(elem, processed);
-            }
-        });
+        process_src_attrs(&mut doc.root, self.config, self.route);
 
         doc
     }
+}
+
+fn process_src_attrs(elem: &mut Element<Indexed>, config: &SiteConfig, route: &PageRoute) {
+    if let Some(src) = elem.get_attr("src").map(|s| s.to_string()) {
+        let processed = process_media_src(&src, config, route);
+        set_media_src(elem, processed);
+    }
+
+    for child in &mut elem.children {
+        if let Node::Element(child) = child {
+            process_src_attrs(child, config, route);
+        }
+    }
+}
+
+fn process_media_src(value: &str, config: &SiteConfig, route: &PageRoute) -> String {
+    match LinkKind::parse(value) {
+        LinkKind::External(_) | LinkKind::Fragment(_) => value.to_string(),
+        LinkKind::SiteRoot(path) => crate::asset::resolve_asset_href(path, config)
+            .unwrap_or_else(|| site_root_file_href(path, config)),
+        LinkKind::FileRelative(_) => resolve_media_relative(value, route),
+    }
+}
+
+fn resolve_media_relative(value: &str, route: &PageRoute) -> String {
+    if route.is_index {
+        value.to_string()
+    } else {
+        format!("../{value}")
+    }
+}
+
+fn site_root_file_href(value: &str, config: &SiteConfig) -> String {
+    let idx = value.find(['?', '#']).unwrap_or(value.len());
+    let path = value[..idx].trim_start_matches('/');
+    let suffix = &value[idx..];
+    format!("{}{}", config.paths().url_for_site_path(path), suffix)
 }
 
 fn set_media_src(elem: &mut Element<Indexed>, src: String) {
@@ -400,5 +429,63 @@ mod tests {
         let media = ExtractFamily::<MediaFamily>::get(&image.ext).unwrap();
         assert_eq!(image.get_attr("src"), Some(".././photo.png"));
         assert_eq!(media.src.as_deref(), Some(".././photo.png"));
+    }
+
+    #[test]
+    fn site_root_media_src_is_not_pageified_when_asset_is_missing() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        let route = PageRoute {
+            source: PathBuf::from("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: PathBuf::from("public/docs/blog/index.html"),
+            output_dir: PathBuf::from("public/docs/blog"),
+            full_url: "https://example.com/docs/blog/".to_string(),
+        };
+        let root = TolaSite::element("main", Attrs::new()).child(TolaSite::element(
+            "img",
+            Attrs::from([("src", "/posts/hello/missing.png?v=1")]),
+        ));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+
+        let transformed = MediaTransform::new(&config, &route).transform(indexed);
+
+        let image = transformed.find(|elem| elem.is_tag("img")).unwrap();
+        let media = ExtractFamily::<MediaFamily>::get(&image.ext).unwrap();
+        assert_eq!(
+            image.get_attr("src"),
+            Some("/docs/blog/posts/hello/missing.png?v=1")
+        );
+        assert_eq!(
+            media.src.as_deref(),
+            Some("/docs/blog/posts/hello/missing.png?v=1")
+        );
+    }
+
+    #[test]
+    fn src_attrs_without_media_family_are_processed_as_assets() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        let route = PageRoute {
+            source: PathBuf::from("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: PathBuf::from("public/docs/blog/index.html"),
+            output_dir: PathBuf::from("public/docs/blog"),
+            full_url: "https://example.com/docs/blog/".to_string(),
+        };
+        let root = TolaSite::element("main", Attrs::new()).child(TolaSite::element(
+            "script",
+            Attrs::from([("src", "/scripts/app.js")]),
+        ));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+
+        let transformed = MediaTransform::new(&config, &route).transform(indexed);
+
+        let script = transformed.find(|elem| elem.is_tag("script")).unwrap();
+        assert_eq!(script.get_attr("src"), Some("/docs/blog/scripts/app.js"));
     }
 }

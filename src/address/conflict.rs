@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use crate::asset::scan_global_assets;
+use crate::asset::{scan_content_assets, scan_global_assets};
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::log;
@@ -49,6 +49,10 @@ fn collect_global_assets(url_sources: &mut UrlSourceMap, config: &SiteConfig) {
 
     // Also collect flatten assets
     for asset in crate::asset::scan_flatten_assets(config) {
+        url_sources.entry(asset.url).or_default().push(asset.source);
+    }
+
+    for asset in scan_content_assets(config) {
         url_sources.entry(asset.url).or_default().push(asset.source);
     }
 }

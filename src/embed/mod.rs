@@ -63,8 +63,8 @@ pub mod build {
         pub fn from_config(config: &SiteConfig) -> Self {
             let nav = &config.site.nav;
             Self {
-                transition: nav.transition.is_enabled(),
-                preload: nav.preload.enable,
+                transition: nav.spa && nav.transition.is_enabled(),
+                preload: nav.spa && nav.preload.enable,
                 preload_delay: nav.preload.delay,
                 path_prefix: normalize_path_prefix(&config.build.path_prefix),
             }
@@ -224,9 +224,14 @@ pub mod css {
 
     /// Build EnhanceVars from SiteConfig.
     pub fn enhance_vars(config: &crate::config::SiteConfig) -> EnhanceVars {
+        let style = if config.site.nav.spa {
+            config.site.nav.transition.style
+        } else {
+            TransitionStyle::None
+        };
         EnhanceVars {
             nav: NavVars {
-                style: config.site.nav.transition.style,
+                style,
                 transition_time: config.site.nav.transition.time,
             },
         }
@@ -447,5 +452,37 @@ mod tests {
         config.build.path_prefix = std::path::PathBuf::from("docs/blog");
         let vars = build::SpaVars::from_config(&config);
         assert_eq!(vars.path_prefix, "/docs/blog");
+    }
+
+    #[test]
+    fn enhance_vars_ignore_transition_when_spa_disabled() {
+        let mut config = crate::config::SiteConfig::default();
+        config.site.nav.spa = false;
+        config.site.nav.transition.style = crate::config::section::site::TransitionStyle::Fade;
+        config.site.nav.transition.time = 350;
+
+        let vars = css::enhance_vars(&config);
+
+        assert!(!vars.nav.is_enabled());
+        assert_eq!(vars.nav.render(), "");
+    }
+
+    #[test]
+    fn write_embedded_assets_does_not_emit_spa_js_when_spa_disabled() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::SiteConfig::default();
+        config.site.nav.spa = false;
+        config.site.nav.preload.enable = true;
+        config.site.nav.transition.style = crate::config::section::site::TransitionStyle::Fade;
+
+        write_embedded_assets(&config, dir.path()).unwrap();
+
+        let generated = std::fs::read_dir(dir.path().join(crate::asset::SYSTEM_ASSET_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(generated.iter().any(|name| name.starts_with("enhance-")));
+        assert!(!generated.iter().any(|name| name.starts_with("spa-")));
     }
 }
