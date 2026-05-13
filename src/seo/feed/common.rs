@@ -4,7 +4,7 @@ use crate::{
     config::{FeedConfig, SiteConfig},
     log,
     page::{StoredPage, StoredPageMap},
-    seo::extract::extract,
+    seo::extract::{extract, extract_text},
 };
 use anyhow::Result;
 use std::{fs, path::Path};
@@ -15,9 +15,15 @@ pub struct FeedPage {
     pub title: String,
     pub date: String,
     pub permalink: String,
-    pub summary: Option<String>,
+    pub summary: Option<FeedSummary>,
     pub feed_body: Option<String>,
     pub author: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FeedSummary {
+    pub html: String,
+    pub text: String,
 }
 
 pub struct FeedPages {
@@ -37,7 +43,10 @@ impl FeedPage {
             title: page.meta.title.clone()?,
             date: page.meta.date.clone()?,
             permalink: page.permalink.to_string(),
-            summary: page.meta.summary.as_ref().map(extract),
+            summary: page.meta.summary.as_ref().map(|summary| FeedSummary {
+                html: extract(summary),
+                text: extract_text(summary),
+            }),
             feed_body: page.feed_body.clone(),
             author: page.meta.author.clone(),
         })
@@ -66,14 +75,14 @@ fn write_if_changed(path: &Path, content: &str) -> Result<WriteOutcome> {
     Ok(WriteOutcome::Written)
 }
 
-pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, xml: &str) -> Result<WriteOutcome> {
+pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, content: &str) -> Result<WriteOutcome> {
     let output_path = config.paths().output_dir().join(&feed.path);
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    let outcome = write_if_changed(&output_path, xml)?;
+    let outcome = write_if_changed(&output_path, content)?;
     if outcome == WriteOutcome::Written {
         log!(
             "feed";

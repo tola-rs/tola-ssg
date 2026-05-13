@@ -32,6 +32,10 @@
 //! path = "feed.xml"
 //! features = ["full-text"]
 //!
+//! [[site.seo.feeds]]
+//! format = "json"
+//! path = "feed.json"
+//!
 //! [site.seo.sitemap]
 //! enable = true
 //!

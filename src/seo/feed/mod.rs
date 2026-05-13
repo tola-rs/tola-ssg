@@ -1,9 +1,10 @@
-//! Feed generation (RSS, Atom).
+//! Feed generation (RSS, Atom, JSON Feed).
 //!
 //! Generates syndication feeds from compiled page metadata:
 //!
 //! - **RSS 2.0**: Standard feed format
 //! - **Atom 1.0**: Modern feed format
+//! - **JSON Feed 1.1**: JSON feed format
 
 use crate::config::{FeedConfig, FeedFormat, SiteConfig};
 use crate::page::StoredPageMap;
@@ -11,6 +12,7 @@ use anyhow::Result;
 
 pub mod atom;
 mod common;
+pub mod json;
 pub mod rss;
 
 use common::{FeedPage, WriteOutcome, collect_feed_pages, write_feed};
@@ -26,8 +28,8 @@ pub fn build_feed(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
     let mut written_outputs = 0usize;
 
     for feed in outputs {
-        let xml = render_one(config, feed, &feed_pages.pages)?;
-        if write_feed(config, feed, &xml)? == WriteOutcome::Written {
+        let content = render_one(config, feed, &feed_pages.pages)?;
+        if write_feed(config, feed, &content)? == WriteOutcome::Written {
             written_outputs += 1;
         }
     }
@@ -47,6 +49,7 @@ fn render_one(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Res
     match feed.format {
         FeedFormat::Rss => rss::render(config, feed, pages),
         FeedFormat::Atom => atom::render(config, feed, pages),
+        FeedFormat::Json => json::render(config, feed, pages),
     }
 }
 
@@ -74,6 +77,11 @@ mod tests {
             FeedConfig {
                 path: "atom.xml".into(),
                 format: FeedFormat::Atom,
+                features: vec![],
+            },
+            FeedConfig {
+                path: "feed.json".into(),
+                format: FeedFormat::Json,
                 features: vec![],
             },
         ];
@@ -106,11 +114,25 @@ mod tests {
 
         let rss = fs::read_to_string(output.join("feed.xml")).unwrap();
         let atom = fs::read_to_string(output.join("atom.xml")).unwrap();
+        let json = fs::read_to_string(output.join("feed.json")).unwrap();
 
         assert!(rss.contains("<rss"));
         assert!(rss.contains("<title>Post</title>"));
         assert!(atom.contains("<feed"));
         assert!(atom.contains("<title>Post</title>"));
+
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(json["version"], "https://jsonfeed.org/version/1.1");
+        assert_eq!(json["title"], "Test Site");
+        assert_eq!(json["home_page_url"], "https://example.com/");
+        assert_eq!(json["feed_url"], "https://example.com/feed.json");
+        assert_eq!(json["items"][0]["id"], "https://example.com/post/");
+        assert_eq!(json["items"][0]["url"], "https://example.com/post/");
+        assert_eq!(json["items"][0]["title"], "Post");
+        assert_eq!(json["items"][0]["date_published"], "2026-05-12T00:00:00Z");
+        assert_eq!(json["items"][0]["summary"], "Summary");
+        assert_eq!(json["items"][0]["content_html"], "Summary");
+        assert!(json["items"][0]["content_text"].is_null());
     }
 
     #[test]
@@ -132,12 +154,14 @@ mod tests {
         let mut config = config_with_feeds(output.clone());
         config.site.seo.feeds[0].features = vec![FeedFeature::FullText];
         config.site.seo.feeds[1].features = vec![FeedFeature::FullText];
+        config.site.seo.feeds[2].features = vec![FeedFeature::FullText];
         let store = store_with_page(Some("<article><p>Full text</p></article>".to_string()));
 
         build_feed(&config, &store).unwrap();
 
         let rss = fs::read_to_string(output.join("feed.xml")).unwrap();
         let atom = fs::read_to_string(output.join("atom.xml")).unwrap();
+        let json = fs::read_to_string(output.join("feed.json")).unwrap();
 
         let rss = ::rss::Channel::read_from(rss.as_bytes()).unwrap();
         let rss_item = rss.items().first().unwrap();
@@ -158,6 +182,13 @@ mod tests {
         assert_eq!(
             atom_content.value(),
             Some("<article><p>Full text</p></article>")
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(json["items"][0]["summary"], "Summary");
+        assert_eq!(
+            json["items"][0]["content_html"],
+            "<article><p>Full text</p></article>"
         );
     }
 }

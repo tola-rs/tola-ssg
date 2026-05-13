@@ -141,6 +141,11 @@ mod tests {
                 path: "atom.xml".into(),
                 features: vec![],
             },
+            crate::config::FeedConfig {
+                format: crate::config::FeedFormat::Json,
+                path: "feed.json".into(),
+                features: vec![],
+            },
         ];
         config.site.seo.sitemap.enable = true;
         config.site.seo.sitemap.path = "sitemap.xml".into();
@@ -167,6 +172,10 @@ mod tests {
         ));
         assert!(!is_reloadable_output_asset(
             Path::new("/public/atom.xml"),
+            &config
+        ));
+        assert!(!is_reloadable_output_asset(
+            Path::new("/public/feed.json"),
             &config
         ));
         assert!(!is_reloadable_output_asset(

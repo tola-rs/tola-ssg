@@ -142,7 +142,11 @@ fn page_to_atom_entry(
             .id(&link)
             .updated(updated)
             .links(vec![entry_link])
-            .summary(page.summary.clone().map(Text::plain))
+            .summary(
+                page.summary
+                    .as_ref()
+                    .map(|summary| Text::plain(&summary.text)),
+            )
             .content(content)
             .authors(authors)
             .build(),
@@ -152,6 +156,7 @@ fn page_to_atom_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seo::feed::common::FeedSummary;
 
     // Helper to create a config for testing
     fn make_config() -> SiteConfig {
@@ -171,7 +176,10 @@ mod tests {
             title: "Test Post".to_string(),
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
-            summary: Some("A test summary".to_string()),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
             feed_body: None,
             author: Some("Post Author".to_string()),
         };
@@ -190,7 +198,10 @@ mod tests {
             title: "Test Post".to_string(),
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
-            summary: Some("A test summary".to_string()),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
             feed_body: Some("<article><p>Full text</p></article>".to_string()),
             author: Some("Post Author".to_string()),
         };

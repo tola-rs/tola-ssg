@@ -72,7 +72,7 @@ fn page_to_rss_item(
     let author = normalize_rss_author(page.author.as_ref(), config);
 
     // Convert summary JSON to HTML string using shared extractor
-    let description = page.summary.clone();
+    let description = page.summary.as_ref().map(|summary| summary.html.clone());
 
     Some(
         ItemBuilder::default()
@@ -113,6 +113,7 @@ fn normalize_rss_author(author: Option<&String>, config: &SiteConfig) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::seo::feed::common::FeedSummary;
 
     // Helper to create a config for testing
     fn make_config(author: &str, email: &str) -> SiteConfig {
@@ -154,7 +155,10 @@ mod tests {
             title: "Test Post".to_string(),
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
-            summary: Some("A test summary".to_string()),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
             feed_body: None,
             author: None,
         };
@@ -173,7 +177,10 @@ mod tests {
             title: "Test Post".to_string(),
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
-            summary: Some("A test summary".to_string()),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
             feed_body: Some("<article><p>Full text</p></article>".to_string()),
             author: None,
         };

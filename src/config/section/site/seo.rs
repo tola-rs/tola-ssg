@@ -14,6 +14,8 @@ pub enum FeedFormat {
     Rss,
     /// Atom 1.0 format.
     Atom,
+    /// JSON Feed 1.1 format.
+    Json,
 }
 
 impl FeedFormat {
@@ -21,6 +23,7 @@ impl FeedFormat {
         match self {
             Self::Rss => "rss",
             Self::Atom => "atom",
+            Self::Json => "json",
         }
     }
 }
@@ -53,7 +56,7 @@ impl FeedFeature {
 pub struct FeedConfig {
     #[config(default = "feed.xml", inline_doc = "Output path for feed file")]
     pub path: PathBuf,
-    #[config(default = "rss", inline_doc = "Feed format: rss | atom")]
+    #[config(default = "rss", inline_doc = "Feed format: rss | atom | json")]
     pub format: FeedFormat,
     /// Optional feed features.
     pub features: Vec<FeedFeature>,
@@ -91,7 +94,7 @@ impl FeedConfig {
         out.push_str(&Self::toml_array_table());
         out.push('\n');
         out.push_str(&format!(
-            "# {} = {}  # rss | atom\n",
+            "# {} = {}  # rss | atom | json\n",
             toml_key(Self::FIELDS.format),
             toml::Value::try_from(default.format)
                 .map(|v| v.to_string())
@@ -147,7 +150,7 @@ pub struct SeoConfig {
     #[config(inline_doc = "Auto-inject OG meta tags (can be overridden in Typst)")]
     pub auto_og: bool,
 
-    /// Feed outputs (RSS/Atom).
+    /// Feed outputs (RSS/Atom/JSON Feed).
     #[config(skip)]
     pub feeds: Vec<FeedConfig>,
 
@@ -297,16 +300,19 @@ path = "{path}"
     #[test]
     fn parses_multiple_feed_outputs() {
         let config = test_parse_config(&format!(
-            "{}{}",
+            "{}{}{}",
             feed_entry("rss", "feed.xml"),
-            feed_entry("atom", "atom.xml")
+            feed_entry("atom", "atom.xml"),
+            feed_entry("json", "feed.json")
         ));
 
-        assert_eq!(config.site.seo.feeds.len(), 2);
+        assert_eq!(config.site.seo.feeds.len(), 3);
         assert_eq!(config.site.seo.feeds[0].format, FeedFormat::Rss);
         assert_eq!(config.site.seo.feeds[0].path, PathBuf::from("feed.xml"));
         assert_eq!(config.site.seo.feeds[1].format, FeedFormat::Atom);
         assert_eq!(config.site.seo.feeds[1].path, PathBuf::from("atom.xml"));
+        assert_eq!(config.site.seo.feeds[2].format, FeedFormat::Json);
+        assert_eq!(config.site.seo.feeds[2].path, PathBuf::from("feed.json"));
     }
 
     #[test]
