@@ -239,8 +239,7 @@ fn build_static_pages_with_store(
 
     let conflicts = conflict::detect_conflicts(&url_sources, config.get_root());
     if !conflicts.is_empty() {
-        let prefix = config.paths().prefix().to_string_lossy().into_owned();
-        conflict::print_conflicts_with_prefix(&conflicts, &prefix);
+        conflict::print_conflicts(&conflicts);
         let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
         return Err(anyhow::anyhow!(
             "build failed: {} conflicting url{}, {} source{}",

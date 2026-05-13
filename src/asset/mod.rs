@@ -22,4 +22,4 @@ pub use process::{
 };
 
 // Metadata helpers
-pub use meta::{compute_asset_href, route_from_source, url_from_output_path};
+pub use meta::{compute_asset_href, route_from_source};

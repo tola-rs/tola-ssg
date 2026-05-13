@@ -13,6 +13,7 @@ use tola_vdom::prelude::*;
 use crate::asset::{compute_asset_href, version};
 use crate::compiler::family::{Raw, TolaSite};
 use crate::config::SiteConfig;
+use crate::seo::feed;
 use crate::utils::mime;
 
 /// Injects site-wide `<head>` content into Raw VDOM
@@ -29,6 +30,14 @@ fn versioned_href(path: &Path, config: &SiteConfig) -> Option<String> {
     let href = compute_asset_href(path, config).ok()?;
     let abs_path = config.get_root().join(path);
     Some(version::versioned_url(&href, &abs_path))
+}
+
+fn feed_title(site_title: &str, feed_label: &str) -> String {
+    if site_title.is_empty() {
+        feed_label.to_string()
+    } else {
+        format!("{site_title} ({feed_label})")
+    }
 }
 
 impl<'a> HeaderInjector<'a> {
@@ -87,6 +96,18 @@ impl<'a> HeaderInjector<'a> {
             head.push_elem(TolaSite::element("meta", attrs));
         }
 
+        for output in config.site.seo.feed_outputs() {
+            let mut attrs = Attrs::new();
+            attrs.set("rel", "alternate");
+            attrs.set("type", output.format.mime_type());
+            attrs.set("href", feed::feed_url(config, output));
+            attrs.set(
+                "title",
+                feed_title(&config.site.info.title, output.format.label()),
+            );
+            head.push_elem(TolaSite::element("link", attrs));
+        }
+
         // Icon
         if let Some(icon) = &head_config.icon
             && let Some(href) = versioned_href(icon, config)
@@ -115,7 +136,8 @@ impl<'a> HeaderInjector<'a> {
         {
             // CSS output uses versioned URL based on OUTPUT file
             // (not path, since CSS processor generates different output based on scanned classes)
-            let href = version::versioned_url(route.url.as_ref(), &route.output);
+            let href = config.paths().url_for_site_path(route.url.as_str());
+            let href = version::versioned_url(&href, &route.output);
             let mut attrs = Attrs::new();
             attrs.set("rel", "stylesheet");
             attrs.set("href", href);
@@ -283,6 +305,7 @@ impl<'a> Transform<Raw> for HeaderInjector<'a> {
 mod tests {
     use super::*;
     use crate::config::section::build::assets::NestedEntry;
+    use crate::config::{FeedConfig, FeedFormat};
     use std::fs;
     use tempfile::TempDir;
 
@@ -295,6 +318,17 @@ mod tests {
         Document::new(html)
     }
 
+    fn head(doc: &Document<Raw>) -> &Element<Raw> {
+        doc.root
+            .children
+            .iter()
+            .find_map(|n| match n {
+                Node::Element(e) if e.tag == "head" => Some(e.as_ref()),
+                _ => None,
+            })
+            .expect("should have head")
+    }
+
     #[test]
     fn test_inject_title() {
         let mut config = SiteConfig::default();
@@ -303,16 +337,7 @@ mod tests {
         let doc = make_html_doc();
         let doc = HeaderInjector::new(&config).transform(doc);
 
-        // Find head
-        let head = doc
-            .root
-            .children
-            .iter()
-            .find_map(|n| match n {
-                Node::Element(e) if e.tag == "head" => Some(e.as_ref()),
-                _ => None,
-            })
-            .expect("should have head");
+        let head = head(&doc);
 
         // Check for title element
         let has_title = head.children.iter().any(|n| match n {
@@ -321,6 +346,48 @@ mod tests {
         });
 
         assert!(has_title, "should have title element");
+    }
+
+    #[test]
+    fn injects_feed_discovery_links() {
+        let mut config = SiteConfig::default();
+        config.site.info.title = "Test Site".to_string();
+        config.site.info.url = Some("https://example.com/blog".to_string());
+        config.site.seo.feeds = vec![
+            FeedConfig {
+                format: FeedFormat::Rss,
+                path: "feed.xml".into(),
+                features: vec![],
+            },
+            FeedConfig {
+                format: FeedFormat::Json,
+                path: "feed.json".into(),
+                features: vec![],
+            },
+        ];
+
+        let doc = HeaderInjector::new(&config).transform(make_html_doc());
+        let links: Vec<_> = head(&doc)
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(elem) if elem.tag == "link" => Some(elem.as_ref()),
+                _ => None,
+            })
+            .filter(|elem| elem.get_attr("rel") == Some("alternate"))
+            .collect();
+
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().any(|link| {
+            link.get_attr("type") == Some("application/rss+xml")
+                && link.get_attr("href") == Some("https://example.com/blog/feed.xml")
+                && link.get_attr("title") == Some("Test Site (RSS)")
+        }));
+        assert!(links.iter().any(|link| {
+            link.get_attr("type") == Some("application/feed+json")
+                && link.get_attr("href") == Some("https://example.com/blog/feed.json")
+                && link.get_attr("title") == Some("Test Site (JSON Feed)")
+        }));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! Common utilities for feed generation.
 
 use crate::{
-    config::{FeedConfig, SiteConfig},
+    config::{FeedConfig, FeedFeature, SiteConfig},
+    core::UrlPath,
     log,
     page::{StoredPage, StoredPageMap},
     seo::extract::{extract, extract_text},
@@ -64,6 +65,42 @@ pub fn collect_feed_pages(store: &StoredPageMap) -> FeedPages {
     FeedPages { pages, excluded }
 }
 
+pub fn page_url(page: &FeedPage, config: &SiteConfig) -> String {
+    config.canonical_url(&UrlPath::from_page(&page.permalink))
+}
+
+pub fn feed_url(config: &SiteConfig, feed: &FeedConfig) -> String {
+    config.canonical_output_url(&feed.path)
+}
+
+pub fn summary_html(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<String> {
+    page.summary
+        .as_ref()
+        .map(|summary| prepare_html(&summary.html, page, config, feed))
+}
+
+pub fn entry_body(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<String> {
+    feed.has_feature(FeedFeature::FullText)
+        .then(|| page.feed_body.as_deref())
+        .flatten()
+        .map(|html| prepare_html(html, page, config, feed))
+}
+
+pub fn entry_content(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<String> {
+    entry_body(page, config, feed).or_else(|| summary_html(page, config, feed))
+}
+
+fn prepare_html(html: &str, page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> String {
+    super::html::prepare(
+        html,
+        &super::html::HtmlOptions {
+            site_url: config.site.info.url.as_deref(),
+            page_url: &page_url(page, config),
+            no_script: feed.has_feature(FeedFeature::NoScript),
+        },
+    )
+}
+
 fn write_if_changed(path: &Path, content: &str) -> Result<WriteOutcome> {
     if let Ok(existing) = fs::read(path)
         && existing == content.as_bytes()
@@ -96,7 +133,8 @@ pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, content: &str) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{WriteOutcome, write_if_changed};
+    use super::{FeedPage, FeedSummary, WriteOutcome, write_if_changed};
+    use crate::config::{FeedConfig, FeedFeature, FeedFormat, SiteConfig};
     use std::fs;
     use tempfile::TempDir;
 
@@ -119,5 +157,63 @@ mod tests {
         );
 
         assert_eq!(fs::read_to_string(path).unwrap(), "<feed/>");
+    }
+
+    #[test]
+    fn feed_html_uses_absolute_urls_and_preserves_scripts_by_default() {
+        let mut config = SiteConfig::default();
+        config.site.info.url = Some("https://example.com".to_string());
+        let feed = FeedConfig {
+            format: FeedFormat::Rss,
+            path: "feed.xml".into(),
+            features: vec![FeedFeature::FullText],
+        };
+        let page = FeedPage {
+            title: "Post".to_string(),
+            date: "2026-05-12".to_string(),
+            permalink: "/posts/中文/".to_string(),
+            summary: Some(FeedSummary {
+                html: r#"<a href="/about/">About</a>"#.to_string(),
+                text: "About".to_string(),
+            }),
+            feed_body: Some(
+                r##"<p><a href="#top">Top</a><img src="/img/中文.png"><script>fold()</script></p>"##
+                    .to_string(),
+            ),
+            author: None,
+        };
+
+        let html = super::entry_content(&page, &config, &feed).unwrap();
+
+        assert!(html.contains(r#"href="https://example.com/posts/%E4%B8%AD%E6%96%87/#top""#));
+        assert!(html.contains(r#"src="https://example.com/img/%E4%B8%AD%E6%96%87.png""#));
+        assert!(html.contains("<script>fold()</script>"));
+    }
+
+    #[test]
+    fn no_script_removes_scripts_and_event_handlers() {
+        let mut config = SiteConfig::default();
+        config.site.info.url = Some("https://example.com".to_string());
+        let feed = FeedConfig {
+            format: FeedFormat::Rss,
+            path: "feed.xml".into(),
+            features: vec![FeedFeature::FullText, FeedFeature::NoScript],
+        };
+        let page = FeedPage {
+            title: "Post".to_string(),
+            date: "2026-05-12".to_string(),
+            permalink: "/posts/post/".to_string(),
+            summary: None,
+            feed_body: Some(
+                r#"<button onclick="fold()">Fold</button><script>fold()</script>"#.to_string(),
+            ),
+            author: None,
+        };
+
+        let html = super::entry_content(&page, &config, &feed).unwrap();
+
+        assert!(html.contains("<button>Fold</button>"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("<script"));
     }
 }

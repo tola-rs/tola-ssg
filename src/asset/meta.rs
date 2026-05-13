@@ -25,9 +25,8 @@ pub fn route_from_source(source: PathBuf, config: &SiteConfig) -> Result<AssetRo
         let assets_dir = entry.source();
         if let Ok(relative) = source.strip_prefix(assets_dir) {
             let prefix = entry.output_name();
-            // Use PathResolver to include path_prefix in URL
             let rel_path = format!("{}/{}", prefix, relative.display());
-            let url = UrlPath::from_asset(&paths.url_for_rel_path(&rel_path));
+            let url = UrlPath::from_asset(&rel_path);
             let output = output_dir.join(prefix).join(relative);
 
             return Ok(AssetRoute {
@@ -55,34 +54,6 @@ pub fn relative_path(source: &Path, config: &SiteConfig) -> String {
         }
     }
     source.display().to_string()
-}
-
-/// Generate a URL path from an output file path
-///
-/// Handles path prefix stripping and cross-platform separators
-///
-/// # Errors
-///
-/// Returns an error if the path is not within the output directory
-pub fn url_from_output_path(path: &Path, config: &SiteConfig) -> Result<String> {
-    let output_root = &config.build.output;
-
-    // Strip output root
-    let rel_to_output = path
-        .strip_prefix(output_root)
-        .map_err(|_| anyhow!("Path is not in output directory: {}", path.display()))?;
-
-    // Convert to string and ensure forward slashes
-    let path_str = rel_to_output.to_string_lossy().replace('\\', "/");
-
-    // Ensure it starts with /
-    let url = if path_str.starts_with('/') {
-        path_str
-    } else {
-        format!("/{path_str}")
-    };
-
-    Ok(url)
 }
 
 /// Compute href for an asset path (relative to site root)
@@ -211,6 +182,32 @@ mod tests {
     }
 
     #[test]
+    fn route_from_source_keeps_url_relative_to_site_root() {
+        let dir = TempDir::new().unwrap();
+
+        let assets_dir = dir.path().join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        let source = assets_dir.join("app.css");
+        fs::write(&source, "body {}").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir,
+            )];
+        config.build.output = dir.path().join("public");
+        config.build.path_prefix = "docs/blog".into();
+
+        let route = route_from_source(source.clone(), &config).unwrap();
+
+        assert_eq!(route.url.as_str(), "/assets/app.css");
+        assert_eq!(
+            route.output,
+            dir.path().join("public/docs/blog/assets/app.css")
+        );
+    }
+
+    #[test]
     fn test_route_from_source_not_in_assets() {
         let dir = TempDir::new().unwrap();
 
@@ -224,19 +221,6 @@ mod tests {
         let result = route_from_source(source, &config);
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_url_from_output_path() {
-        let dir = TempDir::new().unwrap();
-
-        let mut config = SiteConfig::default();
-        config.build.output = dir.path().join("public");
-
-        let path = dir.path().join("public/assets/logo.png");
-        let url = url_from_output_path(&path, &config).unwrap();
-
-        assert_eq!(url, "/assets/logo.png");
     }
 
     #[test]

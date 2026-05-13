@@ -26,6 +26,22 @@ impl FeedFormat {
             Self::Json => "json",
         }
     }
+
+    pub const fn mime_type(&self) -> &'static str {
+        match self {
+            Self::Rss => "application/rss+xml",
+            Self::Atom => "application/atom+xml",
+            Self::Json => "application/feed+json",
+        }
+    }
+
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Rss => "RSS",
+            Self::Atom => "Atom",
+            Self::Json => "JSON Feed",
+        }
+    }
 }
 
 /// Optional feed output feature.
@@ -34,18 +50,22 @@ impl FeedFormat {
 pub enum FeedFeature {
     /// Include full entry HTML in addition to the summary.
     FullText,
+    /// Remove scripts and event handler attributes from feed HTML.
+    NoScript,
 }
 
 impl FeedFeature {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::FullText => "full-text",
+            Self::NoScript => "no-script",
         }
     }
 
     pub const fn requires_feed_body(self) -> bool {
         match self {
             Self::FullText => true,
+            Self::NoScript => false,
         }
     }
 }
@@ -113,7 +133,11 @@ impl FeedConfig {
             toml::Value::try_from(default.features)
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
-            FeedFeature::FullText.as_str()
+            format!(
+                "{} | {}",
+                FeedFeature::FullText.as_str(),
+                FeedFeature::NoScript.as_str()
+            )
         ));
         out
     }
@@ -322,14 +346,14 @@ path = "{path}"
 {}
 format = "rss"
 path = "feed.xml"
-features = ["full-text"]
+features = ["full-text", "no-script"]
 "#,
             FeedConfig::toml_array_table()
         ));
 
         assert_eq!(
             config.site.seo.feeds[0].features,
-            vec![FeedFeature::FullText]
+            vec![FeedFeature::FullText, FeedFeature::NoScript]
         );
     }
 

@@ -1,8 +1,8 @@
 //! JSON Feed 1.1 generation.
 
-use super::common::FeedPage;
+use super::common::{FeedPage, entry_content, feed_url, page_url};
 use crate::{
-    config::{FeedConfig, FeedFeature, SiteConfig},
+    config::{FeedConfig, SiteConfig},
     core::UrlPath,
     utils::date::DateTimeUtc,
 };
@@ -29,17 +29,14 @@ struct JsonFeed<'a> {
 
 impl JsonFeed<'_> {
     fn render(&self) -> Result<String> {
-        let site_url = self.config.site.info.url.as_deref();
-        let home_page_url = UrlPath::from_page("/").canonical_url(site_url);
-        let feed_path = format!("/{}", self.feed.path.to_string_lossy().replace('\\', "/"));
-        let feed_url = UrlPath::from_asset(&feed_path).canonical_url(site_url);
-        let include_full_text = self.feed.has_feature(FeedFeature::FullText);
+        let home_page_url = self.config.canonical_url(&UrlPath::from_page("/"));
+        let feed_url = feed_url(self.config, self.feed);
 
         let authors = author_list(&self.config.site.info.author);
         let items = self
             .pages
             .iter()
-            .filter_map(|page| page_to_item(page, self.config, include_full_text))
+            .filter_map(|page| page_to_item(page, self.config, self.feed))
             .collect();
 
         let feed = Document {
@@ -94,13 +91,12 @@ struct Item {
     authors: Vec<Author>,
 }
 
-fn page_to_item(page: &FeedPage, config: &SiteConfig, include_full_text: bool) -> Option<Item> {
+fn page_to_item(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<Item> {
     let date_published = DateTimeUtc::parse(&page.date)?.to_rfc3339();
 
-    let permalink = UrlPath::from_page(&page.permalink);
-    let url = permalink.canonical_url(config.site.info.url.as_deref());
+    let url = page_url(page, config);
     let summary = page.summary.as_ref().map(|summary| summary.text.clone());
-    let content_html = content_html(page, include_full_text);
+    let content_html = entry_content(page, config, feed);
     let content_text = content_html.is_none().then(String::new);
 
     Some(Item {
@@ -118,14 +114,6 @@ fn page_to_item(page: &FeedPage, config: &SiteConfig, include_full_text: bool) -
             .into_iter()
             .collect(),
     })
-}
-
-fn content_html(page: &FeedPage, include_full_text: bool) -> Option<String> {
-    if include_full_text && let Some(feed_body) = &page.feed_body {
-        return Some(feed_body.clone());
-    }
-
-    page.summary.as_ref().map(|summary| summary.html.clone())
 }
 
 fn author_list(name: &str) -> Vec<Author> {
@@ -146,6 +134,7 @@ fn non_empty(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FeedFeature, FeedFormat};
     use crate::seo::feed::common::FeedSummary;
 
     fn make_config() -> SiteConfig {
@@ -157,6 +146,14 @@ mod tests {
         config.site.info.description = "A test blog".to_string();
         config.site.info.language = "en".to_string();
         config
+    }
+
+    fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
+        FeedConfig {
+            format: FeedFormat::Json,
+            path: "feed.json".into(),
+            features,
+        }
     }
 
     #[test]
@@ -174,7 +171,8 @@ mod tests {
             author: Some("Post Author".to_string()),
         };
 
-        let item = page_to_item(&page, &config, false).expect("should create item");
+        let feed = feed_config(vec![]);
+        let item = page_to_item(&page, &config, &feed).expect("should create item");
 
         assert_eq!(item.id, "https://example.com/test/");
         assert_eq!(item.url, "https://example.com/test/");
@@ -204,7 +202,8 @@ mod tests {
             author: None,
         };
 
-        let item = page_to_item(&page, &config, true).expect("should create item");
+        let feed = feed_config(vec![FeedFeature::FullText]);
+        let item = page_to_item(&page, &config, &feed).expect("should create item");
 
         assert_eq!(item.summary.as_deref(), Some("A test summary"));
         assert_eq!(
@@ -229,7 +228,8 @@ mod tests {
             author: None,
         };
 
-        let item = page_to_item(&page, &config, true).expect("should create item");
+        let feed = feed_config(vec![FeedFeature::FullText]);
+        let item = page_to_item(&page, &config, &feed).expect("should create item");
 
         assert_eq!(item.summary.as_deref(), Some("A test summary"));
         assert_eq!(item.content_html.as_deref(), Some("A test summary"));
@@ -248,7 +248,8 @@ mod tests {
             author: None,
         };
 
-        let item = page_to_item(&page, &config, true).expect("should create item");
+        let feed = feed_config(vec![FeedFeature::FullText]);
+        let item = page_to_item(&page, &config, &feed).expect("should create item");
 
         assert_eq!(item.content_html, None);
         assert_eq!(item.content_text.as_deref(), Some(""));
@@ -266,6 +267,7 @@ mod tests {
             author: None,
         };
 
-        assert!(page_to_item(&page, &config, false).is_none());
+        let feed = feed_config(vec![]);
+        assert!(page_to_item(&page, &config, &feed).is_none());
     }
 }

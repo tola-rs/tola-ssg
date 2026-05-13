@@ -2,9 +2,9 @@
 //!
 //! Generates Atom feeds from page metadata.
 
-use super::common::FeedPage;
+use super::common::{FeedPage, entry_body, feed_url, page_url};
 use crate::{
-    config::{FeedConfig, FeedFeature, SiteConfig},
+    config::{FeedConfig, SiteConfig},
     core::UrlPath,
     utils::date::DateTimeUtc,
 };
@@ -32,21 +32,13 @@ struct AtomFeed<'a> {
 
 impl AtomFeed<'_> {
     fn to_xml(&self) -> Result<String> {
-        let site_url = self.config.site.info.url.as_deref();
-        let base_url = UrlPath::from_page("/").canonical_url(site_url);
-        let feed_path = format!("/{}", self.feed.path.to_string_lossy().replace('\\', "/"));
-        let feed_url = UrlPath::from_asset(&feed_path).canonical_url(site_url);
+        let base_url = self.config.canonical_url(&UrlPath::from_page("/"));
+        let feed_url = feed_url(self.config, self.feed);
 
         let entries: Vec<Entry> = self
             .pages
             .iter()
-            .filter_map(|page| {
-                page_to_atom_entry(
-                    page,
-                    &self.config,
-                    self.feed.has_feature(FeedFeature::FullText),
-                )
-            })
+            .filter_map(|page| page_to_atom_entry(page, self.config, self.feed))
             .collect();
 
         // Find the most recent update time for feed updated field
@@ -72,7 +64,7 @@ impl AtomFeed<'_> {
         let self_link: Link = LinkBuilder::default()
             .href(feed_url)
             .rel("self".to_string())
-            .mime_type(Some("application/atom+xml".to_string()))
+            .mime_type(Some(self.feed.format.mime_type().to_string()))
             .build();
 
         // Build alternate link
@@ -102,16 +94,11 @@ impl AtomFeed<'_> {
     }
 }
 
-fn page_to_atom_entry(
-    page: &FeedPage,
-    config: &SiteConfig,
-    include_full_text: bool,
-) -> Option<Entry> {
+fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<Entry> {
     let updated_str = DateTimeUtc::parse(&page.date)?.to_rfc3339();
     let updated: FixedDateTime = updated_str.parse().ok()?;
 
-    let permalink = UrlPath::from_page(&page.permalink);
-    let link = permalink.canonical_url(config.site.info.url.as_deref());
+    let link = page_url(page, config);
 
     // Build entry link
     let entry_link: Link = LinkBuilder::default()
@@ -126,15 +113,12 @@ fn page_to_atom_entry(
         .map(|name| vec![PersonBuilder::default().name(name.clone()).build()])
         .unwrap_or_default();
 
-    let content = include_full_text
-        .then(|| page.feed_body.clone())
-        .flatten()
-        .map(|html| {
-            ContentBuilder::default()
-                .value(html)
-                .content_type("html".to_string())
-                .build()
-        });
+    let content = entry_body(page, config, feed).map(|html| {
+        ContentBuilder::default()
+            .value(html)
+            .content_type("html".to_string())
+            .build()
+    });
 
     Some(
         EntryBuilder::default()
@@ -156,6 +140,7 @@ fn page_to_atom_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FeedFeature, FeedFormat};
     use crate::seo::feed::common::FeedSummary;
 
     // Helper to create a config for testing
@@ -167,6 +152,14 @@ mod tests {
         config.site.info.url = Some("https://example.com".to_string());
         config.site.info.description = "A test blog".to_string();
         config
+    }
+
+    fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
+        FeedConfig {
+            format: FeedFormat::Atom,
+            path: "atom.xml".into(),
+            features,
+        }
     }
 
     #[test]
@@ -184,7 +177,8 @@ mod tests {
             author: Some("Post Author".to_string()),
         };
 
-        let entry = page_to_atom_entry(&page, &config, false).expect("should create entry");
+        let feed = feed_config(vec![]);
+        let entry = page_to_atom_entry(&page, &config, &feed).expect("should create entry");
         assert_eq!(entry.title().as_str(), "Test Post");
         assert_eq!(entry.id(), "https://example.com/test/");
         assert!(entry.updated().to_rfc3339().starts_with("2024-01-15"));
@@ -206,7 +200,8 @@ mod tests {
             author: Some("Post Author".to_string()),
         };
 
-        let entry = page_to_atom_entry(&page, &config, true).expect("should create entry");
+        let feed = feed_config(vec![FeedFeature::FullText]);
+        let entry = page_to_atom_entry(&page, &config, &feed).expect("should create entry");
         assert_eq!(entry.summary().map(Text::as_str), Some("A test summary"));
         let content = entry.content().expect("should include full text");
         assert_eq!(content.content_type(), Some("html"));
@@ -226,6 +221,7 @@ mod tests {
         };
 
         // Invalid date should return None
-        assert!(page_to_atom_entry(&page, &config, false).is_none());
+        let feed = feed_config(vec![]);
+        assert!(page_to_atom_entry(&page, &config, &feed).is_none());
     }
 }

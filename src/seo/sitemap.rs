@@ -46,9 +46,7 @@ impl Sitemap {
         let urls: Vec<UrlEntry> = pages
             .iter()
             .map(|page| {
-                let full_url = page
-                    .permalink
-                    .canonical_url(config.site.info.url.as_deref());
+                let full_url = config.canonical_url(&page.permalink);
                 UrlEntry {
                     loc: full_url,
                     lastmod: page.meta.date.clone(),

@@ -136,7 +136,8 @@ pub fn process_link_value(value: &str, config: &SiteConfig, route: &PageRoute) -
 pub fn normalize_site_root_page_url(value: &str, config: &SiteConfig) -> UrlPath {
     let (path, _) = split_path_fragment(value);
     let path = path.trim_start_matches('/');
-    UrlPath::from_page(&build_prefixed_url(path, config))
+    let slugified = slugify_path(path, &config.build.slug);
+    UrlPath::from_page(&slugified.to_string_lossy())
 }
 
 /// Resolve site-root-relative links (/about, /posts/hello)
@@ -151,7 +152,8 @@ fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
 
     // Split path and fragment
     let (_, fragment) = split_path_fragment(value);
-    let mut url = normalize_site_root_page_url(value, config).to_string();
+    let site_path = normalize_site_root_page_url(value, config);
+    let mut url = config.paths().url_for_site_path(site_path.as_str());
 
     // Append slugified fragment if present
     if !fragment.is_empty() {
@@ -181,46 +183,6 @@ fn resolve_file_relative(value: &str, route: &PageRoute) -> String {
     // For non-index files: a.typ -> a/index.html (one level deeper)
     // All relative paths need ../ to compensate
     format!("../{value}")
-}
-
-// =============================================================================
-// Path Prefix Handling
-// =============================================================================
-
-/// Build a URL with path_prefix, avoiding double-prefixing
-fn build_prefixed_url(path: &str, config: &SiteConfig) -> String {
-    let paths = config.paths();
-    let slugified = slugify_path(path, &config.build.slug);
-    let slugified_str = slugified.to_string_lossy();
-
-    if has_path_prefix(path, config) {
-        format!("/{slugified_str}")
-    } else {
-        paths.url_for_rel_path(&*slugified_str)
-    }
-}
-
-/// Check if a path already contains the configured path_prefix
-fn has_path_prefix(path: &str, config: &SiteConfig) -> bool {
-    let paths = config.paths();
-
-    if !paths.has_prefix() {
-        return false;
-    }
-
-    let prefix = paths.prefix();
-    let prefix_str = prefix.to_string_lossy();
-
-    path_starts_with_segment(path, &prefix_str)
-}
-
-/// Check if path starts with a given segment (not just string prefix)
-fn path_starts_with_segment(path: &str, segment: &str) -> bool {
-    if path == segment {
-        return true;
-    }
-    let with_slash = format!("{segment}/");
-    path.starts_with(&with_slash)
 }
 
 /// Check if a path is an asset link
@@ -338,6 +300,27 @@ mod tests {
     }
 
     #[test]
+    fn site_root_normalization_uses_site_path_not_public_prefix() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+
+        assert_eq!(
+            normalize_site_root_page_url("/posts/Hello World", &config),
+            UrlPath::from_page("/posts/hello-world/")
+        );
+
+        let route = test_route(true);
+        assert_eq!(
+            resolve_link("/posts/Hello World", &config, &route).unwrap(),
+            "/docs/blog/posts/hello-world/"
+        );
+        assert_eq!(
+            resolve_link("/docs/blog", &config, &route).unwrap(),
+            "/docs/blog/docs/blog/"
+        );
+    }
+
+    #[test]
     fn test_process_link_value_empty_error() {
         let config = SiteConfig::default();
         let route = test_route(true);
@@ -371,26 +354,6 @@ mod tests {
         let heading_data = ExtractFamily::<HeadingFamily>::get(&heading.ext).unwrap();
         assert_eq!(heading.get_attr("id"), Some("my-section"));
         assert_eq!(heading_data.id.as_deref(), Some("my-section"));
-    }
-
-    // =========================================================================
-    // Path Prefix Tests
-    // =========================================================================
-
-    #[test]
-    fn test_path_starts_with_segment_cases() {
-        for (path, prefix, expected) in [
-            ("blog", "blog", true),
-            ("docs", "docs", true),
-            ("blog/post-1", "blog", true),
-            ("blog/2024/post", "blog", true),
-            ("blogger/post", "blog", false),
-            ("blogging", "blog", false),
-            ("about", "blog", false),
-            ("posts/blog", "blog", false),
-        ] {
-            assert_eq!(path_starts_with_segment(path, prefix), expected, "{path:?}");
-        }
     }
 
     // =========================================================================

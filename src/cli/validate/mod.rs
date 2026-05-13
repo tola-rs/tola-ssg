@@ -20,7 +20,6 @@ use crate::core::{ContentKind, LinkKind, LinkOrigin, ResolveContext, ResolveResu
 use crate::log;
 use crate::package::build_visible_inputs;
 use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
-use crate::utils::path::route::{strip_path_prefix, strip_path_prefix_in_text};
 use crate::utils::{plural_count, plural_s};
 
 use report::ValidationReport;
@@ -103,8 +102,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let url_sources = crate::address::conflict::collect_url_sources(&all_pages, config);
     let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
     if !conflicts.is_empty() {
-        let prefix = config.paths().prefix().to_string_lossy().into_owned();
-        crate::address::conflict::print_conflicts_with_prefix(&conflicts, &prefix);
+        crate::address::conflict::print_conflicts(&conflicts);
         let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
         anyhow::bail!(
             "validation failed: {} conflicting url{}, {} source{}",
@@ -254,7 +252,6 @@ fn validate_links(
     flatten_outputs: &[String],
     state: &SiteIndex,
 ) {
-    let prefix = config.paths().prefix().to_string_lossy().into_owned();
     let validate_config = &config.validate;
 
     // Find the page for this file (needed for ResolveContext)
@@ -349,22 +346,7 @@ fn validate_links(
                     origin: link.origin,
                 };
 
-                // Mirror compile-time link normalization (prefix + slug) so
-                // validation targets match final emitted URLs.
-                let resolved_link =
-                    crate::pipeline::transform::resolve_link(&link.dest, config, &page.route)
-                        .unwrap_or_else(|_| link.dest.clone());
-
-                let result = state.read(|_, space| {
-                    let mut result = space.resolve(&resolved_link, &ctx);
-                    // Fallback for mixed prefixed/unprefixed permalink states.
-                    if matches!(result, ResolveResult::NotFound { .. })
-                        && resolved_link != link.dest
-                    {
-                        result = space.resolve(&link.dest, &ctx);
-                    }
-                    result
-                });
+                let result = state.read(|_, space| space.resolve(&link.dest, &ctx));
                 handle_resolve_result(
                     result,
                     source,
@@ -372,7 +354,6 @@ fn validate_links(
                     is_asset_attr,
                     validate_config,
                     report,
-                    &prefix,
                 );
             }
 
@@ -398,7 +379,6 @@ fn validate_links(
                     is_asset_attr,
                     validate_config,
                     report,
-                    &prefix,
                 );
             }
         }
@@ -413,13 +393,8 @@ fn handle_resolve_result(
     is_asset_attr: bool,
     validate_config: &crate::config::ValidateConfig,
     report: &Arc<RwLock<ValidationReport>>,
-    prefix: &str,
 ) {
-    let display_link = if link.starts_with('/') {
-        strip_path_prefix(link, prefix)
-    } else {
-        link.to_string()
-    };
+    let display_link = link.to_string();
 
     match result {
         ResolveResult::Found(_) | ResolveResult::External(_) => {}
@@ -457,31 +432,25 @@ fn handle_resolve_result(
                         available.join(", ")
                     )
                 };
-                report.write().add_page(
-                    source.to_string(),
-                    display_link.clone(),
-                    strip_path_prefix_in_text(&msg, prefix),
-                );
+                report
+                    .write()
+                    .add_page(source.to_string(), display_link.clone(), msg);
             }
         }
 
         ResolveResult::Warning { message, .. } => {
             if validate_config.pages.enable {
-                report.write().add_page(
-                    source.to_string(),
-                    display_link.clone(),
-                    strip_path_prefix_in_text(&message, prefix),
-                );
+                report
+                    .write()
+                    .add_page(source.to_string(), display_link.clone(), message);
             }
         }
 
         ResolveResult::Error { message } => {
             if validate_config.pages.enable {
-                report.write().add_page(
-                    source.to_string(),
-                    display_link,
-                    strip_path_prefix_in_text(&message, prefix),
-                );
+                report
+                    .write()
+                    .add_page(source.to_string(), display_link, message);
             }
         }
     }

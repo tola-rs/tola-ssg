@@ -6,7 +6,6 @@ use std::{fs, path::Path, time::SystemTime};
 
 use anyhow::{Result, anyhow};
 
-use crate::asset::url_from_output_path;
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::utils::path::slug::slugify_path;
@@ -135,29 +134,27 @@ impl CompiledPage {
         // 404 page outputs as 404.html (not 404/index.html)
         // Root index outputs as index.html
         // Other pages output as {slug}/index.html
+        let slugified_relative = slugify_path(Path::new(&relative), &config.build.slug);
         let output_file = if is_404 {
             output_root.join("404.html")
         } else if is_root_index {
             output_root.join("index.html")
         } else {
-            let slugified_relative = slugify_path(Path::new(&relative), &config.build.slug);
-            output_root.join(slugified_relative).join("index.html")
+            output_root.join(&slugified_relative).join("index.html")
         };
 
         // Output directory
         let output_dir = output_file.parent().unwrap_or(Path::new("")).to_path_buf();
 
-        // Compute URL path from the final HTML path to ensure consistency
-        let full_path_url = url_from_output_path(&output_file, config)?;
-
-        // Remove "index.html" for pretty URLs and wrap in UrlPath
-        let permalink = if full_path_url.ends_with("/index.html") {
-            UrlPath::from_page(full_path_url.trim_end_matches("index.html"))
+        let permalink = if is_404 {
+            UrlPath::from_page("/404.html")
+        } else if is_root_index {
+            UrlPath::from_page("/")
         } else {
-            UrlPath::from_page(&full_path_url)
+            UrlPath::from_page(&slugified_relative.to_string_lossy())
         };
 
-        let full_url = permalink.canonical_url(config.site.info.url.as_deref());
+        let full_url = config.canonical_url(&permalink);
         let lastmod = fs::metadata(&source).and_then(|m| m.modified()).ok();
 
         Ok(Self {
@@ -218,7 +215,7 @@ impl CompiledPage {
         // Build output file path from permalink.
         let output_file = permalink.output_html_path(&output_root);
         let output_dir = output_file.parent().unwrap_or(Path::new("")).to_path_buf();
-        let full_url = permalink.canonical_url(config.site.info.url.as_deref());
+        let full_url = config.canonical_url(&permalink);
 
         // Update route
         self.route.permalink = permalink;
@@ -427,6 +424,28 @@ mod tests {
         assert!(page.route.is_index);
         assert_eq!(page.route.permalink, "/");
         assert!(page.route.output_file.ends_with("public/index.html"));
+    }
+
+    #[test]
+    fn test_compiled_page_prefix_affects_output_not_permalink() {
+        let (dir, source, mut config) = temp_source_page("posts/hello.typ", "= Hello");
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        config.site.info.url = Some("https://example.com/docs/blog".to_string());
+
+        let page = CompiledPage::from_paths(source, &config).unwrap();
+
+        assert_eq!(page.route.permalink, "/posts/hello/");
+        assert!(
+            page.route
+                .output_file
+                .ends_with("public/docs/blog/posts/hello/index.html")
+        );
+        assert_eq!(
+            page.route.full_url,
+            "https://example.com/docs/blog/posts/hello/"
+        );
+
+        drop(dir);
     }
 
     #[test]

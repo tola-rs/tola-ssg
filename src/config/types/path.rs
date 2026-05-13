@@ -92,11 +92,7 @@ impl<'a> PathResolver<'a> {
     /// paths.url_for_filename("styles.css") -> "/styles.css"
     /// ```
     pub fn url_for_filename(&self, filename: &str) -> String {
-        if self.has_prefix() {
-            format!("/{}/{}", self.prefix.display(), filename)
-        } else {
-            format!("/{filename}")
-        }
+        self.url_for_rel_path(filename)
     }
 
     /// Generate URL path for a relative path in the output directory.
@@ -110,9 +106,17 @@ impl<'a> PathResolver<'a> {
     /// paths.url_for_rel_path("css/app.css") -> "/my-project/css/app.css"
     /// ```
     pub fn url_for_rel_path<P: AsRef<Path>>(&self, rel_path: P) -> String {
-        let joined = self.prefix.join(rel_path);
-        let path_str = joined.to_string_lossy().replace('\\', "/");
+        let path_str = join_url_paths(&[path_to_url(self.prefix), path_to_url(rel_path.as_ref())]);
         format!("/{path_str}")
+    }
+
+    /// Generate browser URL path for a user-authored site-root path.
+    ///
+    /// The input path is always relative to the site root. If `path_prefix`
+    /// is configured, it is always prepended; no prefix de-duplication is
+    /// attempted.
+    pub fn url_for_site_path<P: AsRef<Path>>(&self, path: P) -> String {
+        self.url_for_rel_path(path)
     }
 
     /// Generate URL path from an absolute file path.
@@ -138,6 +142,22 @@ impl<'a> PathResolver<'a> {
     }
 }
 
+fn path_to_url(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+fn join_url_paths(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +180,36 @@ mod tests {
         assert_eq!(
             nested.url_for_rel_path("img/logo.png"),
             "/sites/blog/img/logo.png"
+        );
+    }
+
+    #[test]
+    fn url_for_rel_path_always_resolves_under_output_prefix() {
+        let paths = PathResolver::new(Path::new("/public"), Path::new("blog"));
+
+        assert_eq!(paths.url_for_rel_path("feed.xml"), "/blog/feed.xml");
+        assert_eq!(paths.url_for_rel_path("/feed.xml"), "/blog/feed.xml");
+        assert_eq!(
+            paths.url_for_rel_path("blog/feed.xml"),
+            "/blog/blog/feed.xml"
+        );
+    }
+
+    #[test]
+    fn url_for_site_path_treats_input_as_site_root_relative() {
+        let paths = PathResolver::new(Path::new("/public"), Path::new("docs/blog"));
+
+        assert_eq!(
+            paths.url_for_site_path("posts/hello"),
+            "/docs/blog/posts/hello"
+        );
+        assert_eq!(
+            paths.url_for_site_path("docs/blog/posts/hello"),
+            "/docs/blog/docs/blog/posts/hello"
+        );
+        assert_eq!(
+            paths.url_for_site_path("docs/blogger"),
+            "/docs/blog/docs/blogger"
         );
     }
 

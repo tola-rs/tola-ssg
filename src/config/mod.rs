@@ -53,6 +53,7 @@ use section::{ServeConfig, SiteSectionConfig, ThemeSectionConfig};
 
 use crate::{
     cli::{BuildArgs, Cli, Commands, ValidateArgs},
+    core::UrlPath,
     log,
 };
 use anyhow::{Context, Result, bail};
@@ -366,6 +367,18 @@ impl SiteConfig {
     /// ```
     pub fn paths(&self) -> PathResolver<'_> {
         PathResolver::new(&self.build.output, &self.build.path_prefix)
+    }
+
+    /// Build an absolute URL using `site.info.url` when configured.
+    pub fn canonical_url(&self, path: &UrlPath) -> String {
+        path.canonical_url(self.site.info.url.as_deref())
+    }
+
+    /// Build an absolute URL for a generated file path relative to the site root.
+    pub fn canonical_output_url(&self, rel_path: impl AsRef<Path>) -> String {
+        let path = rel_path.as_ref().to_string_lossy().replace('\\', "/");
+        let path = UrlPath::from_asset(&path);
+        self.canonical_url(&path)
     }
 
     // ========================================================================

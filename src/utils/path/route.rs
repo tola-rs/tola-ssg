@@ -5,7 +5,6 @@
 //! - Safe filename generation from URLs
 //! - Link type detection (external vs internal)
 //! - URL relative resolution
-//! - User-visible `path_prefix` stripping
 
 use crate::core::UrlPath;
 
@@ -114,62 +113,6 @@ pub fn resolve_relative_url(base: &UrlPath, rel: &str) -> UrlPath {
     }
 }
 
-fn normalize_prefix(prefix: &str) -> Option<String> {
-    let normalized = prefix.trim_matches('/').replace('\\', "/");
-    if normalized.is_empty() {
-        None
-    } else {
-        Some(normalized)
-    }
-}
-
-/// Strip configured `path_prefix` from a URL-like string for user-visible output.
-///
-/// Only strips when the URL starts with the prefix as a full path segment.
-pub fn strip_path_prefix(url: &str, prefix: &str) -> String {
-    let normalized = if url.starts_with('/') {
-        url.to_string()
-    } else {
-        format!("/{url}")
-    };
-
-    let Some(prefix) = normalize_prefix(prefix) else {
-        return normalized;
-    };
-
-    let prefix_root = format!("/{prefix}");
-    let with_slash = format!("{prefix_root}/");
-
-    if normalized == prefix_root || normalized == with_slash {
-        return "/".to_string();
-    }
-
-    if let Some(rest) = normalized.strip_prefix(&with_slash) {
-        return format!("/{rest}");
-    }
-
-    normalized
-}
-
-/// Strip `path_prefix` and normalize as a page URL.
-pub fn strip_path_prefix_from_page_url(url: &str, prefix: &str) -> String {
-    UrlPath::from_page(&strip_path_prefix(url, prefix)).to_string()
-}
-
-/// Strip prefixed URL fragments in diagnostic messages.
-///
-/// This is best-effort text cleanup for user-facing logs.
-pub fn strip_path_prefix_in_text(text: &str, prefix: &str) -> String {
-    let Some(prefix) = normalize_prefix(prefix) else {
-        return text.to_string();
-    };
-
-    let marker = format!("/{prefix}/");
-    let exact = format!("/{prefix}");
-
-    text.replace(&marker, "/").replace(&exact, "/")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,39 +163,5 @@ mod tests {
 
         let base = UrlPath::from_page("/a/b/c/");
         assert_eq!(resolve_relative_url(&base, "../../../"), "/");
-    }
-
-    #[test]
-    fn test_strip_path_prefix() {
-        assert_eq!(
-            strip_path_prefix(
-                "/example-sites/starter/showcase/a/",
-                "example-sites/starter"
-            ),
-            "/showcase/a/"
-        );
-        assert_eq!(
-            strip_path_prefix("/example-sites/starter/", "example-sites/starter"),
-            "/"
-        );
-        assert_eq!(
-            strip_path_prefix("/showcase/a/", "example-sites/starter"),
-            "/showcase/a/"
-        );
-    }
-
-    #[test]
-    fn test_strip_path_prefix_from_page_url() {
-        assert_eq!(
-            strip_path_prefix_from_page_url(
-                "/example-sites/starter/showcase/current-permalink-direct/",
-                "example-sites/starter"
-            ),
-            "/showcase/current-permalink-direct/"
-        );
-        assert_eq!(
-            strip_path_prefix_from_page_url("/example-sites/starter", "example-sites/starter"),
-            "/"
-        );
     }
 }

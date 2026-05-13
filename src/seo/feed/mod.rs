@@ -12,9 +12,11 @@ use anyhow::Result;
 
 pub mod atom;
 mod common;
+mod html;
 pub mod json;
 pub mod rss;
 
+pub(crate) use common::feed_url;
 use common::{FeedPage, WriteOutcome, collect_feed_pages, write_feed};
 
 /// Build all configured feeds.
@@ -91,7 +93,7 @@ mod tests {
     fn store_with_page(feed_body: Option<String>) -> StoredPageMap {
         let store = StoredPageMap::new();
         store.insert_page_with_feed_body(
-            UrlPath::from_page("/post/"),
+            UrlPath::from_page("/post 中文/"),
             PageMeta {
                 title: Some("Post".to_string()),
                 date: Some("2026-05-12".to_string()),
@@ -126,8 +128,14 @@ mod tests {
         assert_eq!(json["title"], "Test Site");
         assert_eq!(json["home_page_url"], "https://example.com/");
         assert_eq!(json["feed_url"], "https://example.com/feed.json");
-        assert_eq!(json["items"][0]["id"], "https://example.com/post/");
-        assert_eq!(json["items"][0]["url"], "https://example.com/post/");
+        assert_eq!(
+            json["items"][0]["id"],
+            "https://example.com/post%20%E4%B8%AD%E6%96%87/"
+        );
+        assert_eq!(
+            json["items"][0]["url"],
+            "https://example.com/post%20%E4%B8%AD%E6%96%87/"
+        );
         assert_eq!(json["items"][0]["title"], "Post");
         assert_eq!(json["items"][0]["date_published"], "2026-05-12T00:00:00Z");
         assert_eq!(json["items"][0]["summary"], "Summary");
@@ -189,6 +197,39 @@ mod tests {
         assert_eq!(
             json["items"][0]["content_html"],
             "<article><p>Full text</p></article>"
+        );
+    }
+
+    #[test]
+    fn prefixed_site_urls_are_canonicalized_once() {
+        let temp = TempDir::new().unwrap();
+        let output = temp.path().join("public");
+        let mut config = config_with_feeds(output.clone());
+        config.site.info.url = Some("https://example.com/docs/blog".to_string());
+        config.build.path_prefix = "docs/blog".into();
+
+        let store = StoredPageMap::new();
+        store.insert_page_with_feed_body(
+            UrlPath::from_page("/post/"),
+            PageMeta {
+                title: Some("Post".to_string()),
+                date: Some("2026-05-12".to_string()),
+                summary: Some(serde_json::json!("Summary")),
+                ..Default::default()
+            },
+            None,
+        );
+
+        build_feed(&config, &store).unwrap();
+
+        let json = fs::read_to_string(output.join("docs/blog/feed.json")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(json["home_page_url"], "https://example.com/docs/blog/");
+        assert_eq!(json["feed_url"], "https://example.com/docs/blog/feed.json");
+        assert_eq!(
+            json["items"][0]["url"],
+            "https://example.com/docs/blog/post/"
         );
     }
 }
