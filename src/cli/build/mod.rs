@@ -51,7 +51,6 @@ pub fn build_site(
         config,
         &typst_host,
         state,
-        &files,
         deps_hash,
         &warnings,
         progress.as_ref(),

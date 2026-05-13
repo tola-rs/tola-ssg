@@ -814,7 +814,7 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &
             space.register_asset(asset);
         }
 
-        // Register content assets (non-.typ/.md files in content directory)
+        // Register content assets (non-page files in content directory)
         for asset in scan_content_assets(config) {
             space.register_asset(asset);
         }

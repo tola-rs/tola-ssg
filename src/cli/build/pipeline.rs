@@ -1,15 +1,8 @@
 use anyhow::{Context, Result, anyhow};
-use rayon::prelude::*;
-use std::{
-    ffi::OsStr,
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{ffi::OsStr, fs, path::Path};
 
 use crate::{
     address::SiteIndex,
-    asset::process_asset,
     compiler::{
         collect_all_files,
         page::{self, MetadataResult, Pages, TypstHost, WarningCollector},
@@ -24,8 +17,8 @@ use crate::{
 
 /// Collected files for the build
 pub(super) struct BuildFiles {
-    /// Asset files from nested directories
-    assets: Vec<PathBuf>,
+    /// Global asset routes found by the asset scanner.
+    asset_count: usize,
     /// Content file counts by type
     typst_count: usize,
     markdown_count: usize,
@@ -57,12 +50,7 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<TypstHost> {
 
 /// Collect all files to process
 pub(super) fn collect_build_files(config: &SiteConfig) -> BuildFiles {
-    let assets: Vec<_> = config
-        .build
-        .assets
-        .nested_sources()
-        .flat_map(collect_all_files)
-        .collect();
+    let asset_count = crate::asset::scan_global_assets(config).len();
 
     // Count content files by type (content assets handled separately)
     let content_files = collect_all_files(&config.build.content);
@@ -76,7 +64,7 @@ pub(super) fn collect_build_files(config: &SiteConfig) -> BuildFiles {
         .count();
 
     BuildFiles {
-        assets,
+        asset_count,
         typst_count,
         markdown_count,
     }
@@ -90,7 +78,7 @@ pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<Progres
     Some(ProgressLine::new(&[
         ("typst", files.typst_count),
         ("markdown", files.markdown_count),
-        ("assets", files.assets.len()),
+        ("assets", files.asset_count),
     ]))
 }
 
@@ -100,13 +88,11 @@ pub(super) fn compile_and_process(
     config: &SiteConfig,
     typst_host: &TypstHost,
     state: &SiteIndex,
-    files: &BuildFiles,
     deps_hash: ContentHash,
     warnings: &WarningCollector,
     progress: Option<&ProgressLine>,
 ) -> Result<MetadataResult> {
     let clean = config.build.clean;
-    let has_error = AtomicBool::new(false);
 
     let (metadata_result, assets_result) = rayon::join(
         || {
@@ -122,7 +108,7 @@ pub(super) fn compile_and_process(
                 progress,
             )
         },
-        || process_assets(&files.assets, config, clean, &has_error, progress),
+        || process_assets(config, clean, progress),
     );
 
     let metadata = metadata_result?;
@@ -131,30 +117,24 @@ pub(super) fn compile_and_process(
     Ok(metadata)
 }
 
-/// Process nested asset files in parallel
-fn process_assets(
-    files: &[PathBuf],
-    config: &SiteConfig,
-    clean: bool,
-    has_error: &AtomicBool,
-    progress: Option<&ProgressLine>,
-) -> Result<()> {
-    files.par_iter().try_for_each(|path| {
-        if is_shutdown() || has_error.load(Ordering::Relaxed) {
-            return Err(anyhow!("Aborted"));
+/// Process global asset files through the unified asset routing rules.
+fn process_assets(config: &SiteConfig, clean: bool, progress: Option<&ProgressLine>) -> Result<()> {
+    if is_shutdown() {
+        return Err(anyhow!("Aborted"));
+    }
+
+    let summary = crate::asset::process_global_assets(config, clean, false).map_err(|e| {
+        log!("error"; "asset processing failed: {:#}", e);
+        anyhow!("Build failed")
+    })?;
+
+    if let Some(progress) = progress {
+        for _ in 0..summary.scanned {
+            progress.inc("assets");
         }
-        if let Err(e) = process_asset(path, config, clean, false) {
-            if !has_error.swap(true, Ordering::Relaxed) {
-                let display_path = path.strip_prefix(config.get_root()).unwrap_or(path);
-                log!("error"; "{}: {:#}", display_path.display(), e);
-            }
-            return Err(anyhow!("Build failed"));
-        }
-        if let Some(p) = progress {
-            p.inc("assets");
-        }
-        Ok(())
-    })
+    }
+
+    Ok(())
 }
 
 /// Rebuild iterative pages if any exist

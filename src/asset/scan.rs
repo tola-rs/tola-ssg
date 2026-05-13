@@ -15,12 +15,11 @@ use super::route::{
 /// Returns all assets found in the configured nested asset directories
 /// with their computed URLs and output paths
 ///
-/// # Move-type Flatten Files
+/// # Flatten Files
 ///
-/// Files configured as flatten with `type = "move"` (the default) are
-/// **skipped** during nested scanning. They will only be output to the
-/// flatten location. Files with `type = "copy"` are included here and
-/// also in `scan_flatten_assets`
+/// Files configured as flatten are skipped during nested scanning. They are
+/// emitted only by `scan_flatten_assets`, so one source file has one output
+/// route.
 ///
 /// # Pure Function
 ///
@@ -45,7 +44,7 @@ pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 
 /// Recursive helper for scanning global assets
 ///
-/// Skips move-type flatten files to avoid duplicate output
+/// Skips flatten files to avoid duplicate output
 fn scan_global_recursive(
     results: &mut Vec<AssetRoute>,
     dir: &Path,
@@ -96,7 +95,7 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 
     for entry in &config.build.assets.flatten {
         let source = entry.source();
-        if !source.exists() {
+        if !source.is_file() {
             continue;
         }
 
@@ -110,7 +109,7 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 
 /// Scan content assets (non-page files in content directory)
 ///
-/// Returns all non-content files found in the content directory
+/// Returns all non-page files found in the content directory
 /// with their computed URLs and output paths.
 ///
 /// ```text
@@ -131,7 +130,7 @@ pub fn scan_flatten_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 pub fn scan_content_assets(config: &SiteConfig) -> Vec<AssetRoute> {
     let content_dir = &config.build.content;
 
-    if !content_dir.exists() {
+    if !config.build.assets.colocated || !content_dir.exists() {
         return vec![];
     }
 
@@ -312,6 +311,24 @@ mod tests {
 
         let assets = scan_flatten_assets(&config);
         assert!(assets.is_empty()); // Nonexistent files are skipped
+    }
+
+    #[test]
+    fn test_scan_flatten_directory_is_not_an_asset_file() {
+        let dir = TempDir::new().unwrap();
+        let source = dir.path().join("icons");
+        fs::create_dir_all(&source).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.assets.flatten =
+            vec![crate::config::section::build::assets::FlattenEntry::Simple(
+                source,
+            )];
+        config.build.output = dir.path().join("public");
+
+        let assets = scan_flatten_assets(&config);
+
+        assert!(assets.is_empty());
     }
 
     #[test]

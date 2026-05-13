@@ -132,7 +132,12 @@ impl<'a> MediaTransform<'a> {
                     .output_dir()
                     .join(parent)
                     .join(format!("{}.nobg.png", stem));
-                let new_src = format!("/{}/{}.nobg.png", parent.display(), stem);
+                let parent = parent.to_string_lossy().replace('\\', "/");
+                let new_src = if parent.is_empty() {
+                    format!("/{stem}.nobg.png")
+                } else {
+                    format!("/{parent}/{stem}.nobg.png")
+                };
                 // Use src path for consistency with compute_output_path
                 let original_output = self.config.paths().output_dir().join(trimmed);
                 (output_path, new_src, original_output)
@@ -487,5 +492,24 @@ mod tests {
 
         let script = transformed.find(|elem| elem.is_tag("script")).unwrap();
         assert_eq!(script.get_attr("src"), Some("/docs/blog/scripts/app.js"));
+    }
+
+    #[test]
+    fn nobg_site_root_image_at_output_root_keeps_single_leading_slash() {
+        let config = SiteConfig::default();
+        let route = PageRoute {
+            source: PathBuf::from("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: PathBuf::from("public/index.html"),
+            output_dir: PathBuf::from("public"),
+            full_url: "https://example.com/".to_string(),
+        };
+        let transform = MediaTransform::new(&config, &route);
+
+        let (_, new_src, _) = transform.generate_nobg_paths("/hero.png", Path::new("hero.png"));
+
+        assert_eq!(new_src, "/hero.nobg.png");
     }
 }

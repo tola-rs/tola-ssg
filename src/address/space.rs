@@ -564,8 +564,7 @@ impl AddressSpace {
     ) -> ResolveResult {
         // Compute the physical path relative to source file directory
         let source_dir = ctx.source_path.parent().unwrap_or(Path::new(""));
-        let clean_path = path.trim_start_matches("./");
-        let physical_path = source_dir.join(clean_path);
+        let physical_path = resolve_physical_path(source_dir, path);
 
         // Check physical path directly
         if let Some(url) = self.by_source.get(&physical_path)
@@ -828,6 +827,33 @@ mod tests {
         assert!(space.is_asset_path("/assets/logo.png"));
         assert!(!space.is_asset_path("/posts/hello/"));
         assert_eq!(space.asset_count(), 1);
+    }
+
+    #[test]
+    fn file_relative_asset_attrs_resolve_normalized_parent_paths() {
+        let mut space = AddressSpace::new();
+        let page_route = test_route(
+            "content/posts/hello.typ",
+            "/posts/hello/",
+            "public/posts/hello/index.html",
+        );
+        space.register_page(page_route.clone(), None);
+        space.register_asset(test_asset_route(
+            "content/shared.png",
+            "/shared.png",
+            "public/shared.png",
+        ));
+
+        let ctx = ResolveContext {
+            current_permalink: &page_route.permalink,
+            source_path: &page_route.source,
+            origin: crate::core::LinkOrigin::Src,
+        };
+
+        assert!(matches!(
+            space.resolve("../shared.png", &ctx),
+            ResolveResult::Found(Resource::Asset { .. })
+        ));
     }
 
     #[test]

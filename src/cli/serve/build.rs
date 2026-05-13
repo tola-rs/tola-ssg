@@ -5,7 +5,6 @@
 //! warming up the rest of the site in the background.
 
 use anyhow::Result;
-use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,25 +70,14 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
 fn process_assets(config: &SiteConfig) -> Result<()> {
     let clean = config.build.clean;
 
-    // Collect asset files from assets directories
-    let assets: Vec<_> = config
-        .build
-        .assets
-        .nested_sources()
-        .flat_map(compiler::collect_all_files)
-        .collect();
-
-    // Process in parallel
-    assets.par_iter().for_each(|path| {
-        let _ = asset::process_asset(path, config, clean, false);
-    });
+    asset::process_global_assets(config, clean, false)?;
 
     // Flatten assets and CNAME
-    let _ = asset::process_flatten_assets(config, clean, false);
-    let _ = asset::process_cname(config);
+    asset::process_flatten_assets(config, clean, false)?;
+    asset::process_cname(config)?;
 
-    // Process content assets (non-.typ/.md files in content directory)
-    let _ = asset::process_content_assets(config, clean);
+    // Process content assets (non-page files in content directory)
+    asset::process_content_assets(config, clean)?;
 
     Ok(())
 }

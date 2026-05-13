@@ -194,7 +194,7 @@ pub fn asset_url_exists(value: &str, config: &SiteConfig) -> bool {
         return true;
     }
 
-    source_for_logical_asset_url(&matched.logical, config).is_some_and(|source| source.exists())
+    source_for_logical_asset_url(&matched.logical, config).is_some_and(|source| source.is_file())
 }
 
 struct AssetUrlMatch {
@@ -246,7 +246,7 @@ fn is_nested_asset_url(path: &str, config: &SiteConfig) -> bool {
         .assets
         .nested
         .iter()
-        .any(|entry| segment_prefix_matches(path, entry.output_name()))
+        .any(|entry| nested_asset_rest(path, entry.output_name()).is_some())
 }
 
 fn is_flatten_asset_url(path: &str, config: &SiteConfig) -> bool {
@@ -260,7 +260,7 @@ fn is_flatten_asset_url(path: &str, config: &SiteConfig) -> bool {
 
 fn is_colocated_asset_url(path: &str, config: &SiteConfig) -> bool {
     let source = config.build.content.join(path);
-    if route_from_content_source(&source, config).is_some_and(|route| route.source.exists()) {
+    if route_from_content_source(&source, config).is_some_and(|route| route.source.is_file()) {
         return true;
     }
 
@@ -278,12 +278,7 @@ fn source_for_logical_asset_url(path: &str, config: &SiteConfig) -> Option<PathB
 
     for entry in &config.build.assets.nested {
         let output_name = entry.output_name();
-        if path == output_name {
-            return Some(entry.source().to_path_buf());
-        }
-        if let Some(rest) = path.strip_prefix(output_name)
-            && let Some(rest) = rest.strip_prefix('/')
-        {
+        if let Some(rest) = nested_asset_rest(path, output_name) {
             return Some(entry.source().join(rest));
         }
     }
@@ -292,11 +287,9 @@ fn source_for_logical_asset_url(path: &str, config: &SiteConfig) -> Option<PathB
     route_from_content_source(&content_source, config).map(|route| route.source)
 }
 
-fn segment_prefix_matches(path: &str, prefix: &str) -> bool {
-    path == prefix
-        || path
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('/'))
+fn nested_asset_rest<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let rest = path.strip_prefix(prefix)?.strip_prefix('/')?;
+    (!rest.is_empty()).then_some(rest)
 }
 
 fn strip_url_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -427,5 +420,32 @@ mod tests {
         assert!(is_asset_url("/posts/missing.png", &config));
         assert!(!asset_url_exists("/posts/missing.png", &config));
         assert!(!is_asset_url("/posts/missing", &config));
+    }
+
+    #[test]
+    fn nested_asset_namespace_root_is_not_an_asset_file() {
+        let dir = TempDir::new().unwrap();
+        let assets_dir = dir.path().join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
+
+        assert!(!is_asset_url("/assets", &config));
+        assert!(!asset_url_exists("/assets", &config));
+    }
+
+    #[test]
+    fn colocated_directory_url_is_not_an_asset_file() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(content_dir.join("posts")).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.assets.colocated = true;
+
+        assert!(!is_asset_url("/posts", &config));
+        assert!(!asset_url_exists("/posts", &config));
     }
 }

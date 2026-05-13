@@ -227,12 +227,33 @@ impl AssetsConfig {
     pub fn validate(&self, diag: &mut ConfigDiagnostics) {
         let mut outputs = OutputNameTracker::new();
 
+        self.validate_nested_overlaps(diag);
+
         for (i, entry) in self.nested.iter().enumerate() {
             Self::validate_nested_entry(entry, i, &mut outputs, diag);
         }
 
         for (i, entry) in self.flatten.iter().enumerate() {
             Self::validate_flatten_entry(entry, i, &mut outputs, diag);
+        }
+    }
+
+    fn validate_nested_overlaps(&self, diag: &mut ConfigDiagnostics) {
+        for (i, current) in self.nested.iter().enumerate() {
+            for (j, other) in self.nested.iter().enumerate().skip(i + 1) {
+                let current_path = current.source();
+                let other_path = other.source();
+                if current_path.starts_with(other_path) || other_path.starts_with(current_path) {
+                    diag.error(
+                        Self::FIELDS.nested,
+                        format!(
+                            "[{j}] '{}' overlaps nested asset source '{}'",
+                            other_path.display(),
+                            current_path.display(),
+                        ),
+                    );
+                }
+            }
         }
     }
 
@@ -251,6 +272,8 @@ impl AssetsConfig {
                 format!("[{idx}] '{}' must be a directory", path.display()),
             );
         }
+
+        Self::validate_output_alias(entry.output_name(), idx, Self::FIELDS.nested, diag);
 
         if is_reserved_output(entry.output_name(), crate::asset::SYSTEM_ASSET_DIR) {
             diag.error(
@@ -288,6 +311,8 @@ impl AssetsConfig {
             );
         }
 
+        Self::validate_output_alias(entry.output_name(), idx, Self::FIELDS.flatten, diag);
+
         if is_reserved_output(entry.output_name(), crate::asset::SYSTEM_ASSET_DIR) {
             diag.error(
                 Self::FIELDS.flatten,
@@ -306,6 +331,27 @@ impl AssetsConfig {
             Self::FIELDS.flatten,
             diag,
         );
+    }
+
+    fn validate_output_alias(
+        name: &str,
+        idx: usize,
+        field: FieldPath,
+        diag: &mut ConfigDiagnostics,
+    ) {
+        let reason = if name.is_empty() {
+            Some("must not be empty")
+        } else if name == "." || name == ".." {
+            Some("must not be '.' or '..'")
+        } else if name.contains('/') || name.contains('\\') {
+            Some("must be a single path segment")
+        } else {
+            None
+        };
+
+        if let Some(reason) = reason {
+            diag.error(field, format!("[{idx}] output alias '{}': {reason}", name));
+        }
     }
 }
 
@@ -483,10 +529,43 @@ mod tests {
 
     #[test]
     fn test_reserved_generated_asset_namespace_is_rejected() {
-        let config: AssetsConfig = toml::from_str(
+        let nested: AssetsConfig = toml::from_str(
             r#"
 nested = [{ dir = "assets", as = ".tola" }]
-flatten = [{ file = "favicon.ico", as = ".tola/favicon.ico" }]
+"#,
+        )
+        .unwrap();
+        let mut diag = ConfigDiagnostics::new();
+
+        nested.validate(&mut diag);
+
+        assert_eq!(diag.len(), 1);
+
+        let flatten: AssetsConfig = toml::from_str(
+            r#"
+flatten = [{ file = "favicon.ico", as = ".tola" }]
+"#,
+        )
+        .unwrap();
+        let mut diag = ConfigDiagnostics::new();
+
+        flatten.validate(&mut diag);
+
+        assert_eq!(diag.len(), 1);
+    }
+
+    #[test]
+    fn test_output_aliases_must_be_single_segments() {
+        let config: AssetsConfig = toml::from_str(
+            r#"
+nested = [
+    { dir = "assets", as = "lib/vendor" },
+    { dir = "vendor", as = "." },
+]
+flatten = [
+    { file = "favicon.ico", as = "../favicon.ico" },
+    { file = "robots.txt", as = "" },
+]
 "#,
         )
         .unwrap();
@@ -494,7 +573,31 @@ flatten = [{ file = "favicon.ico", as = ".tola/favicon.ico" }]
 
         config.validate(&mut diag);
 
-        assert_eq!(diag.len(), 2);
+        assert_eq!(diag.len(), 4);
+    }
+
+    #[test]
+    fn test_nested_sources_must_not_overlap() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let assets = root.join("assets");
+        std::fs::create_dir_all(assets.join("icons")).unwrap();
+
+        let mut config: AssetsConfig = toml::from_str(
+            r#"
+nested = [
+    "assets",
+    { dir = "assets/icons", as = "icons" },
+]
+"#,
+        )
+        .unwrap();
+        config.normalize(root);
+        let mut diag = ConfigDiagnostics::new();
+
+        config.validate(&mut diag);
+
+        assert_eq!(diag.len(), 1);
     }
 
     #[test]
