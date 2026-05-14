@@ -125,26 +125,6 @@ impl AssetsConfig {
         self.flatten.iter().any(|e| e.output_name() == "CNAME")
     }
 
-    /// Check if source path is in any nested directory or is a flatten file.
-    pub fn contains_source(&self, source: &Path) -> bool {
-        self.nested.iter().any(|e| source.starts_with(e.source()))
-            || self.flatten.iter().any(|e| source == e.source())
-    }
-
-    /// Check if a source path is allowed as a colocated content asset.
-    pub fn contains_colocated_source(&self, source: &Path, content_root: &Path) -> bool {
-        let Ok(relative) = source.strip_prefix(content_root) else {
-            return false;
-        };
-        self.colocated && !relative.as_os_str().is_empty()
-    }
-
-    /// Find which nested entry contains the source path.
-    #[allow(dead_code)]
-    pub fn find_nested_for(&self, source: &Path) -> Option<&NestedEntry> {
-        self.nested.iter().find(|e| source.starts_with(e.source()))
-    }
-
     /// Normalize all paths relative to root directory.
     pub fn normalize(&mut self, root: &Path) {
         for entry in &mut self.nested {
@@ -153,14 +133,6 @@ impl AssetsConfig {
         for entry in &mut self.flatten {
             entry.normalize(root);
         }
-    }
-
-    /// Check if a source path is a flatten file.
-    ///
-    /// Used by `scan_global_assets` to skip files that should only
-    /// be output to the flatten location (output root).
-    pub fn is_flatten(&self, source: &Path) -> bool {
-        self.flatten.iter().any(|e| e.source() == source)
     }
 
     // ========================================================================
@@ -228,6 +200,7 @@ impl AssetsConfig {
         let mut outputs = OutputNameTracker::new();
 
         self.validate_nested_overlaps(diag);
+        self.validate_flatten_sources(diag);
 
         for (i, entry) in self.nested.iter().enumerate() {
             Self::validate_nested_entry(entry, i, &mut outputs, diag);
@@ -243,14 +216,55 @@ impl AssetsConfig {
             for (j, other) in self.nested.iter().enumerate().skip(i + 1) {
                 let current_path = current.source();
                 let other_path = other.source();
-                if current_path.starts_with(other_path) || other_path.starts_with(current_path) {
-                    diag.error(
+                if current_path == other_path {
+                    diag.error_with_hint(
                         Self::FIELDS.nested,
                         format!(
-                            "[{j}] '{}' overlaps nested asset source '{}'",
+                            "nested[{j}] '{}' duplicates nested[{i}] '{}'; nested source directories must be unique and disjoint",
                             other_path.display(),
-                            current_path.display(),
+                            current_path.display()
                         ),
+                        "Choose either one nested entry for that directory, or split assets into explicit non-overlapping child directories.",
+                    );
+                } else if current_path.starts_with(other_path) {
+                    Self::report_nested_overlap(j, other_path, i, current_path, diag);
+                } else if other_path.starts_with(current_path) {
+                    Self::report_nested_overlap(i, current_path, j, other_path, diag);
+                }
+            }
+        }
+    }
+
+    fn report_nested_overlap(
+        parent_idx: usize,
+        parent: &Path,
+        child_idx: usize,
+        child: &Path,
+        diag: &mut ConfigDiagnostics,
+    ) {
+        diag.error_with_hint(
+            Self::FIELDS.nested,
+            format!(
+                "nested[{child_idx}] '{}' is inside nested[{parent_idx}] '{}'; nested source directories must be disjoint",
+                child.display(),
+                parent.display(),
+            ),
+            "Choose either the parent directory, or list explicit non-overlapping child directories such as 'assets/icons', 'assets/images', and 'assets/fonts'. Directory shadowing is not supported.",
+        );
+    }
+
+    fn validate_flatten_sources(&self, diag: &mut ConfigDiagnostics) {
+        for (i, current) in self.flatten.iter().enumerate() {
+            for (j, other) in self.flatten.iter().enumerate().skip(i + 1) {
+                if current.source() == other.source() {
+                    diag.error_with_hint(
+                        Self::FIELDS.flatten,
+                        format!(
+                            "flatten[{j}] '{}' uses the same source file as flatten[{i}] '{}'",
+                            other.source().display(),
+                            current.source().display()
+                        ),
+                        "Each flatten source file may be configured once. Use one output alias for the file, or create a separate source file if two outputs are required.",
                     );
                 }
             }
@@ -598,40 +612,44 @@ nested = [
         config.validate(&mut diag);
 
         assert_eq!(diag.len(), 1);
+        let error = &diag.errors()[0];
+        assert!(error.message.contains("nested[1]"));
+        assert!(error.message.contains("nested[0]"));
+        assert!(error.message.contains("must be disjoint"));
+        assert!(
+            error
+                .hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("Choose either the parent directory"))
+        );
     }
 
     #[test]
-    fn test_find_nested_for() {
-        let config: AssetsConfig =
-            toml::from_str(r#"nested = ["assets", { dir = "vendor", as = "lib" }]"#).unwrap();
+    fn test_flatten_sources_must_be_unique() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let assets = root.join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("logo.png"), "logo").unwrap();
 
-        let entry = config.find_nested_for(Path::new("assets/images/logo.png"));
-        assert!(entry.is_some());
-        assert_eq!(entry.unwrap().output_name(), "assets");
-
-        let entry2 = config.find_nested_for(Path::new("vendor/js/app.js"));
-        assert!(entry2.is_some());
-        assert_eq!(entry2.unwrap().output_name(), "lib");
-
-        let entry3 = config.find_nested_for(Path::new("other/file.txt"));
-        assert!(entry3.is_none());
-    }
-
-    #[test]
-    fn test_is_flatten() {
-        let toml = r#"
+        let mut config: AssetsConfig = toml::from_str(
+            r#"
 flatten = [
-    "assets/CNAME",
     { file = "assets/logo.png", as = "logo.png" },
+    { file = "assets/logo.png", as = "brand.png" },
 ]
-"#;
-        let config: AssetsConfig = toml::from_str(toml).unwrap();
+"#,
+        )
+        .unwrap();
+        config.normalize(root);
+        let mut diag = ConfigDiagnostics::new();
 
-        // Flatten files
-        assert!(config.is_flatten(Path::new("assets/CNAME")));
-        assert!(config.is_flatten(Path::new("assets/logo.png")));
+        config.validate(&mut diag);
 
-        // Not a flatten file
-        assert!(!config.is_flatten(Path::new("assets/other.txt")));
+        assert_eq!(diag.len(), 1);
+        let error = &diag.errors()[0];
+        assert!(error.message.contains("flatten[1]"));
+        assert!(error.message.contains("flatten[0]"));
+        assert!(error.message.contains("same source file"));
     }
 }

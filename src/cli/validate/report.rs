@@ -14,6 +14,8 @@ pub struct ValidationError {
     pub target: String,
     /// Error reason/message.
     pub reason: String,
+    /// Optional fix hint.
+    pub hint: Option<String>,
 }
 
 /// Unified validation report for all error types
@@ -31,17 +33,30 @@ impl ValidationReport {
         self.pages.entry(source).or_default().push(ValidationError {
             target: link,
             reason,
+            hint: None,
         });
     }
 
     /// Add an asset error.
     pub fn add_asset(&mut self, source: String, path: String, reason: String) {
+        self.add_asset_with_hint(source, path, reason, None);
+    }
+
+    /// Add an asset error with an optional fix hint.
+    pub fn add_asset_with_hint(
+        &mut self,
+        source: String,
+        path: String,
+        reason: String,
+        hint: Option<String>,
+    ) {
         self.assets
             .entry(source)
             .or_default()
             .push(ValidationError {
                 target: path,
                 reason,
+                hint,
             });
     }
 
@@ -101,6 +116,9 @@ impl ValidationReport {
                     eprintln!("{} {}", "→".red(), e.target);
                 } else {
                     eprintln!("{} {} {}", "→".red(), e.target, e.reason);
+                }
+                if let Some(hint) = &e.hint {
+                    eprintln!("  {} {}", "hint:".yellow(), hint);
                 }
             }
         }

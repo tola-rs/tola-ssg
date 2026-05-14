@@ -35,6 +35,8 @@ pub struct AssetRoute {
 /// The route URL is site-root-relative and does not include `path_prefix`.
 /// The output path always includes `path_prefix` through `config.paths()`.
 pub fn route_from_source(source: PathBuf, config: &SiteConfig) -> Result<AssetRoute> {
+    let source = normalize_source_path(&source);
+
     if let Some(route) = route_from_flatten_source(&source, config) {
         return Ok(route);
     }
@@ -53,13 +55,23 @@ pub fn route_from_source(source: PathBuf, config: &SiteConfig) -> Result<AssetRo
     ))
 }
 
+/// Create an `AssetRoute` from a config field that stores a physical source path.
+///
+/// Config asset fields may be root-relative (`assets/app.css`) or already
+/// normalized to an absolute path. The route itself is still owned by
+/// `build.assets`.
+pub fn route_from_config_source(path: &Path, config: &SiteConfig) -> Result<AssetRoute> {
+    route_from_source(config_source_path(path, config), config)
+}
+
 /// Create a route for a nested global asset source.
 pub fn route_from_nested_source(source: &Path, config: &SiteConfig) -> Option<AssetRoute> {
+    let source = normalize_source_path(source);
     let output_dir = config.paths().output_dir();
 
     for entry in &config.build.assets.nested {
-        let base = entry.source();
-        let Ok(relative) = source.strip_prefix(base) else {
+        let base = normalize_source_path(entry.source());
+        let Ok(relative) = source.strip_prefix(&base) else {
             continue;
         };
         let rel_url = path_to_url(relative);
@@ -67,7 +79,7 @@ pub fn route_from_nested_source(source: &Path, config: &SiteConfig) -> Option<As
         let output = output_dir.join(entry.output_name()).join(relative);
 
         return Some(AssetRoute {
-            source: source.to_path_buf(),
+            source: source.clone(),
             url,
             output,
             kind: AssetKind::Global,
@@ -79,13 +91,14 @@ pub fn route_from_nested_source(source: &Path, config: &SiteConfig) -> Option<As
 
 /// Create a route for a flatten global asset source.
 pub fn route_from_flatten_source(source: &Path, config: &SiteConfig) -> Option<AssetRoute> {
+    let source = normalize_source_path(source);
     let output_dir = config.paths().output_dir();
 
     for entry in &config.build.assets.flatten {
-        if source == entry.source() {
+        if source == normalize_source_path(entry.source()) {
             let output_name = entry.output_name();
             return Some(AssetRoute {
-                source: source.to_path_buf(),
+                source: source.clone(),
                 url: UrlPath::from_asset(output_name),
                 output: output_dir.join(output_name),
                 kind: AssetKind::Global,
@@ -98,56 +111,48 @@ pub fn route_from_flatten_source(source: &Path, config: &SiteConfig) -> Option<A
 
 /// Create a route for an allowed colocated content asset source.
 pub fn route_from_content_source(source: &Path, config: &SiteConfig) -> Option<AssetRoute> {
-    if ContentKind::from_path(source).is_some()
-        || !config
-            .build
-            .assets
-            .contains_colocated_source(source, &config.build.content)
+    let source = normalize_source_path(source);
+    let content = normalize_source_path(&config.build.content);
+    let relative = source.strip_prefix(&content).ok()?.to_path_buf();
+    if ContentKind::from_path(source.as_path()).is_some()
+        || !config.build.assets.colocated
+        || relative.as_os_str().is_empty()
     {
         return None;
     }
 
-    let relative = source.strip_prefix(&config.build.content).ok()?;
-    let rel_url = path_to_url(relative);
+    let rel_url = path_to_url(&relative);
 
     Some(AssetRoute {
-        source: source.to_path_buf(),
+        source,
         url: UrlPath::from_asset(&rel_url),
-        output: config.paths().output_dir().join(relative),
+        output: config.paths().output_dir().join(&relative),
         kind: AssetKind::Content,
     })
 }
 
 /// Get relative path from the asset owner directory for logging.
 pub fn relative_path(source: &Path, config: &SiteConfig) -> String {
+    let source = normalize_source_path(source);
+
     for entry in &config.build.assets.flatten {
-        if source == entry.source() {
+        if source == normalize_source_path(entry.source()) {
             return entry.output_name().to_string();
         }
     }
 
     for entry in &config.build.assets.nested {
-        if let Ok(rel) = source.strip_prefix(entry.source()) {
+        let base = normalize_source_path(entry.source());
+        if let Ok(rel) = source.strip_prefix(base) {
             return path_to_url(rel);
         }
     }
 
-    if let Ok(rel) = source.strip_prefix(&config.build.content) {
+    if let Ok(rel) = source.strip_prefix(normalize_source_path(&config.build.content)) {
         return path_to_url(rel);
     }
 
     source.display().to_string()
-}
-
-/// Compute a browser href for a configured user asset path.
-///
-/// The input path is a physical path relative to the site root, matching
-/// `site.header.icon`, `site.header.styles`, and similar config fields.
-pub fn compute_asset_href(asset_path: &Path, config: &SiteConfig) -> Result<String> {
-    let normalized = asset_path.strip_prefix("./").unwrap_or(asset_path);
-    let abs_path = normalize_path(&config.get_root().join(normalized));
-    let route = route_from_source(abs_path, config)?;
-    Ok(href_for_route(&route, config))
 }
 
 /// Convert an asset route URL into a browser href, applying `path_prefix`.
@@ -195,6 +200,66 @@ pub fn asset_url_exists(value: &str, config: &SiteConfig) -> bool {
     }
 
     source_for_logical_asset_url(&matched.logical, config).is_some_and(|source| source.is_file())
+}
+
+/// Resolve a site-root asset URL back to its configured source file.
+///
+/// Query strings, fragments, and `path_prefix` are accepted. Generated system
+/// assets do not have user source files and return `None`.
+pub fn source_for_asset_url(value: &str, config: &SiteConfig) -> Option<PathBuf> {
+    if !value.starts_with('/') || value.starts_with("//") {
+        return None;
+    }
+
+    let (path, _) = split_url_suffix(value);
+    let matched = asset_url_match(path.trim_start_matches('/'), config)?;
+    if is_system_asset_url(&matched.logical) {
+        return None;
+    }
+
+    source_for_logical_asset_url(&matched.logical, config)
+}
+
+/// Suggest a likely fix for a missing site-root asset URL.
+pub fn asset_url_hint(value: &str, config: &SiteConfig) -> Option<String> {
+    if !value.starts_with('/') || value.starts_with("//") {
+        return None;
+    }
+
+    let (path, suffix) = split_url_suffix(value);
+    let logical = path.trim_start_matches('/');
+    if logical.is_empty() {
+        return None;
+    }
+
+    let root = normalize_path(config.get_root());
+    let source = normalize_path(&root.join(Path::new(logical)));
+    if !source.is_file() {
+        return None;
+    }
+
+    if let Ok(route) = route_from_source(source.clone(), config) {
+        let suggested = format!("{}{}", route.url.as_str(), suffix);
+        if suggested != value {
+            return Some(format!(
+                "did you mean `{suggested}`? `{}` is a source path; configured assets are linked by their output URL",
+                path.trim_start_matches('/')
+            ));
+        }
+    }
+
+    unconfigured_source_hint(&source, &root)
+}
+
+/// Suggest a likely fix for a config field that points at an unowned asset
+/// source path.
+pub fn asset_source_hint(path: &Path, config: &SiteConfig) -> Option<String> {
+    let source = config_source_path(path, config);
+    if !source.is_file() || route_from_source(source.clone(), config).is_ok() {
+        return None;
+    }
+
+    unconfigured_source_hint(&source, &normalize_path(config.get_root()))
 }
 
 struct AssetUrlMatch {
@@ -272,19 +337,74 @@ fn is_colocated_asset_url(path: &str, config: &SiteConfig) -> bool {
 fn source_for_logical_asset_url(path: &str, config: &SiteConfig) -> Option<PathBuf> {
     for entry in &config.build.assets.flatten {
         if path == entry.output_name() {
-            return Some(entry.source().to_path_buf());
+            return Some(normalize_source_path(entry.source()));
         }
     }
 
     for entry in &config.build.assets.nested {
         let output_name = entry.output_name();
         if let Some(rest) = nested_asset_rest(path, output_name) {
-            return Some(entry.source().join(rest));
+            return Some(normalize_source_path(&entry.source().join(rest)));
         }
     }
 
     let content_source = config.build.content.join(path);
     route_from_content_source(&content_source, config).map(|route| route.source)
+}
+
+fn config_source_path(path: &Path, config: &SiteConfig) -> PathBuf {
+    let path = path.strip_prefix("./").unwrap_or(path);
+    if path.is_absolute() {
+        normalize_source_path(path)
+    } else {
+        normalize_source_path(&config.get_root().join(path))
+    }
+}
+
+fn normalize_source_path(path: &Path) -> PathBuf {
+    if path.exists() {
+        return normalize_path(path);
+    }
+
+    let Some(parent) = path.parent() else {
+        return normalize_path(path);
+    };
+
+    if parent == path {
+        return normalize_path(path);
+    }
+
+    let parent = normalize_source_path(parent);
+    match path.file_name() {
+        Some(name) => parent.join(name),
+        None => normalize_path(path),
+    }
+}
+
+fn unconfigured_source_hint(source: &Path, root: &Path) -> Option<String> {
+    let rel = source
+        .strip_prefix(root)
+        .ok()
+        .map(path_to_url)
+        .unwrap_or_else(|| source.display().to_string());
+
+    let hint = match Path::new(&rel).parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            let top = Path::new(&rel)
+                .components()
+                .next()?
+                .as_os_str()
+                .to_string_lossy();
+            format!(
+                "file exists at `{rel}`, but it is not covered by `build.assets.nested`; add `nested = [\"{top}\"]` or move it under a configured asset directory"
+            )
+        }
+        _ => format!(
+            "file exists at `{rel}`, but it is not covered by `build.assets.flatten`; add `flatten = [\"{rel}\"]` or move it under a configured asset directory"
+        ),
+    };
+
+    Some(hint)
 }
 
 fn nested_asset_rest<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
@@ -352,7 +472,7 @@ mod tests {
 
         let route = route_from_source(source.clone(), &config).unwrap();
 
-        assert_eq!(route.source, source);
+        assert_eq!(route.source, normalize_path(&source));
         assert_eq!(route.url, "/assets/app.css");
         assert_eq!(
             route.output,
@@ -447,5 +567,88 @@ mod tests {
 
         assert!(!is_asset_url("/posts", &config));
         assert!(!asset_url_exists("/posts", &config));
+    }
+
+    #[test]
+    fn asset_url_hint_suggests_nested_output_url_for_source_shaped_url() {
+        let dir = TempDir::new().unwrap();
+        let images_dir = dir.path().join("assets/images");
+        fs::create_dir_all(&images_dir).unwrap();
+        fs::write(images_dir.join("logo.png"), "image").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.root = dir.path().to_path_buf();
+        config.build.assets.nested = vec![NestedEntry::Simple(crate::utils::path::normalize_path(
+            &images_dir,
+        ))];
+
+        let hint = asset_url_hint("/assets/images/logo.png", &config).unwrap();
+
+        assert!(hint.contains("`/images/logo.png`"));
+        assert!(hint.contains("source path"));
+    }
+
+    #[test]
+    fn asset_url_hint_suggests_nested_config_for_existing_unconfigured_file() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("images")).unwrap();
+        fs::write(dir.path().join("images/logo.png"), "image").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.root = dir.path().to_path_buf();
+        config.build.assets.nested = vec![NestedEntry::Simple(crate::utils::path::normalize_path(
+            &dir.path().join("assets"),
+        ))];
+
+        let hint = asset_url_hint("/images/logo.png", &config).unwrap();
+
+        assert!(hint.contains("not covered by `build.assets.nested`"));
+        assert!(hint.contains("nested = [\"images\"]"));
+    }
+
+    #[test]
+    fn source_for_asset_url_uses_nested_output_namespace() {
+        let dir = TempDir::new().unwrap();
+        let images_dir = dir.path().join("assets/images");
+        let source_raw = images_dir.join("logo.png");
+        fs::create_dir_all(&images_dir).unwrap();
+        fs::write(&source_raw, "image").unwrap();
+        let source = crate::utils::path::normalize_path(&source_raw);
+
+        let mut config = SiteConfig::default();
+        config.root = dir.path().to_path_buf();
+        config.build.assets.nested = vec![NestedEntry::Simple(crate::utils::path::normalize_path(
+            &images_dir,
+        ))];
+
+        assert_eq!(
+            source_for_asset_url("/images/logo.png?v=1", &config),
+            Some(source)
+        );
+        assert_eq!(
+            source_for_asset_url("/assets/images/logo.png", &config),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn route_from_config_source_normalizes_missing_file_parent() {
+        let dir = TempDir::new().unwrap();
+        let real_root = dir.path().join("site");
+        let link_root = dir.path().join("site-link");
+        let assets_dir = real_root.join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        let mut config = SiteConfig::default();
+        config.root = link_root;
+        config.build.output = real_root.join("public");
+        config.build.assets.nested = vec![NestedEntry::Simple(normalize_path(&assets_dir))];
+
+        let route = route_from_config_source(Path::new("assets/app.css"), &config).unwrap();
+
+        assert_eq!(route.source, normalize_path(&assets_dir).join("app.css"));
+        assert_eq!(route.url, "/assets/app.css");
     }
 }

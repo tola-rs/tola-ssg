@@ -10,7 +10,7 @@ use std::path::Path;
 
 use tola_vdom::prelude::*;
 
-use crate::asset::{compute_asset_href, version};
+use crate::asset::{href_for_route, route_from_config_source, version};
 use crate::compiler::family::{Raw, TolaSite};
 use crate::config::SiteConfig;
 use crate::seo::feed;
@@ -27,9 +27,9 @@ pub struct HeaderInjector<'a> {
 
 /// Compute versioned href for an asset (with ?v=hash for cache busting)
 fn versioned_href(path: &Path, config: &SiteConfig) -> Option<String> {
-    let href = compute_asset_href(path, config).ok()?;
-    let abs_path = config.get_root().join(path);
-    Some(version::versioned_url(&href, &abs_path))
+    let route = route_from_config_source(path, config).ok()?;
+    let href = href_for_route(&route, config);
+    Some(version::versioned_url(&href, &route.source))
 }
 
 fn feed_title(site_title: &str, feed_label: &str) -> String {
@@ -132,7 +132,7 @@ impl<'a> HeaderInjector<'a> {
         // CSS processor output (Tailwind/UnoCSS)
         if config.build.hooks.css.enable
             && let Some(path) = &config.build.hooks.css.path
-            && let Ok(route) = crate::asset::route_from_source(path.clone(), config)
+            && let Ok(route) = route_from_config_source(path, config)
         {
             // CSS output uses versioned URL based on OUTPUT file
             // (not path, since CSS processor generates different output based on scanned classes)

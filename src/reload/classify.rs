@@ -39,16 +39,12 @@ pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         match ContentKind::from_extension(ext) {
             Some(kind) => FileCategory::Content(kind),
-            None if config
-                .build
-                .assets
-                .contains_colocated_source(path, &config.build.content) =>
-            {
+            None if crate::asset::route_from_source(path.to_path_buf(), config).is_ok() => {
                 FileCategory::Asset
             }
             None => FileCategory::Unknown,
         }
-    } else if config.build.assets.contains_source(path) {
+    } else if crate::asset::route_from_source(path.to_path_buf(), config).is_ok() {
         FileCategory::Asset
     } else {
         FileCategory::Unknown

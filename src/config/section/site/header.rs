@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::config::ConfigDiagnostics;
-use crate::config::section::build::AssetsConfig;
+use crate::config::SiteConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
@@ -38,63 +38,39 @@ impl Default for HeaderConfig {
 
 impl HeaderConfig {
     /// Validate all header paths are within configured asset entries.
-    pub fn validate(&self, assets: &AssetsConfig, root: &Path, diag: &mut ConfigDiagnostics) {
-        let checker = AssetPathChecker::new(assets, root);
-
+    pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
         if let Some(icon) = &self.icon {
-            checker.validate(icon, Self::FIELDS.icon, diag);
+            validate_asset_source(icon, Self::FIELDS.icon, config, diag);
         }
 
         for style in &self.styles {
-            checker.validate(style, Self::FIELDS.styles, diag);
+            validate_asset_source(style, Self::FIELDS.styles, config, diag);
         }
 
         for script in &self.scripts {
-            checker.validate(script.path(), Self::FIELDS.scripts, diag);
+            validate_asset_source(script.path(), Self::FIELDS.scripts, config, diag);
         }
     }
 }
 
-// ============================================================================
-// Asset Path Checker (Validation Helper)
-// ============================================================================
-
-/// Helper to validate paths are within asset configuration
-struct AssetPathChecker<'a> {
-    assets: &'a AssetsConfig,
-    root: &'a Path,
-}
-
-impl<'a> AssetPathChecker<'a> {
-    fn new(assets: &'a AssetsConfig, root: &'a Path) -> Self {
-        Self { assets, root }
+fn validate_asset_source(
+    path: &Path,
+    field: crate::config::FieldPath,
+    config: &SiteConfig,
+    diag: &mut ConfigDiagnostics,
+) {
+    if crate::asset::route_from_config_source(path, config).is_ok() {
+        return;
     }
 
-    /// Validate a path is within configured assets, report error if not.
-    fn validate(&self, path: &Path, field: crate::config::FieldPath, diag: &mut ConfigDiagnostics) {
-        if !self.is_in_assets(path) {
-            diag.error(
-                field,
-                format!(
-                    "path '{}' not in any configured asset entry",
-                    path.display()
-                ),
-            );
-        }
-    }
-
-    /// Check if path is within any configured asset entry.
-    fn is_in_assets(&self, path: &Path) -> bool {
-        let normalized = path.strip_prefix("./").unwrap_or(path);
-        let abs_path = crate::utils::path::normalize_path(&self.root.join(normalized));
-
-        // Check flatten (exact match) first, then nested (prefix match)
-        self.assets.flatten.iter().any(|e| abs_path == e.source())
-            || self
-                .assets
-                .nested
-                .iter()
-                .any(|e| abs_path.starts_with(e.source()))
+    let message = format!(
+        "path '{}' not in any configured asset entry",
+        path.display()
+    );
+    if let Some(hint) = crate::asset::asset_source_hint(path, config) {
+        diag.error_with_hint(field, message, hint);
+    } else {
+        diag.error(field, message);
     }
 }
 
@@ -144,7 +120,11 @@ impl ScriptEntry {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::test_parse_config;
+    use super::HeaderConfig;
+    use crate::config::section::build::assets::NestedEntry;
+    use crate::config::{ConfigDiagnostics, SiteConfig, test_parse_config};
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_scripts_parsing_cases() {
@@ -169,5 +149,32 @@ scripts = [
         // async script
         assert!(!config.site.header.scripts[2].is_defer());
         assert!(config.site.header.scripts[2].is_async());
+    }
+
+    #[test]
+    fn header_asset_validation_hints_existing_unconfigured_source() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("assets")).unwrap();
+        fs::create_dir_all(dir.path().join("images")).unwrap();
+        fs::write(dir.path().join("images/favicon.ico"), "icon").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(dir.path().join("assets"))];
+        config.site.header.icon = Some("images/favicon.ico".into());
+
+        let mut diag = ConfigDiagnostics::new();
+        config.site.header.validate(&config, &mut diag);
+
+        assert_eq!(diag.len(), 1);
+        let error = &diag.errors()[0];
+        assert_eq!(error.field, HeaderConfig::FIELDS.icon);
+        assert!(error.message.contains("not in any configured asset entry"));
+        assert!(
+            error
+                .hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("nested = [\"images\"]"))
+        );
     }
 }

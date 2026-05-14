@@ -10,6 +10,7 @@ use crate::freshness::is_newer_than;
 use crate::hooks::css;
 use crate::log;
 
+use super::AssetKind;
 use super::route::{AssetRoute, relative_path, route_from_source};
 
 /// Summary for a batch asset processing pass.
@@ -70,7 +71,10 @@ fn write_asset_route(route: &AssetRoute, config: &SiteConfig, log_file: bool) ->
     let asset_path = &route.source;
 
     if log_file {
-        log!("assets"; "{}", relative_path(asset_path, config));
+        match route.kind {
+            AssetKind::Global => log!("assets"; "{}", relative_path(asset_path, config)),
+            AssetKind::Content => log!("content"; "{}", relative_path(asset_path, config)),
+        }
     }
 
     if let Some(parent) = route.output.parent() {
@@ -121,34 +125,6 @@ pub fn process_global_assets(
     }
 
     Ok(summary)
-}
-
-/// Process an asset file from the content directory.
-///
-/// These are files in the content directory that aren't pages
-pub fn process_rel_asset(
-    path: &Path,
-    config: &SiteConfig,
-    clean: bool,
-    log_file: bool,
-) -> Result<()> {
-    let route = route_from_source(path.to_path_buf(), config)?;
-
-    // Relative assets don't depend on templates/config, use mtime comparison
-    if !clean && route.output.exists() && !is_newer_than(path, &route.output) {
-        return Ok(());
-    }
-
-    if log_file {
-        log!("content"; "{}", relative_path(path, config));
-    }
-
-    if let Some(parent) = route.output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::copy(path, route.output)?;
-    Ok(())
 }
 
 /// Process all non-page files in the content directory.

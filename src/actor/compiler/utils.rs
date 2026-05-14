@@ -3,22 +3,12 @@ use std::path::{Path, PathBuf};
 use crate::config::SiteConfig;
 
 pub(super) fn process_assets(paths: &[PathBuf], config: &SiteConfig) -> Vec<(PathBuf, String)> {
-    use crate::asset::{process_asset, process_rel_asset};
+    use crate::asset::process_asset;
 
     paths
         .iter()
         .filter_map(|path| {
-            let result = if config.build.assets.contains_source(path) {
-                process_asset(path, config, false, true)
-            } else if config
-                .build
-                .assets
-                .contains_colocated_source(path, &config.build.content)
-            {
-                process_rel_asset(path, config, false, true)
-            } else {
-                process_asset(path, config, false, true)
-            };
+            let result = process_asset(path, config, false, true);
             result.err().map(|e| (path.clone(), e.to_string()))
         })
         .collect()

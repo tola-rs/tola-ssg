@@ -88,9 +88,13 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
         // Extract path from "file not found (searched at /abs/path)" -> "/relative/path"
         for (source, error) in compile_errors {
             let path = extract_asset_path(&error, &root);
-            report
-                .write()
-                .add_asset(source, format!("`{}`", path), "not found".to_string());
+            let hint = crate::asset::asset_url_hint(&path, config);
+            report.write().add_asset_with_hint(
+                source,
+                format!("`{}`", path),
+                "not found".to_string(),
+                hint,
+            );
         }
 
         (pages, links)
@@ -99,17 +103,17 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     };
 
     // Check for permalink conflicts
-    let url_sources = crate::address::conflict::collect_url_sources(&all_pages, config);
-    let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
+    let url_owners = crate::address::conflict::collect_url_owners(&all_pages, config);
+    let conflicts = crate::address::conflict::detect_conflicts(&url_owners, config.get_root());
     if !conflicts.is_empty() {
         crate::address::conflict::print_conflicts(&conflicts);
-        let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
+        let total_owners: usize = conflicts.iter().map(|c| c.owners.len()).sum();
         anyhow::bail!(
-            "validation failed: {} conflicting url{}, {} source{}",
+            "validation failed: {} conflicting url{}, {} owner{}",
             conflicts.len(),
             plural_s(conflicts.len()),
-            total_sources,
-            plural_s(total_sources)
+            total_owners,
+            plural_s(total_owners)
         );
     }
 
@@ -237,10 +241,11 @@ fn validate_links(
                     }
 
                     if validate_config.assets.enable {
-                        report.write().add_asset(
+                        report.write().add_asset_with_hint(
                             source.to_string(),
                             format!("`{}`", link.dest),
                             "not found".to_string(),
+                            crate::asset::asset_url_hint(&link.dest, config),
                         );
                     }
                     continue;
@@ -248,10 +253,11 @@ fn validate_links(
 
                 if is_asset_attr {
                     if validate_config.assets.enable {
-                        report.write().add_asset(
+                        report.write().add_asset_with_hint(
                             source.to_string(),
                             format!("`{}`", link.dest),
                             "not found".to_string(),
+                            crate::asset::asset_url_hint(&link.dest, config),
                         );
                     }
                     continue;

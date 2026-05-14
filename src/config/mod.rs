@@ -38,8 +38,8 @@ use util::{extract_url_path, find_config_file};
 
 // Re-export from section/
 pub use section::{
-    AssetsConfig, BuildSectionConfig, DeployConfig, FeedConfig, FeedFeature, FeedFormat, SlugCase,
-    SlugConfig, SlugMode, SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
+    BuildSectionConfig, DeployConfig, FeedConfig, FeedFeature, FeedFormat, SlugCase, SlugConfig,
+    SlugMode, SvgConverter, SvgFormat, ValidateConfig, ValidateLevel,
 };
 
 // Re-export from types/
@@ -609,12 +609,10 @@ impl SiteConfig {
             .info
             .validate(self.site.seo.has_feed_outputs(), &mut diag);
         self.build.validate(&mut diag);
-        self.build.hooks.validate(&mut diag);
+        self.build.hooks.validate(self, &mut diag);
         self.build.svg.validate(&mut diag);
         self.build.assets.validate(&mut diag);
-        self.site
-            .header
-            .validate(&self.build.assets, self.get_root(), &mut diag);
+        self.site.header.validate(self, &mut diag);
         self.site.seo.validate(&mut diag);
 
         // Command-specific validation

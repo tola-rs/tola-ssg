@@ -52,6 +52,6 @@ pub fn css_output_path(config: &SiteConfig) -> Result<Option<PathBuf>> {
         .as_ref()
         .ok_or_else(|| anyhow!("CSS processor path not configured"))?;
 
-    let route = crate::asset::route_from_source(path.to_path_buf(), config)?;
+    let route = crate::asset::route_from_config_source(path, config)?;
     Ok(Some(route.output))
 }

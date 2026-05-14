@@ -26,17 +26,16 @@ use super::route::{
 /// This function only reads the filesystem and returns data
 /// It does not modify any state
 pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
-    let assets_config = &config.build.assets;
     let mut results = Vec::new();
 
     // Scan each nested directory
-    for entry in &assets_config.nested {
+    for entry in &config.build.assets.nested {
         let assets_dir = entry.source();
         if !assets_dir.exists() {
             continue;
         }
 
-        scan_global_recursive(&mut results, assets_dir, config, assets_config);
+        scan_global_recursive(&mut results, assets_dir, config);
     }
 
     results
@@ -45,12 +44,7 @@ pub fn scan_global_assets(config: &SiteConfig) -> Vec<AssetRoute> {
 /// Recursive helper for scanning global assets
 ///
 /// Skips flatten files to avoid duplicate output
-fn scan_global_recursive(
-    results: &mut Vec<AssetRoute>,
-    dir: &Path,
-    config: &SiteConfig,
-    assets_config: &crate::config::AssetsConfig,
-) {
+fn scan_global_recursive(results: &mut Vec<AssetRoute>, dir: &Path, config: &SiteConfig) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -58,10 +52,10 @@ fn scan_global_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            scan_global_recursive(results, &path, config, assets_config);
+            scan_global_recursive(results, &path, config);
         } else {
             // Skip flatten files (they only output to root directory)
-            if assets_config.is_flatten(&path) {
+            if route_from_flatten_source(&path, config).is_some() {
                 continue;
             }
 

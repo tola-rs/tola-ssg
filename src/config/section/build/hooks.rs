@@ -23,7 +23,7 @@
 //! command = ["tailwindcss"]
 //! ```
 
-use crate::config::ConfigDiagnostics;
+use crate::config::{ConfigDiagnostics, SiteConfig};
 use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -42,8 +42,8 @@ pub struct HooksConfig {
 
 impl HooksConfig {
     /// Validate hooks configuration.
-    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
-        self.css.validate(diag);
+    pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
+        self.css.validate(config, diag);
     }
 }
 
@@ -196,6 +196,10 @@ impl WatchMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::section::build::assets::NestedEntry;
+    use crate::config::{ConfigDiagnostics, SiteConfig};
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_watch_matches_directory_pattern() {
@@ -220,6 +224,36 @@ mod tests {
             root
         ));
         assert!(!watch.matches(std::path::Path::new("/site/assets/styles/app.css"), root));
+    }
+
+    #[test]
+    fn css_path_validation_hints_existing_unconfigured_source() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("assets")).unwrap();
+        fs::create_dir_all(dir.path().join("styles")).unwrap();
+        let css = dir.path().join("styles/tailwind.css");
+        fs::write(&css, "@tailwind utilities;").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(dir.path().join("assets"))];
+        config.build.hooks.css.enable = true;
+        config.build.hooks.css.command = vec!["sh".into()];
+        config.build.hooks.css.path = Some(css);
+
+        let mut diag = ConfigDiagnostics::new();
+        config.build.hooks.validate(&config, &mut diag);
+
+        assert_eq!(diag.len(), 1);
+        let error = &diag.errors()[0];
+        assert_eq!(error.field, CssProcessorConfig::FIELDS.path);
+        assert!(error.message.contains("not in any configured asset entry"));
+        assert!(
+            error
+                .hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("nested = [\"styles\"]"))
+        );
     }
 }
 
@@ -304,7 +338,7 @@ impl CssProcessorConfig {
     }
 
     /// Validate CSS processor configuration.
-    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
+    pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
         if !self.enable {
             return;
         }
@@ -360,6 +394,8 @@ impl CssProcessorConfig {
             return;
         };
 
+        validate_css_asset_source(path, config, diag);
+
         // For Tailwind, path must exist as input file
         // For UnoCSS, path is just output location (file doesn't need to exist)
         if self.resolved_format() == CssFormat::Tailwind {
@@ -375,5 +411,25 @@ impl CssProcessorConfig {
                 );
             }
         }
+    }
+}
+
+fn validate_css_asset_source(
+    path: &std::path::Path,
+    config: &SiteConfig,
+    diag: &mut ConfigDiagnostics,
+) {
+    if crate::asset::route_from_config_source(path, config).is_ok() {
+        return;
+    }
+
+    let message = format!(
+        "path '{}' not in any configured asset entry",
+        path.display()
+    );
+    if let Some(hint) = crate::asset::asset_source_hint(path, config) {
+        diag.error_with_hint(CssProcessorConfig::FIELDS.path, message, hint);
+    } else {
+        diag.error(CssProcessorConfig::FIELDS.path, message);
     }
 }

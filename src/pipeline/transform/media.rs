@@ -123,22 +123,27 @@ impl<'a> MediaTransform<'a> {
 
         match LinkKind::parse(src) {
             LinkKind::SiteRoot(path) => {
-                // /images/xxx.png -> public/images/xxx.nobg.png, /images/xxx.nobg.png
+                if let Some(route) = self.asset_route_for_src(src) {
+                    let route_stem = route
+                        .output
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(stem);
+                    let output_path = route
+                        .output
+                        .with_file_name(format!("{route_stem}.nobg.png"));
+                    let new_src = nobg_site_root_src(route.url.as_str(), route_stem);
+                    return (output_path, new_src, route.output);
+                }
+
                 let trimmed = path.trim_start_matches('/');
-                let parent = Path::new(trimmed).parent().unwrap_or(Path::new(""));
                 let output_path = self
                     .config
                     .paths()
                     .output_dir()
-                    .join(parent)
-                    .join(format!("{}.nobg.png", stem));
-                let parent = parent.to_string_lossy().replace('\\', "/");
-                let new_src = if parent.is_empty() {
-                    format!("/{stem}.nobg.png")
-                } else {
-                    format!("/{parent}/{stem}.nobg.png")
-                };
-                // Use src path for consistency with compute_output_path
+                    .join(Path::new(trimmed).parent().unwrap_or(Path::new("")))
+                    .join(format!("{stem}.nobg.png"));
+                let new_src = nobg_site_root_src(path, stem);
                 let original_output = self.config.paths().output_dir().join(trimmed);
                 (output_path, new_src, original_output)
             }
@@ -158,33 +163,11 @@ impl<'a> MediaTransform<'a> {
     ///
     /// Supports:
     /// - File-relative paths: `./image.png` -> source file's parent directory
-    /// - Site-root paths: `/images/xxx` -> config.build.assets.nested mapping
+    /// - Site-root paths: `/images/xxx` -> configured asset route source
     fn resolve_source_path(&self, src: &str) -> Option<PathBuf> {
         match LinkKind::parse(src) {
-            LinkKind::SiteRoot(path) => {
-                // /images/xxx -> find nested asset entry with output_name "images"
-                let trimmed = path.trim_start_matches('/');
-                for entry in &self.config.build.assets.nested {
-                    let output_name = entry.output_name();
-                    // Exact match: /assets -> output_name "assets"
-                    if trimmed == output_name {
-                        let source_path = self.config.root.join(entry.source());
-                        if source_path.exists() {
-                            return Some(source_path);
-                        }
-                    }
-                    // Prefix with slash: /assets/xxx -> output_name "assets", rest "xxx"
-                    if let Some(rest) = trimmed.strip_prefix(output_name)
-                        && let Some(file_path) = rest.strip_prefix('/')
-                    {
-                        let source_path = self.config.root.join(entry.source()).join(file_path);
-                        if source_path.exists() {
-                            return Some(source_path);
-                        }
-                    }
-                }
-                None
-            }
+            LinkKind::SiteRoot(path) => crate::asset::source_for_asset_url(path, self.config)
+                .filter(|source| source.exists()),
             LinkKind::FileRelative(_) | LinkKind::Fragment(_) => {
                 // Try relative to source file's directory
                 if let Some(source_dir) = self.route.source.parent() {
@@ -229,16 +212,35 @@ impl<'a> MediaTransform<'a> {
         }
 
         match LinkKind::parse(src) {
-            LinkKind::SiteRoot(path) => {
-                let trimmed = path.trim_start_matches('/');
-                Some(self.config.paths().output_dir().join(trimmed))
-            }
+            LinkKind::SiteRoot(path) => self
+                .asset_route_for_src(path)
+                .map(|route| route.output)
+                .or_else(|| {
+                    let trimmed = path.trim_start_matches('/');
+                    Some(self.config.paths().output_dir().join(trimmed))
+                }),
             LinkKind::FileRelative(path) => {
                 let filename = Path::new(path).file_name()?;
                 Some(self.route.output_dir.join(filename))
             }
             _ => None,
         }
+    }
+
+    fn asset_route_for_src(&self, src: &str) -> Option<crate::asset::AssetRoute> {
+        let source = crate::asset::source_for_asset_url(src, self.config)?;
+        crate::asset::route_from_source(source, self.config).ok()
+    }
+}
+
+fn nobg_site_root_src(path: &str, stem: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let parent = Path::new(path).parent().unwrap_or(Path::new(""));
+    let parent = parent.to_string_lossy().replace('\\', "/");
+    if parent.is_empty() {
+        format!("/{stem}.nobg.png")
+    } else {
+        format!("/{parent}/{stem}.nobg.png")
     }
 }
 
@@ -407,6 +409,7 @@ fn apply_nobg_processing(
 mod tests {
     use super::*;
     use crate::compiler::family::TolaSite;
+    use crate::config::section::build::assets::FlattenEntry;
     use tola_vdom::core::ExtractFamily;
     use tola_vdom::families::MediaFamily;
 
@@ -511,5 +514,32 @@ mod tests {
         let (_, new_src, _) = transform.generate_nobg_paths("/hero.png", Path::new("hero.png"));
 
         assert_eq!(new_src, "/hero.nobg.png");
+    }
+
+    #[test]
+    fn nobg_site_root_source_resolution_uses_flatten_asset_route() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_raw = dir.path().join("assets/hero.png");
+        std::fs::create_dir_all(source_raw.parent().unwrap()).unwrap();
+        std::fs::write(&source_raw, "image").unwrap();
+        let source = crate::utils::path::normalize_path(&source_raw);
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.output = dir.path().join("public");
+        config.build.assets.flatten = vec![FlattenEntry::Simple(source.clone())];
+
+        let route = PageRoute {
+            source: dir.path().join("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: dir.path().join("public/index.html"),
+            output_dir: dir.path().join("public"),
+            full_url: "https://example.com/".to_string(),
+        };
+        let transform = MediaTransform::new(&config, &route);
+
+        assert_eq!(transform.resolve_source_path("/hero.png"), Some(source));
     }
 }

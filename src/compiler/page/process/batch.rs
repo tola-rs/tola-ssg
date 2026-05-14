@@ -235,18 +235,18 @@ fn build_static_pages_with_store(
 
     flush_thread_local_deps();
 
-    let url_sources = conflict::collect_url_sources(&pages, config);
+    let url_owners = conflict::collect_url_owners(&pages, config);
 
-    let conflicts = conflict::detect_conflicts(&url_sources, config.get_root());
+    let conflicts = conflict::detect_conflicts(&url_owners, config.get_root());
     if !conflicts.is_empty() {
         conflict::print_conflicts(&conflicts);
-        let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
+        let total_owners: usize = conflicts.iter().map(|c| c.owners.len()).sum();
         return Err(anyhow::anyhow!(
-            "build failed: {} conflicting url{}, {} source{}",
+            "build failed: {} conflicting url{}, {} owner{}",
             conflicts.len(),
             crate::utils::plural_s(conflicts.len()),
-            total_sources,
-            crate::utils::plural_s(total_sources)
+            total_owners,
+            crate::utils::plural_s(total_owners)
         ));
     }
 
@@ -781,16 +781,6 @@ fn write_single_page(
 pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &SiteIndex) {
     state.edit(|store, space| {
         space.clear();
-
-        // Use primary nested entry's output name as assets prefix
-        let assets_prefix = config
-            .build
-            .assets
-            .nested
-            .first()
-            .map(|e| e.output_name())
-            .unwrap_or("assets");
-        space.set_assets_prefix(assets_prefix);
         space.set_slug_config(config.build.slug.clone());
 
         // Register pages

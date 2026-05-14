@@ -11,8 +11,9 @@ pub mod version;
 // Types
 pub use kind::AssetKind;
 pub use route::{
-    AssetRoute, SYSTEM_ASSET_DIR, asset_url_exists, compute_asset_href, is_asset_url,
-    resolve_asset_href, route_from_source,
+    AssetRoute, SYSTEM_ASSET_DIR, asset_source_hint, asset_url_exists, asset_url_hint,
+    href_for_route, is_asset_url, resolve_asset_href, route_from_config_source, route_from_source,
+    source_for_asset_url,
 };
 
 // Scanning (pure functions)
@@ -21,5 +22,5 @@ pub use scan::{scan_content_assets, scan_flatten_assets, scan_global_assets};
 // Processing (side effects)
 pub use process::{
     process_asset, process_cname, process_content_assets, process_flatten_assets,
-    process_global_assets, process_rel_asset,
+    process_global_assets,
 };
