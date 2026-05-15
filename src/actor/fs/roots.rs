@@ -132,12 +132,7 @@ fn collect_watch_paths(config: &SiteConfig) -> Vec<PathBuf> {
     }
 
     if config.build.atomic_css.enable {
-        for source in &config.build.atomic_css.sources {
-            let source = root.join(source);
-            if source.exists() {
-                paths.push(source);
-            }
-        }
+        paths.extend(crate::css::source::roots(config));
 
         if let Some(config_path) = &config.build.atomic_css.config {
             let config_path = root.join(config_path);
@@ -238,16 +233,14 @@ mod tests {
     }
 
     #[test]
-    fn includes_atomic_css_sources_and_config() {
+    fn includes_site_root_for_atomic_css_auto_scan_and_config() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         let content = root.join("content");
         let output = root.join("public");
-        let components = root.join("components");
         let atomic_config = root.join("atomic.css.toml");
         std::fs::create_dir_all(&content).unwrap();
         std::fs::create_dir_all(&output).unwrap();
-        std::fs::create_dir_all(&components).unwrap();
         std::fs::write(&atomic_config, "").unwrap();
 
         let mut config = SiteConfig::default();
@@ -255,12 +248,11 @@ mod tests {
         config.build.content = content;
         config.build.output = output;
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![components.clone()];
         config.build.atomic_css.config = Some(atomic_config.clone());
 
         let paths = collect_watch_paths(&config);
 
-        assert!(paths.contains(&components));
+        assert!(paths.contains(&crate::utils::path::normalize_path(root)));
         assert!(paths.contains(&atomic_config));
     }
 

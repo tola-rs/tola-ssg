@@ -17,10 +17,10 @@ pub struct AtomicCssConfig {
     /// Atomic CSS compatibility profile.
     #[config(default = "tailwind-v4", inline_doc = "Compatibility profile")]
     pub profile: String,
-    /// Source roots scanned for atomic class candidates.
+    /// Explicit source files or directories scanned for atomic class candidates.
     #[serde(default)]
-    #[config(inline_doc = "Source paths scanned for atomic classes")]
-    pub sources: Vec<PathBuf>,
+    #[config(inline_doc = "Explicit source files or directories")]
+    pub source: Option<Vec<PathBuf>>,
     /// Optional Atomic CSS semantic config file relative to site root.
     #[config(inline_doc = "e.g. \"atomic.css.toml\"")]
     pub config: Option<PathBuf>,
@@ -31,7 +31,7 @@ impl Default for AtomicCssConfig {
         Self {
             enable: false,
             profile: "tailwind-v4".into(),
-            sources: Vec::new(),
+            source: None,
             config: None,
         }
     }
@@ -66,10 +66,10 @@ impl AtomicCssConfig {
             return;
         }
 
-        if self.sources.is_empty() {
+        if self.source.as_ref().is_some_and(Vec::is_empty) {
             diag.error(
-                Self::FIELDS.sources,
-                "sources is required when atomic CSS is enabled",
+                Self::FIELDS.source,
+                "source must not be empty; omit it to use automatic source detection",
             );
         }
         if self.profile != "tailwind-v4" {
@@ -85,18 +85,23 @@ impl AtomicCssConfig {
         if let Some(config) = &self.config {
             validate_relative_path(config, Self::FIELDS.config, diag);
         }
-        for source in &self.sources {
-            validate_relative_path(source, Self::FIELDS.sources, diag);
+        if let Some(sources) = &self.source {
+            for source in sources {
+                validate_relative_path(source, Self::FIELDS.source, diag);
+            }
         }
     }
 
     /// Normalize site-root relative source/config paths.
     pub fn normalize(&mut self, root: &Path) {
-        self.sources = self
-            .sources
-            .iter()
-            .map(|path| crate::utils::path::normalize_path(&root.join(path)))
-            .collect();
+        if let Some(sources) = self.source.take() {
+            self.source = Some(
+                sources
+                    .iter()
+                    .map(|path| crate::utils::path::normalize_path(&root.join(path)))
+                    .collect(),
+            );
+        }
         if let Some(config) = self.config.take() {
             self.config = Some(crate::utils::path::normalize_path(&root.join(config)));
         }

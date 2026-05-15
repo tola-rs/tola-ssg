@@ -579,7 +579,6 @@ mod tests {
         config.build.content = content;
         config.build.output = output.clone();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![components];
         init_config(config);
 
         let state = Arc::new(SiteIndex::new());

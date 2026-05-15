@@ -219,16 +219,18 @@ impl BuildSectionConfig {
             }
         }
 
-        for source in &self.atomic_css.sources {
-            if path_is_inside(&output, source) {
-                diag.error(
-                    AtomicCssConfig::FIELDS.sources,
-                    format!(
-                        "Atomic CSS output '{}' is inside Atomic CSS source '{}'",
-                        output.display(),
-                        source.display()
-                    ),
-                );
+        if let Some(entries) = &self.atomic_css.source {
+            for entry in entries {
+                if path_is_inside(&output, entry) {
+                    diag.error(
+                        AtomicCssConfig::FIELDS.source,
+                        format!(
+                            "Atomic CSS output '{}' is inside Atomic CSS source '{}'",
+                            output.display(),
+                            entry.display()
+                        ),
+                    );
+                }
             }
         }
     }
@@ -275,7 +277,7 @@ flatten = ["CNAME"]
 [build.atomic_css]
 enable = true
 profile = "tailwind-v4"
-sources = ["content", "components"]
+source = ["content", "components/button.typ"]
 config = "atomic.css.toml"
 "#,
         );
@@ -283,10 +285,10 @@ config = "atomic.css.toml"
         assert!(config.build.atomic_css.enable);
         assert_eq!(config.build.atomic_css.profile.as_str(), "tailwind-v4");
         assert_eq!(
-            config.build.atomic_css.sources,
-            vec![
+            config.build.atomic_css.source.as_ref().unwrap(),
+            &vec![
                 Path::new("content").to_path_buf(),
-                Path::new("components").to_path_buf()
+                Path::new("components/button.typ").to_path_buf()
             ]
         );
         assert_eq!(
@@ -296,12 +298,30 @@ config = "atomic.css.toml"
     }
 
     #[test]
-    fn atomic_css_enabled_requires_sources() {
+    fn atomic_css_enabled_defaults_to_auto_source_scan() {
         let config = test_parse_config(
             r#"
 [build.atomic_css]
 enable = true
 profile = "tailwind-v4"
+"#,
+        );
+        let mut diag = crate::config::ConfigDiagnostics::new();
+
+        assert!(config.build.atomic_css.source.is_none());
+
+        config.build.validate(&mut diag);
+
+        assert!(diag.errors().is_empty());
+    }
+
+    #[test]
+    fn atomic_css_explicit_source_must_not_be_empty() {
+        let config = test_parse_config(
+            r#"
+[build.atomic_css]
+enable = true
+source = []
 "#,
         );
         let mut diag = crate::config::ConfigDiagnostics::new();
@@ -316,7 +336,7 @@ profile = "tailwind-v4"
         assert!(
             messages
                 .iter()
-                .any(|message| message.contains("sources is required"))
+                .any(|message| message.contains("source must not be empty"))
         );
     }
 
@@ -328,7 +348,7 @@ profile = "tailwind-v4"
             "/site".into(),
         )];
         config.atomic_css.enable = true;
-        config.atomic_css.sources = vec![Path::new("/site/content").to_path_buf()];
+        config.atomic_css.source = Some(vec![Path::new("/site/content").to_path_buf()]);
         let mut diag = crate::config::ConfigDiagnostics::new();
 
         config.validate(&mut diag);

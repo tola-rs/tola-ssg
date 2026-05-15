@@ -127,6 +127,12 @@ impl ConfigDiagnostics {
         self.presence.contains(section)
     }
 
+    /// Returns true when raw TOML presence information is available.
+    #[inline]
+    pub fn has_presence(&self) -> bool {
+        !self.presence.is_empty()
+    }
+
     pub fn error(&mut self, field: FieldPath, message: impl Into<String>) {
         self.errors.push(ConfigDiagnostic::new(field, message));
     }

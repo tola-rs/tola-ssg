@@ -255,7 +255,6 @@ nested = ["assets/images", "assets/styles", "assets/scripts", "assets/fonts"]
 [build.atomic_css]
 enable = true
 profile = "tailwind-v4"
-sources = ["content", "templates", "utils"]
 config = "atomic.css.toml"
 ```
 

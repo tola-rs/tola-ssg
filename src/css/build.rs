@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, bail};
 
 use crate::config::SiteConfig;
 use crate::config::section::build::AtomicCssConfig;
@@ -35,7 +35,7 @@ pub fn build(config: &SiteConfig) -> Result<Option<AtomicCssOutput>> {
     let asset = output_asset(config).expect("atomic CSS asset exists when enabled");
     ensure_output_is_available(config, &asset)?;
     let sheet = load_sheet_config(config)?;
-    let source_texts = collect_sources(&css.sources)?;
+    let source_texts = crate::css::source::texts(config)?;
     let source_refs = source_texts.iter().map(String::as_str);
     let rendered = mark_generated(&crate::css::compiler::compile(source_refs, &sheet)?);
     let written = write_if_changed(&asset.path, &rendered)?;
@@ -67,45 +67,6 @@ fn load_sheet_config(config: &SiteConfig) -> Result<AtomicCssFile> {
         Some(path) => AtomicCssFile::parse_path(path).map_err(Into::into),
         None => Ok(AtomicCssFile::default()),
     }
-}
-
-fn collect_sources(paths: &[PathBuf]) -> Result<Vec<String>> {
-    let mut files = Vec::new();
-    for path in paths {
-        collect_path(path, &mut files)?;
-    }
-    files.sort();
-
-    files
-        .into_iter()
-        .map(|path| {
-            let bytes = fs::read(&path).with_context(|| {
-                format!("failed to read Atomic CSS source '{}'", path.display())
-            })?;
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
-        })
-        .collect()
-}
-
-fn collect_path(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    if path.is_file() {
-        files.push(path.to_path_buf());
-        return Ok(());
-    }
-    if !path.is_dir() {
-        return Err(anyhow!(
-            "Atomic CSS source '{}' is not a file or directory",
-            path.display()
-        ));
-    }
-
-    for entry in fs::read_dir(path)
-        .with_context(|| format!("failed to read Atomic CSS source dir '{}'", path.display()))?
-    {
-        let entry = entry?;
-        collect_path(&entry.path(), files)?;
-    }
-    Ok(())
 }
 
 fn write_if_changed(path: &Path, content: &str) -> Result<bool> {
@@ -196,13 +157,15 @@ fn ensure_output_is_not_source(config: &SiteConfig, asset: &AtomicCssAsset) -> R
         }
     }
 
-    for source in &config.build.atomic_css.sources {
-        if path_is_inside(&output, source) {
-            bail!(
-                "Atomic CSS output '{}' is inside Atomic CSS source '{}'",
-                asset.url,
-                source.display()
-            );
+    if let Some(entries) = &config.build.atomic_css.source {
+        for entry in entries {
+            if path_is_inside(&output, entry) {
+                bail!(
+                    "Atomic CSS output '{}' is inside Atomic CSS source '{}'",
+                    asset.url,
+                    entry.display()
+                );
+            }
         }
     }
 
@@ -240,7 +203,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn build_writes_generated_css_from_configured_sources() {
+    fn build_writes_generated_css_from_default_source_scan() {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         let content = root.join("content");
@@ -252,7 +215,6 @@ mod tests {
         config.set_root(root);
         config.build.output = output;
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![content];
 
         let result = build(&config).unwrap().unwrap();
 
@@ -263,6 +225,40 @@ mod tests {
         );
         let css = fs::read_to_string(result.path).unwrap();
         assert!(css.contains(".flex"));
+    }
+
+    #[test]
+    fn build_uses_explicit_source_without_auto_scan() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let content = root.join("content");
+        let components = root.join("components");
+        let output = root.join("public");
+        fs::create_dir_all(&content).unwrap();
+        fs::create_dir_all(&components).unwrap();
+        fs::write(content.join("index.html"), r#"<div class="flex"></div>"#).unwrap();
+        fs::write(
+            components.join("button.html"),
+            r#"<button class="grid"></button>"#,
+        )
+        .unwrap();
+
+        let mut config = crate::config::test_parse_config(
+            r#"
+[build.atomic_css]
+enable = true
+source = ["components/button.html"]
+"#,
+        );
+        config.set_root(root);
+        config.build.output = output;
+        config.build.atomic_css.normalize(root);
+
+        let result = build(&config).unwrap().unwrap();
+        let css = fs::read_to_string(result.path).unwrap();
+
+        assert!(css.contains(".grid"));
+        assert!(!css.contains(".flex"));
     }
 
     #[test]
@@ -281,7 +277,6 @@ mod tests {
         config.set_root(root);
         config.build.output = output;
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![content];
 
         let first = build(&config).unwrap().unwrap();
         let first_href = crate::asset::version::versioned_url(&first.url, &first.path);
@@ -311,7 +306,6 @@ mod tests {
         config.build.assets.normalize(root);
         config.build.output = output;
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![content];
 
         let first = build(&config).unwrap().unwrap();
         fs::write(&page, r#"<div class="grid"></div>"#).unwrap();
@@ -345,7 +339,6 @@ mod tests {
         config.build.assets.normalize(root);
         config.build.output = root.to_path_buf();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![content];
 
         let err = build(&config).unwrap_err();
 
@@ -369,7 +362,6 @@ mod tests {
         config.set_root(root);
         config.build.output = output;
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![content];
 
         let err = build(&config).unwrap_err();
 

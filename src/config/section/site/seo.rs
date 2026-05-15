@@ -202,12 +202,33 @@ impl SeoConfig {
     }
 
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
+        let missing_feed_urls = self.validate_feed_url_presence(diag);
+
         for (idx, feed) in self.feeds.iter().enumerate() {
             feed.url
                 .validate_indexed(FeedConfig::FIELDS.url, idx, self.feeds.len(), diag);
         }
         self.sitemap.url.validate(SitemapConfig::FIELDS.url, diag);
-        validate_feed_path_collisions(self, diag);
+        validate_feed_path_collisions(self, &missing_feed_urls, diag);
+    }
+
+    fn validate_feed_url_presence(&self, diag: &mut ConfigDiagnostics) -> Vec<usize> {
+        if self.feeds.len() <= 1 || !diag.has_presence() {
+            return Vec::new();
+        }
+
+        let mut missing = Vec::new();
+        for idx in 0..self.feeds.len() {
+            if !diag.is_present(&feed_url_presence_path(idx)) {
+                diag.error_with_hint(
+                    FeedConfig::FIELDS.url,
+                    format!("[{idx}] url is required when multiple feeds are configured"),
+                    "set url = \"/...\" in each [[site.seo.feeds]] entry",
+                );
+                missing.push(idx);
+            }
+        }
+        missing
     }
 
     fn validate_features(&self, diag: &mut ConfigDiagnostics) {
@@ -230,10 +251,27 @@ impl SeoConfig {
     }
 }
 
-fn validate_feed_path_collisions(seo: &SeoConfig, diag: &mut ConfigDiagnostics) {
+fn feed_url_presence_path(idx: usize) -> String {
+    format!(
+        "{}.{}.{}",
+        FeedConfig::TEMPLATE_SECTION,
+        idx,
+        toml_key(FeedConfig::FIELDS.url)
+    )
+}
+
+fn validate_feed_path_collisions(
+    seo: &SeoConfig,
+    missing_feed_urls: &[usize],
+    diag: &mut ConfigDiagnostics,
+) {
     let mut seen: Vec<(&str, usize)> = Vec::new();
 
     for (idx, feed) in seo.feeds.iter().enumerate() {
+        if missing_feed_urls.contains(&idx) {
+            continue;
+        }
+
         if let Some((_, prev_idx)) = seen.iter().find(|(url, _)| *url == feed.url.as_str()) {
             diag.error(
                 FeedConfig::FIELDS.url,
@@ -261,7 +299,9 @@ fn validate_feed_path_collisions(seo: &SeoConfig, diag: &mut ConfigDiagnostics) 
 #[cfg(test)]
 mod tests {
     use super::{FeedConfig, SitemapConfig};
-    use crate::config::{FeedFeature, FeedFormat, test_parse_config};
+    use crate::config::{
+        ConfigDiagnostics, ConfigPresence, FeedFeature, FeedFormat, test_parse_config,
+    };
 
     fn feed_entry(format: &str, url: &str) -> String {
         format!(
@@ -450,6 +490,60 @@ features = ["full-text", "full-text"]
         config.site.seo.validate_paths(&mut diag);
 
         assert!(diag.has_errors());
+    }
+
+    #[test]
+    fn reports_missing_urls_after_unknown_feed_fields_are_ignored() {
+        let raw = crate::config::test_config_source(&format!(
+            r#"
+{}
+format = "rss"
+target = "/feed.xml"
+
+{}
+format = "atom"
+target = "/atom.xml"
+"#,
+            FeedConfig::toml_array_table(),
+            FeedConfig::toml_array_table()
+        ));
+        let (config, ignored) = crate::config::SiteConfig::parse_with_ignored(&raw).unwrap();
+        let mut diag = ConfigDiagnostics::new();
+        diag.set_presence(ConfigPresence::from_toml(&raw).unwrap());
+
+        assert!(
+            ignored
+                .iter()
+                .any(|field| field == "site.seo.feeds.0.target")
+        );
+        assert!(
+            ignored
+                .iter()
+                .any(|field| field == "site.seo.feeds.1.target")
+        );
+
+        config.site.seo.validate_paths(&mut diag);
+
+        let messages: Vec<&str> = diag
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| *message == "[0] url is required when multiple feeds are configured")
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| *message == "[1] url is required when multiple feeds are configured")
+        );
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.contains("duplicates feed url"))
+        );
     }
 
     #[test]

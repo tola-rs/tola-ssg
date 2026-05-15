@@ -4,3 +4,4 @@ pub mod build;
 pub mod compiler;
 pub mod config;
 pub mod preflight;
+pub mod source;

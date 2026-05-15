@@ -562,6 +562,7 @@ impl SiteConfig {
     /// detect if the user specified an absolute path in the config.
     fn validate_paths(&self) -> Result<()> {
         let mut diag = ConfigDiagnostics::new();
+        diag.set_presence(self.presence.clone());
 
         // Validate assets paths (must be relative)
         self.build.assets.validate_paths(&mut diag);

@@ -318,7 +318,6 @@ mod tests {
         std::fs::create_dir_all(&components).unwrap();
         std::fs::write(&source, r#"<button class="flex"></button>"#).unwrap();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![components];
 
         let events = DebouncedEvents(vec![(source.clone(), ChangeKind::Modified)]);
         let state = SiteIndex::new();

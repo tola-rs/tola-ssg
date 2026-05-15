@@ -46,27 +46,11 @@ pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
         }
     } else if crate::asset::route_from_source(path.to_path_buf(), config).is_ok() {
         FileCategory::Asset
-    } else if is_atomic_css_input(path, config) {
+    } else if crate::css::source::is_input(path, config) {
         FileCategory::AtomicCss
     } else {
         FileCategory::Unknown
     }
-}
-
-fn is_atomic_css_input(path: &Path, config: &SiteConfig) -> bool {
-    if !config.build.atomic_css.enable {
-        return false;
-    }
-    config
-        .build
-        .atomic_css
-        .config
-        .as_ref()
-        .is_some_and(|config_path| path == normalize_path(config_path))
-        || config.build.atomic_css.sources.iter().any(|source| {
-            let source = normalize_path(source);
-            path == source || path.starts_with(source)
-        })
 }
 
 /// Result of classifying changed files
@@ -123,7 +107,7 @@ pub fn classify_changes(
         let normalized = normalize_path(path);
         let category = categorize_path(&normalized, config);
         classified.push((normalized.clone(), category));
-        if is_atomic_css_input(&normalized, config) {
+        if crate::css::source::is_input(&normalized, config) {
             atomic_css_changed.push(normalized.clone());
         }
 
@@ -273,7 +257,6 @@ mod tests {
         std::fs::create_dir_all(&components).unwrap();
         std::fs::write(&source, r#"<button class="flex"></button>"#).unwrap();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![components];
 
         let source = normalize_path(&source);
         let category = categorize_path(&source, &config);
@@ -289,7 +272,6 @@ mod tests {
         std::fs::create_dir_all(&components).unwrap();
         std::fs::write(&source, r#"<button class="grid"></button>"#).unwrap();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.sources = vec![components];
 
         let state = SiteIndex::new();
         let result = classify_changes(std::slice::from_ref(&source), &config, &state);

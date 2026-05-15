@@ -30,6 +30,11 @@ impl ConfigPresence {
         !path.is_empty() && self.paths.contains(path)
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
     fn collect_value(&mut self, prefix: &str, value: &toml::Value) {
         match value {
             toml::Value::Table(table) => {
@@ -50,9 +55,11 @@ impl ConfigPresence {
                     self.paths.insert(prefix.to_string());
                 }
                 // Keep traversing table items to capture nested keys in array-of-table cases.
-                for item in items {
+                for (idx, item) in items.iter().enumerate() {
                     if matches!(item, toml::Value::Table(_)) {
                         self.collect_value(prefix, item);
+                        let indexed = format!("{prefix}.{idx}");
+                        self.collect_value(&indexed, item);
                     }
                 }
             }
@@ -149,4 +156,30 @@ pub fn check_section_status(section: &str, status: FieldStatus, diag: &mut Confi
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::ConfigPresence;
+
+    #[test]
+    fn records_indexed_fields_for_array_tables() {
+        let raw = r#"
+[[site.seo.feeds]]
+format = "rss"
+
+[[site.seo.feeds]]
+format = "atom"
+url = "/atom.xml"
+"#;
+
+        let presence = ConfigPresence::from_toml(raw).unwrap();
+
+        assert!(presence.contains("site.seo.feeds"));
+        assert!(presence.contains("site.seo.feeds.format"));
+        assert!(presence.contains("site.seo.feeds.url"));
+        assert!(presence.contains("site.seo.feeds.0"));
+        assert!(presence.contains("site.seo.feeds.0.format"));
+        assert!(!presence.contains("site.seo.feeds.0.url"));
+        assert!(presence.contains("site.seo.feeds.1"));
+        assert!(presence.contains("site.seo.feeds.1.format"));
+        assert!(presence.contains("site.seo.feeds.1.url"));
+    }
+}
