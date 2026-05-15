@@ -20,24 +20,25 @@
 //! preload = { enable = true, delay = 100 }
 //!
 //! [site.header]
-//! icon = "favicon.ico"
-//! styles = ["styles/custom.css"]
-//! scripts = ["scripts/app.js"]
+//! icon = "/favicon.ico"
+//! styles = ["/styles/custom.css"]
+//! scripts = ["/scripts/app.js"]
 //!
 //! [site.seo]
 //! auto_og = true
 //!
 //! [[site.seo.feeds]]
 //! format = "rss"
-//! output = "feed.xml"
+//! url = "/feed.xml"
 //! features = ["full-text"]
 //!
 //! [[site.seo.feeds]]
 //! format = "json"
-//! output = "feed.json"
+//! url = "/feed.json"
 //!
 //! [site.seo.sitemap]
 //! enable = true
+//! url = "/sitemap.xml"
 //!
 //! [site]
 //! not_found = "404.html"

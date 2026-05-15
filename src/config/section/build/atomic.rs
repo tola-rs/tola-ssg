@@ -1,6 +1,7 @@
 //! Native atomic CSS build configuration.
 
-use crate::config::{ConfigDiagnostics, GeneratedOutputPath};
+use crate::config::{ConfigDiagnostics, PathResolver};
+use crate::core::UrlPath;
 use macros::Config;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
@@ -16,9 +17,6 @@ pub struct AtomicCssConfig {
     /// Atomic CSS compatibility profile.
     #[config(default = "tailwind-v4", inline_doc = "Compatibility profile")]
     pub profile: String,
-    /// Output CSS path relative to the build output directory.
-    #[config(inline_doc = "e.g. \"assets/site.css\"")]
-    pub output: Option<GeneratedOutputPath>,
     /// Source roots scanned for atomic class candidates.
     #[serde(default)]
     #[config(inline_doc = "Source paths scanned for atomic classes")]
@@ -33,7 +31,6 @@ impl Default for AtomicCssConfig {
         Self {
             enable: false,
             profile: "tailwind-v4".into(),
-            output: None,
             sources: Vec::new(),
             config: None,
         }
@@ -41,26 +38,34 @@ impl Default for AtomicCssConfig {
 }
 
 impl AtomicCssConfig {
+    pub const OUTPUT_FILE: &'static str = "atomic.css";
+
+    pub fn output_logical_path() -> PathBuf {
+        PathBuf::from(crate::asset::SYSTEM_ASSET_DIR).join(Self::OUTPUT_FILE)
+    }
+
+    pub fn output_route() -> UrlPath {
+        UrlPath::from_asset(&format!(
+            "{}/{}",
+            crate::asset::SYSTEM_ASSET_DIR,
+            Self::OUTPUT_FILE
+        ))
+    }
+
+    pub fn output_path(paths: PathResolver<'_>) -> PathBuf {
+        paths.output_dir().join(Self::output_logical_path())
+    }
+
+    pub fn output_href(paths: PathResolver<'_>) -> String {
+        paths.url_for_site_path(Self::output_logical_path())
+    }
+
     /// Validate semantic requirements after path normalization.
     pub fn validate(&self, diag: &mut ConfigDiagnostics) {
         if !self.enable {
             return;
         }
 
-        if self.output.is_none() {
-            diag.error(
-                Self::FIELDS.output,
-                "output is required when atomic CSS is enabled",
-            );
-        } else if self
-            .output
-            .as_ref()
-            .and_then(|path| path.as_path().extension())
-            .and_then(|ext| ext.to_str())
-            != Some("css")
-        {
-            diag.error(Self::FIELDS.output, "output must use the .css extension");
-        }
         if self.sources.is_empty() {
             diag.error(
                 Self::FIELDS.sources,
@@ -77,9 +82,6 @@ impl AtomicCssConfig {
 
     /// Validate path safety before site-root normalization.
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
-        if let Some(output) = &self.output {
-            output.validate(Self::FIELDS.output, diag);
-        }
         if let Some(config) = &self.config {
             validate_relative_path(config, Self::FIELDS.config, diag);
         }
@@ -89,8 +91,6 @@ impl AtomicCssConfig {
     }
 
     /// Normalize site-root relative source/config paths.
-    ///
-    /// `output` intentionally remains output-directory relative.
     pub fn normalize(&mut self, root: &Path) {
         self.sources = self
             .sources

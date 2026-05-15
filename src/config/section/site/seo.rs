@@ -1,9 +1,8 @@
 //! SEO configuration (feed, sitemap, OG tags).
 
-use crate::config::{ConfigDiagnostics, FieldPath, GeneratedOutputPath};
+use crate::config::{ConfigDiagnostics, FieldPath, PublicUrl};
 use macros::Config;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// Feed output format
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,8 +73,8 @@ impl FeedFeature {
 #[serde(default)]
 #[config(section = "site.seo.feeds")]
 pub struct FeedConfig {
-    #[config(default = "feed.xml", inline_doc = "Output path for feed file")]
-    pub output: GeneratedOutputPath,
+    #[config(default = "/feed.xml", inline_doc = "Public URL for feed file")]
+    pub url: PublicUrl,
     #[config(default = "rss", inline_doc = "Feed format: rss | atom | json")]
     pub format: FeedFormat,
     /// Optional feed features.
@@ -85,7 +84,7 @@ pub struct FeedConfig {
 impl Default for FeedConfig {
     fn default() -> Self {
         Self {
-            output: "feed.xml".into(),
+            url: "/feed.xml".into(),
             format: FeedFormat::Rss,
             features: Vec::new(),
         }
@@ -122,8 +121,8 @@ impl FeedConfig {
         ));
         out.push_str(&format!(
             "# {} = {}\n",
-            toml_key(Self::FIELDS.output),
-            toml::Value::String(default.output.logical_path())
+            toml_key(Self::FIELDS.url),
+            toml::Value::String(default.url.as_str().to_string())
         ));
         out.push_str(&format!(
             "# {} = {}  # {}\n",
@@ -151,15 +150,15 @@ fn toml_key(field: FieldPath) -> &'static str {
 pub struct SitemapConfig {
     #[config(inline_doc = "Enable sitemap generation")]
     pub enable: bool,
-    #[config(inline_doc = "Output path for sitemap file")]
-    pub output: GeneratedOutputPath,
+    #[config(inline_doc = "Public URL for sitemap file")]
+    pub url: PublicUrl,
 }
 
 impl Default for SitemapConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            output: "sitemap.xml".into(),
+            url: "/sitemap.xml".into(),
         }
     }
 }
@@ -204,12 +203,10 @@ impl SeoConfig {
 
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         for (idx, feed) in self.feeds.iter().enumerate() {
-            feed.output
-                .validate_indexed(FeedConfig::FIELDS.output, idx, self.feeds.len(), diag);
+            feed.url
+                .validate_indexed(FeedConfig::FIELDS.url, idx, self.feeds.len(), diag);
         }
-        self.sitemap
-            .output
-            .validate(SitemapConfig::FIELDS.output, diag);
+        self.sitemap.url.validate(SitemapConfig::FIELDS.url, diag);
         validate_feed_path_collisions(self, diag);
     }
 
@@ -234,27 +231,27 @@ impl SeoConfig {
 }
 
 fn validate_feed_path_collisions(seo: &SeoConfig, diag: &mut ConfigDiagnostics) {
-    let mut seen: Vec<(&Path, usize)> = Vec::new();
+    let mut seen: Vec<(&str, usize)> = Vec::new();
 
     for (idx, feed) in seo.feeds.iter().enumerate() {
-        if let Some((_, prev_idx)) = seen.iter().find(|(path, _)| *path == feed.output.as_path()) {
+        if let Some((_, prev_idx)) = seen.iter().find(|(url, _)| *url == feed.url.as_str()) {
             diag.error(
-                FeedConfig::FIELDS.output,
+                FeedConfig::FIELDS.url,
                 format!(
-                    "[{idx}] output '{}' duplicates feed output [{prev_idx}]",
-                    feed.output
+                    "[{idx}] url '{}' duplicates feed url [{prev_idx}]",
+                    feed.url
                 ),
             );
         } else {
-            seen.push((feed.output.as_path(), idx));
+            seen.push((feed.url.as_str(), idx));
         }
 
-        if seo.sitemap.enable && feed.output.as_path() == seo.sitemap.output.as_path() {
+        if seo.sitemap.enable && feed.url.as_str() == seo.sitemap.url.as_str() {
             diag.error(
-                FeedConfig::FIELDS.output,
+                FeedConfig::FIELDS.url,
                 format!(
-                    "[{idx}] output '{}' conflicts with enabled sitemap output",
-                    feed.output
+                    "[{idx}] url '{}' conflicts with enabled sitemap url",
+                    feed.url
                 ),
             );
         }
@@ -265,9 +262,19 @@ fn validate_feed_path_collisions(seo: &SeoConfig, diag: &mut ConfigDiagnostics) 
 mod tests {
     use super::{FeedConfig, SitemapConfig};
     use crate::config::{FeedFeature, FeedFormat, test_parse_config};
-    use std::path::Path;
 
-    fn feed_entry(format: &str, output: &str) -> String {
+    fn feed_entry(format: &str, url: &str) -> String {
+        format!(
+            r#"
+{}
+format = "{format}"
+url = "{url}"
+"#,
+            FeedConfig::toml_array_table()
+        )
+    }
+
+    fn legacy_feed_output_entry(format: &str, output: &str) -> String {
         format!(
             r#"
 {}
@@ -289,33 +296,50 @@ path = "{path}"
         )
     }
 
-    fn sitemap_entry(output: &str) -> String {
+    fn sitemap_entry(url: &str) -> String {
         format!(
             r#"
 [{}]
 enable = true
-output = "{output}"
+url = "{url}"
 "#,
             SitemapConfig::TEMPLATE_SECTION
         )
     }
 
     #[test]
-    fn parses_generated_output_fields() {
+    fn parses_site_root_url_fields() {
         let config = test_parse_config(&format!(
             "{}{}",
-            feed_entry("rss", "feed.xml"),
-            sitemap_entry("sitemap.xml")
+            feed_entry("rss", "/feed.xml"),
+            sitemap_entry("/sitemap.xml")
         ));
 
-        assert_eq!(
-            config.site.seo.feeds[0].output.as_path(),
-            Path::new("feed.xml")
+        assert_eq!(config.site.seo.feeds[0].url.as_str(), "/feed.xml");
+        assert_eq!(config.site.seo.sitemap.url.as_str(), "/sitemap.xml");
+    }
+
+    #[test]
+    fn rejects_legacy_feed_output_field() {
+        let content =
+            crate::config::test_config_source(&legacy_feed_output_entry("rss", "feed.xml"));
+        let (_, ignored) = crate::config::SiteConfig::parse_with_ignored(&content).unwrap();
+
+        assert!(ignored.iter().any(|field| field.contains("output")));
+    }
+
+    #[test]
+    fn rejects_legacy_sitemap_output_field() {
+        let content = crate::config::test_config_source(
+            r#"
+[site.seo.sitemap]
+enable = true
+output = "sitemap.xml"
+"#,
         );
-        assert_eq!(
-            config.site.seo.sitemap.output.as_path(),
-            Path::new("sitemap.xml")
-        );
+        let (_, ignored) = crate::config::SiteConfig::parse_with_ignored(&content).unwrap();
+
+        assert!(ignored.iter().any(|field| field.contains("output")));
     }
 
     #[test]
@@ -327,30 +351,21 @@ output = "{output}"
     }
 
     #[test]
-    fn parses_multiple_feed_outputs() {
+    fn parses_multiple_feed_urls() {
         let config = test_parse_config(&format!(
             "{}{}{}",
-            feed_entry("rss", "feed.xml"),
-            feed_entry("atom", "atom.xml"),
-            feed_entry("json", "feed.json")
+            feed_entry("rss", "/feed.xml"),
+            feed_entry("atom", "/atom.xml"),
+            feed_entry("json", "/feed.json")
         ));
 
         assert_eq!(config.site.seo.feeds.len(), 3);
         assert_eq!(config.site.seo.feeds[0].format, FeedFormat::Rss);
-        assert_eq!(
-            config.site.seo.feeds[0].output.as_path(),
-            Path::new("feed.xml")
-        );
+        assert_eq!(config.site.seo.feeds[0].url.as_str(), "/feed.xml");
         assert_eq!(config.site.seo.feeds[1].format, FeedFormat::Atom);
-        assert_eq!(
-            config.site.seo.feeds[1].output.as_path(),
-            Path::new("atom.xml")
-        );
+        assert_eq!(config.site.seo.feeds[1].url.as_str(), "/atom.xml");
         assert_eq!(config.site.seo.feeds[2].format, FeedFormat::Json);
-        assert_eq!(
-            config.site.seo.feeds[2].output.as_path(),
-            Path::new("feed.json")
-        );
+        assert_eq!(config.site.seo.feeds[2].url.as_str(), "/feed.json");
     }
 
     #[test]
@@ -359,7 +374,7 @@ output = "{output}"
             r#"
 {}
 format = "rss"
-output = "feed.xml"
+url = "/feed.xml"
 features = ["full-text", "no-script"]
 "#,
             FeedConfig::toml_array_table()
@@ -377,7 +392,7 @@ features = ["full-text", "no-script"]
             r#"
 {}
 format = "rss"
-output = "feed.xml"
+url = "/feed.xml"
 features = ["full-text", "full-text"]
 "#,
             FeedConfig::toml_array_table()
@@ -390,7 +405,7 @@ features = ["full-text", "full-text"]
     }
 
     #[test]
-    fn rejects_unsafe_feed_output_paths() {
+    fn rejects_unsafe_feed_urls() {
         let config = test_parse_config(&feed_entry("rss", "../feed.xml"));
         let mut diag = crate::config::ConfigDiagnostics::new();
 
@@ -400,7 +415,21 @@ features = ["full-text", "full-text"]
     }
 
     #[test]
-    fn rejects_unsafe_sitemap_output_paths() {
+    fn rejects_feed_urls_without_leading_slash() {
+        let config = test_parse_config(&feed_entry("rss", "feed.xml"));
+        let mut diag = crate::config::ConfigDiagnostics::new();
+
+        config.site.seo.validate_paths(&mut diag);
+
+        assert!(
+            diag.errors()
+                .iter()
+                .any(|error| error.message.contains("must start with `/`"))
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_sitemap_urls() {
         let config = test_parse_config(&sitemap_entry("../sitemap.xml"));
         let mut diag = crate::config::ConfigDiagnostics::new();
 
@@ -410,11 +439,11 @@ features = ["full-text", "full-text"]
     }
 
     #[test]
-    fn rejects_duplicate_feed_output_paths() {
+    fn rejects_duplicate_feed_urls() {
         let config = test_parse_config(&format!(
             "{}{}",
-            feed_entry("rss", "feed.xml"),
-            feed_entry("atom", "feed.xml")
+            feed_entry("rss", "/feed.xml"),
+            feed_entry("atom", "/feed.xml")
         ));
         let mut diag = crate::config::ConfigDiagnostics::new();
 
@@ -424,11 +453,11 @@ features = ["full-text", "full-text"]
     }
 
     #[test]
-    fn rejects_feed_sitemap_output_path_collision() {
+    fn rejects_feed_sitemap_url_collision() {
         let config = test_parse_config(&format!(
             "{}{}",
-            feed_entry("rss", "sitemap.xml"),
-            sitemap_entry("sitemap.xml")
+            feed_entry("rss", "/sitemap.xml"),
+            sitemap_entry("/sitemap.xml")
         ));
         let mut diag = crate::config::ConfigDiagnostics::new();
 

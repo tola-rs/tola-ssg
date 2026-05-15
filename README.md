@@ -222,12 +222,12 @@ url = "https://example.com"
 custom = "This is my custom data"
 
 [site.header]
-icon = "assets/images/favicon.ico"
-styles = ["assets/styles/custom.css"]
+icon = "/images/favicon.ico"
+styles = ["/styles/custom.css"]
 scripts = [
-  "assets/scripts/custom.js" # Simple: No defer and async
-  { path = "assets/scripts/app.js", defer = true }
-  { path = "assets/scripts/app.js", async = true }
+  "/scripts/custom.js" # Simple: No defer and async
+  { url = "/scripts/app.js", defer = true }
+  { url = "/scripts/app.js", async = true }
 ]
 elements = ['<meta name="darkreader-lock">'] # Extra special html elements
 
@@ -236,12 +236,12 @@ auto_og = true   # Auto-inject default OG tags (site_name, locale, description, 
 
 [[site.seo.feeds]]
 format = "rss"   # "rss" | "atom"
-output = "feed.xml"
+url = "/feed.xml"
 features = ["full-text"]
 
 [site.seo.sitemap]
 enable = true
-output = "sitemap.xml"
+url = "/sitemap.xml"
 
 [build]
 content = "content"
@@ -250,12 +250,11 @@ minify = true
 deps = ["templates", "utils"]  # Shared dependencies — changes trigger range rebuild
 
 [build.assets]
-nested = ["assets/images", "assets/styles", "assets/fonts"]
+nested = ["assets/images", "assets/styles", "assets/scripts", "assets/fonts"]
 
 [build.atomic_css]
 enable = true
 profile = "tailwind-v4"
-output = "assets/site.css"
 sources = ["content", "templates", "utils"]
 config = "atomic.css.toml"
 ```

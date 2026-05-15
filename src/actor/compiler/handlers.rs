@@ -53,6 +53,11 @@ impl CompilerActor {
 
         crate::debug!("compile"; "{} direct, {} affected", direct.len(), affected.len());
 
+        if hook_side_effects_changed {
+            self.compile_active_pages_except("hook", changed_paths.len(), &queued_pages, false)
+                .await;
+        }
+
         if atomic_css_changed {
             self.compile_active_pages_except(
                 "atomic-css",
@@ -84,15 +89,15 @@ impl CompilerActor {
 
     /// Run watched pre hooks and return whether hook side effects may have changed output files.
     ///
-    /// When hooks execute, invalidate cached versions for output artifacts so
-    /// the same compilation round uses fresh `?v=` links.
+    /// When hooks execute, clear cached asset versions so the same compilation
+    /// round uses fresh `?v=` links for opaque hook side effects.
     fn run_watched_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
         use crate::hooks;
 
         let config = self.config.current();
         let refs = Self::path_refs(changed_paths);
         let executed = hooks::run_watched_pre_hooks(&config, &refs);
-        self.invalidate_output_versions_after_hooks(&config, HookPhase::Pre, executed)
+        self.invalidate_asset_versions_after_hooks(HookPhase::Pre, executed)
     }
 
     /// Run watched post hooks and return whether hook side effects may have changed output files.
@@ -102,7 +107,7 @@ impl CompilerActor {
         let config = self.config.current();
         let refs = Self::path_refs(changed_paths);
         let executed = hooks::run_watched_post_hooks(&config, &refs);
-        self.invalidate_output_versions_after_hooks(&config, HookPhase::Post, executed)
+        self.invalidate_asset_versions_after_hooks(HookPhase::Post, executed)
     }
 
     /// Capture changed paths for post hooks only when a watched post hook exists.
@@ -122,25 +127,19 @@ impl CompilerActor {
         paths.iter().map(|p| p.as_path()).collect()
     }
 
-    fn invalidate_output_versions_after_hooks(
-        &self,
-        config: &SiteConfig,
-        phase: HookPhase,
-        executed: usize,
-    ) -> bool {
+    fn invalidate_asset_versions_after_hooks(&self, phase: HookPhase, executed: usize) -> bool {
         use crate::asset::version;
 
         if executed == 0 {
             return false;
         }
 
-        let removed = version::invalidate_under(config.paths().output_dir().as_path());
+        version::clear();
         crate::debug!(
             phase.as_str();
-            "{} watched hooks executed: {}, invalidated output versions: {}",
+            "{} watched hooks executed: {}, cleared asset versions",
             phase.as_str(),
-            executed,
-            removed
+            executed
         );
         true
     }
@@ -580,7 +579,6 @@ mod tests {
         config.build.content = content;
         config.build.output = output.clone();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.output = Some("assets/site.css".into());
         config.build.atomic_css.sources = vec![components];
         init_config(config);
 

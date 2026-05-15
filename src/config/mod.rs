@@ -13,7 +13,8 @@
 //! ├── types/         # Utility types
 //! │   ├── error      # ConfigError
 //! │   ├── handle     # Global config handle
-//! │   └── path       # PathResolver
+//! │   ├── path       # PathResolver
+//! │   └── url        # PublicUrl
 //! └── mod.rs         # SiteConfig (this file)
 //! ```
 //!
@@ -44,8 +45,8 @@ pub use section::{
 
 // Re-export from types/
 pub use types::{
-    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, GeneratedOutputPath,
-    PathResolver, config_handle, init_config,
+    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, PathResolver,
+    PublicUrl, config_handle, init_config,
 };
 
 // Internal imports from section/
@@ -461,7 +462,7 @@ impl SiteConfig {
     fn missing_feed_config_warning(&self, args: &BuildArgs) -> Option<String> {
         (args.feed == Some(true) && !self.site.seo.has_feed_outputs()).then(|| {
             format!(
-                "--feed was requested but no {} outputs are configured",
+                "--feed was requested but no {} entries are configured",
                 FeedConfig::toml_array_table()
             )
         })
@@ -525,7 +526,7 @@ impl SiteConfig {
             .map(|p| crate::utils::path::normalize_path(&root.join(p)))
             .collect();
         self.build.atomic_css.normalize(&root);
-        // Generated output paths stay relative to output_dir().
+        // Public URLs stay site-root relative.
 
         // Normalize optional paths
         self.normalize_optional_paths(&root);
@@ -810,7 +811,7 @@ mod tests {
         assert_eq!(
             config.missing_feed_config_warning(&build_args),
             Some(format!(
-                "--feed was requested but no {} outputs are configured",
+                "--feed was requested but no {} entries are configured",
                 FeedConfig::toml_array_table()
             ))
         );
@@ -826,7 +827,7 @@ mod tests {
             r#"
 {}
 format = "rss"
-output = "feed.xml"
+url = "/feed.xml"
 "#,
             FeedConfig::toml_array_table()
         ));
@@ -843,7 +844,7 @@ output = "feed.xml"
                 r#"
 {}
 format = "rss"
-output = "feed.xml"
+url = "/feed.xml"
 "#,
                 FeedConfig::toml_array_table()
             ),
@@ -860,7 +861,7 @@ output = "feed.xml"
                 r#"
 {}
 format = "rss"
-output = "feed.xml"
+url = "/feed.xml"
 "#,
                 FeedConfig::toml_array_table()
             ),
@@ -885,7 +886,7 @@ output = "feed.xml"
                 r#"
 {}
 format = "atom"
-output = "atom.xml"
+url = "/atom.xml"
 "#,
                 FeedConfig::toml_array_table()
             ),
@@ -899,10 +900,7 @@ output = "atom.xml"
 
         assert_eq!(config.site.seo.feeds.len(), 1);
         assert_eq!(config.site.seo.feeds[0].format, FeedFormat::Atom);
-        assert_eq!(
-            config.site.seo.feeds[0].output.as_path(),
-            Path::new("atom.xml")
-        );
+        assert_eq!(config.site.seo.feeds[0].url.as_str(), "/atom.xml");
     }
 
     #[test]

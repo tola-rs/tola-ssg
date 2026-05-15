@@ -6,6 +6,7 @@ use rustc_hash::FxHashMap;
 
 use crate::asset::{scan_content_assets, scan_global_assets};
 use crate::config::SiteConfig;
+use crate::config::section::build::AtomicCssConfig;
 use crate::core::UrlPath;
 use crate::log;
 use crate::page::CompiledPage;
@@ -110,36 +111,33 @@ fn collect_global_assets(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
 }
 
 fn collect_generated_outputs(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
-    if config.build.atomic_css.enable
-        && let Some(output) = &config.build.atomic_css.output
-    {
-        let output = output.logical_path();
+    if config.build.atomic_css.enable {
+        let route = AtomicCssConfig::output_route();
         url_owners
-            .entry(UrlPath::from_asset(&output))
+            .entry(route.clone())
             .or_default()
-            .push(UrlOwner::generated(format!(
-                "build.atomic_css.output ({output})"
-            )));
+            .push(UrlOwner::generated(format!("build.atomic_css ({route})")));
     }
 
     for (idx, feed) in config.site.seo.feed_outputs().iter().enumerate() {
-        let output = feed.output.logical_path();
         url_owners
-            .entry(UrlPath::from_asset(&output))
+            .entry(feed.url.url_path())
             .or_default()
             .push(UrlOwner::generated(format!(
                 "site.seo.feeds[{idx}] ({} -> {})",
                 feed.format.as_str(),
-                output
+                feed.url
             )));
     }
 
     if config.site.seo.sitemap.enable {
-        let output = config.site.seo.sitemap.output.logical_path();
         url_owners
-            .entry(UrlPath::from_asset(&output))
+            .entry(config.site.seo.sitemap.url.url_path())
             .or_default()
-            .push(UrlOwner::generated(format!("site.seo.sitemap ({output})")));
+            .push(UrlOwner::generated(format!(
+                "site.seo.sitemap ({})",
+                config.site.seo.sitemap.url
+            )));
     }
 }
 
@@ -399,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn feed_output_conflicts_with_flatten_asset_url() {
+    fn feed_url_conflicts_with_flatten_asset_url() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("feed.xml");
         std::fs::write(&source, "asset feed").unwrap();
@@ -409,7 +407,7 @@ mod tests {
         config.build.assets.flatten = vec![FlattenEntry::Simple(source)];
         config.site.seo.feeds = vec![FeedConfig {
             format: FeedFormat::Rss,
-            output: "feed.xml".into(),
+            url: "/feed.xml".into(),
             features: Vec::new(),
         }];
 
@@ -428,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn feed_output_conflicts_with_nested_asset_url() {
+    fn feed_url_conflicts_with_nested_asset_url() {
         let dir = TempDir::new().unwrap();
         let assets_dir = dir.path().join("assets");
         std::fs::create_dir_all(&assets_dir).unwrap();
@@ -439,7 +437,7 @@ mod tests {
         config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
         config.site.seo.feeds = vec![FeedConfig {
             format: FeedFormat::Rss,
-            output: "assets/feed.xml".into(),
+            url: "/assets/feed.xml".into(),
             features: Vec::new(),
         }];
 
@@ -452,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn sitemap_output_conflicts_with_flatten_asset_url() {
+    fn sitemap_url_conflicts_with_flatten_asset_url() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("sitemap.xml");
         std::fs::write(&source, "asset sitemap").unwrap();
@@ -461,7 +459,7 @@ mod tests {
         config.set_root(dir.path());
         config.build.assets.flatten = vec![FlattenEntry::Simple(source)];
         config.site.seo.sitemap.enable = true;
-        config.site.seo.sitemap.output = "sitemap.xml".into();
+        config.site.seo.sitemap.url = "/sitemap.xml".into();
 
         let url_owners = collect_url_owners(&[], &config);
         let conflicts = detect_conflicts(&url_owners, config.get_root());
@@ -478,30 +476,31 @@ mod tests {
     }
 
     #[test]
-    fn atomic_css_output_conflicts_with_nested_asset_url() {
+    fn generated_urls_conflict_with_each_other() {
         let dir = TempDir::new().unwrap();
-        let assets_dir = dir.path().join("assets");
-        let source = assets_dir.join("site.css");
-        std::fs::create_dir_all(&assets_dir).unwrap();
-        std::fs::write(&source, "asset css").unwrap();
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.output = Some("assets/site.css".into());
+        config.site.seo.sitemap.enable = true;
+        config.site.seo.sitemap.url = "/.tola/atomic.css".into();
 
         let url_owners = collect_url_owners(&[], &config);
         let conflicts = detect_conflicts(&url_owners, config.get_root());
 
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].url, UrlPath::from_asset("/assets/site.css"));
-        assert_eq!(conflicts[0].owners.len(), 2);
+        assert_eq!(conflicts[0].url, UrlPath::from_asset("/.tola/atomic.css"));
         assert!(
             conflicts[0]
                 .owners
                 .iter()
-                .any(|owner| owner.to_string().contains("build.atomic_css.output"))
+                .any(|owner| owner.to_string().contains("build.atomic_css"))
+        );
+        assert!(
+            conflicts[0]
+                .owners
+                .iter()
+                .any(|owner| owner.to_string().contains("site.seo.sitemap"))
         );
     }
 }

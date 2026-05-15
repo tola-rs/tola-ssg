@@ -170,6 +170,14 @@ impl WatchMode {
 
         false
     }
+
+    /// Literal root-relative watch paths declared by this mode.
+    pub fn path_patterns(&self) -> &[String] {
+        match self {
+            WatchMode::Patterns(patterns) => patterns,
+            WatchMode::Disabled | WatchMode::Bool(_) => &[],
+        }
+    }
 }
 
 #[cfg(test)]

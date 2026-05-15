@@ -26,11 +26,11 @@ auto_og = true
 
 # [[site.seo.feeds]]
 # format = "rss"
-# path = "feed.xml"
+# url = "/feed.xml"
 
 [site.seo.sitemap]
 enable = false
-path = "sitemap.xml"
+url = "/sitemap.xml"
 
 # Development server settings.
 [serve]

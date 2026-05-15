@@ -430,12 +430,12 @@ mod tests {
     #[test]
     fn process_global_assets_does_not_overwrite_atomic_css_output() {
         let dir = TempDir::new().unwrap();
-        let assets_dir = dir.path().join("assets");
+        let assets_dir = dir.path().join("assets/.tola");
         let output_dir = dir.path().join("public");
         fs::create_dir_all(&assets_dir).unwrap();
-        fs::create_dir_all(output_dir.join("assets")).unwrap();
-        fs::write(assets_dir.join("site.css"), "asset css").unwrap();
-        fs::write(output_dir.join("assets/site.css"), "generated css").unwrap();
+        fs::create_dir_all(output_dir.join(".tola")).unwrap();
+        fs::write(assets_dir.join("atomic.css"), "asset css").unwrap();
+        fs::write(output_dir.join(".tola/atomic.css"), "generated css").unwrap();
 
         let mut config = SiteConfig::default();
         config.build.assets.nested =
@@ -444,14 +444,13 @@ mod tests {
             )];
         config.build.output = output_dir.clone();
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.output = Some("assets/site.css".into());
 
         let summary = process_global_assets(&config, true, false).unwrap();
 
         assert_eq!(summary.scanned, 1);
         assert_eq!(summary.written, 0);
         assert_eq!(
-            fs::read_to_string(output_dir.join("assets/site.css")).unwrap(),
+            fs::read_to_string(output_dir.join(".tola/atomic.css")).unwrap(),
             "generated css"
         );
     }

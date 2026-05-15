@@ -72,17 +72,17 @@ mod tests {
         config.site.info.url = Some("https://example.com".to_string());
         config.site.seo.feeds = vec![
             FeedConfig {
-                output: "feed.xml".into(),
+                url: "/feed.xml".into(),
                 format: FeedFormat::Rss,
                 features: vec![],
             },
             FeedConfig {
-                output: "atom.xml".into(),
+                url: "/atom.xml".into(),
                 format: FeedFormat::Atom,
                 features: vec![],
             },
             FeedConfig {
-                output: "feed.json".into(),
+                url: "/feed.json".into(),
                 format: FeedFormat::Json,
                 features: vec![],
             },

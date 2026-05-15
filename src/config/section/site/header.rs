@@ -2,9 +2,10 @@
 
 use macros::Config;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config::ConfigDiagnostics;
+use crate::config::PublicUrl;
 use crate::config::SiteConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
@@ -14,11 +15,11 @@ pub struct HeaderConfig {
     /// Inject a dummy script to prevent FOUC (Flash of Unstyled Content).
     /// The script blocks rendering briefly, giving CSS time to load.
     pub no_fouc: bool,
-    /// Favicon path (relative to site root).
-    pub icon: Option<PathBuf>,
-    /// CSS stylesheet paths (relative to site root).
-    pub styles: Vec<PathBuf>,
-    /// Script entries (relative to site root).
+    /// Favicon public URL.
+    pub icon: Option<PublicUrl>,
+    /// CSS stylesheet public URLs.
+    pub styles: Vec<PublicUrl>,
+    /// Script entries.
     pub scripts: Vec<ScriptEntry>,
     /// Raw HTML elements to insert into head.
     pub elements: Vec<String>,
@@ -37,41 +38,65 @@ impl Default for HeaderConfig {
 }
 
 impl HeaderConfig {
-    /// Validate all header paths are within configured asset entries.
+    /// Validate all header resource URLs are owned by configured assets.
     pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
         if let Some(icon) = &self.icon {
-            validate_asset_source(icon, Self::FIELDS.icon, config, diag);
+            validate_asset_url(icon, Self::FIELDS.icon, config, diag);
         }
 
         for style in &self.styles {
-            validate_asset_source(style, Self::FIELDS.styles, config, diag);
+            validate_asset_url(style, Self::FIELDS.styles, config, diag);
         }
 
         for script in &self.scripts {
-            validate_asset_source(script.path(), Self::FIELDS.scripts, config, diag);
+            validate_asset_url(script.url(), Self::FIELDS.scripts, config, diag);
         }
     }
 }
 
-fn validate_asset_source(
-    path: &Path,
+fn validate_asset_url(
+    url: &PublicUrl,
     field: crate::config::FieldPath,
     config: &SiteConfig,
     diag: &mut ConfigDiagnostics,
 ) {
-    if crate::asset::route_from_config_source(path, config).is_ok() {
+    if !url.as_str().trim().starts_with('/') {
+        let hint = source_path_url_hint(url.as_str(), config)
+            .or_else(|| crate::asset::asset_source_hint(Path::new(url.as_str()), config));
+        diag.error_with_hint(
+            field,
+            format!("header resource '{}' must be a public URL", url.as_str()),
+            hint.unwrap_or_else(|| {
+                "declare the asset in build.assets, then reference its public URL".into()
+            }),
+        );
         return;
     }
 
-    let message = format!(
-        "path '{}' not in any configured asset entry",
-        path.display()
-    );
-    if let Some(hint) = crate::asset::asset_source_hint(path, config) {
+    let before = diag.len();
+    url.validate(field, diag);
+    if diag.len() != before {
+        return;
+    }
+
+    if crate::asset::source_for_asset_url(url.as_str(), config).is_some() {
+        return;
+    }
+
+    let message = format!("URL '{}' is not owned by configured assets", url.as_str());
+    if let Some(hint) = source_path_url_hint(url.as_str(), config) {
         diag.error_with_hint(field, message, hint);
     } else {
         diag.error(field, message);
     }
+}
+
+fn source_path_url_hint(value: &str, config: &SiteConfig) -> Option<String> {
+    let route = crate::asset::route_from_config_source(Path::new(value), config).ok()?;
+    Some(format!(
+        "did you mean `{}`? Header resources use public URLs; source files are declared in build.assets",
+        route.url
+    ))
 }
 
 // ============================================================================
@@ -82,10 +107,10 @@ fn validate_asset_source(
 #[serde(untagged)]
 pub enum ScriptEntry {
     /// Simple path string.
-    Simple(PathBuf),
-    /// Path with `defer`/`async` attributes.
+    Simple(PublicUrl),
+    /// URL with `defer`/`async` attributes.
     WithOptions {
-        path: PathBuf,
+        url: PublicUrl,
         #[serde(default)]
         defer: bool,
         #[serde(default)]
@@ -94,10 +119,10 @@ pub enum ScriptEntry {
 }
 
 impl ScriptEntry {
-    /// Get the path for this script entry.
-    pub fn path(&self) -> &Path {
+    /// Get the URL for this script entry.
+    pub fn url(&self) -> &PublicUrl {
         match self {
-            Self::Simple(path) | Self::WithOptions { path, .. } => path,
+            Self::Simple(url) | Self::WithOptions { url, .. } => url,
         }
     }
 
@@ -131,9 +156,9 @@ mod tests {
         let config = test_parse_config(
             r#"[site.header]
 scripts = [
-    { path = "a.js", defer = true },
-    "b.js",
-    { path = "c.js", async = true }
+    { url = "/a.js", defer = true },
+    "/b.js",
+    { url = "/c.js", async = true }
 ]"#,
         );
         assert_eq!(config.site.header.scripts.len(), 3);
@@ -152,7 +177,7 @@ scripts = [
     }
 
     #[test]
-    fn header_asset_validation_hints_existing_unconfigured_source() {
+    fn header_url_validation_hints_source_path() {
         let dir = TempDir::new().unwrap();
         fs::create_dir_all(dir.path().join("assets")).unwrap();
         fs::create_dir_all(dir.path().join("images")).unwrap();
@@ -169,12 +194,57 @@ scripts = [
         assert_eq!(diag.len(), 1);
         let error = &diag.errors()[0];
         assert_eq!(error.field, HeaderConfig::FIELDS.icon);
-        assert!(error.message.contains("not in any configured asset entry"));
+        assert!(error.message.contains("public URL"));
         assert!(
             error
                 .hint
                 .as_deref()
                 .is_some_and(|hint| hint.contains("nested = [\"images\"]"))
+        );
+    }
+
+    #[test]
+    fn header_styles_reference_public_asset_urls() {
+        let dir = TempDir::new().unwrap();
+        let styles = dir.path().join("assets/styles");
+        fs::create_dir_all(&styles).unwrap();
+        fs::write(styles.join("tailwind.css"), "body{}").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(styles)];
+        config.site.header.styles = vec!["/styles/tailwind.css".into()];
+
+        let mut diag = ConfigDiagnostics::new();
+        config.site.header.validate(&config, &mut diag);
+
+        assert!(diag.is_empty(), "{:?}", diag.errors());
+    }
+
+    #[test]
+    fn header_styles_reject_source_paths_with_url_hint() {
+        let dir = TempDir::new().unwrap();
+        let styles = dir.path().join("assets/styles");
+        fs::create_dir_all(&styles).unwrap();
+        fs::write(styles.join("tailwind.css"), "body{}").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(styles)];
+        config.site.header.styles = vec!["assets/styles/tailwind.css".into()];
+
+        let mut diag = ConfigDiagnostics::new();
+        config.site.header.validate(&config, &mut diag);
+
+        assert_eq!(diag.len(), 1);
+        let error = &diag.errors()[0];
+        assert_eq!(error.field, HeaderConfig::FIELDS.styles);
+        assert!(error.message.contains("public URL"));
+        assert!(
+            error
+                .hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("/styles/tailwind.css"))
         );
     }
 }

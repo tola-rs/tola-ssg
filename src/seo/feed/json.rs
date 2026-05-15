@@ -151,7 +151,7 @@ mod tests {
     fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
         FeedConfig {
             format: FeedFormat::Json,
-            output: "feed.json".into(),
+            url: "/feed.json".into(),
             features,
         }
     }

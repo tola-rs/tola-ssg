@@ -6,11 +6,9 @@
 //! Injected elements: title, description meta, icon link, stylesheets, scripts,
 //! Atomic CSS output, auto-enhance CSS, and raw HTML elements.
 
-use std::path::Path;
-
 use tola_vdom::prelude::*;
 
-use crate::asset::{href_for_route, route_from_config_source, version};
+use crate::asset::{href_for_route, route_from_source, source_for_asset_url, version};
 use crate::compiler::family::{Raw, TolaSite};
 use crate::config::SiteConfig;
 use crate::seo::feed;
@@ -26,8 +24,9 @@ pub struct HeaderInjector<'a> {
 }
 
 /// Compute versioned href for an asset (with ?v=hash for cache busting)
-fn versioned_href(path: &Path, config: &SiteConfig) -> Option<String> {
-    let route = route_from_config_source(path, config).ok()?;
+fn versioned_href(url: &crate::config::PublicUrl, config: &SiteConfig) -> Option<String> {
+    let source = source_for_asset_url(url.as_str(), config)?;
+    let route = route_from_source(source, config).ok()?;
     let href = href_for_route(&route, config);
     Some(version::versioned_url(&href, &route.source))
 }
@@ -115,7 +114,7 @@ impl<'a> HeaderInjector<'a> {
             let mut attrs = Attrs::new();
             attrs.set("rel", "shortcut icon");
             attrs.set("href", href);
-            attrs.set("type", mime::for_icon(icon));
+            attrs.set("type", mime::for_icon(std::path::Path::new(icon.as_str())));
             head.push_elem(TolaSite::element("link", attrs));
         }
 
@@ -179,7 +178,7 @@ impl<'a> HeaderInjector<'a> {
 
         // Scripts
         for script in &head_config.scripts {
-            if let Some(src) = versioned_href(script.path(), config) {
+            if let Some(src) = versioned_href(script.url(), config) {
                 let mut attrs = Attrs::new();
                 attrs.set("src", src);
                 if script.is_defer() {
@@ -352,12 +351,12 @@ mod tests {
         config.site.seo.feeds = vec![
             FeedConfig {
                 format: FeedFormat::Rss,
-                output: "feed.xml".into(),
+                url: "/feed.xml".into(),
                 features: vec![],
             },
             FeedConfig {
                 format: FeedFormat::Json,
-                output: "feed.json".into(),
+                url: "/feed.json".into(),
                 features: vec![],
             },
         ];
@@ -389,7 +388,7 @@ mod tests {
     #[test]
     fn injected_href_links_have_link_family_payloads() {
         let dir = TempDir::new().unwrap();
-        let assets_dir = dir.path().join("assets");
+        let assets_dir = dir.path().join("assets/styles");
         fs::create_dir_all(&assets_dir).unwrap();
         let style_path = assets_dir.join("site.css");
         fs::write(&style_path, "body{}").unwrap();
@@ -398,7 +397,7 @@ mod tests {
         config.set_root(dir.path());
         config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
         config.site.header.no_fouc = false;
-        config.site.header.styles = vec![style_path];
+        config.site.header.styles = vec!["/styles/site.css".into()];
 
         let doc = HeaderInjector::new(&config).transform(make_html_doc());
         let indexed = TolaSite::indexer().transform(doc);
@@ -412,12 +411,47 @@ mod tests {
     }
 
     #[test]
+    fn injects_header_styles_from_public_asset_url() {
+        crate::asset::version::clear();
+
+        let dir = TempDir::new().unwrap();
+        let styles = dir.path().join("assets/styles");
+        fs::create_dir_all(&styles).unwrap();
+        fs::write(styles.join("tailwind.css"), "body{}").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(styles)];
+        config.site.header.no_fouc = false;
+        config.site.header.styles = vec!["/styles/tailwind.css".into()];
+
+        let doc = HeaderInjector::new(&config).transform(make_html_doc());
+        let links: Vec<_> = head(&doc)
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(elem) if elem.tag == "link" => Some(elem.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(links.iter().any(|link| {
+            link.get_attr("rel") == Some("stylesheet")
+                && link
+                    .get_attr("href")
+                    .is_some_and(|href| href.starts_with("/styles/tailwind.css?v="))
+        }));
+
+        crate::asset::version::clear();
+    }
+
+    #[test]
     fn injects_atomic_css_output_stylesheet() {
         crate::asset::version::clear();
 
         let dir = TempDir::new().unwrap();
         let output_dir = dir.path().join("public");
-        let css_path = output_dir.join("assets/site.css");
+        let css_path = output_dir.join(".tola/atomic.css");
         fs::create_dir_all(css_path.parent().unwrap()).unwrap();
         fs::write(&css_path, ".flex{display:flex}").unwrap();
 
@@ -425,7 +459,6 @@ mod tests {
         config.set_root(dir.path());
         config.build.output = output_dir;
         config.build.atomic_css.enable = true;
-        config.build.atomic_css.output = Some("assets/site.css".into());
         config.site.header.no_fouc = false;
 
         let doc = HeaderInjector::new(&config).transform(make_html_doc());
@@ -442,7 +475,7 @@ mod tests {
             link.get_attr("rel") == Some("stylesheet")
                 && link
                     .get_attr("href")
-                    .is_some_and(|href| href.starts_with("/assets/site.css?v="))
+                    .is_some_and(|href| href.starts_with("/.tola/atomic.css?v="))
         }));
 
         crate::asset::version::clear();

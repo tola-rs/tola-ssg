@@ -165,16 +165,15 @@ impl BuildSectionConfig {
         if !self.atomic_css.enable {
             return;
         }
-        let Some(output) = &self.atomic_css.output else {
-            return;
-        };
-        let output = crate::utils::path::normalize_path(&self.output.join(output.as_path()));
+        let output = crate::utils::path::normalize_path(&AtomicCssConfig::output_path(
+            crate::config::PathResolver::new(&self.output, &self.path_prefix),
+        ));
 
         if path_is_inside(&output, &self.content) {
             diag.error(
-                AtomicCssConfig::FIELDS.output,
+                Self::FIELDS.output,
                 format!(
-                    "output '{}' is inside content source '{}'",
+                    "Atomic CSS output '{}' is inside content source '{}'",
                     output.display(),
                     self.content.display()
                 ),
@@ -184,9 +183,9 @@ impl BuildSectionConfig {
         for source in &self.deps {
             if path_is_inside(&output, source) {
                 diag.error(
-                    AtomicCssConfig::FIELDS.output,
+                    Self::FIELDS.output,
                     format!(
-                        "output '{}' is inside dependency source '{}'",
+                        "Atomic CSS output '{}' is inside dependency source '{}'",
                         output.display(),
                         source.display()
                     ),
@@ -197,9 +196,9 @@ impl BuildSectionConfig {
         for source in self.assets.nested_sources() {
             if path_is_inside(&output, source) {
                 diag.error(
-                    AtomicCssConfig::FIELDS.output,
+                    Self::FIELDS.output,
                     format!(
-                        "output '{}' is inside configured asset source '{}'",
+                        "Atomic CSS output '{}' is inside configured asset source '{}'",
                         output.display(),
                         source.display()
                     ),
@@ -210,9 +209,9 @@ impl BuildSectionConfig {
         for source in self.assets.flatten_sources() {
             if paths_equal(&output, source) {
                 diag.error(
-                    AtomicCssConfig::FIELDS.output,
+                    Self::FIELDS.output,
                     format!(
-                        "output '{}' conflicts with configured flatten asset '{}'",
+                        "Atomic CSS output '{}' conflicts with configured flatten asset '{}'",
                         output.display(),
                         source.display()
                     ),
@@ -223,9 +222,9 @@ impl BuildSectionConfig {
         for source in &self.atomic_css.sources {
             if path_is_inside(&output, source) {
                 diag.error(
-                    AtomicCssConfig::FIELDS.output,
+                    AtomicCssConfig::FIELDS.sources,
                     format!(
-                        "output '{}' is inside Atomic CSS source '{}'",
+                        "Atomic CSS output '{}' is inside Atomic CSS source '{}'",
                         output.display(),
                         source.display()
                     ),
@@ -276,7 +275,6 @@ flatten = ["CNAME"]
 [build.atomic_css]
 enable = true
 profile = "tailwind-v4"
-output = "assets/site.css"
 sources = ["content", "components"]
 config = "atomic.css.toml"
 "#,
@@ -284,15 +282,6 @@ config = "atomic.css.toml"
 
         assert!(config.build.atomic_css.enable);
         assert_eq!(config.build.atomic_css.profile.as_str(), "tailwind-v4");
-        assert_eq!(
-            config
-                .build
-                .atomic_css
-                .output
-                .as_ref()
-                .map(|path| path.as_path()),
-            Some(Path::new("assets/site.css"))
-        );
         assert_eq!(
             config.build.atomic_css.sources,
             vec![
@@ -307,7 +296,7 @@ config = "atomic.css.toml"
     }
 
     #[test]
-    fn atomic_css_enabled_requires_output_and_sources() {
+    fn atomic_css_enabled_requires_sources() {
         let config = test_parse_config(
             r#"
 [build.atomic_css]
@@ -324,11 +313,6 @@ profile = "tailwind-v4"
             .iter()
             .map(|error| error.message.as_str())
             .collect();
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.contains("output is required"))
-        );
         assert!(
             messages
                 .iter()
@@ -337,41 +321,13 @@ profile = "tailwind-v4"
     }
 
     #[test]
-    fn atomic_css_output_requires_css_extension() {
-        let config = test_parse_config(
-            r#"
-[build.atomic_css]
-enable = true
-profile = "tailwind-v4"
-output = "index.html"
-sources = ["content"]
-"#,
-        );
-        let mut diag = crate::config::ConfigDiagnostics::new();
-
-        config.build.validate(&mut diag);
-
-        let messages: Vec<_> = diag
-            .errors()
-            .iter()
-            .map(|error| error.message.as_str())
-            .collect();
-        assert!(
-            messages
-                .iter()
-                .any(|message| message.contains(".css extension"))
-        );
-    }
-
-    #[test]
     fn atomic_css_output_must_not_be_inside_asset_source() {
         let mut config = BuildSectionConfig::default();
         config.output = Path::new("/site").to_path_buf();
         config.assets.nested = vec![crate::config::section::build::assets::NestedEntry::Simple(
-            "/site/assets".into(),
+            "/site".into(),
         )];
         config.atomic_css.enable = true;
-        config.atomic_css.output = Some("assets/site.css".into());
         config.atomic_css.sources = vec![Path::new("/site/content").to_path_buf()];
         let mut diag = crate::config::ConfigDiagnostics::new();
 

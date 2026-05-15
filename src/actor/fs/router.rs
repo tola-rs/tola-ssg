@@ -71,11 +71,17 @@ pub(super) fn events_to_messages(
     }
 
     let changed_paths: Vec<PathBuf> = result.classified.iter().map(|(p, _)| p.clone()).collect();
-    let changed_refs: Vec<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
+    let hook_trigger_paths: Vec<PathBuf> = result
+        .classified
+        .iter()
+        .filter(|(_, category)| !matches!(category, FileCategory::Output))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let hook_trigger_refs: Vec<&Path> = hook_trigger_paths.iter().map(|p| p.as_path()).collect();
 
     let hook_only_compile = result.compile_queue.is_empty()
-        && !result.asset_changed.is_empty()
-        && crate::hooks::has_watched_hooks(config, &changed_refs);
+        && !hook_trigger_paths.is_empty()
+        && crate::hooks::has_watched_hooks(config, &hook_trigger_refs);
     let atomic_css_compile = !result.atomic_css_changed.is_empty();
 
     if !result.asset_changed.is_empty() {
@@ -271,6 +277,37 @@ mod tests {
         let (queue, changed_paths) = compile.expect("expected hook-only compile message");
         assert!(queue.is_empty());
         assert_eq!(changed_paths.len(), 1);
+    }
+
+    #[test]
+    fn unknown_change_with_matching_watched_hook_enqueues_hook_only_compile() {
+        let (tmp, mut config) = make_config();
+        let src = tmp.path().join("src");
+        let input = src.join("tailwind.css");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(&input, "@import 'tailwindcss';").unwrap();
+        config.build.hooks.pre.push(HookConfig {
+            enable: true,
+            name: Some("tailwind".into()),
+            command: vec!["tailwindcss".into()],
+            watch: WatchMode::Patterns(vec!["src/tailwind.css".into()]),
+            quiet: true,
+        });
+
+        let events = DebouncedEvents(vec![(input.clone(), ChangeKind::Modified)]);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
+
+        let compile = messages.into_iter().find_map(|msg| match msg {
+            CompilerMsg::Compile {
+                queue,
+                changed_paths,
+            } => Some((queue, changed_paths)),
+            _ => None,
+        });
+        let (queue, changed_paths) = compile.expect("expected hook-only compile message");
+        assert!(queue.is_empty());
+        assert_eq!(changed_paths, vec![normalize_path(&input)]);
     }
 
     #[test]

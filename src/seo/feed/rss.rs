@@ -117,7 +117,7 @@ mod tests {
     fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
         FeedConfig {
             format: FeedFormat::Rss,
-            output: "feed.xml".into(),
+            url: "/feed.xml".into(),
             features,
         }
     }

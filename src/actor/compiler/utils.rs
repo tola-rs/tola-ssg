@@ -113,22 +113,22 @@ mod tests {
         config.site.seo.feeds = vec![
             crate::config::FeedConfig {
                 format: crate::config::FeedFormat::Rss,
-                output: "feed.xml".into(),
+                url: "/feed.xml".into(),
                 features: vec![],
             },
             crate::config::FeedConfig {
                 format: crate::config::FeedFormat::Atom,
-                output: "atom.xml".into(),
+                url: "/atom.xml".into(),
                 features: vec![],
             },
             crate::config::FeedConfig {
                 format: crate::config::FeedFormat::Json,
-                output: "feed.json".into(),
+                url: "/feed.json".into(),
                 features: vec![],
             },
         ];
         config.site.seo.sitemap.enable = true;
-        config.site.seo.sitemap.output = "sitemap.xml".into();
+        config.site.seo.sitemap.url = "/sitemap.xml".into();
 
         assert!(is_reloadable_output_asset(
             Path::new("/public/assets/app.css"),
@@ -189,11 +189,11 @@ fn is_seo_output(path: &Path, config: &SiteConfig) -> bool {
     let path = crate::utils::path::normalize_path(path);
 
     config.site.seo.feed_outputs().iter().any(|feed| {
-        path == crate::utils::path::normalize_path(&feed.output.output_path(config.paths()))
+        path == crate::utils::path::normalize_path(&feed.url.output_path(config.paths()))
     }) || (config.site.seo.sitemap.enable
         && path
             == crate::utils::path::normalize_path(
-                &config.site.seo.sitemap.output.output_path(config.paths()),
+                &config.site.seo.sitemap.url.output_path(config.paths()),
             ))
 }
 

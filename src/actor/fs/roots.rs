@@ -6,18 +6,18 @@ use rustc_hash::FxHashSet;
 use super::is_transient_not_found;
 use crate::config::SiteConfig;
 
-/// Watch-root consistency manager.
+/// Watched root set.
 ///
 /// Responsibility:
 /// - Attach existing roots at startup
 /// - Re-attach roots that were removed and recreated
 /// - Track root changes after config reload
-pub(super) struct WatchRoots {
+pub(super) struct RootSet {
     desired: Vec<PathBuf>,
     attached: FxHashSet<PathBuf>,
 }
 
-impl WatchRoots {
+impl RootSet {
     pub(super) fn new(paths: Vec<PathBuf>) -> Self {
         Self {
             desired: paths,
@@ -147,6 +147,8 @@ fn collect_watch_paths(config: &SiteConfig) -> Vec<PathBuf> {
         }
     }
 
+    collect_hook_watch_paths(config, &mut paths);
+
     if config.config_path.exists() {
         paths.push(config.config_path.clone());
     }
@@ -160,6 +162,42 @@ fn collect_watch_paths(config: &SiteConfig) -> Vec<PathBuf> {
     dedupe_output_children(&mut paths, &output_dir);
 
     paths
+}
+
+fn collect_hook_watch_paths(config: &SiteConfig, paths: &mut Vec<PathBuf>) {
+    for hook in config
+        .build
+        .hooks
+        .pre
+        .iter()
+        .chain(config.build.hooks.post.iter())
+    {
+        for pattern in hook.watch.path_patterns() {
+            if let Some(path) = hook_watch_root(config, pattern) {
+                paths.push(path);
+            }
+        }
+    }
+}
+
+fn hook_watch_root(config: &SiteConfig, pattern: &str) -> Option<PathBuf> {
+    let pattern = pattern
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    if pattern.is_empty() {
+        return None;
+    }
+
+    let root = config.get_root();
+    let path = root.join(pattern);
+    if path.exists() {
+        return Some(path);
+    }
+
+    let parent = path.parent()?;
+    (parent != root && parent.exists()).then(|| parent.to_path_buf())
 }
 
 /// Keep output root watch, drop redundant descendants under output.
@@ -224,5 +262,35 @@ mod tests {
 
         assert!(paths.contains(&components));
         assert!(paths.contains(&atomic_config));
+    }
+
+    #[test]
+    fn includes_hook_watch_patterns() {
+        use crate::config::section::build::{HookConfig, WatchMode};
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let content = root.join("content");
+        let output = root.join("public");
+        let src = root.join("src");
+        let input = src.join("tailwind.css");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(&input, "@import 'tailwindcss';").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.content = content;
+        config.build.output = output;
+        config.build.hooks.pre.push(HookConfig {
+            command: vec!["tailwindcss".into()],
+            watch: WatchMode::Patterns(vec!["src/tailwind.css".into()]),
+            ..HookConfig::default()
+        });
+
+        let paths = collect_watch_paths(&config);
+
+        assert!(paths.contains(&input));
     }
 }
