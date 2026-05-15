@@ -37,6 +37,40 @@ pub fn normalize_path(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Normalize a path for prefix/equality comparisons.
+///
+/// This canonicalizes the nearest existing ancestor before appending the
+/// missing suffix. That keeps comparisons stable when a generated output file
+/// does not exist yet but its parent source directory does.
+#[inline]
+pub fn normalize_existing_prefix(path: &Path) -> PathBuf {
+    if TolaPackage::from_sentinel(path).is_some() {
+        return path.to_path_buf();
+    }
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+
+    let mut missing = Vec::new();
+    let mut current = path;
+    while !current.exists() {
+        let Some(name) = current.file_name() else {
+            break;
+        };
+        missing.push(name.to_owned());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent;
+    }
+
+    let mut normalized = normalize_path(current);
+    for name in missing.iter().rev() {
+        normalized.push(name);
+    }
+    normalized
+}
+
 /// Resolve a path that may be relative to cwd or a fallback directory
 ///
 /// Always returns an absolute path
@@ -109,5 +143,18 @@ mod tests {
 
         let sentinel2 = Path::new("@tola/site");
         assert_eq!(normalize_path(sentinel2), PathBuf::from("@tola/site"));
+    }
+
+    #[test]
+    fn test_normalize_existing_prefix_keeps_missing_suffix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let existing = dir.path().join("assets");
+        std::fs::create_dir_all(&existing).unwrap();
+        let missing = existing.join("site.css");
+
+        assert_eq!(
+            normalize_existing_prefix(&missing),
+            normalize_path(&existing).join("site.css")
+        );
     }
 }

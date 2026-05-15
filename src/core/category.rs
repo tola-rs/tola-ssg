@@ -66,6 +66,8 @@ pub enum FileCategory {
     Content(ContentKind),
     /// Asset file - copy to output
     Asset,
+    /// Atomic CSS input or semantic config - rebuild generated stylesheet.
+    AtomicCss,
     /// Site config (tola.toml) - full rebuild
     Config,
     /// Dependency (templates, utils) - rebuild dependents
@@ -81,6 +83,7 @@ impl FileCategory {
         match self {
             Self::Content(kind) => kind.name(),
             Self::Asset => "asset",
+            Self::AtomicCss => "atomic-css",
             Self::Config => "config",
             Self::Deps => "deps",
             Self::Output => "output",

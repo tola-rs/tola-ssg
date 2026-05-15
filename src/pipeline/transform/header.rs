@@ -4,7 +4,7 @@
 //! Also sets `lang` attribute on `<html>` root if not present.
 //!
 //! Injected elements: title, description meta, icon link, stylesheets, scripts,
-//! CSS processor output, auto-enhance CSS, and raw HTML elements.
+//! Atomic CSS output, auto-enhance CSS, and raw HTML elements.
 
 use std::path::Path;
 
@@ -129,15 +129,11 @@ impl<'a> HeaderInjector<'a> {
             }
         }
 
-        // CSS processor output (Tailwind/UnoCSS)
-        if config.build.hooks.css.enable
-            && let Some(path) = &config.build.hooks.css.path
-            && let Ok(route) = route_from_config_source(path, config)
-        {
-            // CSS output uses versioned URL based on OUTPUT file
-            // (not path, since CSS processor generates different output based on scanned classes)
-            let href = config.paths().url_for_site_path(route.url.as_str());
-            let href = version::versioned_url(&href, &route.output);
+        // Native Atomic CSS output.
+        if let Some(asset) = crate::css::build::output_asset(config) {
+            // The output is generated from all scanned sources, so cache busting
+            // must follow the generated file rather than any single input file.
+            let href = version::versioned_url(&asset.url, &asset.path);
             let mut attrs = Attrs::new();
             attrs.set("rel", "stylesheet");
             attrs.set("href", href);
@@ -356,12 +352,12 @@ mod tests {
         config.site.seo.feeds = vec![
             FeedConfig {
                 format: FeedFormat::Rss,
-                path: "feed.xml".into(),
+                output: "feed.xml".into(),
                 features: vec![],
             },
             FeedConfig {
                 format: FeedFormat::Json,
-                path: "feed.json".into(),
+                output: "feed.json".into(),
                 features: vec![],
             },
         ];
@@ -413,5 +409,42 @@ mod tests {
             let data = ExtractFamily::<LinkFamily>::get(&link.ext).unwrap();
             assert_eq!(data.href.as_deref(), link.get_attr("href"));
         }
+    }
+
+    #[test]
+    fn injects_atomic_css_output_stylesheet() {
+        crate::asset::version::clear();
+
+        let dir = TempDir::new().unwrap();
+        let output_dir = dir.path().join("public");
+        let css_path = output_dir.join("assets/site.css");
+        fs::create_dir_all(css_path.parent().unwrap()).unwrap();
+        fs::write(&css_path, ".flex{display:flex}").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.output = output_dir;
+        config.build.atomic_css.enable = true;
+        config.build.atomic_css.output = Some("assets/site.css".into());
+        config.site.header.no_fouc = false;
+
+        let doc = HeaderInjector::new(&config).transform(make_html_doc());
+        let links: Vec<_> = head(&doc)
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(elem) if elem.tag == "link" => Some(elem.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(links.iter().any(|link| {
+            link.get_attr("rel") == Some("stylesheet")
+                && link
+                    .get_attr("href")
+                    .is_some_and(|href| href.starts_with("/assets/site.css?v="))
+        }));
+
+        crate::asset::version::clear();
     }
 }

@@ -126,6 +126,7 @@ oxc = { version = "0.113", default-features = false, features = [
     "mangler",
 ] }
 lightningcss = "1.0.0-alpha.70"
+encre-css = "0.20.1"
 
 [features]
 default = []

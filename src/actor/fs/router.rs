@@ -34,7 +34,7 @@ pub(super) fn events_to_messages(
             .filter(|p| {
                 matches!(
                     categorize_path(p, config),
-                    FileCategory::Deps | FileCategory::Asset
+                    FileCategory::Deps | FileCategory::Asset | FileCategory::AtomicCss
                 )
             })
             .cloned(),
@@ -76,6 +76,7 @@ pub(super) fn events_to_messages(
     let hook_only_compile = result.compile_queue.is_empty()
         && !result.asset_changed.is_empty()
         && crate::hooks::has_watched_hooks(config, &changed_refs);
+    let atomic_css_compile = !result.atomic_css_changed.is_empty();
 
     if !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
@@ -103,7 +104,7 @@ pub(super) fn events_to_messages(
         messages.push(CompilerMsg::OutputChange(output_changed));
     }
 
-    if !result.compile_queue.is_empty() || hook_only_compile {
+    if !result.compile_queue.is_empty() || hook_only_compile || atomic_css_compile {
         messages.push(CompilerMsg::Compile {
             queue: result.compile_queue,
             changed_paths,
@@ -173,7 +174,7 @@ mod tests {
         let (_tmp, mut config) = make_config();
         let root = config.get_root().to_path_buf();
         config.build.assets.normalize(&root);
-        let asset = config.get_root().join("assets/styles/tailwind.css");
+        let asset = config.get_root().join("assets/styles/app.css");
         let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
 
         let state = SiteIndex::new();
@@ -196,7 +197,7 @@ mod tests {
         let (_tmp, mut config) = make_config();
         let root = config.get_root().to_path_buf();
         config.build.assets.normalize(&root);
-        let asset = config.get_root().join("assets/styles/tailwind.css");
+        let asset = config.get_root().join("assets/styles/app.css");
         let events = DebouncedEvents(vec![(asset.clone(), ChangeKind::Created)]);
 
         let state = SiteIndex::new();
@@ -246,11 +247,10 @@ mod tests {
             name: Some("watched".into()),
             command: vec!["echo".into(), "hook".into()],
             watch: WatchMode::Bool(true),
-            build_args: vec![],
             quiet: true,
         });
 
-        let asset = config.get_root().join("assets/styles/tailwind.css");
+        let asset = config.get_root().join("assets/styles/app.css");
         let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
         let state = SiteIndex::new();
         let messages = events_to_messages(events, &config, &state);
@@ -271,5 +271,37 @@ mod tests {
         let (queue, changed_paths) = compile.expect("expected hook-only compile message");
         assert!(queue.is_empty());
         assert_eq!(changed_paths.len(), 1);
+    }
+
+    #[test]
+    fn atomic_css_source_change_enqueues_compile_without_asset_copy() {
+        let (tmp, mut config) = make_config();
+        let components = tmp.path().join("components");
+        let source = components.join("button.html");
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(&source, r#"<button class="flex"></button>"#).unwrap();
+        config.build.atomic_css.enable = true;
+        config.build.atomic_css.sources = vec![components];
+
+        let events = DebouncedEvents(vec![(source.clone(), ChangeKind::Modified)]);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
+
+        assert!(
+            !messages
+                .iter()
+                .any(|msg| matches!(msg, CompilerMsg::AssetChange(_)))
+        );
+
+        let compile = messages.into_iter().find_map(|msg| match msg {
+            CompilerMsg::Compile {
+                queue,
+                changed_paths,
+            } => Some((queue, changed_paths)),
+            _ => None,
+        });
+        let (queue, changed_paths) = compile.expect("expected atomic CSS compile message");
+        assert!(queue.is_empty());
+        assert_eq!(changed_paths, vec![normalize_path(&source)]);
     }
 }

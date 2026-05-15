@@ -29,12 +29,12 @@
 //!
 //! [[site.seo.feeds]]
 //! format = "rss"
-//! path = "feed.xml"
+//! output = "feed.xml"
 //! features = ["full-text"]
 //!
 //! [[site.seo.feeds]]
 //! format = "json"
-//! path = "feed.json"
+//! output = "feed.json"
 //!
 //! [site.seo.sitemap]
 //! enable = true

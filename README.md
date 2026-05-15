@@ -41,7 +41,7 @@ A static site generator for Typst-based websites.
 <details>
 <summary>How to make "Recent 5 Posts" with Tola's virtual package system</summary>
 
-Thanks to `typst` and `tailwindcss`, `tola` offers writing flexibility.
+Thanks to `typst` and Tola Atomic CSS, `tola` offers writing flexibility.
 Implement `Recent Posts` easily with the `@tola/pages` virtual package.
 This snippet is aligned with the starter virtual package article source:
 `https://github.com/tola-rs/example-sites/blob/main/starter/content/posts/virtual-packages.typ`.
@@ -88,7 +88,7 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 ### Build & Integration
 
 - **build hooks** — Pre/post build hooks for custom scripts (e.g., esbuild, imagemin)
-- **Tailwind CSS** — Built-in CSS processor integration
+- **Atomic CSS** — Native Tailwind v4-compatible atomic utility generation
 - **html/xml minification** — Optional minification for production builds
 - **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API (limitation: inline scripts should be idempotent; navigation may execute them more than once)
 
@@ -191,7 +191,7 @@ You can run `tola` from any subdirectory — it will automatically find `tola.to
     ├── fonts/
     │   └── Luciole-math.otf  # Embedded math font (auto-loaded by tola)
     ├── styles/
-    │   └── tailwind.css      # Tailwind input (if using `build.hooks.css`)
+    │   └── custom.css        # Optional hand-written styles
     └── scripts/
 ```
 
@@ -236,11 +236,12 @@ auto_og = true   # Auto-inject default OG tags (site_name, locale, description, 
 
 [[site.seo.feeds]]
 format = "rss"   # "rss" | "atom"
-path = "feed.xml"
+output = "feed.xml"
 features = ["full-text"]
 
 [site.seo.sitemap]
 enable = true
+output = "sitemap.xml"
 
 [build]
 content = "content"
@@ -251,10 +252,22 @@ deps = ["templates", "utils"]  # Shared dependencies — changes trigger range r
 [build.assets]
 nested = ["assets/images", "assets/styles", "assets/fonts"]
 
-[build.hooks.css]
+[build.atomic_css]
 enable = true
-path = "assets/styles/tailwind.css"
-command = ["tailwindcss"]
+profile = "tailwind-v4"
+output = "assets/site.css"
+sources = ["content", "templates", "utils"]
+config = "atomic.css.toml"
+```
+
+Optional `atomic.css.toml`:
+
+```toml
+[theme.colors]
+primary = "#e5186a"
+
+[preflight]
+use = { source = "profile", name = "tailwind-v4" }
 ```
 
 ### Virtual Packages

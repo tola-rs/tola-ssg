@@ -9,24 +9,16 @@
 //! watch = ["assets/icons"]
 //!
 //! [[build.hooks.pre]]
-//! command = ["esbuild", "src/app.ts", "--bundle", "--outfile=$TOLA_OUTPUT_DIR/assets/js/app.js"]
-//! build_args = ["--minify"]
+//! command = ["esbuild", "src/app.ts", "--bundle", "--outfile=public/assets/js/app.js"]
 //!
 //! # Post hooks (run after build)
 //! [[build.hooks.post]]
-//! command = ["imagemin", "$TOLA_OUTPUT_DIR/images", "--out-dir", "$TOLA_OUTPUT_DIR/images"]
+//! command = ["imagemin", "public/images", "--out-dir", "public/images"]
 //!
-//! # CSS processor (syntax sugar for pre hook)
-//! [build.hooks.css]
-//! enable = true
-//! input = "assets/css/main.css"
-//! command = ["tailwindcss"]
 //! ```
 
-use crate::config::{ConfigDiagnostics, SiteConfig};
-use macros::Config;
+use crate::config::ConfigDiagnostics;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Hooks configuration containing pre and post build hooks
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -36,15 +28,11 @@ pub struct HooksConfig {
     pub pre: Vec<HookConfig>,
     /// Post-build hooks (run after build completion).
     pub post: Vec<HookConfig>,
-    /// CSS processor hook (syntax sugar for pre hook).
-    pub css: CssProcessorConfig,
 }
 
 impl HooksConfig {
     /// Validate hooks configuration.
-    pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
-        self.css.validate(config, diag);
-    }
+    pub fn validate(&self, _diag: &mut ConfigDiagnostics) {}
 }
 
 /// Configuration for a single build hook
@@ -58,17 +46,12 @@ pub struct HookConfig {
     /// Display name for logging (defaults to command[0]).
     pub name: Option<String>,
 
-    /// Command and arguments to execute.
-    /// Supports `$TOLA_*` variable substitution.
+    /// Command and arguments to execute from the site root.
     pub command: Vec<String>,
 
     /// Watch mode for serve (re-execute on file changes).
     #[serde(default)]
     pub watch: WatchMode,
-
-    /// Additional arguments appended only during `tola build` (not serve).
-    #[serde(default)]
-    pub build_args: Vec<String>,
 
     /// Suppress output (default: true).
     #[serde(default = "default_quiet")]
@@ -90,7 +73,6 @@ impl Default for HookConfig {
             name: None,
             command: Vec::new(),
             watch: WatchMode::default(),
-            build_args: Vec::new(),
             quiet: true,
         }
     }
@@ -153,18 +135,16 @@ impl WatchMode {
     }
 
     fn match_pattern(pattern: &str, rel_path: &str) -> bool {
-        let mut pattern = pattern.trim().replace('\\', "/");
+        let pattern = pattern.trim().replace('\\', "/");
         if pattern.is_empty() {
             return false;
         }
 
         let rel_path = rel_path.trim_start_matches("./");
-        let anchored = pattern.starts_with('/');
-        if anchored {
-            pattern.remove(0);
-        }
-
-        let pattern = pattern.trim_end_matches('/');
+        let pattern = pattern
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .trim_end_matches('/');
         if pattern.is_empty() {
             return false;
         }
@@ -179,12 +159,11 @@ impl WatchMode {
             return true;
         }
 
-        // Non-anchored patterns also match by basename for convenience.
-        if !anchored
-            && rel_path
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| name == pattern)
+        // Patterns also match by basename for convenience.
+        if rel_path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name == pattern)
         {
             return true;
         }
@@ -196,10 +175,7 @@ impl WatchMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::section::build::assets::NestedEntry;
-    use crate::config::{ConfigDiagnostics, SiteConfig};
-    use std::fs;
-    use tempfile::TempDir;
+    use crate::config::test_parse_config;
 
     #[test]
     fn test_watch_matches_directory_pattern() {
@@ -216,220 +192,34 @@ mod tests {
 
     #[test]
     fn test_watch_matches_basename_pattern() {
-        let watch = WatchMode::Patterns(vec!["tailwind.css".into()]);
+        let watch = WatchMode::Patterns(vec!["app.css".into()]);
         let root = std::path::Path::new("/site");
 
-        assert!(watch.matches(
-            std::path::Path::new("/site/assets/styles/tailwind.css"),
-            root
-        ));
-        assert!(!watch.matches(std::path::Path::new("/site/assets/styles/app.css"), root));
+        assert!(watch.matches(std::path::Path::new("/site/assets/styles/app.css"), root));
+        assert!(!watch.matches(std::path::Path::new("/site/assets/styles/other.css"), root));
     }
 
     #[test]
-    fn css_path_validation_hints_existing_unconfigured_source() {
-        let dir = TempDir::new().unwrap();
-        fs::create_dir_all(dir.path().join("assets")).unwrap();
-        fs::create_dir_all(dir.path().join("styles")).unwrap();
-        let css = dir.path().join("styles/tailwind.css");
-        fs::write(&css, "@tailwind utilities;").unwrap();
-
-        let mut config = SiteConfig::default();
-        config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(dir.path().join("assets"))];
-        config.build.hooks.css.enable = true;
-        config.build.hooks.css.command = vec!["sh".into()];
-        config.build.hooks.css.path = Some(css);
-
-        let mut diag = ConfigDiagnostics::new();
-        config.build.hooks.validate(&config, &mut diag);
-
-        assert_eq!(diag.len(), 1);
-        let error = &diag.errors()[0];
-        assert_eq!(error.field, CssProcessorConfig::FIELDS.path);
-        assert!(error.message.contains("not in any configured asset entry"));
-        assert!(
-            error
-                .hint
-                .as_deref()
-                .is_some_and(|hint| hint.contains("nested = [\"styles\"]"))
+    fn hook_watch_patterns_are_not_path_validated() {
+        let config = test_parse_config(
+            r#"
+[[build.hooks.pre]]
+command = ["echo", "bad"]
+watch = ["/src", "../templates"]
+"#,
         );
-    }
-}
+        let mut diag = ConfigDiagnostics::new();
 
-// ============================================================================
-// CSS Processor Config
-// ============================================================================
+        config.build.hooks.validate(&mut diag);
 
-/// CSS processor format (determines CLI arguments)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CssFormat {
-    /// Auto-detect from command (default).
-    #[default]
-    Auto,
-    /// Tailwind CSS: `-i input -o output [--minify]`
-    Tailwind,
-    /// UnoCSS: `input -o output [--minify]`
-    Uno,
-}
-
-impl CssFormat {
-    /// Infer format from command.
-    pub fn infer_from_command(command: &[String]) -> Self {
-        let cmd_str = command.join(" ").to_lowercase();
-        if cmd_str.contains("unocss") || cmd_str.contains("uno") {
-            CssFormat::Uno
-        } else {
-            CssFormat::Tailwind // default
-        }
+        assert!(diag.is_empty());
     }
 
-    /// Resolve auto to concrete format.
-    pub fn resolve(&self, command: &[String]) -> Self {
-        match self {
-            CssFormat::Auto => Self::infer_from_command(command),
-            _ => *self,
-        }
-    }
-}
+    #[test]
+    fn watch_leading_slash_matches_root_relative_pattern() {
+        let watch = WatchMode::Patterns(vec!["/src".into()]);
+        let root = std::path::Path::new("/site");
 
-/// CSS processor hook (Only tailwind now)
-#[derive(Debug, Clone, Serialize, Deserialize, Config)]
-#[serde(default)]
-#[config(section = "build.hooks.css")]
-pub struct CssProcessorConfig {
-    #[config(inline_doc = "Enable Tailwind CSS processing")]
-    pub enable: bool,
-    /// Output asset path (also used as Tailwind input file location)
-    #[config(inline_doc = "e.g. \"assets/style/tailwind.css\"")]
-    pub path: Option<PathBuf>,
-    #[config(inline_doc = "e.g. [\"npx\", \"tailwindcss\"] if you want")]
-    pub command: Vec<String>,
-    /// CSS processor format (auto, tailwind, uno). Default: auto (inferred from command)
-    #[config(status = hidden)]
-    pub format: CssFormat,
-    /// Glob patterns for scanning source files (UnoCSS only)
-    #[serde(default)]
-    #[config(status = hidden)]
-    pub scan: Vec<String>,
-    /// Suppress output (default: true)
-    #[config(status = hidden)]
-    pub quiet: bool,
-}
-
-impl Default for CssProcessorConfig {
-    fn default() -> Self {
-        Self {
-            enable: false,
-            path: None,
-            command: vec!["tailwindcss".into()],
-            format: CssFormat::Auto,
-            scan: Vec::new(),
-            quiet: true,
-        }
-    }
-}
-
-impl CssProcessorConfig {
-    /// Get the resolved format (auto -> concrete).
-    pub fn resolved_format(&self) -> CssFormat {
-        self.format.resolve(&self.command)
-    }
-
-    /// Validate CSS processor configuration.
-    pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
-        if !self.enable {
-            return;
-        }
-
-        // Command must have at least one element
-        if self.command.is_empty() {
-            diag.error(
-                Self::FIELDS.command,
-                format!(
-                    "{} is true but {} is empty",
-                    Self::FIELDS.enable,
-                    Self::FIELDS.command
-                ),
-            );
-            return;
-        }
-
-        // Check if command is installed
-        let cmd = &self.command[0];
-        let is_package_runner = ["npx", "bunx", "pnpx", "yarn", "dlx"].contains(&cmd.as_str());
-
-        if which::which(cmd).is_err() {
-            if is_package_runner {
-                // Package runners can download packages at runtime, just hint
-                if self.command.len() > 1 {
-                    diag.hint(
-                        Self::FIELDS.command,
-                        format!(
-                            "`{}` via `{}` — ensure package is installed",
-                            self.command[1], cmd
-                        ),
-                    );
-                }
-            } else {
-                diag.error_with_hint(
-                    Self::FIELDS.command,
-                    format!("`{cmd}` not found"),
-                    format!("install the command or update {}", Self::FIELDS.command),
-                );
-            }
-        }
-
-        // Path must be configured
-        let Some(path) = &self.path else {
-            diag.error(
-                Self::FIELDS.path,
-                format!(
-                    "{} is true but {} is not configured",
-                    Self::FIELDS.enable,
-                    Self::FIELDS.path
-                ),
-            );
-            return;
-        };
-
-        validate_css_asset_source(path, config, diag);
-
-        // For Tailwind, path must exist as input file
-        // For UnoCSS, path is just output location (file doesn't need to exist)
-        if self.resolved_format() == CssFormat::Tailwind {
-            if !path.exists() {
-                diag.error(
-                    Self::FIELDS.path,
-                    format!("{} file not found: {}", Self::FIELDS.path, path.display()),
-                );
-            } else if !path.is_file() {
-                diag.error(
-                    Self::FIELDS.path,
-                    format!("{} is not a file: {}", Self::FIELDS.path, path.display()),
-                );
-            }
-        }
-    }
-}
-
-fn validate_css_asset_source(
-    path: &std::path::Path,
-    config: &SiteConfig,
-    diag: &mut ConfigDiagnostics,
-) {
-    if crate::asset::route_from_config_source(path, config).is_ok() {
-        return;
-    }
-
-    let message = format!(
-        "path '{}' not in any configured asset entry",
-        path.display()
-    );
-    if let Some(hint) = crate::asset::asset_source_hint(path, config) {
-        diag.error_with_hint(CssProcessorConfig::FIELDS.path, message, hint);
-    } else {
-        diag.error(CssProcessorConfig::FIELDS.path, message);
+        assert!(watch.matches(std::path::Path::new("/site/src/app.ts"), root));
     }
 }

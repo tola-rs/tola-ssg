@@ -3,10 +3,11 @@
 //! Build pipeline phases:
 //! - **Pre Hooks** - User-defined pre-build commands
 //! - **Init** - Typst warm-up, output directory, cache clear
+//! - **Atomic CSS** - Generate configured atomic stylesheet
 //! - **Collect** - Gather content files and assets
 //! - **Compile** - Parallel content compilation + asset processing
 //! - **Iterative** - Rebuild iterative pages with complete metadata
-//! - **Post-process** - Flatten assets, CNAME, CSS processor, enhance CSS
+//! - **Post-process** - Flatten assets, CNAME, content assets, enhance CSS
 //! - **Post Hooks** - User-defined post-build commands
 //! - **Finalize** - Cache persistence, warnings, logging
 
@@ -25,7 +26,7 @@ use anyhow::Result;
 
 /// Build the entire site using two-phase compilation
 ///
-/// Pipeline: pre-hooks -> init -> collect -> compile -> iterative -> post-process -> post-hooks -> finalize
+/// Pipeline: init -> pre-hooks -> atomic CSS -> collect -> compile -> iterative -> post-process -> post-hooks -> finalize
 pub fn build_site(
     mode: BuildMode,
     config: &SiteConfig,
@@ -39,7 +40,11 @@ pub fn build_site(
     let deps_hash: ContentHash = freshness::compute_deps_hash(config);
 
     // Pre Hooks (after init so output dir exists and is clean)
-    hooks::run_pre_hooks(config, mode, true)?;
+    hooks::run_pre_hooks(config)?;
+
+    // Native Atomic CSS runs before page compilation so generated stylesheet
+    // links can use the current output hash.
+    crate::css::build::build(config)?;
 
     // Collect files
     let files = pipeline::collect_build_files(config);
@@ -84,7 +89,7 @@ pub fn build_site(
     pipeline::post_process(config, quiet)?;
 
     // Post Hooks
-    hooks::run_post_hooks(config, mode, true)?;
+    hooks::run_post_hooks(config)?;
 
     // Finalize
     pipeline::finalize_build(config, state, &warnings, quiet)?;

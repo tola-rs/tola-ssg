@@ -44,8 +44,8 @@ pub use section::{
 
 // Re-export from types/
 pub use types::{
-    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, PathResolver,
-    config_handle, init_config,
+    ConfigDiagnostics, ConfigError, ConfigHandle, ConfigPresence, FieldPath, GeneratedOutputPath,
+    PathResolver, config_handle, init_config,
 };
 
 // Internal imports from section/
@@ -374,13 +374,6 @@ impl SiteConfig {
         path.canonical_url(self.site.info.url.as_deref())
     }
 
-    /// Build an absolute URL for a generated file path relative to the site root.
-    pub fn canonical_output_url(&self, rel_path: impl AsRef<Path>) -> String {
-        let path = rel_path.as_ref().to_string_lossy().replace('\\', "/");
-        let path = UrlPath::from_asset(&path);
-        self.canonical_url(&path)
-    }
-
     // ========================================================================
     // cli configuration updates
     // ========================================================================
@@ -437,10 +430,6 @@ impl SiteConfig {
         crate::logger::set_verbose(args.verbose);
 
         Self::update_option(&mut self.build.minify, args.minify.as_ref());
-        Self::update_option(
-            &mut self.build.hooks.css.enable,
-            args.css_processor.as_ref(),
-        );
         self.build.clean = args.clean;
         self.build.skip_drafts = args.skip_drafts;
 
@@ -535,19 +524,15 @@ impl SiteConfig {
             .iter()
             .map(|p| crate::utils::path::normalize_path(&root.join(p)))
             .collect();
-        // Note: feed and sitemap paths are kept as relative filenames.
-        // They are resolved to output_dir() at write time to include path_prefix.
+        self.build.atomic_css.normalize(&root);
+        // Generated output paths stay relative to output_dir().
 
         // Normalize optional paths
         self.normalize_optional_paths(&root);
     }
 
-    /// Normalize optional paths (CSS processor path, deploy token).
+    /// Normalize optional paths.
     fn normalize_optional_paths(&mut self, root: &Path) {
-        if let Some(path) = self.build.hooks.css.path.take() {
-            self.build.hooks.css.path = Some(crate::utils::path::normalize_path(&root.join(path)));
-        }
-
         if let Some(token_path) = self.deploy.github.token_path.take() {
             self.deploy.github.token_path = Some(Self::normalize_token_path(&token_path, root));
         }
@@ -579,6 +564,7 @@ impl SiteConfig {
 
         // Validate assets paths (must be relative)
         self.build.assets.validate_paths(&mut diag);
+        self.build.atomic_css.validate_paths(&mut diag);
         self.site.seo.validate_paths(&mut diag);
 
         diag.into_result()
@@ -609,7 +595,7 @@ impl SiteConfig {
             .info
             .validate(self.site.seo.has_feed_outputs(), &mut diag);
         self.build.validate(&mut diag);
-        self.build.hooks.validate(self, &mut diag);
+        self.build.hooks.validate(&mut diag);
         self.build.svg.validate(&mut diag);
         self.build.assets.validate(&mut diag);
         self.site.header.validate(self, &mut diag);
@@ -677,7 +663,6 @@ mod tests {
         BuildArgs {
             clean: false,
             minify: None,
-            css_processor: None,
             feed: None,
             sitemap: None,
             site_url: None,
@@ -841,7 +826,7 @@ mod tests {
             r#"
 {}
 format = "rss"
-path = "feed.xml"
+output = "feed.xml"
 "#,
             FeedConfig::toml_array_table()
         ));
@@ -858,7 +843,7 @@ path = "feed.xml"
                 r#"
 {}
 format = "rss"
-path = "feed.xml"
+output = "feed.xml"
 "#,
                 FeedConfig::toml_array_table()
             ),
@@ -875,7 +860,7 @@ path = "feed.xml"
                 r#"
 {}
 format = "rss"
-path = "feed.xml"
+output = "feed.xml"
 "#,
                 FeedConfig::toml_array_table()
             ),
@@ -900,7 +885,7 @@ path = "feed.xml"
                 r#"
 {}
 format = "atom"
-path = "atom.xml"
+output = "atom.xml"
 "#,
                 FeedConfig::toml_array_table()
             ),
@@ -914,7 +899,10 @@ path = "atom.xml"
 
         assert_eq!(config.site.seo.feeds.len(), 1);
         assert_eq!(config.site.seo.feeds[0].format, FeedFormat::Atom);
-        assert_eq!(config.site.seo.feeds[0].path, PathBuf::from("atom.xml"));
+        assert_eq!(
+            config.site.seo.feeds[0].output.as_path(),
+            Path::new("atom.xml")
+        );
     }
 
     #[test]

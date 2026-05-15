@@ -73,7 +73,7 @@ pub fn collect_url_owners(pages: &[CompiledPage], config: &SiteConfig) -> UrlOwn
     // Collect global assets
     collect_global_assets(&mut url_owners, config);
 
-    // Collect generated SEO outputs
+    // Collect generated public outputs.
     collect_generated_outputs(&mut url_owners, config);
 
     // Collect pages (permalinks + aliases)
@@ -110,27 +110,36 @@ fn collect_global_assets(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
 }
 
 fn collect_generated_outputs(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
-    for (idx, feed) in config.site.seo.feed_outputs().iter().enumerate() {
+    if config.build.atomic_css.enable
+        && let Some(output) = &config.build.atomic_css.output
+    {
+        let output = output.logical_path();
         url_owners
-            .entry(UrlPath::from_asset(&output_path_url(&feed.path)))
+            .entry(UrlPath::from_asset(&output))
+            .or_default()
+            .push(UrlOwner::generated(format!(
+                "build.atomic_css.output ({output})"
+            )));
+    }
+
+    for (idx, feed) in config.site.seo.feed_outputs().iter().enumerate() {
+        let output = feed.output.logical_path();
+        url_owners
+            .entry(UrlPath::from_asset(&output))
             .or_default()
             .push(UrlOwner::generated(format!(
                 "site.seo.feeds[{idx}] ({} -> {})",
                 feed.format.as_str(),
-                output_path_url(&feed.path)
+                output
             )));
     }
 
     if config.site.seo.sitemap.enable {
+        let output = config.site.seo.sitemap.output.logical_path();
         url_owners
-            .entry(UrlPath::from_asset(&output_path_url(
-                &config.site.seo.sitemap.path,
-            )))
+            .entry(UrlPath::from_asset(&output))
             .or_default()
-            .push(UrlOwner::generated(format!(
-                "site.seo.sitemap ({})",
-                output_path_url(&config.site.seo.sitemap.path)
-            )));
+            .push(UrlOwner::generated(format!("site.seo.sitemap ({output})")));
     }
 }
 
@@ -176,13 +185,6 @@ pub fn detect_conflicts(url_owners: &UrlOwnerMap, root: &Path) -> Vec<UrlConflic
             owners: relativize_owners(sources, root),
         })
         .collect()
-}
-
-fn output_path_url(path: &Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "/")
-        .trim_matches('/')
-        .to_string()
 }
 
 /// Convert absolute source paths to relative paths.
@@ -407,7 +409,7 @@ mod tests {
         config.build.assets.flatten = vec![FlattenEntry::Simple(source)];
         config.site.seo.feeds = vec![FeedConfig {
             format: FeedFormat::Rss,
-            path: "feed.xml".into(),
+            output: "feed.xml".into(),
             features: Vec::new(),
         }];
 
@@ -437,7 +439,7 @@ mod tests {
         config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
         config.site.seo.feeds = vec![FeedConfig {
             format: FeedFormat::Rss,
-            path: "assets/feed.xml".into(),
+            output: "assets/feed.xml".into(),
             features: Vec::new(),
         }];
 
@@ -459,7 +461,7 @@ mod tests {
         config.set_root(dir.path());
         config.build.assets.flatten = vec![FlattenEntry::Simple(source)];
         config.site.seo.sitemap.enable = true;
-        config.site.seo.sitemap.path = "sitemap.xml".into();
+        config.site.seo.sitemap.output = "sitemap.xml".into();
 
         let url_owners = collect_url_owners(&[], &config);
         let conflicts = detect_conflicts(&url_owners, config.get_root());
@@ -472,6 +474,34 @@ mod tests {
                 .owners
                 .iter()
                 .any(|owner| owner.to_string().contains("site.seo.sitemap"))
+        );
+    }
+
+    #[test]
+    fn atomic_css_output_conflicts_with_nested_asset_url() {
+        let dir = TempDir::new().unwrap();
+        let assets_dir = dir.path().join("assets");
+        let source = assets_dir.join("site.css");
+        std::fs::create_dir_all(&assets_dir).unwrap();
+        std::fs::write(&source, "asset css").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
+        config.build.atomic_css.enable = true;
+        config.build.atomic_css.output = Some("assets/site.css".into());
+
+        let url_owners = collect_url_owners(&[], &config);
+        let conflicts = detect_conflicts(&url_owners, config.get_root());
+
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].url, UrlPath::from_asset("/assets/site.css"));
+        assert_eq!(conflicts[0].owners.len(), 2);
+        assert!(
+            conflicts[0]
+                .owners
+                .iter()
+                .any(|owner| owner.to_string().contains("build.atomic_css.output"))
         );
     }
 }

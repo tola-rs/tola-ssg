@@ -14,8 +14,8 @@
 //! Cmd::new("git").args(["status", "-s"]).run()?;
 //!
 //! // With working directory and PTY
-//! Cmd::new("tailwindcss")
-//!     .args(["-i", "input.css", "-o", "output.css"])
+//! Cmd::new("esbuild")
+//!     .args(["src/app.ts", "--bundle", "--outfile=public/app.js"])
 //!     .cwd(root)
 //!     .pty(true)
 //!     .run()?;
@@ -66,7 +66,7 @@ impl Cmd {
         }
     }
 
-    /// Create from a command array (e.g., `["git"]` or `["npx", "tailwindcss"]`).
+    /// Create from a command array (e.g., `["git"]` or `["npx", "esbuild"]`).
     pub fn from_slice<S: AsRef<OsStr>>(cmd: &[S]) -> Self {
         let mut iter = cmd.iter();
         let program = iter

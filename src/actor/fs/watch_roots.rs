@@ -131,6 +131,22 @@ fn collect_watch_paths(config: &SiteConfig) -> Vec<PathBuf> {
         }
     }
 
+    if config.build.atomic_css.enable {
+        for source in &config.build.atomic_css.sources {
+            let source = root.join(source);
+            if source.exists() {
+                paths.push(source);
+            }
+        }
+
+        if let Some(config_path) = &config.build.atomic_css.config {
+            let config_path = root.join(config_path);
+            if config_path.exists() {
+                paths.push(config_path);
+            }
+        }
+    }
+
     if config.config_path.exists() {
         paths.push(config.config_path.clone());
     }
@@ -156,8 +172,10 @@ fn dedupe_output_children(paths: &mut Vec<PathBuf>, output_root: &std::path::Pat
 
 #[cfg(test)]
 mod tests {
-    use super::dedupe_output_children;
+    use super::{collect_watch_paths, dedupe_output_children};
+    use crate::config::SiteConfig;
     use std::path::PathBuf;
+    use tempfile::TempDir;
 
     #[test]
     fn keeps_output_root_and_drops_descendants() {
@@ -179,5 +197,32 @@ mod tests {
         assert!(!paths.contains(&PathBuf::from(
             "/site/public/blog/showcase/virtual-packages"
         )));
+    }
+
+    #[test]
+    fn includes_atomic_css_sources_and_config() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let content = root.join("content");
+        let output = root.join("public");
+        let components = root.join("components");
+        let atomic_config = root.join("atomic.css.toml");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(&atomic_config, "").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(root);
+        config.build.content = content;
+        config.build.output = output;
+        config.build.atomic_css.enable = true;
+        config.build.atomic_css.sources = vec![components.clone()];
+        config.build.atomic_css.config = Some(atomic_config.clone());
+
+        let paths = collect_watch_paths(&config);
+
+        assert!(paths.contains(&components));
+        assert!(paths.contains(&atomic_config));
     }
 }

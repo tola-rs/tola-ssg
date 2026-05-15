@@ -157,7 +157,7 @@ mod tests {
     fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
         FeedConfig {
             format: FeedFormat::Atom,
-            path: "atom.xml".into(),
+            output: "atom.xml".into(),
             features,
         }
     }

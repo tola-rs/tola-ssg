@@ -1,9 +1,9 @@
 //! SEO configuration (feed, sitemap, OG tags).
 
-use crate::config::{ConfigDiagnostics, FieldPath};
+use crate::config::{ConfigDiagnostics, FieldPath, GeneratedOutputPath};
 use macros::Config;
 use serde::{Deserialize, Serialize};
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 /// Feed output format
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,7 +75,7 @@ impl FeedFeature {
 #[config(section = "site.seo.feeds")]
 pub struct FeedConfig {
     #[config(default = "feed.xml", inline_doc = "Output path for feed file")]
-    pub path: PathBuf,
+    pub output: GeneratedOutputPath,
     #[config(default = "rss", inline_doc = "Feed format: rss | atom | json")]
     pub format: FeedFormat,
     /// Optional feed features.
@@ -85,7 +85,7 @@ pub struct FeedConfig {
 impl Default for FeedConfig {
     fn default() -> Self {
         Self {
-            path: "feed.xml".into(),
+            output: "feed.xml".into(),
             format: FeedFormat::Rss,
             features: Vec::new(),
         }
@@ -122,10 +122,8 @@ impl FeedConfig {
         ));
         out.push_str(&format!(
             "# {} = {}\n",
-            toml_key(Self::FIELDS.path),
-            toml::Value::try_from(default.path)
-                .map(|v| v.to_string())
-                .unwrap_or_default()
+            toml_key(Self::FIELDS.output),
+            toml::Value::String(default.output.logical_path())
         ));
         out.push_str(&format!(
             "# {} = {}  # {}\n",
@@ -154,14 +152,14 @@ pub struct SitemapConfig {
     #[config(inline_doc = "Enable sitemap generation")]
     pub enable: bool,
     #[config(inline_doc = "Output path for sitemap file")]
-    pub path: PathBuf,
+    pub output: GeneratedOutputPath,
 }
 
 impl Default for SitemapConfig {
     fn default() -> Self {
         Self {
             enable: false,
-            path: "sitemap.xml".into(),
+            output: "sitemap.xml".into(),
         }
     }
 }
@@ -206,15 +204,12 @@ impl SeoConfig {
 
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         for (idx, feed) in self.feeds.iter().enumerate() {
-            validate_output_path(
-                &feed.path,
-                idx,
-                self.feeds.len(),
-                FeedConfig::FIELDS.path,
-                diag,
-            );
+            feed.output
+                .validate_indexed(FeedConfig::FIELDS.output, idx, self.feeds.len(), diag);
         }
-        validate_output_path(&self.sitemap.path, 0, 1, SitemapConfig::FIELDS.path, diag);
+        self.sitemap
+            .output
+            .validate(SitemapConfig::FIELDS.output, diag);
         validate_feed_path_collisions(self, diag);
     }
 
@@ -242,52 +237,25 @@ fn validate_feed_path_collisions(seo: &SeoConfig, diag: &mut ConfigDiagnostics) 
     let mut seen: Vec<(&Path, usize)> = Vec::new();
 
     for (idx, feed) in seo.feeds.iter().enumerate() {
-        if let Some((_, prev_idx)) = seen.iter().find(|(path, _)| *path == feed.path.as_path()) {
+        if let Some((_, prev_idx)) = seen.iter().find(|(path, _)| *path == feed.output.as_path()) {
             diag.error(
-                FeedConfig::FIELDS.path,
+                FeedConfig::FIELDS.output,
                 format!(
-                    "[{idx}] path '{}' duplicates feed output [{prev_idx}]",
-                    feed.path.display()
+                    "[{idx}] output '{}' duplicates feed output [{prev_idx}]",
+                    feed.output
                 ),
             );
         } else {
-            seen.push((feed.path.as_path(), idx));
+            seen.push((feed.output.as_path(), idx));
         }
 
-        if seo.sitemap.enable && feed.path.as_path() == seo.sitemap.path.as_path() {
+        if seo.sitemap.enable && feed.output.as_path() == seo.sitemap.output.as_path() {
             diag.error(
-                FeedConfig::FIELDS.path,
+                FeedConfig::FIELDS.output,
                 format!(
-                    "[{idx}] path '{}' conflicts with enabled sitemap output",
-                    feed.path.display()
+                    "[{idx}] output '{}' conflicts with enabled sitemap output",
+                    feed.output
                 ),
-            );
-        }
-    }
-}
-
-fn validate_output_path(
-    path: &Path,
-    idx: usize,
-    total: usize,
-    field: FieldPath,
-    diag: &mut ConfigDiagnostics,
-) {
-    for comp in path.components() {
-        let msg = match comp {
-            Component::ParentDir => Some("parent directory '..' not allowed"),
-            Component::Prefix(_) | Component::RootDir => Some("absolute paths not allowed"),
-            _ => None,
-        };
-        if let Some(reason) = msg {
-            let prefix = if total > 1 {
-                format!("[{idx}] ")
-            } else {
-                String::new()
-            };
-            diag.error(
-                field,
-                format!("{prefix}path '{}': {reason}", path.display()),
             );
         }
     }
@@ -297,9 +265,20 @@ fn validate_output_path(
 mod tests {
     use super::{FeedConfig, SitemapConfig};
     use crate::config::{FeedFeature, FeedFormat, test_parse_config};
-    use std::path::PathBuf;
+    use std::path::Path;
 
-    fn feed_entry(format: &str, path: &str) -> String {
+    fn feed_entry(format: &str, output: &str) -> String {
+        format!(
+            r#"
+{}
+format = "{format}"
+output = "{output}"
+"#,
+            FeedConfig::toml_array_table()
+        )
+    }
+
+    fn legacy_feed_path_entry(format: &str, path: &str) -> String {
         format!(
             r#"
 {}
@@ -310,15 +289,41 @@ path = "{path}"
         )
     }
 
-    fn sitemap_entry(path: &str) -> String {
+    fn sitemap_entry(output: &str) -> String {
         format!(
             r#"
 [{}]
 enable = true
-path = "{path}"
+output = "{output}"
 "#,
             SitemapConfig::TEMPLATE_SECTION
         )
+    }
+
+    #[test]
+    fn parses_generated_output_fields() {
+        let config = test_parse_config(&format!(
+            "{}{}",
+            feed_entry("rss", "feed.xml"),
+            sitemap_entry("sitemap.xml")
+        ));
+
+        assert_eq!(
+            config.site.seo.feeds[0].output.as_path(),
+            Path::new("feed.xml")
+        );
+        assert_eq!(
+            config.site.seo.sitemap.output.as_path(),
+            Path::new("sitemap.xml")
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_feed_path_field() {
+        let content = crate::config::test_config_source(&legacy_feed_path_entry("rss", "feed.xml"));
+        let (_, ignored) = crate::config::SiteConfig::parse_with_ignored(&content).unwrap();
+
+        assert!(ignored.iter().any(|field| field.contains("path")));
     }
 
     #[test]
@@ -332,11 +337,20 @@ path = "{path}"
 
         assert_eq!(config.site.seo.feeds.len(), 3);
         assert_eq!(config.site.seo.feeds[0].format, FeedFormat::Rss);
-        assert_eq!(config.site.seo.feeds[0].path, PathBuf::from("feed.xml"));
+        assert_eq!(
+            config.site.seo.feeds[0].output.as_path(),
+            Path::new("feed.xml")
+        );
         assert_eq!(config.site.seo.feeds[1].format, FeedFormat::Atom);
-        assert_eq!(config.site.seo.feeds[1].path, PathBuf::from("atom.xml"));
+        assert_eq!(
+            config.site.seo.feeds[1].output.as_path(),
+            Path::new("atom.xml")
+        );
         assert_eq!(config.site.seo.feeds[2].format, FeedFormat::Json);
-        assert_eq!(config.site.seo.feeds[2].path, PathBuf::from("feed.json"));
+        assert_eq!(
+            config.site.seo.feeds[2].output.as_path(),
+            Path::new("feed.json")
+        );
     }
 
     #[test]
@@ -345,7 +359,7 @@ path = "{path}"
             r#"
 {}
 format = "rss"
-path = "feed.xml"
+output = "feed.xml"
 features = ["full-text", "no-script"]
 "#,
             FeedConfig::toml_array_table()
@@ -363,7 +377,7 @@ features = ["full-text", "no-script"]
             r#"
 {}
 format = "rss"
-path = "feed.xml"
+output = "feed.xml"
 features = ["full-text", "full-text"]
 "#,
             FeedConfig::toml_array_table()

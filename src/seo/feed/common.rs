@@ -70,7 +70,7 @@ pub fn page_url(page: &FeedPage, config: &SiteConfig) -> String {
 }
 
 pub fn feed_url(config: &SiteConfig, feed: &FeedConfig) -> String {
-    config.canonical_output_url(&feed.path)
+    feed.output.canonical_url(config.site.info.url.as_deref())
 }
 
 pub fn summary_html(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<String> {
@@ -113,7 +113,7 @@ fn write_if_changed(path: &Path, content: &str) -> Result<WriteOutcome> {
 }
 
 pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, content: &str) -> Result<WriteOutcome> {
-    let output_path = config.paths().output_dir().join(&feed.path);
+    let output_path = feed.output.output_path(config.paths());
 
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
@@ -165,7 +165,7 @@ mod tests {
         config.site.info.url = Some("https://example.com".to_string());
         let feed = FeedConfig {
             format: FeedFormat::Rss,
-            path: "feed.xml".into(),
+            output: "feed.xml".into(),
             features: vec![FeedFeature::FullText],
         };
         let page = FeedPage {
@@ -196,7 +196,7 @@ mod tests {
         config.site.info.url = Some("https://example.com".to_string());
         let feed = FeedConfig {
             format: FeedFormat::Rss,
-            path: "feed.xml".into(),
+            output: "feed.xml".into(),
             features: vec![FeedFeature::FullText, FeedFeature::NoScript],
         };
         let page = FeedPage {

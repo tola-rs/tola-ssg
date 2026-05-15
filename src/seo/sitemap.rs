@@ -82,11 +82,7 @@ impl Sitemap {
     }
 
     fn write(self, config: &SiteConfig) -> Result<()> {
-        // Resolve sitemap path relative to output_dir (with path_prefix)
-        let sitemap_path = config
-            .paths()
-            .output_dir()
-            .join(&config.site.seo.sitemap.path);
+        let sitemap_path = config.site.seo.sitemap.output.output_path(config.paths());
         let xml = self.into_xml();
 
         fs::write(&sitemap_path, xml)

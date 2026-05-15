@@ -113,22 +113,22 @@ mod tests {
         config.site.seo.feeds = vec![
             crate::config::FeedConfig {
                 format: crate::config::FeedFormat::Rss,
-                path: "feed.xml".into(),
+                output: "feed.xml".into(),
                 features: vec![],
             },
             crate::config::FeedConfig {
                 format: crate::config::FeedFormat::Atom,
-                path: "atom.xml".into(),
+                output: "atom.xml".into(),
                 features: vec![],
             },
             crate::config::FeedConfig {
                 format: crate::config::FeedFormat::Json,
-                path: "feed.json".into(),
+                output: "feed.json".into(),
                 features: vec![],
             },
         ];
         config.site.seo.sitemap.enable = true;
-        config.site.seo.sitemap.path = "sitemap.xml".into();
+        config.site.seo.sitemap.output = "sitemap.xml".into();
 
         assert!(is_reloadable_output_asset(
             Path::new("/public/assets/app.css"),
@@ -187,17 +187,14 @@ pub(super) fn is_reloadable_output_asset(path: &Path, config: &SiteConfig) -> bo
 
 fn is_seo_output(path: &Path, config: &SiteConfig) -> bool {
     let path = crate::utils::path::normalize_path(path);
-    let output = config.paths().output_dir();
 
-    config
-        .site
-        .seo
-        .feed_outputs()
-        .iter()
-        .any(|feed| path == crate::utils::path::normalize_path(&output.join(&feed.path)))
-        || (config.site.seo.sitemap.enable
-            && path
-                == crate::utils::path::normalize_path(&output.join(&config.site.seo.sitemap.path)))
+    config.site.seo.feed_outputs().iter().any(|feed| {
+        path == crate::utils::path::normalize_path(&feed.output.output_path(config.paths()))
+    }) || (config.site.seo.sitemap.enable
+        && path
+            == crate::utils::path::normalize_path(
+                &config.site.seo.sitemap.output.output_path(config.paths()),
+            ))
 }
 
 pub(super) fn format_asset_reason(total: usize, error_count: usize) -> String {

@@ -146,7 +146,7 @@ impl EventClassifier {
                 .filter(|(p, _)| {
                     !matches!(
                         categorize_path(p, config),
-                        FileCategory::Deps | FileCategory::Asset
+                        FileCategory::Deps | FileCategory::Asset | FileCategory::AtomicCss
                     )
                 })
                 .map(|(p, _)| p.clone())
@@ -175,7 +175,10 @@ impl EventClassifier {
                 ChangeKind::Removed => {
                     if matches!(
                         categorize_path(p, config),
-                        FileCategory::Deps | FileCategory::Asset | FileCategory::Output
+                        FileCategory::Deps
+                            | FileCategory::Asset
+                            | FileCategory::AtomicCss
+                            | FileCategory::Output
                     ) {
                         return true;
                     }

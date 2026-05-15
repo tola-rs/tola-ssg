@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 
 use crate::config::SiteConfig;
 use crate::freshness::is_newer_than;
-use crate::hooks::css;
 use crate::log;
 
 use super::AssetKind;
@@ -31,7 +30,6 @@ enum AssetRouteOutcome {
 /// Process a configured asset file.
 ///
 /// Copies the asset to the output directory, respecting freshness checks
-/// Skips CSS processor input (handled centrally)
 pub fn process_asset(
     asset_path: &Path,
     config: &SiteConfig,
@@ -58,13 +56,14 @@ fn process_asset_route(
 }
 
 fn skip_asset_route(route: &AssetRoute, config: &SiteConfig, clean: bool) -> bool {
-    (!clean && route.output.exists() && !is_newer_than(&route.source, &route.output))
-        || is_css_input_route(route, config)
+    is_atomic_css_output_path(&route.output, config)
+        || (!clean && route.output.exists() && !is_newer_than(&route.source, &route.output))
 }
 
-fn is_css_input_route(route: &AssetRoute, config: &SiteConfig) -> bool {
-    route.source.extension().and_then(|e| e.to_str()) == Some("css")
-        && css::is_css_input(&route.source, config)
+fn is_atomic_css_output_path(path: &Path, config: &SiteConfig) -> bool {
+    crate::css::build::output_asset(config).is_some_and(|asset| {
+        crate::utils::path::normalize_path(path) == crate::utils::path::normalize_path(&asset.path)
+    })
 }
 
 fn write_asset_route(route: &AssetRoute, config: &SiteConfig, log_file: bool) -> Result<()> {
@@ -149,6 +148,10 @@ pub fn process_content_assets(config: &SiteConfig, clean: bool) -> Result<usize>
     let mut count = 0;
 
     for route in super::scan_content_assets(config) {
+        if is_atomic_css_output_path(&route.output, config) {
+            continue;
+        }
+
         if !clean && route.output.exists() && !is_newer_than(&route.source, &route.output) {
             continue;
         }
@@ -171,6 +174,10 @@ pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) 
     let mut count = 0;
 
     for route in assets {
+        if is_atomic_css_output_path(&route.output, config) {
+            continue;
+        }
+
         // Skip if up-to-date (use mtime comparison for assets)
         if !clean && route.output.exists() && !is_newer_than(&route.source, &route.output) {
             continue;
@@ -417,6 +424,35 @@ mod tests {
                 scanned: 1,
                 written: 0
             }
+        );
+    }
+
+    #[test]
+    fn process_global_assets_does_not_overwrite_atomic_css_output() {
+        let dir = TempDir::new().unwrap();
+        let assets_dir = dir.path().join("assets");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::create_dir_all(output_dir.join("assets")).unwrap();
+        fs::write(assets_dir.join("site.css"), "asset css").unwrap();
+        fs::write(output_dir.join("assets/site.css"), "generated css").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.assets.nested =
+            vec![crate::config::section::build::assets::NestedEntry::Simple(
+                assets_dir,
+            )];
+        config.build.output = output_dir.clone();
+        config.build.atomic_css.enable = true;
+        config.build.atomic_css.output = Some("assets/site.css".into());
+
+        let summary = process_global_assets(&config, true, false).unwrap();
+
+        assert_eq!(summary.scanned, 1);
+        assert_eq!(summary.written, 0);
+        assert_eq!(
+            fs::read_to_string(output_dir.join("assets/site.css")).unwrap(),
+            "generated css"
         );
     }
 }

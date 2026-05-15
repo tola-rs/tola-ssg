@@ -136,10 +136,6 @@ pub struct BuildArgs {
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub minify: Option<bool>,
 
-    /// Enable CSS processor (e.g., TailwindCSS)
-    #[arg(short = 'P', long = "css-processor", action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
-    pub css_processor: Option<bool>,
-
     /// Enable configured feed outputs
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub feed: Option<bool>,

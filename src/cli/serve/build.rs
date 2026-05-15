@@ -15,7 +15,7 @@ use crate::{
     compiler::page::TypstHost,
     compiler::scheduler::{CompileResult, SCHEDULER},
     config::SiteConfig,
-    core::{BuildMode, ContentKind, Priority, is_shutdown},
+    core::{ContentKind, Priority, is_shutdown},
     debug, embed, freshness, hooks, log, seo,
 };
 
@@ -34,8 +34,9 @@ struct BuildWarning {
 /// 1. Clean output directory (if --clean flag)
 /// 2. Initialize fonts and embedded assets
 /// 3. Clear caches for accurate change detection
-/// 4. Run pre hooks (CSS preprocessor etc.)
-/// 5. Process all assets (sync, no priority needed)
+/// 4. Run pre hooks
+/// 5. Generate configured Atomic CSS
+/// 6. Process all assets (sync, no priority needed)
 pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
     // Clean output directory BEFORE set_serving() to avoid race condition
     // where on-demand compilation writes files that get deleted
@@ -57,8 +58,10 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
     // Clear caches for accurate change detection (same as init_build)
     freshness::clear_cache();
 
-    // Run pre hooks (CSS preprocessor etc.) - IMPORTANT for Tailwind users
-    hooks::run_pre_hooks(config, BuildMode::DEVELOPMENT, true)?;
+    // Run pre hooks before generated assets.
+    hooks::run_pre_hooks(config)?;
+
+    crate::css::build::build(config)?;
 
     // Process all assets synchronously (no priority needed for assets)
     process_assets(config)?;
@@ -117,7 +120,7 @@ pub fn serve_build(
     // CNAME already done in init_serve_build
 
     // Run post hooks
-    hooks::run_post_hooks(config, BuildMode::DEVELOPMENT, true)?;
+    hooks::run_post_hooks(config)?;
 
     // Finalize: print warnings and persist cache
     finalize_serve_build(config, &state, &warnings)?;

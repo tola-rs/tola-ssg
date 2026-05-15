@@ -10,6 +10,7 @@ mod cli;
 mod compiler;
 mod config;
 mod core;
+mod css;
 mod embed;
 mod freshness;
 mod hooks;

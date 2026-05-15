@@ -26,6 +26,7 @@
 //! See submodules for detailed options: [`slug`], [`svg`], [`hooks`].
 
 pub mod assets;
+mod atomic;
 mod diagnostics;
 mod hooks;
 mod meta;
@@ -33,8 +34,11 @@ mod slug;
 mod svg;
 
 pub use assets::AssetsConfig;
+pub use atomic::AtomicCssConfig;
 pub use diagnostics::DiagnosticsConfig;
-pub use hooks::{CssFormat, CssProcessorConfig, HookConfig, HooksConfig, WatchMode};
+#[cfg(test)]
+pub use hooks::WatchMode;
+pub use hooks::{HookConfig, HooksConfig};
 pub use meta::MetaConfig;
 pub use slug::{SlugCase, SlugConfig, SlugMode};
 pub use svg::{SvgConfig, SvgConverter, SvgFormat};
@@ -42,7 +46,7 @@ pub use svg::{SvgConfig, SvgConverter, SvgFormat};
 use crate::config::ConfigDiagnostics;
 use macros::Config;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
@@ -88,8 +92,11 @@ pub struct BuildSectionConfig {
     /// SVG processing settings.
     pub svg: SvgConfig,
 
-    /// Build hooks (pre/post commands, tailwind).
+    /// Build hooks (pre/post commands).
     pub hooks: HooksConfig,
+
+    /// Native atomic CSS generation.
+    pub atomic_css: AtomicCssConfig,
 
     /// Metadata extraction settings.
     pub meta: MetaConfig,
@@ -117,6 +124,7 @@ impl Default for BuildSectionConfig {
             slug: SlugConfig::default(),
             svg: SvgConfig::default(),
             hooks: HooksConfig::default(),
+            atomic_css: AtomicCssConfig::default(),
             meta: MetaConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             allow_experimental: false,
@@ -142,6 +150,8 @@ impl BuildSectionConfig {
                 );
             }
         }
+        self.atomic_css.validate(diag);
+        self.validate_atomic_css_output_source_overlap(diag);
     }
 
     /// Filter deps to only existing directories.
@@ -150,10 +160,95 @@ impl BuildSectionConfig {
     pub fn filter_existing_deps(&mut self) {
         self.deps.retain(|p| p.exists());
     }
+
+    fn validate_atomic_css_output_source_overlap(&self, diag: &mut ConfigDiagnostics) {
+        if !self.atomic_css.enable {
+            return;
+        }
+        let Some(output) = &self.atomic_css.output else {
+            return;
+        };
+        let output = crate::utils::path::normalize_path(&self.output.join(output.as_path()));
+
+        if path_is_inside(&output, &self.content) {
+            diag.error(
+                AtomicCssConfig::FIELDS.output,
+                format!(
+                    "output '{}' is inside content source '{}'",
+                    output.display(),
+                    self.content.display()
+                ),
+            );
+        }
+
+        for source in &self.deps {
+            if path_is_inside(&output, source) {
+                diag.error(
+                    AtomicCssConfig::FIELDS.output,
+                    format!(
+                        "output '{}' is inside dependency source '{}'",
+                        output.display(),
+                        source.display()
+                    ),
+                );
+            }
+        }
+
+        for source in self.assets.nested_sources() {
+            if path_is_inside(&output, source) {
+                diag.error(
+                    AtomicCssConfig::FIELDS.output,
+                    format!(
+                        "output '{}' is inside configured asset source '{}'",
+                        output.display(),
+                        source.display()
+                    ),
+                );
+            }
+        }
+
+        for source in self.assets.flatten_sources() {
+            if paths_equal(&output, source) {
+                diag.error(
+                    AtomicCssConfig::FIELDS.output,
+                    format!(
+                        "output '{}' conflicts with configured flatten asset '{}'",
+                        output.display(),
+                        source.display()
+                    ),
+                );
+            }
+        }
+
+        for source in &self.atomic_css.sources {
+            if path_is_inside(&output, source) {
+                diag.error(
+                    AtomicCssConfig::FIELDS.output,
+                    format!(
+                        "output '{}' is inside Atomic CSS source '{}'",
+                        output.display(),
+                        source.display()
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn path_is_inside(path: &Path, source: &Path) -> bool {
+    let path = crate::utils::path::normalize_existing_prefix(path);
+    let source = crate::utils::path::normalize_existing_prefix(source);
+    path == source || path.starts_with(source)
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    crate::utils::path::normalize_existing_prefix(left)
+        == crate::utils::path::normalize_existing_prefix(right)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::BuildSectionConfig;
     use crate::config::test_parse_config;
     use std::path::Path;
 
@@ -172,5 +267,125 @@ flatten = ["CNAME"]
         assert_eq!(config.build.assets.nested[1].output_name(), "lib");
         assert_eq!(config.build.assets.flatten.len(), 1);
         // minify defaults to true, only test assets config here
+    }
+
+    #[test]
+    fn atomic_css_config_parses_explicit_build_settings() {
+        let config = test_parse_config(
+            r#"
+[build.atomic_css]
+enable = true
+profile = "tailwind-v4"
+output = "assets/site.css"
+sources = ["content", "components"]
+config = "atomic.css.toml"
+"#,
+        );
+
+        assert!(config.build.atomic_css.enable);
+        assert_eq!(config.build.atomic_css.profile.as_str(), "tailwind-v4");
+        assert_eq!(
+            config
+                .build
+                .atomic_css
+                .output
+                .as_ref()
+                .map(|path| path.as_path()),
+            Some(Path::new("assets/site.css"))
+        );
+        assert_eq!(
+            config.build.atomic_css.sources,
+            vec![
+                Path::new("content").to_path_buf(),
+                Path::new("components").to_path_buf()
+            ]
+        );
+        assert_eq!(
+            config.build.atomic_css.config.as_deref(),
+            Some(Path::new("atomic.css.toml"))
+        );
+    }
+
+    #[test]
+    fn atomic_css_enabled_requires_output_and_sources() {
+        let config = test_parse_config(
+            r#"
+[build.atomic_css]
+enable = true
+profile = "tailwind-v4"
+"#,
+        );
+        let mut diag = crate::config::ConfigDiagnostics::new();
+
+        config.build.validate(&mut diag);
+
+        let messages: Vec<_> = diag
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("output is required"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("sources is required"))
+        );
+    }
+
+    #[test]
+    fn atomic_css_output_requires_css_extension() {
+        let config = test_parse_config(
+            r#"
+[build.atomic_css]
+enable = true
+profile = "tailwind-v4"
+output = "index.html"
+sources = ["content"]
+"#,
+        );
+        let mut diag = crate::config::ConfigDiagnostics::new();
+
+        config.build.validate(&mut diag);
+
+        let messages: Vec<_> = diag
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains(".css extension"))
+        );
+    }
+
+    #[test]
+    fn atomic_css_output_must_not_be_inside_asset_source() {
+        let mut config = BuildSectionConfig::default();
+        config.output = Path::new("/site").to_path_buf();
+        config.assets.nested = vec![crate::config::section::build::assets::NestedEntry::Simple(
+            "/site/assets".into(),
+        )];
+        config.atomic_css.enable = true;
+        config.atomic_css.output = Some("assets/site.css".into());
+        config.atomic_css.sources = vec![Path::new("/site/content").to_path_buf()];
+        let mut diag = crate::config::ConfigDiagnostics::new();
+
+        config.validate(&mut diag);
+
+        let messages: Vec<_> = diag
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("inside configured asset source"))
+        );
     }
 }

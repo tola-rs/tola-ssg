@@ -7,7 +7,6 @@ use std::{fs, path::Path};
 
 use crate::config::section::{
     AssetsConfig, AssetsValidateConfig, PagesValidateConfig, ServeConfig,
-    build::CssProcessorConfig,
     site::{FeedConfig, HeaderConfig, SeoConfig, SiteInfoConfig},
 };
 use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL, TolaTypstVars};
@@ -45,10 +44,6 @@ pub fn generate_config_template() -> String {
 
     // Static assets section
     out.push_str(&AssetsConfig::template_with_header());
-    out.push('\n');
-
-    // CSS hook section
-    out.push_str(&CssProcessorConfig::template_with_header());
     out.push('\n');
 
     // Development server section
