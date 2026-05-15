@@ -57,6 +57,7 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
 
     // Clear caches for accurate change detection (same as init_build)
     freshness::clear_cache();
+    asset::version::clear();
 
     // Run pre hooks before generated assets.
     hooks::run_pre_hooks(config)?;
@@ -71,16 +72,8 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
 
 /// Process all assets for serve mode
 fn process_assets(config: &SiteConfig) -> Result<()> {
-    let clean = config.build.clean;
-
-    asset::process_global_assets(config, clean, false)?;
-
-    // Flatten assets and CNAME
-    asset::process_flatten_assets(config, clean, false)?;
+    asset::process_configured_assets(config, false, false)?;
     asset::process_cname(config)?;
-
-    // Process content assets (non-page files in content directory)
-    asset::process_content_assets(config, clean)?;
 
     Ok(())
 }
@@ -116,7 +109,7 @@ pub fn serve_build(
     // This ensures they have complete data after all pages are compiled
     warnings.extend(recompile_virtual_users(config, &typst_host, &state));
 
-    // Post-processing (flatten assets already done in init_serve_build)
+    // Post-processing (configured assets already done in init_serve_build)
     // CNAME already done in init_serve_build
 
     // Run post hooks

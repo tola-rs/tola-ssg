@@ -3,7 +3,7 @@
 use typst_batch::prelude::*;
 
 use crate::address::{SiteIndex, conflict};
-use crate::asset::{scan_content_assets, scan_flatten_assets, scan_global_assets};
+use crate::asset::{scan_content_assets, scan_flatten_assets, scan_nested_assets};
 use crate::compiler::dependency::{flush_thread_local_deps, record_dependencies_local};
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
@@ -794,12 +794,12 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &
             space.register_headings(&page.route.permalink, heading_ids);
         }
 
-        // Register global assets (nested directories)
-        for asset in scan_global_assets(config) {
+        // Register directory assets
+        for asset in scan_nested_assets(config) {
             space.register_asset(asset);
         }
 
-        // Register flatten assets (individual files at output root)
+        // Register file assets
         for asset in scan_flatten_assets(config) {
             space.register_asset(asset);
         }

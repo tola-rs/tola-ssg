@@ -14,14 +14,25 @@ pub(super) fn process_assets(paths: &[PathBuf], config: &SiteConfig) -> Vec<(Pat
         .collect()
 }
 
+pub(super) fn process_configured_assets(config: &SiteConfig) -> Vec<(PathBuf, String)> {
+    match crate::asset::process_configured_assets(config, false, false) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![(config.get_root().join("build.assets"), e.to_string())],
+    }
+}
+
 pub(super) fn cleanup_removed_assets(paths: &[PathBuf], config: &SiteConfig) -> usize {
     paths
         .iter()
         .filter(|path| !path.exists())
         .filter(|path| {
             let version_removed = crate::asset::version::remove_version(path);
-            let output_removed = output_path_for_asset(path, config).is_some_and(|output| {
-                let removed = remove_output_file(&output);
+            let output = output_path_for_asset(path, config);
+            let output_version_removed = output
+                .as_deref()
+                .is_some_and(crate::asset::version::remove_version);
+            let output_removed = output.as_deref().is_some_and(|output| {
+                let removed = remove_output_file(output);
                 if removed {
                     crate::debug!("assets"; "removed output for {}", path.display());
                 }
@@ -32,12 +43,12 @@ pub(super) fn cleanup_removed_assets(paths: &[PathBuf], config: &SiteConfig) -> 
                 crate::debug!("assets"; "removed version for {}", path.display());
             }
 
-            version_removed || output_removed
+            version_removed || output_version_removed || output_removed
         })
         .count()
 }
 
-fn output_path_for_asset(path: &Path, config: &SiteConfig) -> Option<PathBuf> {
+pub(super) fn output_path_for_asset(path: &Path, config: &SiteConfig) -> Option<PathBuf> {
     crate::asset::route_from_source(path.to_path_buf(), config)
         .ok()
         .map(|route| route.output)
@@ -105,96 +116,12 @@ mod tests {
         assert!(!ASSET_VERSIONS.contains_key(&crate::utils::path::normalize_path(&source)));
         ASSET_VERSIONS.clear();
     }
-
-    #[test]
-    fn reloadable_output_asset_excludes_html_and_seo_outputs() {
-        let mut config = SiteConfig::default();
-        config.build.output = PathBuf::from("/public");
-        config.site.seo.feeds = vec![
-            crate::config::FeedConfig {
-                format: crate::config::FeedFormat::Rss,
-                url: "/feed.xml".into(),
-                features: vec![],
-            },
-            crate::config::FeedConfig {
-                format: crate::config::FeedFormat::Atom,
-                url: "/atom.xml".into(),
-                features: vec![],
-            },
-            crate::config::FeedConfig {
-                format: crate::config::FeedFormat::Json,
-                url: "/feed.json".into(),
-                features: vec![],
-            },
-        ];
-        config.site.seo.sitemap.enable = true;
-        config.site.seo.sitemap.url = "/sitemap.xml".into();
-
-        assert!(is_reloadable_output_asset(
-            Path::new("/public/assets/app.css"),
-            &config
-        ));
-        assert!(is_reloadable_output_asset(
-            Path::new("/public/assets/app.js"),
-            &config
-        ));
-        assert!(!is_reloadable_output_asset(
-            Path::new("/public/page/index.html"),
-            &config
-        ));
-        assert!(!is_reloadable_output_asset(
-            Path::new("/public/page/index.htm"),
-            &config
-        ));
-        assert!(!is_reloadable_output_asset(
-            Path::new("/public/feed.xml"),
-            &config
-        ));
-        assert!(!is_reloadable_output_asset(
-            Path::new("/public/atom.xml"),
-            &config
-        ));
-        assert!(!is_reloadable_output_asset(
-            Path::new("/public/feed.json"),
-            &config
-        ));
-        assert!(!is_reloadable_output_asset(
-            Path::new("/public/sitemap.xml"),
-            &config
-        ));
-    }
 }
 
 pub(super) fn log_asset_errors(errors: &[(PathBuf, String)]) {
     for (path, error) in errors {
         crate::log!("error"; "asset {}: {}", path.display(), error);
     }
-}
-
-pub(super) fn is_reloadable_output_asset(path: &Path, config: &SiteConfig) -> bool {
-    if matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref(),
-        Some("html" | "htm")
-    ) {
-        return false;
-    }
-
-    !is_seo_output(path, config)
-}
-
-fn is_seo_output(path: &Path, config: &SiteConfig) -> bool {
-    let path = crate::utils::path::normalize_path(path);
-
-    config.site.seo.feed_outputs().iter().any(|feed| {
-        path == crate::utils::path::normalize_path(&feed.url.output_path(config.paths()))
-    }) || (config.site.seo.sitemap.enable
-        && path
-            == crate::utils::path::normalize_path(
-                &config.site.seo.sitemap.url.output_path(config.paths()),
-            ))
 }
 
 pub(super) fn format_asset_reason(total: usize, error_count: usize) -> String {

@@ -7,6 +7,7 @@ use crate::compiler::page::{PageStateTicket, TypstHost};
 use crate::compiler::scheduler::SCHEDULER;
 use crate::config::SiteConfig;
 use crate::reload::compile::{CompileOutcome, compile_page, compile_page_with_ticket};
+use crate::reload::output;
 
 use super::{BackgroundTask, BatchResult};
 
@@ -18,16 +19,21 @@ pub(super) fn spawn_batch(
     state: Arc<SiteIndex>,
     pages_hash: u64,
     watched_post_paths: Option<Vec<PathBuf>>,
+    initial_outcomes: Vec<CompileOutcome>,
+    output_update: output::Update,
     ticket: PageStateTicket,
 ) -> BackgroundTask {
     tokio::spawn(async move {
-        let outcomes =
-            compile_batch_with_ticket(paths, Arc::clone(&config), typst_host, state, ticket).await;
+        let mut outcomes = initial_outcomes;
+        outcomes.extend(
+            compile_batch_with_ticket(paths, Arc::clone(&config), typst_host, state, ticket).await,
+        );
         BatchResult {
             config,
             outcomes,
             pages_hash,
             watched_post_paths,
+            output_update,
         }
     })
 }
@@ -97,6 +103,7 @@ pub(super) async fn wait_task(task: &mut Option<BackgroundTask>) -> BatchResult 
             outcomes: vec![],
             pages_hash: 0,
             watched_post_paths: None,
+            output_update: output::Update::default(),
         }),
         None => std::future::pending().await,
     }

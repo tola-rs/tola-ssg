@@ -1,95 +1,28 @@
 //! `[build.assets]` section configuration.
 //!
-//! Handles static assets configuration with two modes:
-//! - **nested**: Directories copied with structure preserved
-//! - **flatten**: Individual files copied to output root
+//! Assets are explicit source lists:
+//! - `nested`: copy every file under a source directory to a public URL prefix.
+//! - `flatten`: copy one source file to one public URL at the output root.
 //!
-//! # Example
-//!
-//! ```toml
-//! [build.assets]
-//! nested = [
-//!     "assets",                              # assets/ -> output/assets/
-//!     { dir = "vendor/static", as = "lib" }, # vendor/static/ -> output/lib/
-//! ]
-//! flatten = [
-//!     "assets/CNAME",                        # -> output/CNAME
-//!     { file = "icons/fav.ico", as = "favicon.ico" },
-//! ]
-//! colocated = false
-//! ```
+//! Path entries are the normal form. Route objects exist only when the default
+//! basename-derived URL is not the desired public URL.
 
 use rustc_hash::FxHashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use macros::Config;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigDiagnostics, FieldPath};
-
-// ============================================================================
-// Output Name Tracker (Validation Helper)
-// ============================================================================
-
-/// Tracks output names to detect conflicts during validation
-struct OutputNameTracker<'a> {
-    seen: FxHashMap<&'a str, (&'static str, &'a Path)>,
-}
-
-impl<'a> OutputNameTracker<'a> {
-    fn new() -> Self {
-        Self {
-            seen: FxHashMap::default(),
-        }
-    }
-
-    /// Check for conflict and insert. Reports error if conflict found.
-    fn check_and_insert(
-        &mut self,
-        name: &'a str,
-        kind: &'static str,
-        path: &'a Path,
-        idx: usize,
-        field: FieldPath,
-        diag: &mut ConfigDiagnostics,
-    ) {
-        if let Some((prev_kind, prev_path)) = self.seen.get(name) {
-            diag.error(
-                field,
-                format!(
-                    "[{idx}] output conflict: {kind} '{}' and {prev_kind} '{}' both output to '/{name}'",
-                    path.display(),
-                    prev_path.display(),
-                ),
-            );
-        } else {
-            self.seen.insert(name, (kind, path));
-        }
-    }
-}
-
-// ============================================================================
-// Main Config
-// ============================================================================
+use crate::config::{ConfigDiagnostics, FieldPath, PublicUrl};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build.assets")]
 pub struct AssetsConfig {
-    /// Nested directories (preserve structure).
-    /// Each directory is copied to `output/{basename}/`.
-    /// Files inside can be referenced as `/{basename}/path/to/file`.
-    /// Examples:
-    /// - `"assets"` -> `/assets/xxx`
-    /// - `"assets/styles"` -> `/styles/xxx`
-    /// - `{ dir = "vendor", as = "lib" }` -> `/lib/xxx`
+    /// Nested directory assets.
     pub nested: Vec<NestedEntry>,
 
-    /// Flatten files (copy to output root).
-    /// Each file is copied directly to `output/{basename}`.
-    /// Examples:
-    /// - `"assets/CNAME"` -> `/CNAME`
-    /// - `{ file = "icons/fav.ico", as = "favicon.ico" }` -> `/favicon.ico`
+    /// Flattened file assets.
     pub flatten: Vec<FlattenEntry>,
 
     /// Content-local assets.
@@ -101,31 +34,33 @@ pub struct AssetsConfig {
 impl Default for AssetsConfig {
     fn default() -> Self {
         Self {
-            nested: vec![NestedEntry::Simple("assets".into())],
-            flatten: vec![],
+            nested: vec![NestedEntry::Path("assets".into())],
+            flatten: Vec::new(),
             colocated: false,
         }
     }
 }
 
 impl AssetsConfig {
-    /// Get all nested source directories.
     pub fn nested_sources(&self) -> impl Iterator<Item = &Path> {
-        self.nested.iter().map(|e| e.source())
+        self.nested.iter().map(NestedEntry::source)
     }
 
-    /// Get all flatten source files.
     pub fn flatten_sources(&self) -> impl Iterator<Item = &Path> {
-        self.flatten.iter().map(|e| e.source())
+        self.flatten.iter().map(FlattenEntry::source)
     }
 
-    /// Check if a flatten entry would output as "CNAME".
+    pub fn sources(&self) -> impl Iterator<Item = &Path> {
+        self.nested_sources().chain(self.flatten_sources())
+    }
+
     #[allow(dead_code)]
     pub fn has_cname_in_flatten(&self) -> bool {
-        self.flatten.iter().any(|e| e.output_name() == "CNAME")
+        self.flatten
+            .iter()
+            .any(|entry| entry.target().as_str() == "/CNAME")
     }
 
-    /// Normalize all paths relative to root directory.
     pub fn normalize(&mut self, root: &Path) {
         for entry in &mut self.nested {
             entry.normalize(root);
@@ -135,521 +70,646 @@ impl AssetsConfig {
         }
     }
 
-    // ========================================================================
-    // Validation (Pre-normalization)
-    // ========================================================================
-
-    /// Validate path safety before normalization.
-    ///
-    /// MUST be called before `normalize()` - after normalization all paths
-    /// become absolute (joined with root), making this check impossible.
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         let nested_count = self.nested.len();
+        for (i, entry) in self.nested.iter().enumerate() {
+            validate_source_path(entry.source(), i, nested_count, Self::FIELDS.nested, diag);
+            validate_target(entry.target(), i, nested_count, Self::FIELDS.nested, diag);
+        }
+
         let flatten_count = self.flatten.len();
-
-        self.nested.iter().enumerate().for_each(|(i, e)| {
-            Self::validate_path_safety(e.source(), i, nested_count, Self::FIELDS.nested, diag)
-        });
-
-        self.flatten.iter().enumerate().for_each(|(i, e)| {
-            Self::validate_path_safety(e.source(), i, flatten_count, Self::FIELDS.flatten, diag)
-        });
+        for (i, entry) in self.flatten.iter().enumerate() {
+            validate_source_path(entry.source(), i, flatten_count, Self::FIELDS.flatten, diag);
+            validate_target(entry.target(), i, flatten_count, Self::FIELDS.flatten, diag);
+        }
     }
 
-    /// Check a single path for unsafe components (`.."` or absolute).
-    fn validate_path_safety(
-        path: &Path,
-        idx: usize,
-        total: usize,
-        field: FieldPath,
-        diag: &mut ConfigDiagnostics,
-    ) {
-        use std::path::Component;
+    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
+        self.validate_sources(diag);
+        self.validate_output_ownership(diag);
+    }
 
-        for comp in path.components() {
-            let msg = match comp {
-                Component::ParentDir => Some("parent directory '..' not allowed"),
-                Component::Prefix(_) | Component::RootDir => Some("absolute paths not allowed"),
-                _ => None,
-            };
-            if let Some(reason) = msg {
-                // Only show index if there are multiple entries
-                let prefix = if total > 1 {
-                    format!("[{idx}] ")
-                } else {
-                    String::new()
-                };
+    fn validate_sources(&self, diag: &mut ConfigDiagnostics) {
+        for (idx, entry) in self.nested.iter().enumerate() {
+            let source = entry.source();
+            if source.exists() && !source.is_dir() {
                 diag.error(
-                    field,
-                    format!("{prefix}path '{}': {reason}", path.display()),
+                    Self::FIELDS.nested,
+                    format!("[{idx}] '{}' must be a directory", source.display()),
                 );
             }
         }
-    }
 
-    // ========================================================================
-    // Validation (Post-normalization)
-    // ========================================================================
-
-    /// Validate assets configuration after paths are normalized.
-    ///
-    /// Checks:
-    /// - Output name conflicts between entries
-    /// - Type correctness (directories vs files)
-    pub fn validate(&self, diag: &mut ConfigDiagnostics) {
-        let mut outputs = OutputNameTracker::new();
-
-        self.validate_nested_overlaps(diag);
-        self.validate_flatten_sources(diag);
-
-        for (i, entry) in self.nested.iter().enumerate() {
-            Self::validate_nested_entry(entry, i, &mut outputs, diag);
-        }
-
-        for (i, entry) in self.flatten.iter().enumerate() {
-            Self::validate_flatten_entry(entry, i, &mut outputs, diag);
-        }
-    }
-
-    fn validate_nested_overlaps(&self, diag: &mut ConfigDiagnostics) {
-        for (i, current) in self.nested.iter().enumerate() {
-            for (j, other) in self.nested.iter().enumerate().skip(i + 1) {
-                let current_path = current.source();
-                let other_path = other.source();
-                if current_path == other_path {
-                    diag.error_with_hint(
-                        Self::FIELDS.nested,
-                        format!(
-                            "nested[{j}] '{}' duplicates nested[{i}] '{}'; nested source directories must be unique and disjoint",
-                            other_path.display(),
-                            current_path.display()
-                        ),
-                        "Choose either one nested entry for that directory, or split assets into explicit non-overlapping child directories.",
-                    );
-                } else if current_path.starts_with(other_path) {
-                    Self::report_nested_overlap(j, other_path, i, current_path, diag);
-                } else if other_path.starts_with(current_path) {
-                    Self::report_nested_overlap(i, current_path, j, other_path, diag);
-                }
+        for (idx, entry) in self.flatten.iter().enumerate() {
+            let source = entry.source();
+            if source.exists() && !source.is_file() {
+                diag.error(
+                    Self::FIELDS.flatten,
+                    format!("[{idx}] '{}' must be a file", source.display()),
+                );
             }
         }
-    }
 
-    fn report_nested_overlap(
-        parent_idx: usize,
-        parent: &Path,
-        child_idx: usize,
-        child: &Path,
-        diag: &mut ConfigDiagnostics,
-    ) {
-        diag.error_with_hint(
-            Self::FIELDS.nested,
-            format!(
-                "nested[{child_idx}] '{}' is inside nested[{parent_idx}] '{}'; nested source directories must be disjoint",
-                child.display(),
-                parent.display(),
-            ),
-            "Choose either the parent directory, or list explicit non-overlapping child directories such as 'assets/icons', 'assets/images', and 'assets/fonts'. Directory shadowing is not supported.",
-        );
-    }
+        for (i, current) in self.nested.iter().enumerate() {
+            for (j, other) in self.nested.iter().enumerate().skip(i + 1) {
+                report_source_overlap(
+                    current.source(),
+                    Self::FIELDS.nested,
+                    i,
+                    other.source(),
+                    Self::FIELDS.nested,
+                    j,
+                    diag,
+                );
+            }
+        }
 
-    fn validate_flatten_sources(&self, diag: &mut ConfigDiagnostics) {
+        for (nested_idx, nested) in self.nested.iter().enumerate() {
+            for (flatten_idx, flatten) in self.flatten.iter().enumerate() {
+                report_source_overlap(
+                    nested.source(),
+                    Self::FIELDS.nested,
+                    nested_idx,
+                    flatten.source(),
+                    Self::FIELDS.flatten,
+                    flatten_idx,
+                    diag,
+                );
+            }
+        }
+
         for (i, current) in self.flatten.iter().enumerate() {
             for (j, other) in self.flatten.iter().enumerate().skip(i + 1) {
-                if current.source() == other.source() {
+                if paths_equal(current.source(), other.source()) {
                     diag.error_with_hint(
                         Self::FIELDS.flatten,
                         format!(
-                            "flatten[{j}] '{}' uses the same source file as flatten[{i}] '{}'",
+                            "[{j}] '{}' uses the same source file as [{i}] '{}'",
                             other.source().display(),
                             current.source().display()
                         ),
-                        "Each flatten source file may be configured once. Use one output alias for the file, or create a separate source file if two outputs are required.",
+                        "Each source file may be configured once.",
                     );
                 }
             }
         }
     }
 
-    fn validate_nested_entry<'a>(
-        entry: &'a NestedEntry,
-        idx: usize,
-        outputs: &mut OutputNameTracker<'a>,
-        diag: &mut ConfigDiagnostics,
-    ) {
-        let path = entry.source();
+    fn validate_output_ownership(&self, diag: &mut ConfigDiagnostics) {
+        let mut exact_files: FxHashMap<String, (FieldPath, usize, &'static str)> =
+            FxHashMap::default();
 
-        // Must be a directory if it exists
-        if path.exists() && !path.is_dir() {
-            diag.error(
-                Self::FIELDS.nested,
-                format!("[{idx}] '{}' must be a directory", path.display()),
-            );
+        for (idx, nested) in self.nested.iter().enumerate() {
+            let target = nested.target();
+            validate_reserved_target(&target, Self::FIELDS.nested, idx, diag);
+            for (other_idx, other) in self.nested.iter().enumerate().skip(idx + 1) {
+                let other_target = other.target();
+                report_url_prefix_overlap(
+                    &target,
+                    Self::FIELDS.nested,
+                    idx,
+                    &other_target,
+                    Self::FIELDS.nested,
+                    other_idx,
+                    diag,
+                );
+            }
         }
 
-        Self::validate_output_alias(entry.output_name(), idx, Self::FIELDS.nested, diag);
-
-        if is_reserved_output(entry.output_name(), crate::asset::SYSTEM_ASSET_DIR) {
-            diag.error(
-                Self::FIELDS.nested,
-                format!(
-                    "[{idx}] output name '{}' is reserved for generated assets",
-                    entry.output_name()
-                ),
-            );
+        for (idx, flatten) in self.flatten.iter().enumerate() {
+            let target = flatten.target();
+            validate_reserved_target(&target, Self::FIELDS.flatten, idx, diag);
+            if let Some((prev_field, prev_idx, prev_kind)) = exact_files.insert(
+                target.as_str().to_string(),
+                (Self::FIELDS.flatten, idx, "flatten"),
+            ) {
+                diag.error(
+                    Self::FIELDS.flatten,
+                    format!(
+                        "[{idx}] URL '{}' conflicts with {prev_kind}[{prev_idx}]",
+                        target
+                    ),
+                );
+                if prev_field != Self::FIELDS.flatten {
+                    diag.error(prev_field, "conflicting asset URL declared here");
+                }
+            }
         }
 
-        outputs.check_and_insert(
-            entry.output_name(),
-            "nested",
-            path,
-            idx,
-            Self::FIELDS.nested,
-            diag,
-        );
-    }
-
-    fn validate_flatten_entry<'a>(
-        entry: &'a FlattenEntry,
-        idx: usize,
-        outputs: &mut OutputNameTracker<'a>,
-        diag: &mut ConfigDiagnostics,
-    ) {
-        let path = entry.source();
-
-        // Must be a file if it exists
-        if path.exists() && !path.is_file() {
-            diag.error(
-                Self::FIELDS.flatten,
-                format!("[{idx}] '{}' must be a file", path.display()),
-            );
-        }
-
-        Self::validate_output_alias(entry.output_name(), idx, Self::FIELDS.flatten, diag);
-
-        if is_reserved_output(entry.output_name(), crate::asset::SYSTEM_ASSET_DIR) {
-            diag.error(
-                Self::FIELDS.flatten,
-                format!(
-                    "[{idx}] output name '{}' is reserved for generated assets",
-                    entry.output_name()
-                ),
-            );
-        }
-
-        outputs.check_and_insert(
-            entry.output_name(),
-            "flatten",
-            path,
-            idx,
-            Self::FIELDS.flatten,
-            diag,
-        );
-    }
-
-    fn validate_output_alias(
-        name: &str,
-        idx: usize,
-        field: FieldPath,
-        diag: &mut ConfigDiagnostics,
-    ) {
-        let reason = if name.is_empty() {
-            Some("must not be empty")
-        } else if name == "." || name == ".." {
-            Some("must not be '.' or '..'")
-        } else if name.contains('/') || name.contains('\\') {
-            Some("must be a single path segment")
-        } else {
-            None
-        };
-
-        if let Some(reason) = reason {
-            diag.error(field, format!("[{idx}] output alias '{}': {reason}", name));
+        for (nested_idx, nested) in self.nested.iter().enumerate() {
+            let nested_target = nested.target();
+            for (flatten_idx, flatten) in self.flatten.iter().enumerate() {
+                let flatten_target = flatten.target();
+                if flatten_target.as_str() == nested_target.as_str() {
+                    diag.error_with_hint(
+                        Self::FIELDS.flatten,
+                        format!(
+                            "[{flatten_idx}] URL '{}' duplicates nested[{nested_idx}] URL '{}'",
+                            flatten_target, nested_target
+                        ),
+                        "Choose either the directory owner, or a different flattened output name.",
+                    );
+                } else if url_is_under_prefix(flatten_target.as_str(), nested_target.as_str()) {
+                    diag.error_with_hint(
+                        Self::FIELDS.flatten,
+                        format!(
+                            "[{flatten_idx}] URL '{}' is inside nested[{nested_idx}] URL '{}'",
+                            flatten_target,
+                            nested_target
+                        ),
+                        "Choose either the directory owner, or split assets into explicit non-overlapping routes.",
+                    );
+                }
+            }
         }
     }
 }
 
-fn is_reserved_output(name: &str, reserved: &str) -> bool {
-    name == reserved
-        || name
-            .strip_prefix(reserved)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
-
-// ============================================================================
-// Nested Entry
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum NestedEntry {
-    /// Simple path string.
-    Simple(PathBuf),
-    /// Full format with optional rename.
-    Full {
-        /// Source directory path (relative to site root).
+    Path(PathBuf),
+    Route {
         dir: PathBuf,
-        /// Output directory name (defaults to dir's basename).
         #[serde(rename = "as")]
-        output_as: Option<String>,
+        output_as: Option<PublicUrl>,
     },
 }
 
 impl NestedEntry {
-    /// Get source directory path.
     pub fn source(&self) -> &Path {
         match self {
-            Self::Simple(p) => p,
-            Self::Full { dir, .. } => dir,
+            Self::Path(path) => path,
+            Self::Route { dir, .. } => dir,
         }
     }
 
-    /// Get output directory name.
-    pub fn output_name(&self) -> &str {
+    pub fn target(&self) -> PublicUrl {
         match self {
-            Self::Simple(p) => p.file_name().and_then(|n| n.to_str()).unwrap_or("assets"),
-            Self::Full { dir, output_as } => output_as
-                .as_deref()
-                .unwrap_or_else(|| dir.file_name().and_then(|n| n.to_str()).unwrap_or("assets")),
+            Self::Path(path) => default_target(path, "assets"),
+            Self::Route { dir, output_as } => output_as
+                .clone()
+                .unwrap_or_else(|| default_target(dir, "assets")),
         }
     }
 
-    /// Create a simple entry.
     #[cfg(test)]
-    pub fn simple(path: impl Into<PathBuf>) -> Self {
-        Self::Simple(path.into())
+    pub fn new(dir: impl Into<PathBuf>, output_as: impl Into<String>) -> Self {
+        Self::with_as(dir, output_as)
     }
 
-    /// Create a full entry with rename.
     #[cfg(test)]
     pub fn with_as(dir: impl Into<PathBuf>, output_as: impl Into<String>) -> Self {
-        Self::Full {
+        Self::Route {
             dir: dir.into(),
-            output_as: Some(output_as.into()),
+            output_as: Some(output_as.into().into()),
         }
     }
 
-    /// Normalize source path relative to root directory.
-    pub fn normalize(&mut self, root: &Path) {
+    fn normalize(&mut self, root: &Path) {
         match self {
-            Self::Simple(p) => {
-                *p = crate::utils::path::normalize_path(&root.join(&*p));
+            Self::Path(path) => {
+                let output_as = Some(default_target(path, "assets"));
+                let dir = crate::utils::path::normalize_path(&root.join(&*path));
+                *self = Self::Route { dir, output_as };
             }
-            Self::Full { dir, .. } => {
+            Self::Route { dir, output_as } => {
+                if output_as.is_none() {
+                    *output_as = Some(default_target(dir, "assets"));
+                }
                 *dir = crate::utils::path::normalize_path(&root.join(&*dir));
             }
         }
     }
 }
 
-// ============================================================================
-// Flatten Entry
-// ============================================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum FlattenEntry {
-    /// Simple path string.
-    Simple(PathBuf),
-    /// Full format with optional rename.
-    Full {
-        /// Source file path (relative to site root).
+    Path(PathBuf),
+    Route {
         file: PathBuf,
-        /// Output file name (defaults to file's basename).
         #[serde(rename = "as")]
-        output_as: Option<String>,
+        output_as: Option<PublicUrl>,
     },
 }
 
 impl FlattenEntry {
-    /// Get source file path.
     pub fn source(&self) -> &Path {
         match self {
-            Self::Simple(p) => p,
-            Self::Full { file, .. } => file,
+            Self::Path(path) => path,
+            Self::Route { file, .. } => file,
         }
     }
 
-    /// Get output file name.
-    pub fn output_name(&self) -> &str {
+    pub fn target(&self) -> PublicUrl {
         match self {
-            Self::Simple(p) => p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
-            Self::Full { file, output_as } => output_as.as_deref().unwrap_or_else(|| {
-                file.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unknown")
-            }),
+            Self::Path(path) => default_target(path, "asset"),
+            Self::Route { file, output_as } => output_as
+                .clone()
+                .unwrap_or_else(|| default_target(file, "asset")),
         }
     }
 
-    /// Create a simple entry.
     #[cfg(test)]
-    pub fn simple(path: impl Into<PathBuf>) -> Self {
-        Self::Simple(path.into())
+    pub fn new(file: impl Into<PathBuf>, output_as: impl Into<String>) -> Self {
+        Self::with_as(file, output_as)
     }
 
-    /// Create a full entry with rename.
     #[cfg(test)]
     pub fn with_as(file: impl Into<PathBuf>, output_as: impl Into<String>) -> Self {
-        Self::Full {
+        Self::Route {
             file: file.into(),
-            output_as: Some(output_as.into()),
+            output_as: Some(output_as.into().into()),
         }
     }
 
-    /// Normalize source path relative to root directory.
-    pub fn normalize(&mut self, root: &Path) {
+    fn normalize(&mut self, root: &Path) {
         match self {
-            Self::Simple(p) => {
-                *p = crate::utils::path::normalize_path(&root.join(&*p));
+            Self::Path(path) => {
+                let output_as = Some(default_target(path, "asset"));
+                let file = crate::utils::path::normalize_path(&root.join(&*path));
+                *self = Self::Route { file, output_as };
             }
-            Self::Full { file, .. } => {
+            Self::Route { file, output_as } => {
+                if output_as.is_none() {
+                    *output_as = Some(default_target(file, "asset"));
+                }
                 *file = crate::utils::path::normalize_path(&root.join(&*file));
             }
         }
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+fn validate_source_path(
+    path: &Path,
+    idx: usize,
+    total: usize,
+    field: FieldPath,
+    diag: &mut ConfigDiagnostics,
+) {
+    for comp in path.components() {
+        let reason = match comp {
+            Component::ParentDir => Some("parent directory '..' not allowed"),
+            Component::Prefix(_) | Component::RootDir => Some("absolute paths not allowed"),
+            _ => None,
+        };
+        if let Some(reason) = reason {
+            let prefix = if total > 1 {
+                format!("[{idx}] ")
+            } else {
+                String::new()
+            };
+            diag.error(
+                field,
+                format!("{prefix}path '{}': {reason}", path.display()),
+            );
+        }
+    }
+}
+
+fn default_target(source: &Path, fallback: &str) -> PublicUrl {
+    let name = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(fallback);
+    PublicUrl::new(format!("/{name}"))
+}
+
+fn validate_target(
+    target: PublicUrl,
+    idx: usize,
+    total: usize,
+    field: FieldPath,
+    diag: &mut ConfigDiagnostics,
+) {
+    target.validate_indexed(field, idx, total, diag);
+
+    let label = (total > 1).then(|| format!("[{idx}] ")).unwrap_or_default();
+    let logical = target.logical_path();
+    if logical.contains('/') {
+        diag.error(
+            field,
+            format!(
+                "{label}URL '{}' must be a root-level asset name",
+                target.as_str()
+            ),
+        );
+    }
+}
+
+fn validate_reserved_target(
+    target: &PublicUrl,
+    field: FieldPath,
+    idx: usize,
+    diag: &mut ConfigDiagnostics,
+) {
+    let logical = target.as_str().trim_start_matches('/');
+    if logical == crate::asset::SYSTEM_ASSET_DIR
+        || logical
+            .strip_prefix(crate::asset::SYSTEM_ASSET_DIR)
+            .is_some_and(|rest| rest.starts_with('/'))
+    {
+        diag.error(
+            field,
+            format!(
+                "[{idx}] URL '{}' is reserved for generated assets",
+                target.as_str()
+            ),
+        );
+    }
+}
+
+fn report_source_overlap(
+    left: &Path,
+    left_field: FieldPath,
+    left_idx: usize,
+    right: &Path,
+    right_field: FieldPath,
+    right_idx: usize,
+    diag: &mut ConfigDiagnostics,
+) {
+    if paths_equal(left, right) {
+        diag.error_with_hint(
+            right_field,
+            format!(
+                "[{right_idx}] source '{}' duplicates [{left_idx}] '{}'",
+                right.display(),
+                left.display()
+            ),
+            "Each physical asset source may be owned by one route.",
+        );
+    } else if path_is_inside(left, right) {
+        report_contained_source(
+            right,
+            right_field,
+            right_idx,
+            left,
+            left_field,
+            left_idx,
+            diag,
+        );
+    } else if path_is_inside(right, left) {
+        report_contained_source(
+            left,
+            left_field,
+            left_idx,
+            right,
+            right_field,
+            right_idx,
+            diag,
+        );
+    }
+}
+
+fn report_contained_source(
+    parent: &Path,
+    parent_field: FieldPath,
+    parent_idx: usize,
+    child: &Path,
+    child_field: FieldPath,
+    child_idx: usize,
+    diag: &mut ConfigDiagnostics,
+) {
+    diag.error_with_hint(
+        child_field,
+        format!(
+            "[{child_idx}] source '{}' is inside [{parent_idx}] '{}'",
+            child.display(),
+            parent.display()
+        ),
+        "Choose either the parent source, or list explicit non-overlapping child sources.",
+    );
+    if parent_field != child_field {
+        diag.hint(
+            parent_field,
+            format!("overlapping asset source starts at '{}'", parent.display()),
+        );
+    }
+}
+
+fn report_url_prefix_overlap(
+    left: &PublicUrl,
+    left_field: FieldPath,
+    left_idx: usize,
+    right: &PublicUrl,
+    right_field: FieldPath,
+    right_idx: usize,
+    diag: &mut ConfigDiagnostics,
+) {
+    if left.as_str() == right.as_str() {
+        diag.error(
+            right_field,
+            format!(
+                "[{right_idx}] URL '{}' duplicates [{left_idx}] '{}'",
+                right, left
+            ),
+        );
+    } else if url_is_under_prefix(left.as_str(), right.as_str()) {
+        report_contained_url(
+            right,
+            right_field,
+            right_idx,
+            left,
+            left_field,
+            left_idx,
+            diag,
+        );
+    } else if url_is_under_prefix(right.as_str(), left.as_str()) {
+        report_contained_url(
+            left,
+            left_field,
+            left_idx,
+            right,
+            right_field,
+            right_idx,
+            diag,
+        );
+    }
+}
+
+fn report_contained_url(
+    parent: &PublicUrl,
+    _parent_field: FieldPath,
+    parent_idx: usize,
+    child: &PublicUrl,
+    child_field: FieldPath,
+    child_idx: usize,
+    diag: &mut ConfigDiagnostics,
+) {
+    diag.error_with_hint(
+        child_field,
+        format!(
+            "[{child_idx}] URL '{}' is inside [{parent_idx}] '{}'",
+            child, parent
+        ),
+        "Public URL ownership must be explicit and non-overlapping.",
+    );
+}
+
+fn path_is_inside(path: &Path, parent: &Path) -> bool {
+    let path = crate::utils::path::normalize_existing_prefix(path);
+    let parent = crate::utils::path::normalize_existing_prefix(parent);
+    path != parent && path.starts_with(parent)
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    crate::utils::path::normalize_existing_prefix(left)
+        == crate::utils::path::normalize_existing_prefix(right)
+}
+
+fn url_is_under_prefix(path: &str, prefix: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let prefix = prefix.trim_end_matches('/');
+    path != prefix
+        && path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_has_cname_in_flatten() {
-        let config: AssetsConfig = toml::from_str(r#"flatten = ["assets/CNAME"]"#).unwrap();
-        assert!(config.has_cname_in_flatten());
-
-        let config2: AssetsConfig = toml::from_str(r#"flatten = ["assets/robots.txt"]"#).unwrap();
-        assert!(!config2.has_cname_in_flatten());
-    }
-
-    #[test]
-    fn test_colocated_default_false() {
+    fn colocated_default_false() {
         let config = AssetsConfig::default();
 
+        assert_eq!(config.nested.len(), 1);
+        assert_eq!(config.nested[0].source(), Path::new("assets"));
+        assert_eq!(config.nested[0].target().as_str(), "/assets");
+        assert!(config.flatten.is_empty());
         assert!(!config.colocated);
     }
 
     #[test]
-    fn test_colocated_bool_true() {
-        let config: AssetsConfig = toml::from_str(r#"colocated = true"#).unwrap();
-
-        assert!(config.colocated);
-    }
-
-    #[test]
-    fn test_reserved_generated_asset_namespace_is_rejected() {
-        let nested: AssetsConfig = toml::from_str(
-            r#"
-nested = [{ dir = "assets", as = ".tola" }]
-"#,
-        )
-        .unwrap();
-        let mut diag = ConfigDiagnostics::new();
-
-        nested.validate(&mut diag);
-
-        assert_eq!(diag.len(), 1);
-
-        let flatten: AssetsConfig = toml::from_str(
-            r#"
-flatten = [{ file = "favicon.ico", as = ".tola" }]
-"#,
-        )
-        .unwrap();
-        let mut diag = ConfigDiagnostics::new();
-
-        flatten.validate(&mut diag);
-
-        assert_eq!(diag.len(), 1);
-    }
-
-    #[test]
-    fn test_output_aliases_must_be_single_segments() {
+    fn parses_path_assets_and_route_overrides() {
         let config: AssetsConfig = toml::from_str(
             r#"
-nested = [
-    { dir = "assets", as = "lib/vendor" },
-    { dir = "vendor", as = "." },
-]
-flatten = [
-    { file = "favicon.ico", as = "../favicon.ico" },
-    { file = "robots.txt", as = "" },
-]
+nested = ["assets/images", { dir = "vendor/static", as = "/lib" }]
+flatten = ["assets/styles/base.css", { file = "assets/CNAME", as = "/CNAME" }]
 "#,
         )
         .unwrap();
-        let mut diag = ConfigDiagnostics::new();
 
-        config.validate(&mut diag);
-
-        assert_eq!(diag.len(), 4);
+        assert_eq!(config.nested[0].source(), Path::new("assets/images"));
+        assert_eq!(config.nested[0].target().as_str(), "/images");
+        assert_eq!(config.nested[1].source(), Path::new("vendor/static"));
+        assert_eq!(config.nested[1].target().as_str(), "/lib");
+        assert_eq!(
+            config.flatten[0].source(),
+            Path::new("assets/styles/base.css")
+        );
+        assert_eq!(config.flatten[0].target().as_str(), "/base.css");
+        assert_eq!(config.flatten[1].source(), Path::new("assets/CNAME"));
+        assert_eq!(config.flatten[1].target().as_str(), "/CNAME");
     }
 
     #[test]
-    fn test_nested_sources_must_not_overlap() {
+    fn path_entry_targets_survive_normalization() {
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
-        let assets = root.join("assets");
-        std::fs::create_dir_all(assets.join("icons")).unwrap();
-
         let mut config: AssetsConfig = toml::from_str(
             r#"
-nested = [
-    "assets",
-    { dir = "assets/icons", as = "icons" },
-]
+nested = ["assets/images"]
+flatten = ["assets/styles/base.css"]
 "#,
         )
         .unwrap();
+
         config.normalize(root);
+
+        assert_eq!(config.nested[0].target().as_str(), "/images");
+        assert_eq!(config.flatten[0].target().as_str(), "/base.css");
+    }
+
+    #[test]
+    fn rejects_overlapping_nested_sources() {
+        let config: AssetsConfig = toml::from_str(
+            r#"
+nested = ["assets", "assets/icons"]
+"#,
+        )
+        .unwrap();
         let mut diag = ConfigDiagnostics::new();
 
         config.validate(&mut diag);
 
-        assert_eq!(diag.len(), 1);
-        let error = &diag.errors()[0];
-        assert!(error.message.contains("nested[1]"));
-        assert!(error.message.contains("nested[0]"));
-        assert!(error.message.contains("must be disjoint"));
         assert!(
-            error
-                .hint
-                .as_deref()
-                .is_some_and(|hint| hint.contains("Choose either the parent directory"))
+            diag.errors()
+                .iter()
+                .any(|error| error.message.contains("is inside"))
         );
     }
 
     #[test]
-    fn test_flatten_sources_must_be_unique() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path();
-        let assets = root.join("assets");
-        std::fs::create_dir_all(&assets).unwrap();
-        std::fs::write(assets.join("logo.png"), "logo").unwrap();
-
-        let mut config: AssetsConfig = toml::from_str(
+    fn rejects_nested_as_with_nested_url_path() {
+        let config: AssetsConfig = toml::from_str(
             r#"
-flatten = [
-    { file = "assets/logo.png", as = "logo.png" },
-    { file = "assets/logo.png", as = "brand.png" },
-]
+nested = [{ dir = "assets/styles", as = "/assets/styles" }]
 "#,
         )
         .unwrap();
-        config.normalize(root);
         let mut diag = ConfigDiagnostics::new();
 
-        config.validate(&mut diag);
+        config.validate_paths(&mut diag);
 
-        assert_eq!(diag.len(), 1);
-        let error = &diag.errors()[0];
-        assert!(error.message.contains("flatten[1]"));
-        assert!(error.message.contains("flatten[0]"));
-        assert!(error.message.contains("same source file"));
+        assert!(
+            diag.errors()
+                .iter()
+                .any(|error| error.message.contains("root-level asset name"))
+        );
+    }
+
+    #[test]
+    fn rejects_flatten_as_with_nested_url_path() {
+        let config: AssetsConfig = toml::from_str(
+            r#"
+flatten = [{ file = "assets/tailwind.css", as = "/styles/tailwind.css" }]
+"#,
+        )
+        .unwrap();
+        let mut diag = ConfigDiagnostics::new();
+
+        config.validate_paths(&mut diag);
+
+        assert!(
+            diag.errors()
+                .iter()
+                .any(|error| error.message.contains("root-level asset name"))
+        );
+    }
+
+    #[test]
+    fn rejects_as_without_leading_slash() {
+        let config: AssetsConfig = toml::from_str(
+            r#"
+nested = [{ dir = "assets/images", as = "images" }]
+flatten = [{ file = "assets/favicon.ico", as = "favicon.ico" }]
+"#,
+        )
+        .unwrap();
+        let mut diag = ConfigDiagnostics::new();
+
+        config.validate_paths(&mut diag);
+
+        let messages: Vec<_> = diag
+            .errors()
+            .iter()
+            .map(|error| error.message.as_str())
+            .collect();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.contains("must start with `/`"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_colocated_list_syntax() {
+        assert!(toml::from_str::<AssetsConfig>(r#"colocated = ["posts"]"#).is_err());
     }
 }

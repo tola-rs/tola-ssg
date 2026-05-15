@@ -95,10 +95,10 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.content = root.join("content");
-        config.build.assets.nested = vec![NestedEntry::Full {
-            dir: source_dir.to_path_buf(),
-            output_as: Some(output_name.to_string()),
-        }];
+        config.build.assets.nested = vec![NestedEntry::new(
+            source_dir.to_path_buf(),
+            format!("/{output_name}"),
+        )];
         config
     }
 

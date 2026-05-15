@@ -100,7 +100,7 @@ fn ensure_output_is_available(config: &SiteConfig, asset: &AtomicCssAsset) -> Re
     ensure_output_is_not_source(config, asset)?;
 
     let output = crate::utils::path::normalize_path(&asset.path);
-    for route in crate::asset::scan_global_assets(config)
+    for route in crate::asset::scan_nested_assets(config)
         .into_iter()
         .chain(crate::asset::scan_flatten_assets(config))
         .chain(crate::asset::scan_content_assets(config))
@@ -150,7 +150,7 @@ fn ensure_output_is_not_source(config: &SiteConfig, asset: &AtomicCssAsset) -> R
     for source in config.build.assets.flatten_sources() {
         if paths_equal(&output, source) {
             bail!(
-                "Atomic CSS output '{}' conflicts with configured flatten asset '{}'",
+                "Atomic CSS output '{}' conflicts with configured file asset '{}'",
                 asset.url,
                 source.display()
             );
@@ -332,10 +332,9 @@ source = ["components/button.html"]
 
         let mut config = SiteConfig::default();
         config.set_root(root);
-        config.build.assets.nested =
-            vec![crate::config::section::build::assets::NestedEntry::Simple(
-                ".".into(),
-            )];
+        config.build.assets.nested = vec![crate::config::section::build::assets::NestedEntry::new(
+            ".", "/",
+        )];
         config.build.assets.normalize(root);
         config.build.output = root.to_path_buf();
         config.build.atomic_css.enable = true;

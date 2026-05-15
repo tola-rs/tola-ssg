@@ -67,9 +67,13 @@ pub enum VdomMsg {
         permalink_change: Option<PermalinkUpdate>,
         /// Compilation warnings (for persistence)
         warnings: Vec<String>,
+        /// Output assets changed in the same compiler transaction.
+        assets: Vec<String>,
     },
     /// Trigger reload
     Reload { reason: String },
+    /// Linked output asset changed on disk
+    Asset { href: String },
     /// Compilation error (display via VdomActor's WatchStatus for proper overwrite)
     Error {
         path: PathBuf,
@@ -101,6 +105,8 @@ pub enum WsMsg {
     Patch {
         url_path: UrlPath,
         patches: Vec<Patch>,
+        /// Output assets that must be coordinated with these patches.
+        assets: Vec<String>,
         /// If set, browser updates URL bar without reload
         url_change: Option<UrlChange>,
     },
@@ -113,6 +119,8 @@ pub enum WsMsg {
         /// If set, browser updates URL before reload
         url_change: Option<UrlChange>,
     },
+    /// Linked output asset changed on disk
+    Asset { href: String },
     /// Compilation error (display overlay, no reload)
     Error { path: String, error: String },
     /// Clear error for a specific file path

@@ -78,13 +78,15 @@ pub(super) fn events_to_messages(
         .map(|(path, _)| path.clone())
         .collect();
     let hook_trigger_refs: Vec<&Path> = hook_trigger_paths.iter().map(|p| p.as_path()).collect();
+    let has_watched_pre_hook = crate::hooks::has_watched_pre_hooks(config, &hook_trigger_refs);
+    let has_watched_hook =
+        has_watched_pre_hook || crate::hooks::has_watched_post_hooks(config, &hook_trigger_refs);
 
-    let hook_only_compile = result.compile_queue.is_empty()
-        && !hook_trigger_paths.is_empty()
-        && crate::hooks::has_watched_hooks(config, &hook_trigger_refs);
+    let hook_only_compile =
+        result.compile_queue.is_empty() && !hook_trigger_paths.is_empty() && has_watched_hook;
     let atomic_css_compile = !result.atomic_css_changed.is_empty();
 
-    if !result.asset_changed.is_empty() {
+    if !has_watched_pre_hook && !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
     }
 
@@ -244,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_change_with_watched_hooks_enqueues_hook_only_compile() {
+    fn asset_change_with_watched_pre_hook_is_handled_by_compile_batch() {
         let (_tmp, mut config) = make_config();
         let root = config.get_root().to_path_buf();
         config.build.assets.normalize(&root);
@@ -262,7 +264,7 @@ mod tests {
         let messages = events_to_messages(events, &config, &state);
 
         assert!(
-            messages
+            !messages
                 .iter()
                 .any(|msg| matches!(msg, CompilerMsg::AssetChange(_)))
         );
@@ -308,6 +310,35 @@ mod tests {
         let (queue, changed_paths) = compile.expect("expected hook-only compile message");
         assert!(queue.is_empty());
         assert_eq!(changed_paths, vec![normalize_path(&input)]);
+    }
+
+    #[test]
+    fn output_change_with_watched_hook_does_not_enqueue_compile() {
+        let (_tmp, mut config) = make_config();
+        config.build.hooks.post.push(HookConfig {
+            enable: true,
+            name: Some("tailwind".into()),
+            command: vec!["tailwindcss".into()],
+            watch: WatchMode::Bool(true),
+            quiet: true,
+        });
+
+        let output = config.paths().output_dir().join("styles/tailwind.css");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(&output, "body{}").unwrap();
+
+        let events = DebouncedEvents(vec![(output.clone(), ChangeKind::Modified)]);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
+
+        assert!(messages.iter().any(
+            |msg| matches!(msg, CompilerMsg::OutputChange(paths) if paths == &vec![output.clone()])
+        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|msg| matches!(msg, CompilerMsg::Compile { .. }))
+        );
     }
 
     #[test]

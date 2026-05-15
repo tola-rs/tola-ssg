@@ -23,7 +23,7 @@ pub fn respond_file(
     ws_port: Option<u16>,
 ) -> Result<FileServeResult> {
     let content_type = crate::utils::mime::from_path(path);
-    let no_cache = content_type == crate::utils::mime::types::HTML;
+    let no_cache = ws_port.is_some() || content_type == crate::utils::mime::types::HTML;
 
     if is_head_request(&request) {
         send_head(request, 200, content_type, no_cache)?;

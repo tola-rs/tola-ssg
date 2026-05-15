@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use crate::asset::{scan_content_assets, scan_global_assets};
+use crate::asset::{scan_content_assets, scan_nested_assets};
 use crate::config::SiteConfig;
 use crate::config::section::build::AtomicCssConfig;
 use crate::core::UrlPath;
@@ -71,8 +71,7 @@ pub struct UrlConflict {
 pub fn collect_url_owners(pages: &[CompiledPage], config: &SiteConfig) -> UrlOwnerMap {
     let mut url_owners = UrlOwnerMap::default();
 
-    // Collect global assets
-    collect_global_assets(&mut url_owners, config);
+    collect_asset_urls(&mut url_owners, config);
 
     // Collect generated public outputs.
     collect_generated_outputs(&mut url_owners, config);
@@ -85,16 +84,14 @@ pub fn collect_url_owners(pages: &[CompiledPage], config: &SiteConfig) -> UrlOwn
     url_owners
 }
 
-/// Collect global asset URLs into the map
-fn collect_global_assets(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
-    for asset in scan_global_assets(config) {
+fn collect_asset_urls(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
+    for asset in scan_nested_assets(config) {
         url_owners
             .entry(asset.url)
             .or_default()
             .push(UrlOwner::source(asset.source));
     }
 
-    // Also collect flatten assets
     for asset in crate::asset::scan_flatten_assets(config) {
         url_owners
             .entry(asset.url)
@@ -397,14 +394,14 @@ mod tests {
     }
 
     #[test]
-    fn feed_url_conflicts_with_flatten_asset_url() {
+    fn feed_url_conflicts_with_file_asset_url() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("feed.xml");
         std::fs::write(&source, "asset feed").unwrap();
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.flatten = vec![FlattenEntry::Simple(source)];
+        config.build.assets.flatten = vec![FlattenEntry::new(source, "/feed.xml")];
         config.site.seo.feeds = vec![FeedConfig {
             format: FeedFormat::Rss,
             url: "/feed.xml".into(),
@@ -426,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn feed_url_conflicts_with_nested_asset_url() {
+    fn feed_url_conflicts_with_dir_asset_url() {
         let dir = TempDir::new().unwrap();
         let assets_dir = dir.path().join("assets");
         std::fs::create_dir_all(&assets_dir).unwrap();
@@ -434,7 +431,7 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
+        config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/assets")];
         config.site.seo.feeds = vec![FeedConfig {
             format: FeedFormat::Rss,
             url: "/assets/feed.xml".into(),
@@ -450,14 +447,14 @@ mod tests {
     }
 
     #[test]
-    fn sitemap_url_conflicts_with_flatten_asset_url() {
+    fn sitemap_url_conflicts_with_file_asset_url() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("sitemap.xml");
         std::fs::write(&source, "asset sitemap").unwrap();
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.flatten = vec![FlattenEntry::Simple(source)];
+        config.build.assets.flatten = vec![FlattenEntry::new(source, "/sitemap.xml")];
         config.site.seo.sitemap.enable = true;
         config.site.seo.sitemap.url = "/sitemap.xml".into();
 

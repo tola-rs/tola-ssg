@@ -15,6 +15,8 @@
 //! | `SiteRoot` | `/about` | Prefixed and slugified |
 //! | `FileRelative` | `./img.png` | Adjusted for output structure |
 
+use std::path::Path;
+
 use anyhow::Result;
 use tola_vdom::prelude::*;
 
@@ -145,6 +147,9 @@ fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
     if let Some(href) = crate::asset::resolve_asset_href(value, config) {
         return Ok(href);
     }
+    if is_public_file_url(value) {
+        return Ok(resolve_public_file(value, config));
+    }
 
     // Split path and fragment
     let (_, fragment) = split_path_fragment(value);
@@ -158,6 +163,21 @@ fn resolve_site_root(value: &str, config: &SiteConfig) -> Result<String> {
     }
 
     Ok(url)
+}
+
+fn is_public_file_url(value: &str) -> bool {
+    let (path, _) = split_path_fragment(value);
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some()
+}
+
+fn resolve_public_file(value: &str, config: &SiteConfig) -> String {
+    let idx = value.find(['?', '#']).unwrap_or(value.len());
+    let path = value[..idx].trim_start_matches('/');
+    let suffix = &value[idx..];
+    format!("{}{}", config.paths().url_for_site_path(path), suffix)
 }
 
 /// Resolve file-relative links (./image.png, ../other)
@@ -376,10 +396,10 @@ mod tests {
     #[test]
     fn test_is_asset_link_uses_current_config() {
         let mut first = SiteConfig::default();
-        first.build.assets.nested = vec![NestedEntry::Simple("images".into())];
+        first.build.assets.nested = vec![NestedEntry::new("images", "/images")];
 
         let mut second = SiteConfig::default();
-        second.build.assets.nested = vec![NestedEntry::Simple("media".into())];
+        second.build.assets.nested = vec![NestedEntry::new("media", "/media")];
 
         assert!(is_asset_link("/images/logo.png", &first));
         assert!(!is_asset_link("/media/logo.png", &first));
@@ -412,10 +432,10 @@ mod tests {
     }
 
     #[test]
-    fn flatten_asset_links_keep_query_and_fragment() {
+    fn file_asset_links_keep_query_and_fragment() {
         let mut config = SiteConfig::default();
         config.build.path_prefix = PathBuf::from("docs/blog");
-        config.build.assets.flatten = vec![FlattenEntry::Simple("favicon.ico".into())];
+        config.build.assets.flatten = vec![FlattenEntry::new("favicon.ico", "/favicon.ico")];
         let route = test_route(true);
 
         assert_eq!(

@@ -25,10 +25,24 @@ pub struct HeaderInjector<'a> {
 
 /// Compute versioned href for an asset (with ?v=hash for cache busting)
 fn versioned_href(url: &crate::config::PublicUrl, config: &SiteConfig) -> Option<String> {
-    let source = source_for_asset_url(url.as_str(), config)?;
-    let route = route_from_source(source, config).ok()?;
-    let href = href_for_route(&route, config);
-    Some(version::versioned_url(&href, &route.source))
+    if let Some(source) = source_for_asset_url(url.as_str(), config) {
+        let route = route_from_source(source, config).ok()?;
+        let href = href_for_route(&route, config);
+        let version_path = if route.output.is_file() {
+            &route.output
+        } else {
+            &route.source
+        };
+        return Some(version::versioned_url(&href, version_path));
+    }
+
+    let href = url.href(config.paths());
+    let output = url.output_path(config.paths());
+    if output.is_file() {
+        Some(version::versioned_url(&href, &output))
+    } else {
+        Some(href)
+    }
 }
 
 fn feed_title(site_title: &str, feed_label: &str) -> String {
@@ -395,7 +409,7 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(assets_dir)];
+        config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/styles")];
         config.site.header.no_fouc = false;
         config.site.header.styles = vec!["/styles/site.css".into()];
 
@@ -421,7 +435,7 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(styles)];
+        config.build.assets.nested = vec![NestedEntry::new(styles, "/styles")];
         config.site.header.no_fouc = false;
         config.site.header.styles = vec!["/styles/tailwind.css".into()];
 
@@ -440,6 +454,47 @@ mod tests {
                 && link
                     .get_attr("href")
                     .is_some_and(|href| href.starts_with("/styles/tailwind.css?v="))
+        }));
+
+        crate::asset::version::clear();
+    }
+
+    #[test]
+    fn header_asset_version_uses_output_when_available() {
+        crate::asset::version::clear();
+
+        let dir = TempDir::new().unwrap();
+        let styles = dir.path().join("assets/styles");
+        let output = dir.path().join("public");
+        fs::create_dir_all(&styles).unwrap();
+        fs::create_dir_all(output.join("styles")).unwrap();
+        fs::write(styles.join("tailwind.css"), "source").unwrap();
+        let output_css = output.join("styles/tailwind.css");
+        fs::write(&output_css, "compiled").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.output = output;
+        config.build.assets.nested = vec![NestedEntry::new(styles, "/styles")];
+        config.site.header.no_fouc = false;
+        config.site.header.styles = vec!["/styles/tailwind.css".into()];
+
+        let expected = crate::asset::version::compute_version(&output_css);
+        let doc = HeaderInjector::new(&config).transform(make_html_doc());
+        let links: Vec<_> = head(&doc)
+            .children
+            .iter()
+            .filter_map(|node| match node {
+                Node::Element(elem) if elem.tag == "link" => Some(elem.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(links.iter().any(|link| {
+            link.get_attr("rel") == Some("stylesheet")
+                && link
+                    .get_attr("href")
+                    .is_some_and(|href| href == format!("/styles/tailwind.css?v={expected}"))
         }));
 
         crate::asset::version::clear();

@@ -17,10 +17,7 @@ pub use route::{
 };
 
 // Scanning (pure functions)
-pub use scan::{scan_content_assets, scan_flatten_assets, scan_global_assets};
+pub use scan::{scan_content_assets, scan_flatten_assets, scan_nested_assets};
 
 // Processing (side effects)
-pub use process::{
-    process_asset, process_cname, process_content_assets, process_flatten_assets,
-    process_global_assets,
-};
+pub use process::{process_asset, process_cname, process_configured_assets};

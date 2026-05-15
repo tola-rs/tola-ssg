@@ -13,12 +13,12 @@ use crate::config::SiteConfig;
 /// - Re-attach roots that were removed and recreated
 /// - Track root changes after config reload
 pub(super) struct RootSet {
-    desired: Vec<PathBuf>,
-    attached: FxHashSet<PathBuf>,
+    desired: Vec<WatchRoot>,
+    attached: FxHashSet<WatchRoot>,
 }
 
 impl RootSet {
-    pub(super) fn new(paths: Vec<PathBuf>) -> Self {
+    fn new(paths: Vec<WatchRoot>) -> Self {
         Self {
             desired: paths,
             attached: FxHashSet::default(),
@@ -26,40 +26,41 @@ impl RootSet {
     }
 
     pub(super) fn from_config(config: &SiteConfig) -> Self {
-        Self::new(collect_watch_paths(config))
+        Self::new(collect_roots(config))
     }
 
     pub(super) fn attach_existing(
         &mut self,
         watcher: &mut RecommendedWatcher,
     ) -> notify::Result<()> {
-        for path in &self.desired {
-            if !path.exists() {
+        for root in &self.desired {
+            if !root.path.exists() {
                 continue;
             }
-            match watcher.watch(path, RecursiveMode::Recursive) {
+            match watcher.watch(&root.path, root.mode) {
                 Ok(()) => {
-                    self.attached.insert(path.clone());
+                    self.attached.insert(root.clone());
                 }
                 Err(err) => {
+                    let _ = watcher.unwatch(&root.path);
                     // Race-safe startup:
                     // - root may disappear between `exists()` and `watch()` during `serve --clean`
                     // - recursive watch may hit transient missing descendants (e.g. .git/objects/pack)
                     // Don't fail actor startup for single-path watch errors.
                     // maintain() will keep trying to re-attach roots.
-                    let transient = !path.exists() || is_transient_not_found(&err);
+                    let transient = !root.path.exists() || is_transient_not_found(&err);
                     if transient {
                         crate::debug!(
                             "watch";
                             "skip transient watch attach error on startup: {} ({})",
-                            path.display(),
+                            root.path.display(),
                             err
                         );
                     } else {
                         crate::debug!(
                             "watch";
                             "skip non-transient watch attach error on startup: {} ({})",
-                            path.display(),
+                            root.path.display(),
                             err
                         );
                     }
@@ -73,35 +74,37 @@ impl RootSet {
 
     pub(super) fn maintain(&mut self, watcher: &mut RecommendedWatcher) {
         // Drop stale handles for roots that no longer exist.
-        self.attached.retain(|path| path.exists());
+        self.attached.retain(|root| root.path.exists());
 
-        for path in &self.desired {
-            if self.attached.contains(path) || !path.exists() {
+        for root in &self.desired {
+            if self.attached.contains(root) || !root.path.exists() {
                 continue;
             }
 
-            if watcher.watch(path, RecursiveMode::Recursive).is_ok() {
-                self.attached.insert(path.clone());
-                crate::debug!("watch"; "re-attached watch: {}", path.display());
+            if watcher.watch(&root.path, root.mode).is_ok() {
+                self.attached.insert(root.clone());
+                crate::debug!("watch"; "re-attached watch: {}", root.path.display());
+            } else {
+                let _ = watcher.unwatch(&root.path);
             }
         }
     }
 
     pub(super) fn sync_config(&mut self, watcher: &mut RecommendedWatcher, config: &SiteConfig) {
-        let desired = collect_watch_paths(config);
-        let desired_set: FxHashSet<PathBuf> = desired.iter().cloned().collect();
-        let stale: Vec<PathBuf> = self
+        let desired = collect_roots(config);
+        let desired_set: FxHashSet<WatchRoot> = desired.iter().cloned().collect();
+        let stale: Vec<WatchRoot> = self
             .attached
             .iter()
-            .filter(|path| !desired_set.contains(*path))
+            .filter(|root| !desired_set.contains(*root))
             .cloned()
             .collect();
 
-        for path in stale {
-            if watcher.unwatch(&path).is_ok() {
-                crate::debug!("watch"; "detached watch: {}", path.display());
+        for root in stale {
+            if watcher.unwatch(&root.path).is_ok() {
+                crate::debug!("watch"; "detached watch: {}", root.path.display());
             }
-            self.attached.remove(&path);
+            self.attached.remove(&root);
         }
 
         self.desired = desired;
@@ -109,57 +112,87 @@ impl RootSet {
     }
 }
 
-fn collect_watch_paths(config: &SiteConfig) -> Vec<PathBuf> {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WatchRoot {
+    path: PathBuf,
+    mode: RecursiveMode,
+}
+
+impl WatchRoot {
+    fn recursive(path: PathBuf) -> Self {
+        Self {
+            path,
+            mode: RecursiveMode::Recursive,
+        }
+    }
+
+    fn non_recursive(path: PathBuf) -> Self {
+        Self {
+            path,
+            mode: RecursiveMode::NonRecursive,
+        }
+    }
+
+    fn recursively_covers(&self, other: &Self) -> bool {
+        self.mode == RecursiveMode::Recursive && other.path.starts_with(&self.path)
+    }
+}
+
+fn collect_roots(config: &SiteConfig) -> Vec<WatchRoot> {
     let root = config.get_root();
-    let mut paths = vec![root.join(&config.build.content)];
+    let mut roots = vec![WatchRoot::recursive(root.join(&config.build.content))];
     for dep in &config.build.deps {
-        paths.push(root.join(dep));
+        roots.push(WatchRoot::recursive(root.join(dep)));
     }
 
     for source in config.build.assets.nested_sources() {
         if source.exists() {
-            paths.push(source.to_path_buf());
+            roots.push(WatchRoot::recursive(source.to_path_buf()));
         }
     }
 
     for source in config.build.assets.flatten_sources() {
         if let Some(parent) = source.parent() {
             let parent_buf = parent.to_path_buf();
-            if parent.exists() && !paths.contains(&parent_buf) {
-                paths.push(parent_buf);
+            if parent.exists() {
+                roots.push(WatchRoot::recursive(parent_buf));
             }
         }
     }
 
     if config.build.atomic_css.enable {
-        paths.extend(crate::css::source::roots(config));
+        if config.build.atomic_css.source.is_none() && root.exists() {
+            roots.push(WatchRoot::non_recursive(root.to_path_buf()));
+        }
+        roots.extend(
+            crate::css::source::roots(config)
+                .into_iter()
+                .map(WatchRoot::recursive),
+        );
 
         if let Some(config_path) = &config.build.atomic_css.config {
             let config_path = root.join(config_path);
             if config_path.exists() {
-                paths.push(config_path);
+                roots.push(WatchRoot::recursive(config_path));
             }
         }
     }
 
-    collect_hook_watch_paths(config, &mut paths);
+    collect_hook_watch_paths(config, &mut roots);
 
     if config.config_path.exists() {
-        paths.push(config.config_path.clone());
+        roots.push(WatchRoot::recursive(config.config_path.clone()));
     }
 
     let output_dir = config.paths().output_dir();
     let _ = std::fs::create_dir_all(&output_dir);
-    if !paths.contains(&output_dir) {
-        paths.push(output_dir.clone());
-    }
+    roots.push(WatchRoot::recursive(output_dir));
 
-    dedupe_output_children(&mut paths, &output_dir);
-
-    paths
+    dedupe_roots(&mut roots);
+    roots
 }
 
-fn collect_hook_watch_paths(config: &SiteConfig, paths: &mut Vec<PathBuf>) {
+fn collect_hook_watch_paths(config: &SiteConfig, roots: &mut Vec<WatchRoot>) {
     for hook in config
         .build
         .hooks
@@ -169,7 +202,7 @@ fn collect_hook_watch_paths(config: &SiteConfig, paths: &mut Vec<PathBuf>) {
     {
         for pattern in hook.watch.path_patterns() {
             if let Some(path) = hook_watch_root(config, pattern) {
-                paths.push(path);
+                roots.push(WatchRoot::recursive(path));
             }
         }
     }
@@ -195,17 +228,29 @@ fn hook_watch_root(config: &SiteConfig, pattern: &str) -> Option<PathBuf> {
     (parent != root && parent.exists()).then(|| parent.to_path_buf())
 }
 
-/// Keep output root watch, drop redundant descendants under output.
-///
-/// We only need to watch output root recursively; watching its children is
-/// redundant and can introduce startup races during `serve --clean`.
-fn dedupe_output_children(paths: &mut Vec<PathBuf>, output_root: &std::path::Path) {
-    paths.retain(|path| path.as_path() == output_root || !path.starts_with(output_root));
+fn dedupe_roots(roots: &mut Vec<WatchRoot>) {
+    let mut kept: Vec<WatchRoot> = Vec::new();
+    for root in roots.drain(..) {
+        if let Some(existing) = kept.iter_mut().find(|existing| existing.path == root.path) {
+            if root.mode == RecursiveMode::Recursive {
+                existing.mode = RecursiveMode::Recursive;
+            }
+            continue;
+        }
+        if kept.iter().any(|parent| parent.recursively_covers(&root)) {
+            continue;
+        }
+        if root.mode == RecursiveMode::Recursive {
+            kept.retain(|child| !root.recursively_covers(child));
+        }
+        kept.push(root);
+    }
+    *roots = kept;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_watch_paths, dedupe_output_children};
+    use super::{WatchRoot, collect_roots, dedupe_roots};
     use crate::config::SiteConfig;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -213,47 +258,100 @@ mod tests {
     #[test]
     fn keeps_output_root_and_drops_descendants() {
         let output = PathBuf::from("/site/public/blog");
-        let mut paths = vec![
-            PathBuf::from("/site/content"),
-            output.clone(),
-            output.join("showcase"),
-            output.join("showcase/virtual-packages"),
-            PathBuf::from("/site/templates"),
+        let mut roots = vec![
+            WatchRoot::recursive(PathBuf::from("/site/content")),
+            WatchRoot::recursive(output.join("showcase")),
+            WatchRoot::recursive(output.clone()),
+            WatchRoot::recursive(output.join("showcase/virtual-packages")),
+            WatchRoot::recursive(PathBuf::from("/site/templates")),
         ];
 
-        dedupe_output_children(&mut paths, &output);
+        dedupe_roots(&mut roots);
 
-        assert!(paths.contains(&PathBuf::from("/site/content")));
-        assert!(paths.contains(&output));
-        assert!(paths.contains(&PathBuf::from("/site/templates")));
-        assert!(!paths.contains(&PathBuf::from("/site/public/blog/showcase")));
-        assert!(!paths.contains(&PathBuf::from(
+        assert!(roots.contains(&WatchRoot::recursive(PathBuf::from("/site/content"))));
+        assert!(roots.contains(&WatchRoot::recursive(output)));
+        assert!(roots.contains(&WatchRoot::recursive(PathBuf::from("/site/templates"))));
+        assert!(!roots.contains(&WatchRoot::recursive(PathBuf::from(
+            "/site/public/blog/showcase"
+        ))));
+        assert!(!roots.contains(&WatchRoot::recursive(PathBuf::from(
             "/site/public/blog/showcase/virtual-packages"
-        )));
+        ))));
     }
 
     #[test]
-    fn includes_site_root_for_atomic_css_auto_scan_and_config() {
+    fn drops_redundant_descendant_watch_roots() {
+        let mut roots = vec![
+            WatchRoot::recursive(PathBuf::from("/site/content/posts")),
+            WatchRoot::recursive(PathBuf::from("/site/assets/images")),
+            WatchRoot::recursive(PathBuf::from("/site/content")),
+            WatchRoot::recursive(PathBuf::from("/site/assets")),
+            WatchRoot::recursive(PathBuf::from("/site/assets")),
+        ];
+
+        dedupe_roots(&mut roots);
+
+        assert!(roots.contains(&WatchRoot::recursive(PathBuf::from("/site/content"))));
+        assert!(roots.contains(&WatchRoot::recursive(PathBuf::from("/site/assets"))));
+        assert!(!roots.contains(&WatchRoot::recursive(PathBuf::from("/site/content/posts"))));
+        assert!(!roots.contains(&WatchRoot::recursive(PathBuf::from("/site/assets/images"))));
+        assert_eq!(roots.len(), 2);
+    }
+
+    #[test]
+    fn keeps_non_recursive_root_with_recursive_children() {
+        let root = PathBuf::from("/site");
+        let mut roots = vec![
+            WatchRoot::non_recursive(root.clone()),
+            WatchRoot::recursive(root.join("content")),
+            WatchRoot::recursive(root.join("components")),
+        ];
+
+        dedupe_roots(&mut roots);
+
+        assert!(roots.contains(&WatchRoot::non_recursive(root)));
+        assert!(roots.contains(&WatchRoot::recursive(PathBuf::from("/site/content"))));
+        assert!(roots.contains(&WatchRoot::recursive(PathBuf::from("/site/components"))));
+    }
+
+    #[test]
+    fn prunes_atomic_css_auto_scan_watch_roots_and_keeps_config() {
         let temp = TempDir::new().unwrap();
-        let root = temp.path();
+        let root = crate::utils::path::normalize_path(temp.path());
         let content = root.join("content");
         let output = root.join("public");
+        let tests = root.join("tests");
+        let ignored = root.join("ignored");
         let atomic_config = root.join("atomic.css.toml");
         std::fs::create_dir_all(&content).unwrap();
         std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::create_dir_all(&ignored).unwrap();
         std::fs::write(&atomic_config, "").unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
 
         let mut config = SiteConfig::default();
-        config.set_root(root);
+        config.set_root(&root);
         config.build.content = content;
         config.build.output = output;
         config.build.atomic_css.enable = true;
         config.build.atomic_css.config = Some(atomic_config.clone());
 
-        let paths = collect_watch_paths(&config);
+        let roots = collect_roots(&config);
 
-        assert!(paths.contains(&crate::utils::path::normalize_path(root)));
-        assert!(paths.contains(&atomic_config));
+        assert!(roots.contains(&WatchRoot::non_recursive(root.clone())));
+        assert!(!roots.contains(&WatchRoot::recursive(root)));
+        assert!(
+            roots.contains(&WatchRoot::recursive(crate::utils::path::normalize_path(
+                &tests
+            )))
+        );
+        assert!(
+            !roots.contains(&WatchRoot::recursive(crate::utils::path::normalize_path(
+                &ignored
+            )))
+        );
+        assert!(roots.contains(&WatchRoot::recursive(atomic_config)));
     }
 
     #[test]
@@ -281,8 +379,8 @@ mod tests {
             ..HookConfig::default()
         });
 
-        let paths = collect_watch_paths(&config);
+        let roots = collect_roots(&config);
 
-        assert!(paths.contains(&input));
+        assert!(roots.contains(&WatchRoot::recursive(input)));
     }
 }

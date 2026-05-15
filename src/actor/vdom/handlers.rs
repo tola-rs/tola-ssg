@@ -74,6 +74,7 @@ impl VdomActor {
         new_vdom: Document<Indexed>,
         permalink_change: Option<PermalinkUpdate>,
         warnings: Vec<String>,
+        assets: Vec<String>,
     ) {
         // Store warnings for this path
         let rel_path = self.to_relative(&path);
@@ -142,7 +143,8 @@ impl VdomActor {
                 .push_permalink_change(rel_path, old.clone(), url_path.clone());
         }
 
-        self.route_outcome(&path, url_path, outcome, old_url).await;
+        self.route_outcome(&path, url_path, outcome, old_url, assets)
+            .await;
     }
 
     async fn handle_permalink_conflict(&mut self, path: &Path, url: &UrlPath, existing: &Path) {
@@ -189,6 +191,7 @@ impl VdomActor {
         url_path: UrlPath,
         outcome: DiffOutcome,
         old_url: Option<UrlPath>,
+        assets: Vec<String>,
     ) {
         use crate::reload::active::ACTIVE_PAGE;
 
@@ -215,15 +218,17 @@ impl VdomActor {
 
         match outcome {
             DiffOutcome::Edits(edits, new_vdom) => {
-                self.handle_edits(&rel_path, url_path, edits, new_vdom, priority, url_change)
-                    .await;
+                self.handle_edits(
+                    &rel_path, url_path, edits, new_vdom, priority, url_change, assets,
+                )
+                .await;
             }
             DiffOutcome::Initial => {
                 self.handle_initial(&rel_path, url_path, priority, url_change)
                     .await;
             }
             DiffOutcome::Unchanged => {
-                self.handle_unchanged(&rel_path, url_path, priority, url_change)
+                self.handle_unchanged(&rel_path, url_path, priority, url_change, assets)
                     .await;
             }
             DiffOutcome::NeedsReload { reason } => {
@@ -241,6 +246,7 @@ impl VdomActor {
         new_vdom: Box<Document<Indexed>>,
         priority: Option<Priority>,
         url_change: Option<UrlChange>,
+        assets: Vec<String>,
     ) {
         crate::debug_do! {
             let edit_summary: Vec<String> = edits.iter().map(|edit| edit.summary()).collect();
@@ -252,12 +258,14 @@ impl VdomActor {
 
         let config = RenderConfig::default();
         let patches = render_patches(&edits, &config);
+        let assets = crate::reload::patch::filter_covered_assets(assets, &patches);
 
         if self
             .ws_tx
             .send(WsMsg::Patch {
                 url_path: url_path.clone(),
                 patches,
+                assets,
                 url_change,
             })
             .await
@@ -297,6 +305,7 @@ impl VdomActor {
         url_path: UrlPath,
         priority: Option<Priority>,
         url_change: Option<UrlChange>,
+        assets: Vec<String>,
     ) {
         if let Some(change) = url_change {
             // Permalink changed but content unchanged
@@ -306,7 +315,18 @@ impl VdomActor {
                 .send(WsMsg::Patch {
                     url_path,
                     patches: vec![],
+                    assets,
                     url_change: Some(change),
+                })
+                .await;
+        } else if !assets.is_empty() {
+            let _ = self
+                .ws_tx
+                .send(WsMsg::Patch {
+                    url_path,
+                    patches: vec![],
+                    assets,
+                    url_change: None,
                 })
                 .await;
         } else {

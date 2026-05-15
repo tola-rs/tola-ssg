@@ -211,7 +211,7 @@ impl BuildSectionConfig {
                 diag.error(
                     Self::FIELDS.output,
                     format!(
-                        "Atomic CSS output '{}' conflicts with configured flatten asset '{}'",
+                        "Atomic CSS output '{}' conflicts with configured file asset '{}'",
                         output.display(),
                         source.display()
                     ),
@@ -255,18 +255,38 @@ mod tests {
 
     #[test]
     fn test_custom_assets() {
-        // New format: [build.assets] section
         let config = test_parse_config(
             r#"
 [build.assets]
-nested = ["static", { dir = "vendor", as = "lib" }]
-flatten = ["CNAME"]
+nested = ["assets/images", { dir = "vendor/static", as = "/lib" }]
+flatten = ["assets/styles/base.css", { file = "assets/CNAME", as = "/CNAME" }]
 "#,
         );
         assert_eq!(config.build.assets.nested.len(), 2);
-        assert_eq!(config.build.assets.nested[0].source(), Path::new("static"));
-        assert_eq!(config.build.assets.nested[1].output_name(), "lib");
-        assert_eq!(config.build.assets.flatten.len(), 1);
+        assert_eq!(
+            config.build.assets.nested[0].source(),
+            Path::new("assets/images")
+        );
+        assert_eq!(config.build.assets.nested[0].target().as_str(), "/images");
+        assert_eq!(
+            config.build.assets.nested[1].source(),
+            Path::new("vendor/static")
+        );
+        assert_eq!(config.build.assets.nested[1].target().as_str(), "/lib");
+        assert_eq!(config.build.assets.flatten.len(), 2);
+        assert_eq!(
+            config.build.assets.flatten[0].source(),
+            Path::new("assets/styles/base.css")
+        );
+        assert_eq!(
+            config.build.assets.flatten[0].target().as_str(),
+            "/base.css"
+        );
+        assert_eq!(
+            config.build.assets.flatten[1].source(),
+            Path::new("assets/CNAME")
+        );
+        assert_eq!(config.build.assets.flatten[1].target().as_str(), "/CNAME");
         // minify defaults to true, only test assets config here
     }
 
@@ -344,8 +364,8 @@ source = []
     fn atomic_css_output_must_not_be_inside_asset_source() {
         let mut config = BuildSectionConfig::default();
         config.output = Path::new("/site").to_path_buf();
-        config.assets.nested = vec![crate::config::section::build::assets::NestedEntry::Simple(
-            "/site".into(),
+        config.assets.nested = vec![crate::config::section::build::assets::NestedEntry::new(
+            "/site", "/site",
         )];
         config.atomic_css.enable = true;
         config.atomic_css.source = Some(vec![Path::new("/site/content").to_path_buf()]);

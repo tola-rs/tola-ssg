@@ -38,7 +38,7 @@ impl Default for HeaderConfig {
 }
 
 impl HeaderConfig {
-    /// Validate all header resource URLs are owned by configured assets.
+    /// Validate header resources are public URLs.
     pub fn validate(&self, config: &SiteConfig, diag: &mut ConfigDiagnostics) {
         if let Some(icon) = &self.icon {
             validate_asset_url(icon, Self::FIELDS.icon, config, diag);
@@ -79,15 +79,8 @@ fn validate_asset_url(
         return;
     }
 
-    if crate::asset::source_for_asset_url(url.as_str(), config).is_some() {
-        return;
-    }
-
-    let message = format!("URL '{}' is not owned by configured assets", url.as_str());
     if let Some(hint) = source_path_url_hint(url.as_str(), config) {
-        diag.error_with_hint(field, message, hint);
-    } else {
-        diag.error(field, message);
+        diag.hint(field, hint);
     }
 }
 
@@ -185,7 +178,7 @@ scripts = [
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(dir.path().join("assets"))];
+        config.build.assets.nested = vec![NestedEntry::new(dir.path().join("assets"), "/assets")];
         config.site.header.icon = Some("images/favicon.ico".into());
 
         let mut diag = ConfigDiagnostics::new();
@@ -199,7 +192,7 @@ scripts = [
             error
                 .hint
                 .as_deref()
-                .is_some_and(|hint| hint.contains("nested = [\"images\"]"))
+                .is_some_and(|hint| hint.contains("build.assets.nested"))
         );
     }
 
@@ -212,7 +205,7 @@ scripts = [
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(styles)];
+        config.build.assets.nested = vec![NestedEntry::new(styles, "/styles")];
         config.site.header.styles = vec!["/styles/tailwind.css".into()];
 
         let mut diag = ConfigDiagnostics::new();
@@ -230,7 +223,7 @@ scripts = [
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.assets.nested = vec![NestedEntry::Simple(styles)];
+        config.build.assets.nested = vec![NestedEntry::new(styles, "/styles")];
         config.site.header.styles = vec!["assets/styles/tailwind.css".into()];
 
         let mut diag = ConfigDiagnostics::new();

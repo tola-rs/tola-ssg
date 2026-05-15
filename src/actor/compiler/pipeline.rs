@@ -13,6 +13,15 @@ use super::tasks::compile_batch;
 impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
+        let (outcome, config) = self.compile_one_outcome(path).await;
+        self.route(outcome, config, &[]).await;
+    }
+
+    /// Compile a single file and return the outcome without sending it to VDOM.
+    pub(super) async fn compile_one_outcome(
+        &mut self,
+        path: &Path,
+    ) -> (CompileOutcome, Arc<SiteConfig>) {
         let (config, typst_host) = self.current_config_and_typst_host();
         let compile_config = Arc::clone(&config);
         let state = Arc::clone(&self.state);
@@ -27,9 +36,25 @@ impl CompilerActor {
         })
         .await;
 
-        match result {
-            Ok(outcome) => self.route(outcome, config).await,
-            Err(e) => crate::log!("compile"; "error: {}", e),
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                crate::log!("compile"; "error: {}", e);
+                CompileOutcome::Skipped
+            }
+        };
+
+        (outcome, config)
+    }
+
+    pub(super) async fn route_all(
+        &mut self,
+        outcomes: Vec<CompileOutcome>,
+        config: Arc<SiteConfig>,
+        assets: &[String],
+    ) {
+        for outcome in outcomes {
+            self.route(outcome, Arc::clone(&config), assets).await;
         }
     }
 
@@ -44,7 +69,7 @@ impl CompilerActor {
         )
         .await;
         for outcome in outcomes {
-            self.route(outcome, Arc::clone(&config)).await;
+            self.route(outcome, Arc::clone(&config), &[]).await;
         }
     }
 
@@ -66,7 +91,12 @@ impl CompilerActor {
     }
 
     /// Route compilation outcome to VdomActor.
-    pub(super) async fn route(&mut self, outcome: CompileOutcome, config: Arc<SiteConfig>) {
+    pub(super) async fn route(
+        &mut self,
+        outcome: CompileOutcome,
+        config: Arc<SiteConfig>,
+        assets: &[String],
+    ) {
         let msg = match outcome {
             CompileOutcome::Vdom {
                 path,
@@ -81,6 +111,7 @@ impl CompilerActor {
                 vdom,
                 permalink_change,
                 warnings,
+                assets: assets.to_vec(),
             },
             CompileOutcome::Reload { reason } => VdomMsg::Reload { reason },
             CompileOutcome::Skipped => VdomMsg::Skip,

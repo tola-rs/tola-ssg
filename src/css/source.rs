@@ -107,8 +107,7 @@ pub fn roots(config: &SiteConfig) -> Vec<PathBuf> {
             .collect();
     }
 
-    let root = normalize_path(config.get_root());
-    root.exists().then_some(root).into_iter().collect()
+    auto_roots(config)
 }
 
 pub fn is_input(path: &Path, config: &SiteConfig) -> bool {
@@ -188,6 +187,33 @@ fn collect_path(
 
 fn source_path(config: &SiteConfig, source: &Path) -> PathBuf {
     normalize_path(&config.get_root().join(source))
+}
+
+fn auto_roots(config: &SiteConfig) -> Vec<PathBuf> {
+    let root = normalize_path(config.get_root());
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+
+    let mut ignores = Vec::new();
+    if let Some(ignore) = Gitignore::load(&root) {
+        ignores.push(ignore);
+    }
+
+    let mut roots = Vec::new();
+    for entry in entries.flatten() {
+        let path = normalize_path(&entry.path());
+        let is_dir = path.is_dir();
+        if is_excluded_tree(&path, config, ScanMode::Auto) || ignored_by(&ignores, &path, is_dir) {
+            continue;
+        }
+        if is_dir || is_candidate_path(&path, config, ScanMode::Auto) {
+            roots.push(path);
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 fn is_ignored_by_gitignore(path: &Path, config: &SiteConfig) -> bool {
@@ -290,6 +316,33 @@ mod tests {
 
         assert!(texts.contains("flex"));
         assert!(!texts.contains("grid"));
+    }
+
+    #[test]
+    fn auto_roots_use_pruned_top_level_inputs() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let content = root.join("content");
+        let ignored = root.join("ignored");
+        let output = root.join("public");
+        let git = root.join(".git");
+        fs::create_dir_all(&content).unwrap();
+        fs::create_dir_all(&ignored).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::create_dir_all(&git).unwrap();
+        fs::write(root.join("page.html"), r#"<div class="flex"></div>"#).unwrap();
+        fs::write(root.join("style.css"), ".flex {}").unwrap();
+        fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+
+        let roots = roots(&config(root));
+
+        assert!(!roots.contains(&normalize_path(root)));
+        assert!(roots.contains(&normalize_path(&content)));
+        assert!(roots.contains(&normalize_path(&root.join("page.html"))));
+        assert!(!roots.contains(&normalize_path(&ignored)));
+        assert!(!roots.contains(&normalize_path(&output)));
+        assert!(!roots.contains(&normalize_path(&git)));
+        assert!(!roots.contains(&normalize_path(&root.join("style.css"))));
     }
 
     #[test]

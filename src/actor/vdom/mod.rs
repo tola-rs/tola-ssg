@@ -129,12 +129,23 @@ impl VdomActor {
                     vdom,
                     permalink_change,
                     warnings,
+                    assets,
                 } => {
-                    self.handle_process(config, path, url_path, *vdom, permalink_change, warnings)
-                        .await
+                    self.handle_process(
+                        config,
+                        path,
+                        url_path,
+                        *vdom,
+                        permalink_change,
+                        warnings,
+                        assets,
+                    )
+                    .await
                 }
 
                 VdomMsg::Reload { reason } => self.forward_reload(reason).await,
+
+                VdomMsg::Asset { href } => self.forward_asset(href).await,
 
                 VdomMsg::Error {
                     path,
@@ -186,6 +197,10 @@ impl VdomActor {
             .await;
     }
 
+    async fn forward_asset(&self, href: String) {
+        let _ = self.ws_tx.send(WsMsg::Asset { href }).await;
+    }
+
     fn persist_state(&self) {
         let source_paths = self.state.read(|_, address| address.source_paths());
         match persist_cache(&BUILD_CACHE, &source_paths, &self.root) {
@@ -209,6 +224,7 @@ mod persistence_tests {
     use crate::address::{PermalinkUpdate, SiteIndex};
     use crate::cache::restore_diagnostics;
     use crate::compiler::family::{IndexedDocument, Raw, TolaSite};
+    use crate::config::SiteConfig;
     use crate::core::UrlPath;
     use std::fs;
     use std::sync::Arc;
@@ -251,6 +267,72 @@ mod persistence_tests {
         assert_eq!(state.error_count(), 1, "Should have 1 persisted error");
         let error = state.first_error().unwrap();
         assert_eq!(error.error, "test error");
+    }
+
+    #[tokio::test]
+    async fn unchanged_page_assets_are_sent_as_route_patch() {
+        crate::compiler::page::BUILD_CACHE.clear();
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let source = root.join("content/index.md");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "# Home\n").unwrap();
+
+        let (tx, rx) = mpsc::channel(10);
+        let (ws_tx, mut ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
+        let (actor, _, _, _) = VdomActor::new(rx, ws_tx, root, state);
+        let actor_handle = tokio::spawn(actor.run());
+        let config = Arc::new(SiteConfig::default());
+        let url_path = UrlPath::from_page("/");
+
+        tx.send(VdomMsg::Process {
+            config: Arc::clone(&config),
+            path: source.clone(),
+            url_path: url_path.clone(),
+            vdom: Box::new(make_indexed_doc("html")),
+            permalink_change: None,
+            warnings: Vec::new(),
+            assets: Vec::new(),
+        })
+        .await
+        .unwrap();
+        match ws_rx.recv().await.unwrap() {
+            WsMsg::Reload { reason, .. } => assert_eq!(reason, "initial compile"),
+            _ => panic!("expected initial reload"),
+        }
+
+        tx.send(VdomMsg::Process {
+            config,
+            path: source,
+            url_path: url_path.clone(),
+            vdom: Box::new(make_indexed_doc("html")),
+            permalink_change: None,
+            warnings: Vec::new(),
+            assets: vec!["/styles/site.css?v=12345678".into()],
+        })
+        .await
+        .unwrap();
+
+        match ws_rx.recv().await.unwrap() {
+            WsMsg::Patch {
+                url_path: actual,
+                patches,
+                assets,
+                url_change,
+            } => {
+                assert_eq!(actual, url_path);
+                assert!(patches.is_empty());
+                assert_eq!(assets, vec!["/styles/site.css?v=12345678"]);
+                assert!(url_change.is_none());
+            }
+            _ => panic!("expected route patch with assets"),
+        }
+
+        tx.send(VdomMsg::Shutdown).await.unwrap();
+        actor_handle.await.unwrap();
+        crate::compiler::page::BUILD_CACHE.clear();
     }
 
     #[tokio::test]
@@ -342,6 +424,7 @@ mod persistence_tests {
                     url: UrlPath::from_page("/current"),
                     existing_source,
                 }),
+                vec![],
                 vec![],
             )
             .await;

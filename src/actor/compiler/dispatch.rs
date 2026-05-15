@@ -4,6 +4,7 @@ use std::time::Instant;
 use super::tasks::{abort_task, wait_task};
 use super::{BackgroundTask, BatchResult, CompilerActor};
 use crate::actor::messages::{CompilerMsg, VdomMsg};
+use crate::reload::output;
 
 impl CompilerActor {
     /// Main event loop with interruptible background compilation
@@ -87,12 +88,14 @@ impl CompilerActor {
     async fn on_background_done(&mut self, result: BatchResult) {
         let start = Instant::now();
 
-        for outcome in result.outcomes {
-            self.route(outcome, result.config.clone()).await;
-        }
-
-        self.finish_batch(result.config, result.pages_hash, result.watched_post_paths)
-            .await;
+        self.finish_batch(
+            result.config,
+            result.pages_hash,
+            result.watched_post_paths,
+            result.output_update,
+            result.outcomes,
+        )
+        .await;
         crate::debug!("compile"; "background done in {:?}", start.elapsed());
     }
 
@@ -102,12 +105,35 @@ impl CompilerActor {
         config: std::sync::Arc<crate::config::SiteConfig>,
         hash_before: u64,
         watched_post_paths: Option<Vec<PathBuf>>,
+        mut output_update: output::Update,
+        outcomes: Vec<crate::reload::compile::CompileOutcome>,
     ) {
         if self.state.with_pages(|pages| pages.pages_hash()) != hash_before {
             self.recompile_virtual_users().await;
         }
         if let Some(paths) = watched_post_paths {
-            self.run_watched_post_hooks(&paths);
+            let before = output::snapshot(&config);
+            if self.run_watched_post_hooks(&paths) > 0 {
+                let changed = output::changed(&before, &config);
+                if !changed.is_empty() {
+                    output_update.extend(self.stage_output_change(changed));
+                }
+            }
+        }
+        let has_page_outcome = outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, crate::reload::compile::CompileOutcome::Vdom { .. }));
+        let assets = if output_update.reload_count() == 0 && has_page_outcome {
+            output_update.hrefs().to_vec()
+        } else {
+            Vec::new()
+        };
+        let send_standalone_output = output_update.reload_count() > 0 || !has_page_outcome;
+
+        self.route_all(outcomes, std::sync::Arc::clone(&config), &assets)
+            .await;
+        if send_standalone_output {
+            self.send_output_update(output_update).await;
         }
         self.write_seo_outputs(std::sync::Arc::clone(&config)).await;
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd { config }).await;

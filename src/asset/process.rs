@@ -102,18 +102,18 @@ fn write_asset_route(route: &AssetRoute, config: &SiteConfig, log_file: bool) ->
     Ok(())
 }
 
-/// Process configured global assets.
+/// Process configured nested assets.
 ///
-/// This uses `scan_global_assets` so build, serve, validation, and conflict
+/// This uses `scan_nested_assets` so build, serve, validation, and conflict
 /// detection share the same source -> URL -> output routing rules.
-pub fn process_global_assets(
+pub fn process_nested_assets(
     config: &SiteConfig,
     clean: bool,
     log_file: bool,
 ) -> Result<AssetProcessSummary> {
     let mut summary = AssetProcessSummary::default();
 
-    for route in super::scan_global_assets(config) {
+    for route in super::scan_nested_assets(config) {
         summary.scanned += 1;
         match process_asset_route(&route, config, clean, log_file)
             .with_context(|| format!("asset {}", relative_path(&route.source, config)))?
@@ -122,6 +122,23 @@ pub fn process_global_assets(
             AssetRouteOutcome::Written => summary.written += 1,
         }
     }
+
+    Ok(summary)
+}
+
+/// Process every asset source owned by `build.assets`.
+pub fn process_configured_assets(
+    config: &SiteConfig,
+    clean: bool,
+    log_file: bool,
+) -> Result<AssetProcessSummary> {
+    let mut summary = process_nested_assets(config, clean, log_file)?;
+
+    summary.scanned += super::scan_flatten_assets(config).len();
+    summary.written += process_flatten_assets(config, clean, log_file)?;
+
+    summary.scanned += super::scan_content_assets(config).len();
+    summary.written += process_content_assets(config, clean)?;
 
     Ok(summary)
 }
@@ -166,9 +183,7 @@ pub fn process_content_assets(config: &SiteConfig, clean: bool) -> Result<usize>
     Ok(count)
 }
 
-/// Process flatten assets (files that go to output root)
-///
-/// Returns the number of files processed
+/// Process explicitly configured flatten assets.
 pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) -> Result<usize> {
     let assets = super::scan_flatten_assets(config);
     let mut count = 0;
@@ -202,7 +217,7 @@ pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) 
 ///
 /// Auto-generates CNAME from `site.url` domain when:
 /// 1. `site.url` is defined with a custom domain
-/// 2. No flatten entry outputs as "CNAME", or the source file doesn't exist
+/// 2. No flatten asset outputs as "/CNAME", or the source file doesn't exist
 pub fn process_cname(config: &SiteConfig) -> Result<()> {
     use super::generated::should_generate_cname;
 
@@ -367,49 +382,20 @@ mod tests {
     }
 
     #[test]
-    fn process_global_assets_skips_flatten_files_inside_nested_dirs() {
-        let dir = TempDir::new().unwrap();
-        let assets_dir = dir.path().join("assets");
-        fs::create_dir_all(&assets_dir).unwrap();
-        fs::write(assets_dir.join("logo.png"), "logo").unwrap();
-        fs::write(assets_dir.join("CNAME"), "example.com").unwrap();
+    fn process_nested_assets_reports_scanned_and_written_routes_separately() {
+        use crate::config::section::build::assets::NestedEntry;
 
-        let output_dir = dir.path().join("public");
-        let mut config = SiteConfig::default();
-        config.build.assets.nested =
-            vec![crate::config::section::build::assets::NestedEntry::Simple(
-                assets_dir.clone(),
-            )];
-        config.build.assets.flatten =
-            vec![crate::config::section::build::assets::FlattenEntry::Simple(
-                assets_dir.join("CNAME"),
-            )];
-        config.build.output = output_dir.clone();
-
-        let summary = process_global_assets(&config, true, false).unwrap();
-
-        assert_eq!(summary.scanned, 1);
-        assert_eq!(summary.written, 1);
-        assert!(output_dir.join("assets/logo.png").exists());
-        assert!(!output_dir.join("assets/CNAME").exists());
-    }
-
-    #[test]
-    fn process_global_assets_reports_scanned_and_written_routes_separately() {
         let dir = TempDir::new().unwrap();
         let assets_dir = dir.path().join("assets");
         fs::create_dir_all(&assets_dir).unwrap();
         fs::write(assets_dir.join("logo.png"), "logo").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested =
-            vec![crate::config::section::build::assets::NestedEntry::Simple(
-                assets_dir,
-            )];
+        config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/assets")];
         config.build.output = dir.path().join("public");
 
-        let first = process_global_assets(&config, true, false).unwrap();
-        let second = process_global_assets(&config, false, false).unwrap();
+        let first = process_nested_assets(&config, true, false).unwrap();
+        let second = process_nested_assets(&config, false, false).unwrap();
 
         assert_eq!(
             first,
@@ -428,7 +414,9 @@ mod tests {
     }
 
     #[test]
-    fn process_global_assets_does_not_overwrite_atomic_css_output() {
+    fn process_nested_assets_does_not_overwrite_atomic_css_output() {
+        use crate::config::section::build::assets::NestedEntry;
+
         let dir = TempDir::new().unwrap();
         let assets_dir = dir.path().join("assets/.tola");
         let output_dir = dir.path().join("public");
@@ -438,14 +426,11 @@ mod tests {
         fs::write(output_dir.join(".tola/atomic.css"), "generated css").unwrap();
 
         let mut config = SiteConfig::default();
-        config.build.assets.nested =
-            vec![crate::config::section::build::assets::NestedEntry::Simple(
-                assets_dir,
-            )];
+        config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/.tola")];
         config.build.output = output_dir.clone();
         config.build.atomic_css.enable = true;
 
-        let summary = process_global_assets(&config, true, false).unwrap();
+        let summary = process_nested_assets(&config, true, false).unwrap();
 
         assert_eq!(summary.scanned, 1);
         assert_eq!(summary.written, 0);

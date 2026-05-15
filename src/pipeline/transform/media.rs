@@ -517,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn nobg_site_root_source_resolution_uses_flatten_asset_route() {
+    fn nobg_site_root_source_resolution_uses_file_asset_route() {
         let dir = tempfile::TempDir::new().unwrap();
         let source_raw = dir.path().join("assets/hero.png");
         std::fs::create_dir_all(source_raw.parent().unwrap()).unwrap();
@@ -527,7 +527,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.output = dir.path().join("public");
-        config.build.assets.flatten = vec![FlattenEntry::Simple(source.clone())];
+        config.build.assets.flatten = vec![FlattenEntry::new(source.clone(), "/hero.png")];
 
         let route = PageRoute {
             source: dir.path().join("content/index.typ"),

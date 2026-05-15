@@ -17,7 +17,7 @@ use crate::{
 
 /// Collected files for the build
 pub(super) struct BuildFiles {
-    /// Global asset routes found by the asset scanner.
+    /// Asset routes found by the asset scanners.
     asset_count: usize,
     /// Content file counts by type
     typst_count: usize,
@@ -44,13 +44,16 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<TypstHost> {
 
     // Clear caches for accurate change detection
     freshness::clear_cache();
+    crate::asset::version::clear();
 
     Ok(typst_host)
 }
 
 /// Collect all files to process
 pub(super) fn collect_build_files(config: &SiteConfig) -> BuildFiles {
-    let asset_count = crate::asset::scan_global_assets(config).len();
+    let asset_count = crate::asset::scan_nested_assets(config).len()
+        + crate::asset::scan_flatten_assets(config).len()
+        + crate::asset::scan_content_assets(config).len();
 
     // Count content files by type (content assets handled separately)
     let content_files = collect_all_files(&config.build.content);
@@ -82,7 +85,7 @@ pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<Progres
     ]))
 }
 
-/// Compile content and process assets in parallel
+/// Process assets, then compile content.
 pub(super) fn compile_and_process(
     mode: BuildMode,
     config: &SiteConfig,
@@ -92,38 +95,28 @@ pub(super) fn compile_and_process(
     warnings: &WarningCollector,
     progress: Option<&ProgressLine>,
 ) -> Result<MetadataResult> {
-    let clean = config.build.clean;
+    process_assets(config, progress)?;
 
-    let (metadata_result, assets_result) = rayon::join(
-        || {
-            page::build_static_pages(
-                mode,
-                config,
-                typst_host,
-                state,
-                clean,
-                Some(deps_hash),
-                page::GlobalStateMode::Rebuild,
-                warnings,
-                progress,
-            )
-        },
-        || process_assets(config, clean, progress),
-    );
-
-    let metadata = metadata_result?;
-    assets_result?;
-
-    Ok(metadata)
+    page::build_static_pages(
+        mode,
+        config,
+        typst_host,
+        state,
+        config.build.clean,
+        Some(deps_hash),
+        page::GlobalStateMode::Rebuild,
+        warnings,
+        progress,
+    )
 }
 
-/// Process global asset files through the unified asset routing rules.
-fn process_assets(config: &SiteConfig, clean: bool, progress: Option<&ProgressLine>) -> Result<()> {
+/// Process configured asset files through the unified asset routing rules.
+fn process_assets(config: &SiteConfig, progress: Option<&ProgressLine>) -> Result<()> {
     if is_shutdown() {
         return Err(anyhow!("Aborted"));
     }
 
-    let summary = crate::asset::process_global_assets(config, clean, false).map_err(|e| {
+    let summary = crate::asset::process_configured_assets(config, false, false).map_err(|e| {
         log!("error"; "asset processing failed: {:#}", e);
         anyhow!("Build failed")
     })?;
@@ -172,18 +165,10 @@ pub(super) fn rebuild_iterative_pages(
     }
 }
 
-/// Post-processing (flatten assets, CNAME, HTML 404, content assets)
+/// Post-processing (CNAME, HTML 404, cleanup)
 pub(super) fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
-    let clean = config.build.clean;
-
-    // Flatten assets (files copied to output root)
-    crate::asset::process_flatten_assets(config, clean, false)?;
-
     // Auto-generate CNAME if needed
     crate::asset::process_cname(config)?;
-
-    // Copy content assets (non-page files in content directory)
-    crate::asset::process_content_assets(config, clean)?;
 
     // Copy HTML 404 page if configured
     copy_html_404(config)?;
