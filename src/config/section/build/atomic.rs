@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 /// Native atomic CSS build settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
-#[config(section = "build.atomic_css")]
+#[config(section = "build.atomic_css", status = experimental)]
 pub struct AtomicCssConfig {
     /// Enable Tola Atomic CSS generation.
     #[config(inline_doc = "Enable native Atomic CSS generation")]

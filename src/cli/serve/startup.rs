@@ -6,10 +6,7 @@ use anyhow::Result;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tola_vdom::CacheKey;
 
-use super::{
-    bind_server, init_serve_build, note_request_activity, request_idle_for, scan_pages,
-    set_scan_ready, start_serve_build,
-};
+use super::{bind_server, init_serve_build, ready::ServeReady, scan_pages, start_serve_build};
 use crate::address::SiteIndex;
 use crate::cache::{self, PersistedDiagnostics, PersistedError, RemovedFile};
 use crate::compiler::dependency::{self, collect_virtual_dependents};
@@ -31,6 +28,7 @@ const STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     use crate::core::{set_healthy, set_serving};
     let state = Arc::new(SiteIndex::new());
+    let ready = Arc::new(ServeReady::new());
 
     if config.build.clean
         && let Err(e) = cache::clear_cache_dir(config.get_root())
@@ -49,18 +47,19 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     let bound_server = bind_server()?;
 
     SCHEDULER.start_workers();
-    set_scan_ready(false);
-    note_request_activity();
+    ready.reset_startup();
 
     let config_handle = config::config_handle();
     let scan_state = Arc::clone(&state);
+    let scan_ready = Arc::clone(&ready);
     let needs_full_build = !has_cache;
     std::thread::spawn(move || {
         let config_arc = config_handle.current();
-        let scan_success = !needs_full_build || progressive_scan(&config_arc, &scan_state);
+        let scan_success =
+            !needs_full_build || progressive_scan(&config_arc, &scan_state, &scan_ready);
 
         if !scan_success {
-            set_scan_ready(false);
+            scan_ready.set_scan_ready(false);
             if needs_full_build {
                 set_serving();
             }
@@ -71,7 +70,7 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
         // Full-build path uses progressive_scan() before background warmup,
         // so URL->source mapping is available for on-demand requests.
         if needs_full_build {
-            set_scan_ready(true);
+            scan_ready.set_scan_ready(true);
         }
 
         if needs_full_build {
@@ -81,11 +80,17 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
             set_serving();
             set_healthy(true);
             let typst_host = Arc::new(TypstHost::for_config(&config_arc));
-            start_serve_build(Arc::clone(&config_arc), typst_host, Arc::clone(&scan_state));
+            start_serve_build(
+                Arc::clone(&config_arc),
+                typst_host,
+                Arc::clone(&scan_state),
+                Arc::clone(&scan_ready),
+            );
             return;
         }
 
-        let build_success = startup_with_cache(&config_arc, &scan_state);
+        let build_success = startup_with_cache(&config_arc, &scan_state, &scan_ready);
+        scan_ready.set_startup_done();
 
         set_healthy(build_success);
 
@@ -98,10 +103,10 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
         }
     });
 
-    bound_server.run(state)
+    bound_server.run(state, ready)
 }
 
-fn progressive_scan(config: &SiteConfig, state: &SiteIndex) -> bool {
+fn progressive_scan(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady) -> bool {
     use crate::core::is_shutdown;
 
     let typst_host = match init_serve_build(config) {
@@ -111,6 +116,7 @@ fn progressive_scan(config: &SiteConfig, state: &SiteIndex) -> bool {
             return false;
         }
     };
+    ready.set_init_ready();
 
     if is_shutdown() {
         return false;
@@ -128,22 +134,23 @@ fn progressive_scan(config: &SiteConfig, state: &SiteIndex) -> bool {
     true
 }
 
-fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
+fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady) -> bool {
     let typst_host = match init_serve_build(config) {
         Ok(host) => host,
         Err(e) => {
             log!("build"; "cache startup init failed: {}", e);
-            set_scan_ready(false);
+            ready.set_scan_ready(false);
             return false;
         }
     };
+    ready.set_init_ready();
 
     if let Err(e) = scan_pages(config, &typst_host, state) {
         log!("scan"; "cache startup scan failed: {}", e);
-        set_scan_ready(false);
+        ready.set_scan_ready(false);
         return false;
     }
-    set_scan_ready(true);
+    ready.set_scan_ready(true);
 
     let root = config.get_root();
     let mut diagnostics = cache::restore_diagnostics(root).unwrap_or_default();
@@ -197,6 +204,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
             &typst_host,
             state,
             &mut diagnostics,
+            ready,
         );
     }
 
@@ -210,6 +218,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex) -> bool {
                 &typst_host,
                 state,
                 &mut diagnostics,
+                ready,
             );
             stats.success += virtual_stats.success;
             stats.failed += virtual_stats.failed;
@@ -372,10 +381,11 @@ fn compile_startup_batch(
     typst_host: &TypstHost,
     state: &SiteIndex,
     diagnostics: &mut PersistedDiagnostics,
+    ready: &ServeReady,
 ) -> StartupCompileStats {
     let mut stats = StartupCompileStats::default();
     for path_chunk in paths.chunks(STARTUP_COMPILE_BATCH_SIZE) {
-        while !request_idle_for(STARTUP_IDLE_GRACE) {
+        while !ready.request_idle_for(STARTUP_IDLE_GRACE) {
             if crate::core::is_shutdown() {
                 return stats;
             }
@@ -499,6 +509,13 @@ mod tests {
         url.output_html_path(&config.paths().output_dir())
     }
 
+    fn ready() -> ServeReady {
+        let ready = ServeReady::new();
+        ready.set_init_ready();
+        ready.set_scan_ready(true);
+        ready
+    }
+
     #[test]
     fn startup_batch_skipped_draft_cleans_cached_output() {
         let dir = TempDir::new().unwrap();
@@ -526,6 +543,7 @@ mod tests {
         let mut cached_urls = FxHashMap::default();
         cached_urls.insert(source.clone(), old_url.clone());
         let host = typst_host(&config);
+        let ready = ready();
 
         let stats = compile_startup_batch(
             std::slice::from_ref(&source),
@@ -534,6 +552,7 @@ mod tests {
             &host,
             &state,
             &mut diagnostics,
+            &ready,
         );
 
         assert_eq!(stats.success, 0);
@@ -562,6 +581,7 @@ mod tests {
         let mut diagnostics = PersistedDiagnostics::new();
         diagnostics.push_error(PersistedError::new(&rel, "/post/", "old compile error"));
         let host = typst_host(&config);
+        let ready = ready();
 
         let stats = compile_startup_batch(
             std::slice::from_ref(&source),
@@ -570,6 +590,7 @@ mod tests {
             &host,
             &state,
             &mut diagnostics,
+            &ready,
         );
 
         let output_file = output_file_for(&config, &UrlPath::from_page("/post/"));
@@ -598,6 +619,7 @@ mod tests {
         let first = crate::utils::path::normalize_path(&first);
         let second = crate::utils::path::normalize_path(&second);
         let host = typst_host(&config);
+        let ready = ready();
 
         let stats = compile_startup_batch(
             &[first.clone(), second.clone()],
@@ -606,6 +628,7 @@ mod tests {
             &host,
             &state,
             &mut PersistedDiagnostics::new(),
+            &ready,
         );
 
         let first_html = output_file_for(&config, &UrlPath::from_page("/first/"));
@@ -684,6 +707,7 @@ mod tests {
         cached_urls.insert(source.clone(), old_url.clone());
         let mut diagnostics = PersistedDiagnostics::new();
         let host = typst_host(&config);
+        let ready = ready();
 
         let stats = compile_startup_batch(
             std::slice::from_ref(&source),
@@ -692,6 +716,7 @@ mod tests {
             &host,
             &state,
             &mut diagnostics,
+            &ready,
         );
 
         let new_output = output_file_for(&config, &new_url);

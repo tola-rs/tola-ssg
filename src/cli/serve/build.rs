@@ -19,6 +19,8 @@ use crate::{
     debug, embed, freshness, hooks, log, seo,
 };
 
+use super::ready::ServeReady;
+
 const WARMUP_IDLE_GRACE: Duration = Duration::from_millis(1000);
 const WARMUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -90,6 +92,7 @@ pub fn serve_build(
     config: &SiteConfig,
     typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
+    ready: Arc<ServeReady>,
 ) -> Result<()> {
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
@@ -103,11 +106,17 @@ pub fn serve_build(
         Arc::new(config.clone()),
         Arc::clone(&typst_host),
         Arc::clone(&state),
+        ready.as_ref(),
     );
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
-    warnings.extend(recompile_virtual_users(config, &typst_host, &state));
+    warnings.extend(recompile_virtual_users(
+        config,
+        &typst_host,
+        &state,
+        ready.as_ref(),
+    ));
 
     // Post-processing (configured assets already done in init_serve_build)
     // CNAME already done in init_serve_build
@@ -132,11 +141,13 @@ pub fn start_serve_build(
     config: Arc<SiteConfig>,
     typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
+    ready: Arc<ServeReady>,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = serve_build(&config, typst_host, state) {
+        if let Err(e) = serve_build(&config, typst_host, state, Arc::clone(&ready)) {
             log!("build"; "background warmup failed: {}", e);
         }
+        ready.set_startup_done();
     });
 }
 
@@ -145,15 +156,14 @@ fn warm_site_pages(
     config: Arc<SiteConfig>,
     typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
+    ready: &ServeReady,
 ) -> Vec<BuildWarning> {
-    use crate::cli::serve::request_idle_for;
-
     let mut warnings = Vec::new();
     for path in content_files {
         // Only spend cycles on full-site warmup when the request path has been
         // quiet for a moment. This keeps startup eager work from racing page
         // loads or SPA navigation bursts.
-        while !request_idle_for(WARMUP_IDLE_GRACE) {
+        while !ready.request_idle_for(WARMUP_IDLE_GRACE) {
             if is_shutdown() {
                 return warnings;
             }
@@ -190,8 +200,8 @@ fn recompile_virtual_users(
     config: &SiteConfig,
     typst_host: &TypstHost,
     state: &SiteIndex,
+    ready: &ServeReady,
 ) -> Vec<BuildWarning> {
-    use crate::cli::serve::request_idle_for;
     use crate::compiler::dependency::{collect_virtual_dependents, flush_thread_local_deps};
     use crate::compiler::page::cache_vdom;
     use crate::reload::compile::{CompileOutcome, compile_page};
@@ -208,7 +218,7 @@ fn recompile_virtual_users(
 
     // Recompile each dependent page (compile_page handles write + cache)
     for path in &all_dependents {
-        while !request_idle_for(WARMUP_IDLE_GRACE) {
+        while !ready.request_idle_for(WARMUP_IDLE_GRACE) {
             if is_shutdown() {
                 return warnings;
             }

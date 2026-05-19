@@ -173,11 +173,37 @@ impl CompileScheduler {
         }
 
         // Atomically join or create pending
-        if self.join_or_create_pending(&path, priority, config, typst_host, state, tx) {
+        if self.join_or_create_pending(&path, priority, config, typst_host, state, Some(tx)) {
             self.enqueue(path, priority);
         }
 
         Self::recv(rx)
+    }
+
+    /// Request compilation without waiting for the result.
+    pub fn schedule(
+        &self,
+        path: PathBuf,
+        priority: Priority,
+        config: Arc<SiteConfig>,
+        typst_host: Arc<TypstHost>,
+        state: Arc<SiteIndex>,
+    ) {
+        if self
+            .get_cached(&path)
+            .and_then(Self::reusable_cached_result)
+            .is_some()
+        {
+            return;
+        }
+
+        if self.active.contains_key(&path) {
+            return;
+        }
+
+        if self.join_or_create_pending(&path, priority, config, typst_host, state, None) {
+            self.enqueue(path, priority);
+        }
     }
 
     /// Invalidate cache (on file change).
@@ -260,12 +286,14 @@ impl CompileScheduler {
         config: Arc<SiteConfig>,
         typst_host: Arc<TypstHost>,
         state: Arc<SiteIndex>,
-        tx: Waiter,
+        waiter: Option<Waiter>,
     ) -> bool {
         match self.pending.entry(path.to_path_buf()) {
             Entry::Occupied(mut e) => {
                 let pending = e.get_mut();
-                pending.waiters.push(tx);
+                if let Some(tx) = waiter {
+                    pending.waiters.push(tx);
+                }
                 if priority > pending.priority {
                     pending.priority = priority;
                     pending.config = config;
@@ -282,7 +310,7 @@ impl CompileScheduler {
                     config,
                     typst_host,
                     state,
-                    waiters: vec![tx],
+                    waiters: waiter.into_iter().collect(),
                 });
                 true // new task
             }
@@ -578,7 +606,7 @@ mod tests {
             Arc::clone(&background_config),
             Arc::clone(&background_host),
             Arc::clone(&background_state),
-            background_tx,
+            Some(background_tx),
         ));
 
         let (active_tx, _active_rx) = channel::bounded(1);
@@ -588,7 +616,7 @@ mod tests {
             Arc::clone(&active_config),
             Arc::clone(&active_host),
             Arc::clone(&active_state),
-            active_tx,
+            Some(active_tx),
         ));
 
         let (job, waiters) = scheduler
@@ -604,5 +632,39 @@ mod tests {
         assert!(Arc::ptr_eq(&job.typst_host, &active_host));
         assert!(Arc::ptr_eq(&job.state, &active_state));
         assert_eq!(waiters.len(), 2);
+    }
+
+    #[test]
+    fn scheduled_task_without_waiter_can_be_claimed() {
+        let scheduler = CompileScheduler::new();
+        let dir = TempDir::new().unwrap();
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        let config = Arc::new(config);
+        let host = Arc::new(TypstHost::for_config(&config));
+        let state = Arc::new(SiteIndex::new());
+        let path = dir.path().join("content/page.typ");
+
+        scheduler.schedule(
+            path.clone(),
+            Priority::Active,
+            Arc::clone(&config),
+            Arc::clone(&host),
+            Arc::clone(&state),
+        );
+
+        let (job, waiters) = scheduler
+            .claim(Task {
+                path: path.clone(),
+                priority: Priority::Active,
+            })
+            .expect("scheduled task should be claimable");
+
+        assert_eq!(job.path, path);
+        assert_eq!(job.priority, Priority::Active);
+        assert!(Arc::ptr_eq(&job.config, &config));
+        assert!(Arc::ptr_eq(&job.typst_host, &host));
+        assert!(Arc::ptr_eq(&job.state, &state));
+        assert!(waiters.is_empty());
     }
 }

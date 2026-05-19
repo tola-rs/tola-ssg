@@ -591,6 +591,7 @@ impl SiteConfig {
         self.validate.validate_field_status(&mut diag);
         self.deploy.validate_field_status(&mut diag);
         self.build.svg.validate_field_status(&mut diag);
+        self.build.atomic_css.validate_field_status(&mut diag);
 
         // Validate each section
         self.site
