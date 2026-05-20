@@ -386,7 +386,11 @@ fn validate_target(
 ) {
     target.validate_indexed(field, idx, total, diag);
 
-    let label = (total > 1).then(|| format!("[{idx}] ")).unwrap_or_default();
+    let label = if total > 1 {
+        format!("[{idx}] ")
+    } else {
+        String::new()
+    };
     let logical = target.logical_path();
     if logical.contains('/') {
         diag.error(

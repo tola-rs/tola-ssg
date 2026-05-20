@@ -14,6 +14,24 @@ use tola_vdom::prelude::*;
 use super::VdomActor;
 use super::permalink::PermalinkHandler;
 
+pub(super) struct ProcessInput {
+    pub(super) config: Arc<SiteConfig>,
+    pub(super) path: PathBuf,
+    pub(super) url_path: UrlPath,
+    pub(super) vdom: Document<Indexed>,
+    pub(super) permalink_change: Option<PermalinkUpdate>,
+    pub(super) warnings: Vec<String>,
+    pub(super) assets: Vec<String>,
+}
+
+struct RouteContext {
+    rel_path: PathBuf,
+    url_path: UrlPath,
+    priority: Option<Priority>,
+    url_change: Option<UrlChange>,
+    assets: Vec<String>,
+}
+
 impl VdomActor {
     fn persist_diagnostics_state(&self) {
         if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
@@ -66,16 +84,17 @@ impl VdomActor {
         }
     }
 
-    pub(super) async fn handle_process(
-        &mut self,
-        config: Arc<SiteConfig>,
-        path: PathBuf,
-        url_path: UrlPath,
-        new_vdom: Document<Indexed>,
-        permalink_change: Option<PermalinkUpdate>,
-        warnings: Vec<String>,
-        assets: Vec<String>,
-    ) {
+    pub(super) async fn handle_process(&mut self, input: ProcessInput) {
+        let ProcessInput {
+            config,
+            path,
+            url_path,
+            vdom: new_vdom,
+            permalink_change,
+            warnings,
+            assets,
+        } = input;
+
         // Store warnings for this path
         let rel_path = self.to_relative(&path);
         let rel_path_str = rel_path.display().to_string();
@@ -215,39 +234,44 @@ impl VdomActor {
             Priority::Direct
         });
         let url_change = old_url.map(|old| UrlChange::new(old, url_path.clone()));
+        let route = RouteContext {
+            rel_path,
+            url_path,
+            priority,
+            url_change,
+            assets,
+        };
 
         match outcome {
             DiffOutcome::Edits(edits, new_vdom) => {
-                self.handle_edits(
-                    &rel_path, url_path, edits, new_vdom, priority, url_change, assets,
-                )
-                .await;
+                self.handle_edits(route, edits, new_vdom).await;
             }
             DiffOutcome::Initial => {
-                self.handle_initial(&rel_path, url_path, priority, url_change)
-                    .await;
+                self.handle_initial(route).await;
             }
             DiffOutcome::Unchanged => {
-                self.handle_unchanged(&rel_path, url_path, priority, url_change, assets)
-                    .await;
+                self.handle_unchanged(route).await;
             }
             DiffOutcome::NeedsReload { reason } => {
-                self.handle_needs_reload(&rel_path, url_path, reason, priority, url_change)
-                    .await;
+                self.handle_needs_reload(route, reason).await;
             }
         }
     }
 
     async fn handle_edits(
         &mut self,
-        rel_path: &Path,
-        url_path: UrlPath,
+        route: RouteContext,
         edits: Vec<DiffEdit>,
         new_vdom: Box<Document<Indexed>>,
-        priority: Option<Priority>,
-        url_change: Option<UrlChange>,
-        assets: Vec<String>,
     ) {
+        let RouteContext {
+            rel_path,
+            url_path,
+            priority,
+            url_change,
+            assets,
+        } = route;
+
         crate::debug_do! {
             let edit_summary: Vec<String> = edits.iter().map(|edit| edit.summary()).collect();
             crate::log!("vdom"; "reload: {} ({} edits): {:?}", rel_path.display(), edits.len(), edit_summary);
@@ -279,13 +303,15 @@ impl VdomActor {
         }
     }
 
-    async fn handle_initial(
-        &mut self,
-        rel_path: &Path,
-        url_path: UrlPath,
-        priority: Option<Priority>,
-        url_change: Option<UrlChange>,
-    ) {
+    async fn handle_initial(&mut self, route: RouteContext) {
+        let RouteContext {
+            rel_path,
+            url_path,
+            priority,
+            url_change,
+            ..
+        } = route;
+
         crate::debug!("vdom"; "initial {}", rel_path.display());
         self.batch
             .push_reload(rel_path.display().to_string(), priority);
@@ -299,14 +325,15 @@ impl VdomActor {
             .await;
     }
 
-    async fn handle_unchanged(
-        &mut self,
-        rel_path: &Path,
-        url_path: UrlPath,
-        priority: Option<Priority>,
-        url_change: Option<UrlChange>,
-        assets: Vec<String>,
-    ) {
+    async fn handle_unchanged(&mut self, route: RouteContext) {
+        let RouteContext {
+            rel_path,
+            url_path,
+            priority,
+            url_change,
+            assets,
+        } = route;
+
         if let Some(change) = url_change {
             // Permalink changed but content unchanged
             // Don't push to results - permalink change is already logged separately
@@ -336,14 +363,15 @@ impl VdomActor {
         }
     }
 
-    async fn handle_needs_reload(
-        &mut self,
-        rel_path: &Path,
-        url_path: UrlPath,
-        reason: String,
-        priority: Option<Priority>,
-        url_change: Option<UrlChange>,
-    ) {
+    async fn handle_needs_reload(&mut self, route: RouteContext, reason: String) {
+        let RouteContext {
+            rel_path,
+            url_path,
+            priority,
+            url_change,
+            ..
+        } = route;
+
         crate::debug!("vdom"; "reload: {}: {}", rel_path.display(), reason);
         self.batch
             .push_reload(rel_path.display().to_string(), priority);

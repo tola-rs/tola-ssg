@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use rustc_hash::FxHashSet;
 
-use super::tasks::spawn_batch;
+use super::tasks::{BatchTask, spawn_batch};
 use super::utils::{
     cleanup_removed_assets, format_asset_reason, log_asset_errors, output_path_for_asset,
     process_assets, process_configured_assets,
@@ -127,17 +127,17 @@ impl CompilerActor {
             None
         } else {
             let (config, typst_host) = self.current_config_and_typst_host();
-            Some(spawn_batch(
-                affected,
+            Some(spawn_batch(BatchTask {
+                paths: affected,
                 config,
                 typst_host,
-                Arc::clone(&self.state),
+                state: Arc::clone(&self.state),
                 pages_hash,
                 watched_post_paths,
-                direct_outcomes,
+                initial_outcomes: direct_outcomes,
                 output_update,
-                self.page_epoch.ticket(),
-            ))
+                ticket: self.page_epoch.ticket(),
+            }))
         }
     }
 
@@ -245,9 +245,11 @@ impl CompilerActor {
 
         let before = output::snapshot(&config);
         let changed = self.refresh_atomic_css(config).await;
-        let update = changed
-            .then(|| self.stage_internal_outputs(Some(&before)))
-            .unwrap_or_default();
+        let update = if changed {
+            self.stage_internal_outputs(Some(&before))
+        } else {
+            output::Update::default()
+        };
         (changed, update)
     }
 

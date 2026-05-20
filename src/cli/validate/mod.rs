@@ -4,7 +4,7 @@ mod report;
 mod scan;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -45,6 +45,16 @@ type ParsedScanResult = (
     Vec<Vec<scan::ScannedLink>>,
     Vec<(String, String)>,
 );
+
+struct LinkValidation<'a> {
+    root: &'a Path,
+    config: &'a SiteConfig,
+    host: &'a TypstHost,
+    state: &'a SiteIndex,
+    all_pages: &'a [CompiledPage],
+    typst_links: &'a HashMap<PathBuf, Vec<scan::ScannedLink>>,
+    report: &'a Arc<RwLock<ValidationReport>>,
+}
 
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
@@ -120,13 +130,15 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     // Validate links (Typst links from unified scan, Markdown scanned separately)
     validate_all_links(
         &files,
-        &root,
-        config,
-        &host,
-        &state,
-        &all_pages,
-        &typst_links,
-        &report,
+        LinkValidation {
+            root: &root,
+            config,
+            host: &host,
+            state: &state,
+            all_pages: &all_pages,
+            typst_links: &typst_links,
+            report: &report,
+        },
     );
 
     // Log page link results
@@ -160,38 +172,43 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
 }
 
 /// Validate all links using pre-scanned Typst links and scanning Markdown files
-fn validate_all_links(
-    files: &[PathBuf],
-    root: &std::path::Path,
-    config: &SiteConfig,
-    host: &TypstHost,
-    state: &SiteIndex,
-    all_pages: &[CompiledPage],
-    typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
-    report: &Arc<RwLock<ValidationReport>>,
-) {
+fn validate_all_links(files: &[PathBuf], validation: LinkValidation<'_>) {
     // Process Typst links (already scanned in build_address_space)
-    for (file, links) in typst_links {
+    for (file, links) in validation.typst_links {
         let source = file
-            .strip_prefix(root)
+            .strip_prefix(validation.root)
             .unwrap_or(file)
             .to_string_lossy()
             .to_string();
 
-        validate_links(&source, file, links, config, all_pages, report, state);
+        validate_links(
+            &source,
+            file,
+            links,
+            validation.config,
+            validation.all_pages,
+            validation.report,
+            validation.state,
+        );
     }
 
     // Separate Markdown files and scan them
     let (_, markdown_files) = ContentKind::partition_by_kind(files);
 
     // Process Markdown files in parallel.
-    let markdown_results: Vec<_> = state.with_pages(|store| {
+    let markdown_results: Vec<_> = validation.state.with_pages(|store| {
         markdown_files
             .par_iter()
             .filter_map(|file| {
-                scan_markdown(file, root, config, host, store)
-                    .ok()
-                    .map(|result| ((*file).clone(), result))
+                scan_markdown(
+                    file,
+                    validation.root,
+                    validation.config,
+                    validation.host,
+                    store,
+                )
+                .ok()
+                .map(|result| ((*file).clone(), result))
             })
             .collect()
     });
@@ -201,10 +218,10 @@ fn validate_all_links(
             &result.source,
             &file,
             &result.links,
-            config,
-            all_pages,
-            report,
-            state,
+            validation.config,
+            validation.all_pages,
+            validation.report,
+            validation.state,
         );
     }
 }

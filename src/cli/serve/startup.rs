@@ -328,22 +328,26 @@ fn relative_source_path(config: &SiteConfig, path: &Path) -> String {
         .to_string()
 }
 
+struct StartupContext<'a> {
+    cached_urls: &'a FxHashMap<PathBuf, UrlPath>,
+    config: &'a SiteConfig,
+    state: &'a SiteIndex,
+    diagnostics: &'a mut PersistedDiagnostics,
+}
+
 fn handle_startup_vdom_outcome(
     path: PathBuf,
     url_path: UrlPath,
     vdom: Box<tola_vdom::Document<crate::compiler::family::Indexed>>,
     warnings: Vec<String>,
-    cached_urls: &FxHashMap<PathBuf, UrlPath>,
-    config: &SiteConfig,
-    state: &SiteIndex,
-    diagnostics: &mut PersistedDiagnostics,
+    ctx: &mut StartupContext<'_>,
 ) {
-    cleanup_cached_url_if_changed(cached_urls, &path, &url_path, config, state);
+    cleanup_cached_url_if_changed(ctx.cached_urls, &path, &url_path, ctx.config, ctx.state);
     cache_vdom(&url_path, *vdom);
 
-    let rel = relative_source_path(config, &path);
-    diagnostics.clear_errors_for(&rel);
-    diagnostics.set_warnings(&rel, warnings);
+    let rel = relative_source_path(ctx.config, &path);
+    ctx.diagnostics.clear_errors_for(&rel);
+    ctx.diagnostics.set_warnings(&rel, warnings);
 }
 
 fn handle_startup_error_outcome(
@@ -384,6 +388,13 @@ fn compile_startup_batch(
     ready: &ServeReady,
 ) -> StartupCompileStats {
     let mut stats = StartupCompileStats::default();
+    let mut ctx = StartupContext {
+        cached_urls,
+        config,
+        state,
+        diagnostics,
+    };
+
     for path_chunk in paths.chunks(STARTUP_COMPILE_BATCH_SIZE) {
         while !ready.request_idle_for(STARTUP_IDLE_GRACE) {
             if crate::core::is_shutdown() {
@@ -409,16 +420,7 @@ fn compile_startup_batch(
                     warnings,
                     ..
                 } => {
-                    handle_startup_vdom_outcome(
-                        path,
-                        url_path,
-                        vdom,
-                        warnings,
-                        cached_urls,
-                        config,
-                        state,
-                        diagnostics,
-                    );
+                    handle_startup_vdom_outcome(path, url_path, vdom, warnings, &mut ctx);
                     stats.success += 1;
                 }
                 CompileOutcome::Error {
@@ -426,23 +428,29 @@ fn compile_startup_batch(
                     url_path,
                     error,
                 } => {
-                    handle_startup_error_outcome(path, url_path, error, config, diagnostics);
+                    handle_startup_error_outcome(
+                        path,
+                        url_path,
+                        error,
+                        ctx.config,
+                        ctx.diagnostics,
+                    );
                     stats.failed += 1;
                 }
                 CompileOutcome::Skipped => {
                     handle_startup_skipped_outcome(
                         input_path,
                         &rel_input,
-                        cached_urls,
-                        config,
-                        state,
-                        diagnostics,
+                        ctx.cached_urls,
+                        ctx.config,
+                        ctx.state,
+                        ctx.diagnostics,
                     );
                     stats.skipped += 1;
                 }
                 CompileOutcome::Reload { reason } => {
                     debug!("startup"; "startup compile requested reload: {}", reason);
-                    diagnostics.clear_for(&rel_input);
+                    ctx.diagnostics.clear_for(&rel_input);
                     stats.skipped += 1;
                 }
             }

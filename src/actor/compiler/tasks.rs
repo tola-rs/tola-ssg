@@ -11,18 +11,32 @@ use crate::reload::output;
 
 use super::{BackgroundTask, BatchResult};
 
+pub(super) struct BatchTask {
+    pub(super) paths: Vec<PathBuf>,
+    pub(super) config: Arc<SiteConfig>,
+    pub(super) typst_host: Arc<TypstHost>,
+    pub(super) state: Arc<SiteIndex>,
+    pub(super) pages_hash: u64,
+    pub(super) watched_post_paths: Option<Vec<PathBuf>>,
+    pub(super) initial_outcomes: Vec<CompileOutcome>,
+    pub(super) output_update: output::Update,
+    pub(super) ticket: PageStateTicket,
+}
+
 /// Spawn background compilation task.
-pub(super) fn spawn_batch(
-    paths: Vec<PathBuf>,
-    config: Arc<SiteConfig>,
-    typst_host: Arc<TypstHost>,
-    state: Arc<SiteIndex>,
-    pages_hash: u64,
-    watched_post_paths: Option<Vec<PathBuf>>,
-    initial_outcomes: Vec<CompileOutcome>,
-    output_update: output::Update,
-    ticket: PageStateTicket,
-) -> BackgroundTask {
+pub(super) fn spawn_batch(task: BatchTask) -> BackgroundTask {
+    let BatchTask {
+        paths,
+        config,
+        typst_host,
+        state,
+        pages_hash,
+        watched_post_paths,
+        initial_outcomes,
+        output_update,
+        ticket,
+    } = task;
+
     tokio::spawn(async move {
         let mut outcomes = initial_outcomes;
         outcomes.extend(

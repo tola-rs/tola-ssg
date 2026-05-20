@@ -130,7 +130,7 @@ impl FeedConfig {
             toml::Value::try_from(default.features)
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
-            format!(
+            format_args!(
                 "{} | {}",
                 FeedFeature::FullText.as_str(),
                 FeedFeature::NoScript.as_str()

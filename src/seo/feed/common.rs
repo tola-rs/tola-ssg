@@ -81,7 +81,7 @@ pub fn summary_html(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> 
 
 pub fn entry_body(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<String> {
     feed.has_feature(FeedFeature::FullText)
-        .then(|| page.feed_body.as_deref())
+        .then_some(page.feed_body.as_deref())
         .flatten()
         .map(|html| prepare_html(html, page, config, feed))
 }

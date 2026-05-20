@@ -41,28 +41,6 @@ struct BuildContext<'a> {
 }
 
 impl<'a> BuildContext<'a> {
-    fn new(
-        mode: BuildMode,
-        config: &'a SiteConfig,
-        typst_host: &'a TypstHost,
-        store: &'a StoredPageMap,
-        clean: bool,
-        deps_hash: Option<ContentHash>,
-        global_state: GlobalStateMode,
-        warnings: &'a WarningCollector,
-    ) -> Self {
-        Self {
-            mode,
-            config,
-            typst_host,
-            store,
-            clean,
-            deps_hash,
-            global_state,
-            warnings,
-        }
-    }
-
     fn label(&self) -> &str {
         &self.config.build.meta.label
     }
@@ -106,6 +84,30 @@ impl GlobalStateMode {
     }
 }
 
+pub struct StaticPageBuild<'a> {
+    pub mode: BuildMode,
+    pub config: &'a SiteConfig,
+    pub typst_host: &'a TypstHost,
+    pub state: &'a SiteIndex,
+    pub clean: bool,
+    pub deps_hash: Option<ContentHash>,
+    pub global_state: GlobalStateMode,
+    pub warnings: &'a WarningCollector,
+    pub progress: Option<&'a ProgressLine>,
+}
+
+pub struct IterativePageBuild<'a> {
+    pub mode: BuildMode,
+    pub paths: &'a [PathBuf],
+    pub config: &'a SiteConfig,
+    pub typst_host: &'a TypstHost,
+    pub store: &'a StoredPageMap,
+    pub clean: bool,
+    pub deps_hash: Option<ContentHash>,
+    pub snapshot: Option<FileSnapshot>,
+    pub warnings: &'a WarningCollector,
+}
+
 /// Compile all pages. Static pages are written after conflict detection passes
 ///
 /// Uses pre-scan optimization: always scans first to collect metadata and
@@ -113,29 +115,33 @@ impl GlobalStateMode {
 ///
 /// `global_state` controls whether this build owns page storage/address-space
 /// rebuilding or reuses state that a separate scan phase already populated.
-pub fn build_static_pages(
-    mode: BuildMode,
-    config: &SiteConfig,
-    typst_host: &TypstHost,
-    state: &SiteIndex,
-    clean: bool,
-    deps_hash: Option<ContentHash>,
-    global_state: GlobalStateMode,
-    warnings: &WarningCollector,
-    progress: Option<&ProgressLine>,
-) -> Result<MetadataResult> {
+pub fn build_static_pages(build: StaticPageBuild<'_>) -> Result<MetadataResult> {
+    let StaticPageBuild {
+        mode,
+        config,
+        typst_host,
+        state,
+        clean,
+        deps_hash,
+        global_state,
+        warnings,
+        progress,
+    } = build;
+
     if global_state.rebuilds_global_state() {
         let next = SiteIndex::new();
         let build = next.with_pages(|store| {
             build_static_pages_with_store(
-                mode,
-                config,
-                typst_host,
-                store,
-                clean,
-                deps_hash,
-                global_state,
-                warnings,
+                BuildContext {
+                    mode,
+                    config,
+                    typst_host,
+                    store,
+                    clean,
+                    deps_hash,
+                    global_state,
+                    warnings,
+                },
                 progress,
             )
         })?;
@@ -147,14 +153,16 @@ pub fn build_static_pages(
     state
         .with_pages(|store| {
             build_static_pages_with_store(
-                mode,
-                config,
-                typst_host,
-                store,
-                clean,
-                deps_hash,
-                global_state,
-                warnings,
+                BuildContext {
+                    mode,
+                    config,
+                    typst_host,
+                    store,
+                    clean,
+                    deps_hash,
+                    global_state,
+                    warnings,
+                },
                 progress,
             )
         })
@@ -162,31 +170,14 @@ pub fn build_static_pages(
 }
 
 fn build_static_pages_with_store(
-    mode: BuildMode,
-    config: &SiteConfig,
-    typst_host: &TypstHost,
-    store: &StoredPageMap,
-    clean: bool,
-    deps_hash: Option<ContentHash>,
-    global_state: GlobalStateMode,
-    warnings: &WarningCollector,
+    ctx: BuildContext<'_>,
     progress: Option<&ProgressLine>,
 ) -> Result<StaticBuild> {
-    let ctx = BuildContext::new(
-        mode,
-        config,
-        typst_host,
-        store,
-        clean,
-        deps_hash,
-        global_state,
-        warnings,
-    );
-    let content_files = collect_content_files(&config.build.content);
+    let content_files = collect_content_files(&ctx.config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Always pre-scan to collect metadata and identify iterative pages
-    let scan_result = scan_pages(config, typst_host, &typst_files, &markdown_files);
+    let scan_result = scan_pages(ctx.config, ctx.typst_host, &typst_files, &markdown_files);
     let drafts_skipped = scan_result.drafts_skipped;
 
     // Report scan phase errors immediately
@@ -206,26 +197,31 @@ fn build_static_pages_with_store(
 
     // Populate page store from scan results BEFORE compilation.
     if ctx.rebuilds_global_state() {
-        populate_pages(&scan_result.scanned, config, store);
+        populate_pages(&scan_result.scanned, ctx.config, ctx.store);
     }
 
     // Compile Typst files
     // Always create new batcher for compile, reuse only snapshot from scan
     // This avoids duplicate warnings (scan already emitted them)
     let snapshot = scan_result.snapshot();
-    let inputs = build_site_inputs(config, store)?;
+    let inputs = build_site_inputs(ctx.config, ctx.store)?;
     // Always compile with per-file @tola/current inputs to keep build
     // behavior aligned with serve and avoid scan-time under-detection when
     // current-dependent code only appears in page body.
     let batch = create_batch_with_inputs(
-        config.get_root(),
-        typst_host,
+        ctx.config.get_root(),
+        ctx.typst_host,
         &typst_paths,
         snapshot,
         inputs,
     )?;
-    let typst_results =
-        compile_typst_batch_with_current_inputs(&batch, &typst_paths, config, store, progress)?;
+    let typst_results = compile_typst_batch_with_current_inputs(
+        &batch,
+        &typst_paths,
+        ctx.config,
+        ctx.store,
+        progress,
+    )?;
 
     let typst_processed = process_typst_files(&ctx, &typst_paths, typst_results);
     let markdown_processed = process_markdown_files(&ctx, &markdown_paths, progress);
@@ -235,9 +231,9 @@ fn build_static_pages_with_store(
 
     flush_thread_local_deps();
 
-    let url_owners = conflict::collect_url_owners(&pages, config);
+    let url_owners = conflict::collect_url_owners(&pages, ctx.config);
 
-    let conflicts = conflict::detect_conflicts(&url_owners, config.get_root());
+    let conflicts = conflict::detect_conflicts(&url_owners, ctx.config.get_root());
     if !conflicts.is_empty() {
         conflict::print_conflicts(&conflicts);
         let total_owners: usize = conflicts.iter().map(|c| c.owners.len()).sum();
@@ -254,9 +250,9 @@ fn build_static_pages_with_store(
     write_static_pages(
         &pages,
         &iterative_paths,
-        clean,
-        deps_hash,
-        &config.build.output,
+        ctx.clean,
+        ctx.deps_hash,
+        &ctx.config.build.output,
     )?;
 
     let snapshot = batch.and_then(|b: TypstBatcher| b.snapshot());
@@ -282,31 +278,33 @@ const MAX_ITERATIONS: usize = 5;
 /// - Compile with current page-store data
 /// - Check if metadata changed (via hash)
 /// - Repeat until convergence or max iterations
-pub fn rebuild_iterative_pages(
-    mode: BuildMode,
-    paths: &[PathBuf],
-    config: &SiteConfig,
-    typst_host: &TypstHost,
-    store: &StoredPageMap,
-    clean: bool,
-    deps_hash: Option<ContentHash>,
-    snapshot: Option<FileSnapshot>,
-    warnings: &WarningCollector,
-) -> Result<Vec<CompiledPage>> {
+pub fn rebuild_iterative_pages(build: IterativePageBuild<'_>) -> Result<Vec<CompiledPage>> {
+    let IterativePageBuild {
+        mode,
+        paths,
+        config,
+        typst_host,
+        store,
+        clean,
+        deps_hash,
+        snapshot,
+        warnings,
+    } = build;
+
     if paths.is_empty() {
         return Ok(vec![]);
     }
 
-    let ctx = BuildContext::new(
+    let ctx = BuildContext {
         mode,
         config,
         typst_host,
         store,
         clean,
         deps_hash,
-        GlobalStateMode::Rebuild,
+        global_state: GlobalStateMode::Rebuild,
         warnings,
-    );
+    };
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
 
     // Iterative compilation loop
@@ -1026,17 +1024,17 @@ mod tests {
             );
         });
 
-        build_static_pages(
-            BuildMode::DEVELOPMENT,
-            &config,
-            &host,
-            site,
-            false,
-            None,
-            GlobalStateMode::Rebuild,
-            &warnings,
-            None,
-        )
+        build_static_pages(StaticPageBuild {
+            mode: BuildMode::DEVELOPMENT,
+            config: &config,
+            typst_host: &host,
+            state: site,
+            clean: false,
+            deps_hash: None,
+            global_state: GlobalStateMode::Rebuild,
+            warnings: &warnings,
+            progress: None,
+        })
         .unwrap();
 
         let pages = site.with_pages(|store| store.get_pages_with_drafts());
@@ -1082,17 +1080,17 @@ mod tests {
                 .unwrap();
         });
 
-        build_static_pages(
-            BuildMode::DEVELOPMENT,
-            &config,
-            &host,
-            site,
-            false,
-            None,
-            GlobalStateMode::ReuseScanned,
-            &warnings,
-            None,
-        )
+        build_static_pages(StaticPageBuild {
+            mode: BuildMode::DEVELOPMENT,
+            config: &config,
+            typst_host: &host,
+            state: site,
+            clean: false,
+            deps_hash: None,
+            global_state: GlobalStateMode::ReuseScanned,
+            warnings: &warnings,
+            progress: None,
+        })
         .unwrap();
 
         assert_eq!(

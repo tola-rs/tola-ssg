@@ -114,17 +114,17 @@ impl Coordinator {
 
         crate::debug!("actor"; "start");
         let shutdown_rx = self.shutdown_rx.take();
-        runtime::run_actors(
-            fs_actor,
-            compiler_actor,
-            vdom_actor,
-            ws_actor,
-            self.ws_server.take(),
+        runtime::run_actors(runtime::ActorRuntime {
+            fs: fs_actor,
+            compiler: compiler_actor,
+            vdom: vdom_actor,
+            ws: ws_actor,
+            ws_server: self.ws_server.take(),
             compiler_tx,
             vdom_tx,
             ws_tx,
             shutdown_rx,
-        )
+        })
         .await?;
 
         crate::debug!("actor"; "stopped");

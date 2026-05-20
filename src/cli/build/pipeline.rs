@@ -97,17 +97,17 @@ pub(super) fn compile_and_process(
 ) -> Result<MetadataResult> {
     process_assets(config, progress)?;
 
-    page::build_static_pages(
+    page::build_static_pages(page::StaticPageBuild {
         mode,
         config,
         typst_host,
         state,
-        config.build.clean,
-        Some(deps_hash),
-        page::GlobalStateMode::Rebuild,
+        clean: config.build.clean,
+        deps_hash: Some(deps_hash),
+        global_state: page::GlobalStateMode::Rebuild,
         warnings,
         progress,
-    )
+    })
 }
 
 /// Process configured asset files through the unified asset routing rules.
@@ -145,17 +145,17 @@ pub(super) fn rebuild_iterative_pages(
     }
 
     match state.with_pages(|pages| {
-        page::rebuild_iterative_pages(
+        page::rebuild_iterative_pages(page::IterativePageBuild {
             mode,
-            &metadata.iterative_paths,
+            paths: &metadata.iterative_paths,
             config,
             typst_host,
-            pages,
-            config.build.clean,
-            Some(deps_hash),
-            metadata.snapshot.clone(),
+            store: pages,
+            clean: config.build.clean,
+            deps_hash: Some(deps_hash),
+            snapshot: metadata.snapshot.clone(),
             warnings,
-        )
+        })
     }) {
         Ok(pages) => Ok(Pages { items: pages }),
         Err(e) => {

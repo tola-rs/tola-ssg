@@ -131,15 +131,15 @@ impl VdomActor {
                     warnings,
                     assets,
                 } => {
-                    self.handle_process(
+                    self.handle_process(handlers::ProcessInput {
                         config,
                         path,
                         url_path,
-                        *vdom,
+                        vdom: *vdom,
                         permalink_change,
                         warnings,
                         assets,
-                    )
+                    })
                     .await
                 }
 
@@ -415,18 +415,18 @@ mod persistence_tests {
         let existing_source = root.join("content/<script>alert(1)</script>.typ");
 
         actor
-            .handle_process(
-                Arc::new(crate::config::SiteConfig::default()),
-                root.join("content/current.typ"),
-                UrlPath::from_page("/current"),
-                make_indexed_doc("html"),
-                Some(PermalinkUpdate::Conflict {
+            .handle_process(super::handlers::ProcessInput {
+                config: Arc::new(crate::config::SiteConfig::default()),
+                path: root.join("content/current.typ"),
+                url_path: UrlPath::from_page("/current"),
+                vdom: make_indexed_doc("html"),
+                permalink_change: Some(PermalinkUpdate::Conflict {
                     url: UrlPath::from_page("/current"),
                     existing_source,
                 }),
-                vec![],
-                vec![],
-            )
+                warnings: vec![],
+                assets: vec![],
+            })
             .await;
 
         let msg = ws_rx

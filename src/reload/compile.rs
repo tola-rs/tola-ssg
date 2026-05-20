@@ -303,9 +303,7 @@ pub fn cleanup_removed_source_state(
         crate::compiler::scheduler::SCHEDULER.invalidate(&normalized);
     }
 
-    let Some(old_url) = old_url else {
-        return None;
-    };
+    let old_url = old_url?;
 
     // Remove cached VDOM and link-graph edges for this page.
     crate::compiler::page::BUILD_CACHE.remove(&tola_vdom::CacheKey::new(old_url.as_str()));

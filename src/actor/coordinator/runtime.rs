@@ -10,18 +10,32 @@ use crate::actor::vdom::VdomActor;
 use crate::actor::ws::WsActor;
 use crate::reload::server::WsServerHandle;
 
+pub(super) struct ActorRuntime {
+    pub(super) fs: FsActor,
+    pub(super) compiler: CompilerActor,
+    pub(super) vdom: VdomActor,
+    pub(super) ws: WsActor,
+    pub(super) ws_server: Option<WsServerHandle>,
+    pub(super) compiler_tx: mpsc::Sender<CompilerMsg>,
+    pub(super) vdom_tx: mpsc::Sender<VdomMsg>,
+    pub(super) ws_tx: mpsc::Sender<WsMsg>,
+    pub(super) shutdown_rx: Option<Receiver<()>>,
+}
+
 /// Run all actors concurrently.
-pub(super) async fn run_actors(
-    fs: FsActor,
-    compiler: CompilerActor,
-    vdom: VdomActor,
-    ws: WsActor,
-    ws_server: Option<WsServerHandle>,
-    compiler_tx: mpsc::Sender<CompilerMsg>,
-    vdom_tx: mpsc::Sender<VdomMsg>,
-    ws_tx: mpsc::Sender<WsMsg>,
-    shutdown_rx: Option<Receiver<()>>,
-) -> Result<()> {
+pub(super) async fn run_actors(runtime: ActorRuntime) -> Result<()> {
+    let ActorRuntime {
+        fs,
+        compiler,
+        vdom,
+        ws,
+        ws_server,
+        compiler_tx,
+        vdom_tx,
+        ws_tx,
+        shutdown_rx,
+    } = runtime;
+
     let mut vdom_handle = tokio::spawn(async move { vdom.run().await });
     let mut fs_handle = tokio::spawn(async move { fs.run().await });
     let mut compiler_handle = tokio::spawn(async move { compiler.run().await });

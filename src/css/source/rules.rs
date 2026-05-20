@@ -58,7 +58,7 @@ pub(super) fn ignored_file(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
         .is_some_and(|name| {
-            EXCLUDED_FILES.iter().any(|excluded| name == *excluded)
+            EXCLUDED_FILES.contains(&name)
                 || EXCLUDED_FILE_PREFIXES
                     .iter()
                     .any(|excluded| name.starts_with(excluded))

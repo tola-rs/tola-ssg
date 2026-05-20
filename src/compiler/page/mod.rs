@@ -39,8 +39,8 @@ pub use format::{
 pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;
 pub use process::{
-    GlobalStateMode, build_address_space, build_static_pages, populate_pages,
-    rebuild_iterative_pages,
+    GlobalStateMode, IterativePageBuild, StaticPageBuild, build_address_space, build_static_pages,
+    populate_pages, rebuild_iterative_pages,
 };
 pub use process::{PageStateEpoch, PageStateTicket};
 pub(crate) use process::{PreparedPage, commit_page_state_parts, prepare_page};
