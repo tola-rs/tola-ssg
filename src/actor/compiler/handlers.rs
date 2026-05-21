@@ -33,9 +33,17 @@ impl CompilerActor {
         let watched_post_paths = self.collect_watched_post_paths(&changed_paths);
         let watched_pre_paths = self.collect_watched_pre_paths(&changed_paths);
         let outputs_before = self.snapshot_internal_outputs(watched_pre_paths.is_some());
-        let hook_side_effects_changed = watched_pre_paths
-            .as_deref()
-            .is_some_and(|paths| self.run_watched_pre_hooks(paths));
+        let hook_side_effects_changed = match watched_pre_paths.as_deref() {
+            Some(paths) => match self.run_watched_pre_hooks(paths) {
+                Ok(changed) => changed,
+                Err(e) => {
+                    self.report_hook_error(self.config.current(), HookPhase::Pre, e)
+                        .await;
+                    return None;
+                }
+            },
+            None => false,
+        };
         if hook_side_effects_changed {
             self.process_configured_assets_after_pre_hooks().await;
         }
@@ -145,17 +153,20 @@ impl CompilerActor {
     ///
     /// When hooks execute, clear cached asset versions so the same compilation
     /// round uses fresh `?v=` links for opaque hook side effects.
-    fn run_watched_pre_hooks(&self, changed_paths: &[PathBuf]) -> bool {
+    fn run_watched_pre_hooks(&self, changed_paths: &[PathBuf]) -> anyhow::Result<bool> {
         use crate::hooks;
 
         let config = self.config.current();
         let refs = Self::path_refs(changed_paths);
-        let executed = hooks::run_watched_pre_hooks(&config, &refs);
-        self.invalidate_asset_versions_after_hooks(HookPhase::Pre, executed)
+        let executed = hooks::run_watched_pre_hooks(&config, &refs)?;
+        Ok(self.invalidate_asset_versions_after_hooks(HookPhase::Pre, executed))
     }
 
     /// Run watched post hooks and return how many hooks executed.
-    pub(super) fn run_watched_post_hooks(&self, changed_paths: &[PathBuf]) -> usize {
+    pub(super) fn run_watched_post_hooks(
+        &self,
+        changed_paths: &[PathBuf],
+    ) -> anyhow::Result<usize> {
         use crate::hooks;
 
         let config = self.config.current();
@@ -208,6 +219,25 @@ impl CompilerActor {
             executed
         );
         true
+    }
+
+    pub(super) async fn report_hook_error(
+        &self,
+        config: Arc<SiteConfig>,
+        phase: HookPhase,
+        error: anyhow::Error,
+    ) {
+        let summary = format!("{} hook failed", phase.as_str());
+        let detail = format!("{error:#}");
+        crate::logger::status_error(&summary, &detail);
+        let _ = self
+            .vdom_tx
+            .send(VdomMsg::Error {
+                path: config.config_path.clone(),
+                url_path: crate::core::UrlPath::default(),
+                error: detail,
+            })
+            .await;
     }
 
     async fn refresh_atomic_css(&self, config: Arc<SiteConfig>) -> bool {

@@ -4,7 +4,7 @@
 
 use crate::config::SiteConfig;
 use crate::config::section::build::HookConfig;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 // ============================================================================
 // Hook Execution
@@ -45,7 +45,8 @@ pub fn run_hook(hook: &HookConfig, config: &SiteConfig, phase: HookPhase) -> Res
         .cwd(config.get_root())
         .pty(true)
         .filter(&SILENT_FILTER)
-        .run()?;
+        .run()
+        .with_context(|| format!("{} hook `{}` failed", phase.as_str(), hook.display_name()))?;
 
     // Print output directly without prefix (unless quiet)
     if !hook.quiet {
@@ -85,8 +86,9 @@ use std::path::Path;
 /// Check and execute hooks that match changed files (for serve mode)
 ///
 /// Returns the number of hooks executed.
-pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
-    run_watched_pre_hooks(config, changed_paths) + run_watched_post_hooks(config, changed_paths)
+pub fn run_watched_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> Result<usize> {
+    Ok(run_watched_pre_hooks(config, changed_paths)?
+        + run_watched_post_hooks(config, changed_paths)?)
 }
 
 /// Check if any watched hook would run for changed files.
@@ -110,7 +112,7 @@ pub fn has_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> b
 }
 
 /// Execute pre hooks that match changed files
-pub fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
+pub fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> Result<usize> {
     let root = config.get_root();
     run_watched_hook_set(
         config.build.hooks.pre.iter(),
@@ -122,7 +124,7 @@ pub fn run_watched_pre_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> us
 }
 
 /// Execute post hooks that match changed files
-pub fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> usize {
+pub fn run_watched_post_hooks(config: &SiteConfig, changed_paths: &[&Path]) -> Result<usize> {
     let root = config.get_root();
     run_watched_hook_set(
         config.build.hooks.post.iter(),
@@ -139,19 +141,17 @@ fn run_watched_hook_set<'a>(
     changed_paths: &[&Path],
     root: &Path,
     phase: HookPhase,
-) -> usize {
+) -> Result<usize> {
     let mut executed = 0;
 
     for hook in hooks {
         if should_run_hook_for_changes(hook, changed_paths, root) {
-            if let Err(e) = run_hook(hook, config, phase) {
-                crate::log!("hook"; "failed: {}", e);
-            }
+            run_hook(hook, config, phase)?;
             executed += 1;
         }
     }
 
-    executed
+    Ok(executed)
 }
 
 fn has_matching_hook<'a>(

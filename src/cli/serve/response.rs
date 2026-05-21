@@ -239,7 +239,7 @@ body {
     pending = true;
     fetch(url, { method: 'HEAD', cache: 'no-store' })
       .then(function(r) {
-        if (r.ok) {
+        if (r.status !== 503) {
           reload();
         }
       })

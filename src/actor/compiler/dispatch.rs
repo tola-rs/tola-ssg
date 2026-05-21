@@ -113,10 +113,24 @@ impl CompilerActor {
         }
         if let Some(paths) = watched_post_paths {
             let before = output::snapshot(&config);
-            if self.run_watched_post_hooks(&paths) > 0 {
-                let changed = output::changed(&before, &config);
-                if !changed.is_empty() {
-                    output_update.extend(self.stage_output_change(changed));
+            match self.run_watched_post_hooks(&paths) {
+                Ok(executed) => {
+                    if executed > 0 {
+                        let changed = output::changed(&before, &config);
+                        if !changed.is_empty() {
+                            output_update.extend(self.stage_output_change(changed));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.report_hook_error(
+                        std::sync::Arc::clone(&config),
+                        crate::hooks::HookPhase::Post,
+                        e,
+                    )
+                    .await;
+                    let _ = self.vdom_tx.send(VdomMsg::BatchEnd { config }).await;
+                    return;
                 }
             }
         }

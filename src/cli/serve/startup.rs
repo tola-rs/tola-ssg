@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tola_vdom::CacheKey;
 
@@ -44,112 +44,66 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
         if has_cache { "cache" } else { "full-build" }
     );
 
-    let bound_server = bind_server()?;
-
     SCHEDULER.start_workers();
     ready.reset_startup();
 
     let config_handle = config::config_handle();
-    let scan_state = Arc::clone(&state);
-    let scan_ready = Arc::clone(&ready);
-    let needs_full_build = !has_cache;
-    std::thread::spawn(move || {
-        let config_arc = config_handle.current();
-        let scan_success =
-            !needs_full_build || progressive_scan(&config_arc, &scan_state, &scan_ready);
+    let config_arc = config_handle.current();
+    let build_success = if has_cache {
+        let build_success = startup_with_cache(&config_arc, &state, &ready)?;
+        ready.set_startup_done();
+        Some(build_success)
+    } else {
+        progressive_scan(&config_arc, &state, &ready)?;
+        ready.set_scan_ready(true);
+        None
+    };
 
-        if !scan_success {
-            scan_ready.set_scan_ready(false);
-            if needs_full_build {
-                set_serving();
-            }
-            set_healthy(false);
-            return;
-        }
+    let bound_server = bind_server()?;
+    set_serving();
 
-        // Full-build path uses progressive_scan() before background warmup,
-        // so URL->source mapping is available for on-demand requests.
-        if needs_full_build {
-            scan_ready.set_scan_ready(true);
-        }
-
-        if needs_full_build {
-            // Scan completion is enough to serve request-driven compiles.
-            // Keep the full-site warmup in a detached thread so it doesn't
-            // block the startup coordinator or interactive requests.
-            set_serving();
-            set_healthy(true);
-            let typst_host = Arc::new(TypstHost::for_config(&config_arc));
-            start_serve_build(
-                Arc::clone(&config_arc),
-                typst_host,
-                Arc::clone(&scan_state),
-                Arc::clone(&scan_ready),
-            );
-            return;
-        }
-
-        let build_success = startup_with_cache(&config_arc, &scan_state, &scan_ready);
-        scan_ready.set_startup_done();
-
+    if let Some(build_success) = build_success {
         set_healthy(build_success);
-
         if build_success {
             config_handle.clear_clean_flag();
         }
-
-        if has_cache {
-            set_serving();
-        }
-    });
+    } else {
+        set_healthy(true);
+        start_serve_build(
+            Arc::clone(&config_arc),
+            Arc::new(TypstHost::for_config(&config_arc)),
+            Arc::clone(&state),
+            Arc::clone(&ready),
+        );
+    }
 
     bound_server.run(state, ready)
 }
 
-fn progressive_scan(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady) -> bool {
+fn progressive_scan(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady) -> Result<()> {
     use crate::core::is_shutdown;
 
-    let typst_host = match init_serve_build(config) {
-        Ok(host) => host,
-        Err(e) => {
-            debug!("init"; "failed: {}", e);
-            return false;
-        }
-    };
+    let typst_host = init_serve_build(config).context("serve startup init failed")?;
     ready.set_init_ready();
 
     if is_shutdown() {
-        return false;
+        return Ok(());
     }
 
-    if let Err(e) = scan_pages(config, &typst_host, state) {
-        debug!("scan"; "failed: {}", e);
-        return false;
-    }
+    scan_pages(config, &typst_host, state).context("serve startup scan failed")?;
 
     if is_shutdown() {
-        return false;
+        return Ok(());
     }
 
-    true
+    Ok(())
 }
 
-fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady) -> bool {
-    let typst_host = match init_serve_build(config) {
-        Ok(host) => host,
-        Err(e) => {
-            log!("build"; "cache startup init failed: {}", e);
-            ready.set_scan_ready(false);
-            return false;
-        }
-    };
+fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady) -> Result<bool> {
+    let typst_host = init_serve_build(config).context("cache startup init failed")?;
     ready.set_init_ready();
 
-    if let Err(e) = scan_pages(config, &typst_host, state) {
-        log!("scan"; "cache startup scan failed: {}", e);
-        ready.set_scan_ready(false);
-        return false;
-    }
+    scan_pages(config, &typst_host, state).context("cache startup scan failed")?;
     ready.set_scan_ready(true);
 
     let root = config.get_root();
@@ -256,7 +210,7 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady
         log!("serve"; "using cached build (startup compile errors: {})", stats.failed);
     }
 
-    true
+    Ok(true)
 }
 
 #[derive(Debug, Default)]
