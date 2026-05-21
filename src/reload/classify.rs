@@ -256,7 +256,7 @@ mod tests {
         let source = components.join("button.html");
         std::fs::create_dir_all(&components).unwrap();
         std::fs::write(&source, r#"<button class="flex"></button>"#).unwrap();
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let source = normalize_path(&source);
         let category = categorize_path(&source, &config);
@@ -271,7 +271,7 @@ mod tests {
         let source = components.join("button.html");
         std::fs::create_dir_all(&components).unwrap();
         std::fs::write(&source, r#"<button class="grid"></button>"#).unwrap();
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let state = SiteIndex::new();
         let result = classify_changes(std::slice::from_ref(&source), &config, &state);

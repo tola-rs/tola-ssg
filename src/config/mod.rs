@@ -525,7 +525,7 @@ impl SiteConfig {
             .iter()
             .map(|p| crate::utils::path::normalize_path(&root.join(p)))
             .collect();
-        self.build.atomic_css.normalize(&root);
+        self.build.css.atomic.normalize(&root);
         // Public URLs stay site-root relative.
 
         // Normalize optional paths
@@ -566,7 +566,7 @@ impl SiteConfig {
 
         // Validate assets paths (must be relative)
         self.build.assets.validate_paths(&mut diag);
-        self.build.atomic_css.validate_paths(&mut diag);
+        self.build.css.atomic.validate_paths(&mut diag);
         self.site.seo.validate_paths(&mut diag);
 
         diag.into_result()
@@ -591,7 +591,7 @@ impl SiteConfig {
         self.validate.validate_field_status(&mut diag);
         self.deploy.validate_field_status(&mut diag);
         self.build.svg.validate_field_status(&mut diag);
-        self.build.atomic_css.validate_field_status(&mut diag);
+        self.build.css.atomic.validate_field_status(&mut diag);
 
         // Validate each section
         self.site

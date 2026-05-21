@@ -70,7 +70,7 @@ pub fn texts(config: &SiteConfig) -> Result<Vec<String>> {
 
 pub fn files(config: &SiteConfig) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    if let Some(entries) = &config.build.atomic_css.source {
+    if let Some(entries) = &config.build.css.atomic.source {
         for entry in entries {
             let path = source_path(config, entry);
             let mode = if path.is_file() {
@@ -96,10 +96,10 @@ pub fn files(config: &SiteConfig) -> Result<Vec<PathBuf>> {
 }
 
 pub fn roots(config: &SiteConfig) -> Vec<PathBuf> {
-    if !config.build.atomic_css.enable {
+    if !config.build.css.atomic.enable {
         return Vec::new();
     }
-    if let Some(entries) = &config.build.atomic_css.source {
+    if let Some(entries) = &config.build.css.atomic.source {
         return entries
             .iter()
             .map(|entry| source_path(config, entry))
@@ -111,14 +111,15 @@ pub fn roots(config: &SiteConfig) -> Vec<PathBuf> {
 }
 
 pub fn is_input(path: &Path, config: &SiteConfig) -> bool {
-    if !config.build.atomic_css.enable {
+    if !config.build.css.atomic.enable {
         return false;
     }
 
     let path = normalize_path(path);
     if config
         .build
-        .atomic_css
+        .css
+        .atomic
         .config
         .as_ref()
         .is_some_and(|config_path| path == normalize_path(config_path))
@@ -126,7 +127,7 @@ pub fn is_input(path: &Path, config: &SiteConfig) -> bool {
         return true;
     }
 
-    if let Some(entries) = &config.build.atomic_css.source {
+    if let Some(entries) = &config.build.css.atomic.source {
         return entries.iter().any(|entry| {
             let source = source_path(config, entry);
             if path == source {
@@ -292,7 +293,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.output = root.join("public");
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
         config
     }
 
@@ -383,7 +384,7 @@ mod tests {
         fs::write(root.join(".gitignore"), "components/\n").unwrap();
 
         let mut config = config(root);
-        config.build.atomic_css.source = Some(vec![PathBuf::from("components")]);
+        config.build.css.atomic.source = Some(vec![PathBuf::from("components")]);
 
         let texts = texts(&config).unwrap().join("\n");
 
@@ -413,7 +414,7 @@ mod tests {
         fs::write(root.join("style.css"), r#".grid {}"#).unwrap();
 
         let mut config = config(root);
-        config.build.atomic_css.source = Some(vec![PathBuf::from("style.css")]);
+        config.build.css.atomic.source = Some(vec![PathBuf::from("style.css")]);
 
         let texts = texts(&config).unwrap().join("\n");
 
@@ -427,7 +428,7 @@ mod tests {
         fs::write(root.join("tokens.bin"), r#"<div class="grid"></div>"#).unwrap();
 
         let mut config = config(root);
-        config.build.atomic_css.source = Some(vec![PathBuf::from("tokens.bin")]);
+        config.build.css.atomic.source = Some(vec![PathBuf::from("tokens.bin")]);
 
         let texts = texts(&config).unwrap().join("\n");
 
@@ -448,7 +449,7 @@ mod tests {
         fs::write(components.join("tokens.bin"), r#"<div class="grid"></div>"#).unwrap();
 
         let mut config = config(root);
-        config.build.atomic_css.source = Some(vec![PathBuf::from("components")]);
+        config.build.css.atomic.source = Some(vec![PathBuf::from("components")]);
 
         let texts = texts(&config).unwrap().join("\n");
 

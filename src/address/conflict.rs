@@ -108,12 +108,12 @@ fn collect_asset_urls(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
 }
 
 fn collect_generated_outputs(url_owners: &mut UrlOwnerMap, config: &SiteConfig) {
-    if config.build.atomic_css.enable {
+    if config.build.css.atomic.enable {
         let route = AtomicCssConfig::output_route();
         url_owners
             .entry(route.clone())
             .or_default()
-            .push(UrlOwner::generated(format!("build.atomic_css ({route})")));
+            .push(UrlOwner::generated(format!("build.css.atomic ({route})")));
     }
 
     for (idx, feed) in config.site.seo.feed_outputs().iter().enumerate() {
@@ -478,7 +478,7 @@ mod tests {
 
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
         config.site.seo.sitemap.enable = true;
         config.site.seo.sitemap.url = "/.tola/atomic.css".into();
 
@@ -491,7 +491,7 @@ mod tests {
             conflicts[0]
                 .owners
                 .iter()
-                .any(|owner| owner.to_string().contains("build.atomic_css"))
+                .any(|owner| owner.to_string().contains("build.css.atomic"))
         );
         assert!(
             conflicts[0]

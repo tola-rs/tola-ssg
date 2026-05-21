@@ -252,7 +252,7 @@ deps = ["templates", "utils"]  # Shared dependencies — changes trigger range r
 [build.assets]
 nested = ["assets/images", "assets/styles", "assets/scripts", "assets/fonts"]
 
-[build.atomic_css]
+[build.css.atomic]
 enable = true
 profile = "tailwind-v4"
 config = "atomic.css.toml"

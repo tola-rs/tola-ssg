@@ -27,7 +27,7 @@ pub struct AtomicCssAsset {
 
 /// Build configured Atomic CSS output.
 pub fn build(config: &SiteConfig) -> Result<Option<AtomicCssOutput>> {
-    let css = &config.build.atomic_css;
+    let css = &config.build.css.atomic;
     if !css.enable {
         return Ok(None);
     }
@@ -52,7 +52,7 @@ pub fn build(config: &SiteConfig) -> Result<Option<AtomicCssOutput>> {
 
 /// Resolve the fixed Atomic CSS output asset.
 pub fn output_asset(config: &SiteConfig) -> Option<AtomicCssAsset> {
-    if !config.build.atomic_css.enable {
+    if !config.build.css.atomic.enable {
         return None;
     }
 
@@ -63,7 +63,7 @@ pub fn output_asset(config: &SiteConfig) -> Option<AtomicCssAsset> {
 }
 
 fn load_sheet_config(config: &SiteConfig) -> Result<AtomicCssFile> {
-    match &config.build.atomic_css.config {
+    match &config.build.css.atomic.config {
         Some(path) => AtomicCssFile::parse_path(path).map_err(Into::into),
         None => Ok(AtomicCssFile::default()),
     }
@@ -157,7 +157,7 @@ fn ensure_output_is_not_source(config: &SiteConfig, asset: &AtomicCssAsset) -> R
         }
     }
 
-    if let Some(entries) = &config.build.atomic_css.source {
+    if let Some(entries) = &config.build.css.atomic.source {
         for entry in entries {
             if path_is_inside(&output, entry) {
                 bail!(
@@ -214,7 +214,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.output = output;
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let result = build(&config).unwrap().unwrap();
 
@@ -245,14 +245,14 @@ mod tests {
 
         let mut config = crate::config::test_parse_config(
             r#"
-[build.atomic_css]
+[build.css.atomic]
 enable = true
 source = ["components/button.html"]
 "#,
         );
         config.set_root(root);
         config.build.output = output;
-        config.build.atomic_css.normalize(root);
+        config.build.css.atomic.normalize(root);
 
         let result = build(&config).unwrap().unwrap();
         let css = fs::read_to_string(result.path).unwrap();
@@ -276,7 +276,7 @@ source = ["components/button.html"]
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.output = output;
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let first = build(&config).unwrap().unwrap();
         let first_href = crate::asset::version::versioned_url(&first.url, &first.path);
@@ -305,7 +305,7 @@ source = ["components/button.html"]
         config.set_root(root);
         config.build.assets.normalize(root);
         config.build.output = output;
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let first = build(&config).unwrap().unwrap();
         fs::write(&page, r#"<div class="grid"></div>"#).unwrap();
@@ -337,7 +337,7 @@ source = ["components/button.html"]
         )];
         config.build.assets.normalize(root);
         config.build.output = root.to_path_buf();
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let err = build(&config).unwrap_err();
 
@@ -360,7 +360,7 @@ source = ["components/button.html"]
         let mut config = SiteConfig::default();
         config.set_root(root);
         config.build.output = output;
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let err = build(&config).unwrap_err();
 

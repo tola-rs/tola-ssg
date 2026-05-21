@@ -27,6 +27,7 @@
 
 pub mod assets;
 mod atomic;
+mod css;
 mod diagnostics;
 mod hooks;
 mod meta;
@@ -35,6 +36,7 @@ mod svg;
 
 pub use assets::AssetsConfig;
 pub use atomic::AtomicCssConfig;
+pub use css::CssConfig;
 pub use diagnostics::DiagnosticsConfig;
 #[cfg(test)]
 pub use hooks::WatchMode;
@@ -95,8 +97,8 @@ pub struct BuildSectionConfig {
     /// Build hooks (pre/post commands).
     pub hooks: HooksConfig,
 
-    /// Native atomic CSS generation.
-    pub atomic_css: AtomicCssConfig,
+    /// CSS build settings.
+    pub css: CssConfig,
 
     /// Metadata extraction settings.
     pub meta: MetaConfig,
@@ -124,7 +126,7 @@ impl Default for BuildSectionConfig {
             slug: SlugConfig::default(),
             svg: SvgConfig::default(),
             hooks: HooksConfig::default(),
-            atomic_css: AtomicCssConfig::default(),
+            css: CssConfig::default(),
             meta: MetaConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             allow_experimental: false,
@@ -150,7 +152,7 @@ impl BuildSectionConfig {
                 );
             }
         }
-        self.atomic_css.validate(diag);
+        self.css.atomic.validate(diag);
         self.validate_atomic_css_output_source_overlap(diag);
     }
 
@@ -162,7 +164,7 @@ impl BuildSectionConfig {
     }
 
     fn validate_atomic_css_output_source_overlap(&self, diag: &mut ConfigDiagnostics) {
-        if !self.atomic_css.enable {
+        if !self.css.atomic.enable {
             return;
         }
         let output = crate::utils::path::normalize_path(&AtomicCssConfig::output_path(
@@ -219,7 +221,7 @@ impl BuildSectionConfig {
             }
         }
 
-        if let Some(entries) = &self.atomic_css.source {
+        if let Some(entries) = &self.css.atomic.source {
             for entry in entries {
                 if path_is_inside(&output, entry) {
                     diag.error(
@@ -294,7 +296,7 @@ flatten = ["assets/styles/base.css", { file = "assets/CNAME", as = "/CNAME" }]
     fn atomic_css_config_parses_explicit_build_settings() {
         let config = test_parse_config(
             r#"
-[build.atomic_css]
+[build.css.atomic]
 enable = true
 profile = "tailwind-v4"
 source = ["content", "components/button.typ"]
@@ -302,17 +304,17 @@ config = "atomic.css.toml"
 "#,
         );
 
-        assert!(config.build.atomic_css.enable);
-        assert_eq!(config.build.atomic_css.profile.as_str(), "tailwind-v4");
+        assert!(config.build.css.atomic.enable);
+        assert_eq!(config.build.css.atomic.profile.as_str(), "tailwind-v4");
         assert_eq!(
-            config.build.atomic_css.source.as_ref().unwrap(),
+            config.build.css.atomic.source.as_ref().unwrap(),
             &vec![
                 Path::new("content").to_path_buf(),
                 Path::new("components/button.typ").to_path_buf()
             ]
         );
         assert_eq!(
-            config.build.atomic_css.config.as_deref(),
+            config.build.css.atomic.config.as_deref(),
             Some(Path::new("atomic.css.toml"))
         );
     }
@@ -321,14 +323,14 @@ config = "atomic.css.toml"
     fn atomic_css_enabled_defaults_to_auto_source_scan() {
         let config = test_parse_config(
             r#"
-[build.atomic_css]
+[build.css.atomic]
 enable = true
 profile = "tailwind-v4"
 "#,
         );
         let mut diag = crate::config::ConfigDiagnostics::new();
 
-        assert!(config.build.atomic_css.source.is_none());
+        assert!(config.build.css.atomic.source.is_none());
 
         config.build.validate(&mut diag);
 
@@ -339,7 +341,7 @@ profile = "tailwind-v4"
     fn atomic_css_explicit_source_must_not_be_empty() {
         let config = test_parse_config(
             r#"
-[build.atomic_css]
+[build.css.atomic]
 enable = true
 source = []
 "#,
@@ -367,8 +369,8 @@ source = []
         config.assets.nested = vec![crate::config::section::build::assets::NestedEntry::new(
             "/site", "/site",
         )];
-        config.atomic_css.enable = true;
-        config.atomic_css.source = Some(vec![Path::new("/site/content").to_path_buf()]);
+        config.css.atomic.enable = true;
+        config.css.atomic.source = Some(vec![Path::new("/site/content").to_path_buf()]);
         let mut diag = crate::config::ConfigDiagnostics::new();
 
         config.validate(&mut diag);

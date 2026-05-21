@@ -428,7 +428,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/.tola")];
         config.build.output = output_dir.clone();
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
 
         let summary = process_nested_assets(&config, true, false).unwrap();
 

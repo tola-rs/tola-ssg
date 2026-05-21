@@ -160,8 +160,8 @@ fn collect_roots(config: &SiteConfig) -> Vec<WatchRoot> {
         }
     }
 
-    if config.build.atomic_css.enable {
-        if config.build.atomic_css.source.is_none() && root.exists() {
+    if config.build.css.atomic.enable {
+        if config.build.css.atomic.source.is_none() && root.exists() {
             roots.push(WatchRoot::non_recursive(root.to_path_buf()));
         }
         roots.extend(
@@ -170,7 +170,7 @@ fn collect_roots(config: &SiteConfig) -> Vec<WatchRoot> {
                 .map(WatchRoot::recursive),
         );
 
-        if let Some(config_path) = &config.build.atomic_css.config {
+        if let Some(config_path) = &config.build.css.atomic.config {
             let config_path = root.join(config_path);
             if config_path.exists() {
                 roots.push(WatchRoot::recursive(config_path));
@@ -334,8 +334,8 @@ mod tests {
         config.set_root(&root);
         config.build.content = content;
         config.build.output = output;
-        config.build.atomic_css.enable = true;
-        config.build.atomic_css.config = Some(atomic_config.clone());
+        config.build.css.atomic.enable = true;
+        config.build.css.atomic.config = Some(atomic_config.clone());
 
         let roots = collect_roots(&config);
 

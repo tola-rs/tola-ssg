@@ -211,7 +211,7 @@ impl CompilerActor {
     }
 
     async fn refresh_atomic_css(&self, config: Arc<SiteConfig>) -> bool {
-        if !config.build.atomic_css.enable {
+        if !config.build.css.atomic.enable {
             return false;
         }
 
@@ -239,7 +239,7 @@ impl CompilerActor {
         &mut self,
         config: Arc<SiteConfig>,
     ) -> (bool, output::Update) {
-        if !config.build.atomic_css.enable {
+        if !config.build.css.atomic.enable {
             return (false, output::Update::default());
         }
 
@@ -263,7 +263,7 @@ impl CompilerActor {
 
     fn snapshot_internal_outputs(&self, watched_pre_hook_exists: bool) -> Option<output::Snapshot> {
         let config = self.config.current();
-        (watched_pre_hook_exists || config.build.atomic_css.enable)
+        (watched_pre_hook_exists || config.build.css.atomic.enable)
             .then(|| output::snapshot(&config))
     }
 
@@ -1297,7 +1297,7 @@ scripts = ["/scripts/site.js"]
         config.config_path = root.join("tola.toml");
         config.build.content = content;
         config.build.output = output.clone();
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
         init_config(config);
 
         let state = Arc::new(SiteIndex::new());

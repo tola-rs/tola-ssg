@@ -513,7 +513,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.set_root(dir.path());
         config.build.output = output_dir;
-        config.build.atomic_css.enable = true;
+        config.build.css.atomic.enable = true;
         config.site.header.no_fouc = false;
 
         let doc = HeaderInjector::new(&config).transform(make_html_doc());
