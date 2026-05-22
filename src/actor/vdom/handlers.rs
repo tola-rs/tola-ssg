@@ -13,6 +13,7 @@ use tola_vdom::prelude::*;
 
 use super::VdomActor;
 use super::permalink::PermalinkHandler;
+use crate::logger;
 
 pub(super) struct ProcessInput {
     pub(super) config: Arc<SiteConfig>,
@@ -35,7 +36,7 @@ struct RouteContext {
 impl VdomActor {
     fn persist_diagnostics_state(&self) {
         if let Err(e) = persist_diagnostics(&self.error_state, &self.root) {
-            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+            logger::debug("vdom", format_args!("diagnostics persist failed: {}", e));
         }
     }
 
@@ -51,10 +52,9 @@ impl VdomActor {
         self.batch.push_error(&rel_path_str, &error);
 
         if duplicate_same_error {
-            crate::debug!(
-                "vdom";
-                "skip duplicate compile error persist/ws: {}",
-                rel_path_str
+            logger::debug(
+                "vdom",
+                format_args!("skip duplicate compile error persist/ws: {}", rel_path_str),
             );
         } else {
             // Track for persistence
@@ -116,7 +116,14 @@ impl VdomActor {
         // Try to reload cache if empty (handles race with background build)
         self.try_reload_cache_if_empty();
 
-        crate::debug!("vdom"; "handle_process: url={}, cache_size={}", url_path, BUILD_CACHE.len());
+        logger::debug(
+            "vdom",
+            format_args!(
+                "handle_process: url={}, cache_size={}",
+                url_path,
+                BUILD_CACHE.len()
+            ),
+        );
 
         // Handle permalink change BEFORE diff (rename cache key so diff can find it)
         let old_url = if let Some(PermalinkUpdate::Changed { old_url }) = &permalink_change {
@@ -140,7 +147,7 @@ impl VdomActor {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(e) => {
-                crate::log!("vdom"; "spawn_blocking error: {}", e);
+                logger::log("vdom", format_args!("spawn_blocking error: {}", e));
                 let _ = self
                     .ws_tx
                     .send(WsMsg::Reload {
@@ -272,9 +279,17 @@ impl VdomActor {
             assets,
         } = route;
 
-        crate::debug_do! {
+        if logger::is_verbose() {
             let edit_summary: Vec<String> = edits.iter().map(|edit| edit.summary()).collect();
-            crate::log!("vdom"; "reload: {} ({} edits): {:?}", rel_path.display(), edits.len(), edit_summary);
+            logger::log(
+                "vdom",
+                format_args!(
+                    "reload: {} ({} edits): {:?}",
+                    rel_path.display(),
+                    edits.len(),
+                    edit_summary
+                ),
+            );
         }
 
         self.batch
@@ -312,7 +327,7 @@ impl VdomActor {
             ..
         } = route;
 
-        crate::debug!("vdom"; "initial {}", rel_path.display());
+        logger::debug("vdom", format_args!("initial {}", rel_path.display()));
         self.batch
             .push_reload(rel_path.display().to_string(), priority);
         let _ = self
@@ -372,7 +387,10 @@ impl VdomActor {
             ..
         } = route;
 
-        crate::debug!("vdom"; "reload: {}: {}", rel_path.display(), reason);
+        logger::debug(
+            "vdom",
+            format_args!("reload: {}: {}", rel_path.display(), reason),
+        );
         self.batch
             .push_reload(rel_path.display().to_string(), priority);
         let _ = self
@@ -389,11 +407,14 @@ impl VdomActor {
         if BUILD_CACHE.is_empty() {
             match restore_cache(&BUILD_CACHE, &self.root) {
                 Ok(n) if n > 0 => {
-                    crate::debug!("vdom"; "reloaded {} cache entries from disk", n);
+                    logger::debug(
+                        "vdom",
+                        format_args!("reloaded {} cache entries from disk", n),
+                    );
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    crate::debug!("vdom"; "cache reload failed: {}", e);
+                    logger::debug("vdom", format_args!("cache reload failed: {}", e));
                 }
             }
         }

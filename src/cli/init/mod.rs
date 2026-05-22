@@ -12,7 +12,7 @@ mod config;
 mod structure;
 mod validate;
 
-use crate::{config::SiteConfig, log, package::generate_lsp_stubs};
+use crate::{config::SiteConfig, logger, package::generate_lsp_stubs};
 use anyhow::Result;
 use std::path::Path;
 
@@ -41,7 +41,7 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
     };
 
     if let Err(e) = validate::validate_target(root, mode) {
-        log!("error"; "{}", e);
+        logger::log("error", format_args!("{}", e));
         std::process::exit(1);
     }
 
@@ -55,7 +55,7 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
 
     generate_lsp_stubs(root)?;
 
-    log!("init"; "Site initialized successfully");
+    logger::log("init", format_args!("Site initialized successfully"));
     Ok(())
 }
 

@@ -17,7 +17,7 @@ use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_wit
 use crate::compiler::page::{CompiledPage, TypstHost};
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, LinkKind, LinkOrigin, ResolveContext, ResolveResult};
-use crate::log;
+use crate::logger;
 use crate::package::build_visible_inputs;
 use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
 use crate::utils::{plural_count, plural_s};
@@ -66,7 +66,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let files = collect_content_files(&args.paths, &config.build.content)?;
 
     if files.is_empty() {
-        log!("validate"; "no content files found");
+        logger::log("validate", format_args!("no content files found"));
         return Ok(());
     }
 
@@ -78,11 +78,14 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let check_assets = validate_config.assets.enable;
 
     if !check_pages && !check_assets {
-        log!("validate"; "no checks enabled");
+        logger::log("validate", format_args!("no checks enabled"));
         return Ok(());
     }
 
-    log!("validate"; "validating {}", plural_count(file_count, "file"));
+    logger::log(
+        "validate",
+        format_args!("validating {}", plural_count(file_count, "file")),
+    );
 
     // Setup paths
     let root = crate::utils::path::normalize_path(config.get_root());
@@ -145,9 +148,12 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     if check_pages {
         let count = report.read().page_error_count();
         if count > 0 {
-            log!("validate"; "found {} broken page link{}", count, plural_s(count));
+            logger::log(
+                "validate",
+                format_args!("found {} broken page link{}", count, plural_s(count)),
+            );
         } else {
-            log!("validate"; "all page links valid");
+            logger::log("validate", format_args!("all page links valid"));
         }
     }
 
@@ -155,9 +161,12 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     if check_assets {
         let count = report.read().asset_error_count();
         if count > 0 {
-            log!("validate"; "found {} broken asset link{}", count, plural_s(count));
+            logger::log(
+                "validate",
+                format_args!("found {} broken asset link{}", count, plural_s(count)),
+            );
         } else {
-            log!("validate"; "all asset links valid");
+            logger::log("validate", format_args!("all asset links valid"));
         }
     }
 
@@ -623,26 +632,29 @@ fn batch_scan_typst_unified(
                 match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS)
                 {
                     StabilityDecision::Converged => {
-                        crate::debug!(
-                            "validate";
-                            "metadata converged after {} iteration(s)",
-                            iteration + 1
+                        logger::debug(
+                            "validate",
+                            format_args!("metadata converged after {} iteration(s)", iteration + 1),
                         );
                         break;
                     }
                     StabilityDecision::Oscillating => {
-                        crate::log!(
-                            "warning";
-                            "validate metadata oscillating (cycle detected), stopping after {} iterations",
-                            iteration + 1
+                        logger::log(
+                            "warning",
+                            format_args!(
+                                "validate metadata oscillating (cycle detected), stopping after {} iterations",
+                                iteration + 1
+                            ),
                         );
                         break;
                     }
                     StabilityDecision::MaxIterationsReached => {
-                        crate::log!(
-                            "warning";
-                            "validate metadata did not converge after {} iterations",
-                            MAX_METADATA_SCAN_ITERATIONS
+                        logger::log(
+                            "warning",
+                            format_args!(
+                                "validate metadata did not converge after {} iterations",
+                                MAX_METADATA_SCAN_ITERATIONS
+                            ),
                         );
                     }
                     StabilityDecision::Continue => {}

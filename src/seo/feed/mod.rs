@@ -16,6 +16,7 @@ mod html;
 pub mod json;
 pub mod rss;
 
+use crate::logger;
 pub(crate) use common::feed_url;
 use common::{FeedPage, WriteOutcome, collect_feed_pages, write_feed};
 
@@ -37,10 +38,12 @@ pub fn build_feed(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
     }
 
     if written_outputs > 0 && feed_pages.excluded > 0 {
-        crate::log!(
-            "feed";
-            "excluded {} pages without date (only pages with date are included)",
-            feed_pages.excluded
+        logger::log(
+            "feed",
+            format_args!(
+                "excluded {} pages without date (only pages with date are included)",
+                feed_pages.excluded
+            ),
         );
     }
 

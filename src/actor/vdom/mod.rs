@@ -35,6 +35,7 @@ use crate::cache::{
     restore_dependency_graph, restore_diagnostics,
 };
 use crate::compiler::page::BUILD_CACHE;
+use crate::logger;
 
 /// VDOM Actor - converts AST to VDOM and computes diffs
 ///
@@ -74,13 +75,16 @@ impl VdomActor {
     ) -> VdomRestoreResult {
         // Restore cache from disk into BUILD_CACHE (shared with scheduler)
         let restored = restore_cache(&BUILD_CACHE, &root).unwrap_or_else(|e| {
-            crate::debug!("vdom"; "cache restore failed: {}", e);
+            logger::debug("vdom", format_args!("cache restore failed: {}", e));
             0
         });
 
         // Restore dependency graph for incremental rebuilds
         if let Err(e) = restore_dependency_graph(&root) {
-            crate::debug!("vdom"; "dependency graph restore failed: {}", e);
+            logger::debug(
+                "vdom",
+                format_args!("dependency graph restore failed: {}", e),
+            );
         }
 
         // Restore diagnostics from disk
@@ -161,11 +165,11 @@ impl VdomActor {
 
                 VdomMsg::Clear => {
                     crate::compiler::page::BUILD_CACHE.clear();
-                    crate::debug!("vdom"; "cleared all cache");
+                    logger::debug("vdom", format_args!("cleared all cache"));
                 }
 
                 VdomMsg::Shutdown => {
-                    crate::debug!("vdom"; "shutdown requested");
+                    logger::debug("vdom", format_args!("shutdown requested"));
                     break;
                 }
             }
@@ -204,17 +208,17 @@ impl VdomActor {
     fn persist_state(&self) {
         let source_paths = self.state.read(|_, address| address.source_paths());
         match persist_cache(&BUILD_CACHE, &source_paths, &self.root) {
-            Ok(n) => crate::debug!("vdom"; "persisted {} cache entries", n),
-            Err(e) => crate::debug!("vdom"; "cache persist failed: {}", e),
+            Ok(n) => logger::debug("vdom", format_args!("persisted {} cache entries", n)),
+            Err(e) => logger::debug("vdom", format_args!("cache persist failed: {}", e)),
         }
         // Skip if empty: initial build warnings are saved by finalize_serve_build(),
         // which runs in parallel. Persisting empty state here would overwrite them.
         if !self.error_state.is_empty()
             && let Err(e) = persist_diagnostics(&self.error_state, &self.root)
         {
-            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+            logger::debug("vdom", format_args!("diagnostics persist failed: {}", e));
         }
-        crate::debug!("vdom"; "shutting down");
+        logger::debug("vdom", format_args!("shutting down"));
     }
 }
 

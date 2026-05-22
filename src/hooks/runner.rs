@@ -4,6 +4,7 @@
 
 use crate::config::SiteConfig;
 use crate::config::section::build::HookConfig;
+use crate::logger;
 use anyhow::{Context, Result};
 
 // ============================================================================
@@ -38,7 +39,10 @@ pub fn run_hook(hook: &HookConfig, config: &SiteConfig, phase: HookPhase) -> Res
     }
 
     if !hook.quiet {
-        crate::log!(phase.as_str(); "`{}` running", hook.display_name());
+        logger::log(
+            phase.as_str(),
+            format_args!("`{}` running", hook.display_name()),
+        );
     }
 
     let output = Cmd::from_slice(&hook.command)
@@ -53,7 +57,7 @@ pub fn run_hook(hook: &HookConfig, config: &SiteConfig, phase: HookPhase) -> Res
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stdout = stdout.trim();
         if !stdout.is_empty() {
-            println!("{stdout}");
+            logger::text(stdout);
         }
     }
 

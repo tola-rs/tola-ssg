@@ -29,6 +29,7 @@ use crate::compiler::page::PageRoute;
 use crate::config::SiteConfig;
 use crate::core::BuildMode;
 use crate::image::svg::{ExtractContext, OptimizeOptions, extract_svg_to_file, optimize_svg};
+use crate::logger;
 
 /// Processes SVG elements in Indexed VDOM
 ///
@@ -214,7 +215,7 @@ impl Transform<Indexed> for SvgTransform<'_> {
 
             if let Err(e) = result {
                 // Log error but don't fail the entire transform
-                eprintln!("SVG processing error: {}", e);
+                logger::text(&format!("SVG processing error: {}", e));
             }
         });
 

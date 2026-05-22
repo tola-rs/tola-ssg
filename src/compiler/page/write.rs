@@ -12,7 +12,7 @@ use crate::compiler::page::CompiledPage;
 use crate::core::UrlPath;
 use crate::embed::build::{REDIRECT_HTML, RedirectVars};
 use crate::freshness::{self, ContentHash, is_fresh};
-use crate::log;
+use crate::logger;
 
 /// Write a page's HTML to disk
 pub fn write_page_html(page: &CompiledPage) -> Result<()> {
@@ -29,7 +29,10 @@ pub fn write_redirects(page: &CompiledPage, output_dir: &Path) -> Result<()> {
 
     for (alias_url, canonical_url) in targets {
         write_redirect_file(&alias_url, &canonical_url, output_dir)?;
-        log!("redirect"; "{} -> {}", alias_url, canonical_url);
+        logger::log(
+            "redirect",
+            format_args!("{} -> {}", alias_url, canonical_url),
+        );
     }
 
     Ok(())
@@ -102,7 +105,7 @@ pub(super) fn write_page(
     }
 
     if log_file {
-        log!("content"; "{}", page.route.source.display());
+        logger::log("content", format_args!("{}", page.route.source.display()));
     }
 
     if let Some(parent) = page.route.output_file.parent() {

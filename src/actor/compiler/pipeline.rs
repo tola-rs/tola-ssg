@@ -9,6 +9,7 @@ use crate::reload::compile::{CompileOutcome, compile_page};
 
 use super::CompilerActor;
 use super::tasks::compile_batch;
+use crate::logger;
 
 impl CompilerActor {
     /// Compile a single file (blocking).
@@ -39,7 +40,7 @@ impl CompilerActor {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(e) => {
-                crate::log!("compile"; "error: {}", e);
+                logger::log("compile", format_args!("error: {}", e));
                 CompileOutcome::Skipped
             }
         };
@@ -78,15 +79,17 @@ impl CompilerActor {
         let all_dependents = collect_virtual_dependents();
 
         if !all_dependents.is_empty() {
-            crate::debug!(
-                "compile";
-                "recompiling {} virtual package users",
-                all_dependents.len()
+            logger::debug(
+                "compile",
+                format_args!("recompiling {} virtual package users", all_dependents.len()),
             );
             self.compile_batch_blocking(all_dependents.into_iter().collect())
                 .await;
         } else {
-            crate::debug!("compile"; "no virtual package users to recompile");
+            logger::debug(
+                "compile",
+                format_args!("no virtual package users to recompile"),
+            );
         }
     }
 

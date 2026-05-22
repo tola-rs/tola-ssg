@@ -38,9 +38,18 @@ fn main() -> Result<()> {
 
     // Set global color override based on CLI option
     match cli.color {
-        ColorChoice::Always => owo_colors::set_override(true),
-        ColorChoice::Never => owo_colors::set_override(false),
-        ColorChoice::Auto => {} // owo-colors auto-detects TTY
+        ColorChoice::Always => {
+            owo_colors::set_override(true);
+            logger::set_color_mode(logger::ColorMode::Always);
+        }
+        ColorChoice::Never => {
+            owo_colors::set_override(false);
+            logger::set_color_mode(logger::ColorMode::Never);
+        }
+        ColorChoice::Auto => {
+            owo_colors::unset_override();
+            logger::set_color_mode(logger::ColorMode::Auto);
+        }
     }
 
     let config = init_config(SiteConfig::load(cli)?);

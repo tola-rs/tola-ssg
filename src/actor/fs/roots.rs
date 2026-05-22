@@ -5,6 +5,7 @@ use rustc_hash::FxHashSet;
 
 use super::is_transient_not_found;
 use crate::config::SiteConfig;
+use crate::logger;
 
 /// Watched root set.
 ///
@@ -50,18 +51,22 @@ impl RootSet {
                     // maintain() will keep trying to re-attach roots.
                     let transient = !root.path.exists() || is_transient_not_found(&err);
                     if transient {
-                        crate::debug!(
-                            "watch";
-                            "skip transient watch attach error on startup: {} ({})",
-                            root.path.display(),
-                            err
+                        logger::debug(
+                            "watch",
+                            format_args!(
+                                "skip transient watch attach error on startup: {} ({})",
+                                root.path.display(),
+                                err
+                            ),
                         );
                     } else {
-                        crate::debug!(
-                            "watch";
-                            "skip non-transient watch attach error on startup: {} ({})",
-                            root.path.display(),
-                            err
+                        logger::debug(
+                            "watch",
+                            format_args!(
+                                "skip non-transient watch attach error on startup: {} ({})",
+                                root.path.display(),
+                                err
+                            ),
                         );
                     }
                     continue;
@@ -83,7 +88,10 @@ impl RootSet {
 
             if watcher.watch(&root.path, root.mode).is_ok() {
                 self.attached.insert(root.clone());
-                crate::debug!("watch"; "re-attached watch: {}", root.path.display());
+                logger::debug(
+                    "watch",
+                    format_args!("re-attached watch: {}", root.path.display()),
+                );
             } else {
                 let _ = watcher.unwatch(&root.path);
             }
@@ -102,7 +110,10 @@ impl RootSet {
 
         for root in stale {
             if watcher.unwatch(&root.path).is_ok() {
-                crate::debug!("watch"; "detached watch: {}", root.path.display());
+                logger::debug(
+                    "watch",
+                    format_args!("detached watch: {}", root.path.display()),
+                );
             }
             self.attached.remove(&root);
         }

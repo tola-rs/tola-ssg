@@ -8,6 +8,7 @@ use crate::actor::fs::FsActor;
 use crate::actor::messages::{CompilerMsg, VdomMsg, WsMsg};
 use crate::actor::vdom::VdomActor;
 use crate::actor::ws::WsActor;
+use crate::logger;
 use crate::reload::server::WsServerHandle;
 
 pub(super) struct ActorRuntime {
@@ -64,7 +65,7 @@ pub(super) async fn run_actors(runtime: ActorRuntime) -> Result<()> {
                     result = actor_join_result("ws", join);
                 }
                 () = wait_for_shutdown(rx) => {
-                    crate::debug!("actor"; "shutdown signal received");
+                    logger::debug("actor", format_args!("shutdown signal received"));
                 }
             }
         }
@@ -91,10 +92,13 @@ pub(super) async fn run_actors(runtime: ActorRuntime) -> Result<()> {
     }
 
     if let Some(actor) = finished_actor {
-        crate::debug!("actor"; "{} actor stopped first", actor);
+        logger::debug("actor", format_args!("{} actor stopped first", actor));
     }
 
-    crate::debug!("actor"; "sending shutdown to compiler/ws/vdom");
+    logger::debug(
+        "actor",
+        format_args!("sending shutdown to compiler/ws/vdom"),
+    );
     if let Some(ws_server) = ws_server {
         ws_server.request_stop();
     }
@@ -167,7 +171,10 @@ fn record_shutdown_result(result: &mut Result<()>, shutdown_result: Result<()>) 
         if result.is_ok() {
             *result = Err(err);
         } else {
-            crate::debug!("actor"; "additional shutdown error: {:#}", err);
+            logger::debug(
+                "actor",
+                format_args!("additional shutdown error: {:#}", err),
+            );
         }
     }
 }

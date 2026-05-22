@@ -3,9 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use owo_colors::OwoColorize;
-
-use crate::utils::plural_s;
+use crate::{logger, utils::plural_s};
 
 /// A single validation error
 #[derive(Debug, Clone)]
@@ -91,34 +89,43 @@ impl ValidationReport {
         if errors.is_empty() {
             return;
         }
-        eprintln!();
+        logger::blank();
 
         let file_count = errors.len();
         let error_count: usize = errors.values().map(|v| v.len()).sum();
 
         // Section header
-        eprintln!(
+        logger::text(&format!(
             "{} {}",
-            name.red().bold(),
-            format!(
+            logger::style_error_strong(name),
+            logger::style_dim(format!(
                 "({file_count} file{}, {error_count} error{})",
                 plural_s(file_count),
                 plural_s(error_count)
-            )
-            .dimmed()
-        );
+            ))
+        ));
 
         for (path, errs) in errors {
             // File path
-            eprintln!("{}{}{}", "[".dimmed(), path.cyan(), "]".dimmed());
+            logger::text(&format!(
+                "{}{}{}",
+                logger::style_dim("["),
+                logger::style_path(path),
+                logger::style_dim("]")
+            ));
             for e in errs {
                 if e.reason.is_empty() {
-                    eprintln!("{} {}", "→".red(), e.target);
+                    logger::text(&format!("{} {}", logger::style_error("→"), e.target));
                 } else {
-                    eprintln!("{} {} {}", "→".red(), e.target, e.reason);
+                    logger::text(&format!(
+                        "{} {} {}",
+                        logger::style_error("→"),
+                        e.target,
+                        e.reason
+                    ));
                 }
                 if let Some(hint) = &e.hint {
-                    eprintln!("  {} {}", "hint:".yellow(), hint);
+                    logger::text(&format!("  {} {}", logger::style_warning("hint:"), hint));
                 }
             }
         }
@@ -132,14 +139,14 @@ impl fmt::Display for ValidationReport {
         let total = pages + assets;
 
         if total == 0 {
-            write!(f, "{}", "all checks passed".green())
+            write!(f, "{}", logger::style_success("all checks passed"))
         } else {
             write!(
                 f,
                 "{} {} {}",
-                "found".dimmed(),
-                total.to_string().red().bold(),
-                format!("error{}", plural_s(total)).dimmed()
+                logger::style_dim("found"),
+                logger::style_error_strong(total.to_string()),
+                logger::style_dim(format!("error{}", plural_s(total)))
             )
         }
     }

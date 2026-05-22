@@ -14,6 +14,7 @@ use crate::utils::path::slug::slugify_path;
 
 use super::resolve::{resolve_physical_path, resolve_relative_url};
 use super::{ResolveContext, ResolveResult, Resource};
+use crate::logger;
 
 /// Result of updating a page's permalink during hot-reload
 ///
@@ -251,7 +252,10 @@ impl AddressSpace {
             Some(old) => PermalinkUpdate::Changed { old_url: old },
             None => {
                 // First time seeing this source - this is a new page
-                crate::debug!("address_space"; "new source registered: {} -> {}", source.display(), new_url);
+                logger::debug(
+                    "address_space",
+                    format_args!("new source registered: {} -> {}", source.display(), new_url),
+                );
                 PermalinkUpdate::Unchanged
             }
         }

@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 
 use crate::config::SiteConfig;
 use crate::core::{Priority, UrlPath};
+use crate::logger;
 
 /// Batch entry status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +170,10 @@ impl BatchLogger {
 
     fn output_permalink_changes(&mut self) {
         for (path, old_url, new_url) in &self.permalink_changes {
-            crate::log!("permalink"; "{}: \"{}\" -> \"{}\"", path.display(), old_url, new_url);
+            logger::log(
+                "permalink",
+                format_args!("{}: \"{}\" -> \"{}\"", path.display(), old_url, new_url),
+            );
         }
         self.permalink_changes.clear();
     }
@@ -181,7 +185,10 @@ impl BatchLogger {
                 .map(|p| format!("`{}`", p.display()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            crate::log!("conflict"; "url \"{}\" owned by {}", url, sources_str);
+            logger::log(
+                "conflict",
+                format_args!("url \"{}\" owned by {}", url, sources_str),
+            );
         }
         self.conflicts.clear();
     }
@@ -203,16 +210,16 @@ impl BatchLogger {
             let summary =
                 format_result_counts(errors.len(), reloads.len(), unchanged.len(), warning_count);
             let detail = format_primary_error_detail(primary_error);
-            crate::logger::status_error(&summary, &detail);
+            logger::status_error(&summary, &detail);
         } else {
             if !self.warnings.is_empty() {
                 let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
                 for warning in self.warnings.iter().take(max) {
-                    eprintln!("{warning}");
+                    logger::text(warning);
                 }
                 let remaining = self.warnings.len().saturating_sub(max);
                 if remaining > 0 {
-                    eprintln!("... and {} more warning(s)", remaining);
+                    logger::text(&format!("... and {} more warning(s)", remaining));
                 }
             }
 
@@ -234,7 +241,7 @@ impl BatchLogger {
                 if warning_count > 0 {
                     msg.push_str(&format!(", warnings: {warning_count}"));
                 }
-                crate::logger::status_success(&msg);
+                logger::status_success(&msg);
             } else if !unchanged.is_empty() {
                 let first = unchanged[0].path();
                 let mut msg = match unchanged.len() {
@@ -244,9 +251,9 @@ impl BatchLogger {
                 if warning_count > 0 {
                     msg.push_str(&format!(", warnings: {warning_count}"));
                 }
-                crate::logger::status_unchanged(&msg);
+                logger::status_unchanged(&msg);
             } else if warning_count > 0 {
-                crate::logger::status_warning(&format!("warnings: {warning_count}"));
+                logger::status_warning(&format!("warnings: {warning_count}"));
             }
         }
 

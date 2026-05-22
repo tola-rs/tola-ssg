@@ -20,7 +20,7 @@ use crate::{
     config::SiteConfig,
     core::BuildMode,
     freshness::{self, ContentHash},
-    hooks, log,
+    hooks, logger,
     utils::plural_count,
 };
 use anyhow::Result;
@@ -64,10 +64,12 @@ pub fn build_site(
 
     // Log drafts skipped
     if !quiet && metadata.stats.has_skipped_drafts() {
-        log!(
-            "build";
-            "{} skipped",
-            plural_count(metadata.stats.drafts_skipped, "draft")
+        logger::log(
+            "build",
+            format_args!(
+                "{} skipped",
+                plural_count(metadata.stats.drafts_skipped, "draft")
+            ),
         );
     }
 

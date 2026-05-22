@@ -6,12 +6,16 @@ use super::types::DebouncedEvents;
 use crate::actor::messages::CompilerMsg;
 use crate::address::SiteIndex;
 use crate::config::SiteConfig;
+use crate::logger;
 use crate::reload::classify::classify_changes;
 
 pub(super) fn log_events(events: &DebouncedEvents) {
-    crate::debug_do! {
+    if logger::is_verbose() {
         for (path, kind) in &events.0 {
-            crate::log!("watch"; "{}: {}", kind.label(), path.display());
+            logger::log(
+                "watch",
+                format_args!("{}: {}", kind.label(), path.display()),
+            );
         }
     }
 }

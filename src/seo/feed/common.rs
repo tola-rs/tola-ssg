@@ -3,7 +3,7 @@
 use crate::{
     config::{FeedConfig, FeedFeature, SiteConfig},
     core::UrlPath,
-    log,
+    logger,
     page::{StoredPage, StoredPageMap},
     seo::extract::{extract, extract_text},
 };
@@ -121,11 +121,16 @@ pub fn write_feed(config: &SiteConfig, feed: &FeedConfig, content: &str) -> Resu
 
     let outcome = write_if_changed(&output_path, content)?;
     if outcome == WriteOutcome::Written {
-        log!(
-            "feed";
-            "{}: {}",
-            feed.format.as_str(),
-            output_path.file_name().unwrap_or_default().to_string_lossy()
+        logger::log(
+            "feed",
+            format_args!(
+                "{}: {}",
+                feed.format.as_str(),
+                output_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
         );
     }
     Ok(outcome)

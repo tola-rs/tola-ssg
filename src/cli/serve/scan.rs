@@ -9,6 +9,7 @@ use crate::address::SiteIndex;
 use crate::compiler::page::{TypstHost, build_address_space, collect_content_files};
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
+use crate::logger;
 use crate::page::CompiledPage;
 
 /// Scan all content files and populate runtime state
@@ -53,9 +54,15 @@ pub fn scan_pages(config: &SiteConfig, host: &TypstHost, state: &SiteIndex) -> R
 
     let total = pages.len();
     if drafts_skipped > 0 {
-        crate::debug!("scan"; "registered {} pages ({} drafts skipped)", total, drafts_skipped);
+        logger::debug(
+            "scan",
+            format_args!(
+                "registered {} pages ({} drafts skipped)",
+                total, drafts_skipped
+            ),
+        );
     } else {
-        crate::debug!("scan"; "registered {} pages", total);
+        logger::debug("scan", format_args!("registered {} pages", total));
     }
 
     Ok(())

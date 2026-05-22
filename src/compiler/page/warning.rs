@@ -6,6 +6,8 @@ use parking_lot::Mutex;
 use std::path::Path;
 use typst_batch::{DiagnosticInfo, Diagnostics};
 
+use crate::logger;
+
 /// Compilation warning collector.
 ///
 /// Uses `Vec` to preserve all warnings; display-time code owns truncation.
@@ -58,7 +60,8 @@ fn warning_relative_path(warning: &DiagnosticInfo, root: &Path) -> String {
 /// followed by the original warning body.
 pub fn format_warning_with_prefix(warning: &DiagnosticInfo, root: &Path) -> String {
     let rel_path = warning_relative_path(warning, root);
-    format!("[warning] {rel_path}\n{warning}")
+    let options = typst_batch::DiagnosticOptions::default().with_colored(logger::colors_enabled());
+    format!("[warning] {rel_path}\n{}", warning.with_options(options))
 }
 
 #[cfg(test)]

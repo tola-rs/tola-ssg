@@ -29,6 +29,7 @@ use tungstenite::protocol::Message;
 use super::messages::WsMsg;
 use crate::cache::{PersistedDiagnostics, PersistedError};
 use crate::core::UrlPath;
+use crate::logger;
 use crate::reload::active::ACTIVE_PAGE;
 use crate::reload::message::HotReloadMessage;
 
@@ -97,7 +98,13 @@ impl WsActor {
                 } => {
                     // Build HotReloadMessage with optional url_change
                     let hr_msg = if let Some(change) = url_change {
-                        crate::debug!("ws"; "sending patch with url_change: {} -> {}", change.old, change.new);
+                        logger::debug(
+                            "ws",
+                            format_args!(
+                                "sending patch with url_change: {} -> {}",
+                                change.old, change.new
+                            ),
+                        );
                         HotReloadMessage::patch_with_url_change(
                             url_path.as_str(),
                             Self::convert_patches(&patches),
@@ -121,9 +128,15 @@ impl WsActor {
                     url_path,
                     url_change,
                 } => {
-                    crate::debug!("ws"; "sending reload: {}", reason);
+                    logger::debug("ws", format_args!("sending reload: {}", reason));
                     let hr_msg = if let Some(change) = url_change {
-                        crate::debug!("ws"; "reload with url_change: {} -> {}", change.old, change.new);
+                        logger::debug(
+                            "ws",
+                            format_args!(
+                                "reload with url_change: {} -> {}",
+                                change.old, change.new
+                            ),
+                        );
                         HotReloadMessage::reload_with_url_change(
                             &reason,
                             crate::reload::message::UrlChange {
@@ -143,7 +156,7 @@ impl WsActor {
                 }
 
                 WsMsg::Asset { href } => {
-                    crate::debug!("ws"; "sending asset update: {}", href);
+                    logger::debug("ws", format_args!("sending asset update: {}", href));
                     let hr_msg = HotReloadMessage::asset(href);
                     self.broadcast(Message::Text(hr_msg.to_json().into()));
                 }
@@ -170,11 +183,11 @@ impl WsActor {
                 }
 
                 WsMsg::ClientConnected => {
-                    crate::debug!("ws"; "client notification received");
+                    logger::debug("ws", format_args!("client notification received"));
                 }
 
                 WsMsg::Shutdown => {
-                    crate::debug!("ws"; "shutting down");
+                    logger::debug("ws", format_args!("shutting down"));
                     break;
                 }
             }

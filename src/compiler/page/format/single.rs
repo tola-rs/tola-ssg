@@ -9,6 +9,7 @@ use crate::core::{ContentKind, LinkOrigin};
 use crate::page::{PageKind, PageMeta, StoredPageMap};
 
 use super::{ScannedHeading, ScannedPageLink};
+use crate::logger;
 
 /// Scanned data from a single page.
 #[derive(Debug, Clone, Default)]
@@ -73,7 +74,10 @@ fn scan_typst(
     match scanner.scan(path) {
         Ok(scan) => Some(scan),
         Err(e) => {
-            crate::debug!("scan"; "typst page scan failed for {}: {}", path.display(), e);
+            logger::debug(
+                "scan",
+                format_args!("typst page scan failed for {}: {}", path.display(), e),
+            );
             None
         }
     }

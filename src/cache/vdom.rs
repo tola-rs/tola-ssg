@@ -13,6 +13,7 @@ use tola_vdom::snapshot::{from_bytes, to_bytes};
 
 use super::CACHE_DIR;
 use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
+use crate::logger;
 
 /// Entry ready to be persisted to disk
 struct PersistEntry {
@@ -48,7 +49,10 @@ pub fn persist_cache(
     // Write index to disk
     write_index(&cache_dir, &index)?;
 
-    crate::debug!("persist"; "saved {} entries to {}", saved, cache_dir.display());
+    logger::debug(
+        "persist",
+        format_args!("saved {} entries to {}", saved, cache_dir.display()),
+    );
     Ok(saved)
 }
 
@@ -73,7 +77,10 @@ pub fn restore_cache(cache: &SharedCache, root: &Path) -> std::io::Result<usize>
         );
     });
 
-    crate::debug!("persist"; "restored {} entries from {}", restored, cache_dir.display());
+    logger::debug(
+        "persist",
+        format_args!("restored {} entries from {}", restored, cache_dir.display()),
+    );
     Ok(restored)
 }
 
@@ -93,7 +100,10 @@ pub fn restore_dependency_graph(root: &Path) -> std::io::Result<usize> {
         crate::compiler::dependency::global::record(&source, &deps);
     }
 
-    crate::debug!("persist"; "restored {} dependency entries", count);
+    logger::debug(
+        "persist",
+        format_args!("restored {} dependency entries", count),
+    );
     Ok(count)
 }
 
@@ -104,7 +114,10 @@ pub fn has_cache(root: &Path) -> bool {
     };
 
     if index.entries.is_empty() {
-        crate::debug!("persist"; "cache index exists but has no entries");
+        logger::debug(
+            "persist",
+            format_args!("cache index exists but has no entries"),
+        );
         return false;
     }
 
@@ -115,7 +128,10 @@ pub fn has_cache(root: &Path) -> bool {
         .any(|info| fs::read(cache_dir.join(format!("{}.vdom", info.filename))).is_ok());
 
     if !has_vdom {
-        crate::debug!("persist"; "cache index exists but no readable vdom entries");
+        logger::debug(
+            "persist",
+            format_args!("cache index exists but no readable vdom entries"),
+        );
     }
 
     has_vdom
@@ -168,7 +184,7 @@ fn build_persist_entry(
     // This handles the case where a file was deleted but debouncer didn't process it yet
     let source_file = source_paths.get(url)?;
     if !source_file.exists() {
-        crate::debug!("persist"; "skipping {} (source deleted)", url);
+        logger::debug("persist", format_args!("skipping {} (source deleted)", url));
         return None;
     }
 
@@ -176,7 +192,7 @@ fn build_persist_entry(
     let bytes = match to_bytes(&cache_entry.doc) {
         Ok(b) => b,
         Err(e) => {
-            crate::debug!("persist"; "failed to snapshot {}: {}", url, e);
+            logger::debug("persist", format_args!("failed to snapshot {}: {}", url, e));
             return None;
         }
     };
@@ -255,7 +271,10 @@ fn collect_dependency_entries(index: &CacheIndex, root: &Path) -> Vec<(PathBuf, 
 fn write_entry(cache_dir: &Path, entry: &PersistEntry) -> std::io::Result<()> {
     let path = cache_dir.join(format!("{}.vdom", &entry.filename));
     fs::write(&path, &entry.bytes).map_err(|e| {
-        crate::debug!("persist"; "failed to write {}: {}", path.display(), e);
+        logger::debug(
+            "persist",
+            format_args!("failed to write {}: {}", path.display(), e),
+        );
         e
     })
 }
@@ -272,12 +291,18 @@ fn read_entry(cache_dir: &Path, filename: &str) -> Result<StructuralDocument, St
     let path = cache_dir.join(format!("{}.vdom", filename));
 
     let bytes = fs::read(&path).map_err(|e| {
-        crate::debug!("persist"; "failed to read {}: {}", path.display(), e);
+        logger::debug(
+            "persist",
+            format_args!("failed to read {}: {}", path.display(), e),
+        );
         e.to_string()
     })?;
 
     from_bytes(&bytes).map_err(|e| {
-        crate::debug!("persist"; "failed to decode snapshot {}: {}", path.display(), e);
+        logger::debug(
+            "persist",
+            format_args!("failed to decode snapshot {}: {}", path.display(), e),
+        );
         e.to_string()
     })
 }

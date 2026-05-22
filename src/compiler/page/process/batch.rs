@@ -15,7 +15,7 @@ use crate::compiler::{CompileContext, collect_all_files};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::freshness::ContentHash;
-use crate::logger::ProgressLine;
+use crate::logger;
 use crate::package::{
     build_visible_current_inputs_for_source, build_visible_inputs, package_sentinel,
 };
@@ -93,7 +93,7 @@ pub struct StaticPageBuild<'a> {
     pub deps_hash: Option<ContentHash>,
     pub global_state: GlobalStateMode,
     pub warnings: &'a WarningCollector,
-    pub progress: Option<&'a ProgressLine>,
+    pub progress: Option<&'a logger::ProgressLine>,
 }
 
 pub struct IterativePageBuild<'a> {
@@ -171,7 +171,7 @@ pub fn build_static_pages(build: StaticPageBuild<'_>) -> Result<MetadataResult> 
 
 fn build_static_pages_with_store(
     ctx: BuildContext<'_>,
-    progress: Option<&ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Result<StaticBuild> {
     let content_files = collect_content_files(&ctx.config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
@@ -371,22 +371,29 @@ pub fn rebuild_iterative_pages(build: IterativePageBuild<'_>) -> Result<Vec<Comp
         // Check convergence
         match stability.decide(store.pages_hash(), iteration, MAX_ITERATIONS) {
             StabilityDecision::Converged => {
-                crate::debug!("iterative"; "converged after {} iteration(s)", iteration + 1);
+                logger::debug(
+                    "iterative",
+                    format_args!("converged after {} iteration(s)", iteration + 1),
+                );
                 break;
             }
             StabilityDecision::Oscillating => {
-                crate::log!(
-                    "warn";
-                    "metadata oscillating (cycle detected), stopping after {} iterations",
-                    iteration + 1
+                logger::log(
+                    "warn",
+                    format_args!(
+                        "metadata oscillating (cycle detected), stopping after {} iterations",
+                        iteration + 1
+                    ),
                 );
                 break;
             }
             StabilityDecision::MaxIterationsReached => {
-                crate::log!(
-                    "warn";
-                    "metadata did not converge after {} iterations",
-                    MAX_ITERATIONS
+                logger::log(
+                    "warn",
+                    format_args!(
+                        "metadata did not converge after {} iterations",
+                        MAX_ITERATIONS
+                    ),
                 );
             }
             StabilityDecision::Continue => {}
@@ -522,7 +529,7 @@ fn compile_typst_batch_with_current_inputs<'a>(
     files: &[&PathBuf],
     config: &SiteConfig,
     store: &StoredPageMap,
-    progress: Option<&ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
     let current_inputs_by_path: rustc_hash::FxHashMap<&Path, typst_batch::Inputs> = files
@@ -550,7 +557,7 @@ fn compile_typst_batch_with_current_inputs<'a>(
             if let Some(p) = progress {
                 p.inc("typst");
             }
-            crate::debug!("typst"; "compiled {}", path.display());
+            logger::debug("typst", format_args!("compiled {}", path.display()));
         },
     )
     .map_err(|e| anyhow::anyhow!("{}", e))
@@ -615,7 +622,7 @@ fn process_typst_files(
 fn process_markdown_files(
     ctx: &BuildContext,
     files: &[&PathBuf],
-    progress: Option<&crate::logger::ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Vec<Result<Option<BuildPageResult>>> {
     files
         .par_iter()

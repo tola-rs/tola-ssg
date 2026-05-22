@@ -10,6 +10,7 @@ use crate::reload::compile::{CompileOutcome, compile_page, compile_page_with_tic
 use crate::reload::output;
 
 use super::{BackgroundTask, BatchResult};
+use crate::logger;
 
 pub(super) struct BatchTask {
     pub(super) paths: Vec<PathBuf>,
@@ -105,7 +106,7 @@ async fn compile_batch_inner(
 pub(super) fn abort_task(task: &mut Option<BackgroundTask>) {
     if let Some(t) = task.take() {
         t.abort();
-        crate::debug!("compile"; "interrupted background task");
+        logger::debug("compile", format_args!("interrupted background task"));
     }
 }
 

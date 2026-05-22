@@ -21,7 +21,7 @@ use crate::compiler::page::{TypstHost, scan_page_kind};
 use crate::{
     config::{SiteConfig, config_handle},
     core::{ContentKind, UrlPath},
-    debug, log,
+    logger,
 };
 use anyhow::Result;
 use classify::{ServedOutputKind, classify_served_output};
@@ -105,13 +105,16 @@ pub(crate) fn bind_server() -> Result<BoundServer> {
 
     let ws_port = config.serve.watch.then_some(DEFAULT_WS_PORT);
     if ws_port.is_some() {
-        debug!("hotreload"; "ws://localhost:{}", DEFAULT_WS_PORT);
+        logger::debug(
+            "hotreload",
+            format_args!("ws://localhost:{}", DEFAULT_WS_PORT),
+        );
     }
 
     let (shutdown_tx, shutdown_rx) = channel::unbounded::<()>();
     lifecycle::register_server_for_shutdown(Arc::clone(&server), shutdown_tx);
 
-    log!("serve"; "http://{}", addr);
+    logger::log("serve", format_args!("http://{}", addr));
 
     Ok(BoundServer {
         server,
@@ -161,7 +164,7 @@ fn run_request_loop(server: &Server, state: Arc<SiteIndex>, ready: Arc<ServeRead
         pool.spawn(move || {
             let config = config_handle.current();
             if let Err(e) = handle_request(request, config, typst_hosts, state, ready) {
-                log!("serve"; "request error: {e}");
+                logger::log("serve", format_args!("request error: {e}"));
             }
         });
     }
@@ -491,10 +494,12 @@ fn serve_file_with_recovery(
     match response::respond_file(request, path, &config.build.path_prefix, ws_port)? {
         response::FileServeResult::Served => Ok(()),
         response::FileServeResult::Missing(request) => {
-            debug!(
-                "serve";
-                "transient missing output for {}, attempting on-demand recovery",
-                request_url
+            logger::debug(
+                "serve",
+                format_args!(
+                    "transient missing output for {}, attempting on-demand recovery",
+                    request_url
+                ),
             );
             recover_missing_output(request, request_url, config, typst_hosts, state, ws_port)
         }

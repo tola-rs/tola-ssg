@@ -4,6 +4,7 @@ use std::time::Instant;
 use super::tasks::{abort_task, wait_task};
 use super::{BackgroundTask, BatchResult, CompilerActor};
 use crate::actor::messages::{CompilerMsg, VdomMsg};
+use crate::logger;
 use crate::reload::output;
 
 impl CompilerActor {
@@ -96,7 +97,10 @@ impl CompilerActor {
             result.outcomes,
         )
         .await;
-        crate::debug!("compile"; "background done in {:?}", start.elapsed());
+        logger::debug(
+            "compile",
+            format_args!("background done in {:?}", start.elapsed()),
+        );
     }
 
     /// Finalize a compilation batch
@@ -165,8 +169,11 @@ impl CompilerActor {
         match tokio::task::spawn_blocking(move || crate::seo::build_outputs(&config, &state)).await
         {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => crate::log!("warning"; "failed to write SEO outputs: {}", e),
-            Err(e) => crate::debug!("compile"; "SEO output task failed: {}", e),
+            Ok(Err(e)) => logger::log(
+                "warning",
+                format_args!("failed to write SEO outputs: {}", e),
+            ),
+            Err(e) => logger::debug("compile", format_args!("SEO output task failed: {}", e)),
         }
     }
 }

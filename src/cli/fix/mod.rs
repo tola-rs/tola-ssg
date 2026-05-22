@@ -7,8 +7,8 @@ use anyhow::Result;
 
 use crate::config::SiteConfig;
 use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL, TolaTypstVars};
-use crate::log;
 
+use crate::logger;
 use check::{CheckResult, check_and_fix};
 
 /// Version prefix in tola.typ files: `// Tola SSG ... (vX.X.X)`
@@ -55,7 +55,7 @@ pub fn run_fix(config: &SiteConfig) -> Result<()> {
     }
 
     if !has_issues {
-        log!("fix"; "all files up to date");
+        logger::log("fix", format_args!("all files up to date"));
     }
 
     Ok(())

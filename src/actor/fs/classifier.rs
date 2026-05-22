@@ -5,6 +5,7 @@ use rustc_hash::FxHashMap;
 use super::types::{ChangeKind, DebouncedEvents};
 use crate::address::{AddressSpace, SiteIndex};
 use crate::config::SiteConfig;
+use crate::logger;
 use crate::utils::path::normalize_path;
 
 /// Classifies raw debounced events into final DebouncedEvents.
@@ -43,15 +44,24 @@ impl EventClassifier {
             let exists = path.exists();
             match kind {
                 ChangeKind::Created if !exists => {
-                    crate::debug!("watch"; "discard created (gone): {}", path.display());
+                    logger::debug(
+                        "watch",
+                        format_args!("discard created (gone): {}", path.display()),
+                    );
                     changes.remove(&path);
                 }
                 ChangeKind::Modified if !exists => {
-                    crate::debug!("watch"; "upgrade modified->removed: {}", path.display());
+                    logger::debug(
+                        "watch",
+                        format_args!("upgrade modified->removed: {}", path.display()),
+                    );
                     changes.insert(path, ChangeKind::Removed);
                 }
                 ChangeKind::Removed if exists => {
-                    crate::debug!("watch"; "downgrade removed->modified: {}", path.display());
+                    logger::debug(
+                        "watch",
+                        format_args!("downgrade removed->modified: {}", path.display()),
+                    );
                     changes.insert(path, ChangeKind::Modified);
                 }
                 _ => {}
@@ -94,7 +104,10 @@ impl EventClassifier {
     ) {
         for source in space.iter_sources() {
             if source.parent() == Some(dir) && !source.exists() && !changes.contains_key(source) {
-                crate::debug!("watch"; "dir-scan found missing: {}", source.display());
+                logger::debug(
+                    "watch",
+                    format_args!("dir-scan found missing: {}", source.display()),
+                );
                 changes.insert(source.to_path_buf(), ChangeKind::Removed);
             }
         }
@@ -116,7 +129,10 @@ impl EventClassifier {
                 && !changes.contains_key(&path)
                 && space.url_for_source(&path).is_none()
             {
-                crate::debug!("watch"; "dir-scan found untracked: {}", path.display());
+                logger::debug(
+                    "watch",
+                    format_args!("dir-scan found untracked: {}", path.display()),
+                );
                 changes.insert(path, ChangeKind::Created);
             }
         }
@@ -184,7 +200,10 @@ impl EventClassifier {
                     }
                     let tracked = space.url_for_source(p).is_some();
                     if !tracked {
-                        crate::debug!("watch"; "filter removed (not tracked): {}", p.display());
+                        logger::debug(
+                            "watch",
+                            format_args!("filter removed (not tracked): {}", p.display()),
+                        );
                     }
                     tracked
                 }

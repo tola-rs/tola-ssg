@@ -1,7 +1,7 @@
 //! Configuration error types.
 
 use super::{ConfigPresence, FieldPath};
-use owo_colors::OwoColorize;
+use crate::logger;
 use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -63,15 +63,15 @@ impl fmt::Display for ConfigDiagnostic {
         writeln!(
             f,
             "{}{}{}",
-            "[".dimmed(),
-            self.field.as_str().cyan(),
-            "]".dimmed()
+            logger::style_dim("["),
+            logger::style_path(self.field.as_str()),
+            logger::style_dim("]")
         )?;
         // Error message with red bullet
-        write!(f, "{} {}", "→".red(), self.message)?;
+        write!(f, "{} {}", logger::style_error("→"), self.message)?;
         // Hint in yellow
         if let Some(hint) = &self.hint {
-            write!(f, "\n  {} {}", "hint:".yellow(), hint)?;
+            write!(f, "\n  {} {}", logger::style_warning("hint:"), hint)?;
         }
         Ok(())
     }
@@ -160,7 +160,10 @@ impl ConfigDiagnostics {
 
     /// Add a general hint (printed immediately).
     pub fn hint(&mut self, field: FieldPath, message: impl Into<String>) {
-        crate::log!("hint"; "[{}] {}", field.as_str(), message.into());
+        logger::log(
+            "hint",
+            format_args!("[{}] {}", field.as_str(), message.into()),
+        );
     }
 
     /// Print collected hints and warnings in a grouped format.
@@ -173,18 +176,32 @@ impl ConfigDiagnostics {
 
         // Print warnings (deprecated fields/sections)
         if !self.warnings.is_empty() {
-            crate::log!("warning"; "deprecated fields or sections, will be removed in a future version:");
-            for (field, _) in &self.warnings {
-                eprintln!("- {}", field.as_str());
-            }
+            let fields = self
+                .warnings
+                .iter()
+                .map(|(field, _)| format!("- {}", field.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            logger::block(
+                "warning",
+                "deprecated fields or sections, will be removed in a future version:",
+                &fields,
+            );
         }
 
         // Print hints (experimental fields/sections)
         if !self.hints.is_empty() {
-            crate::log!("hint"; "experimental fields or sections, may change or be removed:");
-            for field in &self.hints {
-                eprintln!("- {}", field.as_str());
-            }
+            let fields = self
+                .hints
+                .iter()
+                .map(|field| format!("- {}", field.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            logger::block(
+                "hint",
+                "experimental fields or sections, may change or be removed:",
+                &fields,
+            );
         }
     }
 
@@ -216,7 +233,11 @@ impl ConfigDiagnostics {
 
 impl fmt::Display for ConfigDiagnostics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}\n", "config validation failed:".red().bold())?;
+        writeln!(
+            f,
+            "{}\n",
+            logger::style_error_strong("config validation failed:")
+        )?;
         for (i, err) in self.errors.iter().enumerate() {
             write!(f, "{err}")?;
             if i + 1 < self.errors.len() {
@@ -227,9 +248,9 @@ impl fmt::Display for ConfigDiagnostics {
             write!(
                 f,
                 "\n\n{} {} {}",
-                "found".dimmed(),
-                self.errors.len().to_string().red().bold(),
-                "errors".dimmed()
+                logger::style_dim("found"),
+                logger::style_error_strong(self.errors.len().to_string()),
+                logger::style_dim("errors")
             )?;
         }
         Ok(())

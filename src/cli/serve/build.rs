@@ -16,7 +16,7 @@ use crate::{
     compiler::scheduler::{CompileResult, SCHEDULER},
     config::SiteConfig,
     core::{ContentKind, Priority, is_shutdown},
-    debug, embed, freshness, hooks, log, seo,
+    embed, freshness, hooks, logger, seo,
 };
 
 use super::ready::ServeReady;
@@ -100,7 +100,10 @@ pub fn serve_build(
         .filter(|p| ContentKind::is_content_file(p))
         .collect();
 
-    debug!("build"; "warming {} pages via scheduler", content_files.len());
+    logger::debug(
+        "build",
+        format_args!("warming {} pages via scheduler", content_files.len()),
+    );
     let mut warnings = warm_site_pages(
         content_files,
         Arc::new(config.clone()),
@@ -129,7 +132,7 @@ pub fn serve_build(
 
     seo::build_outputs(config, &state)?;
 
-    debug!("build"; "done");
+    logger::debug("build", format_args!("done"));
     Ok(())
 }
 
@@ -145,7 +148,7 @@ pub fn start_serve_build(
 ) {
     std::thread::spawn(move || {
         if let Err(e) = serve_build(&config, typst_host, state, Arc::clone(&ready)) {
-            log!("build"; "background warmup failed: {}", e);
+            logger::log("build", format_args!("background warmup failed: {}", e));
         }
         ready.set_startup_done();
     });
@@ -212,7 +215,10 @@ fn recompile_virtual_users(
         return Vec::new();
     }
 
-    debug!("build"; "recompiling {} virtual package users", all_dependents.len());
+    logger::debug(
+        "build",
+        format_args!("recompiling {} virtual package users", all_dependents.len()),
+    );
 
     let mut warnings = Vec::new();
 
@@ -263,12 +269,12 @@ fn finalize_serve_build(
         let max = config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
         for (path, msg) in failures.iter().take(max) {
             let display_path = path.strip_prefix(root).unwrap_or(path);
-            log!("error"; "{}", display_path.display());
-            eprintln!("{}", msg);
+            logger::log("error", format_args!("{}", display_path.display()));
+            logger::text(msg);
         }
         let remaining = failures.len().saturating_sub(max);
         if remaining > 0 {
-            eprintln!("... and {} more error(s)", remaining);
+            logger::text(&format!("... and {} more error(s)", remaining));
         }
     }
 
@@ -276,11 +282,11 @@ fn finalize_serve_build(
     if !warnings.is_empty() {
         let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
         for item in warnings.iter().take(max) {
-            eprintln!("{}", item.message);
+            logger::text(&item.message);
         }
         let remaining = warnings.len().saturating_sub(max);
         if remaining > 0 {
-            eprintln!("... and {} more warning(s)", remaining);
+            logger::text(&format!("... and {} more warning(s)", remaining));
         }
     }
 
@@ -301,7 +307,10 @@ fn finalize_serve_build(
         diagnostics.push_warning(PersistedWarning::new(rel_path, warning.message.clone()));
     }
     if let Err(e) = persist_diagnostics(&diagnostics, root) {
-        crate::debug!("build"; "failed to persist diagnostics: {}", e);
+        logger::debug(
+            "build",
+            format_args!("failed to persist diagnostics: {}", e),
+        );
     }
 
     // Persist VDOM cache for serve reuse
@@ -311,7 +320,7 @@ fn finalize_serve_build(
         &source_paths,
         config.get_root(),
     ) {
-        crate::debug!("build"; "failed to persist vdom cache: {}", e);
+        logger::debug("build", format_args!("failed to persist vdom cache: {}", e));
     }
 
     Ok(())

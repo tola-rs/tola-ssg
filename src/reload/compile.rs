@@ -12,6 +12,7 @@ use crate::compiler::page::{
 };
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
+use crate::logger;
 use crate::page::PageState;
 use tola_vdom::Document;
 
@@ -136,7 +137,10 @@ fn compile_content_file(
                 None => cleanup_draft_state(path, config, state),
             };
             if cleaned {
-                crate::debug!("watch"; "page became draft: {}", path.display());
+                logger::debug(
+                    "watch",
+                    format_args!("page became draft: {}", path.display()),
+                );
             }
             CompileOutcome::Skipped
         }
@@ -321,7 +325,10 @@ fn cleanup_output_file(config: &SiteConfig, url: &UrlPath) {
     }
 
     if let Err(e) = std::fs::remove_file(&output_file) {
-        crate::debug!("watch"; "failed to remove {}: {}", output_file.display(), e);
+        logger::debug(
+            "watch",
+            format_args!("failed to remove {}: {}", output_file.display(), e),
+        );
         return;
     }
 

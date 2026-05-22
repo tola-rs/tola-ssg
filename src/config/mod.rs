@@ -55,7 +55,7 @@ use section::{ServeConfig, SiteSectionConfig, ThemeSectionConfig};
 use crate::{
     cli::{BuildArgs, Cli, Commands, ValidateArgs},
     core::UrlPath,
-    log,
+    logger,
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -139,10 +139,12 @@ impl SiteConfig {
 
         // Validate config existence (skip for init)
         if !cli.is_init() && !exists {
-            log!(
-                "error";
-                "Config file '{}' not found. Run 'tola init' to create a new project.",
-                cli.config.display()
+            logger::log(
+                "error",
+                format_args!(
+                    "Config file '{}' not found. Run 'tola init' to create a new project.",
+                    cli.config.display()
+                ),
             );
             std::process::exit(1);
         }
@@ -291,13 +293,18 @@ impl SiteConfig {
             .file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_else(|| path.to_string_lossy());
-        eprintln!();
-        log!("warning"; "unknown fields in {}:", display_path);
-        log!("warning"; "ignoring:");
-        for field in fields {
-            eprintln!("- {}", field);
-        }
-        eprintln!();
+        let body = fields
+            .iter()
+            .map(|field| format!("- {field}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        logger::blank();
+        logger::block(
+            "warning",
+            &format!("unknown fields in {display_path}:"),
+            &body,
+        );
+        logger::blank();
     }
 
     /// Prompt user to continue. Returns true only if user explicitly confirms.
@@ -428,7 +435,7 @@ impl SiteConfig {
     /// `is_serve`: If true, feed/sitemap output defaults to disabled for faster local preview.
     fn apply_build_args(&mut self, args: &BuildArgs, is_serve: bool) {
         // Set verbose mode globally
-        crate::logger::set_verbose(args.verbose);
+        logger::set_verbose(args.verbose);
 
         Self::update_option(&mut self.build.minify, args.minify.as_ref());
         self.build.clean = args.clean;
@@ -441,7 +448,7 @@ impl SiteConfig {
         }
 
         if let Some(message) = self.missing_feed_config_warning(args) {
-            log!("warning"; "{message}");
+            logger::log("warning", format_args!("{message}"));
         }
 
         if is_serve {

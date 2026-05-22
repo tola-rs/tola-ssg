@@ -18,6 +18,7 @@ use crate::config::SiteConfig;
 use crate::config::section::theme::RecolorTarget;
 use crate::core::LinkKind;
 use crate::image::background;
+use crate::logger;
 
 // =============================================================================
 // nobg reference tracking (minify mode only)
@@ -101,7 +102,7 @@ impl<'a> MediaTransform<'a> {
 
         // Process image (with caching)
         if let Err(e) = self.process_nobg_image(&source_path, &output_path) {
-            eprintln!("nobg processing error: {}", e);
+            logger::text(&format!("nobg processing error: {}", e));
             return;
         }
 

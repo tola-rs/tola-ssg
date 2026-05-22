@@ -28,6 +28,7 @@ mod types;
 // Root attach/re-attach lifecycle.
 mod roots;
 
+use crate::logger;
 use classifier::EventClassifier;
 use debouncer::Debouncer;
 use roots::RootSet;
@@ -170,7 +171,7 @@ async fn process_changes(
             return Ok(());
         }
         let changed_paths: Vec<_> = raw_events.keys().cloned().collect();
-        crate::debug!("watch"; "retrying scan after change");
+        logger::debug("watch", format_args!("retrying scan after change"));
         compiler_tx
             .send(CompilerMsg::RetryScan { changed_paths })
             .await

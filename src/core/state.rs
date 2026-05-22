@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::logger;
 use tiny_http::Server;
 
 /// Site is ready to serve requests (init phase complete)
@@ -77,7 +78,7 @@ pub fn setup_shutdown_handler() -> anyhow::Result<()> {
 
         // Unblock HTTP server, or exit immediately if not yet serving
         if let Some(server) = SERVER.get() {
-            crate::log!("serve"; "shutting down...");
+            logger::log("serve", format_args!("shutting down..."));
             server.unblock();
         } else {
             // No server registered yet (e.g., during config prompt)

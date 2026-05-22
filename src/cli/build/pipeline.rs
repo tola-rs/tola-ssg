@@ -10,8 +10,7 @@ use crate::{
     config::{SiteConfig, section::build::DiagnosticsConfig},
     core::{BuildMode, ContentKind, is_shutdown},
     freshness::{self, ContentHash},
-    log,
-    logger::ProgressLine,
+    logger,
     package::generate_lsp_stubs,
 };
 
@@ -36,7 +35,7 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<TypstHost> {
     if config.build.clean
         && let Err(e) = crate::cache::clear_cache_dir(config.get_root())
     {
-        crate::debug!("build"; "failed to clear vdom cache: {}", e);
+        logger::debug("build", format_args!("failed to clear vdom cache: {}", e));
     }
 
     // Write enhance.css with config variables
@@ -74,11 +73,11 @@ pub(super) fn collect_build_files(config: &SiteConfig) -> BuildFiles {
 }
 
 /// Create progress display if not quiet
-pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<ProgressLine> {
+pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<logger::ProgressLine> {
     if quiet {
         return None;
     }
-    Some(ProgressLine::new(&[
+    Some(logger::ProgressLine::new(&[
         ("typst", files.typst_count),
         ("markdown", files.markdown_count),
         ("assets", files.asset_count),
@@ -93,7 +92,7 @@ pub(super) fn compile_and_process(
     state: &SiteIndex,
     deps_hash: ContentHash,
     warnings: &WarningCollector,
-    progress: Option<&ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Result<MetadataResult> {
     process_assets(config, progress)?;
 
@@ -111,13 +110,13 @@ pub(super) fn compile_and_process(
 }
 
 /// Process configured asset files through the unified asset routing rules.
-fn process_assets(config: &SiteConfig, progress: Option<&ProgressLine>) -> Result<()> {
+fn process_assets(config: &SiteConfig, progress: Option<&logger::ProgressLine>) -> Result<()> {
     if is_shutdown() {
         return Err(anyhow!("Aborted"));
     }
 
     let summary = crate::asset::process_configured_assets(config, false, false).map_err(|e| {
-        log!("error"; "asset processing failed: {:#}", e);
+        logger::log("error", format_args!("asset processing failed: {:#}", e));
         anyhow!("Build failed")
     })?;
 
@@ -159,7 +158,7 @@ pub(super) fn rebuild_iterative_pages(
     }) {
         Ok(pages) => Ok(Pages { items: pages }),
         Err(e) => {
-            log!("error"; "compile failed: {:#}", e);
+            logger::log("error", format_args!("compile failed: {:#}", e));
             Err(anyhow!("Build failed"))
         }
     }
@@ -194,7 +193,10 @@ fn copy_html_404(config: &SiteConfig) -> Result<()> {
 
     let source = config.root_join(not_found);
     if !source.is_file() {
-        log!("warning"; "404 page not found: {}", not_found.display());
+        logger::log(
+            "warning",
+            format_args!("404 page not found: {}", not_found.display()),
+        );
         return Ok(());
     }
 
@@ -228,7 +230,7 @@ pub(super) fn finalize_build(
     if let Err(e) =
         crate::cache::persist_cache(&page::BUILD_CACHE, &source_paths, config.get_root())
     {
-        crate::debug!("build"; "failed to persist vdom cache: {}", e);
+        logger::debug("build", format_args!("failed to persist vdom cache: {}", e));
     }
 
     if !quiet {
@@ -244,12 +246,12 @@ fn print_warnings(warnings: &typst_batch::Diagnostics, config: &DiagnosticsConfi
     let total = warnings.len();
 
     for item in warnings.iter().take(max) {
-        eprintln!("{}", page::format_warning_with_prefix(item, root));
+        logger::text(&page::format_warning_with_prefix(item, root));
     }
 
     let hidden = total.saturating_sub(max);
     if hidden > 0 {
-        eprintln!("... and {} more warning(s)", hidden);
+        logger::text(&format!("... and {} more warning(s)", hidden));
     }
 }
 
@@ -276,7 +278,10 @@ fn log_build_result(output: &Path) -> Result<()> {
         .count();
 
     if file_count == 0 {
-        log!("warn"; "output is empty, check if content has page files");
+        logger::log(
+            "warn",
+            format_args!("output is empty, check if content has page files"),
+        );
     }
 
     Ok(())

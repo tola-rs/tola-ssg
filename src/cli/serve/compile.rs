@@ -14,6 +14,7 @@ use crate::compiler::scheduler::{CompileResult, SCHEDULER};
 use crate::config::SiteConfig;
 use crate::core::Priority;
 use crate::freshness::mtime::{get_mtime, is_newer_than};
+use crate::logger;
 use crate::page::CompiledPage;
 
 /// Result of preparing an on-demand page request.
@@ -105,7 +106,10 @@ fn output_path_for_source(
 fn is_output_fresh(source: &Path, output: &Path) -> bool {
     // Output must exist and be newer than source
     if !is_newer_than(output, source) {
-        crate::debug!("fresh"; "{}: output older than source", source.display());
+        logger::debug(
+            "fresh",
+            format_args!("{}: output older than source", source.display()),
+        );
         return false;
     }
 
@@ -117,13 +121,22 @@ fn is_output_fresh(source: &Path, output: &Path) -> bool {
             if let (Some(out_time), Some(dep_time)) = (output_mtime, get_mtime(dep))
                 && dep_time > out_time
             {
-                crate::debug!("fresh"; "{}: dep {} is newer", source.display(), dep.display());
+                logger::debug(
+                    "fresh",
+                    format_args!("{}: dep {} is newer", source.display(), dep.display()),
+                );
                 return false;
             }
         }
-        crate::debug!("fresh"; "{}: fresh (checked {} deps)", source.display(), deps.len());
+        logger::debug(
+            "fresh",
+            format_args!("{}: fresh (checked {} deps)", source.display(), deps.len()),
+        );
     } else {
-        crate::debug!("fresh"; "{}: fresh (no deps recorded)", source.display());
+        logger::debug(
+            "fresh",
+            format_args!("{}: fresh (no deps recorded)", source.display()),
+        );
     }
 
     true

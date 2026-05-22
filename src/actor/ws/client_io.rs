@@ -11,6 +11,7 @@ use crate::reload::active::ACTIVE_PAGE;
 use crate::reload::message::HotReloadMessage;
 
 use super::{RegisteredClient, WsActor};
+use crate::logger;
 
 impl WsActor {
     fn initial_client_messages(&self) -> Vec<HotReloadMessage> {
@@ -45,12 +46,15 @@ impl WsActor {
                     };
 
                     if let Err(e) = ws.send(Message::Text(msg.to_json().into())) {
-                        crate::log!("ws"; "failed to send {} message: {}", msg_type, e);
+                        logger::log(
+                            "ws",
+                            format_args!("failed to send {} message: {}", msg_type, e),
+                        );
                         return;
                     }
 
                     if matches!(msg, HotReloadMessage::Error { .. }) {
-                        crate::debug!("ws"; "sent pending error to new client");
+                        logger::debug("ws", format_args!("sent pending error to new client"));
                     }
                 }
 
@@ -59,11 +63,18 @@ impl WsActor {
                 let route = Self::try_read_initial_route(&mut ws);
 
                 let mut clients = self.clients.lock();
-                crate::debug!("ws"; "client connected (total: {}, route: {:?})", clients.len() + 1, route);
+                logger::debug(
+                    "ws",
+                    format_args!(
+                        "client connected (total: {}, route: {:?})",
+                        clients.len() + 1,
+                        route
+                    ),
+                );
                 clients.push(RegisteredClient { ws, route });
             }
             Err(e) => {
-                crate::log!("ws"; "handshake failed: {}", e);
+                logger::log("ws", format_args!("handshake failed: {}", e));
             }
         }
     }
@@ -165,7 +176,7 @@ impl WsActor {
         let decoded = percent_decode_str(path)
             .decode_utf8()
             .unwrap_or_else(|_| path.into());
-        crate::debug!("ws"; "client route: {}", decoded);
+        logger::debug("ws", format_args!("client route: {}", decoded));
         Some(UrlPath::from_page(&decoded))
     }
 }

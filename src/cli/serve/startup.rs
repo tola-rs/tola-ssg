@@ -14,9 +14,9 @@ use crate::compiler::page::{BUILD_CACHE, TypstHost, cache_vdom};
 use crate::compiler::scheduler::SCHEDULER;
 use crate::config::{self, SiteConfig};
 use crate::core::UrlPath;
+use crate::logger;
 use crate::page::PageState;
 use crate::reload::compile::{self, CompileOutcome};
-use crate::{debug, log, logger};
 
 /// Keep cache-startup repair work narrow so request-driven compiles can still
 /// win the machine while startup catches up on offline changes.
@@ -33,15 +33,17 @@ pub fn serve_with_cache(config: &SiteConfig) -> Result<()> {
     if config.build.clean
         && let Err(e) = cache::clear_cache_dir(config.get_root())
     {
-        debug!("serve"; "failed to clear vdom cache: {}", e);
+        logger::debug("serve", format_args!("failed to clear vdom cache: {}", e));
     }
 
     let has_cache =
         !config.build.clean && cache::has_cache(config.get_root()) && config.build.output.exists();
-    debug!(
-        "startup";
-        "serve startup path: {}",
-        if has_cache { "cache" } else { "full-build" }
+    logger::debug(
+        "startup",
+        format_args!(
+            "serve startup path: {}",
+            if has_cache { "cache" } else { "full-build" }
+        ),
     );
 
     SCHEDULER.start_workers();
@@ -127,13 +129,15 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady
 
     let modified = cache::get_modified_files(root, &config.build.content);
 
-    debug!(
-        "startup";
-        "offline changes: errors={}, created={}, removed={}, modified={}",
-        error_files,
-        modified.created.len(),
-        modified.removed.len(),
-        modified.modified.len()
+    logger::debug(
+        "startup",
+        format_args!(
+            "offline changes: errors={}, created={}, removed={}, modified={}",
+            error_files,
+            modified.created.len(),
+            modified.removed.len(),
+            modified.modified.len()
+        ),
     );
 
     cleanup_removed_files(&modified.removed, config, state, &mut diagnostics);
@@ -181,7 +185,10 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady
     }
 
     if let Err(e) = cache::persist_diagnostics(&diagnostics, root) {
-        debug!("startup"; "failed to persist diagnostics: {}", e);
+        logger::debug(
+            "startup",
+            format_args!("failed to persist diagnostics: {}", e),
+        );
     }
 
     if let Some(first_error) = diagnostics.first_error() {
@@ -194,20 +201,32 @@ fn startup_with_cache(config: &SiteConfig, state: &SiteIndex, ready: &ServeReady
         logger::WatchStatus::new().error(&summary, &detail);
     }
 
-    debug!(
-        "startup";
-        "compile result: success={}, failed={}, skipped={}",
-        stats.success,
-        stats.failed,
-        stats.skipped
+    logger::debug(
+        "startup",
+        format_args!(
+            "compile result: success={}, failed={}, skipped={}",
+            stats.success, stats.failed, stats.skipped
+        ),
     );
 
     if stats.failed == 0 && compile_targets.is_empty() && modified.removed.is_empty() {
-        log!("serve"; "using cached build");
+        logger::log("serve", format_args!("using cached build"));
     } else if stats.failed == 0 {
-        log!("serve"; "using cached build (startup compiled {} files)", stats.success);
+        logger::log(
+            "serve",
+            format_args!(
+                "using cached build (startup compiled {} files)",
+                stats.success
+            ),
+        );
     } else {
-        log!("serve"; "using cached build (startup compile errors: {})", stats.failed);
+        logger::log(
+            "serve",
+            format_args!(
+                "using cached build (startup compile errors: {})",
+                stats.failed
+            ),
+        );
     }
 
     Ok(true)
@@ -403,7 +422,10 @@ fn compile_startup_batch(
                     stats.skipped += 1;
                 }
                 CompileOutcome::Reload { reason } => {
-                    debug!("startup"; "startup compile requested reload: {}", reason);
+                    logger::debug(
+                        "startup",
+                        format_args!("startup compile requested reload: {}", reason),
+                    );
                     ctx.diagnostics.clear_for(&rel_input);
                     stats.skipped += 1;
                 }

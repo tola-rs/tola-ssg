@@ -6,6 +6,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::CACHE_DIR;
+use crate::logger;
 
 /// Diagnostics state file name
 const DIAGNOSTICS_FILE: &str = "diagnostics.json";
@@ -164,12 +165,22 @@ pub fn persist_diagnostics(state: &PersistedDiagnostics, root: &Path) -> std::io
     let json = serde_json::to_string_pretty(state)?;
 
     if file_content_matches(&path, &json) {
-        crate::debug!("persist"; "diagnostics unchanged, skipping write");
+        logger::debug(
+            "persist",
+            format_args!("diagnostics unchanged, skipping write"),
+        );
         return Ok(());
     }
 
     fs::write(&path, &json)?;
-    crate::debug!("persist"; "saved {} errors, {} warnings", state.error_count(), state.warning_count());
+    logger::debug(
+        "persist",
+        format_args!(
+            "saved {} errors, {} warnings",
+            state.error_count(),
+            state.warning_count()
+        ),
+    );
     Ok(())
 }
 
@@ -185,6 +196,13 @@ pub fn restore_diagnostics(root: &Path) -> std::io::Result<PersistedDiagnostics>
     let state: PersistedDiagnostics = serde_json::from_str(&json)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    crate::debug!("persist"; "restored {} errors, {} warnings", state.error_count(), state.warning_count());
+    logger::debug(
+        "persist",
+        format_args!(
+            "restored {} errors, {} warnings",
+            state.error_count(),
+            state.warning_count()
+        ),
+    );
     Ok(state)
 }

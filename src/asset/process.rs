@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 
 use crate::config::SiteConfig;
 use crate::freshness::is_newer_than;
-use crate::log;
 
 use super::AssetKind;
 use super::route::{AssetRoute, relative_path, route_from_source};
+use crate::logger;
 
 /// Summary for a batch asset processing pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -71,8 +71,14 @@ fn write_asset_route(route: &AssetRoute, config: &SiteConfig, log_file: bool) ->
 
     if log_file {
         match route.kind {
-            AssetKind::Global => log!("assets"; "{}", relative_path(asset_path, config)),
-            AssetKind::Content => log!("content"; "{}", relative_path(asset_path, config)),
+            AssetKind::Global => logger::log(
+                "assets",
+                format_args!("{}", relative_path(asset_path, config)),
+            ),
+            AssetKind::Content => logger::log(
+                "content",
+                format_args!("{}", relative_path(asset_path, config)),
+            ),
         }
     }
 
@@ -199,7 +205,10 @@ pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) 
         }
 
         if log_file {
-            log!("assets"; "{}", relative_path(&route.source, config));
+            logger::log(
+                "assets",
+                format_args!("{}", relative_path(&route.source, config)),
+            );
         }
 
         if let Some(parent) = route.output.parent() {
@@ -231,7 +240,7 @@ pub fn process_cname(config: &SiteConfig) -> Result<()> {
         let output_dir = config.paths().output_dir();
         let cname_path = output_dir.join("CNAME");
         fs::write(&cname_path, &domain)?;
-        crate::debug!("assets"; "generated CNAME: {}", domain);
+        logger::debug("assets", format_args!("generated CNAME: {}", domain));
     }
 
     Ok(())

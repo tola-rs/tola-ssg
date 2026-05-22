@@ -8,7 +8,7 @@ use crate::asset::{scan_content_assets, scan_nested_assets};
 use crate::config::SiteConfig;
 use crate::config::section::build::AtomicCssConfig;
 use crate::core::UrlPath;
-use crate::log;
+use crate::logger;
 use crate::page::CompiledPage;
 use crate::utils::plural_s;
 
@@ -202,22 +202,35 @@ pub fn print_conflicts(conflicts: &[UrlConflict]) {
     }
 
     let total_owners: usize = conflicts.iter().map(|c| c.owners.len()).sum();
-    log!("error"; "url conflicts ({} url{}, {} owner{})",
-        conflicts.len(), plural_s(conflicts.len()),
-        total_owners, plural_s(total_owners));
+    logger::log(
+        "error",
+        format_args!(
+            "url conflicts ({} url{}, {} owner{})",
+            conflicts.len(),
+            plural_s(conflicts.len()),
+            total_owners,
+            plural_s(total_owners)
+        ),
+    );
 
     for conflict in conflicts {
-        eprintln!();
-        log!(
-            "url";
-            "{} ({} owner{})",
-            conflict.url,
-            conflict.owners.len(),
-            plural_s(conflict.owners.len())
+        logger::blank();
+        logger::log(
+            "url",
+            format_args!(
+                "{} ({} owner{})",
+                conflict.url,
+                conflict.owners.len(),
+                plural_s(conflict.owners.len())
+            ),
         );
-        for source in &conflict.owners {
-            eprintln!("  - {}", source);
-        }
+        let owners = conflict
+            .owners
+            .iter()
+            .map(|source| format!("  - {source}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        logger::text(&owners);
     }
 }
 

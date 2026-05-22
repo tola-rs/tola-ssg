@@ -6,6 +6,7 @@
 use std::sync::LazyLock;
 
 use crate::compiler::family::{CacheEntry, Indexed, SharedCache};
+use crate::logger;
 use tola_vdom::{CacheKey, Document};
 
 /// Indexed VDOM document produced by compilation before cache projection.
@@ -23,5 +24,8 @@ pub fn cache_vdom(url_path: impl AsRef<str>, vdom: IndexedDocument) {
     let key = CacheKey::new(url);
     let entry = CacheEntry::with_default_version(tola_vdom::snapshot::project(&vdom));
     BUILD_CACHE.insert(key, entry);
-    crate::debug!("cache"; "cache_vdom: url={}, cache_size={}", url, BUILD_CACHE.len());
+    logger::debug(
+        "cache",
+        format_args!("cache_vdom: url={}, cache_size={}", url, BUILD_CACHE.len()),
+    );
 }

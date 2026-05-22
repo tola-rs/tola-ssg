@@ -9,7 +9,7 @@
 //!
 //! ```ignore
 //! // Simple logging
-//! log!("build"; "compiling {} files", count);
+//! logger::log("build", format_args!("compiling {} files", count));
 //!
 //! // Progress line for build
 //! let progress = ProgressLine::new(&[("typst", 69), ("markdown", 10)]);
@@ -21,16 +21,25 @@ use crossterm::{
     cursor, execute,
     terminal::{Clear, ClearType},
 };
-use owo_colors::OwoColorize;
+use owo_colors::{OwoColorize, Stream};
 use parking_lot::Mutex;
 use std::{
-    io::{Write, stdout},
+    fmt::Display,
+    io::{IsTerminal, Write, stdout},
     sync::LazyLock,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
 /// Global verbose flag (set by --verbose CLI argument)
 static VERBOSE: AtomicBool = AtomicBool::new(false);
+static COLOR_MODE: AtomicU8 = AtomicU8::new(ColorMode::Auto as u8);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto = 0,
+    Always = 1,
+    Never = 2,
+}
 
 /// Set verbose mode globally
 pub fn set_verbose(v: bool) {
@@ -43,59 +52,184 @@ pub fn is_verbose() -> bool {
     VERBOSE.load(Ordering::SeqCst)
 }
 
-/// Active progress bar count (for log coordination)
-static BAR_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-// ============================================================================
-// Log Macro
-// ============================================================================
-
-/// Log a message with a colored module prefix
-///
-/// # Usage
-/// ```ignore
-/// log!("module"; "message with {} formatting", args);
-/// ```
-#[macro_export]
-macro_rules! log {
-    ($module:expr; $($arg:tt)*) => {{
-        $crate::logger::log($module, &format!($($arg)*))
-    }};
+pub fn set_color_mode(mode: ColorMode) {
+    COLOR_MODE.store(mode as u8, Ordering::SeqCst);
 }
 
-/// Log a debug message (only shown when --verbose is enabled)
-///
-/// # Usage
-/// ```ignore
-/// debug!("module"; "debug info: {}", value);
-/// ```
-#[macro_export]
-macro_rules! debug {
-    ($module:expr; $($arg:tt)*) => {{
-        if $crate::logger::is_verbose() {
-            $crate::logger::log($module, &format!($($arg)*))
+pub fn colors_enabled() -> bool {
+    match COLOR_MODE.load(Ordering::SeqCst) {
+        value if value == ColorMode::Always as u8 => true,
+        value if value == ColorMode::Never as u8 => false,
+        _ => {
+            format!(
+                "{}",
+                "x".if_supports_color(Stream::Stdout, |text| text.red())
+            ) != "x"
         }
-    }};
+    }
 }
 
-/// Execute code only when --verbose is enabled
-///
-/// Use this to avoid computing expensive debug data when not needed.
-///
-/// # Usage
-/// ```ignore
-/// debug_do! {
-///     let summary = expensive_computation();
-///     log!("module"; "result: {:?}", summary);
-/// }
-/// ```
-#[macro_export]
-macro_rules! debug_do {
-    ($($body:tt)*) => {{
-        if $crate::logger::is_verbose() {
-            $($body)*
+pub fn terminal_control_enabled() -> bool {
+    stdout().is_terminal()
+}
+
+static OUTPUT: LazyLock<Mutex<OutputState>> = LazyLock::new(|| Mutex::new(OutputState::new()));
+
+enum Transient {
+    Progress(String),
+    Status(String),
+}
+
+impl Transient {
+    fn line_count(&self) -> usize {
+        match self {
+            Self::Progress(_) => 1,
+            Self::Status(text) => line_count(text),
         }
-    }};
+    }
+}
+
+struct OutputState {
+    transient: Option<Transient>,
+}
+
+impl OutputState {
+    const fn new() -> Self {
+        Self { transient: None }
+    }
+
+    fn write_persistent(&mut self, text: &str) {
+        let mut stdout = stdout().lock();
+        if terminal_control_enabled() {
+            self.clear_transient(&mut stdout);
+        }
+        writeln!(stdout, "{text}").ok();
+        if terminal_control_enabled() {
+            self.redraw_transient(&mut stdout);
+        }
+        stdout.flush().ok();
+    }
+
+    fn set_progress(&mut self, text: String) {
+        if !terminal_control_enabled() {
+            self.transient = Some(Transient::Progress(text));
+            return;
+        }
+
+        let mut stdout = stdout().lock();
+        self.clear_transient(&mut stdout);
+        self.transient = Some(Transient::Progress(text));
+        self.redraw_transient(&mut stdout);
+        stdout.flush().ok();
+    }
+
+    fn finish_progress(&mut self, text: &str) {
+        if !terminal_control_enabled() {
+            if matches!(self.transient, Some(Transient::Progress(_))) {
+                self.transient = None;
+            }
+            return;
+        }
+
+        let mut stdout = stdout().lock();
+        if matches!(self.transient, Some(Transient::Progress(_))) {
+            self.clear_transient(&mut stdout);
+            self.transient = None;
+        }
+        writeln!(stdout, "{text}").ok();
+        stdout.flush().ok();
+    }
+
+    fn clear_progress(&mut self) {
+        if !terminal_control_enabled() {
+            if matches!(self.transient, Some(Transient::Progress(_))) {
+                self.transient = None;
+            }
+            return;
+        }
+
+        let mut stdout = stdout().lock();
+        if matches!(self.transient, Some(Transient::Progress(_))) {
+            self.clear_transient(&mut stdout);
+            self.transient = None;
+            stdout.flush().ok();
+        }
+    }
+
+    fn set_status(&mut self, text: String) {
+        if !terminal_control_enabled() {
+            self.write_persistent(&text);
+            return;
+        }
+
+        let mut stdout = stdout().lock();
+        self.clear_transient(&mut stdout);
+        self.transient = Some(Transient::Status(text));
+        self.redraw_transient(&mut stdout);
+        stdout.flush().ok();
+    }
+
+    fn clear_status(&mut self) {
+        if !terminal_control_enabled() {
+            if matches!(self.transient, Some(Transient::Status(_))) {
+                self.transient = None;
+            }
+            return;
+        }
+
+        let mut stdout = stdout().lock();
+        if matches!(self.transient, Some(Transient::Status(_))) {
+            self.clear_transient(&mut stdout);
+            self.transient = None;
+            stdout.flush().ok();
+        }
+    }
+
+    fn clear_transient(&self, stdout: &mut impl Write) {
+        let Some(transient) = &self.transient else {
+            execute!(
+                stdout,
+                cursor::MoveToColumn(0),
+                Clear(ClearType::UntilNewLine)
+            )
+            .ok();
+            return;
+        };
+
+        match transient {
+            Transient::Progress(_) => {
+                execute!(
+                    stdout,
+                    cursor::MoveToColumn(0),
+                    Clear(ClearType::CurrentLine)
+                )
+                .ok();
+            }
+            Transient::Status(_) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let lines = transient.line_count() as u16;
+                execute!(stdout, cursor::MoveUp(lines)).ok();
+                execute!(stdout, cursor::MoveToColumn(0)).ok();
+                execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
+            }
+        }
+    }
+
+    fn redraw_transient(&self, stdout: &mut impl Write) {
+        match &self.transient {
+            Some(Transient::Progress(text)) => {
+                write!(stdout, "{text}").ok();
+            }
+            Some(Transient::Status(text)) => {
+                writeln!(stdout, "{text}").ok();
+            }
+            None => {}
+        }
+    }
+}
+
+fn line_count(text: &str) -> usize {
+    text.lines().count().max(1)
 }
 
 // ============================================================================
@@ -103,45 +237,143 @@ macro_rules! debug_do {
 // ============================================================================
 
 /// Log a message with a colored module prefix
-#[inline]
-#[allow(clippy::cast_possible_truncation)] // Safe: bars count is always small
-pub fn log(module: &str, message: &str) {
+pub fn log(module: &str, message: impl Display) {
     let module_lower = module.to_ascii_lowercase();
     let prefix = colorize_prefix(module, &module_lower);
+    OUTPUT
+        .lock()
+        .write_persistent(&format!("{prefix} {message}"));
+}
 
-    let mut stdout = stdout().lock();
+/// Log a verbose message with a colored module prefix.
+pub fn debug(module: &str, message: impl Display) {
+    if is_verbose() {
+        log(module, message);
+    }
+}
 
-    let bar_count = BAR_COUNT.load(Ordering::SeqCst);
-    if bar_count > 0 {
-        execute!(stdout, cursor::MoveUp(bar_count as u16)).ok();
-        execute!(stdout, cursor::MoveToColumn(0)).ok();
-        execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
+/// Write a persistent block with a colored module prefix on the first line.
+#[inline]
+pub fn block(module: &str, title: &str, body: &str) {
+    let module_lower = module.to_ascii_lowercase();
+    let prefix = colorize_prefix(module, &module_lower);
+    let text = if body.is_empty() {
+        format!("{prefix} {title}")
     } else {
-        execute!(stdout, cursor::MoveToColumn(0)).ok();
-        execute!(stdout, Clear(ClearType::UntilNewLine)).ok();
-    }
+        format!("{prefix} {title}\n{body}")
+    };
+    OUTPUT.lock().write_persistent(&text);
+}
 
-    writeln!(stdout, "{prefix} {message}").ok();
+/// Write persistent text without adding a module prefix.
+#[inline]
+pub fn text(message: &str) {
+    OUTPUT.lock().write_persistent(message);
+}
 
-    if bar_count > 0 {
-        for _ in 0..bar_count {
-            writeln!(stdout).ok();
-        }
-    }
-
-    stdout.flush().ok();
+/// Write one persistent blank line.
+#[inline]
+pub fn blank() {
+    OUTPUT.lock().write_persistent("");
 }
 
 /// Apply color to a module prefix based on module type
 #[inline]
 fn colorize_prefix(module: &str, module_lower: &str) -> String {
     let prefix = format!("[{module}]");
+    if !colors_enabled() {
+        return prefix;
+    }
     match module_lower {
         "serve" => prefix.bright_blue().bold().to_string(),
         "watch" => prefix.bright_green().bold().to_string(),
         "error" => prefix.bright_red().bold().to_string(),
         _ => prefix.bright_yellow().bold().to_string(),
     }
+}
+
+pub fn style_error(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.red().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_error_strong(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.red().bold().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_warning(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.yellow().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_hint(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.cyan().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_success(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.green().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_path(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.cyan().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_field(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.bright_blue().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_dim(text: impl AsRef<str>) -> String {
+    let text = text.as_ref();
+    if colors_enabled() {
+        text.dimmed().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+fn success_symbol() -> String {
+    style_success("✓")
+}
+
+fn error_symbol() -> String {
+    style_error("✗")
+}
+
+fn warning_symbol() -> String {
+    style_warning("⚠")
 }
 
 // ============================================================================
@@ -163,7 +395,7 @@ fn now() -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-/// Single-line status display for watch mode
+/// Single status block display for watch mode
 ///
 /// Displays status messages that overwrite the previous output,
 /// keeping the terminal clean. Supports timestamps and different
@@ -177,10 +409,7 @@ fn now() -> String {
 /// status.unchanged("content/about.typ");
 /// status.error("failed", "syntax error on line 5");
 /// ```
-pub struct WatchStatus {
-    /// Lines of previous output to clear
-    last_lines: usize,
-}
+pub struct WatchStatus;
 
 /// Global watch status display shared across watch-mode subsystems.
 ///
@@ -192,17 +421,17 @@ static WATCH_STATUS: LazyLock<Mutex<WatchStatus>> =
 impl WatchStatus {
     /// Create a new watch status display.
     pub const fn new() -> Self {
-        Self { last_lines: 0 }
+        Self
     }
 
     /// Display success message (✓ prefix, green).
     pub fn success(&mut self, message: &str) {
-        self.display(format!("{}", "✓".green()), message);
+        self.display(success_symbol(), message);
     }
 
     /// Display unchanged message (dimmed, no symbol).
     pub fn unchanged(&mut self, message: &str) {
-        self.display(String::new(), &format!("{}", message.dimmed()));
+        self.display(String::new(), &style_dim(message));
     }
 
     /// Display error message (✗ prefix, red) with optional detail.
@@ -212,12 +441,12 @@ impl WatchStatus {
         } else {
             format!("{summary}\n{detail}")
         };
-        self.display(format!("{}", "✗".red()), &message);
+        self.display(error_symbol(), &message);
     }
 
     /// Display warning message (⚠ prefix, yellow) with detail.
     pub fn warning(&mut self, detail: &str) {
-        self.display(format!("{}", "⚠".yellow()), detail);
+        self.display(warning_symbol(), detail);
     }
 
     /// Internal display logic with line overwriting.
@@ -226,46 +455,19 @@ impl WatchStatus {
     /// overwritten by the next message. This ensures a clean single-block
     /// status display in watch mode.
     fn display(&mut self, symbol: String, message: &str) {
-        let mut stdout = stdout().lock();
-
-        // Clear previous output by moving cursor up and clearing
-        if self.last_lines > 0 {
-            #[allow(clippy::cast_possible_truncation)]
-            let lines = self.last_lines as u16;
-            execute!(stdout, cursor::MoveUp(lines)).ok();
-            execute!(stdout, cursor::MoveToColumn(0)).ok();
-            execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
-        }
-
-        // Format message with timestamp
-        let timestamp = format!("[{}]", now()).dimmed().to_string();
+        let timestamp = style_dim(format!("[{}]", now()));
         let line = if symbol.is_empty() {
             format!("{timestamp} {message}")
         } else {
             format!("{timestamp} {symbol} {message}")
         };
-
-        // Print and count lines
-        writeln!(stdout, "{line}").ok();
-        stdout.flush().ok();
-
-        // Track actual line count (including newlines in message)
-        self.last_lines = message.matches('\n').count() + 1;
+        OUTPUT.lock().set_status(line);
     }
 
     /// Clear the status line.
     #[allow(dead_code)]
     pub fn clear(&mut self) {
-        if self.last_lines > 0 {
-            let mut stdout = stdout().lock();
-            #[allow(clippy::cast_possible_truncation)]
-            let lines = self.last_lines as u16;
-            execute!(stdout, cursor::MoveUp(lines)).ok();
-            execute!(stdout, cursor::MoveToColumn(0)).ok();
-            execute!(stdout, Clear(ClearType::FromCursorDown)).ok();
-            stdout.flush().ok();
-            self.last_lines = 0;
-        }
+        OUTPUT.lock().clear_status();
     }
 }
 
@@ -339,8 +541,6 @@ impl ProgressLine {
             })
             .collect();
 
-        BAR_COUNT.store(1, Ordering::SeqCst);
-
         let progress = Self {
             counters,
             lock: Mutex::new(()),
@@ -377,22 +577,11 @@ impl ProgressLine {
         let line = parts.join(" ");
         let prefix = colorize_prefix("build", "build");
 
-        let mut stdout = stdout().lock();
-        // Clear line and write progress (no newline - stays on same line)
-        execute!(
-            stdout,
-            cursor::MoveToColumn(0),
-            Clear(ClearType::CurrentLine)
-        )
-        .ok();
-        write!(stdout, "{} {}", prefix, line).ok();
-        stdout.flush().ok();
+        OUTPUT.lock().set_progress(format!("{} {}", prefix, line));
     }
 
     /// Finish progress display, preserve line and move to next line.
     pub fn finish(self) {
-        BAR_COUNT.store(0, Ordering::SeqCst);
-
         {
             let _guard = self.lock.lock(); // Wait for any pending display
 
@@ -404,17 +593,9 @@ impl ProgressLine {
             }
             let line = parts.join(" ");
             let prefix = colorize_prefix("build", "build");
-
-            let mut stdout = stdout().lock();
-            // Final line with newline to preserve it
-            execute!(
-                stdout,
-                cursor::MoveToColumn(0),
-                Clear(ClearType::CurrentLine)
-            )
-            .ok();
-            writeln!(stdout, "{} {}", prefix, line).ok();
-            stdout.flush().ok();
+            OUTPUT
+                .lock()
+                .finish_progress(&format!("{} {}", prefix, line));
         }
 
         std::mem::forget(self); // Prevent Drop from clearing
@@ -423,17 +604,7 @@ impl ProgressLine {
 
 impl Drop for ProgressLine {
     fn drop(&mut self) {
-        BAR_COUNT.store(0, Ordering::SeqCst);
-
-        // Clear the line on drop (if not finished properly)
-        let mut stdout = stdout().lock();
-        execute!(
-            stdout,
-            cursor::MoveToColumn(0),
-            Clear(ClearType::CurrentLine)
-        )
-        .ok();
-        stdout.flush().ok();
+        OUTPUT.lock().clear_progress();
     }
 }
 
@@ -451,8 +622,7 @@ mod tests {
 
     #[test]
     fn test_watch_status_new() {
-        let status = WatchStatus::new();
-        assert_eq!(status.last_lines, 0);
+        let _status = WatchStatus::new();
     }
 
     #[test]

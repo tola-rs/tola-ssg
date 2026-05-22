@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, log, page::StoredPageMap};
+use crate::{config::SiteConfig, logger, page::StoredPageMap};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
@@ -88,7 +88,16 @@ impl Sitemap {
         fs::write(&sitemap_path, xml)
             .with_context(|| format!("Failed to write sitemap to {}", sitemap_path.display()))?;
 
-        log!("sitemap"; "{}", sitemap_path.file_name().unwrap_or_default().to_string_lossy());
+        logger::log(
+            "sitemap",
+            format_args!(
+                "{}",
+                sitemap_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
         Ok(())
     }
 }

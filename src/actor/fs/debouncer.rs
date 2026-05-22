@@ -4,6 +4,7 @@ use std::time::Duration;
 use rustc_hash::FxHashMap;
 
 use super::types::ChangeKind;
+use crate::logger;
 use crate::utils::path::normalize_path;
 
 pub(super) const DEBOUNCE_MS: u64 = 300;
@@ -48,7 +49,10 @@ impl Debouncer {
             _ => return,
         };
 
-        crate::debug!("watch"; "raw notify: {:?} {:?}", event.kind, event.paths);
+        logger::debug(
+            "watch",
+            format_args!("raw notify: {:?} {:?}", event.kind, event.paths),
+        );
 
         for path in &event.paths {
             if is_temp_file(path) {
@@ -66,17 +70,30 @@ impl Debouncer {
                 match (existing, kind) {
                     (ChangeKind::Removed, ChangeKind::Created | ChangeKind::Modified) => {
                         // File was deleted then restored → use the restore event
-                        crate::debug!("watch"; "restore {}->created: {}", existing.label(), path.display());
+                        logger::debug(
+                            "watch",
+                            format_args!(
+                                "restore {}->created: {}",
+                                existing.label(),
+                                path.display()
+                            ),
+                        );
                         self.changes.insert(path, kind);
                     }
                     (ChangeKind::Modified, ChangeKind::Removed) => {
                         // Tracked file was modified then deleted → upgrade to Removed
-                        crate::debug!("watch"; "upgrade modified->removed: {}", path.display());
+                        logger::debug(
+                            "watch",
+                            format_args!("upgrade modified->removed: {}", path.display()),
+                        );
                         self.changes.insert(path, ChangeKind::Removed);
                     }
                     (ChangeKind::Created, ChangeKind::Removed) => {
                         // New file appeared then vanished within window → no-op
-                        crate::debug!("watch"; "discard created+removed: {}", path.display());
+                        logger::debug(
+                            "watch",
+                            format_args!("discard created+removed: {}", path.display()),
+                        );
                         self.changes.remove(&path);
                     }
                     _ => {
@@ -88,7 +105,10 @@ impl Debouncer {
                 continue;
             }
 
-            crate::debug!("watch"; "event {}: {}", kind.label(), path.display());
+            logger::debug(
+                "watch",
+                format_args!("event {}: {}", kind.label(), path.display()),
+            );
             self.changes.insert(path, kind);
             self.last_event = Some(std::time::Instant::now());
         }

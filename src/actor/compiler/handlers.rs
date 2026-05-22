@@ -13,6 +13,7 @@ use super::{ACTIVE_RECOMPILE_COOLDOWN, BackgroundTask, CompilerActor};
 use crate::actor::messages::VdomMsg;
 use crate::config::SiteConfig;
 use crate::hooks::HookPhase;
+use crate::logger;
 use crate::page::CompiledPage;
 use crate::reload::classify::{collect_dependents, url_to_content_path};
 use crate::reload::compile::{CompileOutcome, cleanup_removed_source_state};
@@ -70,7 +71,10 @@ impl CompilerActor {
                 &changed_set,
                 hook_side_effects_changed || atomic_css_changed,
             ) {
-                crate::debug!("compile"; "skip no-op save: {}", path.display());
+                logger::debug(
+                    "compile",
+                    format_args!("skip no-op save: {}", path.display()),
+                );
                 continue;
             }
             if defer_delivery {
@@ -81,7 +85,10 @@ impl CompilerActor {
             }
         }
 
-        crate::debug!("compile"; "{} direct, {} affected", direct.len(), affected.len());
+        logger::debug(
+            "compile",
+            format_args!("{} direct, {} affected", direct.len(), affected.len()),
+        );
 
         if hook_side_effects_changed {
             if defer_delivery {
@@ -131,7 +138,7 @@ impl CompilerActor {
                 direct_outcomes,
             )
             .await;
-            crate::debug!("compile"; "done in {:?}", start.elapsed());
+            logger::debug("compile", format_args!("done in {:?}", start.elapsed()));
             None
         } else {
             let (config, typst_host) = self.current_config_and_typst_host();
@@ -212,11 +219,13 @@ impl CompilerActor {
         }
 
         version::clear();
-        crate::debug!(
-            phase.as_str();
-            "{} watched hooks executed: {}, cleared asset versions",
+        logger::debug(
             phase.as_str(),
-            executed
+            format_args!(
+                "{} watched hooks executed: {}, cleared asset versions",
+                phase.as_str(),
+                executed
+            ),
         );
         true
     }
@@ -229,7 +238,7 @@ impl CompilerActor {
     ) {
         let summary = format!("{} hook failed", phase.as_str());
         let detail = format!("{error:#}");
-        crate::logger::status_error(&summary, &detail);
+        logger::status_error(&summary, &detail);
         let _ = self
             .vdom_tx
             .send(VdomMsg::Error {
@@ -249,7 +258,7 @@ impl CompilerActor {
             Ok(Ok(Some(output))) => output.written,
             Ok(Ok(None)) => false,
             Ok(Err(e)) => {
-                crate::log!("error"; "atomic CSS: {:#}", e);
+                logger::log("error", format_args!("atomic CSS: {:#}", e));
                 let _ = self
                     .vdom_tx
                     .send(VdomMsg::Reload {
@@ -259,7 +268,7 @@ impl CompilerActor {
                 false
             }
             Err(e) => {
-                crate::debug!("compile"; "atomic CSS task failed: {}", e);
+                logger::debug("compile", format_args!("atomic CSS task failed: {}", e));
                 false
             }
         }
@@ -333,7 +342,10 @@ impl CompilerActor {
     pub(super) async fn on_compile_dependents(&mut self, deps: Vec<PathBuf>) {
         let affected = collect_dependents(&deps);
         if affected.is_empty() {
-            crate::log!("compile"; "no dependents for {} deps", deps.len());
+            logger::log(
+                "compile",
+                format_args!("no dependents for {} deps", deps.len()),
+            );
         } else {
             self.compile_batch_blocking(affected).await;
         }
@@ -342,7 +354,7 @@ impl CompilerActor {
     /// Handle new content files and register them.
     pub(super) async fn on_content_created(&mut self, paths: Vec<PathBuf>) {
         let count = paths.len();
-        crate::debug!("watch"; "{} new content files", count);
+        logger::debug("watch", format_args!("{} new content files", count));
 
         let pages_hash = self.state.with_pages(|pages| pages.pages_hash());
 
@@ -371,12 +383,15 @@ impl CompilerActor {
     /// Handle deleted content files and cleanup all related state.
     pub(super) async fn on_content_removed(&mut self, paths: Vec<PathBuf>) {
         let count = paths.len();
-        crate::debug!("watch"; "{} content files removed", count);
+        logger::debug("watch", format_args!("{} content files removed", count));
         let config = self.config.current();
 
         for path in &paths {
             if let Some(url) = cleanup_removed_source_state(path, &config, &self.state) {
-                crate::debug!("watch"; "cleaned up {} -> {}", path.display(), url);
+                logger::debug(
+                    "watch",
+                    format_args!("cleaned up {} -> {}", path.display(), url),
+                );
             }
 
             let _ = self
@@ -461,13 +476,15 @@ impl CompilerActor {
 
         let filtered = total.saturating_sub(echo_count + output_assets.len());
         if total > 0 {
-            crate::debug!(
-                "output";
-                "events: total={}, tracked={}, echoes={}, filtered={}",
-                total,
-                output_assets.len(),
-                echo_count,
-                filtered
+            logger::debug(
+                "output",
+                format_args!(
+                    "events: total={}, tracked={}, echoes={}, filtered={}",
+                    total,
+                    output_assets.len(),
+                    echo_count,
+                    filtered
+                ),
             );
         }
 
@@ -494,7 +511,10 @@ impl CompilerActor {
         }
 
         if removed_count > 0 {
-            crate::debug!("output"; "removed tracked outputs: {}", removed_count);
+            logger::debug(
+                "output",
+                format_args!("removed tracked outputs: {}", removed_count),
+            );
         }
 
         self.output_echoes.record(&output_assets);
@@ -566,10 +586,12 @@ impl CompilerActor {
         use crate::reload::active::ACTIVE_PAGE;
 
         if throttle && self.should_throttle_active_recompile() {
-            crate::debug!(
-                tag;
-                "throttled active-page recompile for {} changed files",
-                changed_count
+            logger::debug(
+                tag,
+                format_args!(
+                    "throttled active-page recompile for {} changed files",
+                    changed_count
+                ),
             );
             return Vec::new();
         }
@@ -589,11 +611,13 @@ impl CompilerActor {
             return Vec::new();
         }
 
-        crate::log!(
-            tag;
-            "{} files changed, recompiling {} active pages",
-            changed_count,
-            active_paths.len()
+        logger::log(
+            tag,
+            format_args!(
+                "{} files changed, recompiling {} active pages",
+                changed_count,
+                active_paths.len()
+            ),
         );
 
         let mut outcomes = Vec::new();
@@ -617,7 +641,7 @@ impl CompilerActor {
         use crate::core::{BuildMode, set_healthy};
         use crate::reload::active::ACTIVE_PAGE;
 
-        crate::debug!("compile"; "full rebuild triggered");
+        logger::debug("compile", format_args!("full rebuild triggered"));
         set_healthy(false);
 
         let _ = self.config.reload();
@@ -638,7 +662,7 @@ impl CompilerActor {
             Ok(Ok(_)) => {
                 set_healthy(true);
                 self.config.clear_clean_flag();
-                crate::debug!("compile"; "full rebuild complete");
+                logger::debug("compile", format_args!("full rebuild complete"));
 
                 let _ = self
                     .vdom_tx
@@ -647,10 +671,12 @@ impl CompilerActor {
 
                 let active_urls = ACTIVE_PAGE.get_all();
                 if !active_urls.is_empty() {
-                    crate::debug!(
-                        "compile";
-                        "recompiling {} active pages after rebuild",
-                        active_urls.len()
+                    logger::debug(
+                        "compile",
+                        format_args!(
+                            "recompiling {} active pages after rebuild",
+                            active_urls.len()
+                        ),
                     );
                     for url in active_urls {
                         if let Some(path) = url_to_content_path(url.as_str(), &self.state) {
@@ -661,12 +687,12 @@ impl CompilerActor {
                 self.write_seo_outputs(self.config.current()).await;
             }
             Ok(Err(e)) => {
-                crate::debug!("compile"; "full rebuild failed: {}", e);
+                logger::debug("compile", format_args!("full rebuild failed: {}", e));
                 let reason = format!("rebuild failed: {}", e);
                 let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
             }
             Err(e) => {
-                crate::debug!("compile"; "spawn_blocking error: {}", e);
+                logger::debug("compile", format_args!("spawn_blocking error: {}", e));
                 let reason = format!("internal error: {}", e);
                 let _ = self.vdom_tx.send(VdomMsg::Reload { reason }).await;
             }
@@ -680,7 +706,7 @@ impl CompilerActor {
         use crate::reload::active::ACTIVE_PAGE;
         use crate::reload::classify::{FileCategory, categorize_path};
 
-        crate::debug!("compile"; "retry scan triggered");
+        logger::debug("compile", format_args!("retry scan triggered"));
 
         let (config, typst_host) = self.current_config_and_typst_host();
         let scan_config = Arc::clone(&config);
@@ -691,7 +717,7 @@ impl CompilerActor {
 
         match result {
             Ok(Ok(_)) => {
-                crate::debug!("scan"; "recovered");
+                logger::debug("scan", format_args!("recovered"));
 
                 let (_, output_update) = self.refresh_atomic_css_output(Arc::clone(&config)).await;
 
@@ -724,10 +750,10 @@ impl CompilerActor {
                     .await;
             }
             Ok(Err(e)) => {
-                crate::debug!("scan"; "still failing: {}", e);
+                logger::debug("scan", format_args!("still failing: {}", e));
             }
             Err(e) => {
-                crate::debug!("compile"; "spawn_blocking error: {}", e);
+                logger::debug("compile", format_args!("spawn_blocking error: {}", e));
             }
         }
     }

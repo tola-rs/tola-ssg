@@ -27,10 +27,12 @@
 //!     .run()?;
 //! ```
 
-use crate::log;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use regex::Regex;
+
+use crate::logger;
+
 use std::{
     ffi::{OsStr, OsString},
     io::{Read, Write},
@@ -438,7 +440,7 @@ impl FilterRule {
             .collect();
 
         if !lines.is_empty() {
-            log!(name; "{}", lines.join("\n"));
+            logger::log(name, format_args!("{}", lines.join("\n")));
         }
     }
 }

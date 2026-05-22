@@ -1,4 +1,4 @@
-use crate::{config::SiteConfig, exec, log};
+use crate::{config::SiteConfig, exec, logger};
 use anyhow::{Context, Result, bail};
 use gix::{Repository, ThreadSafeRepository, remote::Direction};
 use std::{fs, path::Path};
@@ -8,7 +8,7 @@ use super::repo::get_repo_root;
 /// Push commits to remote repository
 pub fn push(repo: &ThreadSafeRepository, config: &SiteConfig) -> Result<()> {
     let github = &config.deploy.github;
-    log!("git"; "pushing to {}", github.url);
+    logger::log("git", format_args!("pushing to {}", github.url));
 
     let repo_local = repo.to_thread_local();
     let root = get_repo_root(&repo_local)?;

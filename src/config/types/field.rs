@@ -1,6 +1,6 @@
 //! Type-safe config field path.
 
-use owo_colors::OwoColorize;
+use crate::logger;
 use std::fmt;
 
 /// A type-safe wrapper for config field paths
@@ -42,7 +42,7 @@ impl FieldPath {
 
 impl fmt::Display for FieldPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", format_args!("`{}`", self.0).bright_blue())
+        write!(f, "{}", logger::style_field(format!("`{}`", self.0)))
     }
 }
 

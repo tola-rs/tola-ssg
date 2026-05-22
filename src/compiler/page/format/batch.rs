@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{compiler::page::TypstHost, config::SiteConfig};
+use crate::{compiler::page::TypstHost, config::SiteConfig, logger};
 
 use super::ScannedPage;
 
@@ -39,21 +39,27 @@ impl<'a> PageScanResult<'a> {
             if let Some((path, error)) = self.errors.first() {
                 let display_path = path.strip_prefix(root).unwrap_or(path);
                 let detail = super::super::format_compile_error(error, max_errors).to_string();
-                crate::logger::status_error(&display_path.display().to_string(), &detail);
+                logger::status_error(&display_path.display().to_string(), &detail);
             }
             if total_errors > 1 {
-                crate::log!("error"; "... and {} more errors", total_errors - 1);
+                logger::log(
+                    "error",
+                    format_args!("... and {} more errors", total_errors - 1),
+                );
             }
         } else {
             for (path, error) in self.errors.iter().take(max_errors) {
                 let display_path = path.strip_prefix(root).unwrap_or(path);
-                crate::log!("error"; "{}", display_path.display());
+                logger::log("error", format_args!("{}", display_path.display()));
                 let err = super::super::format_compile_error(error, max_errors);
-                eprintln!("{}", err);
+                logger::text(&err.to_string());
             }
 
             if total_errors > max_errors {
-                eprintln!("... and {} more errors", total_errors - max_errors);
+                logger::text(&format!(
+                    "... and {} more errors",
+                    total_errors - max_errors
+                ));
             }
         }
 

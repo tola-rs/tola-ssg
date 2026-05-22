@@ -8,6 +8,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::CACHE_DIR;
 use super::index::{CacheFileInfo, CacheIndex, INDEX_FILE};
 use crate::core::{ContentKind, UrlPath};
+use crate::logger;
 
 /// Result of modified files detection
 #[derive(Debug, Default)]
@@ -105,12 +106,14 @@ pub fn get_modified_files(root: &Path, content_dir: &Path) -> ModifiedFilesResul
         .sort_by(|a, b| a.source_path.cmp(&b.source_path));
 
     if !result.created.is_empty() || !result.removed.is_empty() || !result.modified.is_empty() {
-        crate::debug!(
-            "modified";
-            "offline changes: created={}, removed={}, modified={}",
-            result.created.len(),
-            result.removed.len(),
-            result.modified.len()
+        logger::debug(
+            "modified",
+            format_args!(
+                "offline changes: created={}, removed={}, modified={}",
+                result.created.len(),
+                result.removed.len(),
+                result.modified.len()
+            ),
         );
     }
 
@@ -131,7 +134,10 @@ pub fn get_source_paths(root: &Path) -> FxHashMap<UrlPath, PathBuf> {
         })
         .collect();
 
-    crate::debug!("modified"; "loaded {} source paths", paths.len());
+    logger::debug(
+        "modified",
+        format_args!("loaded {} source paths", paths.len()),
+    );
     paths
 }
 
@@ -175,7 +181,10 @@ fn is_file_modified(root: &Path, info: &CacheFileInfo) -> bool {
     // Check source hash
     let source_path = root.join(&info.source_path);
     if compute_hash(&source_path) != info.source_hash {
-        crate::debug!("modified"; "{} (source changed)", info.source_path);
+        logger::debug(
+            "modified",
+            format_args!("{} (source changed)", info.source_path),
+        );
         return true;
     }
 
@@ -183,7 +192,10 @@ fn is_file_modified(root: &Path, info: &CacheFileInfo) -> bool {
     for (dep_rel, cached_hash) in &info.dependencies {
         let dep_path = root.join(dep_rel);
         if compute_hash(&dep_path) != *cached_hash {
-            crate::debug!("modified"; "{} (dep {} changed)", info.source_path, dep_rel);
+            logger::debug(
+                "modified",
+                format_args!("{} (dep {} changed)", info.source_path, dep_rel),
+            );
             return true;
         }
     }

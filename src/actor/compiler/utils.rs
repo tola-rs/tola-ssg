@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::SiteConfig;
+use crate::logger;
 
 pub(super) fn process_assets(paths: &[PathBuf], config: &SiteConfig) -> Vec<(PathBuf, String)> {
     use crate::asset::process_asset;
@@ -34,13 +35,19 @@ pub(super) fn cleanup_removed_assets(paths: &[PathBuf], config: &SiteConfig) -> 
             let output_removed = output.as_deref().is_some_and(|output| {
                 let removed = remove_output_file(output);
                 if removed {
-                    crate::debug!("assets"; "removed output for {}", path.display());
+                    logger::debug(
+                        "assets",
+                        format_args!("removed output for {}", path.display()),
+                    );
                 }
                 removed
             });
 
             if version_removed {
-                crate::debug!("assets"; "removed version for {}", path.display());
+                logger::debug(
+                    "assets",
+                    format_args!("removed version for {}", path.display()),
+                );
             }
 
             version_removed || output_version_removed || output_removed
@@ -60,7 +67,10 @@ fn remove_output_file(output: &Path) -> bool {
     }
 
     if let Err(e) = std::fs::remove_file(output) {
-        crate::debug!("assets"; "failed to remove {}: {}", output.display(), e);
+        logger::debug(
+            "assets",
+            format_args!("failed to remove {}: {}", output.display(), e),
+        );
         return false;
     }
 
@@ -120,7 +130,7 @@ mod tests {
 
 pub(super) fn log_asset_errors(errors: &[(PathBuf, String)]) {
     for (path, error) in errors {
-        crate::log!("error"; "asset {}: {}", path.display(), error);
+        logger::log("error", format_args!("asset {}: {}", path.display(), error));
     }
 }
 
