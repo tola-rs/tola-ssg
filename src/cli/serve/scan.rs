@@ -34,6 +34,7 @@ pub fn scan_pages(config: &SiteConfig, host: &TypstHost, state: &SiteIndex) -> R
     scan_result.report_errors(
         config.build.diagnostics.max_errors.unwrap_or(usize::MAX),
         config.get_root(),
+        config.build.extra_hints,
     )?;
 
     let scanned = scan_result.scanned;

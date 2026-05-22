@@ -322,7 +322,7 @@ pub fn style_warning(text: impl AsRef<str>) -> String {
 pub fn style_hint(text: impl AsRef<str>) -> String {
     let text = text.as_ref();
     if colors_enabled() {
-        text.cyan().to_string()
+        text.bright_yellow().to_string()
     } else {
         text.to_string()
     }

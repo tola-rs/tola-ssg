@@ -11,6 +11,7 @@
 //! assets = "assets"           # Static assets directory (relative to site root)
 //! deps = ["templates"]        # Dependency dirs (relative to site root)
 //! minify = true               # Minify HTML output
+//! extra_hints = true          # Show Tola-specific diagnostic hints
 //!
 //! [build.slug]
 //! path = "safe"               # URL path slugification: full | safe | ascii
@@ -109,6 +110,10 @@ pub struct BuildSectionConfig {
     /// Allow experimental features without warnings.
     #[serde(default)]
     pub allow_experimental: bool,
+
+    /// Show Tola-specific diagnostic hints.
+    #[serde(default = "default_extra_hints")]
+    pub extra_hints: bool,
 }
 
 impl Default for BuildSectionConfig {
@@ -130,8 +135,13 @@ impl Default for BuildSectionConfig {
             meta: MetaConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             allow_experimental: false,
+            extra_hints: true,
         }
     }
+}
+
+const fn default_extra_hints() -> bool {
+    true
 }
 
 impl BuildSectionConfig {
@@ -290,6 +300,25 @@ flatten = ["assets/styles/base.css", { file = "assets/CNAME", as = "/CNAME" }]
         );
         assert_eq!(config.build.assets.flatten[1].target().as_str(), "/CNAME");
         // minify defaults to true, only test assets config here
+    }
+
+    #[test]
+    fn extra_hints_defaults_to_enabled() {
+        let config = test_parse_config("");
+
+        assert!(config.build.extra_hints);
+    }
+
+    #[test]
+    fn extra_hints_can_be_disabled() {
+        let config = test_parse_config(
+            r#"
+[build]
+extra_hints = false
+"#,
+        );
+
+        assert!(!config.build.extra_hints);
     }
 
     #[test]
