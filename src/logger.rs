@@ -1,7 +1,7 @@
 //! Logging utilities with colored output and progress display.
 //!
 //! This module provides:
-//! - `log!` macro for formatted terminal output with colored prefixes
+//! - formatted terminal output with colored prefixes
 //! - `ProgressLine` for single-line progress display with multiple counters
 //! - `WatchStatus` for watch mode status messages
 //!
@@ -25,7 +25,7 @@ use owo_colors::{OwoColorize, Stream};
 use parking_lot::Mutex;
 use std::{
     fmt::Display,
-    io::{IsTerminal, Write, stdout},
+    io::{IsTerminal, Write, stderr, stdout},
     sync::LazyLock,
     sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
@@ -46,8 +46,7 @@ pub fn set_verbose(v: bool) {
     VERBOSE.store(v, Ordering::SeqCst);
 }
 
-/// Check if verbose mode is enabled
-#[allow(dead_code)] // Used by debug! macro
+/// Check if verbose mode is enabled.
 pub fn is_verbose() -> bool {
     VERBOSE.load(Ordering::SeqCst)
 }
@@ -275,6 +274,30 @@ pub fn text(message: &str) {
 #[inline]
 pub fn blank() {
     OUTPUT.lock().write_persistent("");
+}
+
+/// Write command payload to stdout without adding a diagnostic prefix.
+#[inline]
+pub fn write_stdout(message: impl Display) -> std::io::Result<()> {
+    let mut stdout = stdout().lock();
+    write!(stdout, "{message}")?;
+    stdout.flush()
+}
+
+/// Write one command payload line to stdout without adding a diagnostic prefix.
+#[inline]
+pub fn write_stdout_line(message: impl Display) -> std::io::Result<()> {
+    let mut stdout = stdout().lock();
+    writeln!(stdout, "{message}")?;
+    stdout.flush()
+}
+
+/// Write an interactive prompt to stderr and flush it immediately.
+#[inline]
+pub fn prompt(message: impl Display) -> std::io::Result<()> {
+    let mut stderr = stderr().lock();
+    write!(stderr, "{message}")?;
+    stderr.flush()
 }
 
 /// Apply color to a module prefix based on module type

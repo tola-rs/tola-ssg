@@ -457,7 +457,7 @@ mod tests {
         );
         assert!(body.contains("clearInterval(pollTimer)"), "{response}");
         assert!(!body.contains("setTimeout(reload"), "{response}");
-        assert!(body.contains("if (r.ok)"), "{response}");
+        assert!(body.contains("if (r.status !== 503)"), "{response}");
         assert!(body.contains("location.reload()"), "{response}");
         assert!(!body.contains("location.replace(url)"), "{response}");
         assert!(!body.contains("document.write"), "{response}");

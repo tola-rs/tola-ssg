@@ -45,7 +45,7 @@ pub(super) fn output_results(results: &QueryResult, args: &QueryArgs) -> Result<
             format_args!("wrote output to {}", output_path.display()),
         );
     } else {
-        println!("{}", formatted);
+        logger::write_stdout_line(formatted)?;
     }
 
     Ok(())

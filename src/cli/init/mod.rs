@@ -29,7 +29,7 @@ pub use validate::InitMode;
 /// If `dry_run` is true, only prints the config template to stdout
 pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Result<()> {
     if dry_run {
-        print!("{}", config::generate_config_template());
+        logger::write_stdout(config::generate_config_template())?;
         return Ok(());
     }
 

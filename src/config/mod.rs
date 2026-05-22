@@ -309,10 +309,9 @@ impl SiteConfig {
 
     /// Prompt user to continue. Returns true only if user explicitly confirms.
     fn prompt_continue() -> Result<bool> {
-        use std::io::{self, Write};
+        use std::io;
 
-        eprint!("Continue? [y/N] ");
-        io::stderr().flush()?;
+        logger::prompt("Continue? [y/N] ")?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
