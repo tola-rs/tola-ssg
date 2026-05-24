@@ -2,8 +2,6 @@
 
 A static site generator for Typst-based websites.
 
-> Note (v0.7.x): Released now. Some caching-related bugs may still exist. You can use `tola s -c`(`serve --clean`) as a workaround, but please try regular `serve` first so I can collect feedback and fix these issues in upcoming updates. Thanks for your support!
-
 
 ## Table of Contents
 
@@ -449,7 +447,7 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 ```nix
 {
   inputs.tola = {
-    url = "github:tola-ssg/tola-ssg/v0.7.1";
+    url = "github:tola-ssg/tola-ssg/v0.8.0";
     inputs.nixpkgs.follows = "<your nixpkgs input here>";
     inputs.rust-overlay.follows = "<your rust-overlay input here, if you have one>";
     # ...

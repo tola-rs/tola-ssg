@@ -1,6 +1,6 @@
 [package]
 name = "tola"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "static site generator for typst-based blog - keeping your focus on the content"
 documentation = "https://github.com/tola-rs/tola-ssg"
@@ -139,13 +139,3 @@ crossterm = { version = "0.29.0", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = "3"
-
-[build-dependencies]
-oxc = { version = "0.113", default-features = false, features = [
-    "minifier",
-    "codegen",
-    "mangler",
-] }
-lightningcss = "1.0.0-alpha.70"
-# typst-batch = { path = "./typst-batch", features = ["svg"] }
-typst-batch = { version = "0.2.8", features = ["svg"] }

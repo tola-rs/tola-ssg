@@ -27,8 +27,8 @@
           };
 
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-          packageName = cargoToml.package.name; # or "tola"
-          packageVersion = cargoToml.package.version; # or "0.7.0"
+          packageName = cargoToml.package.name;
+          packageVersion = cargoToml.package.version;
           packageDescription = cargoToml.package.description;
           buildTools = [ pkgs.nasm pkgs.perl pkgs.pkg-config ];
 

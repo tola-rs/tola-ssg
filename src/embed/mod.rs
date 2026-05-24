@@ -4,7 +4,7 @@
 //!
 //! - `template` - Template types for typed variable injection
 //! - `asset` - Embedded asset types with content-hash filenames
-//! - `build` - Build-time templates (redirect.html)
+//! - `build` - Build output templates and scripts
 //! - `serve` - Dev server templates (welcome.html, hotreload.js)
 //! - `css` - Embedded stylesheets (enhance.css)
 //!
@@ -117,15 +117,21 @@ pub mod build {
     }
 
     /// SPA navigation JavaScript with configuration injection.
-    pub const SPA_JS: EmbeddedAsset<SpaVars> = EmbeddedAsset::new(
-        AssetKind::JavaScript,
-        "spa",
-        include_str!(concat!(env!("OUT_DIR"), "/spa.min.js")),
-    );
+    pub const SPA_JS: EmbeddedAsset<SpaVars> =
+        EmbeddedAsset::new(AssetKind::JavaScript, "spa", include_str!("build/spa.js"));
 }
 
 pub mod serve {
     use super::{AssetKind, EmbeddedAsset, Template, TemplateVars};
+
+    const ERROR_OVERLAY_CSS: &str = include_str!("serve/hotreload-error-overlay.css");
+
+    fn escape_template_literal(input: &str) -> String {
+        input
+            .replace('\\', "\\\\")
+            .replace('`', "\\`")
+            .replace("${", "\\${")
+    }
 
     /// Variables for hotreload.js.
     pub struct HotreloadVars {
@@ -134,7 +140,12 @@ pub mod serve {
 
     impl TemplateVars for HotreloadVars {
         fn apply(&self, content: &str) -> String {
-            content.replace("__TOLA_WS_PORT__", &self.ws_port.to_string())
+            content
+                .replace("__TOLA_WS_PORT__", &self.ws_port.to_string())
+                .replace(
+                    "__TOLA_ERROR_OVERLAY_CSS__",
+                    &escape_template_literal(ERROR_OVERLAY_CSS),
+                )
         }
 
         fn hash_input(&self) -> String {
@@ -143,28 +154,25 @@ pub mod serve {
     }
 
     /// Variables for welcome.html.
-    pub struct WelcomeVars<'a> {
-        pub title: &'a str,
-        pub version: &'a str,
+    pub struct WelcomeVars {
+        pub version: &'static str,
     }
 
-    impl TemplateVars for WelcomeVars<'_> {
+    impl TemplateVars for WelcomeVars {
         fn apply(&self, content: &str) -> String {
-            content
-                .replace("__TITLE__", self.title)
-                .replace("__VERSION__", self.version)
+            content.replace("__TOLA_VERSION__", self.version)
         }
     }
 
     /// Welcome page template.
-    pub const WELCOME_HTML: Template<WelcomeVars<'static>> =
-        Template::new(include_str!(concat!(env!("OUT_DIR"), "/welcome.html")));
+    pub const WELCOME_HTML: Template<WelcomeVars> =
+        Template::new(include_str!("serve/welcome.html"));
 
     /// Hot reload JavaScript with WebSocket port injection.
     pub const HOTRELOAD_JS: EmbeddedAsset<HotreloadVars> = EmbeddedAsset::new(
         AssetKind::JavaScript,
         "hotreload",
-        include_str!(concat!(env!("OUT_DIR"), "/hotreload.min.js")),
+        include_str!("serve/hotreload.js"),
     );
 }
 

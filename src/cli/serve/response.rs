@@ -290,7 +290,6 @@ pub fn respond_welcome(request: Request) -> Result<()> {
     }
 
     let body = WELCOME_HTML.render(&WelcomeVars {
-        title: "Welcome",
         version: env!("CARGO_PKG_VERSION"),
     });
 
