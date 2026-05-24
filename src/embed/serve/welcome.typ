@@ -20,7 +20,8 @@
     == Quick Tips
 
     - Use `tola serve` for live reload
-    - Customize templates in `templates/` directory
+    - Customize Tola helpers in `tola/lib.typ`
+    - Add your own templates in `templates/`
     - Add assets to `assets/` directory
   ]
 

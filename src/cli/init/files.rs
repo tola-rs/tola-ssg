@@ -10,7 +10,7 @@ use crate::config::section::{
     build::AtomicCssConfig,
     site::{FeedConfig, HeaderConfig, SeoConfig, SiteInfoConfig, SitemapConfig},
 };
-use crate::embed::typst::{TOLA_TEMPLATE, TOLA_UTIL, TolaTypstVars};
+use crate::embed::typst::{TOLA_LIB, TolaTypstVars};
 
 use super::Settings;
 
@@ -181,24 +181,11 @@ pub fn write_ignore_files(root: &Path, output_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write templates/tola.typ with default show rules for HTML export
-pub fn write_tola_template(root: &Path) -> Result<()> {
-    let path = root.join("templates/tola.typ");
-    // Only create if doesn't exist
+/// Write tola/lib.typ with Tola Typst support functions.
+pub fn write_tola_lib(root: &Path) -> Result<()> {
+    let path = root.join("tola/lib.typ");
     if !path.exists() {
-        let content = TOLA_TEMPLATE.render(&TolaTypstVars::default());
-        fs::write(&path, content)
-            .with_context(|| format!("Failed to write '{}'", path.display()))?;
-    }
-    Ok(())
-}
-
-/// Write utils/tola.typ with utility functions
-pub fn write_tola_util(root: &Path) -> Result<()> {
-    let path = root.join("utils/tola.typ");
-    // Only create if doesn't exist
-    if !path.exists() {
-        let content = TOLA_UTIL.render(&TolaTypstVars::default());
+        let content = TOLA_LIB.render(&TolaTypstVars::default());
         fs::write(&path, content)
             .with_context(|| format!("Failed to write '{}'", path.display()))?;
     }
@@ -272,5 +259,18 @@ mod tests {
 
         let content = fs::read_to_string(&gitignore).unwrap();
         assert_eq!(content, "custom content");
+    }
+
+    #[test]
+    fn writes_tola_lib() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("tola")).unwrap();
+
+        write_tola_lib(temp.path()).unwrap();
+
+        let content = fs::read_to_string(temp.path().join("tola/lib.typ")).unwrap();
+        assert!(content.contains("Tola SSG Typst library"));
+        assert!(content.contains("#let tola-page"));
+        assert!(content.contains("#let og-tags"));
     }
 }

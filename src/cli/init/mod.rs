@@ -104,8 +104,7 @@ pub fn new_site(
     files::write_config(root, &settings)?;
     let output_dir = site_config.root_relative(&site_config.build.output);
     files::write_ignore_files(root, &output_dir)?;
-    files::write_tola_template(root)?;
-    files::write_tola_util(root)?;
+    files::write_tola_lib(root)?;
 
     logger::blank();
     logger::log("init", format_args!("created site"));

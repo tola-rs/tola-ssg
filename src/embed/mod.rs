@@ -245,7 +245,7 @@ pub mod css {
 pub mod typst {
     use super::{Template, TemplateVars};
 
-    /// Variables for tola.typ templates.
+    /// Variables for the generated Tola Typst library.
     pub struct TolaTypstVars {
         pub version: &'static str,
     }
@@ -264,12 +264,8 @@ pub mod typst {
         }
     }
 
-    /// Tola template for tola init to generate templates/tola.typ.
-    pub const TOLA_TEMPLATE: Template<TolaTypstVars> =
-        Template::new(include_str!("typst/templates/tola.typ"));
-    /// Tola util for tola init to generate utils/tola.typ.
-    pub const TOLA_UTIL: Template<TolaTypstVars> =
-        Template::new(include_str!("typst/utils/tola.typ"));
+    /// Tola Typst library for tola init to generate tola/lib.typ.
+    pub const TOLA_LIB: Template<TolaTypstVars> = Template::new(include_str!("typst/tola/lib.typ"));
 }
 
 pub mod recolor {

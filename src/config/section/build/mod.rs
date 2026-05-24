@@ -9,7 +9,7 @@
 //! content = "content"         # Source directory for .typ files (relative to site root)
 //! output = "public"           # Output directory for generated HTML (relative to site root)
 //! assets = "assets"           # Static assets directory (relative to site root)
-//! deps = ["templates"]        # Dependency dirs (relative to site root)
+//! deps = ["tola", "templates", "utils"] # Dependency dirs (relative to site root)
 //! minify = true               # Minify HTML output
 //! extra_hints = true          # Show Tola-specific diagnostic hints
 //!
@@ -70,7 +70,7 @@ pub struct BuildSectionConfig {
     /// Static assets configuration.
     pub assets: AssetsConfig,
 
-    /// Dependency directories (templates/, utilities/, etc.).
+    /// Dependency directories (Tola library, templates, utilities, etc.).
     pub deps: Vec<PathBuf>,
 
     /// Virtual data files directory (relative to output).
@@ -123,7 +123,7 @@ impl Default for BuildSectionConfig {
             content: "content".into(),
             output: "public".into(),
             assets: AssetsConfig::default(),
-            deps: vec!["templates".into(), "utils".into()],
+            deps: vec!["tola".into(), "templates".into(), "utils".into()],
             data: "_data".into(),
             minify: true,
             clean: false,
