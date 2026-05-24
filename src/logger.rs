@@ -300,6 +300,22 @@ pub fn prompt(message: impl Display) -> std::io::Result<()> {
     stderr.flush()
 }
 
+/// Write one interactive prompt line to stderr.
+#[inline]
+pub fn prompt_line(message: impl Display) -> std::io::Result<()> {
+    let mut stderr = stderr().lock();
+    writeln!(stderr, "{message}")?;
+    stderr.flush()
+}
+
+/// Write a prefixed interactive prompt line to stderr.
+#[inline]
+pub fn prompt_log(module: &str, message: impl Display) -> std::io::Result<()> {
+    let module_lower = module.to_ascii_lowercase();
+    let prefix = colorize_prefix(module, &module_lower);
+    prompt_line(format_args!("{prefix} {message}"))
+}
+
 /// Apply color to a module prefix based on module type
 #[inline]
 fn colorize_prefix(module: &str, module_lower: &str) -> String {
@@ -308,6 +324,7 @@ fn colorize_prefix(module: &str, module_lower: &str) -> String {
         return prefix;
     }
     match module_lower {
+        "init" => prefix.bright_cyan().bold().to_string(),
         "serve" => prefix.bright_blue().bold().to_string(),
         "watch" => prefix.bright_green().bold().to_string(),
         "error" => prefix.bright_red().bold().to_string(),

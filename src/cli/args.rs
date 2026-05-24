@@ -49,6 +49,10 @@ pub enum Commands {
         /// Print generated config to stdout without creating files
         #[arg(long)]
         dry: bool,
+
+        /// Generate the default site without interactive prompts
+        #[arg(long)]
+        no_interactive: bool,
     },
 
     /// Build the site for production

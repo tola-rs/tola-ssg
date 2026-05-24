@@ -55,7 +55,11 @@ fn main() -> Result<()> {
     let config = init_config(SiteConfig::load(cli)?);
 
     match &cli.command {
-        Commands::Init { name, dry } => cli::init::new_site(&config, name.is_some(), *dry),
+        Commands::Init {
+            name,
+            dry,
+            no_interactive,
+        } => cli::init::new_site(&config, name.is_some(), *dry, *no_interactive),
         Commands::Build { .. } => build_all(&config, BuildMode::PRODUCTION),
         Commands::Deploy { .. } => {
             build_all(&config, BuildMode::PRODUCTION)?;
