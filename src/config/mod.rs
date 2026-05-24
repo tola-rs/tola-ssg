@@ -293,16 +293,15 @@ impl SiteConfig {
             .file_name()
             .map(|n| n.to_string_lossy())
             .unwrap_or_else(|| path.to_string_lossy());
-        let body = fields
+        let lines = fields
             .iter()
             .map(|field| format!("- {field}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
         logger::blank();
         logger::block(
             "warning",
             &format!("unknown fields in {display_path}:"),
-            &body,
+            &lines,
         );
         logger::blank();
     }

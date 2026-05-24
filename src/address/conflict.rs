@@ -215,22 +215,18 @@ pub fn print_conflicts(conflicts: &[UrlConflict]) {
 
     for conflict in conflicts {
         logger::blank();
-        logger::log(
-            "url",
-            format_args!(
-                "{} ({} owner{})",
-                conflict.url,
-                conflict.owners.len(),
-                plural_s(conflict.owners.len())
-            ),
+        let title = format!(
+            "{} ({} owner{})",
+            conflict.url,
+            conflict.owners.len(),
+            plural_s(conflict.owners.len())
         );
         let owners = conflict
             .owners
             .iter()
-            .map(|source| format!("  - {source}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        logger::text(&owners);
+            .map(|source| format!("- {source}"))
+            .collect::<Vec<_>>();
+        logger::block("url", &title, &owners);
     }
 }
 

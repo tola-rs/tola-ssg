@@ -180,8 +180,7 @@ impl ConfigDiagnostics {
                 .warnings
                 .iter()
                 .map(|(field, _)| format!("- {}", field.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect::<Vec<_>>();
             logger::block(
                 "warning",
                 "deprecated fields or sections, will be removed in a future version:",
@@ -195,8 +194,7 @@ impl ConfigDiagnostics {
                 .hints
                 .iter()
                 .map(|field| format!("- {}", field.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect::<Vec<_>>();
             logger::block(
                 "hint",
                 "experimental fields or sections, may change or be removed:",

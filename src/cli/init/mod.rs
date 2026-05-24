@@ -45,6 +45,7 @@ struct Settings {
     language: String,
     author: String,
     email: String,
+    tola_lib: bool,
     atomic_css: bool,
     feeds: Vec<FeedFormat>,
     sitemap: bool,
@@ -58,6 +59,7 @@ impl Settings {
             language: "en".into(),
             author: String::new(),
             email: String::new(),
+            tola_lib: true,
             atomic_css: false,
             feeds: Vec::new(),
             sitemap: false,
@@ -99,22 +101,32 @@ pub fn new_site(
 
     let settings = collect_settings(root, no_interactive)?;
 
-    tree::create_dirs(root)?;
+    tree::create_dirs(root, settings.tola_lib)?;
 
     files::write_config(root, &settings)?;
     let output_dir = site_config.root_relative(&site_config.build.output);
     files::write_ignore_files(root, &output_dir)?;
-    files::write_tola_lib(root)?;
+    if settings.tola_lib {
+        files::write_tola_lib(root)?;
+    }
 
     logger::blank();
     logger::log("init", format_args!("created site"));
     logger::blank();
-    logger::text(&tree::render_tree(root));
+    logger::text(&tree::render_tree(root, settings.tola_lib));
     logger::blank();
 
     generate_lsp_stubs(root)?;
 
-    logger::log("init", format_args!("generated Typst LSP stubs"));
+    logger::log("init", format_args!("generated Typst LSP packages"));
+    logger::block(
+        "hint",
+        "Tinymist setup:",
+        &[
+            "For editor diagnostics/completion, use Tola's generated package path.",
+            "Add `--package-path .tola/packages` to Tinymist extra args.",
+        ],
+    );
     logger::log("init", format_args!("site initialized successfully"));
     Ok(())
 }

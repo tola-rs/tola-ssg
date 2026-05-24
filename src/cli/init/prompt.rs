@@ -35,6 +35,12 @@ pub fn ask() -> Result<Settings> {
     let email = read_text("email", None)?.into_value("");
 
     section(
+        "Tola Typst library",
+        "add tola/lib.typ with useful helpers.",
+    )?;
+    let tola_lib = confirm("enable?", true)?;
+
+    section(
         "atomic CSS",
         "built-in utility CSS, ready to use. default profile: Tailwind CSS v4.",
     )?;
@@ -76,6 +82,7 @@ pub fn ask() -> Result<Settings> {
         language,
         author,
         email,
+        tola_lib,
         atomic_css,
         feeds,
         sitemap,

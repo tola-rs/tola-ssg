@@ -61,7 +61,7 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
 
       # Enable Cachix only for Linux/macOS targets
-      - uses: cachix/cachix-action@v15
+      - uses: cachix/cachix-action@v17
         if: ${{ matrix.use_cachix }}
         with:
           name: tola
@@ -100,7 +100,7 @@ jobs:
           BINARY: ${{ matrix.binary }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: artifact-${{ matrix.target }}
           path: artifacts/*
@@ -125,7 +125,7 @@ jobs:
           path: workflow-source
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: artifact-*
           merge-multiple: true

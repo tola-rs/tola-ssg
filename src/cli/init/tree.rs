@@ -31,7 +31,7 @@ impl InitTreeEntry {
     }
 }
 
-const INIT_TREE: &[InitTreeEntry] = &[
+const BASE_TREE_HEAD: &[InitTreeEntry] = &[
     InitTreeEntry::file("tola.toml"),
     InitTreeEntry::file(".gitignore"),
     InitTreeEntry::file(".ignore"),
@@ -40,26 +40,41 @@ const INIT_TREE: &[InitTreeEntry] = &[
     InitTreeEntry::dir("assets/fonts"),
     InitTreeEntry::dir("assets/scripts"),
     InitTreeEntry::dir("assets/styles"),
-    InitTreeEntry::dir("tola"),
-    InitTreeEntry::file("tola/lib.typ"),
-    InitTreeEntry::dir("templates"),
-    InitTreeEntry::dir("utils"),
 ];
 
-fn dirs() -> impl Iterator<Item = &'static str> {
-    INIT_TREE
+const TOLA_LIB_TREE: &[InitTreeEntry] = &[
+    InitTreeEntry::dir("tola"),
+    InitTreeEntry::file("tola/lib.typ"),
+];
+
+const BASE_TREE_TAIL: &[InitTreeEntry] =
+    &[InitTreeEntry::dir("templates"), InitTreeEntry::dir("utils")];
+
+fn entries(include_tola_lib: bool) -> impl Iterator<Item = &'static InitTreeEntry> {
+    BASE_TREE_HEAD
         .iter()
+        .chain(
+            include_tola_lib
+                .then_some(TOLA_LIB_TREE)
+                .into_iter()
+                .flatten(),
+        )
+        .chain(BASE_TREE_TAIL)
+}
+
+fn dirs(include_tola_lib: bool) -> impl Iterator<Item = &'static str> {
+    entries(include_tola_lib)
         .filter(|entry| entry.kind == InitTreeEntryKind::Dir)
         .map(|entry| entry.path)
 }
 
-pub fn create_dirs(root: &Path) -> Result<()> {
+pub fn create_dirs(root: &Path, include_tola_lib: bool) -> Result<()> {
     if !root.exists() {
         fs::create_dir_all(root)
             .with_context(|| format!("Failed to create root directory '{}'", root.display()))?;
     }
 
-    for dir in dirs() {
+    for dir in dirs(include_tola_lib) {
         let path = root.join(dir);
         fs::create_dir_all(&path)
             .with_context(|| format!("Failed to create directory '{}'", path.display()))?;
@@ -68,9 +83,9 @@ pub fn create_dirs(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn render_tree(root: &Path) -> String {
+pub fn render_tree(root: &Path, include_tola_lib: bool) -> String {
     let mut tree = TreeNode::default();
-    for entry in INIT_TREE {
+    for entry in entries(include_tola_lib) {
         tree.insert(entry.path, entry.kind);
     }
 
@@ -151,7 +166,7 @@ mod tests {
 
     #[test]
     fn renders_init_tree_entries() {
-        let tree = render_tree(Path::new("/tmp/my-site"));
+        let tree = render_tree(Path::new("/tmp/my-site"), true);
 
         assert!(tree.contains("my-site/"));
         assert!(tree.contains("├── assets/"));
@@ -167,7 +182,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("my-site");
 
-        create_dirs(&root).unwrap();
+        create_dirs(&root, true).unwrap();
 
         assert!(root.join("content").is_dir());
         assert!(root.join("assets/images").is_dir());
@@ -180,7 +195,7 @@ mod tests {
     fn creates_dirs_in_existing_root() {
         let temp = TempDir::new().unwrap();
 
-        create_dirs(temp.path()).unwrap();
+        create_dirs(temp.path(), true).unwrap();
 
         assert!(temp.path().join("content").is_dir());
     }

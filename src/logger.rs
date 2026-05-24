@@ -253,14 +253,14 @@ pub fn debug(module: &str, message: impl Display) {
 
 /// Write a persistent block with a colored module prefix on the first line.
 #[inline]
-pub fn block(module: &str, title: &str, body: &str) {
+pub fn block<T: AsRef<str>>(module: &str, title: &str, lines: &[T]) {
     let module_lower = module.to_ascii_lowercase();
     let prefix = colorize_prefix(module, &module_lower);
-    let text = if body.is_empty() {
-        format!("{prefix} {title}")
-    } else {
-        format!("{prefix} {title}\n{body}")
-    };
+    let mut text = format!("{prefix} {title}");
+    for line in lines {
+        text.push_str("\n  ");
+        text.push_str(line.as_ref());
+    }
     OUTPUT.lock().write_persistent(&text);
 }
 

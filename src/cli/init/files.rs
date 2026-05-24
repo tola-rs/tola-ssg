@@ -219,6 +219,7 @@ mod tests {
             language: "zh-CN".into(),
             author: "Kaway".into(),
             email: "kaway@example.com".into(),
+            tola_lib: true,
             atomic_css: true,
             feeds: vec![FeedFormat::Rss, FeedFormat::Json],
             sitemap: true,
