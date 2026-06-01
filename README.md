@@ -1,4 +1,5 @@
 # tola-ssg
+[ **English** | [中文](./README-zh.md) ]
 
 A static site generator for Typst-based websites.
 
