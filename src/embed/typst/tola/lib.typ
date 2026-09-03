@@ -198,7 +198,11 @@
   let is-html = sys.inputs.at("format", default: "paged") == "html"
   if is-html {
     html.html[
-      #html.head[#head]
+      #html.head[
+        #html.meta(charset: "utf-8")
+        #html.meta(name: "viewport", content: "width=device-width, initial-scale=1")
+        #head
+      ]
       #html.body[#body]
     ]
   } else {
