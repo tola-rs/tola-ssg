@@ -1,0 +1,588 @@
+{
+  "name": "tola",
+  "displayName": "Tola",
+  "description": "Tola language services for Typst sources and site configuration: diagnostics, completion, hover, definitions, references, renames, highlights, code actions, colours, workspace symbol search, highlighting, formatting, folding, outlines, links, and preview commands.",
+  "version": "0.1.0",
+  "publisher": "tola",
+  "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tola-rs/tola-ssg.git",
+    "directory": "extensions/vscode"
+  },
+  "engines": {
+    "vscode": "^1.97.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "tola",
+    "typst",
+    "language-server"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "workspaceContains:tola.toml",
+    "onFileSystem:tola-package"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Tola starts the configured executable and evaluates site sources."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Tola requires a local filesystem workspace."
+    }
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "typst",
+        "extensions": [
+          ".typ"
+        ],
+        "aliases": [
+          "Typst",
+          "typst"
+        ],
+        "configuration": "./syntaxes/language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "typst",
+        "scopeName": "source.typst",
+        "path": "./syntaxes/typst.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.typst.codeblock",
+        "path": "./syntaxes/typst-markdown-injection.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.typst": "typst"
+        }
+      }
+    ],
+    "semanticTokenTypes": [
+      {
+        "id": "text",
+        "description": "Text without a more specific type"
+      },
+      {
+        "id": "heading",
+        "description": "Heading"
+      },
+      {
+        "id": "marker",
+        "description": "List, enum, or term marker"
+      },
+      {
+        "id": "term",
+        "description": "Term in a term list"
+      },
+      {
+        "id": "label",
+        "description": "Label"
+      },
+      {
+        "id": "ref",
+        "description": "Reference to a label"
+      },
+      {
+        "id": "link",
+        "description": "Hyperlink"
+      },
+      {
+        "id": "raw",
+        "description": "Raw text"
+      },
+      {
+        "id": "bool",
+        "description": "Boolean literal"
+      },
+      {
+        "id": "punct",
+        "description": "Punctuation"
+      },
+      {
+        "id": "pol",
+        "description": "Interpolated value"
+      },
+      {
+        "id": "escape",
+        "description": "Escape sequence"
+      },
+      {
+        "id": "delim",
+        "description": "Math delimiter"
+      },
+      {
+        "id": "error",
+        "description": "Syntax error"
+      }
+    ],
+    "semanticTokenModifiers": [
+      {
+        "id": "math",
+        "description": "Math mode"
+      },
+      {
+        "id": "strong",
+        "description": "Strong text"
+      },
+      {
+        "id": "emph",
+        "description": "Emphasized text"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "typst",
+        "scopes": {
+          "*.strong.emph": [
+            "markup.bold.typst markup.italic.typst"
+          ],
+          "*.strong": [
+            "markup.bold.typst"
+          ],
+          "*.emph": [
+            "markup.italic.typst"
+          ],
+          "*.math": [
+            "markup.math.typst"
+          ],
+          "bool": [
+            "constant.language.boolean.typst"
+          ],
+          "punct": [
+            "punctuation.typst",
+            "punctuation.definition.typst"
+          ],
+          "escape": [
+            "constant.character.escape.typst",
+            "keyword.operator.typst",
+            "punctuation.definition.typst"
+          ],
+          "link": [
+            "markup.underline.link.typst"
+          ],
+          "raw": [
+            "markup.other.raw.typst"
+          ],
+          "delim.math": [
+            "punctuation.definition.math.typst",
+            "punctuation.definition.string.end.math.typst",
+            "string.quoted.other.typst"
+          ],
+          "operator.math": [
+            "keyword.operator.math.typst"
+          ],
+          "heading": [
+            "markup.heading.typst"
+          ],
+          "marker": [
+            "markup.list.typst punctuation.definition.list.begin.typst",
+            "markup.list.typst",
+            "punctuation.definition.list.begin.typst"
+          ],
+          "term": [
+            "markup.list.term.typst",
+            "markup.bold.term.typst"
+          ],
+          "label": [
+            "string.other.link.title.typst",
+            "entity.name.label.typst",
+            "meta.link.inline.typst",
+            "markup.underline.link.typst"
+          ],
+          "ref": [
+            "string.other.link.typst",
+            "markup.other.reference.typst",
+            "entity.name.label.typst",
+            "meta.link.inline.typst",
+            "markup.underline.link.typst"
+          ],
+          "pol": [
+            "meta.interpolation.typst",
+            "variable.typst"
+          ],
+          "error": [
+            "invalid.typst"
+          ]
+        }
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "tola.onEnter",
+        "key": "enter",
+        "when": "editorTextFocus && !editorReadonly && editorLangId == typst && config.tola.onEnter && !suggestWidgetVisible && !editorHasMultipleSelections"
+      },
+      {
+        "command": "tola.openPreview",
+        "key": "ctrl+k v",
+        "mac": "cmd+k v",
+        "when": "editorLangId == typst"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tola.restart",
+        "title": "Tola: Restart Language Services"
+      },
+      {
+        "command": "tola.goToDefinition",
+        "title": "Tola: Go to Definition"
+      },
+      {
+        "command": "tola.onEnter",
+        "title": "Tola: Insert Newline"
+      },
+      {
+        "command": "tola.startPreview",
+        "title": "Tola: Start Preview Server"
+      },
+      {
+        "command": "tola.openPreview",
+        "title": "Tola: Open Preview"
+      },
+      {
+        "command": "tola.openPage",
+        "title": "Tola: Open Page for Current Document"
+      },
+      {
+        "command": "tola.copyRoute",
+        "title": "Tola: Copy Route"
+      },
+      {
+        "command": "tola.build",
+        "title": "Tola: Build Site"
+      },
+      {
+        "command": "tola.revealOutput",
+        "title": "Tola: Reveal Site Output"
+      },
+      {
+        "command": "tola.showLog",
+        "title": "Tola: Show Output"
+      },
+      {
+        "command": "tola.vendorPackages",
+        "title": "Tola: Vendor Packages"
+      },
+      {
+        "command": "tola.editorSetup",
+        "title": "Tola: Set Up Editor Integration"
+      },
+      {
+        "command": "tola.initSite",
+        "title": "Tola: Create Site"
+      },
+      {
+        "command": "tola.refreshPages",
+        "title": "Tola: Refresh Pages"
+      }
+    ],
+    "configuration": {
+      "title": "Tola",
+      "properties": {
+        "tola.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Enable Tola diagnostics and language features in this workspace folder."
+        },
+        "tola.serverPath": {
+          "type": "string",
+          "default": "tola",
+          "scope": "resource",
+          "description": "Command name or path of the Tola executable. A relative path resolves from the workspace folder; Tola runs it directly, without a shell."
+        },
+        "tola.onEnter": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Let Tola insert what the site's own syntax calls for when Enter is pressed in a Typst source, such as continuing a list, comment, or equation."
+        },
+        "tola.configPath": {
+          "type": "string",
+          "default": "tola.toml",
+          "scope": "resource",
+          "description": "Site configuration file, absolute or relative to the workspace folder. If the file is missing, Tola does not fall back to `tola.toml`."
+        },
+        "tola.packagePath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Directory of local Typst packages, absolute or relative to the workspace folder. Leave empty to use Typst's default package directory."
+        },
+        "tola.packageCachePath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Typst package cache directory, absolute or relative to the workspace folder. Leave empty to use Typst's default cache directory."
+        },
+        "tola.formatterPrintWidth": {
+          "type": "number",
+          "default": 120,
+          "scope": "resource",
+          "description": "Maximum line width the formatter aims for."
+        },
+        "tola.formatterProseWrap": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Rewrap prose paragraphs to the formatter's width."
+        },
+        "tola.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "scope": "window",
+          "description": "Trace the messages the Tola client and its language server exchange in the output channel."
+        },
+        "tola.assetDirectory": {
+          "type": "string",
+          "default": "assets",
+          "scope": "resource",
+          "description": "Directory a dropped or pasted file is copied into, relative to the site root. The file is published through the Bundle as `asset(<path>, read(<path>))`."
+        },
+        "tola.previewTarget": {
+          "type": "string",
+          "enum": [
+            "external",
+            "simpleBrowser"
+          ],
+          "default": "external",
+          "scope": "resource",
+          "description": "Where a published page opens: the system browser, or an editor tab through the built-in Simple Browser."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "[typst]": {
+        "editor.wordWrap": "on",
+        "editor.tabSize": 2,
+        "editor.semanticHighlighting.enabled": true,
+        "editor.quickSuggestions": {
+          "strings": true
+        }
+      }
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "tola.openPreview",
+          "when": "editorLangId == typst",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "tola.openPreview",
+          "when": "resourceLangId == typst && editorTextFocus",
+          "group": "navigation"
+        },
+        {
+          "command": "tola.openPage",
+          "when": "resourceLangId == typst && editorTextFocus",
+          "group": "navigation"
+        },
+        {
+          "command": "tola.build",
+          "when": "resourceLangId == typst && editorTextFocus",
+          "group": "navigation"
+        },
+        {
+          "command": "tola.copyRoute",
+          "when": "resourceLangId == typst && editorTextFocus",
+          "group": "9_cutcopypaste"
+        },
+        {
+          "command": "tola.vendorPackages",
+          "when": "resourceLangId == typst && editorTextFocus",
+          "group": "z_commands"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "tola.openPage",
+          "when": "editorLangId == typst"
+        },
+        {
+          "command": "tola.copyRoute",
+          "when": "editorLangId == typst"
+        },
+        {
+          "command": "tola.openPreview",
+          "when": "editorLangId == typst"
+        },
+        {
+          "command": "tola.startPreview",
+          "when": "editorLangId == typst"
+        },
+        {
+          "command": "tola.build",
+          "when": "tola.site"
+        },
+        {
+          "command": "tola.vendorPackages",
+          "when": "tola.site"
+        },
+        {
+          "command": "tola.editorSetup",
+          "when": "tola.site"
+        },
+        {
+          "command": "tola.initSite",
+          "when": "!tola.site"
+        },
+        {
+          "command": "tola.restart",
+          "when": "tola.site"
+        },
+        {
+          "command": "tola.revealOutput",
+          "when": "tola.site"
+        },
+        {
+          "command": "tola.showLog",
+          "when": "tola.site"
+        },
+        {
+          "command": "tola.refreshPages",
+          "when": "tola.site"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "tola.refreshPages",
+          "when": "view == tolaPages",
+          "group": "navigation"
+        }
+      ]
+    },
+    "taskDefinitions": [
+      {
+        "type": "tola",
+        "required": [
+          "verb"
+        ],
+        "properties": {
+          "verb": {
+            "type": "string",
+            "default": "build",
+            "enum": [
+              "build"
+            ],
+            "enumDescriptions": [
+              "Build the site and write its output files."
+            ],
+            "description": "The Tola verb the task runs."
+          },
+          "site": {
+            "type": "string",
+            "description": "The workspace folder whose site the task runs in; omitting it uses the folder the task starts in."
+          }
+        }
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "tolaPages",
+          "name": "Tola Pages",
+          "when": "tola.site"
+        }
+      ]
+    },
+    "snippets": [
+      {
+        "language": "typst",
+        "path": "./snippets/tola.json"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "tola.gettingStarted",
+        "title": "Get started with Tola",
+        "description": "Set up this folder's editor integration, build the site, then preview it. Every step asks before it writes into the workspace.",
+        "steps": [
+          {
+            "id": "setup",
+            "title": "Set up editor integration",
+            "description": "Regenerates the editor package mirror for this site and merges the workspace settings it needs.\n[Set up this folder](command:tola.editorSetup)",
+            "media": {
+              "image": "icon.png"
+            },
+            "completionEvents": [
+              "onCommand:tola.editorSetup"
+            ]
+          },
+          {
+            "id": "build",
+            "title": "Build the site",
+            "description": "Writes the site's output files with the same CLI invocation the Build Site command uses.\n[Build the site](command:tola.build)",
+            "media": {
+              "image": "icon.png"
+            },
+            "completionEvents": [
+              "onCommand:tola.build"
+            ]
+          },
+          {
+            "id": "preview",
+            "title": "Preview a page",
+            "description": "Publishes the current source through the loopback preview server and opens the page it is served at.\n[Preview the current source](command:tola.startPreview)",
+            "media": {
+              "image": "icon.png"
+            },
+            "completionEvents": [
+              "onCommand:tola.startPreview"
+            ]
+          },
+          {
+            "id": "create",
+            "title": "Create a site",
+            "description": "For a folder that has no site yet, `tola init` writes a starting site after asking for the directory and confirming.\n[Create a site](command:tola.initSite)",
+            "media": {
+              "image": "icon.png"
+            },
+            "completionEvents": [
+              "onCommand:tola.initSite"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "check": "deno task typecheck",
+    "build": "deno task build",
+    "package": "deno task package",
+    "test": "deno task test"
+  },
+  "dependencies": {
+    "vscode-languageclient": "9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.6",
+    "@types/vscode": "1.97.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.25.12",
+    "playwright": "1.62.0"
+  }
+}

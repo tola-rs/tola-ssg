@@ -1,0 +1,25 @@
+{
+  // Deno owns exactly the three TypeScript workspace members (see "workspace" in deno.jsonc).
+  // Everything else — the Rust crates and src/embed/dev/hotreload.js — stays with VS Code's
+  // built-in service, because `deno lint`/`deno check` do not cover those paths either.
+  "deno.enablePaths": ["./scripts", "./e2e", "./extensions/vscode"],
+
+  // Lint from the same rules the root deno.jsonc declares (recommended + eqeqeq).
+  "deno.lint": true,
+
+  // Format-on-save must equal `deno fmt --check` (root deno.jsonc fmt block: 110 cols,
+  // single quotes, no semicolons) — otherwise every save creates CI churn.
+  "editor.formatOnSave": true,
+
+  // Per-language, NOT a global "editor.defaultFormatter": this is a Rust repo and the Deno
+  // formatter only declares the seven languages below.
+  "[typescript]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "[typescriptreact]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "[javascript]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "[javascriptreact]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "[json]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "[jsonc]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "[markdown]": { "editor.defaultFormatter": "denoland.vscode-deno" },
+  "tola.packagePath": "/Users/kawayww/Library/Application Support/typst/packages",
+  "tola.packageCachePath": "/Users/kawayww/Library/Caches/typst/packages"
+}

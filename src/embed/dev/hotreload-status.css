@@ -1,0 +1,91 @@
+#tola-dev-status {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 99997;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  max-width: calc(100vw - 32px);
+  padding: 6px 10px;
+  border: 1px solid #3f3f46;
+  background: #18181b;
+  color: #e4e4e7;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .24);
+  font: 12px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#tola-dev-status [hidden] {
+  display: none;
+}
+
+.tola-dev-status-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  box-sizing: border-box;
+  border: 2px solid #71717a;
+  border-top-color: #f4f4f5;
+  border-radius: 50%;
+}
+
+.tola-dev-status-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tola-dev-status-count {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tola-dev-status-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.tola-dev-status-icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tola-dev-status-count[data-severity="error"] {
+  color: #f87171;
+}
+
+.tola-dev-status-count[data-severity="error"] .tola-dev-status-icon {
+  stroke-width: 2;
+}
+
+.tola-dev-status-count[data-severity="warning"] {
+  color: #fbbf24;
+}
+
+.tola-dev-status-count[data-severity="warning"] .tola-dev-status-icon {
+  stroke-width: 1.4;
+}
+
+@media (max-width: 600px) {
+  #tola-dev-status {
+    right: 10px;
+    bottom: 10px;
+    max-width: calc(100vw - 20px);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .tola-dev-status-spinner {
+    animation: tola-dev-status-spin 700ms linear infinite;
+  }
+}
+
+@keyframes tola-dev-status-spin {
+  to { transform: rotate(360deg); }
+}

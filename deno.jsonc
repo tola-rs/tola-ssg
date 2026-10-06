@@ -1,0 +1,39 @@
+{
+  "workspace": ["./scripts", "./e2e", "./extensions/vscode"],
+  // Not Deno's recommended "none": Node-hosted tools (esbuild's binary, vsce's .bin shims, the VS
+  // Code launcher, approved install scripts) resolve real packages through these node_modules links.
+  "nodeModulesDir": "auto",
+  // Shared by every Deno subcommand, not just the formatter and linter: the dependency tree, build
+  // output, and the Playwright and VS Code artifacts the packages write.
+  "exclude": [
+    "node_modules",
+    "target",
+    "e2e/test-results",
+    "e2e/playwright-report",
+    "extensions/vscode/dist",
+    "extensions/vscode/.vscode-test"
+  ],
+  "fmt": {
+    "indentWidth": 2,
+    "lineWidth": 110,
+    "singleQuote": true,
+    "semiColons": false,
+    "include": ["scripts/", "e2e/", "extensions/vscode/"]
+  },
+  "lint": {
+    "include": ["scripts/", "e2e/", "extensions/vscode/"],
+    "rules": {
+      "tags": ["recommended"],
+      "include": ["eqeqeq"]
+    }
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "lib": ["deno.window", "dom", "dom.iterable", "esnext"]
+  },
+  "allowScripts": ["npm:@vscode/vsce-sign@2.1.0", "npm:keytar@7.9.0"]
+}

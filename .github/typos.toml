@@ -1,0 +1,57 @@
+# Scope: prose and source. Vendored mirrors (`docs/`), redistributed licence documents, the pinyin
+# tables under `crates/tola-pronunciations/data/`, the syntax themes under
+# `crates/tola-packages/src/embed/code-themes/`, and build output are data.
+[files]
+extend-exclude = [
+  ".git",
+  ".jj",
+  "docs",
+  "target",
+  "node_modules",
+  "e2e/test-results",
+  "e2e/playwright-report",
+  "extensions/vscode/dist",
+  "extensions/vscode/.vscode-test",
+  "crates/tola-packages/src/embed/code-themes",
+  "crates/tola-pronunciations/data",
+  "crates/tola-pronunciations/licenses",
+]
+
+[default.extend-words]
+# Kana transliteration samples in the romanization tests, the suffix list the watcher
+# uses to recognize editor artifacts, and the prefix the checker splits out of
+# hyphenated words such as `mis-parses`.
+ba = "ba"
+bck = "bck"
+fo = "fo"
+gya = "gya"
+mis = "mis"
+mye = "mye"
+myu = "myu"
+# Percent-encoded "café" examples, whose decoding the URL tests assert.
+caf = "caf"
+# Deliberate misspellings in fixtures, and upstream spellings quoted verbatim:
+# correct where they stand, so the checker must not rewrite them.
+adress = "adress"
+alhpa = "alhpa"
+alikes = "alikes"
+asert = "asert"
+authros = "authros"
+boundarys = "boundarys"
+bui = "bui"
+cach = "cach"
+descriptio = "descriptio"
+documnt = "documnt"
+hel = "hel"
+ment = "ment"
+nam = "nam"
+nd = "nd"
+pronounciation = "pronounciation"
+pronounciations = "pronounciations"
+# The TUI library's name, which the dictionary reads as Ratatouille.
+Ratatui = "Ratatui"
+stauts = "stauts"
+titel = "titel"
+ue = "ue"
+ues = "ues"
+underlaying = "underlaying"

@@ -1,0 +1,20 @@
+[package]
+name = "tola-address"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Address identity for Tola sites: slugs, routes, logical output paths, and browser URLs"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
+caseless = "0.2.2"
+percent-encoding = "2.3.2"
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+thiserror = "2.0.20"
+tola-slugify = { workspace = true }
+unicode-normalization = "0.1.25"
+url = "2.5.8"
+
+[dev-dependencies]
+serde_json = "1.0.151"

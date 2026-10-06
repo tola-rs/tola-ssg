@@ -1,0 +1,62 @@
+{
+  "Tola package imports": {
+    "prefix": [
+      "tola-import"
+    ],
+    "body": [
+      "#import \"@tola/document:0.0.0\": current-document",
+      "#import \"@tola/site:0.0.0\": site",
+      "$0"
+    ],
+    "description": "The document being rendered and this site's values, resolved from tola.toml."
+  },
+  "Published page": {
+    "prefix": [
+      "tola-page"
+    ],
+    "body": [
+      "#document(\"${1:index}.html\", format: \"html\")[",
+      "\t$0",
+      "]"
+    ],
+    "description": "Publish this source at the route its output path names."
+  },
+  "Heading with anchor": {
+    "prefix": [
+      "tola-heading"
+    ],
+    "body": [
+      "= ${1:Title} <${2:anchor}>"
+    ],
+    "description": "A section heading whose label other sources can link to."
+  },
+  "Asset URL": {
+    "prefix": [
+      "tola-asset"
+    ],
+    "body": [
+      "#import \"@tola/address:0.0.0\": asset-url",
+      "#asset-url(\"${1:/assets/logo.svg}\")$0"
+    ],
+    "description": "The mounted browser URL of an asset the site declares."
+  },
+  "Source metadata": {
+    "prefix": [
+      "tola-metadata"
+    ],
+    "body": [
+      "#import \"@tola/source:0.0.0\": tola-meta",
+      "#tola-meta((${1:title: [My document]}))$0"
+    ],
+    "description": "Declare this source's metadata in one eager call."
+  },
+  "Template function": {
+    "prefix": [
+      "tola-template"
+    ],
+    "body": [
+      "#let ${1:page}(body) = document(\"${2:index.html}\", format: \"html\")[#body]"
+    ],
+    "description": "A function that publishes the body it is given."
+  }
+}

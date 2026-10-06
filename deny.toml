@@ -1,0 +1,37 @@
+# MIT covers the workspace crates; the rest is the reviewed set of dependency licenses
+# (regenerate the full list with `just licenses`).
+[licenses]
+version = 2
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC-BY-SA-4.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Zlib",
+]
+
+# Vulnerability scanning, from the RustSec database.
+[advisories]
+# A `-[RUSTSEC]` entry names the crate and what blocks the fixed release; delete it once that
+# dependency reaches the release.
+ignore = [
+  { id = "RUSTSEC-2024-0320", reason = "syntect 5.3.0 under typst-library 0.15.1; no fixed release" },
+  { id = "RUSTSEC-2024-0436", reason = "biblatex 0.12.0 under hayagriva 0.10.1; no fixed release" },
+  { id = "RUSTSEC-2025-0141", reason = "syntect 5.3.0 under typst-library 0.15.1; no fixed release" },
+  { id = "RUSTSEC-2026-0118", reason = "hickory-resolver 0.25.2 under reqwest 0.12; no fixed release there" },
+  { id = "RUSTSEC-2026-0119", reason = "hickory-resolver 0.25.2 pins hickory-proto ^0.25; needs 0.26.1" },
+  { id = "RUSTSEC-2026-0192", reason = "fontdb 0.23.0 and usvg 0.47.0 under typst 0.15.1; no fixed release" },
+  { id = "RUSTSEC-2026-0194", reason = "citationberg 0.7.0 pins quick-xml ^0.38; needs 0.41.0" },
+  { id = "RUSTSEC-2026-0195", reason = "citationberg 0.7.0 pins quick-xml ^0.38; needs 0.41.0" },
+  { id = "RUSTSEC-2026-0206", reason = "typst-layout 0.15.1, usvg 0.47.0, and krilla 0.8.2; no fixed release" },
+]

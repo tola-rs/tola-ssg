@@ -1,0 +1,73 @@
+version: 2
+updates:
+  # `directory: "/"` does not reach .github/actions/setup-typescript, hence the glob entry.
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/**/*"
+    schedule:
+      interval: weekly
+      day: tuesday
+      time: "09:00"
+      timezone: Asia/Shanghai # matches this repository's commit times (UTC+8)
+    cooldown:
+      default-days: 7 # a week of soak instead of the 3-day default
+    groups:
+      actions-minor-patch: # routine bumps ride in one PR
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "denoland/setup-deno"
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    versioning-strategy: lockfile-only
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: "tola-*" # internal crates released in lockstep
+      - dependency-name: "typst*" # the family ships as one release; owned by hand
+      - dependency-name: "oxc*"
+
+  # One entry covers all three workspace members, which the root deno.jsonc declares.
+  - package-ecosystem: deno
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      deno:
+        patterns: ["*"]
+
+  # extensions/vscode devDependencies; there is no package-lock.json.
+  - package-ecosystem: npm
+    directory: "/extensions/vscode"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    versioning-strategy: increase-if-necessary
+    groups:
+      vscode-tooling:
+        patterns: ["*"]
+    open-pull-requests-limit: 3
+
+  - package-ecosystem: nix
+    directory: "/"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      nix-inputs:
+        patterns: ["*"]
+    ignore:
+      - dependency-name: "nixpkgs" # the development shell supplies the pinned toolchains

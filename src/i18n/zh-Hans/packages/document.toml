@@ -1,0 +1,115 @@
+# Simplified-Chinese documentation of `@tola/document`. English stays authoritative in the
+# package's own Typst sources; a unit here overrides one of them.
+
+overview = '''
+你在构建的这篇文档、它的标题，以及你写下的引用
+
+这个包回答三个问题。`current-document()` 说明一次调用属于哪篇文档，`headings()` 列出该文档的标题，`references()` 列出 Bundle 写下的链接与引用。读取文档需要文档上下文：请在 `document(…)` 正文里的 `context` 中调用。渲染进同一篇文档的多个源共享同一份身份，单个源自身的身份则属于 `@tola/source`。
+'''
+
+[exports.current-document]
+
+summary = [
+  '''
+输出中包含这次调用的文档，它的 `output`、`route` 与 `location`。
+
+`output` 是文档在 Bundle 中的输出路径，例如 `notes/index.html`。`route` 是它可达的站点根 route，尚未套用部署路径。`location` 是外层文档元素自身的 location，可以直接交给 `link` 或某个查询。请在 `context` 中调用。在 `document(…)` 正文之外调用会报错。渲染进同一篇文档的两个源得到同一篇文档。
+
+Example - 识别所在的文档：
+''',
+  'Example - 把查询限定到所在的文档：',
+  '',
+]
+
+[exports.references]
+
+summary = [
+  '''
+你在 Bundle 中写下的链接与引用，按 Bundle 顺序。
+
+请在 `context` 中调用。每篇文档提供最外层的原生 `link` 和 `ref`，再对这些引用应用所有传入的过滤条件。指向相同目标的不同引用仍各占一条记录。
+
+| 参数 | 选取 |
+| --- | --- |
+| `from` | 选中元素所在的文档 |
+| `from-within` | 包含引用出现位置的祖先区域 |
+| `to` | 原生文档或资产的 output，或精确的原生目标元素 |
+| `to-within` | 包含已知原生目标的祖先区域 |
+
+四个参数都接受 `none`（默认，不限制）、label、location、可定位的元素函数，或原生可定位 selector。用 `selector(...).or(...)` 或 `.and(...)` 组合选择。label 会选中所有匹配元素；没有匹配元素时返回空数组。一条引用匹配多个选择时，只出现一次。
+
+`from` 选中每个匹配元素所在的文档；选中资产或不属于任何文档的内容会报错。`to` 按 output 匹配文档和资产目标，按精确的原生 location 匹配其他元素。`from` 和 `to` 还接受 `auto`，表示当前文档，需要在文档正文里调用。
+
+两个区域过滤条件都只选严格后代，不含区域自身。标题的 label 选中标题元素，不代表它后面的章节正文；要选正文，请给包含它的元素（例如 `html.section`）加 label。每条返回的引用必须满足所有传入的条件。
+
+每条记录描述一条引用。`ref` 报告它指名的 label，`link` 报告它拼写的目标。show rule 不改变这层关系。原生引用的目标必须唯一。写明自身 scheme 与 host 的目标是 `external`，写的是 `site.origin` 也一样。未限制目标时，也会返回 external 和 unresolved 引用。
+
+| 字段 | 含义 |
+| --- | --- |
+| `element` | 原始的原生 `link` 或 `ref` 元素 |
+| `document` | 来源文档的 `output`、`route` 与 `location` |
+| `destination` | 原始的原生目标值 |
+| `resolution` | `found`、`external` 或 `unresolved` |
+| `reason` | 没能解析的原因，以字典给出；解析成功时为 `none` |
+| `target` | 已知 output 或地址时的目标字典，否则为 `none` |
+
+目标带有 `kind`、`output`、`route`、`query`、`fragment` 与 `location`，取不到的值是 `none`。原生文档或资产的 `kind` 是 `output`，其他原生目标是 `element`，URL 目标是 `url`。只有原生目标带有其真实 location。URL 目标只有 output 和地址信息，没有 location：它们可以匹配 `to` 的文档或资产选择，但不匹配元素选择或 `to-within`。
+
+URL 的 `fragment` 经过百分号解码供展示；原生目标的 anchor 保留分配时的原值。原生整篇文档和资产目标没有 fragment。`found` 表示存在原生 Bundle 输出，与导出的 HTML 是否包含该 fragment 无关。直接写出的 HTML 链接和其他生产者的输出由最终 HTML 校验处理，不属于这条查询。把查询派生出的列表放在 `from-within` 读取的区域之外，避免列表加入自己的查询。
+
+`reason` 带有稳定的 `tag` 供分支判断，另有 `message` 与指出修法的 `help`：
+
+| tag | 含义 |
+| --- | --- |
+| `outside-mount` | 目标落在 `site.base-path` 之外 |
+| `invalid-destination` | 目标不是本站能读取的 URL |
+| `no-such-target` | 本次构建没有任何输出回应这个目标 |
+| `positional-destination` | 元素目标没有指出站内目标 |
+| `label-has-no-location` | 该 label 的内容在本次构建中没有 location |
+| `ambiguous-label` | 多个元素共用一个 label |
+
+Example - 列出链接到当前页面的来源页面：
+''',
+  'Example - 只对准一个标题，而不是整篇文档：',
+  'Example - 读取写在一篇文档正文里的引用：',
+  'Example - 选取 A 正文中指向 B 章节内部原生目标的引用：',
+  'Example - 选择多个目标，或区域内部的标题：',
+  '',
+]
+
+[exports.references.parameters]
+
+from = "选中元素所在的原生文档，或 `none`（默认，所有文档）。"
+from-within = "包含引用出现位置的选中祖先区域，或 `none`（默认，所有区域）。"
+to = "引用指向的选中原生 output 或元素，或 `none`（默认，所有目标）。"
+to-within = "包含已知原生目标的选中祖先区域，或 `none`（默认，所有区域）。"
+
+[exports.headings]
+
+summary = [
+  '''
+当前文档的标题，按文档顺序。
+
+每个标题都会列出，包括 `outlined: false` 排除在 Typst `outline()` 之外的标题。没有任何标题的文档返回空数组。
+
+| 字段 | 含义 |
+| --- | --- |
+| `level` | 标题在源中声明的层级 |
+| `nesting` | 在 outline 树中的深度；未进入 outline 时为 `none` |
+| `number` | 渲染出的编号：模式生成的字符串、回调的结果，或 `none` |
+| `text` | show rule 生效前的标题纯文本 |
+| `label` | 你写下的 label，或 `none` |
+| `location` | 传给 `link` 的原生 location |
+| `outlined` | 该标题是否参与 outline |
+
+这条查询只针对当前文档，结果里不会混进其他页面的标题。`location` 就是传给 `link()` 的值；建立链接会让 Typst 为该标题生成 anchor。带 label 的标题用那个 label 作为 anchor；否则 Typst 生成 `loc-N`。请在 `context` 中调用；返回的每个 location 都属于本次编译。
+
+Example - 链接到第 2 层为止、进入 outline 的标题：
+''',
+  'Example - 看 `nesting` 与 `label` 如何跟随 outline 树：',
+  '',
+]
+
+[exports.headings.parameters]
+
+depth = "`none` 列出所有层级，传正整数则只保留声明层级不超过该值的标题。"

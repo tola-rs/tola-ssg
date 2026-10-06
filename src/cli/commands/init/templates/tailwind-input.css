@@ -1,0 +1,20 @@
+@layer theme, base, components, utilities;
+/* Browser typography is the baseline for the site's semantic HTML. */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "../../content/**/*.typ";
+@source "../../site/**/*.typ";
+@source "../../site.typ";
+
+@custom-variant dark {
+  &:where([data-theme="dark"], [data-theme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme]), :root:not([data-theme]) *) {
+      @slot;
+    }
+  }
+}
+
+{{stylesheet}}

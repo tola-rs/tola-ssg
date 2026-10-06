@@ -1,0 +1,17 @@
+{
+  "imports": {
+    "@vscode/test-electron": "npm:@vscode/test-electron@3.1.0",
+    "@vscode/vsce": "npm:@vscode/vsce@3.9.2",
+    "esbuild": "npm:esbuild@0.25.12",
+    "vscode": "npm:@types/vscode@1.97.0",
+    "vscode-languageclient": "npm:vscode-languageclient@9.0.1"
+  },
+  "tasks": {
+    "typecheck": "deno check src/extension.ts src/test/suite.ts build.ts test/run.ts",
+    "build": "deno run --allow-read --allow-write --allow-run --allow-env build.ts",
+    "build:production": "deno run --allow-read --allow-write --allow-run --allow-env build.ts --production",
+    "test": "deno task build && deno run -A test/run.ts",
+    "package": "deno task typecheck && deno task build:production && deno run -A @vscode/vsce package --no-dependencies",
+    "check": "deno task typecheck && deno task test && deno task package"
+  }
+}

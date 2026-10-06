@@ -1,0 +1,206 @@
+# Simplified-Chinese documentation of `@tola/web`. English stays authoritative in the package's
+# own Typst sources; a unit here overrides one of them.
+
+overview = "纯文本、head 条目、以 SVG 渲染的数学、社交卡片、feed 与 sitemap"
+
+[exports.plain-text]
+
+summary = [
+  '''
+读取字符串或你自己写下的内容里的文本。
+
+文本字符、符号字符、空格、raw 代码和弯引号自带文本。其他元素都取自己内容的文本，所以容器、格式、链接和数学都是透明的。metadata 不产生任何文本。文本取自你写下的内容：不运行 show rule，也不做排版。
+
+读取字符串或内容总是成功。元素自身既没有文本也没有内容时，它不产生任何文本，并有一条警告指出你写下它的位置。
+
+Example - 从字符串与内容中读取文本：
+''',
+  'Example - 不带文本的元素不产生文本：',
+  '',
+]
+
+[exports.plain-text.parameters]
+
+value = "要读取的字符串或 Typst 内容。"
+
+[exports.head-metadata]
+
+summary = [
+  '''
+文档的 head 条目，作为数组拼进 head。
+
+这些条目是字符集、viewport、标题和描述。head 由你的模板写入：把这些条目拼进 `html.head(...)`，文档自己的 metadata 单独处理。`+` 拼接数组，条目保持扁平且按顺序排列：
+''',
+  'Example - 省略标题与描述条目：',
+  '',
+]
+
+[exports.head-metadata.parameters]
+
+site = "默认值的来源，通常就是 `@tola/site` 提供的字典。"
+
+charset = "文档的字符编码；除非你传入 `none`，否则写入该条目。"
+
+description = "`auto` 继承站点描述；`none` 或空字符串则不写入该条目。"
+
+title = "`auto` 继承站点标题；`none` 或空字符串则不写入该条目。"
+
+viewport = "viewport meta 的内容；除非你传入 `none`，否则写入该条目。"
+
+[exports.canonical]
+
+summary = [
+  '''
+页面的 canonical 链接条目，作为数组拼进 head。
+
+一个页面只声明一个 canonical URL，这个条目就是 head 里的 `<link rel="canonical">`。
+
+Example - 声明页面的 canonical URL：
+''',
+  '',
+]
+
+[exports.canonical.parameters]
+
+href = "页面的绝对 URL，协议必须是 `http` 或 `https`。"
+
+[exports.open-graph]
+
+summary = [
+  '''
+页面的 Open Graph 条目，作为数组拼进 head。
+
+`title`、`kind`、`url` 和 `images` 必填，其中 `images` 至少包含一个 `(url:, alt:, …)` 字典。
+
+可选文本非空时才会写入条目。
+
+Example - 声明页面的 Open Graph 条目：
+''',
+  '',
+]
+
+[exports.open-graph.parameters]
+
+title = "页面的标题。"
+
+kind = "页面的 Open Graph 类型，例如 `website` 或 `article`。"
+
+url = "页面的绝对 URL。"
+
+images = "要声明的图片。每张图片的条目保持在一起，并按你给出的顺序排列；`alt` 描述图片，其余键都可选。"
+
+description = "页面的描述；设置后才写入。"
+
+site-name = "站点名称；设置后才写入。"
+
+locale = "页面的 locale；设置后才写入。"
+
+[exports.twitter-card]
+
+summary = [
+  '''
+页面的 Twitter 卡片条目，作为数组拼进 head。
+
+`card` 和 `title` 总是写入，`summary_large_image` 卡片还需要 `image`。可选文本非空时才会写入条目。
+
+Example - 声明大图卡片：
+''',
+  '',
+]
+
+[exports.twitter-card.parameters]
+
+card = "卡片类型：`\"summary\"` 或 `\"summary_large_image\"`。"
+
+title = "页面的标题。"
+
+image = "大图卡片必填：一个 `(url:, alt:)` 字典。"
+
+description = "页面的描述；设置后才写入。"
+
+handle = "站点的 handle；设置后才写入。"
+
+creator = "创作者的 handle；设置后才写入。"
+
+[exports.math-svg]
+
+summary = [
+  '''
+在 HTML 导出期间把公式渲染为 SVG。
+
+用 `#show math.equation: math-svg` 把它应用到每个公式上。行内公式留在行内，行间公式独立成块，由公式自身的 `block` 决定。helper 在每个导出目标里都会检查选项；HTML 导出之外，公式原样返回。
+行内公式自动与周围文字的基线对齐。
+
+包装元素就是你的样式表要选中的那个元素：它带有 `role="math"`，以及 `tola-math-inline` 或 `tola-math-block` 类。SVG 用编译公式时的颜色绘制；把包装元素内部图形的 `fill` 与 `stroke` 设为 `currentColor`，它就会跟随周围文字颜色。
+
+Example - 渲染每个公式，并为其中一个指定替代文本：
+''',
+  '',
+]
+
+[exports.math-svg.parameters]
+
+equation = "要渲染的公式。"
+
+alt = "为辅助技术描述公式：`auto` 取公式自身的 `alt`，`none` 不给包装元素命名，字符串则直接命名。它会成为包装元素的 `aria-label`。"
+
+attrs = "传给包装元素的、取字符串值的 HTML 属性，例如 `class` 和 `style`。`role` 与 `aria-label` 属于 helper；你传入的 `class` 会保留原值，并加上包装元素自身的类名。"
+
+[exports.feed]
+
+summary = [
+  '''
+通过 metadata 声明一个 feed 输出。把返回的内容放进根程序：声明只在根程序里生效。站点需要 `site.origin`，因为 feed 的每个地址都是绝对地址。
+
+每个条目都需要 `target` 和 `published`，还可以设置 `id`、`title`、`updated`、`summary`、`content` 和 `authors`。`target` 是输出路径、`(output:, fragment:)` 字典、label 或 location；条目会链接到对应文档，并带上 target 所指的 fragment。`id` 为 `auto` 或省略时取解析后的目标 URL，`title` 为 `auto` 或省略时取目标文档自己的标题。
+
+每种格式各自填写修改日期。Atom 的 `updated` 默认取 `published`。RSS 不写修改日期。JSON Feed 只在条目设置了 `updated` 时才写 `date_modified`。
+
+`content` 也可以改用一个 `(document:, id:)` 字典，选定文档中的某个元素。
+
+文档内的 label 或 location 需要一个导出的 anchor，所以在站点某处链接到它（`#link(<label>)`、`@label` 或 `#outline()`）：导出只会给有链接指向的元素分配 `id`。缺少这个 anchor 时，构建会直接失败，绝不会改为链接整篇文档。整篇文档的 label 或 location 不需要正文 anchor。`fragment` 按原样保留，并且必须指向目标文档导出的 anchor。
+
+Typst 的 datetime 一律按 UTC 解释，RFC 3339 字符串保留自己的时区。
+
+Example - 声明一个 RSS feed：
+''',
+  'Example - 为已发现的源发布一个条目：',
+  '',
+]
+
+[exports.feed.parameters]
+
+output = "输出路径；`auto` 跟随 `format`：`rss` 取 `feed.xml`，`atom` 取 `atom.xml`，`json` 取 `feed.json`。"
+
+format = "feed 格式：`rss`、`atom` 或 `json`。"
+
+id = "feed 标识符；`auto` 取 feed 自己的绝对 URL。"
+
+title = "feed 标题；`auto` 取站点标题。"
+
+description = "feed 描述；`auto` 取站点描述。"
+
+language = "feed 语言；`auto` 取站点的 language tag。"
+
+authors = "feed 作者；`auto` 取站点的作者。"
+
+entries = "要发布的条目，按你给出的顺序。"
+
+[exports.sitemap]
+
+summary = [
+  '''
+通过 metadata 声明一个 sitemap 输出。和 `feed` 一样，把返回的内容放进根程序。
+
+每个 target 都指向整篇文档。解析到元素的 target（文档内的 label 或 location，或写有 `fragment` 的字典）会直接报错，同一个 target 出现两次也会报错。列出的 URL 都是绝对 URL，因此站点需要 `site.origin`。Typst 的 datetime 一律按 UTC 解释，RFC 3339 字符串保留自己的时区。
+
+Example - 列出已发现源发布的文档：
+''',
+  '',
+]
+
+[exports.sitemap.parameters]
+
+output = "sitemap 发布到的输出路径。"
+
+targets = "sitemap 列出的文档，每一项是输出路径、label、location，或为其注明日期的 `(target:, lastmod:)` 字典。"

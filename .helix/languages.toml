@@ -1,0 +1,16 @@
+[language-server]
+
+[language-server.tola-lsp]
+command = "tola"
+args = ["lsp"]
+
+[language-server.tola-lsp.config]
+packageSourceDirectory = "/Users/kawayww/projects/tola-ssg-dev/.tola/builtin-packages"
+
+[[language]]
+name = "typst"
+language-servers = [{ name = "tola-lsp", only-features = ["code-action", "completion", "diagnostics", "document-colors", "document-highlight", "document-symbols", "format", "goto-definition", "goto-reference", "hover", "inlay-hints", "rename-symbol", "signature-help", "workspace-symbols"] }]
+
+[[language]]
+name = "toml"
+language-servers = [{ name = "tola-lsp", only-features = ["completion", "diagnostics", "hover"] }]

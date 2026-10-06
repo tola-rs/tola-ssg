@@ -1,0 +1,25 @@
+/*
+ * The shared code stylesheet `render-code` renders against.
+ *
+ * Tola's runs carry the colors and font styles Typst resolved for each block as local custom
+ * properties; every declaration here consumes them at zero specificity, so a site's own rules win
+ * wherever they load. The default appearance applies everywhere; a site opts into the dark
+ * appearance with `data-theme="dark"` on its root element and decides itself whether that follows
+ * the system preference.
+ */
+:where(.tola-code span) {
+  color: var(--tola-code-color, inherit);
+  font-weight: var(--tola-code-weight, inherit);
+  font-style: var(--tola-code-style, inherit);
+  text-decoration-line: var(--tola-code-decoration, inherit);
+}
+
+:where(:root[data-theme="dark"] .tola-code span) {
+  color: var(--tola-code-dark-color, var(--tola-code-color, inherit));
+  font-weight: var(--tola-code-dark-weight, var(--tola-code-weight, inherit));
+  font-style: var(--tola-code-dark-style, var(--tola-code-style, inherit));
+  text-decoration-line: var(
+    --tola-code-dark-decoration,
+    var(--tola-code-decoration, inherit)
+  );
+}

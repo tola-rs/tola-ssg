@@ -1,29 +1,222 @@
-name: Check (Fmt + Clippy)
+name: Check
 on:
+  workflow_call:
   pull_request:
   push:
     branches:
       - main
 
+concurrency:
+  # Reusable calls inherit the caller's workflow name; never share its release group.
+  # Separate manual runs so releases of different tags cannot cancel each other.
+  group: check-workflow-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || '' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
-  cargo-fmt:
+  static-check:
+    name: Check formatting, lints, spelling, versions, and workflows
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - run: cargo fmt --check
-
-  cargo-clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-typescript
+      - uses: ./.github/actions/setup-rust
         with:
-          shared-key: check-clippy
+          components: rustfmt
+          cache-key: check-static
           cache-on-failure: true
+      - name: Check formatting, lints, test names, and synchronized versions
+        run: just quality version-check
+      - name: Check dependency licences and advisories
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          just deny
+      - name: Check spelling in sources and prose
+        uses: crate-ci/typos@00f422f3b19c57bc6338715ebfe3316d38768461 # v1.50.3
+        with:
+          config: ./.github/typos.toml
+      - name: Check workflow syntax
+        run: docker run --rm -v "${{ github.workspace }}:/repo" -w /repo rhysd/actionlint:1.7.12
+      - name: Check that action pins carry the release they name
+        uses: suzuki-shunsuke/pinact-action@896d595f299e71d65b9d28349d6956abe144390a # v3.0.0
+        with:
+          fix: false
+          skip_push: true
+          verify: true
 
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+  cargo:
+    name: Check (just ${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - checks: clippy docs
+            components: clippy
+            cache-key: check-clippy
+          - checks: test package-check
+            components: ''
+            cache-key: check-test
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: ${{ matrix.components }}
+          cache-key: ${{ matrix.cache-key }}
+          cache-on-failure: true
+      - run: just ${{ matrix.checks }}
+
+  minimum-rust:
+    name: Check minimum Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read minimum Rust from the workspace manifest
+        id: minimum-rust
+        run: |
+          rust_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["rust-version"])')"
+          printf 'rust-version=%s\n' "$rust_version" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ steps.minimum-rust.outputs.rust-version }}
+      - name: Compile all workspace targets and features on minimum Rust
+        run: cargo check --locked --workspace --all-targets --all-features
+
+  maintenance-scripts:
+    name: Check maintenance scripts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-typescript
+      - uses: ./.github/actions/setup-rust
+      - run: just scripts::check
+
+  cargo-windows:
+    name: Check Windows ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # MSVC runs the native tests; GNU cross-checks the Windows target.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            checks: windows::msvc
+            cache-key: check-windows
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            checks: windows::gnu
+            cache-key: check-windows-gnu
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          target: ${{ matrix.target }}
+          cache-key: ${{ matrix.cache-key }}
+          cache-on-failure: true
+      - name: Install MinGW cross compiler
+        if: ${{ matrix.target == 'x86_64-pc-windows-gnu' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes gcc-mingw-w64-x86-64
+      - run: just ${{ matrix.checks }}
+
+  e2e:
+    name: Exercise CLI, development, and site behavior
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-typescript
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: check-e2e
+          cache-on-failure: true
+      - name: Install Chromium
+        run: just e2e::setup --with-deps
+      - name: Type-check and exercise CLI, development, and site behavior
+        env:
+          TOLA_E2E_PROFILE: release
+        run: just e2e::run
+      - name: Upload Playwright report and failure artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-results
+          overwrite: true
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/playwright/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  vscode:
+    name: Check and package the VS Code extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-typescript
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: check-vscode
+          cache-on-failure: true
+      - name: Install the headless VS Code display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes xvfb
+      - name: Run integration tests and create a type-checked VSIX without publishing
+        run: just vscode::check
+
+  nix:
+    name: Evaluate the Nix flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
+      - uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - run: just flake

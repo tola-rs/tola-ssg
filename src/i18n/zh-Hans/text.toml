@@ -1,0 +1,9 @@
+# The Simplified-Chinese phrases `tola help` writes around its pages. Each key names one
+# `HelpText` phrase in `src/i18n/mod.rs`; English is the phrase's own spelling. Page section
+# headings and every other label stay English in both languages.
+
+[text]
+site-fields = "配置字段与默认值"
+package-overview = "包概览与导出"
+selected-exports = "选定的导出"
+default-values = "默认值；用 `tola config` 查看你站点的设置。"

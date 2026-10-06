@@ -1,0 +1,75 @@
+@layer base {
+  :root {
+    color-scheme: light dark;
+    color: CanvasText;
+    background: Canvas;
+  }
+
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  body {
+    box-sizing: border-box;
+    margin: 0 auto;
+    max-width: 42rem;
+    padding: 1.5rem;
+    font-family: system-ui, sans-serif;
+    line-height: 1.6;
+  }
+
+  .pagefind-search {
+    --pagefind-ui-primary: LinkText;
+    --pagefind-ui-text: CanvasText;
+    --pagefind-ui-background: Canvas;
+    --pagefind-ui-border: GrayText;
+    --pagefind-ui-tag: ButtonFace;
+    --pagefind-ui-font: inherit;
+  }
+
+  pre {
+    overflow-x: auto;
+  }
+
+  img,
+  video {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* Framed math follows the text color: SVG keeps the colors it was compiled with. */
+  .tola-math-inline [fill="#000000"],
+  .tola-math-block [fill="#000000"] {
+    fill: currentColor;
+  }
+
+  .tola-math-inline [stroke="#000000"],
+  .tola-math-block [stroke="#000000"] {
+    stroke: currentColor;
+  }
+
+  .tola-math-block {
+    margin-block: 1em;
+    overflow-x: auto;
+    overflow-y: hidden;
+    text-align: center;
+  }
+
+  .tola-math-block > svg {
+    margin-inline: auto;
+  }
+}
+
+/* Keep this unlayered to override the package's code stylesheet when following the system theme. */
+@media (prefers-color-scheme: dark) {
+  :where(:root:not([data-theme]) .tola-code span) {
+    color: var(--tola-code-dark-color, var(--tola-code-color, inherit));
+    font-weight: var(--tola-code-dark-weight, var(--tola-code-weight, inherit));
+    font-style: var(--tola-code-dark-style, var(--tola-code-style, inherit));
+    text-decoration-line: var(--tola-code-dark-decoration, var(--tola-code-decoration, inherit));
+  }
+}

@@ -1,22 +1,90 @@
+[workspace]
+members = [
+    "./",
+    "crates/tola-address",
+    "crates/tola-build",
+    "crates/tola-lsp",
+    "crates/tola-minify",
+    "crates/tola-packages",
+    "crates/tola-pronunciations",
+    "crates/tola-slugify",
+    "crates/tola-config-macros",
+    "crates/tola-icons",
+    "crates/tola-image",
+    "crates/tola-config",
+    "crates/tola-subprocess",
+    "crates/tola-typst",
+    "crates/tola-typst-syntax",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.8.0"
+rust-version = "1.96"
+
+[workspace.dependencies]
+lightningcss = { version = "=1.0.0-alpha.72", default-features = false, features = ["into_owned", "visitor"] }
+
+# Typst's facade, value types, native macros, and formatter must share one release.
+typst = "=0.15.1"
+typst-bundle = "=0.15.1"
+typst-eval = "=0.15.1"
+typst-html = "=0.15.1"
+typst-ide = "=0.15.1"
+typst-kit = "=0.15.1"
+typst-layout = "=0.15.1"
+typst-library = "=0.15.1"
+typst-pdf = "=0.15.1"
+typst-render = "=0.15.1"
+typst-svg = "=0.15.1"
+typst-syntax = "=0.15.1"
+typst-utils = "=0.15.1"
+typstyle-core = { version = "=0.15.1", default-features = false }
+
+# Internal crates stay path dependencies of the workspace and are released in
+# lockstep, so published packages resolve through crates.io.
+tola-address = { version = "0.8.0", path = "crates/tola-address" }
+tola-build = { version = "0.8.0", path = "crates/tola-build" }
+tola-config = { version = "0.8.0", path = "crates/tola-config" }
+tola-config-macros = { version = "0.8.0", path = "crates/tola-config-macros" }
+tola-icons = { version = "0.8.0", path = "crates/tola-icons" }
+tola-image = { version = "0.8.0", path = "crates/tola-image" }
+tola-lsp = { version = "0.8.0", path = "crates/tola-lsp" }
+tola-minify = { version = "0.8.0", path = "crates/tola-minify" }
+tola-packages = { version = "0.8.0", path = "crates/tola-packages" }
+tola-pronunciations = { version = "0.8.0", path = "crates/tola-pronunciations" }
+tola-slugify = { version = "0.8.0", path = "crates/tola-slugify" }
+tola-subprocess = { version = "0.8.0", path = "crates/tola-subprocess" }
+tola-typst = { version = "0.8.0", path = "crates/tola-typst" }
+tola-typst-syntax = { version = "0.8.0", path = "crates/tola-typst-syntax" }
+
 [package]
 name = "tola"
-version = "0.8.0"
+version.workspace = true
 edition = "2024"
-description = "static site generator for typst-based blog - keeping your focus on the content"
+rust-version.workspace = true
+description = "A programmable static site generator built on Typst Bundles"
 documentation = "https://github.com/tola-rs/tola-ssg"
 homepage = "https://github.com/tola-rs/tola-ssg"
 repository = "https://github.com/tola-rs/tola-ssg"
 keywords = ["blog", "static", "typst", "ssg", "cli"]
 categories = ["command-line-utilities"]
 license = "MIT"
-exclude = ["/target", "/screenshots", "/result", "/test_site"]
+exclude = [
+    "/target",
+    "/screenshots",
+    "/result",
+    "/scripts",
+]
 
-# Reduce the size of binary file
+[profile.dev.package."*"]
+opt-level = 3
+debug = "line-tables-only"
+
 [profile.release]
-opt-level = 'z'
-lto = true
+opt-level = 3
+lto = "thin"
 codegen-units = 1
-panic = 'abort'
 strip = true
 
 [profile.flamegraph]
@@ -25,117 +93,91 @@ debug = 1
 strip = false
 
 [dependencies]
-arc-swap = "1.7"
-anyhow = "1.0.98"
-which = "8.0.0"
-clap = { version = "4.5.40", features = ["derive", "string"] }
-owo-colors = { version = "4", features = ["supports-colors"] }
-crossterm = { version = "0.29.0", default-features = false }
-notify = { version = "8.0.0", features = ["macos_kqueue"] }
-rayon = "1.10.0"
-regex = { version = "1.12.2", default-features = false, features = [
-    "std",
-    "perf",
-] }
-serde = { version = "1.0.219", default-features = false, features = ["derive"] }
-serde_json = { version = "1.0.0", features = ["preserve_order"] }
-serde_ignored = "0.1"
-toml = "0.8.23"
-thiserror = "2.0.12"
-gix = { version = "0.72.1", default-features = false, features = [
-    "basic",
-    "parallel",
-    "excludes",
-] }
-shellexpand = { version = "3.1.1", default-features = false, features = [
-    "base-0",
-    "tilde",
-] }
-quick-xml = { version = "0.38.0", default-features = false }
-usvg = { version = "0.45.1", default-features = false }
-image = { version = "0.25", default-features = false, features = [
-    "png",
-    "jpeg",
-    "webp",
-] }
-lab = "0.11" # LAB color space conversion (AVX2 accelerated)
-url = "2"
-percent-encoding = "2.3"
-rss = { version = "2.0.12", default-features = false, features = [
-    "builders",
-    "validation",
-] }
-atom_syndication = { version = "0.12", default-features = false, features = [
-    "builders",
-] }
-jwalk = "0.8"
-tiny_http = "0.12.0"
-ctrlc = "3.5.1"
-deunicode = "1.6.2"
-portable-pty = "0.9.0"
-macros = { package = "tola-ssg-macros", version = "0.1.4" }
-
-# Typst integration (via typst-batch crate)
-# typst-batch = { path = "./typst-batch", features = ["svg", "embed-fonts"] }
-typst-batch = { version = "0.2.8", features = ["svg", "embed-fonts"] }
-# tola-vdom = { path = "./tola-vdom" }
-tola-vdom = "0.2.2"
-smallvec = "1.13"
-
+arc-swap = "1.9.2"
+tola-address.workspace = true
+tola-packages.workspace = true
+tola-build.workspace = true
+tola-minify.workspace = true
+tola-lsp = { workspace = true, features = ["network"] }
+tola-config.workspace = true
+tola-typst = { workspace = true, features = ["embed-fonts"] }
+anyhow = "1.0.104"
+anstream = "1.0.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+which = "8.0.6"
+clap = { version = "4.6.6", features = ["derive", "string", "wrap_help"] }
+clap_complete = "4.6.9"
+clap_complete_nushell = "4.6.2"
+clap_mangen = "0.3.3"
+codespan-reporting = "0.11.1"
+owo-colors = { version = "4.3.0", features = ["supports-colors"] }
 parking_lot = "0.12.5"
-rustc-hash = "2.1.1"
+crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows", "bracketed-paste"] }
+notify = "=9.0.0-rc.5"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+same-file = "1.0.6"
+toml = "1.1.4"
+toml_edit = "0.25.13"
+thiserror = "2.0.20"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
+url = "2.5.8"
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
+hyper = { version = "1.11.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["server", "http1", "tokio"] }
+http-body-util = "0.1.5"
+bytes = "1.12.1"
+ctrlc = "3.5.2"
 
-# Lock-free concurrent data structures
-crossbeam = { version = "0.8", default-features = false, features = [
-    "crossbeam-queue",
-    "crossbeam-channel",
-] }
+typst.workspace = true
 
-# WebSocket for hot reload
-tungstenite = "0.27"
+tokio-tungstenite = "0.30.0"
+tokio-stream = "0.1.19"
+futures-util = "0.3"
 
-# Fast cryptographic hashing for content-based freshness detection
-blake3 = "1.8"
-hex = "0.4"
+blake3 = "1.8.7"
+hex = "0.4.3"
+getrandom = "0.4.3"
+tempfile = "3.27.0"
 
-# Markdown parsing
-pulldown-cmark = { version = "0.13", default-features = false, features = [
-    "simd",
-] }
-
-# Async runtime for Actor model
-tokio = { version = "1", features = [
+tokio = { version = "1.53.1", features = [
     "rt-multi-thread",
     "sync",
     "macros",
     "time",
+    "net",
+    "io-util",
 ] }
-
-# # Async HTTP client for link validation
-# reqwest = { version = "0.12", default-features = false, features = [
-#     "rustls-tls",
-# ] }
-
-tl = "0.7.8"
-dashmap = "6.1.0"
-
-# Asset minification
-oxc = { version = "0.113", default-features = false, features = [
-    "minifier",
-    "codegen",
-    "mangler",
-] }
-lightningcss = "1.0.0-alpha.70"
-encre-css = "0.20.1"
+tokio-util = { version = "0.7.18", features = ["io-util", "rt"] }
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 
 [features]
 default = []
 
-# Windows-specific: enable crossterm Windows support
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [target.'cfg(windows)'.dependencies]
-crossterm = { version = "0.29.0", default-features = false, features = [
-    "windows",
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]
-tempfile = "3"
+rss = { version = "2.1.0", default-features = false, features = [
+    "builders",
+    "validation",
+] }
+atom_syndication = { version = "0.12.10", default-features = false, features = [
+    "builders",
+] }
+oxc = { version = "0.147.0", default-features = false, features = [
+    "minifier",
+    "codegen",
+    "mangler",
+] }

@@ -1,0 +1,221 @@
+{
+  "name": "Typst",
+  "scopeName": "source.typst",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#raw" },
+    { "include": "#escape" },
+    { "include": "#string" },
+    { "include": "#math" },
+    { "include": "#keyword" },
+    { "include": "#hash" },
+    { "include": "#heading" },
+    { "include": "#list" },
+    { "include": "#label" },
+    { "include": "#reference" },
+    { "include": "#link" },
+    { "include": "#strong" },
+    { "include": "#emphasis" },
+    { "include": "#constant" },
+    { "include": "#typed-name" },
+    { "include": "#call" },
+    { "include": "#content-body" },
+    { "include": "#number" },
+    { "include": "#operator" }
+  ],
+  "repository": {
+    "comment": {
+      "patterns": [
+        { "match": "(^|[ \\t])(//.*)$", "captures": { "2": { "name": "comment.line.double-slash.typst" } } },
+        { "name": "comment.block.typst", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "raw": {
+      "patterns": [
+        {
+          "name": "markup.raw.block.typst",
+          "begin": "^([ \\t]*)(`{3,})[ \\t]*[A-Za-z0-9_+-]*[ \\t]*$",
+          "beginCaptures": { "2": { "name": "punctuation.definition.raw.begin.typst" } },
+          "end": "^([ \\t]*)(`{3,})[ \\t]*$",
+          "endCaptures": { "2": { "name": "punctuation.definition.raw.end.typst" } }
+        },
+        {
+          "name": "markup.raw.inline.typst",
+          "match": "(`+)(?:[^`\\n]|`(?!\\1))*?\\1",
+          "captures": { "1": { "name": "punctuation.definition.raw.typst" } }
+        }
+      ]
+    },
+    "escape": { "match": "\\\\[^A-Za-z0-9\\s]", "name": "constant.character.escape.typst" },
+    "string": {
+      "name": "string.quoted.double.typst",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "match": "\\\\.", "name": "constant.character.escape.typst" }]
+    },
+    "math": {
+      "name": "markup.math.typst",
+      "begin": "\\$",
+      "end": "\\$",
+      "patterns": [
+        { "include": "#escape" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "match": "#(?=[A-Za-z_])", "name": "punctuation.definition.keyword.typst" },
+        {
+          "match": "(?<![A-Za-z0-9_.])(alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Pi|Sigma|Phi|Psi|Omega|infinity|oo|sum|product|integral|diff|partial|nabla|forall|exists|emptyset|in|notin|subset|supset|union|sect|times|dot|lt|gt|eq|neq|approx|equiv|prop|arrow|arrow\\.r|arrow\\.l|arrow\\.lr|arrow\\.long|arrow\\.long\\.r)(?![A-Za-z0-9_.])",
+          "name": "support.constant.math.typst"
+        },
+        {
+          "match": "(?<![A-Za-z0-9_])(->|<-|=>|<=|>=|!=|==|[-+*/=<>^_&|,;:])",
+          "name": "keyword.operator.math.typst"
+        },
+        { "match": "([A-Za-z_][A-Za-z0-9_.-]*)(?=\\()", "name": "support.function.typst" },
+        { "match": "[A-Za-z_][A-Za-z0-9_.-]*", "name": "variable.other.math.typst" }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "match": "(#)(let|set|show|import|include|context|if|else|for|while|return|break|continue|as|in)\\b",
+          "captures": {
+            "1": { "name": "punctuation.definition.keyword.typst" },
+            "2": { "name": "keyword.control.typst" }
+          }
+        },
+        {
+          "match": "^([ \\t]*)(let|set|show|import|include|context|if|else|for|while|return|break|continue)\\b",
+          "captures": { "2": { "name": "keyword.control.typst" } }
+        }
+      ]
+    },
+    "hash": { "match": "#(?=[A-Za-z_\\[{(\"'])", "name": "punctuation.definition.keyword.typst" },
+    "heading": {
+      "match": "^([ \\t]*)(=+)([ \\t]+)(.*)$",
+      "captures": {
+        "2": { "name": "punctuation.definition.heading.typst" },
+        "4": { "name": "markup.heading.typst" }
+      }
+    },
+    "list": {
+      "patterns": [
+        {
+          "match": "^([ \\t]*)(-)(?=[ \\t])",
+          "captures": { "2": { "name": "punctuation.definition.list.typst" } }
+        },
+        {
+          "match": "^([ \\t]*)(\\+)(?=[ \\t])",
+          "captures": { "2": { "name": "punctuation.definition.list.enum.typst" } }
+        },
+        {
+          "match": "^([ \\t]*)(/)(?=[ \\t])",
+          "captures": { "2": { "name": "punctuation.definition.list.term.typst" } }
+        }
+      ]
+    },
+    "label": {
+      "match": "<([A-Za-z][A-Za-z0-9_:.-]*)>",
+      "captures": {
+        "0": { "name": "markup.label.typst" },
+        "1": { "name": "entity.name.label.typst" }
+      }
+    },
+    "reference": {
+      "match": "@([A-Za-z][A-Za-z0-9_:.-]*)",
+      "captures": {
+        "0": { "name": "markup.reference.typst" },
+        "1": { "name": "entity.name.reference.typst" }
+      }
+    },
+    "link": { "match": "https?://[^\\s<>)\\]}]+", "name": "markup.underline.link.typst" },
+    "strong": {
+      "name": "markup.bold.typst",
+      "begin": "(?<![A-Za-z0-9_*])\\*(?=\\S)",
+      "beginCaptures": { "0": { "name": "punctuation.definition.bold.typst" } },
+      "end": "(?<=\\S)\\*(?![A-Za-z0-9_*])",
+      "endCaptures": { "0": { "name": "punctuation.definition.bold.typst" } },
+      "patterns": [{ "include": "#inline" }]
+    },
+    "emphasis": {
+      "name": "markup.italic.typst",
+      "begin": "(?<![A-Za-z0-9_])_(?=\\S)",
+      "beginCaptures": { "0": { "name": "punctuation.definition.italic.typst" } },
+      "end": "(?<=\\S)_(?![A-Za-z0-9_])",
+      "endCaptures": { "0": { "name": "punctuation.definition.italic.typst" } },
+      "patterns": [{ "include": "#inline" }]
+    },
+    "constant": {
+      "match": "(?<![A-Za-z0-9_-])(true|false|auto|none)(?![A-Za-z0-9_-])",
+      "name": "constant.language.typst"
+    },
+    "typed-name": {
+      "match": "(?<![A-Za-z0-9_-])(string|dictionary|array|boolean|integer|float|decimal|content|length|color|label|counter|ratio|fraction|alignment|direction|stroke|relative|function|symbol|datetime|duration|type|module|selector|arguments|version|bytes)(?=\\s*[:|=,)\\]}])",
+      "name": "support.type.typst"
+    },
+    "call": {
+      "name": "meta.function-call.typst",
+      "begin": "([A-Za-z_][A-Za-z0-9_.-]*)(\\()",
+      "beginCaptures": {
+        "1": { "name": "entity.name.function.typst" },
+        "2": { "name": "punctuation.section.arguments.begin.typst" }
+      },
+      "end": "\\)",
+      "endCaptures": { "0": { "name": "punctuation.section.arguments.end.typst" } },
+      "patterns": [{ "include": "#arguments" }]
+    },
+    "content-body": {
+      "name": "markup.content.typst",
+      "begin": "(?:(?<=\\))|(?<==))\\[",
+      "beginCaptures": { "0": { "name": "punctuation.definition.content.begin.typst" } },
+      "end": "\\]",
+      "endCaptures": { "0": { "name": "punctuation.definition.content.end.typst" } },
+      "patterns": [{ "include": "#inline" }]
+    },
+    "arguments": {
+      "patterns": [
+        { "match": "([A-Za-z_][A-Za-z0-9_-]*)(?=\\s*:)", "name": "variable.parameter.typst" },
+        { "include": "#typed-name" },
+        { "include": "#constant" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#call" },
+        { "include": "#content" },
+        { "match": "(=>|->|\\||=)", "name": "keyword.operator.typst" },
+        { "match": "[,:;]", "name": "punctuation.separator.typst" },
+        { "match": "[\\[\\]{}()]", "name": "punctuation.bracket.typst" }
+      ]
+    },
+    "content": {
+      "name": "markup.content.typst",
+      "begin": "\\[",
+      "end": "\\]",
+      "beginCaptures": { "0": { "name": "punctuation.definition.content.begin.typst" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.content.end.typst" } },
+      "patterns": [{ "include": "#inline" }]
+    },
+    "inline": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#raw" },
+        { "include": "#escape" },
+        { "include": "#string" },
+        { "include": "#math" },
+        { "include": "#keyword" },
+        { "include": "#hash" },
+        { "include": "#label" },
+        { "include": "#reference" },
+        { "include": "#link" },
+        { "include": "#constant" },
+        { "include": "#typed-name" },
+        { "include": "#call" },
+        { "include": "#number" },
+        { "include": "#operator" }
+      ]
+    },
+    "number": {
+      "match": "(?<![A-Za-z0-9_])\\d+(?:\\.\\d+)?(?:pt|mm|cm|in|em|fr|deg|rad|turn|s|ms|hz|khz|dpi|px|%)?(?![A-Za-z0-9_])",
+      "name": "constant.numeric.typst"
+    },
+    "operator": { "match": "(==|!=|<=|>=|=>|->|\\+=|-=|\\*=|/=|[=<>!])", "name": "keyword.operator.typst" }
+  }
+}

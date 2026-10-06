@@ -1,0 +1,24 @@
+[package]
+name = "tola-typst-syntax"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+description = "Typst source analysis: positions, scoped names, imports, syntax selection, and formatting"
+keywords = ["typst", "syntax", "analysis", "formatter"]
+categories = ["text-processing", "development-tools"]
+repository = "https://github.com/tola-rs/tola-ssg"
+documentation = "https://docs.rs/tola-typst-syntax"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+format = ["dep:typstyle-core"]
+
+[dependencies]
+typst-syntax.workspace = true
+typst-library.workspace = true
+typstyle-core = { workspace = true, optional = true }
+anyhow = "1.0.104"
