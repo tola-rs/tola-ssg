@@ -27,7 +27,7 @@ pub mod transform;
 use tola_vdom::prelude::*;
 
 use crate::compiler::CompileContext;
-use crate::compiler::family::{IndexedDocument, Raw, TolaSite};
+use crate::compiler::family::{IndexedDocument, Processed, ProcessedDocument, Raw, TolaSite};
 use crate::compiler::page::PageRoute;
 
 pub use transform::{BodyInjector, HeaderInjector, LinkTransform, MediaTransform, SvgTransform};
@@ -41,6 +41,8 @@ pub use transform::{BodyInjector, HeaderInjector, LinkTransform, MediaTransform,
 pub struct CompileOutput {
     /// Rendered HTML bytes.
     pub html: Vec<u8>,
+    /// Rendered body fragment for feed output.
+    pub feed_body: Option<String>,
     /// Indexed VDOM for validation and hot reload diffing.
     /// Present when `mode.cache_vdom` is true OR validation is enabled.
     pub indexed: Option<IndexedDocument>,
@@ -85,6 +87,10 @@ pub fn compile(doc: Document<Raw>, ctx: &CompileContext<'_>) -> CompileOutput {
             indexed_cache = Some(doc.clone());
         })
         .pipe(SvgTransform::new(ctx.config, route, ctx.mode))
+        .into_inner();
+
+    let feed_source = ctx.feed_body.should_render().then(|| indexed.clone());
+    let indexed = Pipeline::new(indexed)
         .pipe(BodyInjector::new(ctx.config))
         .into_inner();
 
@@ -94,12 +100,39 @@ pub fn compile(doc: Document<Raw>, ctx: &CompileContext<'_>) -> CompileOutput {
         .into_inner();
 
     let render_config = RenderConfig::new(ctx.mode.emit_ids, ctx.config.build.minify);
+    let feed_body = feed_source.map(|doc| {
+        let processed = Pipeline::new(doc).pipe(TolaSite::processor()).into_inner();
+        render_feed_body(&processed, &render_config)
+    });
 
     CompileOutput {
         html: render_document_bytes(&processed, &render_config),
+        feed_body,
         indexed: indexed_cache,
         stats: processed.meta,
     }
+}
+
+fn render_feed_body(doc: &ProcessedDocument, config: &RenderConfig) -> String {
+    match doc.root.tag.as_str() {
+        "html" => doc
+            .find(|elem| elem.tag == "body")
+            .map(|body| render_children(&body.children, config))
+            .unwrap_or_else(|| render_document(doc, config)),
+        "body" => render_children(&doc.root.children, config),
+        _ => render_document(doc, config),
+    }
+}
+
+fn render_children(children: &[Node<Processed>], config: &RenderConfig) -> String {
+    let mut wrapper = Element::<Processed>::new("div");
+    wrapper.children.extend(children.iter().cloned());
+
+    let html = render_document(&Document::new(wrapper), config);
+    html.strip_prefix("<div>")
+        .and_then(|html| html.strip_suffix("</div>"))
+        .unwrap_or(&html)
+        .to_string()
 }
 
 // =============================================================================

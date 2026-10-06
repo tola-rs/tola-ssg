@@ -3,7 +3,7 @@
 use typst_batch::prelude::*;
 
 use crate::address::{SiteIndex, conflict};
-use crate::asset::{scan_content_assets, scan_flatten_assets, scan_global_assets};
+use crate::asset::{scan_content_assets, scan_flatten_assets, scan_nested_assets};
 use crate::compiler::dependency::{flush_thread_local_deps, record_dependencies_local};
 use crate::compiler::page::write::write_page;
 use crate::compiler::page::{
@@ -15,9 +15,9 @@ use crate::compiler::{CompileContext, collect_all_files};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
 use crate::freshness::ContentHash;
-use crate::logger::ProgressLine;
+use crate::logger;
 use crate::package::{
-    build_visible_current_context_for_source, build_visible_inputs, package_sentinel,
+    build_visible_current_inputs_for_source, build_visible_inputs, package_sentinel,
 };
 use crate::page::CompiledPage;
 use crate::page::{
@@ -41,28 +41,6 @@ struct BuildContext<'a> {
 }
 
 impl<'a> BuildContext<'a> {
-    fn new(
-        mode: BuildMode,
-        config: &'a SiteConfig,
-        typst_host: &'a TypstHost,
-        store: &'a StoredPageMap,
-        clean: bool,
-        deps_hash: Option<ContentHash>,
-        global_state: GlobalStateMode,
-        warnings: &'a WarningCollector,
-    ) -> Self {
-        Self {
-            mode,
-            config,
-            typst_host,
-            store,
-            clean,
-            deps_hash,
-            global_state,
-            warnings,
-        }
-    }
-
     fn label(&self) -> &str {
         &self.config.build.meta.label
     }
@@ -106,6 +84,30 @@ impl GlobalStateMode {
     }
 }
 
+pub struct StaticPageBuild<'a> {
+    pub mode: BuildMode,
+    pub config: &'a SiteConfig,
+    pub typst_host: &'a TypstHost,
+    pub state: &'a SiteIndex,
+    pub clean: bool,
+    pub deps_hash: Option<ContentHash>,
+    pub global_state: GlobalStateMode,
+    pub warnings: &'a WarningCollector,
+    pub progress: Option<&'a logger::ProgressLine>,
+}
+
+pub struct IterativePageBuild<'a> {
+    pub mode: BuildMode,
+    pub paths: &'a [PathBuf],
+    pub config: &'a SiteConfig,
+    pub typst_host: &'a TypstHost,
+    pub store: &'a StoredPageMap,
+    pub clean: bool,
+    pub deps_hash: Option<ContentHash>,
+    pub snapshot: Option<FileSnapshot>,
+    pub warnings: &'a WarningCollector,
+}
+
 /// Compile all pages. Static pages are written after conflict detection passes
 ///
 /// Uses pre-scan optimization: always scans first to collect metadata and
@@ -113,29 +115,33 @@ impl GlobalStateMode {
 ///
 /// `global_state` controls whether this build owns page storage/address-space
 /// rebuilding or reuses state that a separate scan phase already populated.
-pub fn build_static_pages(
-    mode: BuildMode,
-    config: &SiteConfig,
-    typst_host: &TypstHost,
-    state: &SiteIndex,
-    clean: bool,
-    deps_hash: Option<ContentHash>,
-    global_state: GlobalStateMode,
-    warnings: &WarningCollector,
-    progress: Option<&ProgressLine>,
-) -> Result<MetadataResult> {
+pub fn build_static_pages(build: StaticPageBuild<'_>) -> Result<MetadataResult> {
+    let StaticPageBuild {
+        mode,
+        config,
+        typst_host,
+        state,
+        clean,
+        deps_hash,
+        global_state,
+        warnings,
+        progress,
+    } = build;
+
     if global_state.rebuilds_global_state() {
         let next = SiteIndex::new();
         let build = next.with_pages(|store| {
             build_static_pages_with_store(
-                mode,
-                config,
-                typst_host,
-                store,
-                clean,
-                deps_hash,
-                global_state,
-                warnings,
+                BuildContext {
+                    mode,
+                    config,
+                    typst_host,
+                    store,
+                    clean,
+                    deps_hash,
+                    global_state,
+                    warnings,
+                },
                 progress,
             )
         })?;
@@ -147,14 +153,16 @@ pub fn build_static_pages(
     state
         .with_pages(|store| {
             build_static_pages_with_store(
-                mode,
-                config,
-                typst_host,
-                store,
-                clean,
-                deps_hash,
-                global_state,
-                warnings,
+                BuildContext {
+                    mode,
+                    config,
+                    typst_host,
+                    store,
+                    clean,
+                    deps_hash,
+                    global_state,
+                    warnings,
+                },
                 progress,
             )
         })
@@ -162,35 +170,22 @@ pub fn build_static_pages(
 }
 
 fn build_static_pages_with_store(
-    mode: BuildMode,
-    config: &SiteConfig,
-    typst_host: &TypstHost,
-    store: &StoredPageMap,
-    clean: bool,
-    deps_hash: Option<ContentHash>,
-    global_state: GlobalStateMode,
-    warnings: &WarningCollector,
-    progress: Option<&ProgressLine>,
+    ctx: BuildContext<'_>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Result<StaticBuild> {
-    let ctx = BuildContext::new(
-        mode,
-        config,
-        typst_host,
-        store,
-        clean,
-        deps_hash,
-        global_state,
-        warnings,
-    );
-    let content_files = collect_content_files(&config.build.content);
+    let content_files = collect_content_files(&ctx.config.build.content);
     let (typst_files, markdown_files) = ContentKind::partition_by_kind(&content_files);
 
     // Always pre-scan to collect metadata and identify iterative pages
-    let scan_result = scan_pages(config, typst_host, &typst_files, &markdown_files);
+    let scan_result = scan_pages(ctx.config, ctx.typst_host, &typst_files, &markdown_files);
     let drafts_skipped = scan_result.drafts_skipped;
 
     // Report scan phase errors immediately
-    scan_result.report_errors(ctx.max_errors(), ctx.config.get_root())?;
+    scan_result.report_errors(
+        ctx.max_errors(),
+        ctx.config.get_root(),
+        ctx.config.build.extra_hints,
+    )?;
 
     // Get paths and identify iterative pages from scan results
     let (scanned_typst, scanned_md) = ScannedPage::partition_by_kind(&scan_result.scanned);
@@ -206,26 +201,31 @@ fn build_static_pages_with_store(
 
     // Populate page store from scan results BEFORE compilation.
     if ctx.rebuilds_global_state() {
-        populate_pages(&scan_result.scanned, config, store);
+        populate_pages(&scan_result.scanned, ctx.config, ctx.store);
     }
 
     // Compile Typst files
     // Always create new batcher for compile, reuse only snapshot from scan
     // This avoids duplicate warnings (scan already emitted them)
     let snapshot = scan_result.snapshot();
-    let inputs = build_site_inputs(config, store)?;
-    // Always compile with per-file @tola/current context to keep build
+    let inputs = build_site_inputs(ctx.config, ctx.store)?;
+    // Always compile with per-file @tola/current inputs to keep build
     // behavior aligned with serve and avoid scan-time under-detection when
     // current-dependent code only appears in page body.
     let batch = create_batch_with_inputs(
-        config.get_root(),
-        typst_host,
+        ctx.config.get_root(),
+        ctx.typst_host,
         &typst_paths,
         snapshot,
         inputs,
     )?;
-    let typst_results =
-        compile_typst_batch_with_context(&batch, &typst_paths, config, store, progress)?;
+    let typst_results = compile_typst_batch_with_current_inputs(
+        &batch,
+        &typst_paths,
+        ctx.config,
+        ctx.store,
+        progress,
+    )?;
 
     let typst_processed = process_typst_files(&ctx, &typst_paths, typst_results);
     let markdown_processed = process_markdown_files(&ctx, &markdown_paths, progress);
@@ -235,19 +235,18 @@ fn build_static_pages_with_store(
 
     flush_thread_local_deps();
 
-    let url_sources = conflict::collect_url_sources(&pages, config);
+    let url_owners = conflict::collect_url_owners(&pages, ctx.config);
 
-    let conflicts = conflict::detect_conflicts(&url_sources, config.get_root());
+    let conflicts = conflict::detect_conflicts(&url_owners, ctx.config.get_root());
     if !conflicts.is_empty() {
-        let prefix = config.paths().prefix().to_string_lossy().into_owned();
-        conflict::print_conflicts_with_prefix(&conflicts, &prefix);
-        let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
+        conflict::print_conflicts(&conflicts);
+        let total_owners: usize = conflicts.iter().map(|c| c.owners.len()).sum();
         return Err(anyhow::anyhow!(
-            "build failed: {} conflicting url{}, {} source{}",
+            "build failed: {} conflicting url{}, {} owner{}",
             conflicts.len(),
             crate::utils::plural_s(conflicts.len()),
-            total_sources,
-            crate::utils::plural_s(total_sources)
+            total_owners,
+            crate::utils::plural_s(total_owners)
         ));
     }
 
@@ -255,9 +254,9 @@ fn build_static_pages_with_store(
     write_static_pages(
         &pages,
         &iterative_paths,
-        clean,
-        deps_hash,
-        &config.build.output,
+        ctx.clean,
+        ctx.deps_hash,
+        &ctx.config.build.output,
     )?;
 
     let snapshot = batch.and_then(|b: TypstBatcher| b.snapshot());
@@ -283,31 +282,33 @@ const MAX_ITERATIONS: usize = 5;
 /// - Compile with current page-store data
 /// - Check if metadata changed (via hash)
 /// - Repeat until convergence or max iterations
-pub fn rebuild_iterative_pages(
-    mode: BuildMode,
-    paths: &[PathBuf],
-    config: &SiteConfig,
-    typst_host: &TypstHost,
-    store: &StoredPageMap,
-    clean: bool,
-    deps_hash: Option<ContentHash>,
-    snapshot: Option<FileSnapshot>,
-    warnings: &WarningCollector,
-) -> Result<Vec<CompiledPage>> {
+pub fn rebuild_iterative_pages(build: IterativePageBuild<'_>) -> Result<Vec<CompiledPage>> {
+    let IterativePageBuild {
+        mode,
+        paths,
+        config,
+        typst_host,
+        store,
+        clean,
+        deps_hash,
+        snapshot,
+        warnings,
+    } = build;
+
     if paths.is_empty() {
         return Ok(vec![]);
     }
 
-    let ctx = BuildContext::new(
+    let ctx = BuildContext {
         mode,
         config,
         typst_host,
         store,
         clean,
         deps_hash,
-        GlobalStateMode::Rebuild,
+        global_state: GlobalStateMode::Rebuild,
         warnings,
-    );
+    };
     let (typst_paths, markdown_paths) = ContentKind::partition_by_kind(paths);
 
     // Iterative compilation loop
@@ -325,7 +326,7 @@ pub fn rebuild_iterative_pages(
             Some(inputs),
         )?;
         let typst_results =
-            compile_typst_batch_with_context(&batch, &typst_paths, config, store, None)?;
+            compile_typst_batch_with_current_inputs(&batch, &typst_paths, config, store, None)?;
 
         // Process results and update page store.
         let max_errors = ctx.max_errors();
@@ -335,9 +336,14 @@ pub fn rebuild_iterative_pages(
             .map(|(path, result)| {
                 let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
                 let page = CompiledPage::from_paths(path, ctx.config)?;
-                let compile_ctx =
-                    CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                        .with_route(&page.route);
+                let compile_ctx = CompileContext::new(
+                    ctx.mode,
+                    ctx.config,
+                    ctx.typst_host,
+                    ctx.store,
+                    super::feed_body_mode(ctx.config),
+                )
+                .with_route(&page.route);
                 let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -348,9 +354,14 @@ pub fn rebuild_iterative_pages(
             .par_iter()
             .map(|path| {
                 let page = CompiledPage::from_paths(path, ctx.config)?;
-                let compile_ctx =
-                    CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                        .with_route(&page.route);
+                let compile_ctx = CompileContext::new(
+                    ctx.mode,
+                    ctx.config,
+                    ctx.typst_host,
+                    ctx.store,
+                    super::feed_body_mode(ctx.config),
+                )
+                .with_route(&page.route);
                 let content = compile(path, &compile_ctx)?;
                 process_iterative_page(&ctx, page, content)
             })
@@ -364,22 +375,29 @@ pub fn rebuild_iterative_pages(
         // Check convergence
         match stability.decide(store.pages_hash(), iteration, MAX_ITERATIONS) {
             StabilityDecision::Converged => {
-                crate::debug!("iterative"; "converged after {} iteration(s)", iteration + 1);
+                logger::debug(
+                    "iterative",
+                    format_args!("converged after {} iteration(s)", iteration + 1),
+                );
                 break;
             }
             StabilityDecision::Oscillating => {
-                crate::log!(
-                    "warn";
-                    "metadata oscillating (cycle detected), stopping after {} iterations",
-                    iteration + 1
+                logger::log(
+                    "warn",
+                    format_args!(
+                        "metadata oscillating (cycle detected), stopping after {} iterations",
+                        iteration + 1
+                    ),
                 );
                 break;
             }
             StabilityDecision::MaxIterationsReached => {
-                crate::log!(
-                    "warn";
-                    "metadata did not converge after {} iterations",
-                    MAX_ITERATIONS
+                logger::log(
+                    "warn",
+                    format_args!(
+                        "metadata did not converge after {} iterations",
+                        MAX_ITERATIONS
+                    ),
                 );
             }
             StabilityDecision::Continue => {}
@@ -405,6 +423,7 @@ fn process_iterative_page(
 ) -> Result<CompiledPage> {
     let source = page.route.source.clone();
     page.apply_meta(result.meta, ctx.config);
+    page.feed_body = result.feed_body;
 
     // Keep source->permalink mapping consistent across iterative passes.
     let state = PageState::new(ctx.store);
@@ -416,8 +435,11 @@ fn process_iterative_page(
 
     // Update page store with metadata from compile phase.
     if let Some(ref meta) = page.content_meta {
-        ctx.store
-            .insert_page(page.route.permalink.clone(), meta.clone());
+        ctx.store.insert_page_with_feed_body(
+            page.route.permalink.clone(),
+            meta.clone(),
+            page.feed_body.clone(),
+        );
     }
 
     if let Some(vdom) = result.indexed_vdom {
@@ -505,38 +527,43 @@ fn create_batch_with_inputs<'a>(
     }))
 }
 
-/// Compile with per-file context for @tola/current
-fn compile_typst_batch_with_context<'a>(
+/// Compile with per-file `@tola/current` inputs.
+fn compile_typst_batch_with_current_inputs<'a>(
     batch: &Option<TypstBatcher<'a>>,
     files: &[&PathBuf],
     config: &SiteConfig,
     store: &StoredPageMap,
-    progress: Option<&ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Result<Vec<BatchCompileResult>> {
     let Some(b) = batch else { return Ok(vec![]) };
-    let current_context_by_path: rustc_hash::FxHashMap<&Path, serde_json::Value> = files
+    let current_inputs_by_path: rustc_hash::FxHashMap<&Path, typst_batch::Inputs> = files
         .iter()
         .map(|p| {
-            let current = build_visible_current_context_for_source(config, store, p)?;
+            let current = build_visible_current_inputs_for_source(config, store, p)?;
             Ok((p.as_path(), current))
         })
         .collect::<Result<_>>()?;
 
-    b.batch_compile_with_context(files, |path| {
-        if let Some(p) = progress {
-            p.inc("typst");
-        }
-        crate::debug!("typst"; "compiled {}", path.display());
-        current_context_by_path
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing precomputed @tola/current context for {}",
-                    path.display()
-                )
-            })
-    })
+    b.batch_compile_with_inputs_each(
+        files,
+        |path| {
+            current_inputs_by_path
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing precomputed @tola/current inputs for {}",
+                        path.display()
+                    )
+                })
+        },
+        |path| {
+            if let Some(p) = progress {
+                p.inc("typst");
+            }
+            logger::debug("typst", format_args!("compiled {}", path.display()));
+        },
+    )
     .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
@@ -582,8 +609,14 @@ fn process_typst_files(
         .map(|(path, result)| {
             let result = result.map_err(|e| format_compile_error(&e, max_errors))?;
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx = CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                .with_route(&page.route);
+            let compile_ctx = CompileContext::new(
+                ctx.mode,
+                ctx.config,
+                ctx.typst_host,
+                ctx.store,
+                super::feed_body_mode(ctx.config),
+            )
+            .with_route(&page.route);
             let content = process_typst_result(result, ctx.label(), &compile_ctx)?;
             finalize_static_page(ctx, page, content)
         })
@@ -593,14 +626,20 @@ fn process_typst_files(
 fn process_markdown_files(
     ctx: &BuildContext,
     files: &[&PathBuf],
-    progress: Option<&crate::logger::ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Vec<Result<Option<BuildPageResult>>> {
     files
         .par_iter()
         .map(|path| {
             let page = CompiledPage::from_paths(path, ctx.config)?;
-            let compile_ctx = CompileContext::new(ctx.mode, ctx.config, ctx.typst_host, ctx.store)
-                .with_route(&page.route);
+            let compile_ctx = CompileContext::new(
+                ctx.mode,
+                ctx.config,
+                ctx.typst_host,
+                ctx.store,
+                super::feed_body_mode(ctx.config),
+            )
+            .with_route(&page.route);
             let content = compile(path, &compile_ctx)?;
             if let Some(p) = progress {
                 p.inc("markdown");
@@ -642,6 +681,7 @@ fn finalize_static_page(
     }
 
     page.apply_meta(result.meta, ctx.config); // Apply metadata/permalink FIRST
+    page.feed_body = result.feed_body;
     page.compiled_html = Some(result.html);
 
     // Cache VDOM with the CORRECT permalink (after apply_custom_permalink)
@@ -652,9 +692,10 @@ fn finalize_static_page(
     if ctx.rebuilds_global_state() {
         let state = PageState::new(ctx.store);
         state.sync_source_permalink(&path, page.route.permalink.clone(), StaleLinkPolicy::Keep);
-        ctx.store.insert_page(
+        ctx.store.insert_page_with_feed_body(
             page.route.permalink.clone(),
             page.content_meta.clone().unwrap_or_default(),
+            page.feed_body.clone(),
         );
     }
 
@@ -749,16 +790,6 @@ fn write_single_page(
 pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &SiteIndex) {
     state.edit(|store, space| {
         space.clear();
-
-        // Use primary nested entry's output name as assets prefix
-        let assets_prefix = config
-            .build
-            .assets
-            .nested
-            .first()
-            .map(|e| e.output_name())
-            .unwrap_or("assets");
-        space.set_assets_prefix(assets_prefix);
         space.set_slug_config(config.build.slug.clone());
 
         // Register pages
@@ -772,17 +803,17 @@ pub fn build_address_space(pages: &[CompiledPage], config: &SiteConfig, state: &
             space.register_headings(&page.route.permalink, heading_ids);
         }
 
-        // Register global assets (nested directories)
-        for asset in scan_global_assets(config) {
+        // Register directory assets
+        for asset in scan_nested_assets(config) {
             space.register_asset(asset);
         }
 
-        // Register flatten assets (individual files at output root)
+        // Register file assets
         for asset in scan_flatten_assets(config) {
             space.register_asset(asset);
         }
 
-        // Register content assets (non-.typ/.md files in content directory)
+        // Register content assets (non-page files in content directory)
         for asset in scan_content_assets(config) {
             space.register_asset(asset);
         }
@@ -1004,17 +1035,17 @@ mod tests {
             );
         });
 
-        build_static_pages(
-            BuildMode::DEVELOPMENT,
-            &config,
-            &host,
-            site,
-            false,
-            None,
-            GlobalStateMode::Rebuild,
-            &warnings,
-            None,
-        )
+        build_static_pages(StaticPageBuild {
+            mode: BuildMode::DEVELOPMENT,
+            config: &config,
+            typst_host: &host,
+            state: site,
+            clean: false,
+            deps_hash: None,
+            global_state: GlobalStateMode::Rebuild,
+            warnings: &warnings,
+            progress: None,
+        })
         .unwrap();
 
         let pages = site.with_pages(|store| store.get_pages_with_drafts());
@@ -1060,17 +1091,17 @@ mod tests {
                 .unwrap();
         });
 
-        build_static_pages(
-            BuildMode::DEVELOPMENT,
-            &config,
-            &host,
-            site,
-            false,
-            None,
-            GlobalStateMode::ReuseScanned,
-            &warnings,
-            None,
-        )
+        build_static_pages(StaticPageBuild {
+            mode: BuildMode::DEVELOPMENT,
+            config: &config,
+            typst_host: &host,
+            state: site,
+            clean: false,
+            deps_hash: None,
+            global_state: GlobalStateMode::ReuseScanned,
+            warnings: &warnings,
+            progress: None,
+        })
         .unwrap();
 
         assert_eq!(

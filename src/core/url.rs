@@ -7,7 +7,20 @@ use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
+
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 /// Decoded URL path (internal representation)
 ///
@@ -122,10 +135,9 @@ impl UrlPath {
 
     /// Encode for browser (percent-encode non-ASCII and special characters).
     pub fn to_encoded(&self) -> String {
-        use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
         self.0
             .split('/')
-            .map(|segment| utf8_percent_encode(segment, NON_ALPHANUMERIC).to_string())
+            .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string())
             .collect::<Vec<_>>()
             .join("/")
     }
@@ -183,10 +195,23 @@ impl UrlPath {
     ///
     /// - `Some("https://example.com") + /posts/hello/` -> `https://example.com/posts/hello/`
     /// - `Some("https://example.com/") + /posts/hello/` -> `https://example.com/posts/hello/`
+    /// - `Some("https://example.com/blog") + /posts/hello/` -> `https://example.com/blog/posts/hello/`
+    /// - `Some("https://example.com/blog") + /blog/posts/hello/` -> `https://example.com/blog/blog/posts/hello/`
     /// - `None + /posts/hello/` -> `/posts/hello/`
     pub fn canonical_url(&self, site_url: Option<&str>) -> String {
-        let base = site_url.unwrap_or_default().trim_end_matches('/');
-        format!("{base}{self}")
+        let path = self.to_encoded();
+        let Some(site_url) = site_url else {
+            return path;
+        };
+
+        let Ok(base) = url::Url::parse(site_url) else {
+            return format!("{}{}", site_url.trim_end_matches('/'), path);
+        };
+
+        let origin = base.origin().ascii_serialization();
+        let path = canonical_path(&path, base.path());
+
+        format!("{origin}{path}")
     }
 
     /// Map URL path to generated HTML output path.
@@ -200,6 +225,18 @@ impl UrlPath {
         } else {
             output_dir.join(rel).join("index.html")
         }
+    }
+}
+
+fn canonical_path(path: &str, base_path: &str) -> String {
+    let base_path = base_path.trim_matches('/');
+    let site_path = path.trim_start_matches('/');
+
+    match (base_path.is_empty(), site_path.is_empty()) {
+        (true, true) => "/".to_string(),
+        (true, false) => format!("/{site_path}"),
+        (false, true) => format!("/{base_path}/"),
+        (false, false) => format!("/{base_path}/{site_path}"),
     }
 }
 
@@ -329,6 +366,15 @@ mod tests {
     fn test_to_encoded_space() {
         let url = UrlPath::from_page("/posts/hello world/");
         assert_eq!(url.to_encoded(), "/posts/hello%20world/");
+    }
+
+    #[test]
+    fn test_to_encoded_preserves_path_safe_chars() {
+        let url = UrlPath::from_asset("/feed.json");
+        assert_eq!(url.to_encoded(), "/feed.json");
+
+        let url = UrlPath::from_asset("/assets/app-1.0_~.js");
+        assert_eq!(url.to_encoded(), "/assets/app-1.0_~.js");
     }
 
     #[test]
@@ -483,6 +529,46 @@ mod tests {
             "https://example.com/posts/hello/"
         );
         assert_eq!(url.canonical_url(None), "/posts/hello/");
+    }
+
+    #[test]
+    fn test_canonical_url_with_base_path() {
+        assert_eq!(
+            UrlPath::from_page("/posts/hello/")
+                .canonical_url(Some("https://example.com/docs/blog")),
+            "https://example.com/docs/blog/posts/hello/"
+        );
+        assert_eq!(
+            UrlPath::from_page("/docs/blog/posts/hello/")
+                .canonical_url(Some("https://example.com/docs/blog")),
+            "https://example.com/docs/blog/docs/blog/posts/hello/"
+        );
+        assert_eq!(
+            UrlPath::from_page("/").canonical_url(Some("https://example.com/docs/blog")),
+            "https://example.com/docs/blog/"
+        );
+        assert_eq!(
+            UrlPath::from_asset("/docs/blog/feed.json")
+                .canonical_url(Some("https://example.com/docs/blog")),
+            "https://example.com/docs/blog/docs/blog/feed.json"
+        );
+    }
+
+    #[test]
+    fn test_canonical_url_does_not_deduplicate_matching_prefix() {
+        assert_eq!(
+            UrlPath::from_page("/blog/post/").canonical_url(Some("https://example.com/blog")),
+            "https://example.com/blog/blog/post/"
+        );
+    }
+
+    #[test]
+    fn test_canonical_url_encodes_path_segments() {
+        let url = UrlPath::from_page("/posts/中文 path/");
+        assert_eq!(
+            url.canonical_url(Some("https://example.com")),
+            "https://example.com/posts/%E4%B8%AD%E6%96%87%20path/"
+        );
     }
 
     #[test]

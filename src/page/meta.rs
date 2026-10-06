@@ -95,7 +95,7 @@ pub struct PageMeta {
     /// Example: `["/old-url/", "/legacy/post/"]`
     ///
     /// Aliases generate redirect HTML files pointing to the canonical permalink.
-    /// They participate in conflict detection but are excluded from RSS/sitemap.
+    /// They participate in conflict detection but are excluded from feed/sitemap output.
     #[serde(default, skip_serializing)]
     pub aliases: Vec<String>,
     /// Whether to inject global header (styles, scripts, elements).

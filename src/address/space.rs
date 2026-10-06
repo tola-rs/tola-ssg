@@ -14,6 +14,7 @@ use crate::utils::path::slug::slugify_path;
 
 use super::resolve::{resolve_physical_path, resolve_relative_url};
 use super::{ResolveContext, ResolveResult, Resource};
+use crate::logger;
 
 /// Result of updating a page's permalink during hot-reload
 ///
@@ -49,8 +50,6 @@ pub struct AddressSpace {
     pub(super) by_source: FxHashMap<PathBuf, UrlPath>,
     /// Page URL -> heading IDs (for fragment validation)
     headings: FxHashMap<UrlPath, FxHashSet<String>>,
-    /// Assets directory prefix (e.g., "assets")
-    assets_prefix: String,
     /// Slug configuration for URL normalization
     slug_config: Option<SlugConfig>,
 }
@@ -66,24 +65,7 @@ impl AddressSpace {
         self.by_url.clear();
         self.by_source.clear();
         self.headings.clear();
-        self.assets_prefix.clear();
         self.slug_config = None;
-    }
-
-    /// Set the assets directory prefix.
-    pub fn with_assets_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.assets_prefix = prefix.into();
-        self
-    }
-
-    /// Get the assets directory prefix.
-    pub fn assets_prefix(&self) -> &str {
-        &self.assets_prefix
-    }
-
-    /// Set the assets directory prefix.
-    pub fn set_assets_prefix(&mut self, prefix: impl Into<String>) {
-        self.assets_prefix = prefix.into();
     }
 
     /// Set the slug configuration for URL normalization.
@@ -270,7 +252,10 @@ impl AddressSpace {
             Some(old) => PermalinkUpdate::Changed { old_url: old },
             None => {
                 // First time seeing this source - this is a new page
-                crate::debug!("address_space"; "new source registered: {} -> {}", source.display(), new_url);
+                logger::debug(
+                    "address_space",
+                    format_args!("new source registered: {} -> {}", source.display(), new_url),
+                );
                 PermalinkUpdate::Unchanged
             }
         }
@@ -339,18 +324,6 @@ impl AddressSpace {
     /// Get heading IDs for a page.
     pub fn headings_for(&self, permalink: &UrlPath) -> Option<&FxHashSet<String>> {
         self.headings.get(permalink)
-    }
-
-    /// Check if a URL path is in the assets directory.
-    pub fn is_asset_path(&self, path: &str) -> bool {
-        let path = path.trim_start_matches('/');
-        if self.assets_prefix.is_empty() {
-            return false;
-        }
-        path.starts_with(&self.assets_prefix)
-            && path
-                .get(self.assets_prefix.len()..)
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     }
 
     /// Get total number of resources.
@@ -564,8 +537,7 @@ impl AddressSpace {
     ) -> ResolveResult {
         // Compute the physical path relative to source file directory
         let source_dir = ctx.source_path.parent().unwrap_or(Path::new(""));
-        let clean_path = path.trim_start_matches("./");
-        let physical_path = source_dir.join(clean_path);
+        let physical_path = resolve_physical_path(source_dir, path);
 
         // Check physical path directly
         if let Some(url) = self.by_source.get(&physical_path)
@@ -815,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_register_asset() {
-        let mut space = AddressSpace::new().with_assets_prefix("assets");
+        let mut space = AddressSpace::new();
         let route = test_asset_route(
             "assets/logo.png",
             "/assets/logo.png",
@@ -825,9 +797,34 @@ mod tests {
         space.register_asset(route);
 
         assert!(space.contains_url(&url));
-        assert!(space.is_asset_path("/assets/logo.png"));
-        assert!(!space.is_asset_path("/posts/hello/"));
         assert_eq!(space.asset_count(), 1);
+    }
+
+    #[test]
+    fn file_relative_asset_attrs_resolve_normalized_parent_paths() {
+        let mut space = AddressSpace::new();
+        let page_route = test_route(
+            "content/posts/hello.typ",
+            "/posts/hello/",
+            "public/posts/hello/index.html",
+        );
+        space.register_page(page_route.clone(), None);
+        space.register_asset(test_asset_route(
+            "content/shared.png",
+            "/shared.png",
+            "public/shared.png",
+        ));
+
+        let ctx = ResolveContext {
+            current_permalink: &page_route.permalink,
+            source_path: &page_route.source,
+            origin: crate::core::LinkOrigin::Src,
+        };
+
+        assert!(matches!(
+            space.resolve("../shared.png", &ctx),
+            ResolveResult::Found(Resource::Asset { .. })
+        ));
     }
 
     #[test]
@@ -860,20 +857,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_asset_path() {
-        let space = AddressSpace::new().with_assets_prefix("assets");
-
-        assert!(space.is_asset_path("/assets/logo.png"));
-        assert!(space.is_asset_path("/assets/images/photo.jpg"));
-        assert!(space.is_asset_path("assets/logo.png"));
-        assert!(!space.is_asset_path("/assetsxyz/logo.png")); // not a segment match
-        assert!(!space.is_asset_path("/posts/hello/"));
-        assert!(!space.is_asset_path("/about/"));
-    }
-
-    #[test]
     fn test_dump() {
-        let mut space = AddressSpace::new().with_assets_prefix("assets");
+        let mut space = AddressSpace::new();
         let route = test_route("content/hello.typ", "/hello/", "public/hello/index.html");
         space.register_page(route, Some("Hello".to_string()));
         space.register_asset(test_asset_route(

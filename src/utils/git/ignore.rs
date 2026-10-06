@@ -80,19 +80,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_gix_parse_behavior() {
-        let gitignore = b"/root_only\nsub/dir\n*.log\ntemp/";
-        for (pattern, _, _) in gix::ignore::parse(gitignore) {
-            println!(
-                "Pattern: {:?}, Mode: {:?} (bits: {:b})",
-                pattern.text,
-                pattern.mode,
-                pattern.mode.bits()
-            );
-        }
-    }
-
-    #[test]
     fn test_ignore_matcher() {
         // Note: We use "target/**" to match nested files with simple wildmatch
         let gitignore = b"target/**\n*.log\n.DS_Store\n!important.log\nbuild/\n/root_only";

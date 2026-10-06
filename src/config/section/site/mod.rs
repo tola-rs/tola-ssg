@@ -20,19 +20,25 @@
 //! preload = { enable = true, delay = 100 }
 //!
 //! [site.header]
-//! icon = "favicon.ico"
-//! styles = ["styles/custom.css"]
-//! scripts = ["scripts/app.js"]
+//! icon = "/favicon.ico"
+//! styles = ["/styles/custom.css"]
+//! scripts = ["/scripts/app.js"]
 //!
 //! [site.seo]
 //! auto_og = true
 //!
-//! [site.seo.feed]
-//! enable = true
-//! path = "feed.xml"
+//! [[site.seo.feeds]]
+//! format = "rss"
+//! url = "/feed.xml"
+//! features = ["full-text"]
+//!
+//! [[site.seo.feeds]]
+//! format = "json"
+//! url = "/feed.json"
 //!
 //! [site.seo.sitemap]
 //! enable = true
+//! url = "/sitemap.xml"
 //!
 //! [site]
 //! not_found = "404.html"
@@ -46,7 +52,7 @@ mod seo;
 pub use header::HeaderConfig;
 pub use info::SiteInfoConfig;
 pub use nav::{NavConfig, TransitionStyle};
-pub use seo::{FeedConfig, FeedFormat, SeoConfig};
+pub use seo::{FeedConfig, FeedFeature, FeedFormat, SeoConfig, SitemapConfig};
 
 use macros::Config;
 use serde::{Deserialize, Serialize};

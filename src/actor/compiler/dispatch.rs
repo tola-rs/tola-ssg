@@ -4,6 +4,8 @@ use std::time::Instant;
 use super::tasks::{abort_task, wait_task};
 use super::{BackgroundTask, BatchResult, CompilerActor};
 use crate::actor::messages::{CompilerMsg, VdomMsg};
+use crate::logger;
+use crate::reload::output;
 
 impl CompilerActor {
     /// Main event loop with interruptible background compilation
@@ -87,13 +89,18 @@ impl CompilerActor {
     async fn on_background_done(&mut self, result: BatchResult) {
         let start = Instant::now();
 
-        for outcome in result.outcomes {
-            self.route(outcome, result.config.clone()).await;
-        }
-
-        self.finish_batch(result.config, result.pages_hash, result.watched_post_paths)
-            .await;
-        crate::debug!("compile"; "background done in {:?}", start.elapsed());
+        self.finish_batch(
+            result.config,
+            result.pages_hash,
+            result.watched_post_paths,
+            result.output_update,
+            result.outcomes,
+        )
+        .await;
+        logger::debug(
+            "compile",
+            format_args!("background done in {:?}", start.elapsed()),
+        );
     }
 
     /// Finalize a compilation batch
@@ -102,14 +109,72 @@ impl CompilerActor {
         config: std::sync::Arc<crate::config::SiteConfig>,
         hash_before: u64,
         watched_post_paths: Option<Vec<PathBuf>>,
+        mut output_update: output::Update,
+        outcomes: Vec<crate::reload::compile::CompileOutcome>,
     ) {
         if self.state.with_pages(|pages| pages.pages_hash()) != hash_before {
             self.recompile_virtual_users().await;
         }
         if let Some(paths) = watched_post_paths {
-            self.run_watched_post_hooks(&paths);
+            let before = output::snapshot(&config);
+            match self.run_watched_post_hooks(&paths) {
+                Ok(executed) => {
+                    if executed > 0 {
+                        let changed = output::changed(&before, &config);
+                        if !changed.is_empty() {
+                            output_update.extend(self.stage_output_change(changed));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.report_hook_error(
+                        std::sync::Arc::clone(&config),
+                        crate::hooks::HookPhase::Post,
+                        e,
+                    )
+                    .await;
+                    let _ = self.vdom_tx.send(VdomMsg::BatchEnd { config }).await;
+                    return;
+                }
+            }
         }
+        let has_page_outcome = outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, crate::reload::compile::CompileOutcome::Vdom { .. }));
+        let assets = if output_update.reload_count() == 0 && has_page_outcome {
+            output_update.hrefs().to_vec()
+        } else {
+            Vec::new()
+        };
+        let send_standalone_output = output_update.reload_count() > 0 || !has_page_outcome;
+
+        self.route_all(outcomes, std::sync::Arc::clone(&config), &assets)
+            .await;
+        if send_standalone_output {
+            self.send_output_update(output_update).await;
+        }
+        self.write_seo_outputs(std::sync::Arc::clone(&config)).await;
         let _ = self.vdom_tx.send(VdomMsg::BatchEnd { config }).await;
+    }
+
+    pub(super) async fn write_seo_outputs(
+        &self,
+        config: std::sync::Arc<crate::config::SiteConfig>,
+    ) {
+        if !config.site.seo.has_feed_outputs() && !config.site.seo.sitemap.enable {
+            return;
+        }
+
+        let state = std::sync::Arc::clone(&self.state);
+        match tokio::task::spawn_blocking(move || crate::seo::build_outputs(&config, &state)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => logger::log(
+                "warning",
+                format_args!("failed to write SEO outputs: {}", e),
+            ),
+            Err(e) => logger::debug("compile", format_args!("SEO output task failed: {}", e)),
+        }
     }
 }
 

@@ -2,7 +2,6 @@
 
 mod generated;
 mod kind;
-mod meta;
 pub mod minify;
 mod process;
 mod route;
@@ -11,15 +10,14 @@ pub mod version;
 
 // Types
 pub use kind::AssetKind;
-pub use route::AssetRoute;
-
-// Scanning (pure functions)
-pub use scan::{scan_content_assets, scan_flatten_assets, scan_global_assets};
-
-// Processing (side effects)
-pub use process::{
-    process_asset, process_cname, process_content_assets, process_flatten_assets, process_rel_asset,
+pub use route::{
+    AssetRoute, SYSTEM_ASSET_DIR, asset_source_hint, asset_url_exists, asset_url_hint,
+    href_for_route, is_asset_url, resolve_asset_href, route_from_config_source, route_from_source,
+    source_for_asset_url,
 };
 
-// Metadata helpers
-pub use meta::{compute_asset_href, route_from_source, url_from_output_path};
+// Scanning (pure functions)
+pub use scan::{scan_content_assets, scan_flatten_assets, scan_nested_assets};
+
+// Processing (side effects)
+pub use process::{process_asset, process_cname, process_configured_assets};

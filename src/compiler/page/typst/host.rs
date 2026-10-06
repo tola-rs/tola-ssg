@@ -9,25 +9,25 @@ use typst_batch::prelude::*;
 
 use crate::{config::SiteConfig, package};
 
-/// Nested asset mapping: (output_name, source_path)
+/// Nested asset mapping: (public URL prefix without leading slash, source path)
 ///
-/// Example: `("images", "assets/images")` maps `/images/photo.webp` to `assets/images/photo.webp`
-pub type NestedMapping = (String, PathBuf);
+/// Example: `("images", "assets/images")` maps `/images/photo.webp` to `assets/images/photo.webp`.
+pub type AssetMapping = (String, PathBuf);
 
 /// Tola's virtual file system for:
 /// - `@tola/site:0.0.0` and `@tola/current:0.0.0` packages
 /// - Nested asset path mapping (e.g., `/images/xxx` -> `assets/images/xxx`)
 pub struct TolaVirtualFS {
     root: PathBuf,
-    nested_mappings: Vec<NestedMapping>,
+    asset_mappings: Vec<AssetMapping>,
 }
 
 impl TolaVirtualFS {
     /// Create a new VFS with nested asset mappings.
-    pub fn new(root: PathBuf, nested_mappings: Vec<NestedMapping>) -> Self {
+    pub fn new(root: PathBuf, asset_mappings: Vec<AssetMapping>) -> Self {
         Self {
             root,
-            nested_mappings,
+            asset_mappings,
         }
     }
 }
@@ -36,11 +36,10 @@ impl typst_batch::VirtualFileSystem for TolaVirtualFS {
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
         let path_str = path.to_str()?;
         let trimmed = path_str.trim_start_matches('/');
-        let first_segment = trimmed.split('/').next()?;
 
-        for (output_name, source) in &self.nested_mappings {
-            if output_name == first_segment {
-                let rest = trimmed.strip_prefix(first_segment).unwrap_or("");
+        for (prefix, source) in &self.asset_mappings {
+            if trimmed == prefix || trimmed.starts_with(&format!("{prefix}/")) {
+                let rest = trimmed.strip_prefix(prefix).unwrap_or("");
                 let rest = rest.trim_start_matches('/');
                 let real_path = if rest.is_empty() {
                     source.clone()
@@ -68,20 +67,20 @@ pub struct TypstHost {
 
 impl TypstHost {
     /// Create a host for Typst compilation.
-    pub fn new(font_dirs: &[&Path], root: PathBuf, nested_mappings: Vec<NestedMapping>) -> Self {
-        Self::new_with_packages(font_dirs, root, nested_mappings, None, None)
+    pub fn new(font_dirs: &[&Path], root: PathBuf, asset_mappings: Vec<AssetMapping>) -> Self {
+        Self::new_with_packages(font_dirs, root, asset_mappings, None, None)
     }
 
     fn new_with_packages(
         font_dirs: &[&Path],
         root: PathBuf,
-        nested_mappings: Vec<NestedMapping>,
+        asset_mappings: Vec<AssetMapping>,
         package_path: Option<&Path>,
         package_cache_path: Option<&Path>,
     ) -> Self {
-        let fonts = typst_batch::warmup(font_dirs);
+        let fonts = Arc::new(FontStore::with_paths(font_dirs).preload());
         Self {
-            files: file_resolver(root, nested_mappings, package_path, package_cache_path),
+            files: file_resolver(root, asset_mappings, package_path, package_cache_path),
             file_cache: Arc::new(SharedFileCache::new()),
             fonts,
         }
@@ -93,7 +92,7 @@ impl TypstHost {
         Self::new_with_packages(
             &font_dirs,
             config.get_root().to_path_buf(),
-            build_nested_mappings(&config.build.assets.nested),
+            build_asset_mappings(&config.build.assets.nested),
             config.package_path(),
             config.package_cache_path(),
         )
@@ -136,11 +135,11 @@ impl TypstHost {
 
 fn file_resolver(
     root: PathBuf,
-    nested_mappings: Vec<NestedMapping>,
+    asset_mappings: Vec<AssetMapping>,
     package_path: Option<&Path>,
     package_cache_path: Option<&Path>,
 ) -> FileResolver {
-    let mut files = FileResolver::new().with_virtual_fs(TolaVirtualFS::new(root, nested_mappings));
+    let mut files = FileResolver::new().with_virtual_fs(TolaVirtualFS::new(root, asset_mappings));
     if let Some(path) = package_path {
         files = files.with_package_path(path);
     }
@@ -158,18 +157,13 @@ fn font_dirs(config: &SiteConfig) -> Vec<&Path> {
     dirs
 }
 
-/// Build nested mappings from assets config.
-fn build_nested_mappings(
+/// Build nested asset mappings from assets config.
+fn build_asset_mappings(
     nested: &[crate::config::section::build::assets::NestedEntry],
-) -> Vec<NestedMapping> {
+) -> Vec<AssetMapping> {
     nested
         .iter()
-        .map(|entry| {
-            (
-                entry.output_name().to_string(),
-                entry.source().to_path_buf(),
-            )
-        })
+        .map(|entry| (entry.target().logical_path(), entry.source().to_path_buf()))
         .collect()
 }
 

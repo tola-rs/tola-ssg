@@ -12,6 +12,7 @@ use crate::compiler::page::{
 };
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind, UrlPath};
+use crate::logger;
 use crate::page::PageState;
 use tola_vdom::Document;
 
@@ -136,7 +137,10 @@ fn compile_content_file(
                 None => cleanup_draft_state(path, config, state),
             };
             if cleaned {
-                crate::debug!("watch"; "page became draft: {}", path.display());
+                logger::debug(
+                    "watch",
+                    format_args!("page became draft: {}", path.display()),
+                );
             }
             CompileOutcome::Skipped
         }
@@ -303,9 +307,7 @@ pub fn cleanup_removed_source_state(
         crate::compiler::scheduler::SCHEDULER.invalidate(&normalized);
     }
 
-    let Some(old_url) = old_url else {
-        return None;
-    };
+    let old_url = old_url?;
 
     // Remove cached VDOM and link-graph edges for this page.
     crate::compiler::page::BUILD_CACHE.remove(&tola_vdom::CacheKey::new(old_url.as_str()));
@@ -323,7 +325,10 @@ fn cleanup_output_file(config: &SiteConfig, url: &UrlPath) {
     }
 
     if let Err(e) = std::fs::remove_file(&output_file) {
-        crate::debug!("watch"; "failed to remove {}: {}", output_file.display(), e);
+        logger::debug(
+            "watch",
+            format_args!("failed to remove {}: {}", output_file.display(), e),
+        );
         return;
     }
 

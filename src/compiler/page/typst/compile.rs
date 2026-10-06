@@ -15,13 +15,14 @@ use crate::page::PageMeta;
 use crate::pipeline::compile as pipeline_compile;
 
 use super::from_typst_html;
+use crate::logger;
 
 /// Parse metadata JSON to PageMeta, logging warning on failure.
 fn parse_page_meta(json: serde_json::Value) -> Option<PageMeta> {
     match serde_json::from_value::<PageMeta>(json) {
         Ok(meta) => Some(meta),
         Err(e) => {
-            crate::log!("warning"; "failed to parse metadata: {}", e);
+            logger::log("warning", format_args!("failed to parse metadata: {}", e));
             None
         }
     }
@@ -119,6 +120,7 @@ pub fn process_result(
 
     Ok(PageCompileOutput {
         html: output.html,
+        feed_body: output.feed_body,
         indexed_vdom: output.indexed,
         meta,
         accessed_files: accessed.files,

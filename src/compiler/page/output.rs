@@ -19,6 +19,8 @@ use typst_batch::Diagnostics;
 pub struct PageCompileOutput {
     /// Generated HTML bytes
     pub html: Vec<u8>,
+    /// Rendered body fragment for feed output.
+    pub feed_body: Option<String>,
     /// Indexed VDOM for diff comparison (only in development mode)
     pub indexed_vdom: Option<tola_vdom::Document<Indexed>>,
     /// Extracted metadata (unified across all formats)

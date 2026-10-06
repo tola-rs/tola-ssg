@@ -11,4 +11,4 @@ pub mod route;
 pub mod slug;
 
 // Re-export commonly used functions from fs (used in many places)
-pub use fs::{normalize_path, resolve_path};
+pub use fs::{normalize_existing_prefix, normalize_path, resolve_path};

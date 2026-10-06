@@ -5,7 +5,6 @@
 //! warming up the rest of the site in the background.
 
 use anyhow::Result;
-use rayon::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,9 +15,11 @@ use crate::{
     compiler::page::TypstHost,
     compiler::scheduler::{CompileResult, SCHEDULER},
     config::SiteConfig,
-    core::{BuildMode, ContentKind, Priority, is_shutdown},
-    debug, embed, freshness, hooks, log, seo,
+    core::{ContentKind, Priority, is_shutdown},
+    embed, freshness, hooks, logger, seo,
 };
+
+use super::ready::ServeReady;
 
 const WARMUP_IDLE_GRACE: Duration = Duration::from_millis(1000);
 const WARMUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -35,8 +36,9 @@ struct BuildWarning {
 /// 1. Clean output directory (if --clean flag)
 /// 2. Initialize fonts and embedded assets
 /// 3. Clear caches for accurate change detection
-/// 4. Run pre hooks (CSS preprocessor etc.)
-/// 5. Process all assets (sync, no priority needed)
+/// 4. Run pre hooks
+/// 5. Generate configured Atomic CSS
+/// 6. Process all assets (sync, no priority needed)
 pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
     // Clean output directory BEFORE set_serving() to avoid race condition
     // where on-demand compilation writes files that get deleted
@@ -57,9 +59,12 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
 
     // Clear caches for accurate change detection (same as init_build)
     freshness::clear_cache();
+    asset::version::clear();
 
-    // Run pre hooks (CSS preprocessor etc.) - IMPORTANT for Tailwind users
-    hooks::run_pre_hooks(config, BuildMode::DEVELOPMENT, true)?;
+    // Run pre hooks before generated assets.
+    hooks::run_pre_hooks(config)?;
+
+    crate::css::build::build(config)?;
 
     // Process all assets synchronously (no priority needed for assets)
     process_assets(config)?;
@@ -69,27 +74,8 @@ pub fn init_serve_build(config: &SiteConfig) -> Result<TypstHost> {
 
 /// Process all assets for serve mode
 fn process_assets(config: &SiteConfig) -> Result<()> {
-    let clean = config.build.clean;
-
-    // Collect asset files from assets directories
-    let assets: Vec<_> = config
-        .build
-        .assets
-        .nested_sources()
-        .flat_map(compiler::collect_all_files)
-        .collect();
-
-    // Process in parallel
-    assets.par_iter().for_each(|path| {
-        let _ = asset::process_asset(path, config, clean, false);
-    });
-
-    // Flatten assets and CNAME
-    let _ = asset::process_flatten_assets(config, clean, false);
-    let _ = asset::process_cname(config);
-
-    // Process content assets (non-.typ/.md files in content directory)
-    let _ = asset::process_content_assets(config, clean);
+    asset::process_configured_assets(config, false, false)?;
+    asset::process_cname(config)?;
 
     Ok(())
 }
@@ -106,6 +92,7 @@ pub fn serve_build(
     config: &SiteConfig,
     typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
+    ready: Arc<ServeReady>,
 ) -> Result<()> {
     // Collect all content files
     let content_files: Vec<_> = compiler::collect_all_files(&config.build.content)
@@ -113,37 +100,39 @@ pub fn serve_build(
         .filter(|p| ContentKind::is_content_file(p))
         .collect();
 
-    debug!("build"; "warming {} pages via scheduler", content_files.len());
+    logger::debug(
+        "build",
+        format_args!("warming {} pages via scheduler", content_files.len()),
+    );
     let mut warnings = warm_site_pages(
         content_files,
         Arc::new(config.clone()),
         Arc::clone(&typst_host),
         Arc::clone(&state),
+        ready.as_ref(),
     );
 
     // Recompile pages that depend on virtual packages (@tola/pages, @tola/site, etc.)
     // This ensures they have complete data after all pages are compiled
-    warnings.extend(recompile_virtual_users(config, &typst_host, &state));
+    warnings.extend(recompile_virtual_users(
+        config,
+        &typst_host,
+        &state,
+        ready.as_ref(),
+    ));
 
-    // Post-processing (flatten assets already done in init_serve_build)
+    // Post-processing (configured assets already done in init_serve_build)
     // CNAME already done in init_serve_build
 
     // Run post hooks
-    hooks::run_post_hooks(config, BuildMode::DEVELOPMENT, true)?;
+    hooks::run_post_hooks(config)?;
 
     // Finalize: print warnings and persist cache
     finalize_serve_build(config, &state, &warnings)?;
 
-    // Generate feed and sitemap
-    let (rss_result, sitemap_result) = rayon::join(
-        || state.with_pages(|pages| seo::feed::build_feed(config, pages)),
-        || state.with_pages(|pages| seo::sitemap::build_sitemap(config, pages)),
-    );
+    seo::build_outputs(config, &state)?;
 
-    rss_result?;
-    sitemap_result?;
-
-    debug!("build"; "done");
+    logger::debug("build", format_args!("done"));
     Ok(())
 }
 
@@ -155,11 +144,13 @@ pub fn start_serve_build(
     config: Arc<SiteConfig>,
     typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
+    ready: Arc<ServeReady>,
 ) {
     std::thread::spawn(move || {
-        if let Err(e) = serve_build(&config, typst_host, state) {
-            log!("build"; "background warmup failed: {}", e);
+        if let Err(e) = serve_build(&config, typst_host, state, Arc::clone(&ready)) {
+            logger::log("build", format_args!("background warmup failed: {}", e));
         }
+        ready.set_startup_done();
     });
 }
 
@@ -168,15 +159,14 @@ fn warm_site_pages(
     config: Arc<SiteConfig>,
     typst_host: Arc<TypstHost>,
     state: Arc<SiteIndex>,
+    ready: &ServeReady,
 ) -> Vec<BuildWarning> {
-    use crate::cli::serve::request_idle_for;
-
     let mut warnings = Vec::new();
     for path in content_files {
         // Only spend cycles on full-site warmup when the request path has been
         // quiet for a moment. This keeps startup eager work from racing page
         // loads or SPA navigation bursts.
-        while !request_idle_for(WARMUP_IDLE_GRACE) {
+        while !ready.request_idle_for(WARMUP_IDLE_GRACE) {
             if is_shutdown() {
                 return warnings;
             }
@@ -213,8 +203,8 @@ fn recompile_virtual_users(
     config: &SiteConfig,
     typst_host: &TypstHost,
     state: &SiteIndex,
+    ready: &ServeReady,
 ) -> Vec<BuildWarning> {
-    use crate::cli::serve::request_idle_for;
     use crate::compiler::dependency::{collect_virtual_dependents, flush_thread_local_deps};
     use crate::compiler::page::cache_vdom;
     use crate::reload::compile::{CompileOutcome, compile_page};
@@ -225,13 +215,16 @@ fn recompile_virtual_users(
         return Vec::new();
     }
 
-    debug!("build"; "recompiling {} virtual package users", all_dependents.len());
+    logger::debug(
+        "build",
+        format_args!("recompiling {} virtual package users", all_dependents.len()),
+    );
 
     let mut warnings = Vec::new();
 
     // Recompile each dependent page (compile_page handles write + cache)
     for path in &all_dependents {
-        while !request_idle_for(WARMUP_IDLE_GRACE) {
+        while !ready.request_idle_for(WARMUP_IDLE_GRACE) {
             if is_shutdown() {
                 return warnings;
             }
@@ -276,12 +269,12 @@ fn finalize_serve_build(
         let max = config.build.diagnostics.max_errors.unwrap_or(usize::MAX);
         for (path, msg) in failures.iter().take(max) {
             let display_path = path.strip_prefix(root).unwrap_or(path);
-            log!("error"; "{}", display_path.display());
-            eprintln!("{}", msg);
+            logger::log("error", format_args!("{}", display_path.display()));
+            logger::text(msg);
         }
         let remaining = failures.len().saturating_sub(max);
         if remaining > 0 {
-            eprintln!("... and {} more error(s)", remaining);
+            logger::text(&format!("... and {} more error(s)", remaining));
         }
     }
 
@@ -289,11 +282,11 @@ fn finalize_serve_build(
     if !warnings.is_empty() {
         let max = config.build.diagnostics.max_warnings.unwrap_or(usize::MAX);
         for item in warnings.iter().take(max) {
-            eprintln!("{}", item.message);
+            logger::text(&item.message);
         }
         let remaining = warnings.len().saturating_sub(max);
         if remaining > 0 {
-            eprintln!("... and {} more warning(s)", remaining);
+            logger::text(&format!("... and {} more warning(s)", remaining));
         }
     }
 
@@ -314,7 +307,10 @@ fn finalize_serve_build(
         diagnostics.push_warning(PersistedWarning::new(rel_path, warning.message.clone()));
     }
     if let Err(e) = persist_diagnostics(&diagnostics, root) {
-        crate::debug!("build"; "failed to persist diagnostics: {}", e);
+        logger::debug(
+            "build",
+            format_args!("failed to persist diagnostics: {}", e),
+        );
     }
 
     // Persist VDOM cache for serve reuse
@@ -324,7 +320,7 @@ fn finalize_serve_build(
         &source_paths,
         config.get_root(),
     ) {
-        crate::debug!("build"; "failed to persist vdom cache: {}", e);
+        logger::debug("build", format_args!("failed to persist vdom cache: {}", e));
     }
 
     Ok(())

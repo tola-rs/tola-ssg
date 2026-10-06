@@ -77,7 +77,7 @@ def compare_versions(left, right):
 def find_previous_tag(repo, tag):
     current = parse_version(tag)
     if current is None:
-        raise ValueError(f"release tag must look like v0.7.0 or v0.7.0-pre.1: {tag}")
+        raise ValueError(f"release tag must look like v0.x.y or v0.x.y-pre.1: {tag}")
 
     tags = []
     for candidate in git(repo, "tag", "--list", "v[0-9]*").splitlines():

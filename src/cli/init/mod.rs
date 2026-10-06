@@ -2,21 +2,70 @@
 //!
 //! Creates new site structure with default configuration.
 //!
-//! # Module Structure
-//!
-//! - [`validate`]: Pre-initialization validation
-//! - [`structure`]: Directory structure creation
-//! - [`config`]: Configuration file generation
-
-mod config;
-mod structure;
+mod files;
+mod prompt;
+mod tree;
 mod validate;
 
-use crate::{config::SiteConfig, log, package::generate_lsp_stubs};
+use crate::{config::SiteConfig, logger, package::generate_lsp_stubs};
 use anyhow::Result;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub use validate::InitMode;
+use validate::InitMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedFormat {
+    Rss,
+    Atom,
+    Json,
+}
+
+impl FeedFormat {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rss => "rss",
+            Self::Atom => "atom",
+            Self::Json => "json",
+        }
+    }
+
+    const fn url(self) -> &'static str {
+        match self {
+            Self::Rss => "/feed.xml",
+            Self::Atom => "/atom.xml",
+            Self::Json => "/feed.json",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Settings {
+    title: String,
+    base_url: Option<String>,
+    language: String,
+    author: String,
+    email: String,
+    tola_lib: bool,
+    atomic_css: bool,
+    feeds: Vec<FeedFormat>,
+    sitemap: bool,
+}
+
+impl Settings {
+    fn recommended() -> Self {
+        Self {
+            title: String::new(),
+            base_url: None,
+            language: "en".into(),
+            author: String::new(),
+            email: String::new(),
+            tola_lib: true,
+            atomic_css: false,
+            feeds: Vec::new(),
+            sitemap: false,
+        }
+    }
+}
 
 /// Create a new site with default structure
 ///
@@ -26,10 +75,15 @@ pub use validate::InitMode;
 /// 3. Write configuration files
 /// 4. Generate LSP stubs
 ///
-/// If `dry_run` is true, only prints the config template to stdout
-pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Result<()> {
+/// If `dry_run` is true, only prints the config template to stdout.
+pub fn new_site(
+    site_config: &SiteConfig,
+    has_name: bool,
+    dry_run: bool,
+    no_interactive: bool,
+) -> Result<()> {
     if dry_run {
-        print!("{}", config::generate_config_template());
+        logger::write_stdout(files::generate_config_template(&Settings::recommended()))?;
         return Ok(());
     }
 
@@ -41,27 +95,78 @@ pub fn new_site(site_config: &SiteConfig, has_name: bool, dry_run: bool) -> Resu
     };
 
     if let Err(e) = validate::validate_target(root, mode) {
-        log!("error"; "{}", e);
+        logger::prompt_log("error", format_args!("{}", e))?;
         std::process::exit(1);
     }
 
-    structure::create_structure(root)?;
+    let settings = collect_settings(root, no_interactive)?;
 
-    config::write_config(root)?;
+    tree::create_dirs(root, settings.tola_lib)?;
+
+    files::write_config(root, &settings)?;
     let output_dir = site_config.root_relative(&site_config.build.output);
-    config::write_ignore_files(root, &output_dir)?;
-    config::write_tola_template(root)?;
-    config::write_tola_util(root)?;
+    files::write_ignore_files(root, &output_dir)?;
+    if settings.tola_lib {
+        files::write_tola_lib(root)?;
+    }
+
+    logger::blank();
+    logger::log("init", format_args!("created site"));
+    logger::blank();
+    logger::text(&tree::render_tree(root, settings.tola_lib));
+    logger::blank();
 
     generate_lsp_stubs(root)?;
 
-    log!("init"; "Site initialized successfully");
+    logger::log("init", format_args!("generated Typst LSP packages"));
+    logger::block(
+        "hint",
+        "Tinymist setup:",
+        &[
+            "For editor diagnostics/completion, use Tola's generated package path.",
+            "Add `--package-path .tola/packages` to Tinymist extra args.",
+        ],
+    );
+    logger::log("init", format_args!("site initialized successfully"));
     Ok(())
 }
 
-/// Get the output directory path relative to root
-///
-/// Helper for external callers that need the output path
-pub fn get_output_dir(config: &SiteConfig) -> &Path {
-    &config.build.output
+fn collect_settings(root: &Path, no_interactive: bool) -> Result<Settings> {
+    if !no_interactive && !prompt::can_prompt() {
+        logger::prompt_log(
+            "error",
+            format_args!("interactive init requires a terminal"),
+        )?;
+        logger::prompt_line("hint: use `tola init --no-interactive` to generate the default site")?;
+        std::process::exit(1);
+    }
+
+    logger::log("init", format_args!("create a new Tola site"));
+    logger::log("init", format_args!("path: {}", display_path(root)));
+
+    if no_interactive {
+        logger::log("init", format_args!("using recommended settings"));
+        return Ok(Settings::recommended());
+    }
+
+    logger::blank();
+    if prompt::confirm("use recommended settings?", true)? {
+        return Ok(Settings::recommended());
+    }
+
+    prompt::ask()
+}
+
+fn display_path(path: &Path) -> String {
+    let normalized = crate::utils::path::normalize_path(path);
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = crate::utils::path::normalize_path(&PathBuf::from(home));
+        if let Ok(rest) = normalized.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".into();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    normalized.display().to_string()
 }

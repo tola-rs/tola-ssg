@@ -1,6 +1,6 @@
 [package]
 name = "tola"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2024"
 description = "static site generator for typst-based blog - keeping your focus on the content"
 documentation = "https://github.com/tola-rs/tola-ssg"
@@ -76,8 +76,8 @@ portable-pty = "0.9.0"
 macros = { package = "tola-ssg-macros", version = "0.1.4" }
 
 # Typst integration (via typst-batch crate)
-typst-batch = { version = "0.2.6", features = ["svg", "embed-fonts"] }
 # typst-batch = { path = "./typst-batch", features = ["svg", "embed-fonts"] }
+typst-batch = { version = "0.2.8", features = ["svg", "embed-fonts"] }
 # tola-vdom = { path = "./tola-vdom" }
 tola-vdom = "0.2.2"
 smallvec = "1.13"
@@ -126,6 +126,7 @@ oxc = { version = "0.113", default-features = false, features = [
     "mangler",
 ] }
 lightningcss = "1.0.0-alpha.70"
+encre-css = "0.20.1"
 
 [features]
 default = []
@@ -138,13 +139,3 @@ crossterm = { version = "0.29.0", default-features = false, features = [
 
 [dev-dependencies]
 tempfile = "3"
-
-[build-dependencies]
-oxc = { version = "0.113", default-features = false, features = [
-    "minifier",
-    "codegen",
-    "mangler",
-] }
-lightningcss = "1.0.0-alpha.70"
-typst-batch = { version = "0.2.6", features = ["svg"] }
-# typst-batch = { path = "./typst-batch", features = ["svg"] }

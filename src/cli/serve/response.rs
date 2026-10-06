@@ -23,7 +23,7 @@ pub fn respond_file(
     ws_port: Option<u16>,
 ) -> Result<FileServeResult> {
     let content_type = crate::utils::mime::from_path(path);
-    let no_cache = content_type == crate::utils::mime::types::HTML;
+    let no_cache = ws_port.is_some() || content_type == crate::utils::mime::types::HTML;
 
     if is_head_request(&request) {
         send_head(request, 200, content_type, no_cache)?;
@@ -172,7 +172,7 @@ pub fn respond_not_found(
     send_body(request, 404, PLAIN, b"404 Not Found".to_vec(), false)
 }
 
-/// Respond with 503 + auto-retry (build not ready yet)
+/// Respond with an auto-retrying loading page while the build is not ready.
 pub fn respond_loading(request: Request) -> Result<()> {
     use crate::utils::mime::types::HTML;
 
@@ -180,6 +180,7 @@ pub fn respond_loading(request: Request) -> Result<()> {
     if is_head_request(&request) {
         let response =
             Response::empty(StatusCode(503)).with_header(make_header("Content-Type", HTML));
+        let response = with_no_cache_headers(response);
         request.respond(response)?;
         return Ok(());
     }
@@ -187,21 +188,66 @@ pub fn respond_loading(request: Request) -> Result<()> {
     // Keep a stable loading page and poll readiness via HEAD.
     // This avoids repeated full-page meta-refresh flicker during startup.
     let body = r#"<!doctype html>
-<html><body>Loading...
+<html><head>
+<meta name="color-scheme" content="light dark">
+<style>
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: Canvas;
+  color: CanvasText;
+}
+
+.tola-loading-spinner {
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 0.25rem solid rgba(127, 127, 127, 0.25);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: tola-loading-spin 0.75s linear infinite;
+}
+
+@keyframes tola-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+</style>
+</head><body>
+<div class="tola-loading-spinner" role="status" aria-label="Building page"></div>
 <script>
 (function() {
   var url = location.origin + location.pathname + location.search;
+  var pending = false;
+  var reloading = false;
+  var pollTimer = null;
+  var reload = function() {
+    if (reloading) return;
+    reloading = true;
+    if (pollTimer !== null) clearInterval(pollTimer);
+    location.reload();
+  };
   var poll = function() {
-    fetch(url, { method: 'HEAD' })
+    if (pending || reloading) return;
+    pending = true;
+    fetch(url, { method: 'HEAD', cache: 'no-store' })
       .then(function(r) {
-        if (r.headers.get('X-Tola-Ready') === 'true') {
-          location.reload();
+        if (r.status !== 503) {
+          reload();
         }
       })
-      .catch(function() {});
+      .catch(function() {})
+      .then(function() { pending = false; });
   };
   poll();
-  setInterval(poll, 500);
+  pollTimer = setInterval(poll, 500);
 })();
 </script>
 </body></html>"#;
@@ -209,6 +255,7 @@ pub fn respond_loading(request: Request) -> Result<()> {
     let response = Response::from_string(body)
         .with_status_code(StatusCode(503))
         .with_header(make_header("Content-Type", HTML));
+    let response = with_no_cache_headers(response);
     request.respond(response)?;
     Ok(())
 }
@@ -227,36 +274,44 @@ pub fn respond_unavailable(request: Request) -> Result<()> {
 
 /// Respond with welcome page (empty content directory)
 ///
-/// Includes a polling script that auto-refreshes when content is created
-/// Note: HEAD requests return without X-Tola-Ready to prevent infinite refresh loop
+/// Includes a polling script that auto-refreshes when content is created.
 pub fn respond_welcome(request: Request) -> Result<()> {
     use crate::embed::serve::{WELCOME_HTML, WelcomeVars};
     use crate::utils::mime::types::HTML;
 
-    // HEAD request: return without X-Tola-Ready (polling checks this header)
+    // HEAD requests are used by polling logic; an empty content directory is
+    // not ready to replace the welcome page.
     if is_head_request(&request) {
         let response =
-            Response::empty(StatusCode(200)).with_header(make_header("Content-Type", HTML));
-        return request.respond(response).map_err(Into::into);
+            Response::empty(StatusCode(503)).with_header(make_header("Content-Type", HTML));
+        let response = with_no_cache_headers(response);
+        request.respond(response)?;
+        return Ok(());
     }
 
     let body = WELCOME_HTML.render(&WelcomeVars {
-        title: "Welcome",
         version: env!("CARGO_PKG_VERSION"),
     });
 
-    // Inject polling script to auto-refresh when content is created
-    // Note: fetch ignores fragment, but we need to preserve it for navigation
-    // Check both X-Tola-Ready header AND status 200 (not 404)
+    // Inject polling script to auto-refresh when content is created.
+    // Note: fetch ignores fragment, but we need to preserve it for navigation.
     let poll_script = r#"<script>
 (function(){
     var url = location.origin + location.pathname + location.search;
+    var pending = false;
+    var reloading = false;
     var poll = function() {
-        fetch(url, { method: 'HEAD' })
+        if (pending || reloading) return;
+        pending = true;
+        fetch(url, { method: 'HEAD', cache: 'no-store' })
             .then(function(r) {
-                if (r.ok && r.headers.get('X-Tola-Ready') === 'true') location.reload();
+                if (r.ok) {
+                    reloading = true;
+                    location.reload();
+                }
             })
-            .catch(function() {});
+            .catch(function() {})
+            .then(function() { pending = false; });
     };
     poll();
     setInterval(poll, 1000);
@@ -277,9 +332,8 @@ fn send_head(
     content_type: &'static str,
     no_cache: bool,
 ) -> Result<()> {
-    let response = Response::empty(StatusCode(status))
-        .with_header(make_header("Content-Type", content_type))
-        .with_header(make_header("X-Tola-Ready", "true"));
+    let response =
+        Response::empty(StatusCode(status)).with_header(make_header("Content-Type", content_type));
     let response = if no_cache {
         with_no_cache_headers(response)
     } else {
@@ -304,8 +358,7 @@ fn send_body(
 
     let response = Response::from_data(body)
         .with_status_code(StatusCode(status))
-        .with_header(make_header("Content-Type", content_type))
-        .with_header(make_header("X-Tola-Ready", "true"));
+        .with_header(make_header("Content-Type", content_type));
     let response = if no_cache {
         with_no_cache_headers(response)
     } else {
@@ -314,7 +367,7 @@ fn send_body(
     request.respond(response)?;
     Ok(())
 }
-/// Send HTML without X-Tola-Ready (for welcome pages)
+/// Send standalone HTML.
 fn send_html(request: Request, body: String) -> Result<()> {
     use crate::utils::mime::types::HTML;
     let response = Response::from_string(crate::utils::html::ensure_doctype(body))
@@ -365,6 +418,9 @@ fn with_no_cache_headers<R: std::io::Read>(response: Response<R>) -> Response<R>
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::thread;
 
     #[test]
     fn prepends_doctype_to_html_bytes() {
@@ -381,5 +437,67 @@ mod tests {
     fn does_not_duplicate_existing_doctype() {
         let body = crate::utils::html::ensure_doctype("<!DOCTYPE html>\n<html></html>".to_string());
         assert_eq!(body.matches("<!DOCTYPE html>").count(), 1);
+    }
+
+    #[test]
+    fn loading_get_is_not_ready_document() {
+        let response = request_loading("GET");
+        let (headers, body) = split_response(&response);
+
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(body.contains("tola-loading-spinner"), "{response}");
+        assert!(body.contains("place-items: center"), "{response}");
+        assert!(!body.contains(">Loading"), "{response}");
+        assert!(!body.contains("http-equiv=\"refresh\""), "{response}");
+        assert!(body.contains("cache: 'no-store'"), "{response}");
+        assert!(
+            body.contains("if (pending || reloading) return"),
+            "{response}"
+        );
+        assert!(body.contains("clearInterval(pollTimer)"), "{response}");
+        assert!(!body.contains("setTimeout(reload"), "{response}");
+        assert!(body.contains("if (r.status !== 503)"), "{response}");
+        assert!(body.contains("location.reload()"), "{response}");
+        assert!(!body.contains("location.replace(url)"), "{response}");
+        assert!(!body.contains("document.write"), "{response}");
+        assert!(!body.contains("AbortController"), "{response}");
+        assert!(!body.contains("if (ready) reload()"), "{response}");
+        assert!(!body.contains("if (!ready) reload()"), "{response}");
+        assert!(headers.contains("Cache-Control: no-store"), "{response}");
+    }
+
+    #[test]
+    fn loading_head_stays_not_ready_for_polling() {
+        let response = request_loading("HEAD");
+        let (headers, _) = split_response(&response);
+
+        assert!(response.starts_with("HTTP/1.1 503"), "{response}");
+        assert!(headers.contains("Cache-Control: no-store"), "{response}");
+    }
+
+    fn split_response(response: &str) -> (&str, &str) {
+        response.split_once("\r\n\r\n").unwrap_or((response, ""))
+    }
+
+    fn request_loading(method: &str) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+
+        let handle = thread::spawn(move || {
+            let request = server.recv().unwrap();
+            super::respond_loading(request).unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "{method} / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        handle.join().unwrap();
+        response
     }
 }

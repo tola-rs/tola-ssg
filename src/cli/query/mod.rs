@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use crate::cli::args::QueryArgs;
 use crate::config::SiteConfig;
-use crate::log;
+use crate::logger;
 use crate::page::StoredPageMap;
 use crate::utils::plural_count;
 
@@ -26,14 +26,19 @@ pub fn run_query(args: &QueryArgs, config: &SiteConfig) -> Result<()> {
     let files = crate::cli::common::collect_content_files(&args.paths, &config.build.content)?;
 
     let file_count = files.len();
-    log!("query"; "querying {}", plural_count(file_count, "file"));
+    logger::log(
+        "query",
+        format_args!("querying {}", plural_count(file_count, "file")),
+    );
 
     let results = collect::query_files(&files, args, config, &host, &store)?;
 
-    log!(
-        "query";
-        "found {}",
-        plural_count(results.pages.len(), "page with metadata")
+    logger::log(
+        "query",
+        format_args!(
+            "found {}",
+            plural_count(results.pages.len(), "page with metadata")
+        ),
     );
 
     output::output_results(&results, args)?;

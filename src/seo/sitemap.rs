@@ -14,7 +14,7 @@
 //! </urlset>
 //! ```
 
-use crate::{config::SiteConfig, log, page::StoredPageMap, seo::minify_xml};
+use crate::{config::SiteConfig, logger, page::StoredPageMap};
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs;
@@ -46,9 +46,7 @@ impl Sitemap {
         let urls: Vec<UrlEntry> = pages
             .iter()
             .map(|page| {
-                let full_url = page
-                    .permalink
-                    .canonical_url(config.site.info.url.as_deref());
+                let full_url = config.canonical_url(&page.permalink);
                 UrlEntry {
                     loc: full_url,
                     lastmod: page.meta.date.clone(),
@@ -84,18 +82,22 @@ impl Sitemap {
     }
 
     fn write(self, config: &SiteConfig) -> Result<()> {
-        // Resolve sitemap path relative to output_dir (with path_prefix)
-        let sitemap_path = config
-            .paths()
-            .output_dir()
-            .join(&config.site.seo.sitemap.path);
+        let sitemap_path = config.site.seo.sitemap.url.output_path(config.paths());
         let xml = self.into_xml();
-        let xml = minify_xml(xml.as_bytes(), config.build.minify);
 
-        fs::write(&sitemap_path, &*xml)
+        fs::write(&sitemap_path, xml)
             .with_context(|| format!("Failed to write sitemap to {}", sitemap_path.display()))?;
 
-        log!("sitemap"; "{}", sitemap_path.file_name().unwrap_or_default().to_string_lossy());
+        logger::log(
+            "sitemap",
+            format_args!(
+                "{}",
+                sitemap_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
         Ok(())
     }
 }

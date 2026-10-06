@@ -25,13 +25,14 @@ mod debouncer;
 mod router;
 // Shared fs event types.
 mod types;
-// Watch root attach/re-attach lifecycle.
-mod watch_roots;
+// Root attach/re-attach lifecycle.
+mod roots;
 
+use crate::logger;
 use classifier::EventClassifier;
 use debouncer::Debouncer;
+use roots::RootSet;
 use router::{events_to_messages, log_events};
-use watch_roots::WatchRoots;
 
 /// FileSystem Actor - watches for file changes
 pub struct FsActor {
@@ -39,8 +40,8 @@ pub struct FsActor {
     notify_rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
     /// Watcher handle (must be kept alive)
     watcher: RecommendedWatcher,
-    /// Watch-root consistency layer (attach/re-attach root directories)
-    watch_roots: WatchRoots,
+    /// Root consistency layer (attach/re-attach watched directories)
+    roots: RootSet,
     /// Channel to send messages to CompilerActor
     compiler_tx: mpsc::Sender<CompilerMsg>,
     /// Debouncer state
@@ -72,15 +73,15 @@ impl FsActor {
 
         // Start watching all existing roots (missing roots will be re-attached later)
         let current_config = config.current();
-        let mut watch_roots = WatchRoots::from_config(&current_config);
-        watch_roots.attach_existing(&mut watcher)?;
+        let mut roots = RootSet::from_config(&current_config);
+        roots.attach_existing(&mut watcher)?;
 
         // Events are now buffering in notify_rx while caller does initial build
 
         Ok(Self {
             notify_rx,
             watcher,
-            watch_roots,
+            roots,
             compiler_tx,
             debouncer: Debouncer::new(),
             config,
@@ -97,7 +98,7 @@ impl FsActor {
         let state = Arc::clone(&self.state);
         let mut debouncer = self.debouncer;
         let mut watcher = self.watcher;
-        let mut watch_roots = self.watch_roots;
+        let mut roots = self.roots;
 
         let (async_tx, mut async_rx) = tokio::sync::mpsc::channel::<notify::Event>(64);
 
@@ -122,7 +123,7 @@ impl FsActor {
                 _ = tokio::time::sleep(debouncer.sleep_duration()) => {
                     // Ensure watcher roots remain attached.
                     let current_config = config.current();
-                    watch_roots.sync_config(&mut watcher, &current_config);
+                    roots.sync_config(&mut watcher, &current_config);
                     // Classify recovered events and route messages.
                     if process_changes(&mut debouncer, &compiler_tx, &current_config, &state).await.is_err() {
                         break;
@@ -170,7 +171,7 @@ async fn process_changes(
             return Ok(());
         }
         let changed_paths: Vec<_> = raw_events.keys().cloned().collect();
-        crate::debug!("watch"; "retrying scan after change");
+        logger::debug("watch", format_args!("retrying scan after change"));
         compiler_tx
             .send(CompilerMsg::RetryScan { changed_paths })
             .await

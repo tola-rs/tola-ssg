@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag (required, e.g. v0.7.0, v0.7.0-pre.1)."
+        description: "Existing release tag (required, e.g. v0.x.y, v0.x.y-pre.1)."
         required: true
         type: string
   push:
@@ -29,18 +29,22 @@ jobs:
       matrix:
         include:
           - target: x86_64-linux-static
+            package: x86_64-linux-static
             archive: tar.gz
             binary: tola
             use_cachix: true
           - target: aarch64-linux-static
+            package: aarch64-linux-static
             archive: tar.gz
             binary: tola
             use_cachix: true
           - target: aarch64-darwin
+            package: aarch64-darwin-release
             archive: tar.gz
             binary: tola
             use_cachix: true
           - target: x86_64-windows
+            package: x86_64-windows
             archive: zip
             binary: tola.exe
             use_cachix: false
@@ -57,7 +61,7 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
 
       # Enable Cachix only for Linux/macOS targets
-      - uses: cachix/cachix-action@v15
+      - uses: cachix/cachix-action@v17
         if: ${{ matrix.use_cachix }}
         with:
           name: tola
@@ -69,8 +73,20 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
 
-          echo "Building ${TARGET}..."
-          outpath=$(nix build -j auto --no-link --print-out-paths "./#${TARGET}")
+          echo "Building ${TARGET} from .#${PACKAGE}..."
+          outpath=$(nix build -j auto --no-link --print-out-paths "./#${PACKAGE}")
+          binary_path="$outpath/bin/${BINARY}"
+
+          if [[ "${TARGET}" == *-darwin ]]; then
+            echo "Checking Darwin dynamic library dependencies..."
+            deps="$(otool -L "$binary_path")"
+            printf '%s\n' "$deps"
+
+            if printf '%s\n' "$deps" | grep -E '/nix/store/.+\.dylib'; then
+              echo "::error::Darwin release binary depends on Nix store dylibs"
+              exit 1
+            fi
+          fi
 
           if [ "${ARCHIVE}" = "zip" ]; then
             (cd "$outpath/bin" && zip -9 "$OLDPWD/artifacts/tola-${TARGET}.zip" "${BINARY}")
@@ -79,11 +95,12 @@ jobs:
           fi
         env:
           TARGET: ${{ matrix.target }}
+          PACKAGE: ${{ matrix.package }}
           ARCHIVE: ${{ matrix.archive }}
           BINARY: ${{ matrix.binary }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: artifact-${{ matrix.target }}
           path: artifacts/*
@@ -108,7 +125,7 @@ jobs:
           path: workflow-source
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: artifact-*
           merge-multiple: true
@@ -126,7 +143,7 @@ jobs:
           # Basic validation for release tag format
           if ! echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "Invalid release tag: $tag"
-            echo "Expected format like v0.7.0 or v0.7.0-pre.1"
+            echo "Expected format like v0.x.y or v0.x.y-pre.1"
             exit 1
           fi
 

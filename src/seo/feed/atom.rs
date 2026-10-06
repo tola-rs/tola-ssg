@@ -2,56 +2,43 @@
 //!
 //! Generates Atom feeds from page metadata.
 
-use super::common::{FeedPage, get_feed_pages};
+use super::common::{FeedPage, entry_body, feed_url, page_url};
 use crate::{
-    config::SiteConfig, core::UrlPath, log, page::StoredPageMap, seo::minify_xml,
+    config::{FeedConfig, SiteConfig},
+    core::UrlPath,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result};
 use atom_syndication::{
-    Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link, LinkBuilder,
-    Person, PersonBuilder, Text,
+    ContentBuilder, Entry, EntryBuilder, Feed, FeedBuilder, FixedDateTime, GeneratorBuilder, Link,
+    LinkBuilder, Person, PersonBuilder, Text,
 };
-use std::fs;
 
-/// Build Atom 1.0 feed
-pub fn build_atom(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
-    AtomFeed::build(config, store).write()
-}
-
-struct AtomFeed {
-    config: SiteConfig,
-    pages: Vec<FeedPage>,
-}
-
-impl AtomFeed {
-    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
-        let pages = get_feed_pages(store);
-        Self {
-            config: config.clone(),
-            pages,
-        }
+/// Render an Atom 1.0 feed.
+pub(super) fn render(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<String> {
+    AtomFeed {
+        config,
+        feed,
+        pages,
     }
+    .to_xml()
+}
 
-    fn into_xml(self) -> Result<String> {
-        let site_url = self.config.site.info.url.as_deref();
-        let base_url = UrlPath::from_page("/").canonical_url(site_url);
-        let feed_path = format!(
-            "/{}",
-            self.config
-                .site
-                .seo
-                .feed
-                .path
-                .to_string_lossy()
-                .replace('\\', "/")
-        );
-        let feed_url = UrlPath::from_asset(&feed_path).canonical_url(site_url);
+struct AtomFeed<'a> {
+    config: &'a SiteConfig,
+    feed: &'a FeedConfig,
+    pages: &'a [FeedPage],
+}
+
+impl AtomFeed<'_> {
+    fn to_xml(&self) -> Result<String> {
+        let base_url = self.config.canonical_url(&UrlPath::from_page("/"));
+        let feed_url = feed_url(self.config, self.feed);
 
         let entries: Vec<Entry> = self
             .pages
             .iter()
-            .filter_map(|page| page_to_atom_entry(page, &self.config))
+            .filter_map(|page| page_to_atom_entry(page, self.config, self.feed))
             .collect();
 
         // Find the most recent update time for feed updated field
@@ -77,7 +64,7 @@ impl AtomFeed {
         let self_link: Link = LinkBuilder::default()
             .href(feed_url)
             .rel("self".to_string())
-            .mime_type(Some("application/atom+xml".to_string()))
+            .mime_type(Some(self.feed.format.mime_type().to_string()))
             .build();
 
         // Build alternate link
@@ -105,32 +92,13 @@ impl AtomFeed {
 
         Ok(feed.to_string())
     }
-
-    fn write(self) -> Result<()> {
-        let minify = self.config.build.minify;
-        let output_dir = self.config.paths().output_dir();
-        let feed_path = self.config.site.seo.feed.path.clone();
-        let xml = self.into_xml()?;
-        let xml = minify_xml(xml.as_bytes(), minify);
-        // Resolve feed path relative to output_dir (with path_prefix)
-        let atom_path = output_dir.join(&feed_path);
-
-        if let Some(parent) = atom_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&atom_path, &*xml)?;
-
-        log!("atom"; "{}", atom_path.file_name().unwrap_or_default().to_string_lossy());
-        Ok(())
-    }
 }
 
-fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
+fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<Entry> {
     let updated_str = DateTimeUtc::parse(&page.date)?.to_rfc3339();
     let updated: FixedDateTime = updated_str.parse().ok()?;
 
-    let permalink = UrlPath::from_page(&page.permalink);
-    let link = permalink.canonical_url(config.site.info.url.as_deref());
+    let link = page_url(page, config);
 
     // Build entry link
     let entry_link: Link = LinkBuilder::default()
@@ -145,13 +113,25 @@ fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
         .map(|name| vec![PersonBuilder::default().name(name.clone()).build()])
         .unwrap_or_default();
 
+    let content = entry_body(page, config, feed).map(|html| {
+        ContentBuilder::default()
+            .value(html)
+            .content_type("html".to_string())
+            .build()
+    });
+
     Some(
         EntryBuilder::default()
             .title(Text::plain(page.title.clone()))
             .id(&link)
             .updated(updated)
             .links(vec![entry_link])
-            .summary(page.summary.clone().map(Text::plain))
+            .summary(
+                page.summary
+                    .as_ref()
+                    .map(|summary| Text::plain(&summary.text)),
+            )
+            .content(content)
             .authors(authors)
             .build(),
     )
@@ -160,6 +140,8 @@ fn page_to_atom_entry(page: &FeedPage, config: &SiteConfig) -> Option<Entry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FeedFeature, FeedFormat};
+    use crate::seo::feed::common::FeedSummary;
 
     // Helper to create a config for testing
     fn make_config() -> SiteConfig {
@@ -172,6 +154,14 @@ mod tests {
         config
     }
 
+    fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
+        FeedConfig {
+            format: FeedFormat::Atom,
+            url: "/atom.xml".into(),
+            features,
+        }
+    }
+
     #[test]
     fn test_page_to_atom_entry_basic() {
         let config = make_config();
@@ -179,14 +169,43 @@ mod tests {
             title: "Test Post".to_string(),
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
-            summary: Some("A test summary".to_string()),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
+            feed_body: None,
             author: Some("Post Author".to_string()),
         };
 
-        let entry = page_to_atom_entry(&page, &config).expect("should create entry");
+        let feed = feed_config(vec![]);
+        let entry = page_to_atom_entry(&page, &config, &feed).expect("should create entry");
         assert_eq!(entry.title().as_str(), "Test Post");
         assert_eq!(entry.id(), "https://example.com/test/");
         assert!(entry.updated().to_rfc3339().starts_with("2024-01-15"));
+        assert_eq!(entry.content(), None);
+    }
+
+    #[test]
+    fn test_page_to_atom_entry_full_text() {
+        let config = make_config();
+        let page = FeedPage {
+            title: "Test Post".to_string(),
+            date: "2024-01-15".to_string(),
+            permalink: "/test/".to_string(),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
+            feed_body: Some("<article><p>Full text</p></article>".to_string()),
+            author: Some("Post Author".to_string()),
+        };
+
+        let feed = feed_config(vec![FeedFeature::FullText]);
+        let entry = page_to_atom_entry(&page, &config, &feed).expect("should create entry");
+        assert_eq!(entry.summary().map(Text::as_str), Some("A test summary"));
+        let content = entry.content().expect("should include full text");
+        assert_eq!(content.content_type(), Some("html"));
+        assert_eq!(content.value(), Some("<article><p>Full text</p></article>"));
     }
 
     #[test]
@@ -197,10 +216,12 @@ mod tests {
             date: "invalid-date".to_string(),
             permalink: "/test/".to_string(),
             summary: None,
+            feed_body: None,
             author: None,
         };
 
         // Invalid date should return None
-        assert!(page_to_atom_entry(&page, &config).is_none());
+        let feed = feed_config(vec![]);
+        assert!(page_to_atom_entry(&page, &config, &feed).is_none());
     }
 }

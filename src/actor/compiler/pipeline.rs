@@ -9,10 +9,20 @@ use crate::reload::compile::{CompileOutcome, compile_page};
 
 use super::CompilerActor;
 use super::tasks::compile_batch;
+use crate::logger;
 
 impl CompilerActor {
     /// Compile a single file (blocking).
     pub(super) async fn compile_one(&mut self, path: &Path) {
+        let (outcome, config) = self.compile_one_outcome(path).await;
+        self.route(outcome, config, &[]).await;
+    }
+
+    /// Compile a single file and return the outcome without sending it to VDOM.
+    pub(super) async fn compile_one_outcome(
+        &mut self,
+        path: &Path,
+    ) -> (CompileOutcome, Arc<SiteConfig>) {
         let (config, typst_host) = self.current_config_and_typst_host();
         let compile_config = Arc::clone(&config);
         let state = Arc::clone(&self.state);
@@ -27,9 +37,25 @@ impl CompilerActor {
         })
         .await;
 
-        match result {
-            Ok(outcome) => self.route(outcome, config).await,
-            Err(e) => crate::log!("compile"; "error: {}", e),
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                logger::log("compile", format_args!("error: {}", e));
+                CompileOutcome::Skipped
+            }
+        };
+
+        (outcome, config)
+    }
+
+    pub(super) async fn route_all(
+        &mut self,
+        outcomes: Vec<CompileOutcome>,
+        config: Arc<SiteConfig>,
+        assets: &[String],
+    ) {
+        for outcome in outcomes {
+            self.route(outcome, Arc::clone(&config), assets).await;
         }
     }
 
@@ -44,7 +70,7 @@ impl CompilerActor {
         )
         .await;
         for outcome in outcomes {
-            self.route(outcome, Arc::clone(&config)).await;
+            self.route(outcome, Arc::clone(&config), &[]).await;
         }
     }
 
@@ -53,20 +79,27 @@ impl CompilerActor {
         let all_dependents = collect_virtual_dependents();
 
         if !all_dependents.is_empty() {
-            crate::debug!(
-                "compile";
-                "recompiling {} virtual package users",
-                all_dependents.len()
+            logger::debug(
+                "compile",
+                format_args!("recompiling {} virtual package users", all_dependents.len()),
             );
             self.compile_batch_blocking(all_dependents.into_iter().collect())
                 .await;
         } else {
-            crate::debug!("compile"; "no virtual package users to recompile");
+            logger::debug(
+                "compile",
+                format_args!("no virtual package users to recompile"),
+            );
         }
     }
 
     /// Route compilation outcome to VdomActor.
-    pub(super) async fn route(&mut self, outcome: CompileOutcome, config: Arc<SiteConfig>) {
+    pub(super) async fn route(
+        &mut self,
+        outcome: CompileOutcome,
+        config: Arc<SiteConfig>,
+        assets: &[String],
+    ) {
         let msg = match outcome {
             CompileOutcome::Vdom {
                 path,
@@ -81,6 +114,7 @@ impl CompilerActor {
                 vdom,
                 permalink_change,
                 warnings,
+                assets: assets.to_vec(),
             },
             CompileOutcome::Reload { reason } => VdomMsg::Reload { reason },
             CompileOutcome::Skipped => VdomMsg::Skip,

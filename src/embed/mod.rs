@@ -4,7 +4,7 @@
 //!
 //! - `template` - Template types for typed variable injection
 //! - `asset` - Embedded asset types with content-hash filenames
-//! - `build` - Build-time templates (redirect.html)
+//! - `build` - Build output templates and scripts
 //! - `serve` - Dev server templates (welcome.html, hotreload.js)
 //! - `css` - Embedded stylesheets (enhance.css)
 //!
@@ -63,8 +63,8 @@ pub mod build {
         pub fn from_config(config: &SiteConfig) -> Self {
             let nav = &config.site.nav;
             Self {
-                transition: nav.transition.is_enabled(),
-                preload: nav.preload.enable,
+                transition: nav.spa && nav.transition.is_enabled(),
+                preload: nav.spa && nav.preload.enable,
                 preload_delay: nav.preload.delay,
                 path_prefix: normalize_path_prefix(&config.build.path_prefix),
             }
@@ -117,15 +117,21 @@ pub mod build {
     }
 
     /// SPA navigation JavaScript with configuration injection.
-    pub const SPA_JS: EmbeddedAsset<SpaVars> = EmbeddedAsset::new(
-        AssetKind::JavaScript,
-        "spa",
-        include_str!(concat!(env!("OUT_DIR"), "/spa.min.js")),
-    );
+    pub const SPA_JS: EmbeddedAsset<SpaVars> =
+        EmbeddedAsset::new(AssetKind::JavaScript, "spa", include_str!("build/spa.js"));
 }
 
 pub mod serve {
     use super::{AssetKind, EmbeddedAsset, Template, TemplateVars};
+
+    const ERROR_OVERLAY_CSS: &str = include_str!("serve/hotreload-error-overlay.css");
+
+    fn escape_template_literal(input: &str) -> String {
+        input
+            .replace('\\', "\\\\")
+            .replace('`', "\\`")
+            .replace("${", "\\${")
+    }
 
     /// Variables for hotreload.js.
     pub struct HotreloadVars {
@@ -134,7 +140,12 @@ pub mod serve {
 
     impl TemplateVars for HotreloadVars {
         fn apply(&self, content: &str) -> String {
-            content.replace("__TOLA_WS_PORT__", &self.ws_port.to_string())
+            content
+                .replace("__TOLA_WS_PORT__", &self.ws_port.to_string())
+                .replace(
+                    "__TOLA_ERROR_OVERLAY_CSS__",
+                    &escape_template_literal(ERROR_OVERLAY_CSS),
+                )
         }
 
         fn hash_input(&self) -> String {
@@ -143,28 +154,25 @@ pub mod serve {
     }
 
     /// Variables for welcome.html.
-    pub struct WelcomeVars<'a> {
-        pub title: &'a str,
-        pub version: &'a str,
+    pub struct WelcomeVars {
+        pub version: &'static str,
     }
 
-    impl TemplateVars for WelcomeVars<'_> {
+    impl TemplateVars for WelcomeVars {
         fn apply(&self, content: &str) -> String {
-            content
-                .replace("__TITLE__", self.title)
-                .replace("__VERSION__", self.version)
+            content.replace("__TOLA_VERSION__", self.version)
         }
     }
 
     /// Welcome page template.
-    pub const WELCOME_HTML: Template<WelcomeVars<'static>> =
-        Template::new(include_str!(concat!(env!("OUT_DIR"), "/welcome.html")));
+    pub const WELCOME_HTML: Template<WelcomeVars> =
+        Template::new(include_str!("serve/welcome.html"));
 
     /// Hot reload JavaScript with WebSocket port injection.
     pub const HOTRELOAD_JS: EmbeddedAsset<HotreloadVars> = EmbeddedAsset::new(
         AssetKind::JavaScript,
         "hotreload",
-        include_str!(concat!(env!("OUT_DIR"), "/hotreload.min.js")),
+        include_str!("serve/hotreload.js"),
     );
 }
 
@@ -224,9 +232,14 @@ pub mod css {
 
     /// Build EnhanceVars from SiteConfig.
     pub fn enhance_vars(config: &crate::config::SiteConfig) -> EnhanceVars {
+        let style = if config.site.nav.spa {
+            config.site.nav.transition.style
+        } else {
+            TransitionStyle::None
+        };
         EnhanceVars {
             nav: NavVars {
-                style: config.site.nav.transition.style,
+                style,
                 transition_time: config.site.nav.transition.time,
             },
         }
@@ -240,7 +253,7 @@ pub mod css {
 pub mod typst {
     use super::{Template, TemplateVars};
 
-    /// Variables for tola.typ templates.
+    /// Variables for the generated Tola Typst library.
     pub struct TolaTypstVars {
         pub version: &'static str,
     }
@@ -259,12 +272,8 @@ pub mod typst {
         }
     }
 
-    /// Tola template for tola init to generate templates/tola.typ.
-    pub const TOLA_TEMPLATE: Template<TolaTypstVars> =
-        Template::new(include_str!("typst/templates/tola.typ"));
-    /// Tola util for tola init to generate utils/tola.typ.
-    pub const TOLA_UTIL: Template<TolaTypstVars> =
-        Template::new(include_str!("typst/utils/tola.typ"));
+    /// Tola Typst library for tola init to generate tola/lib.typ.
+    pub const TOLA_LIB: Template<TolaTypstVars> = Template::new(include_str!("typst/tola/lib.typ"));
 }
 
 pub mod recolor {
@@ -447,5 +456,37 @@ mod tests {
         config.build.path_prefix = std::path::PathBuf::from("docs/blog");
         let vars = build::SpaVars::from_config(&config);
         assert_eq!(vars.path_prefix, "/docs/blog");
+    }
+
+    #[test]
+    fn enhance_vars_ignore_transition_when_spa_disabled() {
+        let mut config = crate::config::SiteConfig::default();
+        config.site.nav.spa = false;
+        config.site.nav.transition.style = crate::config::section::site::TransitionStyle::Fade;
+        config.site.nav.transition.time = 350;
+
+        let vars = css::enhance_vars(&config);
+
+        assert!(!vars.nav.is_enabled());
+        assert_eq!(vars.nav.render(), "");
+    }
+
+    #[test]
+    fn write_embedded_assets_does_not_emit_spa_js_when_spa_disabled() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::SiteConfig::default();
+        config.site.nav.spa = false;
+        config.site.nav.preload.enable = true;
+        config.site.nav.transition.style = crate::config::section::site::TransitionStyle::Fade;
+
+        write_embedded_assets(&config, dir.path()).unwrap();
+
+        let generated = std::fs::read_dir(dir.path().join(crate::asset::SYSTEM_ASSET_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(generated.iter().any(|name| name.starts_with("enhance-")));
+        assert!(!generated.iter().any(|name| name.starts_with("spa-")));
     }
 }

@@ -44,7 +44,7 @@ fn extract_domain(url_str: &str) -> Option<String> {
 ///
 /// # Rules
 /// 1. `site.url` must be defined
-/// 2. No flatten entry outputs as "CNAME", OR the source file doesn't exist
+/// 2. No flatten asset outputs as "/CNAME", OR the source file doesn't exist
 pub fn should_generate_cname(
     site_url: Option<&str>,
     flatten: &[FlattenEntry],
@@ -54,7 +54,7 @@ pub fn should_generate_cname(
     let domain = extract_domain(url)?;
 
     for entry in flatten {
-        if entry.output_name() == "CNAME" {
+        if entry.target().as_str() == "/CNAME" {
             let src_path = site_root.join(entry.source());
             if src_path.exists() {
                 // User provided CNAME file exists, don't auto-generate
@@ -118,15 +118,14 @@ mod tests {
         std::fs::create_dir_all(cname_path.parent().unwrap()).unwrap();
         std::fs::write(&cname_path, "user-domain.com").unwrap();
 
-        let flatten = vec![FlattenEntry::Simple("assets/CNAME".into())];
+        let flatten = vec![FlattenEntry::new("assets/CNAME", "/CNAME")];
         assert!(should_generate_cname(Some("https://example.com"), &flatten, tmp.path()).is_none());
     }
 
     #[test]
     fn test_should_generate_cname_user_file_missing() {
         let tmp = TempDir::new().unwrap();
-        // User configured CNAME in flatten but file doesn't exist
-        let flatten = vec![FlattenEntry::Simple("assets/CNAME".into())];
+        let flatten = vec![FlattenEntry::new("assets/CNAME", "/CNAME")];
         let result = should_generate_cname(Some("https://example.com"), &flatten, tmp.path());
         assert_eq!(result, Some("example.com".to_string()));
     }

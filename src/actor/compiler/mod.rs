@@ -22,12 +22,14 @@ use crate::address::SiteIndex;
 use crate::compiler::page::{PageStateEpoch, TypstHost};
 use crate::config::{ConfigHandle, SiteConfig};
 use crate::reload::compile::CompileOutcome;
+use crate::reload::output;
 
 pub(super) struct BatchResult {
     pub(super) config: Arc<SiteConfig>,
     pub(super) outcomes: Vec<CompileOutcome>,
     pub(super) pages_hash: u64,
     pub(super) watched_post_paths: Option<Vec<PathBuf>>,
+    pub(super) output_update: output::Update,
 }
 
 pub(super) type BackgroundTask = JoinHandle<BatchResult>;
@@ -46,6 +48,7 @@ pub struct CompilerActor {
     pub(super) last_active_recompile: Option<Instant>,
     pub(super) page_epoch: PageStateEpoch,
     pub(super) typst_host: Option<CachedTypstHost>,
+    pub(super) output_echoes: output::Echoes,
 }
 
 impl CompilerActor {
@@ -63,6 +66,7 @@ impl CompilerActor {
             last_active_recompile: None,
             page_epoch: PageStateEpoch::new(),
             typst_host: None,
+            output_echoes: output::Echoes::default(),
         }
     }
 

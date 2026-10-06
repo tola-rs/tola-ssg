@@ -12,6 +12,7 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use std::sync::LazyLock;
 
+use crate::logger;
 use crate::utils::path::normalize_path;
 
 /// Asset path -> version hash mapping
@@ -35,7 +36,10 @@ pub fn versioned_url(base_url: &str, path: &Path) -> String {
         Entry::Occupied(entry) => entry.get().clone(),
         Entry::Vacant(entry) => {
             let v = compute_version(&path);
-            crate::debug!("version"; "computed new version for {}: {}", path.display(), v);
+            logger::debug(
+                "version",
+                format_args!("computed new version for {}: {}", path.display(), v),
+            );
             entry.insert(v.clone());
             v
         }

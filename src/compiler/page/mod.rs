@@ -29,18 +29,19 @@ use anyhow::Result;
 
 use crate::compiler::CompileContext;
 use crate::core::ContentKind;
+use crate::logger;
 
 // Re-export types
 pub use cache::{BUILD_CACHE, IndexedDocument, cache_vdom};
 pub use format::{
-    PageFormat, ScannedHeading, ScannedPage, ScannedPageLink, SinglePageScanData, scan_pages,
-    scan_single_page,
+    PageFormat, ScannedHeading, ScannedPage, ScannedPageLink, SinglePageScanData, scan_page_kind,
+    scan_pages, scan_single_page,
 };
 pub use output::{PageCompileOutput, PageScanOutput};
 pub use process::collect_content_files;
 pub use process::{
-    GlobalStateMode, build_address_space, build_static_pages, populate_pages,
-    rebuild_iterative_pages,
+    GlobalStateMode, IterativePageBuild, StaticPageBuild, build_address_space, build_static_pages,
+    populate_pages, rebuild_iterative_pages,
 };
 pub use process::{PageStateEpoch, PageStateTicket};
 pub(crate) use process::{PreparedPage, commit_page_state_parts, prepare_page};
@@ -110,9 +111,33 @@ pub type BatchCompileResult =
 /// from a single syntax error
 pub fn format_compile_error(error: &typst_batch::CompileError, max_errors: usize) -> anyhow::Error {
     match error.diagnostics() {
-        Some(diags) => anyhow::anyhow!("{}", diags.with_max_errors(max_errors)),
+        Some(diags) => anyhow::anyhow!("{}", format_diagnostics(diags, max_errors)),
         None => anyhow::anyhow!("{}", error),
     }
+}
+
+fn format_diagnostics(diagnostics: &typst_batch::Diagnostics, max_errors: usize) -> String {
+    let options = typst_batch::DiagnosticOptions::default().with_colored(logger::colors_enabled());
+    let mut sorted = diagnostics.as_slice().iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|diagnostic| match diagnostic.severity {
+        typst_batch::DiagnosticSeverity::Error => 0,
+        typst_batch::DiagnosticSeverity::Warning => 1,
+    });
+
+    let mut error_count = 0;
+    sorted
+        .into_iter()
+        .filter(|diagnostic| {
+            if diagnostic.severity == typst_batch::DiagnosticSeverity::Error {
+                error_count += 1;
+                error_count <= max_errors
+            } else {
+                true
+            }
+        })
+        .map(|diagnostic| diagnostic.with_options(options).to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Compilation statistics: counts of direct, iterative, and skipped draft pages

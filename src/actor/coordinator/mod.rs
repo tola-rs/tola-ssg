@@ -20,6 +20,7 @@ use super::vdom::VdomActor;
 use super::ws::WsActor;
 use crate::address::SiteIndex;
 use crate::config::ConfigHandle;
+use crate::logger;
 use crate::reload::server::WsServerHandle;
 
 const CHANNEL_BUFFER: usize = 32;
@@ -70,7 +71,7 @@ impl Coordinator {
                     self.ws_server = Some(ws_server);
                 }
                 Err(e) => {
-                    crate::log!("actor"; "websocket server failed: {}", e);
+                    logger::log("actor", format_args!("websocket server failed: {}", e));
                 }
             }
         }
@@ -93,7 +94,7 @@ impl Coordinator {
         );
 
         let ws_actor = WsActor::new(ws_rx).with_pending_errors(restored_errors);
-        crate::debug!("vdom"; "cache: {} entries", restored_count);
+        logger::debug("vdom", format_args!("cache: {} entries", restored_count));
 
         if !restored_warnings.is_empty() {
             let max = self
@@ -104,30 +105,30 @@ impl Coordinator {
                 .max_warnings
                 .unwrap_or(usize::MAX);
             for warning in restored_warnings.iter().take(max) {
-                eprintln!("{}", warning);
+                logger::text(warning);
             }
             let remaining = restored_warnings.len().saturating_sub(max);
             if remaining > 0 {
-                eprintln!("... and {} more warnings", remaining);
+                logger::text(&format!("... and {} more warnings", remaining));
             }
         }
 
-        crate::debug!("actor"; "start");
+        logger::debug("actor", format_args!("start"));
         let shutdown_rx = self.shutdown_rx.take();
-        runtime::run_actors(
-            fs_actor,
-            compiler_actor,
-            vdom_actor,
-            ws_actor,
-            self.ws_server.take(),
+        runtime::run_actors(runtime::ActorRuntime {
+            fs: fs_actor,
+            compiler: compiler_actor,
+            vdom: vdom_actor,
+            ws: ws_actor,
+            ws_server: self.ws_server.take(),
             compiler_tx,
             vdom_tx,
             ws_tx,
             shutdown_rx,
-        )
+        })
         .await?;
 
-        crate::debug!("actor"; "stopped");
+        logger::debug("actor", format_args!("stopped"));
         Ok(())
     }
 }

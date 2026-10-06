@@ -99,26 +99,32 @@ pub enum ValidateLevel {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{SiteConfig, test_parse_config};
+    use super::{AssetsValidateConfig, PagesValidateConfig, ValidateConfig};
+    use crate::config::{SiteConfig, test_config_source, test_parse_config};
 
     #[test]
     fn test_validate_config_custom() {
-        let config = test_parse_config(
-            r#"[validate.pages]
+        let config = test_parse_config(&format!(
+            r#"[{}]
 enable = true
 level = "warn"
 
-[validate.assets]
+[{}]
 enable = false
 level = "warn""#,
-        );
+            PagesValidateConfig::TEMPLATE_SECTION,
+            AssetsValidateConfig::TEMPLATE_SECTION
+        ));
         assert!(!config.validate.assets.enable);
     }
 
     #[test]
     fn test_validate_unknown_field_detected() {
-        let content = "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[validate]\nunknown = \"field\"";
-        let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+        let content = test_config_source(&format!(
+            "[{}]\nunknown = \"field\"",
+            ValidateConfig::TEMPLATE_SECTION
+        ));
+        let (_, ignored) = SiteConfig::parse_with_ignored(&content).unwrap();
         assert!(ignored.iter().any(|f| f.contains("unknown")));
     }
 }

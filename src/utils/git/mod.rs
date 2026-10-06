@@ -2,7 +2,7 @@
 //!
 //! Handles repository initialization, commits, and remote pushing.
 
-mod ignore;
+pub(crate) mod ignore;
 mod remote;
 mod repo;
 mod tree;

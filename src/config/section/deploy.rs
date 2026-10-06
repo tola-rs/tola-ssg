@@ -147,28 +147,35 @@ impl Default for VercelDeployConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::{ConfigDiagnostics, ConfigPresence, SiteConfig, test_parse_config};
+    use super::{CloudflareDeployConfig, DeployConfig, GithubDeployConfig};
+    use crate::config::{
+        ConfigDiagnostics, ConfigPresence, SiteConfig, test_config_source, test_parse_config,
+    };
 
     #[test]
     fn test_deploy_unknown_fields_detected() {
-        for content in [
-            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy]\nunknown = \"field\"",
-            "[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n[deploy.github]\nunknown = \"field\"",
+        for section in [
+            DeployConfig::TEMPLATE_SECTION,
+            GithubDeployConfig::TEMPLATE_SECTION,
         ] {
-            let (_, ignored) = SiteConfig::parse_with_ignored(content).unwrap();
+            let content = test_config_source(&format!("[{section}]\nunknown = \"field\""));
+            let (_, ignored) = SiteConfig::parse_with_ignored(&content).unwrap();
             assert!(ignored.iter().any(|f| f.contains("unknown")));
         }
     }
 
     #[test]
     fn test_not_implemented_section_triggers_on_explicit_presence_even_if_default() {
-        let snippet = r#"
-[deploy.cloudflare]
+        let snippet = format!(
+            r#"
+[{}]
 provider = "github"
-"#;
-        let config = test_parse_config(snippet);
+"#,
+            CloudflareDeployConfig::TEMPLATE_SECTION
+        );
+        let config = test_parse_config(&snippet);
         let mut diag = ConfigDiagnostics::new();
-        let raw = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{snippet}");
+        let raw = test_config_source(&snippet);
         diag.set_presence(ConfigPresence::from_toml(&raw).unwrap());
 
         config.deploy.validate_field_status(&mut diag);

@@ -3,20 +3,33 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result};
 
 use crate::config::SiteConfig;
-use crate::core::ContentKind;
 use crate::freshness::is_newer_than;
-use crate::hooks::css;
-use crate::log;
 
-use super::meta::{relative_path, route_from_source};
+use super::AssetKind;
+use super::route::{AssetRoute, relative_path, route_from_source};
+use crate::logger;
 
-/// Process an asset file from the assets directory
+/// Summary for a batch asset processing pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AssetProcessSummary {
+    /// Routes returned by the scanner and considered by the processor.
+    pub scanned: usize,
+    /// Routes that wrote or rewrote an output file.
+    pub written: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssetRouteOutcome {
+    Skipped,
+    Written,
+}
+
+/// Process a configured asset file.
 ///
 /// Copies the asset to the output directory, respecting freshness checks
-/// Skips CSS processor input (handled centrally)
 pub fn process_asset(
     asset_path: &Path,
     config: &SiteConfig,
@@ -25,13 +38,48 @@ pub fn process_asset(
 ) -> Result<()> {
     let route = route_from_source(asset_path.to_path_buf(), config)?;
 
-    // Skip if up-to-date (use mtime comparison for assets, not hash markers)
-    if !clean && route.output.exists() && !is_newer_than(asset_path, &route.output) {
-        return Ok(());
+    process_asset_route(&route, config, clean, log_file).map(|_| ())
+}
+
+fn process_asset_route(
+    route: &AssetRoute,
+    config: &SiteConfig,
+    clean: bool,
+    log_file: bool,
+) -> Result<AssetRouteOutcome> {
+    if skip_asset_route(route, config, clean) {
+        return Ok(AssetRouteOutcome::Skipped);
     }
 
+    write_asset_route(route, config, log_file)?;
+    Ok(AssetRouteOutcome::Written)
+}
+
+fn skip_asset_route(route: &AssetRoute, config: &SiteConfig, clean: bool) -> bool {
+    is_atomic_css_output_path(&route.output, config)
+        || (!clean && route.output.exists() && !is_newer_than(&route.source, &route.output))
+}
+
+fn is_atomic_css_output_path(path: &Path, config: &SiteConfig) -> bool {
+    crate::css::build::output_asset(config).is_some_and(|asset| {
+        crate::utils::path::normalize_path(path) == crate::utils::path::normalize_path(&asset.path)
+    })
+}
+
+fn write_asset_route(route: &AssetRoute, config: &SiteConfig, log_file: bool) -> Result<()> {
+    let asset_path = &route.source;
+
     if log_file {
-        log!("assets"; "{}", relative_path(asset_path, config));
+        match route.kind {
+            AssetKind::Global => logger::log(
+                "assets",
+                format_args!("{}", relative_path(asset_path, config)),
+            ),
+            AssetKind::Content => logger::log(
+                "content",
+                format_args!("{}", relative_path(asset_path, config)),
+            ),
+        }
     }
 
     if let Some(parent) = route.output.parent() {
@@ -42,11 +90,6 @@ pub fn process_asset(
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default();
-
-    // Skip CSS processor input (handled centrally)
-    if ext == "css" && css::is_css_input(asset_path, config) {
-        return Ok(());
-    }
 
     // Minify JS/CSS (skip already minified .min.js/.min.css)
     let stem = asset_path
@@ -65,45 +108,50 @@ pub fn process_asset(
     Ok(())
 }
 
-/// Process an asset file from the content directory (non-.typ files)
+/// Process configured nested assets.
 ///
-/// These are files in the content directory that aren't pages
-pub fn process_rel_asset(
-    path: &Path,
+/// This uses `scan_nested_assets` so build, serve, validation, and conflict
+/// detection share the same source -> URL -> output routing rules.
+pub fn process_nested_assets(
     config: &SiteConfig,
     clean: bool,
     log_file: bool,
-) -> Result<()> {
-    let content = &config.build.content;
-    let output = config.paths().output_dir();
+) -> Result<AssetProcessSummary> {
+    let mut summary = AssetProcessSummary::default();
 
-    let rel_path = path
-        .strip_prefix(content)?
-        .to_str()
-        .ok_or_else(|| anyhow!("Invalid path"))?;
-
-    let output_path = output.join(rel_path);
-
-    // Relative assets don't depend on templates/config, use mtime comparison
-    if !clean && output_path.exists() && !is_newer_than(path, &output_path) {
-        return Ok(());
+    for route in super::scan_nested_assets(config) {
+        summary.scanned += 1;
+        match process_asset_route(&route, config, clean, log_file)
+            .with_context(|| format!("asset {}", relative_path(&route.source, config)))?
+        {
+            AssetRouteOutcome::Skipped => {}
+            AssetRouteOutcome::Written => summary.written += 1,
+        }
     }
 
-    if log_file {
-        log!("content"; "{}", rel_path);
-    }
-
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    fs::copy(path, output_path)?;
-    Ok(())
+    Ok(summary)
 }
 
-/// Process all non-content files in the content directory
+/// Process every asset source owned by `build.assets`.
+pub fn process_configured_assets(
+    config: &SiteConfig,
+    clean: bool,
+    log_file: bool,
+) -> Result<AssetProcessSummary> {
+    let mut summary = process_nested_assets(config, clean, log_file)?;
+
+    summary.scanned += super::scan_flatten_assets(config).len();
+    summary.written += process_flatten_assets(config, clean, log_file)?;
+
+    summary.scanned += super::scan_content_assets(config).len();
+    summary.written += process_content_assets(config, clean)?;
+
+    Ok(summary)
+}
+
+/// Process all non-page files in the content directory.
 ///
-/// Copies all files that are not pages (.typ, .md) to the output directory,
+/// Copies all files that are not pages to the output directory,
 /// preserving the directory structure.
 ///
 /// ```text
@@ -120,78 +168,47 @@ pub fn process_rel_asset(
 ///
 /// Returns the number of files copied
 pub fn process_content_assets(config: &SiteConfig, clean: bool) -> Result<usize> {
-    let content_dir = &config.build.content;
-    let output_dir = config.paths().output_dir();
+    let mut count = 0;
 
-    if !content_dir.exists() {
-        return Ok(0);
+    for route in super::scan_content_assets(config) {
+        if is_atomic_css_output_path(&route.output, config) {
+            continue;
+        }
+
+        if !clean && route.output.exists() && !is_newer_than(&route.source, &route.output) {
+            continue;
+        }
+
+        if let Some(parent) = route.output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&route.source, &route.output)?;
+        count += 1;
     }
 
-    let mut count = 0;
-    copy_content_assets_recursive(content_dir, content_dir, &output_dir, clean, &mut count)?;
     Ok(count)
 }
 
-/// Recursively copy non-content files from content directory to output
-fn copy_content_assets_recursive(
-    dir: &Path,
-    content_root: &Path,
-    output_root: &Path,
-    clean: bool,
-    count: &mut usize,
-) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-
-    for entry in entries.flatten() {
-        let src_path = entry.path();
-
-        if src_path.is_dir() {
-            // Recursively process subdirectories
-            copy_content_assets_recursive(&src_path, content_root, output_root, clean, count)?;
-        } else {
-            // Skip content files (.typ, .md) - they are pages, not assets
-            if ContentKind::from_path(&src_path).is_some() {
-                continue;
-            }
-
-            // Compute output path: content/a/b/file.png -> output/a/b/file.png
-            let rel_path = src_path.strip_prefix(content_root).unwrap_or(&src_path);
-            let dest_path = output_root.join(rel_path);
-
-            // Skip if destination is fresh
-            if !clean && dest_path.exists() && !is_newer_than(&src_path, &dest_path) {
-                continue;
-            }
-
-            // Create parent directory and copy file
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(&src_path, &dest_path)?;
-            *count += 1;
-        }
-    }
-
-    Ok(())
-}
-
-/// Process flatten assets (files that go to output root)
-///
-/// Returns the number of files processed
+/// Process explicitly configured flatten assets.
 pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) -> Result<usize> {
     let assets = super::scan_flatten_assets(config);
     let mut count = 0;
 
     for route in assets {
+        if is_atomic_css_output_path(&route.output, config) {
+            continue;
+        }
+
         // Skip if up-to-date (use mtime comparison for assets)
         if !clean && route.output.exists() && !is_newer_than(&route.source, &route.output) {
             continue;
         }
 
         if log_file {
-            log!("assets"; "{}", relative_path(&route.source, config));
+            logger::log(
+                "assets",
+                format_args!("{}", relative_path(&route.source, config)),
+            );
         }
 
         if let Some(parent) = route.output.parent() {
@@ -205,12 +222,12 @@ pub fn process_flatten_assets(config: &SiteConfig, clean: bool, log_file: bool) 
     Ok(count)
 }
 
-/// Generate CNAME file if needed
+/// Generate CNAME file if needed.
 ///
 /// Auto-generates CNAME from `site.url` domain when:
 /// 1. `site.url` is defined with a custom domain
-/// 2. No flatten entry outputs as "CNAME", or the source file doesn't exist
-pub fn process_cname(config: &SiteConfig) -> Result<bool> {
+/// 2. No flatten asset outputs as "/CNAME", or the source file doesn't exist
+pub fn process_cname(config: &SiteConfig) -> Result<()> {
     use super::generated::should_generate_cname;
 
     let domain = should_generate_cname(
@@ -223,11 +240,10 @@ pub fn process_cname(config: &SiteConfig) -> Result<bool> {
         let output_dir = config.paths().output_dir();
         let cname_path = output_dir.join("CNAME");
         fs::write(&cname_path, &domain)?;
-        crate::debug!("assets"; "generated CNAME: {}", domain);
-        Ok(true)
-    } else {
-        Ok(false)
+        logger::debug("assets", format_args!("generated CNAME: {}", domain));
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -266,6 +282,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.build.content = content_dir;
         config.build.output = output_dir.clone();
+        config.build.assets.colocated = true;
 
         let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 2);
@@ -291,6 +308,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.build.content = content_dir;
         config.build.output = output_dir.clone();
+        config.build.assets.colocated = true;
 
         let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 1);
@@ -305,19 +323,20 @@ mod tests {
 
         // Create various files
         fs::write(content_dir.join("index.typ"), "= Home").unwrap();
-        fs::write(content_dir.join("about.md"), "# About").unwrap();
+        fs::write(content_dir.join("about.typ"), "= About").unwrap();
         fs::write(content_dir.join("logo.png"), "fake png").unwrap();
 
         let output_dir = dir.path().join("public");
         let mut config = SiteConfig::default();
         config.build.content = content_dir;
         config.build.output = output_dir.clone();
+        config.build.assets.colocated = true;
 
         let count = process_content_assets(&config, true).unwrap();
         assert_eq!(count, 1); // Only logo.png
         assert!(output_dir.join("logo.png").exists());
         assert!(!output_dir.join("index.typ").exists());
-        assert!(!output_dir.join("about.md").exists());
+        assert!(!output_dir.join("about.typ").exists());
     }
 
     #[test]
@@ -334,6 +353,7 @@ mod tests {
         let mut config = SiteConfig::default();
         config.build.content = content_dir.clone();
         config.build.output = output_dir;
+        config.build.assets.colocated = true;
 
         // First copy (clean mode)
         let count = process_content_assets(&config, true).unwrap();
@@ -350,5 +370,82 @@ mod tests {
         // Third copy (incremental mode) - should copy since source is newer
         let count = process_content_assets(&config, false).unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_process_content_assets_default_disabled() {
+        let dir = TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        fs::create_dir_all(&content_dir).unwrap();
+        fs::write(content_dir.join("logo.png"), "fake png").unwrap();
+
+        let output_dir = dir.path().join("public");
+        let mut config = SiteConfig::default();
+        config.build.content = content_dir;
+        config.build.output = output_dir.clone();
+
+        let count = process_content_assets(&config, true).unwrap();
+
+        assert_eq!(count, 0);
+        assert!(!output_dir.join("logo.png").exists());
+    }
+
+    #[test]
+    fn process_nested_assets_reports_scanned_and_written_routes_separately() {
+        use crate::config::section::build::assets::NestedEntry;
+
+        let dir = TempDir::new().unwrap();
+        let assets_dir = dir.path().join("assets");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::write(assets_dir.join("logo.png"), "logo").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/assets")];
+        config.build.output = dir.path().join("public");
+
+        let first = process_nested_assets(&config, true, false).unwrap();
+        let second = process_nested_assets(&config, false, false).unwrap();
+
+        assert_eq!(
+            first,
+            AssetProcessSummary {
+                scanned: 1,
+                written: 1
+            }
+        );
+        assert_eq!(
+            second,
+            AssetProcessSummary {
+                scanned: 1,
+                written: 0
+            }
+        );
+    }
+
+    #[test]
+    fn process_nested_assets_does_not_overwrite_atomic_css_output() {
+        use crate::config::section::build::assets::NestedEntry;
+
+        let dir = TempDir::new().unwrap();
+        let assets_dir = dir.path().join("assets/.tola");
+        let output_dir = dir.path().join("public");
+        fs::create_dir_all(&assets_dir).unwrap();
+        fs::create_dir_all(output_dir.join(".tola")).unwrap();
+        fs::write(assets_dir.join("atomic.css"), "asset css").unwrap();
+        fs::write(output_dir.join(".tola/atomic.css"), "generated css").unwrap();
+
+        let mut config = SiteConfig::default();
+        config.build.assets.nested = vec![NestedEntry::new(assets_dir, "/.tola")];
+        config.build.output = output_dir.clone();
+        config.build.css.atomic.enable = true;
+
+        let summary = process_nested_assets(&config, true, false).unwrap();
+
+        assert_eq!(summary.scanned, 1);
+        assert_eq!(summary.written, 0);
+        assert_eq!(
+            fs::read_to_string(output_dir.join(".tola/atomic.css")).unwrap(),
+            "generated css"
+        );
     }
 }

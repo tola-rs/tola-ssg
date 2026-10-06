@@ -30,13 +30,8 @@ pub(super) fn scan_single_with_current_in_store(
     config: &SiteConfig,
     store: &StoredPageMap,
 ) -> Result<typst_batch::ScanResult, typst_batch::CompileError> {
-    let inputs = build_visible_inputs_for_source(config, store, file).map_err(|e| {
-        typst_batch::CompileError::html_export(format!(
-            "failed to build scan inputs for {}: {}",
-            file.display(),
-            e
-        ))
-    })?;
+    let inputs = build_visible_inputs_for_source(config, store, file)
+        .map_err(|e| typst_batch::CompileError::input(e.to_string()))?;
 
     let single = [file];
     let scanner = host

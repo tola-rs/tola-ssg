@@ -9,6 +9,7 @@ use crate::compiler::page::TypstBatcher;
 use crate::compiler::page::format::{ScannedHeading, ScannedPage, ScannedPageLink};
 use crate::config::SiteConfig;
 use crate::core::LinkOrigin;
+use crate::logger;
 use crate::package::build_filter_inputs_with_site;
 use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
 
@@ -184,22 +185,29 @@ fn filter_drafts_impl<'a>(
 
             match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS) {
                 StabilityDecision::Converged => {
-                    crate::debug!("scan"; "converged after {} iteration(s)", iteration + 1);
+                    logger::debug(
+                        "scan",
+                        format_args!("converged after {} iteration(s)", iteration + 1),
+                    );
                     break;
                 }
                 StabilityDecision::Oscillating => {
-                    crate::log!(
-                        "warning";
-                        "scan metadata oscillating (cycle detected), stopping after {} iterations",
-                        iteration + 1
+                    logger::log(
+                        "warning",
+                        format_args!(
+                            "scan metadata oscillating (cycle detected), stopping after {} iterations",
+                            iteration + 1
+                        ),
                     );
                     break;
                 }
                 StabilityDecision::MaxIterationsReached => {
-                    crate::log!(
-                        "warning";
-                        "scan metadata did not converge after {} iterations",
-                        MAX_METADATA_SCAN_ITERATIONS
+                    logger::log(
+                        "warning",
+                        format_args!(
+                            "scan metadata did not converge after {} iterations",
+                            MAX_METADATA_SCAN_ITERATIONS
+                        ),
                     );
                 }
                 StabilityDecision::Continue => {}

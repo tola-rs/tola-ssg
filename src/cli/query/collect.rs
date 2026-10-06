@@ -11,12 +11,11 @@ use crate::cli::common::{
 use crate::config::SiteConfig;
 use crate::core::ContentKind;
 use crate::core::UrlPath;
-use crate::log;
 use crate::page::StoredPageMap;
 use crate::utils::path::normalize_path;
-use crate::utils::path::route::strip_path_prefix_from_page_url;
 
 use super::types::{PageQueryResult, QueryMeta, QueryResult};
+use crate::logger;
 
 pub(super) fn query_files(
     files: &[PathBuf],
@@ -65,7 +64,10 @@ pub(super) fn query_files(
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Failed to query {}: {}", file.display(), e);
+                logger::log(
+                    "warning",
+                    format_args!("failed to query {}: {}", file.display(), e),
+                );
             }
         }
     });
@@ -92,7 +94,10 @@ fn process_query_result(
     let permalink = match resolve_permalink(file, &raw_meta, config, store) {
         Ok(permalink) => permalink,
         Err(e) => {
-            log!("warning"; "failed to resolve permalink for {}: {}", file.display(), e);
+            logger::log(
+                "warning",
+                format_args!("failed to resolve permalink for {}: {}", file.display(), e),
+            );
             return None;
         }
     };
@@ -103,7 +108,10 @@ fn process_query_result(
         match serde_json::from_value(raw_meta) {
             Ok(content_meta) => QueryMeta::Normalized(Box::new(content_meta)),
             Err(e) => {
-                log!("warning"; "failed to normalize metadata for {}: {}", file.display(), e);
+                logger::log(
+                    "warning",
+                    format_args!("failed to normalize metadata for {}: {}", file.display(), e),
+                );
                 return None;
             }
         }
@@ -128,27 +136,19 @@ fn resolve_permalink(
     config: &SiteConfig,
     store: &StoredPageMap,
 ) -> Result<String> {
-    let prefix = config.paths().prefix().to_string_lossy().into_owned();
-
     // Respect explicit custom permalink from metadata.
     if let Some(custom) = raw_meta.get("permalink").and_then(|v| v.as_str()) {
-        return Ok(strip_path_prefix_from_page_url(
-            UrlPath::from_page(custom).as_ref(),
-            &prefix,
-        ));
+        return Ok(UrlPath::from_page(custom).to_string());
     }
 
     // Prefer source mapping populated by `populate_stored_pages` (includes derived permalinks).
     if let Some(mapped) = store.get_permalink_by_source(file) {
-        return Ok(strip_path_prefix_from_page_url(mapped.as_str(), &prefix));
+        return Ok(mapped.to_string());
     }
 
-    // Keep behavior aligned with build routing (slug/path_prefix aware).
+    // Keep behavior aligned with build routing.
     let compiled = crate::compiler::page::CompiledPage::from_paths(file, config)?;
-    Ok(strip_path_prefix_from_page_url(
-        compiled.route.permalink.as_str(),
-        &prefix,
-    ))
+    Ok(compiled.route.permalink.to_string())
 }
 
 /// Query Markdown file metadata using shared VDOM pipeline

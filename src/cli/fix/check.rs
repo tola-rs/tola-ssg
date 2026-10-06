@@ -2,9 +2,8 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-use crate::log;
-
 use super::{VERSION_PATTERN, prompt::prompt_create};
+use crate::logger;
 
 /// File check result
 pub(super) enum CheckResult {
@@ -28,10 +27,10 @@ pub(super) fn check_and_fix(
 ) -> Result<CheckResult> {
     // Case: File missing -> prompt to create
     if !path.exists() {
-        log!("fix"; "{} not found", name);
+        logger::log("fix", format_args!("{} not found", name));
         if prompt_create(name)? {
             fs::write(path, generate())?;
-            log!("fix"; "created {}", name);
+            logger::log("fix", format_args!("created {}", name));
             return Ok(CheckResult::Created);
         }
         return Ok(CheckResult::Skipped);
@@ -41,13 +40,16 @@ pub(super) fn check_and_fix(
     match extract_version(path)? {
         Some(v) if v == current_version => Ok(CheckResult::Ok),
         Some(v) => {
-            log!("fix"; "{}: v{} -> v{} available", name, v, current_version);
-            log!("fix"; "see `{}`", github_url);
+            logger::log(
+                "fix",
+                format_args!("{}: v{} -> v{} available", name, v, current_version),
+            );
+            logger::log("fix", format_args!("see `{}`", github_url));
             Ok(CheckResult::Outdated)
         }
         None => {
-            log!("fix"; "{}: no version marker", name);
-            log!("fix"; "see `{}`", github_url);
+            logger::log("fix", format_args!("{}: no version marker", name));
+            logger::log("fix", format_args!("see `{}`", github_url));
             Ok(CheckResult::Outdated)
         }
     }

@@ -14,8 +14,8 @@
 //! Cmd::new("git").args(["status", "-s"]).run()?;
 //!
 //! // With working directory and PTY
-//! Cmd::new("tailwindcss")
-//!     .args(["-i", "input.css", "-o", "output.css"])
+//! Cmd::new("esbuild")
+//!     .args(["src/app.ts", "--bundle", "--outfile=public/app.js"])
 //!     .cwd(root)
 //!     .pty(true)
 //!     .run()?;
@@ -27,10 +27,12 @@
 //!     .run()?;
 //! ```
 
-use crate::log;
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use regex::Regex;
+
+use crate::logger;
+
 use std::{
     ffi::{OsStr, OsString},
     io::{Read, Write},
@@ -66,7 +68,7 @@ impl Cmd {
         }
     }
 
-    /// Create from a command array (e.g., `["git"]` or `["npx", "tailwindcss"]`).
+    /// Create from a command array (e.g., `["git"]` or `["npx", "esbuild"]`).
     pub fn from_slice<S: AsRef<OsStr>>(cmd: &[S]) -> Self {
         let mut iter = cmd.iter();
         let program = iter
@@ -438,7 +440,7 @@ impl FilterRule {
             .collect();
 
         if !lines.is_empty() {
-            log!(name; "{}", lines.join("\n"));
+            logger::log(name, format_args!("{}", lines.join("\n")));
         }
     }
 }

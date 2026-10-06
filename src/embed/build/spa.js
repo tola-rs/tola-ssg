@@ -91,6 +91,31 @@
     }
   }
 
+  function normalizePathname(pathname) {
+    if (pathname.length <= 1) return '/';
+    return pathname.replace(/\/+$/, '') || '/';
+  }
+
+  function sameDocumentExceptHash(a, b) {
+    try {
+      const left = new URL(a, location.origin);
+      const right = new URL(b, location.origin);
+      return left.origin === right.origin
+        && normalizePathname(left.pathname) === normalizePathname(right.pathname)
+        && left.search === right.search;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function urlHash(url) {
+    try {
+      return new URL(url, location.origin).hash;
+    } catch (e) {
+      return '';
+    }
+  }
+
   function withPathPrefix(path) {
     if (!PATH_PREFIX) return path;
     if (path === '/') return PATH_PREFIX + '/';
@@ -119,8 +144,9 @@
     if (link.origin !== location.origin) return false;
     if (link.hasAttribute('download')) return false;
     if (link.hasAttribute('data-spa-ignore')) return false;
-    // Same page anchor - let browser handle
-    if (link.hash && link.pathname === location.pathname) return false;
+    // Same-document anchors must stay on the browser path so native smooth
+    // scrolling and :target handling do not fight DOM morphing.
+    if (link.hash && sameDocumentExceptHash(link.href, location.href)) return false;
     return true;
   }
 
@@ -225,8 +251,9 @@
     Promise.all(stylePromises).then(function() {
       if (isStaleNavigation(navId)) return;
 
-      // Morph the page (with or without View Transitions)
-      if (CONFIG.transition && document.startViewTransition) {
+      // Morph the page. Hash navigations scroll immediately after morphing, so
+      // keep them out of View Transitions to avoid scroll/transition tearing.
+      if (CONFIG.transition && document.startViewTransition && !urlHash(url)) {
         document.startViewTransition(function() {
           morphPage(newDoc);
         });

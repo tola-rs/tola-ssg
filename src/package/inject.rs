@@ -6,12 +6,12 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use typst_batch::codegen::ConvertError;
 
 use crate::config::SiteConfig;
 use crate::core::UrlPath;
 use crate::page::{PageState, StoredPageMap};
 use crate::utils::path::normalize_path;
-use crate::utils::path::route::strip_path_prefix_from_page_url;
 
 use super::{Phase, TolaPackage};
 
@@ -113,52 +113,63 @@ fn site_payload(config: &SiteConfig) -> serde_json::Value {
     site
 }
 
-fn strip_permalink_in_page_object(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    prefix: &str,
-) {
-    if let Some(permalink_value) = obj.get_mut("permalink")
-        && let Some(permalink) = permalink_value.as_str()
-    {
-        *permalink_value =
-            serde_json::Value::String(strip_path_prefix_from_page_url(permalink, prefix));
-    }
-}
+fn tola_meta_field(path: &str) -> Option<String> {
+    let pages_key = TolaPackage::Pages.input_key();
 
-fn strip_pages_permalinks(value: &mut serde_json::Value, prefix: &str) {
-    let Some(arr) = value.as_array_mut() else {
-        return;
-    };
-    for page in arr {
-        if let Some(obj) = page.as_object_mut() {
-            strip_permalink_in_page_object(obj, prefix);
+    let mut segments = path.trim_start_matches('/').split('/');
+    if segments.next()? != pages_key {
+        return None;
+    }
+    let _page_index = segments.next()?;
+
+    let mut field = Vec::new();
+    for segment in segments {
+        if is_content_path_segment(segment) {
+            break;
         }
+        field.push(unescape_path_segment(segment));
     }
+
+    (!field.is_empty()).then(|| field.join("."))
 }
 
-fn strip_current_context_permalinks(value: &mut serde_json::Value, prefix: &str) {
-    let key = TolaPackage::Current.input_key();
-    let Some(current) = value.get_mut(key).and_then(|v| v.as_object_mut()) else {
-        return;
-    };
+fn is_content_path_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "func" | "children" | "body" | "child" | "text" | "styles"
+    )
+}
 
-    if let Some(v) = current.get_mut("current-permalink")
-        && let Some(s) = v.as_str()
-    {
-        *v = serde_json::Value::String(strip_path_prefix_from_page_url(s, prefix));
-    }
+fn unescape_path_segment(segment: &str) -> String {
+    segment.replace("~1", "/").replace("~0", "~")
+}
 
-    if let Some(v) = current.get_mut("parent-permalink")
-        && let Some(s) = v.as_str()
-    {
-        *v = serde_json::Value::String(strip_path_prefix_from_page_url(s, prefix));
-    }
+fn unsupported_content_hint(path: &str) -> Option<&'static str> {
+    path.starts_with(&format!("/{}", TolaPackage::Pages.input_key())).then_some(
+        "<tola-meta> fields can be shared across files, so they must be portable static metadata.",
+    )
+}
 
-    if let Some(links_to) = current.get_mut("links_to") {
-        strip_pages_permalinks(links_to, prefix);
-    }
-    if let Some(linked_by) = current.get_mut("linked_by") {
-        strip_pages_permalinks(linked_by, prefix);
+fn virtual_package_input_error(error: ConvertError, extra_hints: bool) -> anyhow::Error {
+    match error {
+        ConvertError::Unsupported { path, .. } => {
+            let detail = if let Some(field) = tola_meta_field(&path) {
+                format!("unsupported contextual content in <tola-meta> field `{field}`")
+            } else {
+                "unsupported contextual content in <tola-meta>".to_string()
+            };
+            if extra_hints && let Some(hint) = unsupported_content_hint(&path) {
+                anyhow!(
+                    "{}\n\n{} {}\n",
+                    detail,
+                    crate::logger::style_hint("hint:"),
+                    hint
+                )
+            } else {
+                anyhow!(detail)
+            }
+        }
+        error => anyhow!("failed to build virtual-package inputs: {}", error),
     }
 }
 
@@ -176,9 +187,10 @@ fn build_base_inputs_impl(
     }
 
     if spec.include_pages {
-        let mut pages_payload = store.pages_to_json_value_with_drafts();
-        strip_pages_permalinks(&mut pages_payload, &path_prefix(config));
-        combined.insert(TolaPackage::Pages.input_key(), pages_payload);
+        combined.insert(
+            TolaPackage::Pages.input_key(),
+            store.pages_to_json_value_with_drafts(),
+        );
     }
 
     combined.insert(
@@ -194,31 +206,27 @@ fn build_base_inputs_impl(
         &serde_json::Value::Object(combined),
         config.get_root(),
     )
-    .map_err(|e| anyhow!("failed to build virtual-package inputs: {}", e))
+    .map_err(|error| virtual_package_input_error(error, config.build.extra_hints))
 }
 
 /// Merge `@tola/current` payload into existing inputs.
 fn merge_current_context_value(
-    config: &SiteConfig,
     inputs: &mut typst_batch::Inputs,
     current_context: &serde_json::Value,
 ) -> Result<()> {
-    let mut current_context = current_context.clone();
-    strip_current_context_permalinks(&mut current_context, &path_prefix(config));
     inputs
-        .merge_json(&current_context)
+        .merge_json(current_context)
         .map_err(|e| anyhow!("failed to merge @tola/current inputs: {}", e))
 }
 
 fn merge_current_context(
-    config: &SiteConfig,
     inputs: &mut typst_batch::Inputs,
     store: &StoredPageMap,
     permalink: &UrlPath,
     path_rel: Option<&str>,
 ) -> Result<()> {
     let current_context = PageState::new(store).build_current_context(permalink, path_rel);
-    merge_current_context_value(config, inputs, &current_context)
+    merge_current_context_value(inputs, &current_context)
 }
 
 fn resolve_source_context(
@@ -263,7 +271,7 @@ fn build_inputs_for_source_impl(
     let mut inputs = build_base_inputs_impl(config, store, spec)?;
     let (permalink, path_rel) = resolve_source_context(config, store, file_path)?;
 
-    merge_current_context(config, &mut inputs, store, &permalink, path_rel.as_deref())?;
+    merge_current_context(&mut inputs, store, &permalink, path_rel.as_deref())?;
     Ok(inputs)
 }
 
@@ -282,7 +290,7 @@ pub fn build_visible_inputs_with_current_context(
     current_context: &serde_json::Value,
 ) -> Result<typst_batch::Inputs> {
     let mut inputs = build_base_inputs_impl(config, store, InjectSpec::visible())?;
-    merge_current_context_value(config, &mut inputs, current_context)?;
+    merge_current_context_value(&mut inputs, current_context)?;
     Ok(inputs)
 }
 
@@ -311,9 +319,18 @@ pub fn build_visible_current_context_for_source(
 ) -> Result<serde_json::Value> {
     validate_spec(InjectSpec::visible(), true)?;
     let (permalink, path_rel) = resolve_source_context(config, store, file_path)?;
-    let mut current = PageState::new(store).build_current_context(&permalink, path_rel.as_deref());
-    strip_current_context_permalinks(&mut current, &path_prefix(config));
-    Ok(current)
+    Ok(PageState::new(store).build_current_context(&permalink, path_rel.as_deref()))
+}
+
+/// Build visible-phase `@tola/current` inputs for a specific source.
+pub fn build_visible_current_inputs_for_source(
+    config: &SiteConfig,
+    store: &StoredPageMap,
+    file_path: &Path,
+) -> Result<typst_batch::Inputs> {
+    let current = build_visible_current_context_for_source(config, store, file_path)?;
+    typst_batch::Inputs::from_json(&current)
+        .map_err(|e| anyhow!("failed to build @tola/current inputs: {}", e))
 }
 
 #[cfg(test)]
@@ -386,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_visible_current_context_for_source_strips_configured_prefix() {
+    fn test_build_visible_current_context_for_source_uses_site_permalink() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let content_dir = root.join("content");
@@ -411,5 +428,91 @@ mod tests {
             .and_then(|v| v.as_str());
 
         assert_eq!(current_permalink, Some("/post/"));
+    }
+
+    #[test]
+    fn test_build_visible_inputs_reports_unsupported_metadata_path() {
+        let dir = TempDir::new().unwrap();
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+
+        let store = StoredPageMap::new();
+        store.insert_page(
+            UrlPath::from_page("/a/"),
+            crate::page::PageMeta {
+                summary: Some(serde_json::json!({"func": "context"})),
+                ..Default::default()
+            },
+        );
+
+        let err = match build_visible_inputs(&config, &store) {
+            Ok(_) => panic!("context should be rejected"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+
+        assert!(message.contains("unsupported contextual content in <tola-meta> field `summary`"));
+        assert!(message.contains("hint:"));
+        assert!(message.contains("portable static metadata"));
+    }
+
+    #[test]
+    fn test_build_visible_inputs_respects_extra_hints_flag() {
+        let dir = TempDir::new().unwrap();
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.extra_hints = false;
+
+        let store = StoredPageMap::new();
+        store.insert_page(
+            UrlPath::from_page("/a/"),
+            crate::page::PageMeta {
+                summary: Some(serde_json::json!({"func": "context"})),
+                ..Default::default()
+            },
+        );
+
+        let err = match build_visible_inputs(&config, &store) {
+            Ok(_) => panic!("context should be rejected"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+
+        assert_eq!(
+            message,
+            "unsupported contextual content in <tola-meta> field `summary`"
+        );
+    }
+
+    #[test]
+    fn test_build_visible_inputs_reports_nested_metadata_field() {
+        let dir = TempDir::new().unwrap();
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.extra_hints = false;
+
+        let store = StoredPageMap::new();
+        let mut extra = crate::page::JsonMap::new();
+        extra.insert(
+            "card".to_string(),
+            serde_json::json!({"summary": {"func": "context"}}),
+        );
+        store.insert_page(
+            UrlPath::from_page("/a/"),
+            crate::page::PageMeta {
+                extra,
+                ..Default::default()
+            },
+        );
+
+        let err = match build_visible_inputs(&config, &store) {
+            Ok(_) => panic!("context should be rejected"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "unsupported contextual content in <tola-meta> field `card.summary`"
+        );
     }
 }

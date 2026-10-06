@@ -1,7 +1,7 @@
 //! Server lifecycle management.
 
 use crate::address::SiteIndex;
-use crate::{actor::Coordinator, config::ConfigHandle, core::register_server, log};
+use crate::{actor::Coordinator, config::ConfigHandle, core::register_server, logger};
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
 use std::{
@@ -26,7 +26,10 @@ pub fn bind_with_retry(
         match Server::http(addr) {
             Ok(server) => {
                 if offset > 0 {
-                    log!("serve"; "port {} in use, using {} instead", base_port, port);
+                    logger::log(
+                        "serve",
+                        format_args!("port {} in use, using {} instead", base_port, port),
+                    );
                 }
                 return Ok((server, addr));
             }
@@ -89,7 +92,7 @@ fn run_actor_system(
             coordinator = coordinator.with_ws_port(port);
         }
         if let Err(e) = coordinator.run().await {
-            log!("actor"; "error: {}", e);
+            logger::log("actor", format_args!("error: {}", e));
         }
     });
 }

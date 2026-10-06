@@ -24,14 +24,13 @@ flatten = []
 [site.seo]
 auto_og = true
 
-[site.seo.feed]
-enable = false
-path = "feed.xml"
-format = "rss"
+# [[site.seo.feeds]]
+# format = "rss"
+# url = "/feed.xml"
 
 [site.seo.sitemap]
 enable = false
-path = "sitemap.xml"
+url = "/sitemap.xml"
 
 # Development server settings.
 [serve]

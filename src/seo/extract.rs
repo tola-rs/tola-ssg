@@ -1,6 +1,7 @@
-//! Typst Content -> HTML extraction.
+//! Typst Content extraction for feed metadata.
 //!
-//! Converts Typst's serialized content JSON to HTML strings for RSS feeds.
+//! Converts Typst's serialized content JSON to strings suitable for feed
+//! fields with either HTML or plain-text semantics.
 
 use crate::utils::html::{escape, escape_attr, is_void_element};
 use serde_json::{Map, Value};
@@ -10,8 +11,74 @@ pub fn extract(value: &Value) -> String {
     Extractor::new(value).run().trim().to_string()
 }
 
+/// Extract plain text from Typst content JSON (with trimmed whitespace).
+pub fn extract_text(value: &Value) -> String {
+    TextExtractor::new(value).run().trim().to_string()
+}
+
 struct Extractor<'a> {
     value: &'a Value,
+}
+
+struct TextExtractor<'a> {
+    value: &'a Value,
+}
+
+impl<'a> TextExtractor<'a> {
+    fn new(value: &'a Value) -> Self {
+        Self { value }
+    }
+
+    fn run(self) -> String {
+        self.extract(self.value)
+    }
+
+    fn extract(&self, value: &Value) -> String {
+        match value {
+            Value::String(s) => s.clone(),
+            Value::Array(arr) => arr.iter().map(|v| self.extract(v)).collect(),
+            Value::Object(obj) => self.extract_element(obj),
+            _ => String::new(),
+        }
+    }
+
+    fn extract_element(&self, obj: &Map<String, Value>) -> String {
+        let func = obj.get("func").and_then(Value::as_str).unwrap_or("");
+
+        match func {
+            "space" | "linebreak" | "parbreak" => " ".into(),
+            "raw" => obj.get("text").and_then(Value::as_str).unwrap_or("").into(),
+            "elem" | "link" => obj.get("body").map(|v| self.extract(v)).unwrap_or_default(),
+            "frame" => obj
+                .get("body")
+                .and_then(|b| b.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .into(),
+            _ => self.extract_generic(obj),
+        }
+    }
+
+    fn extract_generic(&self, obj: &Map<String, Value>) -> String {
+        let mut out = String::new();
+
+        if let Some(s) = obj.get("text").and_then(Value::as_str) {
+            out.push_str(s);
+        }
+        if let Some(v) = obj.get("body") {
+            out.push_str(&self.extract(v));
+        }
+        if let Some(v) = obj.get("child") {
+            out.push_str(&self.extract(v));
+        }
+        if let Some(Value::Array(arr)) = obj.get("children") {
+            for v in arr {
+                out.push_str(&self.extract(v));
+            }
+        }
+
+        out
+    }
 }
 
 impl<'a> Extractor<'a> {
@@ -215,6 +282,50 @@ mod tests {
             );
 
             assert_extract(json!({"func": "unknown_element", "data": 123}), "");
+        }
+    }
+
+    mod extract_text {
+        use super::*;
+
+        fn assert_extract_text(input: serde_json::Value, expected: &str) {
+            assert_eq!(extract_text(&input), expected);
+        }
+
+        #[test]
+        fn text_nodes() {
+            assert_extract_text(json!({"func": "text", "text": "Hello"}), "Hello");
+
+            let json = json!({
+                "func": "sequence",
+                "children": [
+                    {"func": "text", "text": "Hello"},
+                    {"func": "space"},
+                    {"func": "text", "text": "World"}
+                ]
+            });
+            assert_extract_text(json, "Hello World");
+        }
+
+        #[test]
+        fn drops_html_structure() {
+            assert_extract_text(
+                json!({
+                    "func": "link",
+                    "dest": "https://example.com",
+                    "body": {"func": "text", "text": "click"}
+                }),
+                "click",
+            );
+            assert_extract_text(
+                json!({
+                    "func": "elem",
+                    "tag": "span",
+                    "attrs": {"class": "test"},
+                    "body": {"func": "text", "text": "content"}
+                }),
+                "content",
+            );
         }
     }
 

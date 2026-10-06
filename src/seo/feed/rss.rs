@@ -2,45 +2,45 @@
 //!
 //! Generates RSS feeds from page metadata.
 
-use super::common::{FeedPage, get_feed_pages};
+use super::common::{FeedPage, entry_body, page_url, summary_html};
 use crate::{
-    config::SiteConfig, core::UrlPath, log, page::StoredPageMap, seo::minify_xml,
+    config::{FeedConfig, SiteConfig},
+    core::UrlPath,
     utils::date::DateTimeUtc,
 };
 use anyhow::{Ok, Result, anyhow};
 use regex::Regex;
 use rss::{ChannelBuilder, GuidBuilder, ItemBuilder, validation::Validate};
-use std::{fs, sync::LazyLock};
+use std::sync::LazyLock;
 
-/// Build RSS 2.0 feed
-pub fn build_rss(config: &SiteConfig, store: &StoredPageMap) -> Result<()> {
-    RssFeed::build(config, store).write()
-}
-
-struct RssFeed {
-    config: SiteConfig,
-    pages: Vec<FeedPage>,
-}
-
-impl RssFeed {
-    fn build(config: &SiteConfig, store: &StoredPageMap) -> Self {
-        let pages = get_feed_pages(store);
-        Self {
-            config: config.clone(),
-            pages,
-        }
+/// Render an RSS 2.0 feed.
+pub(super) fn render(config: &SiteConfig, feed: &FeedConfig, pages: &[FeedPage]) -> Result<String> {
+    RssFeed {
+        config,
+        feed,
+        pages,
     }
+    .to_xml()
+}
 
-    fn into_xml(self) -> Result<String> {
+struct RssFeed<'a> {
+    config: &'a SiteConfig,
+    feed: &'a FeedConfig,
+    pages: &'a [FeedPage],
+}
+
+impl RssFeed<'_> {
+    fn to_xml(&self) -> Result<String> {
+        let base_url = self.config.canonical_url(&UrlPath::from_page("/"));
         let items: Vec<_> = self
             .pages
             .iter()
-            .filter_map(|page| page_to_rss_item(page, &self.config))
+            .filter_map(|page| page_to_rss_item(page, self.config, self.feed))
             .collect();
 
         let channel = ChannelBuilder::default()
             .title(&self.config.site.info.title)
-            .link(self.config.site.info.url.as_deref().unwrap_or_default())
+            .link(base_url)
             .description(&self.config.site.info.description)
             .language(self.config.site.info.language.clone())
             .generator("tola-ssg".to_string())
@@ -52,36 +52,16 @@ impl RssFeed {
             .map_err(|e| anyhow!("RSS validation failed: {e}"))?;
         Ok(channel.to_string())
     }
-
-    fn write(self) -> Result<()> {
-        let minify = self.config.build.minify;
-        let output_dir = self.config.paths().output_dir();
-        let feed_path = self.config.site.seo.feed.path.clone();
-        let xml = self.into_xml()?;
-        let xml = minify_xml(xml.as_bytes(), minify);
-        // Resolve feed path relative to output_dir (with path_prefix)
-        let rss_path = output_dir.join(&feed_path);
-
-        if let Some(parent) = rss_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&rss_path, &*xml)?;
-
-        log!("rss"; "{}", rss_path.file_name().unwrap_or_default().to_string_lossy());
-        Ok(())
-    }
 }
 
-fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
+fn page_to_rss_item(page: &FeedPage, config: &SiteConfig, feed: &FeedConfig) -> Option<rss::Item> {
     let pub_date = DateTimeUtc::parse(&page.date).map(DateTimeUtc::to_rfc2822)?;
 
-    let permalink = UrlPath::from_page(&page.permalink);
-    let link = permalink.canonical_url(config.site.info.url.as_deref());
+    let link = page_url(page, config);
 
     let author = normalize_rss_author(page.author.as_ref(), config);
 
-    // Convert summary JSON to HTML string using shared extractor
-    let description = page.summary.clone();
+    let description = summary_html(page, config, feed);
 
     Some(
         ItemBuilder::default()
@@ -89,6 +69,7 @@ fn page_to_rss_item(page: &FeedPage, config: &SiteConfig) -> Option<rss::Item> {
             .link(Some(link.clone()))
             .guid(GuidBuilder::default().permalink(true).value(link).build())
             .description(description)
+            .content(entry_body(page, config, feed))
             .pub_date(pub_date)
             .author(author)
             .build(),
@@ -121,6 +102,8 @@ fn normalize_rss_author(author: Option<&String>, config: &SiteConfig) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{FeedFeature, FeedFormat};
+    use crate::seo::feed::common::FeedSummary;
 
     // Helper to create a config for testing
     fn make_config(author: &str, email: &str) -> SiteConfig {
@@ -129,6 +112,14 @@ mod tests {
         config.site.info.email = email.to_string();
         config.site.info.url = Some("https://example.com".to_string());
         config
+    }
+
+    fn feed_config(features: Vec<FeedFeature>) -> FeedConfig {
+        FeedConfig {
+            format: FeedFormat::Rss,
+            url: "/feed.xml".into(),
+            features,
+        }
     }
 
     #[test]
@@ -162,14 +153,41 @@ mod tests {
             title: "Test Post".to_string(),
             date: "2024-01-15".to_string(),
             permalink: "/test/".to_string(),
-            summary: Some("A test summary".to_string()),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
+            feed_body: None,
             author: None,
         };
 
-        let item = page_to_rss_item(&page, &config).expect("should create item");
+        let feed = feed_config(vec![]);
+        let item = page_to_rss_item(&page, &config, &feed).expect("should create item");
         assert_eq!(item.title(), Some("Test Post"));
         assert_eq!(item.link(), Some("https://example.com/test/"));
         assert_eq!(item.description(), Some("A test summary"));
+        assert_eq!(item.content(), None);
+    }
+
+    #[test]
+    fn test_page_to_rss_item_full_text() {
+        let config = make_config("Test Author", "test@example.com");
+        let page = FeedPage {
+            title: "Test Post".to_string(),
+            date: "2024-01-15".to_string(),
+            permalink: "/test/".to_string(),
+            summary: Some(FeedSummary {
+                html: "A test summary".to_string(),
+                text: "A test summary".to_string(),
+            }),
+            feed_body: Some("<article><p>Full text</p></article>".to_string()),
+            author: None,
+        };
+
+        let feed = feed_config(vec![FeedFeature::FullText]);
+        let item = page_to_rss_item(&page, &config, &feed).expect("should create item");
+        assert_eq!(item.description(), Some("A test summary"));
+        assert_eq!(item.content(), Some("<article><p>Full text</p></article>"));
     }
 
     #[test]
@@ -180,10 +198,12 @@ mod tests {
             date: "invalid-date".to_string(),
             permalink: "/test/".to_string(),
             summary: None,
+            feed_body: None,
             author: None,
         };
 
         // Invalid date format should return None
-        assert!(page_to_rss_item(&page, &config).is_none());
+        let feed = feed_config(vec![]);
+        assert!(page_to_rss_item(&page, &config, &feed).is_none());
     }
 }

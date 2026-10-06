@@ -1,23 +1,25 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::SiteConfig;
+use crate::logger;
 
 pub(super) fn process_assets(paths: &[PathBuf], config: &SiteConfig) -> Vec<(PathBuf, String)> {
-    use crate::asset::{process_asset, process_rel_asset};
+    use crate::asset::process_asset;
 
     paths
         .iter()
         .filter_map(|path| {
-            let result = if config.build.assets.contains_source(path) {
-                process_asset(path, config, false, true)
-            } else if path.starts_with(&config.build.content) {
-                process_rel_asset(path, config, false, true)
-            } else {
-                process_asset(path, config, false, true)
-            };
+            let result = process_asset(path, config, false, true);
             result.err().map(|e| (path.clone(), e.to_string()))
         })
         .collect()
+}
+
+pub(super) fn process_configured_assets(config: &SiteConfig) -> Vec<(PathBuf, String)> {
+    match crate::asset::process_configured_assets(config, false, false) {
+        Ok(_) => Vec::new(),
+        Err(e) => vec![(config.get_root().join("build.assets"), e.to_string())],
+    }
 }
 
 pub(super) fn cleanup_removed_assets(paths: &[PathBuf], config: &SiteConfig) -> usize {
@@ -26,41 +28,37 @@ pub(super) fn cleanup_removed_assets(paths: &[PathBuf], config: &SiteConfig) -> 
         .filter(|path| !path.exists())
         .filter(|path| {
             let version_removed = crate::asset::version::remove_version(path);
-            let output_removed = output_path_for_asset(path, config).is_some_and(|output| {
-                let removed = remove_output_file(&output);
+            let output = output_path_for_asset(path, config);
+            let output_version_removed = output
+                .as_deref()
+                .is_some_and(crate::asset::version::remove_version);
+            let output_removed = output.as_deref().is_some_and(|output| {
+                let removed = remove_output_file(output);
                 if removed {
-                    crate::debug!("assets"; "removed output for {}", path.display());
+                    logger::debug(
+                        "assets",
+                        format_args!("removed output for {}", path.display()),
+                    );
                 }
                 removed
             });
 
             if version_removed {
-                crate::debug!("assets"; "removed version for {}", path.display());
+                logger::debug(
+                    "assets",
+                    format_args!("removed version for {}", path.display()),
+                );
             }
 
-            version_removed || output_removed
+            version_removed || output_version_removed || output_removed
         })
         .count()
 }
 
-fn output_path_for_asset(path: &Path, config: &SiteConfig) -> Option<PathBuf> {
-    let output = config.paths().output_dir();
-
-    if let Some(entry) = config
-        .build
-        .assets
-        .flatten
-        .iter()
-        .find(|entry| path == entry.source())
-    {
-        return Some(output.join(entry.output_name()));
-    }
-
-    config.build.assets.nested.iter().find_map(|entry| {
-        path.strip_prefix(entry.source())
-            .ok()
-            .map(|relative| output.join(entry.output_name()).join(relative))
-    })
+pub(super) fn output_path_for_asset(path: &Path, config: &SiteConfig) -> Option<PathBuf> {
+    crate::asset::route_from_source(path.to_path_buf(), config)
+        .ok()
+        .map(|route| route.output)
 }
 
 fn remove_output_file(output: &Path) -> bool {
@@ -69,7 +67,10 @@ fn remove_output_file(output: &Path) -> bool {
     }
 
     if let Err(e) = std::fs::remove_file(output) {
-        crate::debug!("assets"; "failed to remove {}: {}", output.display(), e);
+        logger::debug(
+            "assets",
+            format_args!("failed to remove {}: {}", output.display(), e),
+        );
         return false;
     }
 
@@ -125,38 +126,12 @@ mod tests {
         assert!(!ASSET_VERSIONS.contains_key(&crate::utils::path::normalize_path(&source)));
         ASSET_VERSIONS.clear();
     }
-
-    #[test]
-    fn reloadable_output_asset_excludes_html() {
-        assert!(is_reloadable_output_asset(Path::new(
-            "/public/assets/app.css"
-        )));
-        assert!(is_reloadable_output_asset(Path::new(
-            "/public/assets/app.js"
-        )));
-        assert!(!is_reloadable_output_asset(Path::new(
-            "/public/page/index.html"
-        )));
-        assert!(!is_reloadable_output_asset(Path::new(
-            "/public/page/index.htm"
-        )));
-    }
 }
 
 pub(super) fn log_asset_errors(errors: &[(PathBuf, String)]) {
     for (path, error) in errors {
-        crate::log!("error"; "asset {}: {}", path.display(), error);
+        logger::log("error", format_args!("asset {}: {}", path.display(), error));
     }
-}
-
-pub(super) fn is_reloadable_output_asset(path: &Path) -> bool {
-    !matches!(
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.to_ascii_lowercase())
-            .as_deref(),
-        Some("html" | "htm")
-    )
 }
 
 pub(super) fn format_asset_reason(total: usize, error_count: usize) -> String {

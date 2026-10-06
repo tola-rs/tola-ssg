@@ -15,15 +15,15 @@ use crate::core::UrlPath;
 ///
 /// ```text
 /// Source: content/posts/hello.typ
-/// Output: public/blog/posts/hello/index.html
+/// Output: public/docs/blog/posts/hello/index.html
 ///
 /// PageRoute {
 ///     source:      content/posts/hello.typ
 ///     is_index:    false
-///     permalink:   /blog/posts/hello/
-///     output_file: public/blog/posts/hello/index.html
-///     output_dir:  public/blog/posts/hello/
-///     full_url:    https://example.com/blog/posts/hello/
+///     permalink:   /posts/hello/
+///     output_file: public/docs/blog/posts/hello/index.html
+///     output_dir:  public/docs/blog/posts/hello/
+///     full_url:    https://example.com/docs/blog/posts/hello/
 /// }
 /// ```
 ///
@@ -49,7 +49,7 @@ pub struct PageRoute {
     pub is_404: bool,
 
     // === Output ===
-    /// URL path / permalink (e.g., /blog/posts/hello/)
+    /// Site-root URL path / permalink (e.g., /posts/hello/).
     pub permalink: UrlPath,
     /// Output HTML file (e.g., public/blog/posts/hello/index.html)
     pub output_file: PathBuf,

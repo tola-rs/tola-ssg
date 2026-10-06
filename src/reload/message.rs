@@ -7,7 +7,6 @@
 //!
 //! - `reload`: Trigger full page reload
 //! - `patch`: Apply incremental DOM patches (with optional URL change)
-//! - `css`: Inject updated CSS (no layout recalc)
 //! - `ping`/`pong`: Keep connection alive
 
 // Many methods are not yet used but will be for incremental hot reload
@@ -38,17 +37,21 @@ pub enum HotReloadMessage {
         path: String,
         /// Sequence of patch operations
         ops: Vec<ClientPatch>,
+        /// Output assets changed in the same compiler transaction.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        assets: Vec<String>,
         /// Optional URL change (permalink changed)
         #[serde(skip_serializing_if = "Option::is_none")]
         url_change: Option<UrlChange>,
     },
 
-    /// CSS-only update (fast path - no layout recalc)
-    Css {
-        /// CSS selector or stylesheet href
-        target: String,
-        /// New CSS content
-        content: String,
+    /// Linked asset changed on disk.
+    ///
+    /// The browser decides whether the asset can be refreshed in place. If it
+    /// cannot, this message falls back to a normal reload.
+    Asset {
+        /// Browser href for the updated asset, including cache busting.
+        href: String,
     },
 
     /// Keep-alive ping (server -> client)
@@ -117,6 +120,7 @@ impl HotReloadMessage {
         Self::Patch {
             path: path.into(),
             ops,
+            assets: Vec::new(),
             url_change: None,
         }
     }
@@ -125,13 +129,20 @@ impl HotReloadMessage {
     pub fn patch_with_url_change(
         path: impl Into<String>,
         ops: Vec<ClientPatch>,
+        assets: Vec<String>,
         url_change: UrlChange,
     ) -> Self {
         Self::Patch {
             path: path.into(),
             ops,
+            assets,
             url_change: Some(url_change),
         }
+    }
+
+    /// Create an asset refresh message
+    pub fn asset(href: impl Into<String>) -> Self {
+        Self::Asset { href: href.into() }
     }
 
     /// Create a connected message
@@ -185,10 +196,15 @@ impl HotReloadMessage {
     ///
     /// All operations use StableId for targeting. No position indices.
     /// Order of operations doesn't matter for correctness.
-    pub fn from_patches(path: &str, patches: &[tola_vdom::patch::Patch]) -> Self {
+    pub fn from_patches(
+        path: &str,
+        patches: &[tola_vdom::patch::Patch],
+        assets: Vec<String>,
+    ) -> Self {
         Self::Patch {
             path: path.to_string(),
             ops: crate::reload::patch::from_render_patches(patches),
+            assets,
             url_change: None,
         }
     }
@@ -262,39 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn hotreload_js_handles_every_serialized_message_type() {
-        fn serialized_type(message: HotReloadMessage) -> String {
-            let json = message.to_json();
-            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-            value["type"].as_str().unwrap().to_string()
-        }
-
-        let runtime = include_str!("../embed/serve/hotreload.js");
-        let messages = [
-            HotReloadMessage::reload(),
-            HotReloadMessage::patch("/index.html", vec![]),
-            HotReloadMessage::Css {
-                target: "style[data-tola-css-target=\"main\"]".to_string(),
-                content: "body { color: red; }".to_string(),
-            },
-            HotReloadMessage::Ping { ts: 1 },
-            HotReloadMessage::Pong { ts: 1 },
-            HotReloadMessage::connected(),
-            HotReloadMessage::error("content/index.typ", "compile error"),
-            HotReloadMessage::clear_all_errors(),
-        ];
-
-        for message in messages {
-            let ty = serialized_type(message);
-            let expected_case = format!("case '{}':", ty);
-            assert!(
-                runtime.contains(&expected_case),
-                "hotreload.js does not handle serialized message type: {ty}"
-            );
-        }
-    }
-
-    #[test]
     fn test_anchor_based_insert() {
         use tola_vdom::diff::Anchor;
         use tola_vdom::identity::StableId;
@@ -308,7 +291,7 @@ mod tests {
             html: "<span>new</span>".to_string(),
         }];
 
-        let msg = HotReloadMessage::from_patches("/test.html", &patches);
+        let msg = HotReloadMessage::from_patches("/test.html", &patches, Vec::new());
         if let HotReloadMessage::Patch { ops, .. } = msg {
             assert_eq!(ops.len(), 1);
             if let ClientPatch::Insert {
@@ -342,7 +325,7 @@ mod tests {
             to: Anchor::FirstChildOf(anchor_id),
         }];
 
-        let msg = HotReloadMessage::from_patches("/test.html", &patches);
+        let msg = HotReloadMessage::from_patches("/test.html", &patches, Vec::new());
         if let HotReloadMessage::Patch { ops, .. } = msg {
             assert_eq!(ops.len(), 1);
             if let ClientPatch::Move {

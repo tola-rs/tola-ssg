@@ -35,6 +35,7 @@ use crate::cache::{
     restore_dependency_graph, restore_diagnostics,
 };
 use crate::compiler::page::BUILD_CACHE;
+use crate::logger;
 
 /// VDOM Actor - converts AST to VDOM and computes diffs
 ///
@@ -74,13 +75,16 @@ impl VdomActor {
     ) -> VdomRestoreResult {
         // Restore cache from disk into BUILD_CACHE (shared with scheduler)
         let restored = restore_cache(&BUILD_CACHE, &root).unwrap_or_else(|e| {
-            crate::debug!("vdom"; "cache restore failed: {}", e);
+            logger::debug("vdom", format_args!("cache restore failed: {}", e));
             0
         });
 
         // Restore dependency graph for incremental rebuilds
         if let Err(e) = restore_dependency_graph(&root) {
-            crate::debug!("vdom"; "dependency graph restore failed: {}", e);
+            logger::debug(
+                "vdom",
+                format_args!("dependency graph restore failed: {}", e),
+            );
         }
 
         // Restore diagnostics from disk
@@ -129,12 +133,23 @@ impl VdomActor {
                     vdom,
                     permalink_change,
                     warnings,
+                    assets,
                 } => {
-                    self.handle_process(config, path, url_path, *vdom, permalink_change, warnings)
-                        .await
+                    self.handle_process(handlers::ProcessInput {
+                        config,
+                        path,
+                        url_path,
+                        vdom: *vdom,
+                        permalink_change,
+                        warnings,
+                        assets,
+                    })
+                    .await
                 }
 
                 VdomMsg::Reload { reason } => self.forward_reload(reason).await,
+
+                VdomMsg::Asset { href } => self.forward_asset(href).await,
 
                 VdomMsg::Error {
                     path,
@@ -150,11 +165,11 @@ impl VdomActor {
 
                 VdomMsg::Clear => {
                     crate::compiler::page::BUILD_CACHE.clear();
-                    crate::debug!("vdom"; "cleared all cache");
+                    logger::debug("vdom", format_args!("cleared all cache"));
                 }
 
                 VdomMsg::Shutdown => {
-                    crate::debug!("vdom"; "shutdown requested");
+                    logger::debug("vdom", format_args!("shutdown requested"));
                     break;
                 }
             }
@@ -186,20 +201,24 @@ impl VdomActor {
             .await;
     }
 
+    async fn forward_asset(&self, href: String) {
+        let _ = self.ws_tx.send(WsMsg::Asset { href }).await;
+    }
+
     fn persist_state(&self) {
         let source_paths = self.state.read(|_, address| address.source_paths());
         match persist_cache(&BUILD_CACHE, &source_paths, &self.root) {
-            Ok(n) => crate::debug!("vdom"; "persisted {} cache entries", n),
-            Err(e) => crate::debug!("vdom"; "cache persist failed: {}", e),
+            Ok(n) => logger::debug("vdom", format_args!("persisted {} cache entries", n)),
+            Err(e) => logger::debug("vdom", format_args!("cache persist failed: {}", e)),
         }
         // Skip if empty: initial build warnings are saved by finalize_serve_build(),
         // which runs in parallel. Persisting empty state here would overwrite them.
         if !self.error_state.is_empty()
             && let Err(e) = persist_diagnostics(&self.error_state, &self.root)
         {
-            crate::debug!("vdom"; "diagnostics persist failed: {}", e);
+            logger::debug("vdom", format_args!("diagnostics persist failed: {}", e));
         }
-        crate::debug!("vdom"; "shutting down");
+        logger::debug("vdom", format_args!("shutting down"));
     }
 }
 
@@ -209,6 +228,7 @@ mod persistence_tests {
     use crate::address::{PermalinkUpdate, SiteIndex};
     use crate::cache::restore_diagnostics;
     use crate::compiler::family::{IndexedDocument, Raw, TolaSite};
+    use crate::config::SiteConfig;
     use crate::core::UrlPath;
     use std::fs;
     use std::sync::Arc;
@@ -251,6 +271,72 @@ mod persistence_tests {
         assert_eq!(state.error_count(), 1, "Should have 1 persisted error");
         let error = state.first_error().unwrap();
         assert_eq!(error.error, "test error");
+    }
+
+    #[tokio::test]
+    async fn unchanged_page_assets_are_sent_as_route_patch() {
+        crate::compiler::page::BUILD_CACHE.clear();
+
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().to_path_buf();
+        let source = root.join("content/index.md");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, "# Home\n").unwrap();
+
+        let (tx, rx) = mpsc::channel(10);
+        let (ws_tx, mut ws_rx) = mpsc::channel(10);
+        let state = Arc::new(SiteIndex::new());
+        let (actor, _, _, _) = VdomActor::new(rx, ws_tx, root, state);
+        let actor_handle = tokio::spawn(actor.run());
+        let config = Arc::new(SiteConfig::default());
+        let url_path = UrlPath::from_page("/");
+
+        tx.send(VdomMsg::Process {
+            config: Arc::clone(&config),
+            path: source.clone(),
+            url_path: url_path.clone(),
+            vdom: Box::new(make_indexed_doc("html")),
+            permalink_change: None,
+            warnings: Vec::new(),
+            assets: Vec::new(),
+        })
+        .await
+        .unwrap();
+        match ws_rx.recv().await.unwrap() {
+            WsMsg::Reload { reason, .. } => assert_eq!(reason, "initial compile"),
+            _ => panic!("expected initial reload"),
+        }
+
+        tx.send(VdomMsg::Process {
+            config,
+            path: source,
+            url_path: url_path.clone(),
+            vdom: Box::new(make_indexed_doc("html")),
+            permalink_change: None,
+            warnings: Vec::new(),
+            assets: vec!["/styles/site.css?v=12345678".into()],
+        })
+        .await
+        .unwrap();
+
+        match ws_rx.recv().await.unwrap() {
+            WsMsg::Patch {
+                url_path: actual,
+                patches,
+                assets,
+                url_change,
+            } => {
+                assert_eq!(actual, url_path);
+                assert!(patches.is_empty());
+                assert_eq!(assets, vec!["/styles/site.css?v=12345678"]);
+                assert!(url_change.is_none());
+            }
+            _ => panic!("expected route patch with assets"),
+        }
+
+        tx.send(VdomMsg::Shutdown).await.unwrap();
+        actor_handle.await.unwrap();
+        crate::compiler::page::BUILD_CACHE.clear();
     }
 
     #[tokio::test]
@@ -333,17 +419,18 @@ mod persistence_tests {
         let existing_source = root.join("content/<script>alert(1)</script>.typ");
 
         actor
-            .handle_process(
-                Arc::new(crate::config::SiteConfig::default()),
-                root.join("content/current.typ"),
-                UrlPath::from_page("/current"),
-                make_indexed_doc("html"),
-                Some(PermalinkUpdate::Conflict {
+            .handle_process(super::handlers::ProcessInput {
+                config: Arc::new(crate::config::SiteConfig::default()),
+                path: root.join("content/current.typ"),
+                url_path: UrlPath::from_page("/current"),
+                vdom: make_indexed_doc("html"),
+                permalink_change: Some(PermalinkUpdate::Conflict {
                     url: UrlPath::from_page("/current"),
                     existing_source,
                 }),
-                vec![],
-            )
+                warnings: vec![],
+                assets: vec![],
+            })
             .await;
 
         let msg = ws_rx

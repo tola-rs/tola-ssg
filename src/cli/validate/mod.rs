@@ -4,7 +4,7 @@ mod report;
 mod scan;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -17,10 +17,9 @@ use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_wit
 use crate::compiler::page::{CompiledPage, TypstHost};
 use crate::config::SiteConfig;
 use crate::core::{ContentKind, LinkKind, LinkOrigin, ResolveContext, ResolveResult};
-use crate::log;
+use crate::logger;
 use crate::package::build_visible_inputs;
 use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
-use crate::utils::path::route::{strip_path_prefix, strip_path_prefix_in_text};
 use crate::utils::{plural_count, plural_s};
 
 use report::ValidationReport;
@@ -47,6 +46,16 @@ type ParsedScanResult = (
     Vec<(String, String)>,
 );
 
+struct LinkValidation<'a> {
+    root: &'a Path,
+    config: &'a SiteConfig,
+    host: &'a TypstHost,
+    state: &'a SiteIndex,
+    all_pages: &'a [CompiledPage],
+    typst_links: &'a HashMap<PathBuf, Vec<scan::ScannedLink>>,
+    report: &'a Arc<RwLock<ValidationReport>>,
+}
+
 /// Validate site links and assets
 pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let state = SiteIndex::new();
@@ -57,7 +66,7 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let files = collect_content_files(&args.paths, &config.build.content)?;
 
     if files.is_empty() {
-        log!("validate"; "no content files found");
+        logger::log("validate", format_args!("no content files found"));
         return Ok(());
     }
 
@@ -69,11 +78,14 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     let check_assets = validate_config.assets.enable;
 
     if !check_pages && !check_assets {
-        log!("validate"; "no checks enabled");
+        logger::log("validate", format_args!("no checks enabled"));
         return Ok(());
     }
 
-    log!("validate"; "validating {}", plural_count(file_count, "file"));
+    logger::log(
+        "validate",
+        format_args!("validating {}", plural_count(file_count, "file")),
+    );
 
     // Setup paths
     let root = crate::utils::path::normalize_path(config.get_root());
@@ -89,9 +101,13 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
         // Extract path from "file not found (searched at /abs/path)" -> "/relative/path"
         for (source, error) in compile_errors {
             let path = extract_asset_path(&error, &root);
-            report
-                .write()
-                .add_asset(source, format!("`{}`", path), "not found".to_string());
+            let hint = crate::asset::asset_url_hint(&path, config);
+            report.write().add_asset_with_hint(
+                source,
+                format!("`{}`", path),
+                "not found".to_string(),
+                hint,
+            );
         }
 
         (pages, links)
@@ -100,40 +116,44 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     };
 
     // Check for permalink conflicts
-    let url_sources = crate::address::conflict::collect_url_sources(&all_pages, config);
-    let conflicts = crate::address::conflict::detect_conflicts(&url_sources, config.get_root());
+    let url_owners = crate::address::conflict::collect_url_owners(&all_pages, config);
+    let conflicts = crate::address::conflict::detect_conflicts(&url_owners, config.get_root());
     if !conflicts.is_empty() {
-        let prefix = config.paths().prefix().to_string_lossy().into_owned();
-        crate::address::conflict::print_conflicts_with_prefix(&conflicts, &prefix);
-        let total_sources: usize = conflicts.iter().map(|c| c.sources.len()).sum();
+        crate::address::conflict::print_conflicts(&conflicts);
+        let total_owners: usize = conflicts.iter().map(|c| c.owners.len()).sum();
         anyhow::bail!(
-            "validation failed: {} conflicting url{}, {} source{}",
+            "validation failed: {} conflicting url{}, {} owner{}",
             conflicts.len(),
             plural_s(conflicts.len()),
-            total_sources,
-            plural_s(total_sources)
+            total_owners,
+            plural_s(total_owners)
         );
     }
 
     // Validate links (Typst links from unified scan, Markdown scanned separately)
     validate_all_links(
         &files,
-        &root,
-        config,
-        &host,
-        &state,
-        &all_pages,
-        &typst_links,
-        &report,
+        LinkValidation {
+            root: &root,
+            config,
+            host: &host,
+            state: &state,
+            all_pages: &all_pages,
+            typst_links: &typst_links,
+            report: &report,
+        },
     );
 
     // Log page link results
     if check_pages {
         let count = report.read().page_error_count();
         if count > 0 {
-            log!("validate"; "found {} broken page link{}", count, plural_s(count));
+            logger::log(
+                "validate",
+                format_args!("found {} broken page link{}", count, plural_s(count)),
+            );
         } else {
-            log!("validate"; "all page links valid");
+            logger::log("validate", format_args!("all page links valid"));
         }
     }
 
@@ -141,9 +161,12 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
     if check_assets {
         let count = report.read().asset_error_count();
         if count > 0 {
-            log!("validate"; "found {} broken asset link{}", count, plural_s(count));
+            logger::log(
+                "validate",
+                format_args!("found {} broken asset link{}", count, plural_s(count)),
+            );
         } else {
-            log!("validate"; "all asset links valid");
+            logger::log("validate", format_args!("all asset links valid"));
         }
     }
 
@@ -158,39 +181,11 @@ pub fn validate_site(config: &SiteConfig) -> Result<()> {
 }
 
 /// Validate all links using pre-scanned Typst links and scanning Markdown files
-fn validate_all_links(
-    files: &[PathBuf],
-    root: &std::path::Path,
-    config: &SiteConfig,
-    host: &TypstHost,
-    state: &SiteIndex,
-    all_pages: &[CompiledPage],
-    typst_links: &HashMap<PathBuf, Vec<scan::ScannedLink>>,
-    report: &Arc<RwLock<ValidationReport>>,
-) {
-    // Collect all nested asset source directories with their output prefixes
-    let nested_assets: Vec<_> = config
-        .build
-        .assets
-        .nested
-        .iter()
-        .map(|e| (e.output_name().to_string(), root.join(e.source())))
-        .collect();
-
-    // Collect all flatten files (for asset link validation)
-    let flatten_outputs: Vec<_> = config
-        .build
-        .assets
-        .flatten
-        .iter()
-        .filter(|e| e.source().exists())
-        .map(|e| e.output_name().to_string())
-        .collect();
-
+fn validate_all_links(files: &[PathBuf], validation: LinkValidation<'_>) {
     // Process Typst links (already scanned in build_address_space)
-    for (file, links) in typst_links {
+    for (file, links) in validation.typst_links {
         let source = file
-            .strip_prefix(root)
+            .strip_prefix(validation.root)
             .unwrap_or(file)
             .to_string_lossy()
             .to_string();
@@ -199,13 +194,10 @@ fn validate_all_links(
             &source,
             file,
             links,
-            config,
-            all_pages,
-            report,
-            root,
-            &nested_assets,
-            &flatten_outputs,
-            state,
+            validation.config,
+            validation.all_pages,
+            validation.report,
+            validation.state,
         );
     }
 
@@ -213,13 +205,19 @@ fn validate_all_links(
     let (_, markdown_files) = ContentKind::partition_by_kind(files);
 
     // Process Markdown files in parallel.
-    let markdown_results: Vec<_> = state.with_pages(|store| {
+    let markdown_results: Vec<_> = validation.state.with_pages(|store| {
         markdown_files
             .par_iter()
             .filter_map(|file| {
-                scan_markdown(file, root, config, host, store)
-                    .ok()
-                    .map(|result| ((*file).clone(), result))
+                scan_markdown(
+                    file,
+                    validation.root,
+                    validation.config,
+                    validation.host,
+                    store,
+                )
+                .ok()
+                .map(|result| ((*file).clone(), result))
             })
             .collect()
     });
@@ -229,13 +227,10 @@ fn validate_all_links(
             &result.source,
             &file,
             &result.links,
-            config,
-            all_pages,
-            report,
-            root,
-            &nested_assets,
-            &flatten_outputs,
-            state,
+            validation.config,
+            validation.all_pages,
+            validation.report,
+            validation.state,
         );
     }
 }
@@ -249,12 +244,8 @@ fn validate_links(
     config: &SiteConfig,
     all_pages: &[CompiledPage],
     report: &Arc<RwLock<ValidationReport>>,
-    root: &std::path::Path,
-    nested_assets: &[(String, PathBuf)],
-    flatten_outputs: &[String],
     state: &SiteIndex,
 ) {
-    let prefix = config.paths().prefix().to_string_lossy().into_owned();
     let validate_config = &config.validate;
 
     // Find the page for this file (needed for ResolveContext)
@@ -270,67 +261,29 @@ fn validate_links(
 
             // Site-root links: could be page OR static asset
             LinkKind::SiteRoot(path) => {
-                // For asset attributes, check all static assets directories
-                if is_asset_attr {
-                    let trimmed = path.trim_start_matches('/');
-
-                    // Check nested assets: /images/xxx -> find entry with output_name "images"
-                    let in_nested = nested_assets.iter().any(|(output_name, abs_source)| {
-                        // Exact match: /images -> output_name "images"
-                        if trimmed == output_name {
-                            return abs_source.exists();
-                        }
-                        // Prefix with slash: /images/xxx -> output_name "images", rest "xxx"
-                        if let Some(rest) = trimmed.strip_prefix(output_name)
-                            && let Some(rest) = rest.strip_prefix('/')
-                        {
-                            return abs_source.join(rest).exists();
-                        }
-                        false
-                    });
-
-                    // Check flatten outputs (e.g., /favicon.ico -> "favicon.ico")
-                    let in_flatten = flatten_outputs.iter().any(|name| trimmed == name);
-
-                    if in_nested || in_flatten {
+                if crate::asset::is_asset_url(path, config) {
+                    if crate::asset::asset_url_exists(path, config) {
                         continue;
                     }
 
-                    // Asset not found via nested/flatten - check if it exists in source
-                    // and suggest the correct path
                     if validate_config.assets.enable {
-                        // Check if path matches a nested source directory
-                        // e.g., /assets/images/photo.webp -> should be /images/photo.webp
-                        let suggestion =
-                            nested_assets.iter().find_map(|(output_name, abs_source)| {
-                                // Get relative source path by stripping root
-                                let rel_source = abs_source.strip_prefix(root).ok()?;
-                                let source_str = rel_source.to_string_lossy();
-                                // trimmed: "assets/images/photo.webp", source_str: "assets/images"
-                                let rest = trimmed.strip_prefix(source_str.as_ref())?;
-                                let rest = rest.trim_start_matches('/');
-                                let file_path = abs_source.join(rest);
-                                if file_path.exists() {
-                                    let correct = if rest.is_empty() {
-                                        format!("/{}", output_name)
-                                    } else {
-                                        format!("/{}/{}", output_name, rest)
-                                    };
-                                    return Some(correct);
-                                }
-                                None
-                            });
-
-                        let reason = if let Some(correct_path) = suggestion {
-                            format!("maybe should be `{}`", correct_path)
-                        } else {
-                            "not found".to_string()
-                        };
-
-                        report.write().add_asset(
+                        report.write().add_asset_with_hint(
                             source.to_string(),
                             format!("`{}`", link.dest),
-                            reason,
+                            "not found".to_string(),
+                            crate::asset::asset_url_hint(&link.dest, config),
+                        );
+                    }
+                    continue;
+                }
+
+                if is_asset_attr {
+                    if validate_config.assets.enable {
+                        report.write().add_asset_with_hint(
+                            source.to_string(),
+                            format!("`{}`", link.dest),
+                            "not found".to_string(),
+                            crate::asset::asset_url_hint(&link.dest, config),
                         );
                     }
                     continue;
@@ -349,22 +302,7 @@ fn validate_links(
                     origin: link.origin,
                 };
 
-                // Mirror compile-time link normalization (prefix + slug) so
-                // validation targets match final emitted URLs.
-                let resolved_link =
-                    crate::pipeline::transform::resolve_link(&link.dest, config, &page.route)
-                        .unwrap_or_else(|_| link.dest.clone());
-
-                let result = state.read(|_, space| {
-                    let mut result = space.resolve(&resolved_link, &ctx);
-                    // Fallback for mixed prefixed/unprefixed permalink states.
-                    if matches!(result, ResolveResult::NotFound { .. })
-                        && resolved_link != link.dest
-                    {
-                        result = space.resolve(&link.dest, &ctx);
-                    }
-                    result
-                });
+                let result = state.read(|_, space| space.resolve(&link.dest, &ctx));
                 handle_resolve_result(
                     result,
                     source,
@@ -372,7 +310,6 @@ fn validate_links(
                     is_asset_attr,
                     validate_config,
                     report,
-                    &prefix,
                 );
             }
 
@@ -398,7 +335,6 @@ fn validate_links(
                     is_asset_attr,
                     validate_config,
                     report,
-                    &prefix,
                 );
             }
         }
@@ -413,13 +349,8 @@ fn handle_resolve_result(
     is_asset_attr: bool,
     validate_config: &crate::config::ValidateConfig,
     report: &Arc<RwLock<ValidationReport>>,
-    prefix: &str,
 ) {
-    let display_link = if link.starts_with('/') {
-        strip_path_prefix(link, prefix)
-    } else {
-        link.to_string()
-    };
+    let display_link = link.to_string();
 
     match result {
         ResolveResult::Found(_) | ResolveResult::External(_) => {}
@@ -457,31 +388,25 @@ fn handle_resolve_result(
                         available.join(", ")
                     )
                 };
-                report.write().add_page(
-                    source.to_string(),
-                    display_link.clone(),
-                    strip_path_prefix_in_text(&msg, prefix),
-                );
+                report
+                    .write()
+                    .add_page(source.to_string(), display_link.clone(), msg);
             }
         }
 
         ResolveResult::Warning { message, .. } => {
             if validate_config.pages.enable {
-                report.write().add_page(
-                    source.to_string(),
-                    display_link.clone(),
-                    strip_path_prefix_in_text(&message, prefix),
-                );
+                report
+                    .write()
+                    .add_page(source.to_string(), display_link.clone(), message);
             }
         }
 
         ResolveResult::Error { message } => {
             if validate_config.pages.enable {
-                report.write().add_page(
-                    source.to_string(),
-                    display_link,
-                    strip_path_prefix_in_text(&message, prefix),
-                );
+                report
+                    .write()
+                    .add_page(source.to_string(), display_link, message);
             }
         }
     }
@@ -707,26 +632,29 @@ fn batch_scan_typst_unified(
                 match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS)
                 {
                     StabilityDecision::Converged => {
-                        crate::debug!(
-                            "validate";
-                            "metadata converged after {} iteration(s)",
-                            iteration + 1
+                        logger::debug(
+                            "validate",
+                            format_args!("metadata converged after {} iteration(s)", iteration + 1),
                         );
                         break;
                     }
                     StabilityDecision::Oscillating => {
-                        crate::log!(
-                            "warning";
-                            "validate metadata oscillating (cycle detected), stopping after {} iterations",
-                            iteration + 1
+                        logger::log(
+                            "warning",
+                            format_args!(
+                                "validate metadata oscillating (cycle detected), stopping after {} iterations",
+                                iteration + 1
+                            ),
                         );
                         break;
                     }
                     StabilityDecision::MaxIterationsReached => {
-                        crate::log!(
-                            "warning";
-                            "validate metadata did not converge after {} iterations",
-                            MAX_METADATA_SCAN_ITERATIONS
+                        logger::log(
+                            "warning",
+                            format_args!(
+                                "validate metadata did not converge after {} iterations",
+                                MAX_METADATA_SCAN_ITERATIONS
+                            ),
                         );
                     }
                     StabilityDecision::Continue => {}

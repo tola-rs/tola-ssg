@@ -3,13 +3,13 @@
 //! Handles compiling individual content files (Typst, Markdown) and extracting metadata.
 
 use crate::address::{AddressSpace, SiteIndex};
-use crate::compiler::CompileContext;
 use crate::compiler::dependency::record_dependencies_local;
 use crate::compiler::page::compile;
 use crate::compiler::page::{
     CompileMetaResult, PageResult, ScannedHeading, ScannedPageLink, SinglePageScanData,
     scan_single_page,
 };
+use crate::compiler::{CompileContext, FeedBodyMode};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, UrlPath};
 use crate::package::{TolaPackage, package_sentinel};
@@ -177,9 +177,10 @@ pub(crate) fn commit_page_state_parts(
         config,
     );
 
-    store.insert_page(
+    store.insert_page_with_feed_body(
         page.route.permalink.clone(),
         page.content_meta.clone().unwrap_or_default(),
+        page.feed_body.clone(),
     );
 
     // Register headings for fragment validation. Full page route registration
@@ -259,7 +260,7 @@ fn prepare_page_inner(
 
         // Compile with fresh @tola/current data ===
         let current_context = current_context_from_scan(store, path, &page, &scan_data, config);
-        let ctx = CompileContext::new(mode, config, host, store)
+        let ctx = CompileContext::new(mode, config, host, store, super::feed_body_mode(config))
             .with_route(&page.route)
             .with_current_context(&current_context);
         let result = compile(path, &ctx)?;
@@ -282,6 +283,7 @@ fn prepare_page_inner(
         record_dependencies_local(path, deps);
 
         page.apply_meta(content_meta, config);
+        page.feed_body = result.feed_body;
         page.compiled_html = Some(result.html);
 
         let warnings = result.warnings.clone();
@@ -321,7 +323,7 @@ pub fn compile_meta(
 ) -> Result<CompileMetaResult> {
     // Build context without route - compile_meta is typically used for production
     // where globally unique StableIds aren't needed
-    let ctx = CompileContext::new(mode, config, host, store);
+    let ctx = CompileContext::new(mode, config, host, store, FeedBodyMode::Skip);
     let result = compile(path, &ctx)?;
 
     let meta = result.meta;

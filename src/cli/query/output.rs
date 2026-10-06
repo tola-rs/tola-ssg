@@ -5,9 +5,9 @@ use anyhow::Result;
 use serde_json::{Map, Value as JsonValue};
 
 use crate::cli::args::QueryArgs;
-use crate::log;
 
 use super::types::{PageQueryResult, QueryResult};
+use crate::logger;
 
 pub(super) fn output_results(results: &QueryResult, args: &QueryArgs) -> Result<()> {
     // Skip output if no results
@@ -40,9 +40,12 @@ pub(super) fn output_results(results: &QueryResult, args: &QueryArgs) -> Result<
     if let Some(ref output_path) = args.output {
         let mut file = fs::File::create(output_path)?;
         writeln!(file, "{}", formatted)?;
-        log!("query"; "wrote output to {}", output_path.display());
+        logger::log(
+            "query",
+            format_args!("wrote output to {}", output_path.display()),
+        );
     } else {
-        println!("{}", formatted);
+        logger::write_stdout_line(formatted)?;
     }
 
     Ok(())

@@ -27,6 +27,7 @@ pub mod classify;
 pub mod compile;
 pub mod diff;
 pub mod message;
+pub(crate) mod output;
 pub mod patch;
 pub mod queue;
 pub mod server;

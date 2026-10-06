@@ -49,6 +49,10 @@ pub enum Commands {
         /// Print generated config to stdout without creating files
         #[arg(long)]
         dry: bool,
+
+        /// Generate the default site without interactive prompts
+        #[arg(long)]
+        no_interactive: bool,
     },
 
     /// Build the site for production
@@ -136,13 +140,9 @@ pub struct BuildArgs {
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub minify: Option<bool>,
 
-    /// Enable CSS processor (e.g., TailwindCSS)
-    #[arg(short = 'P', long = "css-processor", action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
-    pub css_processor: Option<bool>,
-
-    /// Enable RSS feed generation
+    /// Enable configured feed outputs
     #[arg(long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
-    pub rss: Option<bool>,
+    pub feed: Option<bool>,
 
     /// Enable sitemap generation
     #[arg(short = 'S', long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
@@ -259,5 +259,15 @@ mod tests {
             Cli::try_parse_from(["tola", "build", "--typst-package-path", "packages"]).unwrap_err();
 
         assert!(err.to_string().contains("--typst-package-path"));
+    }
+
+    #[test]
+    fn parses_feed_flag_for_configured_feeds() {
+        let cli = Cli::try_parse_from(["tola", "build", "--feed"]).unwrap();
+
+        let Commands::Build { build_args } = cli.command else {
+            panic!("expected build command");
+        };
+        assert_eq!(build_args.feed, Some(true));
     }
 }

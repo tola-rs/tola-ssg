@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::Result;
 
 use crate::actor::messages::WsMsg;
+use crate::logger;
 
 /// Maximum port retry attempts
 const MAX_PORT_RETRIES: u16 = 10;
@@ -51,7 +52,7 @@ pub fn start_ws_server_with_channel(
         while !stop_for_thread.load(Ordering::SeqCst) {
             match listener.accept() {
                 Ok((stream, addr)) => {
-                    crate::debug!("reload"; "client connected: {}", addr);
+                    logger::debug("reload", format_args!("client connected: {}", addr));
 
                     // Set blocking for WebSocket operations
                     let _ = stream.set_nonblocking(false);
@@ -59,7 +60,7 @@ pub fn start_ws_server_with_channel(
                     // Send raw TcpStream to WsActor for handshake
                     let tx = ws_tx.clone();
                     if tx.blocking_send(WsMsg::AddClient(stream)).is_err() {
-                        crate::log!("reload"; "failed to send client to actor");
+                        logger::log("reload", format_args!("failed to send client to actor"));
                         break;
                     }
                 }
@@ -68,7 +69,7 @@ pub fn start_ws_server_with_channel(
                     continue;
                 }
                 Err(e) => {
-                    crate::log!("reload"; "accept error: {}", e);
+                    logger::log("reload", format_args!("accept error: {}", e));
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }

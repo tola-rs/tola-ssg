@@ -4,6 +4,7 @@ use crate::core::UrlPath;
 use crate::reload::active::ACTIVE_PAGE;
 
 use super::WsActor;
+use crate::logger;
 
 impl WsActor {
     /// Convert rendered patches to client patch commands.
@@ -19,21 +20,21 @@ impl WsActor {
         let count = clients.len();
 
         if count == 0 {
-            crate::debug!("ws"; "no clients connected");
+            logger::debug("ws", format_args!("no clients connected"));
             return;
         }
 
         clients.retain_mut(|client| match client.ws.send(msg.clone()) {
             Ok(_) => true,
             Err(e) => {
-                crate::debug!("ws"; "client disconnected: {}", e);
+                logger::debug("ws", format_args!("client disconnected: {}", e));
                 if let Some(ref route) = client.route {
                     ACTIVE_PAGE.remove(route);
                 }
                 false
             }
         });
-        crate::debug!("ws"; "broadcast to {} clients", count);
+        logger::debug("ws", format_args!("broadcast to {} clients", count));
     }
 
     /// Send a message to clients viewing a specific route
@@ -56,7 +57,7 @@ impl WsActor {
                         true
                     }
                     Err(e) => {
-                        crate::debug!("ws"; "client disconnected: {}", e);
+                        logger::debug("ws", format_args!("client disconnected: {}", e));
                         if let Some(ref route) = client.route {
                             ACTIVE_PAGE.remove(route);
                         }
@@ -69,7 +70,10 @@ impl WsActor {
         });
 
         if sent > 0 {
-            crate::debug!("ws"; "sent to {} clients viewing {}", sent, target_route);
+            logger::debug(
+                "ws",
+                format_args!("sent to {} clients viewing {}", sent, target_route),
+            );
         }
     }
 }

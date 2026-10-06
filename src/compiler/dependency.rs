@@ -10,6 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use crate::logger;
 use crate::utils::path::normalize_path;
 
 type PathSet = FxHashSet<PathBuf>;
@@ -249,8 +250,13 @@ pub mod parallel {
         let all_entries = rayon_deps.into_iter().flatten().chain(main_deps);
         let reverse_count = global::merge(all_entries);
 
-        crate::debug!("dep"; "flushed {} rayon + {} main deps, reverse map has {} entries",
-            rayon_count, main_count, reverse_count);
+        logger::debug(
+            "dep",
+            format_args!(
+                "flushed {} rayon + {} main deps, reverse map has {} entries",
+                rayon_count, main_count, reverse_count
+            ),
+        );
     }
 
     /// Flush current thread's dependencies to the global graph.

@@ -11,14 +11,14 @@ use std::sync::LazyLock;
 use dashmap::DashSet;
 use tola_vdom::prelude::*;
 
-use super::link::process_link_value;
 use crate::address::resolve_physical_path;
-use crate::compiler::family::{Indexed, TolaSite::FamilyKind};
+use crate::compiler::family::Indexed;
 use crate::compiler::page::PageRoute;
 use crate::config::SiteConfig;
 use crate::config::section::theme::RecolorTarget;
 use crate::core::LinkKind;
 use crate::image::background;
+use crate::logger;
 
 // =============================================================================
 // nobg reference tracking (minify mode only)
@@ -102,7 +102,7 @@ impl<'a> MediaTransform<'a> {
 
         // Process image (with caching)
         if let Err(e) = self.process_nobg_image(&source_path, &output_path) {
-            eprintln!("nobg processing error: {}", e);
+            logger::text(&format!("nobg processing error: {}", e));
             return;
         }
 
@@ -124,18 +124,28 @@ impl<'a> MediaTransform<'a> {
 
         match LinkKind::parse(src) {
             LinkKind::SiteRoot(path) => {
-                // /images/xxx.png -> public/images/xxx.nobg.png, /images/xxx.nobg.png
+                if let Some(route) = self.asset_route_for_src(src) {
+                    let route_stem = route
+                        .output
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(stem);
+                    let output_path = route
+                        .output
+                        .with_file_name(format!("{route_stem}.nobg.png"));
+                    let new_src = nobg_site_root_src(route.url.as_str(), route_stem);
+                    return (output_path, new_src, route.output);
+                }
+
                 let trimmed = path.trim_start_matches('/');
-                let parent = Path::new(trimmed).parent().unwrap_or(Path::new(""));
                 let output_path = self
                     .config
-                    .build
-                    .output
-                    .join(parent)
-                    .join(format!("{}.nobg.png", stem));
-                let new_src = format!("/{}/{}.nobg.png", parent.display(), stem);
-                // Use src path for consistency with compute_output_path
-                let original_output = self.config.build.output.join(trimmed);
+                    .paths()
+                    .output_dir()
+                    .join(Path::new(trimmed).parent().unwrap_or(Path::new("")))
+                    .join(format!("{stem}.nobg.png"));
+                let new_src = nobg_site_root_src(path, stem);
+                let original_output = self.config.paths().output_dir().join(trimmed);
                 (output_path, new_src, original_output)
             }
             _ => {
@@ -154,33 +164,11 @@ impl<'a> MediaTransform<'a> {
     ///
     /// Supports:
     /// - File-relative paths: `./image.png` -> source file's parent directory
-    /// - Site-root paths: `/images/xxx` -> config.build.assets.nested mapping
+    /// - Site-root paths: `/images/xxx` -> configured asset route source
     fn resolve_source_path(&self, src: &str) -> Option<PathBuf> {
         match LinkKind::parse(src) {
-            LinkKind::SiteRoot(path) => {
-                // /images/xxx -> find nested asset entry with output_name "images"
-                let trimmed = path.trim_start_matches('/');
-                for entry in &self.config.build.assets.nested {
-                    let output_name = entry.output_name();
-                    // Exact match: /assets -> output_name "assets"
-                    if trimmed == output_name {
-                        let source_path = self.config.root.join(entry.source());
-                        if source_path.exists() {
-                            return Some(source_path);
-                        }
-                    }
-                    // Prefix with slash: /assets/xxx -> output_name "assets", rest "xxx"
-                    if let Some(rest) = trimmed.strip_prefix(output_name)
-                        && let Some(file_path) = rest.strip_prefix('/')
-                    {
-                        let source_path = self.config.root.join(entry.source()).join(file_path);
-                        if source_path.exists() {
-                            return Some(source_path);
-                        }
-                    }
-                }
-                None
-            }
+            LinkKind::SiteRoot(path) => crate::asset::source_for_asset_url(path, self.config)
+                .filter(|source| source.exists()),
             LinkKind::FileRelative(_) | LinkKind::Fragment(_) => {
                 // Try relative to source file's directory
                 if let Some(source_dir) = self.route.source.parent() {
@@ -225,16 +213,35 @@ impl<'a> MediaTransform<'a> {
         }
 
         match LinkKind::parse(src) {
-            LinkKind::SiteRoot(path) => {
-                let trimmed = path.trim_start_matches('/');
-                Some(self.config.build.output.join(trimmed))
-            }
+            LinkKind::SiteRoot(path) => self
+                .asset_route_for_src(path)
+                .map(|route| route.output)
+                .or_else(|| {
+                    let trimmed = path.trim_start_matches('/');
+                    Some(self.config.paths().output_dir().join(trimmed))
+                }),
             LinkKind::FileRelative(path) => {
                 let filename = Path::new(path).file_name()?;
                 Some(self.route.output_dir.join(filename))
             }
             _ => None,
         }
+    }
+
+    fn asset_route_for_src(&self, src: &str) -> Option<crate::asset::AssetRoute> {
+        let source = crate::asset::source_for_asset_url(src, self.config)?;
+        crate::asset::route_from_source(source, self.config).ok()
+    }
+}
+
+fn nobg_site_root_src(path: &str, stem: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let parent = Path::new(path).parent().unwrap_or(Path::new(""));
+    let parent = parent.to_string_lossy().replace('\\', "/");
+    if parent.is_empty() {
+        format!("/{stem}.nobg.png")
+    } else {
+        format!("/{parent}/{stem}.nobg.png")
     }
 }
 
@@ -247,17 +254,47 @@ impl Transform<Indexed> for MediaTransform<'_> {
             && self.config.theme.recolor.target == RecolorTarget::Auto;
         process_classes(&mut doc.root, &self, ClassState::default(), auto_inject);
 
-        // Process src attributes (URL resolution)
-        doc.modify_by::<FamilyKind::Media, _>(|elem| {
-            if let Some(src) = elem.get_attr("src").map(|s| s.to_string())
-                && let Ok(processed) = process_link_value(&src, self.config, self.route)
-            {
-                set_media_src(elem, processed);
-            }
-        });
+        process_src_attrs(&mut doc.root, self.config, self.route);
 
         doc
     }
+}
+
+fn process_src_attrs(elem: &mut Element<Indexed>, config: &SiteConfig, route: &PageRoute) {
+    if let Some(src) = elem.get_attr("src").map(|s| s.to_string()) {
+        let processed = process_media_src(&src, config, route);
+        set_media_src(elem, processed);
+    }
+
+    for child in &mut elem.children {
+        if let Node::Element(child) = child {
+            process_src_attrs(child, config, route);
+        }
+    }
+}
+
+fn process_media_src(value: &str, config: &SiteConfig, route: &PageRoute) -> String {
+    match LinkKind::parse(value) {
+        LinkKind::External(_) | LinkKind::Fragment(_) => value.to_string(),
+        LinkKind::SiteRoot(path) => crate::asset::resolve_asset_href(path, config)
+            .unwrap_or_else(|| site_root_file_href(path, config)),
+        LinkKind::FileRelative(_) => resolve_media_relative(value, route),
+    }
+}
+
+fn resolve_media_relative(value: &str, route: &PageRoute) -> String {
+    if route.is_index {
+        value.to_string()
+    } else {
+        format!("../{value}")
+    }
+}
+
+fn site_root_file_href(value: &str, config: &SiteConfig) -> String {
+    let idx = value.find(['?', '#']).unwrap_or(value.len());
+    let path = value[..idx].trim_start_matches('/');
+    let suffix = &value[idx..];
+    format!("{}{}", config.paths().url_for_site_path(path), suffix)
 }
 
 fn set_media_src(elem: &mut Element<Indexed>, src: String) {
@@ -373,6 +410,7 @@ fn apply_nobg_processing(
 mod tests {
     use super::*;
     use crate::compiler::family::TolaSite;
+    use crate::config::section::build::assets::FlattenEntry;
     use tola_vdom::core::ExtractFamily;
     use tola_vdom::families::MediaFamily;
 
@@ -400,5 +438,109 @@ mod tests {
         let media = ExtractFamily::<MediaFamily>::get(&image.ext).unwrap();
         assert_eq!(image.get_attr("src"), Some(".././photo.png"));
         assert_eq!(media.src.as_deref(), Some(".././photo.png"));
+    }
+
+    #[test]
+    fn site_root_media_src_is_not_pageified_when_asset_is_missing() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        let route = PageRoute {
+            source: PathBuf::from("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: PathBuf::from("public/docs/blog/index.html"),
+            output_dir: PathBuf::from("public/docs/blog"),
+            full_url: "https://example.com/docs/blog/".to_string(),
+        };
+        let root = TolaSite::element("main", Attrs::new()).child(TolaSite::element(
+            "img",
+            Attrs::from([("src", "/posts/hello/missing.png?v=1")]),
+        ));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+
+        let transformed = MediaTransform::new(&config, &route).transform(indexed);
+
+        let image = transformed.find(|elem| elem.is_tag("img")).unwrap();
+        let media = ExtractFamily::<MediaFamily>::get(&image.ext).unwrap();
+        assert_eq!(
+            image.get_attr("src"),
+            Some("/docs/blog/posts/hello/missing.png?v=1")
+        );
+        assert_eq!(
+            media.src.as_deref(),
+            Some("/docs/blog/posts/hello/missing.png?v=1")
+        );
+    }
+
+    #[test]
+    fn src_attrs_without_media_family_are_processed_as_assets() {
+        let mut config = SiteConfig::default();
+        config.build.path_prefix = PathBuf::from("docs/blog");
+        let route = PageRoute {
+            source: PathBuf::from("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: PathBuf::from("public/docs/blog/index.html"),
+            output_dir: PathBuf::from("public/docs/blog"),
+            full_url: "https://example.com/docs/blog/".to_string(),
+        };
+        let root = TolaSite::element("main", Attrs::new()).child(TolaSite::element(
+            "script",
+            Attrs::from([("src", "/scripts/app.js")]),
+        ));
+        let indexed = TolaSite::indexer().transform(Document::new(root));
+
+        let transformed = MediaTransform::new(&config, &route).transform(indexed);
+
+        let script = transformed.find(|elem| elem.is_tag("script")).unwrap();
+        assert_eq!(script.get_attr("src"), Some("/docs/blog/scripts/app.js"));
+    }
+
+    #[test]
+    fn nobg_site_root_image_at_output_root_keeps_single_leading_slash() {
+        let config = SiteConfig::default();
+        let route = PageRoute {
+            source: PathBuf::from("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: PathBuf::from("public/index.html"),
+            output_dir: PathBuf::from("public"),
+            full_url: "https://example.com/".to_string(),
+        };
+        let transform = MediaTransform::new(&config, &route);
+
+        let (_, new_src, _) = transform.generate_nobg_paths("/hero.png", Path::new("hero.png"));
+
+        assert_eq!(new_src, "/hero.nobg.png");
+    }
+
+    #[test]
+    fn nobg_site_root_source_resolution_uses_file_asset_route() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source_raw = dir.path().join("assets/hero.png");
+        std::fs::create_dir_all(source_raw.parent().unwrap()).unwrap();
+        std::fs::write(&source_raw, "image").unwrap();
+        let source = crate::utils::path::normalize_path(&source_raw);
+
+        let mut config = SiteConfig::default();
+        config.set_root(dir.path());
+        config.build.output = dir.path().join("public");
+        config.build.assets.flatten = vec![FlattenEntry::new(source.clone(), "/hero.png")];
+
+        let route = PageRoute {
+            source: dir.path().join("content/index.typ"),
+            is_index: true,
+            is_404: false,
+            permalink: crate::core::UrlPath::from_page("/"),
+            output_file: dir.path().join("public/index.html"),
+            output_dir: dir.path().join("public"),
+            full_url: "https://example.com/".to_string(),
+        };
+        let transform = MediaTransform::new(&config, &route);
+
+        assert_eq!(transform.resolve_source_path("/hero.png"), Some(source));
     }
 }

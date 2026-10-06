@@ -3,9 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use owo_colors::OwoColorize;
-
-use crate::utils::plural_s;
+use crate::{logger, utils::plural_s};
 
 /// A single validation error
 #[derive(Debug, Clone)]
@@ -14,6 +12,8 @@ pub struct ValidationError {
     pub target: String,
     /// Error reason/message.
     pub reason: String,
+    /// Optional fix hint.
+    pub hint: Option<String>,
 }
 
 /// Unified validation report for all error types
@@ -31,17 +31,30 @@ impl ValidationReport {
         self.pages.entry(source).or_default().push(ValidationError {
             target: link,
             reason,
+            hint: None,
         });
     }
 
     /// Add an asset error.
     pub fn add_asset(&mut self, source: String, path: String, reason: String) {
+        self.add_asset_with_hint(source, path, reason, None);
+    }
+
+    /// Add an asset error with an optional fix hint.
+    pub fn add_asset_with_hint(
+        &mut self,
+        source: String,
+        path: String,
+        reason: String,
+        hint: Option<String>,
+    ) {
         self.assets
             .entry(source)
             .or_default()
             .push(ValidationError {
                 target: path,
                 reason,
+                hint,
             });
     }
 
@@ -76,31 +89,43 @@ impl ValidationReport {
         if errors.is_empty() {
             return;
         }
-        eprintln!();
+        logger::blank();
 
         let file_count = errors.len();
         let error_count: usize = errors.values().map(|v| v.len()).sum();
 
         // Section header
-        eprintln!(
+        logger::text(&format!(
             "{} {}",
-            name.red().bold(),
-            format!(
+            logger::style_error_strong(name),
+            logger::style_dim(format!(
                 "({file_count} file{}, {error_count} error{})",
                 plural_s(file_count),
                 plural_s(error_count)
-            )
-            .dimmed()
-        );
+            ))
+        ));
 
         for (path, errs) in errors {
             // File path
-            eprintln!("{}{}{}", "[".dimmed(), path.cyan(), "]".dimmed());
+            logger::text(&format!(
+                "{}{}{}",
+                logger::style_dim("["),
+                logger::style_path(path),
+                logger::style_dim("]")
+            ));
             for e in errs {
                 if e.reason.is_empty() {
-                    eprintln!("{} {}", "→".red(), e.target);
+                    logger::text(&format!("{} {}", logger::style_error("→"), e.target));
                 } else {
-                    eprintln!("{} {} {}", "→".red(), e.target, e.reason);
+                    logger::text(&format!(
+                        "{} {} {}",
+                        logger::style_error("→"),
+                        e.target,
+                        e.reason
+                    ));
+                }
+                if let Some(hint) = &e.hint {
+                    logger::text(&format!("  {} {}", logger::style_warning("hint:"), hint));
                 }
             }
         }
@@ -114,14 +139,14 @@ impl fmt::Display for ValidationReport {
         let total = pages + assets;
 
         if total == 0 {
-            write!(f, "{}", "all checks passed".green())
+            write!(f, "{}", logger::style_success("all checks passed"))
         } else {
             write!(
                 f,
                 "{} {} {}",
-                "found".dimmed(),
-                total.to_string().red().bold(),
-                format!("error{}", plural_s(total)).dimmed()
+                logger::style_dim("found"),
+                logger::style_error_strong(total.to_string()),
+                logger::style_dim(format!("error{}", plural_s(total)))
             )
         }
     }

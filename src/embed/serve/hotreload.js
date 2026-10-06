@@ -26,6 +26,10 @@
     suppressNextClose: false,
     suppressReloadUntil: 0,
     reconnectDelay: 1000,
+    pendingReload: null,
+    pendingReloadTimer: null,
+    reloadInProgress: false,
+    messageQueue: Promise.resolve(),
 
     closeWsSilently() {
       if (!this.ws) return;
@@ -78,7 +82,7 @@
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
-          this.handleMessage(msg);
+          this.enqueueMessage(msg);
         } catch (err) {
           console.error('[tola] message error:', err);
         }
@@ -165,12 +169,14 @@
           this.suppressReloadUntil = Date.now() + 1200;
         }
         this.attemptReconnect();
+        this.flushPendingReload();
       });
 
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible') {
           this.pageActive = true;
           this.attemptReconnect();
+          this.flushPendingReload();
         } else {
           // Keep the socket alive for ordinary tab switches so edits made while
           // you're in the editor still patch the page in the background.
@@ -188,11 +194,13 @@
       document.addEventListener('resume', () => {
         this.pageActive = true;
         this.attemptReconnect();
+        this.flushPendingReload();
       });
 
       window.addEventListener('online', () => {
         this.pageActive = true;
         this.attemptReconnect();
+        this.flushPendingReload();
       });
     },
 
@@ -208,56 +216,49 @@
       }
     },
 
+    enqueueMessage(msg) {
+      const run = () => Promise.resolve(this.handleMessage(msg)).catch((err) => {
+        console.error('[tola] message error:', err);
+      });
+      this.messageQueue = this.messageQueue.then(run, run);
+    },
+
     // Handle incoming message
     handleMessage(msg) {
       switch (msg.type) {
         case 'reload':
-          if (!this.pageActive || document.visibilityState !== 'visible') {
-            break;
-          }
-          if (Date.now() < this.suppressReloadUntil) {
-            console.log('[tola] skip stale reload after history restore');
-            break;
-          }
-          console.log('[tola] reloading:', msg.reason || 'file changed');
-          // If permalink changed, update URL before reload to avoid 404
-          if (msg.url_change) {
-            this.updateUrl(msg.url_change);
-          }
-          location.reload();
-          break;
+          this.handleReloadMessage(msg);
+          return Promise.resolve();
         case 'patch':
           // StableIds are globally unique (include page path hash), so we can
           // safely apply all patches - only matching elements will be affected.
           // This naturally supports htmx/dynamic content loading.
-          this.applyPatches(msg.ops);
+          return this.applyPatches(msg.ops, msg.assets || [], msg.path).then(() => {
+            // Clear SPA prefetch cache (content may have changed)
+            if (window.TolaSpa && typeof window.TolaSpa.clearCaches === 'function') {
+              window.TolaSpa.clearCaches();
+            }
 
-          // Clear SPA prefetch cache (content may have changed)
-          if (window.TolaSpa && typeof window.TolaSpa.clearCaches === 'function') {
-            window.TolaSpa.clearCaches();
-          }
-
-          // Seamless URL update when permalink changes (no reload)
-          if (msg.url_change) {
-            this.updateUrl(msg.url_change);
-          }
-          break;
-        case 'css':
-          this.applyCssMessage(msg);
-          break;
+            // Seamless URL update when permalink changes (no reload)
+            if (msg.url_change) {
+              this.updateUrl(msg.url_change);
+            }
+          });
+        case 'asset':
+          return this.applyAssetMessage(msg);
         case 'ping':
           this.sendMessage({ type: 'pong', ts: msg.ts });
-          break;
+          return Promise.resolve();
         case 'pong':
-          break;
+          return Promise.resolve();
         case 'connected':
           console.log('[tola] server version:', msg.version);
-          break;
+          return Promise.resolve();
         case 'error':
           console.error('[tola] compile error:', msg.path, msg.error);
           this.errorState.set(msg.path, msg.error);
           this.renderErrorOverlay();
-          break;
+          return Promise.resolve();
         case 'clear_error':
           if (msg.path) {
             console.log('[tola] error cleared:', msg.path);
@@ -267,8 +268,73 @@
             this.errorState.clear();
           }
           this.renderErrorOverlay();
-          break;
+          return Promise.resolve();
+        default:
+          return Promise.resolve();
       }
+    },
+
+    handleReloadMessage(msg) {
+      if (!this.canReloadNow()) {
+        this.queueReload(msg);
+        return;
+      }
+
+      this.reloadNow(msg);
+    },
+
+    canReloadNow() {
+      return this.pageActive && document.visibilityState === 'visible';
+    },
+
+    queueReload(msg) {
+      this.pendingReload = msg || { type: 'reload' };
+    },
+
+    flushPendingReload() {
+      if (!this.pendingReload || !this.canReloadNow()) {
+        return;
+      }
+
+      if (Date.now() < this.suppressReloadUntil) {
+        this.schedulePendingReload();
+        return;
+      }
+
+      const msg = this.pendingReload;
+      this.pendingReload = null;
+      this.reloadNow(msg);
+    },
+
+    schedulePendingReload() {
+      if (this.pendingReloadTimer) {
+        return;
+      }
+
+      const delay = Math.max(this.suppressReloadUntil - Date.now(), 0) + 10;
+      this.pendingReloadTimer = setTimeout(() => {
+        this.pendingReloadTimer = null;
+        this.flushPendingReload();
+      }, delay);
+    },
+
+    reloadNow(msg) {
+      if (this.reloadInProgress) {
+        return;
+      }
+      if (Date.now() < this.suppressReloadUntil) {
+        this.queueReload(msg);
+        this.schedulePendingReload();
+        return;
+      }
+
+      this.reloadInProgress = true;
+      console.log('[tola] reloading:', msg.reason || 'file changed');
+      // If permalink changed, update URL before reload to avoid 404
+      if (msg.url_change) {
+        this.updateUrl(msg.url_change);
+      }
+      location.reload();
     },
 
     sendMessage(message) {
@@ -296,90 +362,78 @@
       }
     },
 
-    applyCssMessage(msg) {
-      if (!msg || typeof msg.target !== 'string' || typeof msg.content !== 'string') {
-        return;
+    applyAssetMessage(msg) {
+      if (!msg || typeof msg.href !== 'string' || msg.href.length === 0) {
+        return Promise.resolve();
       }
 
-      const targets = this.findCssTargets(msg.target);
-      if (targets.length === 0) {
-        this.upsertManagedStyle(msg.target, msg.content);
-        return;
-      }
-
-      for (const target of targets) {
-        if (target.tagName === 'STYLE') {
-          target.textContent = msg.content;
-        } else if (target.tagName === 'LINK' && target.rel === 'stylesheet') {
-          this.replaceStylesheetWithStyle(target, msg.target, msg.content);
+      const link = this.findStylesheetLink(msg.href);
+      if (link) {
+        if (this.sameHref(link, msg.href)) {
+          return Promise.resolve();
         }
+        return this.seamlessCssUpdate(link, this.stylesheetHtml(link, msg.href));
       }
-    },
 
-    findCssTargets(target) {
-      const targets = [];
-      try {
-        document.querySelectorAll(target).forEach((node) => {
-          if (this.isCssNode(node)) {
-            targets.push(node);
-          }
-        });
-      } catch (_) {}
+      if (this.isStylesheetHref(msg.href)) {
+        return Promise.resolve();
+      }
 
-      document.querySelectorAll('link[rel="stylesheet"]').forEach((link) => {
-        if (this.hrefMatches(link, target) && !targets.includes(link)) {
-          targets.push(link);
-        }
+      this.handleReloadMessage({
+        type: 'reload',
+        reason: `asset changed: ${msg.href}`,
       });
-
-      document.querySelectorAll('style[data-tola-css-target]').forEach((style) => {
-        if (style.dataset.tolaCssTarget === target && !targets.includes(style)) {
-          targets.push(style);
-        }
-      });
-
-      return targets;
+      return Promise.resolve();
     },
 
-    isCssNode(node) {
-      return !!(node && (
-        node.tagName === 'STYLE'
-        || (node.tagName === 'LINK' && node.rel === 'stylesheet')
-      ));
-    },
-
-    hrefMatches(link, target) {
-      const href = link.getAttribute('href') || '';
-      if (href === target || link.href === target) {
-        return true;
-      }
+    isStylesheetHref(href) {
       try {
-        return new URL(href, window.location.href).href === new URL(target, window.location.href).href;
+        return new URL(href, window.location.href).pathname.toLowerCase().endsWith('.css');
       } catch (_) {
         return false;
       }
     },
 
-    replaceStylesheetWithStyle(link, target, content) {
-      const style = document.createElement('style');
-      style.dataset.tolaCssTarget = target;
-      style.textContent = content;
-      link.replaceWith(style);
+    findStylesheetLink(href) {
+      let target = null;
+      try {
+        target = new URL(href, window.location.href);
+      } catch (_) {
+        return null;
+      }
+
+      const candidates = [];
+      for (const link of document.querySelectorAll('link[rel="stylesheet"]')) {
+        try {
+          const current = new URL(link.getAttribute('href') || link.href, window.location.href);
+          if (current.origin === target.origin && current.pathname === target.pathname) {
+            if (current.href === target.href) {
+              return link;
+            }
+            if (!link.dataset.tolaPendingStylesheet) {
+              candidates.push(link);
+            }
+          }
+        } catch (_) {}
+      }
+
+      return candidates.length > 0 ? candidates[candidates.length - 1] : null;
     },
 
-    upsertManagedStyle(target, content) {
-      let style = null;
-      document.querySelectorAll('style[data-tola-css-target]').forEach((candidate) => {
-        if (!style && candidate.dataset.tolaCssTarget === target) {
-          style = candidate;
-        }
-      });
-      if (!style) {
-        style = document.createElement('style');
-        style.dataset.tolaCssTarget = target;
-        document.head.appendChild(style);
+    sameHref(link, href) {
+      try {
+        const current = new URL(link.getAttribute('href') || link.href, window.location.href);
+        const next = new URL(href, window.location.href);
+        return current.href === next.href;
+      } catch (_) {
+        return false;
       }
-      style.textContent = content;
+    },
+
+    stylesheetHtml(link, href) {
+      const next = link.cloneNode(false);
+      next.setAttribute('href', href);
+      return next.outerHTML;
     },
 
     // Render error overlay from the current error set without reloading
@@ -435,9 +489,15 @@
     // Apply patch operations
     // Phase 1: apply stylesheet updates (replace/attrs) and wait for preload completion
     // Phase 2: apply all remaining DOM patches
-    applyPatches(ops) {
+    applyPatches(ops, assets, path) {
+      ops = Array.isArray(ops) ? ops : [];
+      assets = Array.isArray(assets) ? assets : [];
+
       const cssOps = [];
       const otherOps = [];
+      const cssTasks = [];
+      const deferredAssets = [];
+      const patchOwnsPage = this.patchAppliesToCurrentPage(ops, path);
 
       for (const op of ops) {
         if (this.isStylesheetPatch(op)) {
@@ -447,15 +507,23 @@
         }
       }
 
-      const applyRemaining = () => {
+      const applyRemaining = (styleUpdates) => {
+        for (const update of styleUpdates || []) {
+          update.activate();
+        }
+
         for (const op of otherOps) {
           try {
             this.applyPatch(op);
           } catch (err) {
             console.error('[tola] patch failed:', op.op, err);
             location.reload();
-            return;
+            return Promise.resolve();
           }
+        }
+
+        for (const update of styleUpdates || []) {
+          update.cleanup();
         }
         this.hydrate();
 
@@ -463,30 +531,96 @@
         if (window.TolaRecolor && typeof window.TolaRecolor.update === 'function') {
           window.TolaRecolor.update();
         }
+
+        return this.applyDeferredAssets(deferredAssets);
       };
 
-      if (cssOps.length === 0) {
-        applyRemaining();
-        return;
-      }
-
-      const cssTasks = [];
       for (const op of cssOps) {
         try {
-          cssTasks.push(this.applyStylesheetPatch(op));
+          cssTasks.push(this.prepareStylesheetPatch(op));
         } catch (err) {
           console.error('[tola] css patch failed:', op.op, err);
           location.reload();
-          return;
+          return Promise.resolve();
         }
       }
 
-      Promise.all(cssTasks)
+      if (patchOwnsPage) {
+        for (const href of assets) {
+          const task = this.prepareAssetForPatch(href);
+          if (task) {
+            cssTasks.push(task);
+          } else {
+            deferredAssets.push(href);
+          }
+        }
+      }
+
+      if (cssTasks.length === 0) {
+        return applyRemaining([]);
+      }
+
+      return Promise.all(cssTasks)
         .then(applyRemaining)
         .catch((err) => {
           console.error('[tola] css patch failed:', err);
           location.reload();
         });
+    },
+
+    patchAppliesToCurrentPage(ops, path) {
+      return this.pathMatchesCurrentPage(path) || ops.some((op) => this.patchTargetExists(op));
+    },
+
+    pathMatchesCurrentPage(path) {
+      const target = this.normalizeRoutePath(path);
+      if (!target) return false;
+      return target === this.normalizeRoutePath(window.location.pathname);
+    },
+
+    normalizeRoutePath(path) {
+      if (typeof path !== 'string' || path.length === 0) return '';
+      let value = path;
+      try {
+        value = decodeURIComponent(value);
+      } catch (_) {}
+      if (!value.startsWith('/')) value = `/${value}`;
+      value = value.replace(/\/+$/, '');
+      return value || '/';
+    },
+
+    patchTargetExists(op) {
+      if (!op || typeof op.op !== 'string') return false;
+      switch (op.op) {
+        case 'replace':
+        case 'text':
+        case 'html':
+        case 'remove':
+        case 'attrs':
+          return !!this.getById(op.target);
+        case 'insert':
+          return !!this.getById(op.anchor_id);
+        case 'move':
+          return !!(this.getById(op.target) && this.getById(op.anchor_id));
+        default:
+          return false;
+      }
+    },
+
+    prepareAssetForPatch(href) {
+      if (typeof href !== 'string' || href.length === 0) return null;
+      const link = this.findStylesheetLink(href);
+      if (!link) return null;
+      if (this.sameHref(link, href)) return Promise.resolve(this.emptyStyleUpdate());
+      return this.prepareStylesheetUpdate(link, this.stylesheetHtml(link, href));
+    },
+
+    applyDeferredAssets(assets) {
+      let chain = Promise.resolve();
+      for (const href of assets) {
+        chain = chain.then(() => this.applyAssetMessage({ type: 'asset', href }));
+      }
+      return chain;
     },
 
     isStylesheetPatch(op) {
@@ -509,31 +643,29 @@
       return !!(el && el.tagName === 'LINK' && el.rel === 'stylesheet');
     },
 
-    applyStylesheetPatch(op) {
-      if (!op) return Promise.resolve();
-      if (op.op === 'replace') return this.applyStylesheetReplace(op);
-      if (op.op === 'attrs') return this.applyStylesheetAttrs(op);
-      return Promise.resolve();
+    prepareStylesheetPatch(op) {
+      if (!op) return Promise.resolve(this.emptyStyleUpdate());
+      if (op.op === 'replace') return this.prepareStylesheetReplace(op);
+      if (op.op === 'attrs') return this.prepareStylesheetAttrs(op);
+      return Promise.resolve(this.emptyStyleUpdate());
     },
 
-    applyStylesheetReplace(op) {
+    prepareStylesheetReplace(op) {
       const el = this.getById(op.target);
       if (!el) {
-        return Promise.resolve();
+        return Promise.resolve(this.emptyStyleUpdate());
       }
       if (el.tagName === 'LINK' && el.rel === 'stylesheet') {
-        return this.seamlessCssUpdate(el, op.html);
+        return this.prepareStylesheetUpdate(el, op.html);
       }
       // Fallback: if target exists but is not stylesheet, apply as normal replace
-      this.applyPatch(op);
-      return Promise.resolve();
+      return Promise.resolve(this.styleUpdate(() => this.applyPatch(op)));
     },
 
-    applyStylesheetAttrs(op) {
+    prepareStylesheetAttrs(op) {
       const oldLink = this.getById(op.target);
       if (!(oldLink && oldLink.tagName === 'LINK' && oldLink.rel === 'stylesheet')) {
-        this.applyPatch(op);
-        return Promise.resolve();
+        return Promise.resolve(this.styleUpdate(() => this.applyPatch(op)));
       }
 
       const nextLink = oldLink.cloneNode(false);
@@ -551,11 +683,10 @@
 
       // Only use preload swap when stylesheet href actually changes.
       if (nextRel === 'stylesheet' && nextHref && nextHref !== oldHref) {
-        return this.seamlessCssUpdate(oldLink, nextLink.outerHTML);
+        return this.prepareStylesheetUpdate(oldLink, nextLink.outerHTML);
       }
 
-      this.applyPatch(op);
-      return Promise.resolve();
+      return Promise.resolve(this.styleUpdate(() => this.applyPatch(op)));
     },
 
     // Apply single patch - pure ID/anchor based, no position indices
@@ -568,7 +699,7 @@
             if (el.tagName === 'LINK' && el.rel === 'stylesheet') {
               this.seamlessCssUpdate(el, op.html);
             } else {
-              el.outerHTML = op.html;
+              this.morphOuterHtml(el, op.html);
             }
           }
           break;
@@ -590,12 +721,9 @@
           const el = this.getById(op.target);
           if (el) {
             if (op.is_svg) {
-              // SVG requires namespace-aware parsing
-              const temp = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-              temp.innerHTML = op.html;
-              el.replaceChildren(...temp.childNodes);
+              this.morphSvgChildren(el, op.html);
             } else {
-              el.innerHTML = op.html;
+              this.morphInnerHtml(el, op.html);
             }
           }
           break;
@@ -686,9 +814,16 @@
       return el;
     },
 
-    // Seamless CSS update: preload new stylesheet before removing old one
-    // This prevents flash of unstyled content (FOUC)
+    // Seamless CSS update: load the new stylesheet while the old one remains
+    // applied, then commit the swap after the new CSS is ready.
     seamlessCssUpdate(oldLink, newHtml) {
+      return this.prepareStylesheetUpdate(oldLink, newHtml).then((update) => {
+        update.activate();
+        update.cleanup();
+      });
+    },
+
+    prepareStylesheetUpdate(oldLink, newHtml) {
       return new Promise((resolve) => {
       // Parse new link element from HTML
         const temp = document.createElement('div');
@@ -696,46 +831,198 @@
         const newLink = temp.querySelector('link');
         if (!newLink) {
           // Fallback to direct replacement if parsing fails
-          oldLink.outerHTML = newHtml;
-          resolve();
+          resolve(this.styleUpdate(() => this.morphOuterHtml(oldLink, newHtml)));
           return;
         }
 
-        // Create a preload link to fetch CSS without applying it
-        const preload = document.createElement('link');
-        preload.rel = 'preload';
-        preload.as = 'style';
-        preload.href = newLink.href;
+        const pending = newLink.cloneNode(false);
+        const media = pending.getAttribute('media');
+        pending.dataset.tolaPendingStylesheet = 'true';
+        pending.dataset.tolaMedia = media === null ? '' : media;
+        pending.media = 'not all';
 
         const finish = () => {
-          preload.remove();
-          resolve();
+          resolve(this.styleUpdate(
+            () => this.activateStylesheet(pending),
+            () => this.cleanupStylesheet(oldLink, pending),
+          ));
         };
 
-        // When preload completes, swap the stylesheets
-        preload.onload = () => {
-          // Remove attributes that no longer exist
-          for (const attr of Array.from(oldLink.attributes)) {
-            if (!newLink.hasAttribute(attr.name)) {
-              oldLink.removeAttribute(attr.name);
-            }
-          }
-          // Copy all attributes from new link
-          for (const attr of newLink.attributes) {
-            oldLink.setAttribute(attr.name, attr.value);
-          }
-          finish();
+        pending.onload = finish;
+        pending.onerror = () => {
+          pending.remove();
+          resolve(this.styleUpdate(() => this.morphOuterHtml(oldLink, newHtml)));
         };
 
-        preload.onerror = () => {
-          // Fallback to direct replacement on error
-          oldLink.outerHTML = newHtml;
-          finish();
-        };
-
-        // Start preloading
-        document.head.appendChild(preload);
+        oldLink.insertAdjacentElement('afterend', pending);
       });
+    },
+
+    styleUpdate(activate, cleanup) {
+      return {
+        activate: typeof activate === 'function' ? activate : () => {},
+        cleanup: typeof cleanup === 'function' ? cleanup : () => {},
+      };
+    },
+
+    emptyStyleUpdate() {
+      return this.styleUpdate();
+    },
+
+    activateStylesheet(pendingLink) {
+      if (!pendingLink || !pendingLink.isConnected) {
+        return;
+      }
+
+      const media = pendingLink.dataset.tolaMedia;
+      pendingLink.removeAttribute('data-tola-pending-stylesheet');
+      pendingLink.removeAttribute('data-tola-media');
+      if (media) {
+        pendingLink.media = media;
+      } else {
+        pendingLink.removeAttribute('media');
+      }
+    },
+
+    cleanupStylesheet(oldLink, pendingLink) {
+      if (!pendingLink || !pendingLink.isConnected) {
+        return;
+      }
+
+      const removeOld = () => {
+        if (oldLink.isConnected) {
+          oldLink.remove();
+        }
+      };
+
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(removeOld);
+        });
+      } else {
+        setTimeout(removeOld, 32);
+      }
+    },
+
+    morphOuterHtml(el, html) {
+      const next = this.parseHtmlNode(html);
+      if (!next) {
+        el.outerHTML = html;
+        return;
+      }
+      this.morphNode(el, next);
+    },
+
+    morphInnerHtml(el, html) {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      this.morphChildren(el, range.createContextualFragment(html));
+    },
+
+    morphSvgChildren(el, html) {
+      const temp = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      temp.innerHTML = html;
+      this.morphChildren(el, temp);
+    },
+
+    parseHtmlNode(html) {
+      const template = document.createElement('template');
+      template.innerHTML = html.trim();
+      return template.content.firstChild;
+    },
+
+    morphNode(oldNode, newNode) {
+      if (!this.nodesMatch(oldNode, newNode)) {
+        oldNode.replaceWith(newNode);
+        return;
+      }
+
+      if (oldNode.nodeType === Node.TEXT_NODE) {
+        if (oldNode.textContent !== newNode.textContent) {
+          oldNode.textContent = newNode.textContent;
+        }
+        return;
+      }
+
+      if (oldNode.nodeType !== Node.ELEMENT_NODE) {
+        return;
+      }
+
+      this.syncAttributes(oldNode, newNode);
+      this.morphChildren(oldNode, newNode);
+    },
+
+    morphChildren(oldParent, newParent) {
+      let cursor = oldParent.firstChild;
+      for (const newChild of Array.from(newParent.childNodes)) {
+        const oldChild = this.matchChild(oldParent, cursor, newChild);
+        if (oldChild) {
+          if (oldChild !== cursor) {
+            oldParent.insertBefore(oldChild, cursor);
+          }
+          this.morphNode(oldChild, newChild);
+          cursor = oldChild.nextSibling;
+        } else {
+          oldParent.insertBefore(newChild, cursor);
+        }
+      }
+
+      while (cursor) {
+        const next = cursor.nextSibling;
+        cursor.remove();
+        cursor = next;
+      }
+    },
+
+    matchChild(parent, cursor, newChild) {
+      if (cursor && this.nodesMatch(cursor, newChild)) {
+        return cursor;
+      }
+
+      const id = this.nodeStableId(newChild);
+      if (!id) {
+        return null;
+      }
+
+      for (let node = cursor; node; node = node.nextSibling) {
+        if (node.parentNode === parent && this.nodeStableId(node) === id) {
+          return node;
+        }
+      }
+      return null;
+    },
+
+    nodesMatch(oldNode, newNode) {
+      if (!oldNode || !newNode || oldNode.nodeType !== newNode.nodeType) {
+        return false;
+      }
+
+      if (oldNode.nodeType === Node.ELEMENT_NODE) {
+        const oldId = this.nodeStableId(oldNode);
+        const newId = this.nodeStableId(newNode);
+        if (oldId || newId) {
+          return oldId === newId;
+        }
+      }
+
+      return oldNode.nodeName === newNode.nodeName;
+    },
+
+    nodeStableId(node) {
+      return node && node.nodeType === Node.ELEMENT_NODE ? node.dataset.tolaId || '' : '';
+    },
+
+    syncAttributes(oldEl, newEl) {
+      for (const attr of Array.from(oldEl.attributes)) {
+        if (!newEl.hasAttribute(attr.name)) {
+          oldEl.removeAttribute(attr.name);
+        }
+      }
+      for (const attr of Array.from(newEl.attributes)) {
+        if (oldEl.getAttribute(attr.name) !== attr.value) {
+          oldEl.setAttribute(attr.name, attr.value);
+        }
+      }
     },
 
     // SyncTeX: get source location from element

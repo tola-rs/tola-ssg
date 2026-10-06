@@ -1,10 +1,11 @@
 use anyhow::Result;
-use std::io::{self, Write};
+use std::io;
+
+use crate::logger;
 
 /// Prompt user to create file
 pub(super) fn prompt_create(name: &str) -> Result<bool> {
-    eprint!("Create {}? [y/N] ", name);
-    io::stderr().flush()?;
+    logger::prompt(format_args!("Create {}? [y/N] ", name))?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;

@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use super::convert::convert_svg;
 use super::filename_hash;
 use super::optimize::{OptimizeOptions, optimize_svg};
+use crate::asset::SYSTEM_ASSET_DIR;
 use crate::config::{SvgConverter, SvgFormat};
 
 /// Context for SVG extraction
@@ -55,7 +56,7 @@ impl ExtractContext {
 
     /// Get the .tola subdirectory path.
     pub fn tola_dir(&self) -> PathBuf {
-        self.output_dir.join(".tola")
+        self.output_dir.join(SYSTEM_ASSET_DIR)
     }
 
     /// Check if SVG should stay inline based on size threshold.
@@ -123,7 +124,7 @@ pub fn extract_svg_to_file(svg_content: &[u8], ctx: &ExtractContext) -> Result<E
         false
     };
 
-    let relative_path = format!(".tola/{}", filename);
+    let relative_path = format!("{}/{}", SYSTEM_ASSET_DIR, filename);
 
     Ok(ExtractResult {
         relative_path,

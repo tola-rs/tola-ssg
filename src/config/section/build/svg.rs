@@ -212,7 +212,11 @@ fn parse_size_string(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ConfigDiagnostics, ConfigPresence, test_parse_config};
+    use crate::config::{ConfigDiagnostics, ConfigPresence, test_config_source, test_parse_config};
+
+    fn svg_config(body: &str) -> String {
+        format!("[{}]\n{body}", SvgConfig::TEMPLATE_SECTION)
+    }
 
     #[test]
     fn test_format_extension() {
@@ -227,16 +231,16 @@ mod tests {
         assert!(!SvgFormat::SVG.needs_rasterization());
         assert!(SvgFormat::PNG.needs_rasterization());
 
-        let config = test_parse_config("[build.svg]\nexternal = true");
+        let config = test_parse_config(&svg_config("external = true"));
         assert!(!config.build.svg.is_embedded());
 
-        for (toml, expected) in [
-            ("[build.svg]\nexternal = true\nformat = \"svg\"", true),
-            ("[build.svg]\nexternal = true\nformat = \"png\"", false),
-            ("[build.svg]\nexternal = false\nformat = \"svg\"", false),
+        for (body, expected) in [
+            ("external = true\nformat = \"svg\"", true),
+            ("external = true\nformat = \"png\"", false),
+            ("external = false\nformat = \"svg\"", false),
         ] {
-            let config = test_parse_config(toml);
-            assert_eq!(config.build.svg.is_svg_output(), expected, "{toml:?}");
+            let config = test_parse_config(&svg_config(body));
+            assert_eq!(config.build.svg.is_svg_output(), expected, "{body:?}");
         }
     }
 
@@ -252,16 +256,16 @@ mod tests {
 
     #[test]
     fn test_threshold_bytes() {
-        let config = test_parse_config("[build.svg]\nthreshold = \"10KB\"");
+        let config = test_parse_config(&svg_config("threshold = \"10KB\""));
         assert_eq!(config.build.svg.threshold_bytes(), 10 * 1024);
     }
 
     #[test]
     fn test_baseline_align_is_not_implemented() {
-        let snippet = "[build.svg]\nbaseline_align = true";
-        let config = test_parse_config(snippet);
+        let snippet = svg_config("baseline_align = true");
+        let config = test_parse_config(&snippet);
         let mut diag = ConfigDiagnostics::new();
-        let raw = format!("[site.info]\ntitle = \"Test\"\ndescription = \"Test\"\n{snippet}");
+        let raw = test_config_source(&snippet);
         diag.set_presence(ConfigPresence::from_toml(&raw).unwrap());
 
         config.build.svg.validate_field_status(&mut diag);

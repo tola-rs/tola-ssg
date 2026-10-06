@@ -1,15 +1,8 @@
 use anyhow::{Context, Result, anyhow};
-use rayon::prelude::*;
-use std::{
-    ffi::OsStr,
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{ffi::OsStr, fs, path::Path};
 
 use crate::{
     address::SiteIndex,
-    asset::process_asset,
     compiler::{
         collect_all_files,
         page::{self, MetadataResult, Pages, TypstHost, WarningCollector},
@@ -17,15 +10,14 @@ use crate::{
     config::{SiteConfig, section::build::DiagnosticsConfig},
     core::{BuildMode, ContentKind, is_shutdown},
     freshness::{self, ContentHash},
-    log,
-    logger::ProgressLine,
+    logger,
     package::generate_lsp_stubs,
 };
 
 /// Collected files for the build
 pub(super) struct BuildFiles {
-    /// Asset files from nested directories
-    assets: Vec<PathBuf>,
+    /// Asset routes found by the asset scanners.
+    asset_count: usize,
     /// Content file counts by type
     typst_count: usize,
     markdown_count: usize,
@@ -43,7 +35,7 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<TypstHost> {
     if config.build.clean
         && let Err(e) = crate::cache::clear_cache_dir(config.get_root())
     {
-        crate::debug!("build"; "failed to clear vdom cache: {}", e);
+        logger::debug("build", format_args!("failed to clear vdom cache: {}", e));
     }
 
     // Write enhance.css with config variables
@@ -51,18 +43,16 @@ pub(super) fn init_build(config: &SiteConfig) -> Result<TypstHost> {
 
     // Clear caches for accurate change detection
     freshness::clear_cache();
+    crate::asset::version::clear();
 
     Ok(typst_host)
 }
 
 /// Collect all files to process
 pub(super) fn collect_build_files(config: &SiteConfig) -> BuildFiles {
-    let assets: Vec<_> = config
-        .build
-        .assets
-        .nested_sources()
-        .flat_map(collect_all_files)
-        .collect();
+    let asset_count = crate::asset::scan_nested_assets(config).len()
+        + crate::asset::scan_flatten_assets(config).len()
+        + crate::asset::scan_content_assets(config).len();
 
     // Count content files by type (content assets handled separately)
     let content_files = collect_all_files(&config.build.content);
@@ -76,85 +66,67 @@ pub(super) fn collect_build_files(config: &SiteConfig) -> BuildFiles {
         .count();
 
     BuildFiles {
-        assets,
+        asset_count,
         typst_count,
         markdown_count,
     }
 }
 
 /// Create progress display if not quiet
-pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<ProgressLine> {
+pub(super) fn create_progress(files: &BuildFiles, quiet: bool) -> Option<logger::ProgressLine> {
     if quiet {
         return None;
     }
-    Some(ProgressLine::new(&[
+    Some(logger::ProgressLine::new(&[
         ("typst", files.typst_count),
         ("markdown", files.markdown_count),
-        ("assets", files.assets.len()),
+        ("assets", files.asset_count),
     ]))
 }
 
-/// Compile content and process assets in parallel
+/// Process assets, then compile content.
 pub(super) fn compile_and_process(
     mode: BuildMode,
     config: &SiteConfig,
     typst_host: &TypstHost,
     state: &SiteIndex,
-    files: &BuildFiles,
     deps_hash: ContentHash,
     warnings: &WarningCollector,
-    progress: Option<&ProgressLine>,
+    progress: Option<&logger::ProgressLine>,
 ) -> Result<MetadataResult> {
-    let clean = config.build.clean;
-    let has_error = AtomicBool::new(false);
+    process_assets(config, progress)?;
 
-    let (metadata_result, assets_result) = rayon::join(
-        || {
-            page::build_static_pages(
-                mode,
-                config,
-                typst_host,
-                state,
-                clean,
-                Some(deps_hash),
-                page::GlobalStateMode::Rebuild,
-                warnings,
-                progress,
-            )
-        },
-        || process_assets(&files.assets, config, clean, &has_error, progress),
-    );
-
-    let metadata = metadata_result?;
-    assets_result?;
-
-    Ok(metadata)
+    page::build_static_pages(page::StaticPageBuild {
+        mode,
+        config,
+        typst_host,
+        state,
+        clean: config.build.clean,
+        deps_hash: Some(deps_hash),
+        global_state: page::GlobalStateMode::Rebuild,
+        warnings,
+        progress,
+    })
 }
 
-/// Process nested asset files in parallel
-fn process_assets(
-    files: &[PathBuf],
-    config: &SiteConfig,
-    clean: bool,
-    has_error: &AtomicBool,
-    progress: Option<&ProgressLine>,
-) -> Result<()> {
-    files.par_iter().try_for_each(|path| {
-        if is_shutdown() || has_error.load(Ordering::Relaxed) {
-            return Err(anyhow!("Aborted"));
+/// Process configured asset files through the unified asset routing rules.
+fn process_assets(config: &SiteConfig, progress: Option<&logger::ProgressLine>) -> Result<()> {
+    if is_shutdown() {
+        return Err(anyhow!("Aborted"));
+    }
+
+    let summary = crate::asset::process_configured_assets(config, false, false).map_err(|e| {
+        logger::log("error", format_args!("asset processing failed: {:#}", e));
+        anyhow!("Build failed")
+    })?;
+
+    if let Some(progress) = progress {
+        for _ in 0..summary.scanned {
+            progress.inc("assets");
         }
-        if let Err(e) = process_asset(path, config, clean, false) {
-            if !has_error.swap(true, Ordering::Relaxed) {
-                let display_path = path.strip_prefix(config.get_root()).unwrap_or(path);
-                log!("error"; "{}: {:#}", display_path.display(), e);
-            }
-            return Err(anyhow!("Build failed"));
-        }
-        if let Some(p) = progress {
-            p.inc("assets");
-        }
-        Ok(())
-    })
+    }
+
+    Ok(())
 }
 
 /// Rebuild iterative pages if any exist
@@ -172,38 +144,30 @@ pub(super) fn rebuild_iterative_pages(
     }
 
     match state.with_pages(|pages| {
-        page::rebuild_iterative_pages(
+        page::rebuild_iterative_pages(page::IterativePageBuild {
             mode,
-            &metadata.iterative_paths,
+            paths: &metadata.iterative_paths,
             config,
             typst_host,
-            pages,
-            config.build.clean,
-            Some(deps_hash),
-            metadata.snapshot.clone(),
+            store: pages,
+            clean: config.build.clean,
+            deps_hash: Some(deps_hash),
+            snapshot: metadata.snapshot.clone(),
             warnings,
-        )
+        })
     }) {
         Ok(pages) => Ok(Pages { items: pages }),
         Err(e) => {
-            log!("error"; "compile failed: {:#}", e);
+            logger::log("error", format_args!("compile failed: {:#}", e));
             Err(anyhow!("Build failed"))
         }
     }
 }
 
-/// Post-processing (flatten assets, CNAME, HTML 404, content assets)
+/// Post-processing (CNAME, HTML 404, cleanup)
 pub(super) fn post_process(config: &SiteConfig, _quiet: bool) -> Result<()> {
-    let clean = config.build.clean;
-
-    // Flatten assets (files copied to output root)
-    crate::asset::process_flatten_assets(config, clean, false)?;
-
     // Auto-generate CNAME if needed
     crate::asset::process_cname(config)?;
-
-    // Copy content assets (non-.typ/.md files in content directory)
-    crate::asset::process_content_assets(config, clean)?;
 
     // Copy HTML 404 page if configured
     copy_html_404(config)?;
@@ -229,7 +193,10 @@ fn copy_html_404(config: &SiteConfig) -> Result<()> {
 
     let source = config.root_join(not_found);
     if !source.is_file() {
-        log!("warning"; "404 page not found: {}", not_found.display());
+        logger::log(
+            "warning",
+            format_args!("404 page not found: {}", not_found.display()),
+        );
         return Ok(());
     }
 
@@ -263,7 +230,7 @@ pub(super) fn finalize_build(
     if let Err(e) =
         crate::cache::persist_cache(&page::BUILD_CACHE, &source_paths, config.get_root())
     {
-        crate::debug!("build"; "failed to persist vdom cache: {}", e);
+        logger::debug("build", format_args!("failed to persist vdom cache: {}", e));
     }
 
     if !quiet {
@@ -279,12 +246,12 @@ fn print_warnings(warnings: &typst_batch::Diagnostics, config: &DiagnosticsConfi
     let total = warnings.len();
 
     for item in warnings.iter().take(max) {
-        eprintln!("{}", page::format_warning_with_prefix(item, root));
+        logger::text(&page::format_warning_with_prefix(item, root));
     }
 
     let hidden = total.saturating_sub(max);
     if hidden > 0 {
-        eprintln!("... and {} more warning(s)", hidden);
+        logger::text(&format!("... and {} more warning(s)", hidden));
     }
 }
 
@@ -311,7 +278,10 @@ fn log_build_result(output: &Path) -> Result<()> {
         .count();
 
     if file_count == 0 {
-        log!("warn"; "output is empty, check if content has .typ or .md files");
+        logger::log(
+            "warn",
+            format_args!("output is empty, check if content has page files"),
+        );
     }
 
     Ok(())

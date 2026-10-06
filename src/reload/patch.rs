@@ -148,6 +148,69 @@ pub fn from_render_patches(patches: &[Patch]) -> Vec<ClientPatch> {
     patches.iter().map(patch_to_client).collect()
 }
 
+pub fn filter_covered_assets(assets: Vec<String>, patches: &[Patch]) -> Vec<String> {
+    if assets.is_empty() {
+        return assets;
+    }
+
+    let covered = covered_hrefs(patches);
+    if covered.is_empty() {
+        return assets;
+    }
+
+    assets
+        .into_iter()
+        .filter(|href| !covered.iter().any(|covered| covered == href))
+        .collect()
+}
+
+fn covered_hrefs(patches: &[Patch]) -> Vec<String> {
+    let mut hrefs = Vec::new();
+    for patch in patches {
+        match patch {
+            Patch::Replace { html, .. }
+            | Patch::ReplaceChildren { html, .. }
+            | Patch::Insert { html, .. } => collect_stylesheet_hrefs(html, &mut hrefs),
+            Patch::UpdateAttrs { attrs, .. } => {
+                hrefs.extend(attrs.iter().filter_map(|(name, value)| {
+                    if name.as_str() == "href" {
+                        value.as_ref().map(|value| value.to_string())
+                    } else {
+                        None
+                    }
+                }));
+            }
+            Patch::UpdateText { .. } | Patch::Remove { .. } | Patch::Move { .. } => {}
+        }
+    }
+    hrefs.sort();
+    hrefs.dedup();
+    hrefs
+}
+
+fn collect_stylesheet_hrefs(html: &str, hrefs: &mut Vec<String>) {
+    let Ok(dom) = tl::parse(html, tl::ParserOptions::default()) else {
+        return;
+    };
+
+    let Some(links) = dom.query_selector(r#"link[rel="stylesheet"]"#) else {
+        return;
+    };
+
+    for handle in links {
+        let Some(node) = handle.get(dom.parser()) else {
+            continue;
+        };
+        let Some(tag) = node.as_tag() else {
+            continue;
+        };
+        let Some(Some(href)) = tag.attributes().get("href") else {
+            continue;
+        };
+        hrefs.push(href.as_utf8_str().to_string());
+    }
+}
+
 fn patch_to_client(patch: &Patch) -> ClientPatch {
     match patch {
         Patch::Replace { target, html } => ClientPatch::Replace {
@@ -213,6 +276,33 @@ fn anchor_to_parts(anchor: &Anchor) -> (String, String) {
 mod tests {
     use super::*;
     use tola_vdom::identity::StableId;
+
+    #[test]
+    fn filter_covered_assets_removes_stylesheet_replaced_by_patch() {
+        let stylesheet = "/styles/tailwind.css?v=abc";
+        let patches = vec![Patch::Replace {
+            target: StableId::from_raw(1),
+            html: format!(r#"<link rel="stylesheet" href="{stylesheet}" />"#),
+        }];
+        let assets = vec![stylesheet.into(), "/data/site.json?v=abc".into()];
+
+        assert_eq!(
+            filter_covered_assets(assets, &patches),
+            vec!["/data/site.json?v=abc"]
+        );
+    }
+
+    #[test]
+    fn filter_covered_assets_removes_href_written_by_attr_patch() {
+        let stylesheet = "/styles/tailwind.css?v=abc";
+        let patches = vec![Patch::UpdateAttrs {
+            target: StableId::from_raw(1),
+            attrs: vec![("href".into(), Some(stylesheet.into()))],
+        }];
+        let assets = vec![stylesheet.into()];
+
+        assert!(filter_covered_assets(assets, &patches).is_empty());
+    }
 
     #[test]
     fn test_anchor_based_insert() {

@@ -6,6 +6,7 @@ mod compile;
 mod content;
 mod lifecycle;
 mod path;
+mod ready;
 mod response;
 mod scan;
 mod startup;
@@ -16,11 +17,11 @@ pub use scan::scan_pages;
 pub use startup::serve_with_cache;
 
 use crate::address::SiteIndex;
-use crate::compiler::page::TypstHost;
+use crate::compiler::page::{TypstHost, scan_page_kind};
 use crate::{
     config::{SiteConfig, config_handle},
     core::{ContentKind, UrlPath},
-    debug, log,
+    logger,
 };
 use anyhow::Result;
 use classify::{ServedOutputKind, classify_served_output};
@@ -29,9 +30,10 @@ use parking_lot::Mutex;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU16, Ordering};
 use tiny_http::{Request, Server};
+
+use ready::ServeReady;
 
 /// Default WebSocket port for hot reload
 pub const DEFAULT_WS_PORT: u16 = 35729;
@@ -39,13 +41,6 @@ pub const DEFAULT_WS_PORT: u16 = 35729;
 /// Actual WebSocket port (may differ from DEFAULT_WS_PORT if port was in use)
 /// Updated by coordinator after WebSocket server binds successfully
 static ACTUAL_WS_PORT: AtomicU16 = AtomicU16::new(DEFAULT_WS_PORT);
-
-/// Startup scan readiness for progressive serving.
-/// Kept in serve module to avoid leaking serve-only state into core globals.
-static SCAN_READY: AtomicBool = AtomicBool::new(false);
-/// Last observed HTTP request time. Used to keep startup warmup out of the
-/// user's way while the first page load is still in flight.
-static LAST_REQUEST_MS: AtomicU64 = AtomicU64::new(0);
 
 struct CachedTypstHost {
     config: Arc<SiteConfig>,
@@ -62,30 +57,6 @@ pub fn set_actual_ws_port(port: u16) {
 /// Get the actual WebSocket port
 fn get_actual_ws_port() -> u16 {
     ACTUAL_WS_PORT.load(Ordering::Relaxed)
-}
-
-pub(crate) fn set_scan_ready(ready: bool) {
-    SCAN_READY.store(ready, Ordering::SeqCst);
-}
-
-fn is_scan_ready() -> bool {
-    SCAN_READY.load(Ordering::SeqCst)
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-pub(crate) fn note_request_activity() {
-    LAST_REQUEST_MS.store(now_millis(), Ordering::SeqCst);
-}
-
-pub(crate) fn request_idle_for(duration: Duration) -> bool {
-    let last = LAST_REQUEST_MS.load(Ordering::SeqCst);
-    last == 0 || now_millis().saturating_sub(last) >= duration.as_millis() as u64
 }
 
 fn typst_host_for(config: &Arc<SiteConfig>, cache: &TypstHostCache) -> Arc<TypstHost> {
@@ -115,7 +86,7 @@ fn compile_source_on_demand(
 }
 
 /// Bound server ready to accept requests
-pub struct BoundServer {
+pub(crate) struct BoundServer {
     server: Arc<Server>,
     addr: SocketAddr,
     ws_port: Option<u16>,
@@ -127,20 +98,23 @@ pub struct BoundServer {
 /// This allows the caller to start background tasks (like scan) before
 /// entering the request loop, while still being able to respond to requests
 /// with a 503 response
-pub fn bind_server() -> Result<BoundServer> {
+pub(crate) fn bind_server() -> Result<BoundServer> {
     let config = config_handle().current();
     let (server, addr) = lifecycle::bind_with_retry(config.serve.interface, config.serve.port)?;
     let server = Arc::new(server);
 
     let ws_port = config.serve.watch.then_some(DEFAULT_WS_PORT);
     if ws_port.is_some() {
-        debug!("hotreload"; "ws://localhost:{}", DEFAULT_WS_PORT);
+        logger::debug(
+            "hotreload",
+            format_args!("ws://localhost:{}", DEFAULT_WS_PORT),
+        );
     }
 
     let (shutdown_tx, shutdown_rx) = channel::unbounded::<()>();
     lifecycle::register_server_for_shutdown(Arc::clone(&server), shutdown_tx);
 
-    log!("serve"; "http://{}", addr);
+    logger::log("serve", format_args!("http://{}", addr));
 
     Ok(BoundServer {
         server,
@@ -152,12 +126,12 @@ pub fn bind_server() -> Result<BoundServer> {
 
 impl BoundServer {
     /// Get the bound address.
-    pub fn addr(&self) -> SocketAddr {
+    pub(crate) fn addr(&self) -> SocketAddr {
         self.addr
     }
 
     /// Start the request loop (blocking).
-    pub fn run(self, state: Arc<SiteIndex>) -> Result<()> {
+    pub(crate) fn run(self, state: Arc<SiteIndex>, ready: Arc<ServeReady>) -> Result<()> {
         let handle = config_handle();
         let config = handle.current();
         let actor_handle = lifecycle::spawn_actors(
@@ -167,13 +141,13 @@ impl BoundServer {
             self.ws_port,
             self.shutdown_rx,
         );
-        run_request_loop(&self.server, state);
+        run_request_loop(&self.server, state, ready);
         lifecycle::wait_for_shutdown(actor_handle);
         Ok(())
     }
 }
 
-fn run_request_loop(server: &Server, state: Arc<SiteIndex>) {
+fn run_request_loop(server: &Server, state: Arc<SiteIndex>, ready: Arc<ServeReady>) {
     // Use thread pool to handle requests concurrently
     // This prevents on-demand compilation from blocking other requests
     let pool = rayon::ThreadPoolBuilder::new()
@@ -186,10 +160,11 @@ fn run_request_loop(server: &Server, state: Arc<SiteIndex>) {
     for request in server.incoming_requests() {
         let state = Arc::clone(&state);
         let typst_hosts = Arc::clone(&typst_hosts);
+        let ready = Arc::clone(&ready);
         pool.spawn(move || {
             let config = config_handle.current();
-            if let Err(e) = handle_request(request, config, typst_hosts, state) {
-                log!("serve"; "request error: {e}");
+            if let Err(e) = handle_request(request, config, typst_hosts, state, ready) {
+                logger::log("serve", format_args!("request error: {e}"));
             }
         });
     }
@@ -201,8 +176,12 @@ fn handle_request(
     config: Arc<SiteConfig>,
     typst_hosts: TypstHostCache,
     state: Arc<SiteIndex>,
+    ready: Arc<ServeReady>,
 ) -> Result<()> {
-    note_request_activity();
+    // Readiness probes must not keep background warmup from reaching post hooks.
+    if request.method() != &tiny_http::Method::Head {
+        ready.note_request();
+    }
 
     // Early exit if shutdown requested
     if crate::core::is_shutdown() {
@@ -224,26 +203,54 @@ fn handle_request(
 
     let request_url = request.url().to_string();
 
+    if !ready.init_ready() {
+        return response::respond_loading(request);
+    }
+
     // Serve static output files as early as possible, even during startup scan.
     // This keeps CSS/JS/assets and already-built pages available while the site
     // is still converging.
     if let Some(path) = path::resolve_path(&request_url, &config_ref.build.output) {
         return match classify_served_output(&request_url, &path, config_ref, &state) {
-            ServedOutputKind::PageHtml { source } => {
-                match compile_source_on_demand(&source, &config, &typst_hosts, Arc::clone(&state)) {
-                    Ok(output_path) => {
-                        serve_file_without_recovery(request, &output_path, config_ref, ws_port)
-                    }
-                    Err(e) => response::respond_compile_error(
-                        request,
-                        &e,
-                        &config_ref.build.path_prefix,
-                        ws_port,
-                    ),
-                }
-            }
+            ServedOutputKind::PageHtml { source } => compile_or_load_source(
+                request,
+                &source,
+                config,
+                &typst_hosts,
+                state,
+                ready.as_ref(),
+                ws_port,
+            ),
             ServedOutputKind::NotFoundHtml => {
                 response::respond_not_found(request, config_ref, ws_port)
+            }
+            ServedOutputKind::GeneratedHtml | ServedOutputKind::UnknownHtml
+                if !ready.scan_ready() =>
+            {
+                if let Some(source) = guess_source_before_scan(&request_url, config_ref) {
+                    if !can_compile_before_scan(&source, &config, &typst_hosts, &state) {
+                        return response::respond_loading(request);
+                    }
+                    compile_or_load_source(
+                        request,
+                        &source,
+                        config,
+                        &typst_hosts,
+                        state,
+                        ready.as_ref(),
+                        ws_port,
+                    )
+                } else {
+                    serve_file_with_recovery(
+                        request,
+                        &request_url,
+                        &path,
+                        Arc::clone(&config),
+                        &typst_hosts,
+                        state,
+                        ws_port,
+                    )
+                }
             }
             ServedOutputKind::Asset
             | ServedOutputKind::RedirectHtml
@@ -265,25 +272,21 @@ fn handle_request(
     }
 
     let serving = crate::core::is_serving();
-    let scan_ready = is_scan_ready();
+    let scan_ready = ready.scan_ready();
     if !serving && !scan_ready {
         if let Some(source) = guess_source_before_scan(&request_url, config_ref) {
-            return match compile_source_on_demand(
+            if !can_compile_before_scan(&source, &config, &typst_hosts, &state) {
+                return response::respond_loading(request);
+            }
+            return compile_or_load_source(
+                request,
                 &source,
-                &config,
+                config,
                 &typst_hosts,
-                Arc::clone(&state),
-            ) {
-                Ok(output_path) => {
-                    serve_file_without_recovery(request, &output_path, config_ref, ws_port)
-                }
-                Err(e) => response::respond_compile_error(
-                    request,
-                    &e,
-                    &config_ref.build.path_prefix,
-                    ws_port,
-                ),
-            };
+                state,
+                ready.as_ref(),
+                ws_port,
+            );
         }
         return response::respond_loading(request);
     }
@@ -292,7 +295,15 @@ fn handle_request(
     // While unhealthy (initial/full rebuild or recovery), still allow
     // direct on-demand compilation for requested pages.
     if !crate::core::is_healthy() {
-        return serve_unhealthy_request(request, &request_url, config, typst_hosts, state, ws_port);
+        return serve_unhealthy_request(
+            request,
+            &request_url,
+            config,
+            typst_hosts,
+            state,
+            Arc::clone(&ready),
+            ws_port,
+        );
     }
 
     // On-demand compilation (URL → source → compile → serve from disk)
@@ -300,14 +311,15 @@ fn handle_request(
     let source = state.read(|_, address| address.source_for_url(&url));
 
     if let Some(source) = source {
-        return match compile_source_on_demand(&source, &config, &typst_hosts, state) {
-            Ok(output_path) => {
-                serve_file_without_recovery(request, &output_path, config_ref, ws_port)
-            }
-            Err(e) => {
-                response::respond_compile_error(request, &e, &config_ref.build.path_prefix, ws_port)
-            }
-        };
+        return compile_or_load_source(
+            request,
+            &source,
+            config,
+            &typst_hosts,
+            state,
+            ready.as_ref(),
+            ws_port,
+        );
     }
 
     response::respond_not_found(request, config_ref, ws_port)
@@ -319,24 +331,93 @@ fn serve_unhealthy_request(
     config: Arc<SiteConfig>,
     typst_hosts: TypstHostCache,
     state: Arc<SiteIndex>,
+    ready: Arc<ServeReady>,
     ws_port: Option<u16>,
 ) -> Result<()> {
     let url = UrlPath::from_browser(request_url);
     let config_ref = config.as_ref();
     let source = state
         .read(|_, address| address.source_for_url(&url))
-        .or_else(|| guess_source_before_scan(request_url, config_ref));
+        .or_else(|| {
+            let source = guess_source_before_scan(request_url, config_ref)?;
+            (ready.scan_ready() || can_compile_before_scan(&source, &config, &typst_hosts, &state))
+                .then_some(source)
+        });
 
     let Some(source) = source else {
         return response::respond_loading(request);
     };
 
-    match compile_source_on_demand(&source, &config, &typst_hosts, state) {
+    compile_or_load_source(
+        request,
+        &source,
+        config,
+        &typst_hosts,
+        state,
+        ready.as_ref(),
+        ws_port,
+    )
+}
+
+fn compile_or_load_source(
+    request: Request,
+    source: &Path,
+    config: Arc<SiteConfig>,
+    typst_hosts: &TypstHostCache,
+    state: Arc<SiteIndex>,
+    ready: &ServeReady,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    if matches!(
+        request.method(),
+        &tiny_http::Method::Get | &tiny_http::Method::Head
+    ) {
+        let config_ref = config.as_ref();
+        let request_url = request.url().to_string();
+        return match schedule_source_on_demand(source, &config, typst_hosts, Arc::clone(&state)) {
+            Ok(compile::OnDemandBuild::Ready(output_path)) => serve_page_without_recovery(
+                request,
+                &request_url,
+                &output_path,
+                config_ref,
+                ready,
+                ws_port,
+            ),
+            Ok(compile::OnDemandBuild::Scheduled) => response::respond_loading(request),
+            Err(e) => {
+                response::respond_compile_error(request, &e, &config_ref.build.path_prefix, ws_port)
+            }
+        };
+    }
+
+    compile_and_serve_source(request, source, config, typst_hosts, state, ws_port)
+}
+
+fn compile_and_serve_source(
+    request: Request,
+    source: &Path,
+    config: Arc<SiteConfig>,
+    typst_hosts: &TypstHostCache,
+    state: Arc<SiteIndex>,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    let config_ref = config.as_ref();
+    match compile_source_on_demand(source, &config, typst_hosts, state) {
         Ok(output_path) => serve_file_without_recovery(request, &output_path, config_ref, ws_port),
         Err(e) => {
             response::respond_compile_error(request, &e, &config_ref.build.path_prefix, ws_port)
         }
     }
+}
+
+fn schedule_source_on_demand(
+    source: &Path,
+    config: &Arc<SiteConfig>,
+    typst_hosts: &TypstHostCache,
+    state: Arc<SiteIndex>,
+) -> Result<compile::OnDemandBuild> {
+    let typst_host = typst_host_for(config, typst_hosts);
+    compile::schedule_on_demand(source, Arc::clone(config), typst_host, state)
 }
 
 /// Best-effort source lookup before `scan_pages()` has populated AddressSpace.
@@ -385,6 +466,22 @@ fn push_content_candidate(matches: &mut Vec<PathBuf>, candidate: PathBuf) {
     }
 }
 
+fn can_compile_before_scan(
+    source: &Path,
+    config: &Arc<SiteConfig>,
+    typst_hosts: &TypstHostCache,
+    state: &SiteIndex,
+) -> bool {
+    if ContentKind::from_path(source) == Some(ContentKind::Markdown) {
+        return true;
+    }
+
+    let typst_host = typst_host_for(config, typst_hosts);
+    state.with_pages(|store| {
+        scan_page_kind(source, config, &typst_host, store).is_some_and(|kind| kind.is_direct())
+    })
+}
+
 fn serve_file_with_recovery(
     request: Request,
     request_url: &str,
@@ -397,10 +494,12 @@ fn serve_file_with_recovery(
     match response::respond_file(request, path, &config.build.path_prefix, ws_port)? {
         response::FileServeResult::Served => Ok(()),
         response::FileServeResult::Missing(request) => {
-            debug!(
-                "serve";
-                "transient missing output for {}, attempting on-demand recovery",
-                request_url
+            logger::debug(
+                "serve",
+                format_args!(
+                    "transient missing output for {}, attempting on-demand recovery",
+                    request_url
+                ),
             );
             recover_missing_output(request, request_url, config, typst_hosts, state, ws_port)
         }
@@ -418,6 +517,21 @@ fn serve_file_without_recovery(
         // Single recovery attempt already happened in caller path.
         response::FileServeResult::Missing(request) => response::respond_loading(request),
     }
+}
+
+fn serve_page_without_recovery(
+    request: Request,
+    request_url: &str,
+    path: &Path,
+    config: &SiteConfig,
+    ready: &ServeReady,
+    ws_port: Option<u16>,
+) -> Result<()> {
+    if !ready::page_ready(path, request_url, config, ready) {
+        return response::respond_loading(request);
+    }
+
+    serve_file_without_recovery(request, path, config, ws_port)
 }
 
 fn recover_missing_output(

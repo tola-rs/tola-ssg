@@ -3,7 +3,6 @@
 //! Contains basic site information like title, author, description, etc.
 //! These values are accessible in Typst via `@tola/site` virtual package.
 
-use crate::config::section::FeedConfig;
 use macros::Config;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -74,8 +73,7 @@ impl SiteInfoConfig {
             diag.error_with_hint(
                 Self::FIELDS.url,
                 format!(
-                    "{} is enabled but {} is not configured",
-                    FeedConfig::FIELDS.enable,
+                    "feed output is configured but {} is not configured",
                     Self::FIELDS.url
                 ),
                 format!("set {}, e.g.: \"https://example.com\"", Self::FIELDS.url),

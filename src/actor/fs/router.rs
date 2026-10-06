@@ -6,12 +6,16 @@ use super::types::DebouncedEvents;
 use crate::actor::messages::CompilerMsg;
 use crate::address::SiteIndex;
 use crate::config::SiteConfig;
+use crate::logger;
 use crate::reload::classify::classify_changes;
 
 pub(super) fn log_events(events: &DebouncedEvents) {
-    crate::debug_do! {
+    if logger::is_verbose() {
         for (path, kind) in &events.0 {
-            crate::log!("watch"; "{}: {}", kind.label(), path.display());
+            logger::log(
+                "watch",
+                format_args!("{}: {}", kind.label(), path.display()),
+            );
         }
     }
 }
@@ -34,7 +38,7 @@ pub(super) fn events_to_messages(
             .filter(|p| {
                 matches!(
                     categorize_path(p, config),
-                    FileCategory::Deps | FileCategory::Asset
+                    FileCategory::Deps | FileCategory::Asset | FileCategory::AtomicCss
                 )
             })
             .cloned(),
@@ -71,13 +75,22 @@ pub(super) fn events_to_messages(
     }
 
     let changed_paths: Vec<PathBuf> = result.classified.iter().map(|(p, _)| p.clone()).collect();
-    let changed_refs: Vec<&Path> = changed_paths.iter().map(|p| p.as_path()).collect();
+    let hook_trigger_paths: Vec<PathBuf> = result
+        .classified
+        .iter()
+        .filter(|(_, category)| !matches!(category, FileCategory::Output))
+        .map(|(path, _)| path.clone())
+        .collect();
+    let hook_trigger_refs: Vec<&Path> = hook_trigger_paths.iter().map(|p| p.as_path()).collect();
+    let has_watched_pre_hook = crate::hooks::has_watched_pre_hooks(config, &hook_trigger_refs);
+    let has_watched_hook =
+        has_watched_pre_hook || crate::hooks::has_watched_post_hooks(config, &hook_trigger_refs);
 
-    let hook_only_compile = result.compile_queue.is_empty()
-        && !result.asset_changed.is_empty()
-        && crate::hooks::has_watched_hooks(config, &changed_refs);
+    let hook_only_compile =
+        result.compile_queue.is_empty() && !hook_trigger_paths.is_empty() && has_watched_hook;
+    let atomic_css_compile = !result.atomic_css_changed.is_empty();
 
-    if !result.asset_changed.is_empty() {
+    if !has_watched_pre_hook && !result.asset_changed.is_empty() {
         messages.push(CompilerMsg::AssetChange(result.asset_changed));
     }
 
@@ -103,7 +116,7 @@ pub(super) fn events_to_messages(
         messages.push(CompilerMsg::OutputChange(output_changed));
     }
 
-    if !result.compile_queue.is_empty() || hook_only_compile {
+    if !result.compile_queue.is_empty() || hook_only_compile || atomic_css_compile {
         messages.push(CompilerMsg::Compile {
             queue: result.compile_queue,
             changed_paths,
@@ -173,7 +186,7 @@ mod tests {
         let (_tmp, mut config) = make_config();
         let root = config.get_root().to_path_buf();
         config.build.assets.normalize(&root);
-        let asset = config.get_root().join("assets/styles/tailwind.css");
+        let asset = config.get_root().join("assets/styles/app.css");
         let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
 
         let state = SiteIndex::new();
@@ -196,7 +209,7 @@ mod tests {
         let (_tmp, mut config) = make_config();
         let root = config.get_root().to_path_buf();
         config.build.assets.normalize(&root);
-        let asset = config.get_root().join("assets/styles/tailwind.css");
+        let asset = config.get_root().join("assets/styles/app.css");
         let events = DebouncedEvents(vec![(asset.clone(), ChangeKind::Created)]);
 
         let state = SiteIndex::new();
@@ -237,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_change_with_watched_hooks_enqueues_hook_only_compile() {
+    fn asset_change_with_watched_pre_hook_is_handled_by_compile_batch() {
         let (_tmp, mut config) = make_config();
         let root = config.get_root().to_path_buf();
         config.build.assets.normalize(&root);
@@ -246,17 +259,16 @@ mod tests {
             name: Some("watched".into()),
             command: vec!["echo".into(), "hook".into()],
             watch: WatchMode::Bool(true),
-            build_args: vec![],
             quiet: true,
         });
 
-        let asset = config.get_root().join("assets/styles/tailwind.css");
+        let asset = config.get_root().join("assets/styles/app.css");
         let events = DebouncedEvents(vec![(asset, ChangeKind::Modified)]);
         let state = SiteIndex::new();
         let messages = events_to_messages(events, &config, &state);
 
         assert!(
-            messages
+            !messages
                 .iter()
                 .any(|msg| matches!(msg, CompilerMsg::AssetChange(_)))
         );
@@ -271,5 +283,96 @@ mod tests {
         let (queue, changed_paths) = compile.expect("expected hook-only compile message");
         assert!(queue.is_empty());
         assert_eq!(changed_paths.len(), 1);
+    }
+
+    #[test]
+    fn unknown_change_with_matching_watched_hook_enqueues_hook_only_compile() {
+        let (tmp, mut config) = make_config();
+        let src = tmp.path().join("src");
+        let input = src.join("tailwind.css");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(&input, "@import 'tailwindcss';").unwrap();
+        config.build.hooks.pre.push(HookConfig {
+            enable: true,
+            name: Some("tailwind".into()),
+            command: vec!["tailwindcss".into()],
+            watch: WatchMode::Patterns(vec!["src/tailwind.css".into()]),
+            quiet: true,
+        });
+
+        let events = DebouncedEvents(vec![(input.clone(), ChangeKind::Modified)]);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
+
+        let compile = messages.into_iter().find_map(|msg| match msg {
+            CompilerMsg::Compile {
+                queue,
+                changed_paths,
+            } => Some((queue, changed_paths)),
+            _ => None,
+        });
+        let (queue, changed_paths) = compile.expect("expected hook-only compile message");
+        assert!(queue.is_empty());
+        assert_eq!(changed_paths, vec![normalize_path(&input)]);
+    }
+
+    #[test]
+    fn output_change_with_watched_hook_does_not_enqueue_compile() {
+        let (_tmp, mut config) = make_config();
+        config.build.hooks.post.push(HookConfig {
+            enable: true,
+            name: Some("tailwind".into()),
+            command: vec!["tailwindcss".into()],
+            watch: WatchMode::Bool(true),
+            quiet: true,
+        });
+
+        let output = config.paths().output_dir().join("styles/tailwind.css");
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        std::fs::write(&output, "body{}").unwrap();
+
+        let events = DebouncedEvents(vec![(output.clone(), ChangeKind::Modified)]);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
+
+        assert!(messages.iter().any(
+            |msg| matches!(msg, CompilerMsg::OutputChange(paths) if paths == &vec![output.clone()])
+        ));
+        assert!(
+            !messages
+                .iter()
+                .any(|msg| matches!(msg, CompilerMsg::Compile { .. }))
+        );
+    }
+
+    #[test]
+    fn atomic_css_source_change_enqueues_compile_without_asset_copy() {
+        let (tmp, mut config) = make_config();
+        let components = tmp.path().join("components");
+        let source = components.join("button.html");
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(&source, r#"<button class="flex"></button>"#).unwrap();
+        config.build.css.atomic.enable = true;
+
+        let events = DebouncedEvents(vec![(source.clone(), ChangeKind::Modified)]);
+        let state = SiteIndex::new();
+        let messages = events_to_messages(events, &config, &state);
+
+        assert!(
+            !messages
+                .iter()
+                .any(|msg| matches!(msg, CompilerMsg::AssetChange(_)))
+        );
+
+        let compile = messages.into_iter().find_map(|msg| match msg {
+            CompilerMsg::Compile {
+                queue,
+                changed_paths,
+            } => Some((queue, changed_paths)),
+            _ => None,
+        });
+        let (queue, changed_paths) = compile.expect("expected atomic CSS compile message");
+        assert!(queue.is_empty());
+        assert_eq!(changed_paths, vec![normalize_path(&source)]);
     }
 }

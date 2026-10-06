@@ -10,6 +10,7 @@ mod cli;
 mod compiler;
 mod config;
 mod core;
+mod css;
 mod embed;
 mod freshness;
 mod hooks;
@@ -28,7 +29,6 @@ use clap::{ColorChoice, Parser};
 use cli::{Cli, Commands, build::build_site};
 use config::{SiteConfig, init_config};
 use core::BuildMode;
-use seo::{feed::build_feed, sitemap::build_sitemap};
 
 fn main() -> Result<()> {
     // Setup global Ctrl+C handler (before any blocking operations)
@@ -38,15 +38,28 @@ fn main() -> Result<()> {
 
     // Set global color override based on CLI option
     match cli.color {
-        ColorChoice::Always => owo_colors::set_override(true),
-        ColorChoice::Never => owo_colors::set_override(false),
-        ColorChoice::Auto => {} // owo-colors auto-detects TTY
+        ColorChoice::Always => {
+            owo_colors::set_override(true);
+            logger::set_color_mode(logger::ColorMode::Always);
+        }
+        ColorChoice::Never => {
+            owo_colors::set_override(false);
+            logger::set_color_mode(logger::ColorMode::Never);
+        }
+        ColorChoice::Auto => {
+            owo_colors::unset_override();
+            logger::set_color_mode(logger::ColorMode::Auto);
+        }
     }
 
     let config = init_config(SiteConfig::load(cli)?);
 
     match &cli.command {
-        Commands::Init { name, dry } => cli::init::new_site(&config, name.is_some(), *dry),
+        Commands::Init {
+            name,
+            dry,
+            no_interactive,
+        } => cli::init::new_site(&config, name.is_some(), *dry, *no_interactive),
         Commands::Build { .. } => build_all(&config, BuildMode::PRODUCTION),
         Commands::Deploy { .. } => {
             build_all(&config, BuildMode::PRODUCTION)?;
@@ -59,19 +72,11 @@ fn main() -> Result<()> {
     }
 }
 
-/// Build site and optionally generate rss/sitemap in parallel
+/// Build site and optionally generate feed/sitemap outputs in parallel
 fn build_all(config: &SiteConfig, mode: BuildMode) -> Result<()> {
     let state = SiteIndex::new();
     let _pages = build_site(mode, config, &state, false)?;
 
-    // Generate SEO files in parallel (feed, sitemap)
-    // Note: OG tags are injected during VDOM pipeline (see HeaderInjector)
-    let (feed_result, sitemap_result) = rayon::join(
-        || state.with_pages(|pages| build_feed(config, pages)),
-        || state.with_pages(|pages| build_sitemap(config, pages)),
-    );
-
-    feed_result?;
-    sitemap_result?;
-    Ok(())
+    // OG tags are injected during VDOM pipeline (see HeaderInjector).
+    seo::build_outputs(config, &state)
 }

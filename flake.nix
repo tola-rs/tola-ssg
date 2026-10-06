@@ -27,14 +27,48 @@
           };
 
           cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-          packageName = cargoToml.package.name; # or "tola"
-          packageVersion = cargoToml.package.version; # or "0.7.0"
+          packageName = cargoToml.package.name;
+          packageVersion = cargoToml.package.version;
           packageDescription = cargoToml.package.description;
-          commonNativeBuildInputs = [ pkgs.nasm pkgs.perl pkgs.pkg-config ];
-          darwinBuildInputs = lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconvReal ];
-          nativeBuildInputs = commonNativeBuildInputs ++ darwinBuildInputs;
-          libPath = lib.optionalString pkgs.stdenv.isDarwin
-            (lib.makeLibraryPath [ pkgs.libiconvReal ]);
+          buildTools = [ pkgs.nasm pkgs.perl pkgs.pkg-config ];
+
+          needsOpenSSL = packageSet:
+            let
+              platform = packageSet.stdenv.hostPlatform;
+            in
+            !(platform.isDarwin || platform.isWindows);
+
+          buildPlatformInputs =
+            lib.optionals (needsOpenSSL pkgs) [ pkgs.openssl ];
+
+          hostPlatformInputs = packageSet:
+            lib.optionals (needsOpenSSL packageSet) [ packageSet.openssl ];
+
+          darwinLinkEnv = targetPkgs:
+            let
+              platform = targetPkgs.stdenv.hostPlatform;
+              ccSuffix = builtins.replaceStrings [ "-" ] [ "_" ] platform.config;
+            in
+            lib.optionalAttrs platform.isDarwin {
+              "NIX_LDFLAGS_${ccSuffix}" = "-dead_strip_dylibs";
+            };
+
+          cargoEnv = targetPkgs:
+            {
+              OPENSSL_NO_VENDOR = true;
+            }
+            // darwinLinkEnv targetPkgs;
+
+          darwinReleaseCheck = targetPkgs:
+            lib.optionalString targetPkgs.stdenv.hostPlatform.isDarwin ''
+              deps="$(${targetPkgs.stdenv.cc.targetPrefix}otool -L "$out/bin/${packageName}")"
+              badDeps="$(printf '%s\n' "$deps" | awk '/\/nix\/store\/.*\.dylib/ { print }')"
+              if [ -n "$badDeps" ]; then
+                echo "Darwin binary depends on Nix store dylibs:" >&2
+                echo "$badDeps" >&2
+                exit 1
+              fi
+            '';
 
           typstPackageCache = selectPackages:
             let
@@ -80,9 +114,9 @@
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
 
-              inherit nativeBuildInputs;
-              buildInputs = [ targetPkgs.openssl ];
-              LIBRARY_PATH = libPath;
+              nativeBuildInputs = buildTools ++ buildPlatformInputs;
+              buildInputs = hostPlatformInputs targetPkgs;
+              env = cargoEnv targetPkgs;
 
               doCheck = false;
               enableParallelBuilding = true;
@@ -106,6 +140,14 @@
               };
             });
 
+          mkReleaseTolaPackage = targetPkgs:
+            (mkTolaPackageWithPackages targetPkgs).overrideAttrs (old: {
+              postFixup = lib.concatStringsSep "\n" [
+                (old.postFixup or "")
+                (darwinReleaseCheck targetPkgs)
+              ];
+            });
+
           crossTargets = {
             x86_64-linux = pkgs.pkgsCross.gnu64;
             x86_64-linux-static = pkgs.pkgsCross.gnu64.pkgsStatic;
@@ -120,7 +162,9 @@
           packages = {
             default = mkTolaPackageWithPackages pkgs;
             static = mkTolaPackageWithPackages pkgs.pkgsStatic;
-          } // lib.mapAttrs (_: targetPkgs: mkTolaPackageWithPackages targetPkgs) crossTargets;
+            aarch64-darwin-release = mkReleaseTolaPackage pkgs.pkgsCross.aarch64-darwin;
+          }
+          // lib.mapAttrs (_: targetPkgs: mkTolaPackageWithPackages targetPkgs) crossTargets;
         in
         {
           inherit packages;
@@ -128,12 +172,15 @@
           apps.default = {
             type = "app";
             program = "${self'.packages.default}/bin/tola";
+            meta.description = packageDescription;
           };
 
           checks.default = packages.default;
 
           devShells.default = pkgs.mkShell {
-            packages = [ pkgs.rust-bin.stable.latest.default pkgs.openssl ] ++ nativeBuildInputs;
+            packages = [ pkgs.rust-bin.stable.latest.default ] ++ buildTools;
+            buildInputs = hostPlatformInputs pkgs;
+            env = cargoEnv pkgs;
           };
         };
     };

@@ -8,13 +8,14 @@ use crossbeam::queue::SegQueue;
 use serde_json::Value as JsonValue;
 use typst_batch::prelude::*;
 
-use crate::compiler::CompileContext;
 use crate::compiler::collect_all_files;
 use crate::compiler::family::Indexed;
 use crate::compiler::page::scan;
 use crate::compiler::page::typst::{MAX_METADATA_SCAN_ITERATIONS, scan_single_with_current};
+use crate::compiler::{CompileContext, FeedBodyMode};
 use crate::config::SiteConfig;
 use crate::core::{BuildMode, ContentKind};
+use crate::logger;
 use crate::package::build_visible_inputs;
 use crate::page::{HashStabilityTracker, PageKind, PageMeta, StabilityDecision, StoredPageMap};
 use crate::utils::path::resolve_path;
@@ -172,7 +173,13 @@ pub fn scan_markdown_file(
     host: &crate::compiler::page::TypstHost,
     store: &StoredPageMap,
 ) -> Result<MarkdownScanResult> {
-    let ctx = CompileContext::new(BuildMode::PRODUCTION, config, host, store);
+    let ctx = CompileContext::new(
+        BuildMode::PRODUCTION,
+        config,
+        host,
+        store,
+        FeedBodyMode::Skip,
+    );
     let result = scan(file, &ctx)?;
 
     Ok(MarkdownScanResult {
@@ -206,7 +213,7 @@ pub fn batch_scan_typst(
     {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("{}", e);
+            logger::text(&e.to_string());
             return files.iter().map(|_| None).collect();
         }
     };
@@ -218,13 +225,13 @@ pub fn batch_scan_typst(
             .map(|(result, _file)| match result {
                 Ok(scan) => Some(scan),
                 Err(e) => {
-                    eprintln!("{}", e);
+                    logger::text(&e.to_string());
                     None
                 }
             })
             .collect(),
         Err(e) => {
-            eprintln!("{}", e);
+            logger::text(&e.to_string());
             files.iter().map(|_| None).collect()
         }
     }
@@ -387,22 +394,29 @@ pub fn batch_scan_typst_metadata_iterative(
         // Check convergence
         match stability.decide(store.pages_hash(), iteration, MAX_METADATA_SCAN_ITERATIONS) {
             StabilityDecision::Converged => {
-                crate::debug!("scan"; "converged after {} iteration(s)", iteration + 1);
+                logger::debug(
+                    "scan",
+                    format_args!("converged after {} iteration(s)", iteration + 1),
+                );
                 break;
             }
             StabilityDecision::Oscillating => {
-                crate::log!(
-                    "warning";
-                    "scan metadata oscillating (cycle detected), stopping after {} iterations",
-                    iteration + 1
+                logger::log(
+                    "warning",
+                    format_args!(
+                        "scan metadata oscillating (cycle detected), stopping after {} iterations",
+                        iteration + 1
+                    ),
                 );
                 break;
             }
             StabilityDecision::MaxIterationsReached => {
-                crate::log!(
-                    "warning";
-                    "metadata did not converge after {} iterations",
-                    MAX_METADATA_SCAN_ITERATIONS
+                logger::log(
+                    "warning",
+                    format_args!(
+                        "metadata did not converge after {} iterations",
+                        MAX_METADATA_SCAN_ITERATIONS
+                    ),
                 );
             }
             StabilityDecision::Continue => {}
@@ -430,7 +444,10 @@ fn parse_page_meta(meta_json: JsonValue, file: &Path) -> Option<PageMeta> {
     match serde_json::from_value::<PageMeta>(meta_json) {
         Ok(meta) => Some(meta),
         Err(e) => {
-            crate::log!("warning"; "failed to parse metadata for {}: {}", file.display(), e);
+            logger::log(
+                "warning",
+                format_args!("failed to parse metadata for {}: {}", file.display(), e),
+            );
             None
         }
     }

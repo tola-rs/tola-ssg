@@ -39,10 +39,15 @@ pub fn categorize_path(path: &Path, config: &SiteConfig) -> FileCategory {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         match ContentKind::from_extension(ext) {
             Some(kind) => FileCategory::Content(kind),
-            None => FileCategory::Unknown, // Unsupported content type
+            None if crate::asset::route_from_source(path.to_path_buf(), config).is_ok() => {
+                FileCategory::Asset
+            }
+            None => FileCategory::Unknown,
         }
-    } else if config.build.assets.contains_source(path) {
+    } else if crate::asset::route_from_source(path.to_path_buf(), config).is_ok() {
         FileCategory::Asset
+    } else if crate::css::source::is_input(path, config) {
+        FileCategory::AtomicCss
     } else {
         FileCategory::Unknown
     }
@@ -61,6 +66,8 @@ pub struct ClassifyResult {
     pub asset_changed: Vec<PathBuf>,
     /// Output files that changed (hook-generated artifacts)
     pub output_changed: Vec<PathBuf>,
+    /// Atomic CSS inputs that changed.
+    pub atomic_css_changed: Vec<PathBuf>,
     /// Optional note (e.g., "deps changed but no dependents")
     pub note: Option<String>,
 }
@@ -90,6 +97,7 @@ pub fn classify_changes(
     let mut content_changed = Vec::new();
     let mut asset_changed = Vec::new();
     let mut output_changed = Vec::new();
+    let mut atomic_css_changed = Vec::new();
 
     // Categorize each path
     for path in paths {
@@ -99,6 +107,9 @@ pub fn classify_changes(
         let normalized = normalize_path(path);
         let category = categorize_path(&normalized, config);
         classified.push((normalized.clone(), category));
+        if crate::css::source::is_input(&normalized, config) {
+            atomic_css_changed.push(normalized.clone());
+        }
 
         match category {
             FileCategory::Config => config_changed = true,
@@ -106,6 +117,7 @@ pub fn classify_changes(
             FileCategory::Content(_) => content_changed.push(normalized),
             FileCategory::Asset => asset_changed.push(normalized),
             FileCategory::Output => output_changed.push(normalized),
+            FileCategory::AtomicCss => {}
             FileCategory::Unknown => {}
         }
     }
@@ -153,6 +165,7 @@ pub fn classify_changes(
         compile_queue: queue,
         asset_changed,
         output_changed,
+        atomic_css_changed,
         note,
     }
 }
@@ -232,6 +245,38 @@ mod tests {
         let result = classify_changes(std::slice::from_ref(&output_file), &config, &state);
         assert_eq!(result.output_changed, vec![output_file]);
         assert!(result.asset_changed.is_empty());
+        assert!(result.compile_queue.is_empty());
+        assert!(!result.config_changed);
+    }
+
+    #[test]
+    fn test_categorize_atomic_css_source_path() {
+        let (tmp, mut config) = make_config();
+        let components = tmp.path().join("components");
+        let source = components.join("button.html");
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(&source, r#"<button class="flex"></button>"#).unwrap();
+        config.build.css.atomic.enable = true;
+
+        let source = normalize_path(&source);
+        let category = categorize_path(&source, &config);
+
+        assert_eq!(category, FileCategory::AtomicCss);
+    }
+
+    #[test]
+    fn test_classify_collects_atomic_css_changes() {
+        let (tmp, mut config) = make_config();
+        let components = tmp.path().join("components");
+        let source = components.join("button.html");
+        std::fs::create_dir_all(&components).unwrap();
+        std::fs::write(&source, r#"<button class="grid"></button>"#).unwrap();
+        config.build.css.atomic.enable = true;
+
+        let state = SiteIndex::new();
+        let result = classify_changes(std::slice::from_ref(&source), &config, &state);
+
+        assert_eq!(result.atomic_css_changed, vec![normalize_path(&source)]);
         assert!(result.compile_queue.is_empty());
         assert!(!result.config_changed);
     }
