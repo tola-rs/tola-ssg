@@ -1,0 +1,278 @@
+# Simplified-Chinese documentation of `@tola/collection`. English stays authoritative in the
+# package's own Typst sources; a unit here overrides one of them.
+
+overview = '''
+由你自己的值组成的数组：挑选、分组、索引并导航
+
+成员就是你自己提供的值：字典、字符串，或者任何能放进数组的东西。每个操作都接受你提供的访问函数，所以字段名、排列顺序和层级约定都由你决定：`key` 标识一个成员，`keys` 给出成员的归属，`parent` 推导成员的容器键。
+
+`key` 和 `keys` 接收成员；`parent` 接收键，包括数组里没有对应成员的键。层级遍历可能重复经过共享的祖先，所以 `parent` 对同一个键必须返回同一个容器键，并在有限步内到达 `none`。
+'''
+
+[exports.pick]
+
+summary = [
+  '''
+按你列出的顺序，从 `fields` 中取出 `keys` 里每个字符串键对应的条目。
+
+`keys` 里的每个键都必须是字符串。只复制 `fields` 中确实存在的键，同一个键列两次也只算一次。值原样复制，`none` 也不例外。键里的点是普通字符，所以 `"a.b"` 是一个键。
+
+Example - 复制选中的字段：
+''',
+  '',
+]
+
+[exports.pick.parameters]
+
+fields = "要从中复制条目的字典。"
+
+keys = "要复制的字符串键。"
+
+[exports.index-by]
+
+summary = [
+  '''
+按输入顺序，从每个成员各自的一个字符串键建立到该成员的字典；键重复会报错。
+
+Example - 按每个成员各自的一个键建立索引：
+''',
+  '',
+]
+
+[exports.index-by.parameters]
+
+members = "要索引的成员。"
+
+key = "每个成员调用一次；必须返回字符串，返回数组或 `none` 都算错误。"
+
+[exports.group-by]
+
+summary = [
+  '''
+按每个成员各自的一个字符串键分组。
+
+分组按组键首次出现的顺序排列，组内成员保持输入顺序。成员有多个归属时，用 `group-by-keys`。
+
+Example - 按每个成员各自的一个键分组：
+''',
+  '',
+]
+
+[exports.group-by.parameters]
+
+members = "要分组的成员。"
+
+key = "每个成员调用一次；必须返回字符串。"
+
+[exports.group-by-keys]
+
+summary = [
+  '''
+按每个成员的字符串键分组。
+
+分组按组键首次出现的顺序排列，组内成员保持输入顺序。`keys` 为空的成员不进任何分组，重复的键只算一次。
+
+Example - 按成员的标签列表分组：
+''',
+  'Example - 重复的键只算一次，空标签列表不进分组：',
+  '',
+]
+
+[exports.group-by-keys.parameters]
+
+members = "要分组的成员。"
+
+keys = "每个成员调用一次；返回该成员的字符串键。"
+
+[exports.select-members]
+
+summary = [
+  '''
+保留 `keys` 数组里含有 `wanted` 中任意一个值的成员；`match: "all"` 时，只保留归属包含全部目标值的成员。
+
+两个数组里都是普通值：`(none,)` 算一个归属，`()` 一个也不算。结果保持输入顺序。`wanted` 为空时，`"any"` 不选中任何成员，`"all"` 会选中每个成员。
+
+Example - 按成员的归属过滤：
+''',
+  'Example - 用空的 `wanted` 数组筛选：',
+  '',
+]
+
+[exports.select-members.parameters]
+
+members = "要过滤的成员。"
+
+wanted = "成员必须有的归属。"
+
+keys = "返回一个成员的归属。"
+
+match = "有一个目标归属就够，还是必须全部有。"
+
+[exports.adjacent]
+
+summary = [
+  '''
+返回键为 `at` 的成员的前后邻居，结果是一个字典；没有成员以 `at` 为键时，结果是 `none`。
+
+只有邻居确实存在时，字典里才会出现对应的 `before` 或 `after` 键，而邻居本身可以是 `none`。成员键必须唯一，`at` 不存在时也一样。键可以是任何可比较的值，包括 `none`；`index-by` 更严格，要求字符串。
+
+Example - 查找成员的邻居：
+''',
+  'Example - 走到链的两端：',
+  'Example - 链接到一节里的上一篇与下一篇：',
+  '',
+]
+
+[exports.adjacent.parameters]
+
+members = "要搜索的成员。"
+
+at = "要取邻居的成员键。"
+
+key = "返回一个成员的键。"
+
+[exports.window]
+
+summary = [
+  '''
+返回以 `at` 为中心、前面最多 `before` 个、后面最多 `after` 个成员，不含 `at` 本身。
+
+结果保持输入顺序。没有成员以 `at` 为键时，结果是 `none`。成员键必须唯一，`at` 不存在时也一样。
+
+Example - 取某个成员周围的窗口：
+''',
+  'Example - 只保留 `at` 一侧的成员：',
+  '',
+]
+
+[exports.window.parameters]
+
+members = "要搜索的成员。"
+
+at = "窗口以哪个成员键为中心。"
+
+key = "返回一个成员的键。"
+
+before = "向前包含多少个成员；`0` 表示不包含。必须是非负整数。"
+
+after = "向后包含多少个成员；`0` 表示不包含。必须是非负整数。"
+
+[exports.children]
+
+summary = [
+  '''
+按输入顺序返回容器键 `of` 的直接子成员，不含更深的层级。
+
+`of` 不能是 `none`，容器本身也可以不出现在 `members` 里。`parent` 接收成员键，返回它的容器键，在根处返回 `none`。成员键必须唯一，且不能是 `none`。只看直接边，自环算错误。
+
+Example - 列出容器的直接子成员：
+''',
+  'Example - 列出不在 `members` 里的容器的子成员：',
+  '',
+]
+
+[exports.children.parameters]
+
+members = "要搜索的成员。"
+
+of = "要取其直接子成员的容器键。"
+
+parent = "接收成员键而不是成员；返回它的容器键，在根处返回 `none`。"
+
+key = "每个成员调用一次；返回成员的键。"
+
+[exports.descendants]
+
+summary = [
+  '''
+按输入顺序返回容器键 `of` 的所有后代，不含 `of` 代表的容器本身。
+
+`of` 不能是 `none`；容器本身可以不出现在 `members` 里。结果保持输入顺序。为了发现环，每个成员的父链都会完整走一遍，包括匹配到容器之后的部分；链上 `members` 里没有对应成员的键也照常向上走。成员键必须唯一，且不能是 `none`；`parent` 在根处返回 `none`。
+
+容器不存在时也会检查每个成员的链。父查找开销大时，可以复用预先算好的键到父键字典。
+
+Example - 列出容器的所有后代：
+''',
+  'Example - 沿着链经过不是成员的键：',
+  '',
+]
+
+[exports.descendants.parameters]
+
+members = "要搜索的成员。"
+
+of = "要取其所有后代的容器键。"
+
+parent = "返回成员键的容器键，在根处返回 `none`。"
+
+key = "返回一个成员的键。"
+
+[exports.ancestors]
+
+summary = [
+  '''
+返回键为 `at` 的成员的祖先，从根开始，到它的父键为止。
+
+结果只包含 `members` 里有的祖先，不含成员自身。成员键必须唯一，成员键和 `at` 都不能是 `none`；`at` 不在 `members` 里时，结果是 `none`。上溯沿 `parent` 走到 `none` 为止；链上 `members` 里没有对应成员的键也照常向上走；链中出现重复的键算错误。
+
+Example - 上溯成员的祖先链：
+''',
+  '',
+]
+
+[exports.ancestors.parameters]
+
+members = "要搜索的成员。"
+
+at = "要取其祖先的成员键。"
+
+parent = "返回成员键的容器键，在根处返回 `none`。"
+
+key = "返回一个成员的键。"
+
+[exports.lineage]
+
+summary = [
+  '''
+返回键为 `at` 的成员的祖先，从根开始，成员自身排在最后。
+
+结果只包含 `members` 里有的祖先。成员键必须唯一，成员键和 `at` 都不能是 `none`；`at` 不在 `members` 里时，结果是 `none`。上溯沿 `parent` 走到 `none` 为止；链上 `members` 里没有对应成员的键也照常向上走；链中出现重复的键算错误。
+
+Example - 沿着链经过不是成员的键：
+''',
+  '',
+]
+
+[exports.lineage.parameters]
+
+members = "要搜索的成员。"
+
+at = "要取其祖先链的成员键。"
+
+parent = "返回成员键的容器键，在根处返回 `none`。"
+
+key = "返回一个成员的键。"
+
+[exports.siblings]
+
+summary = [
+  '''
+按输入顺序返回与 `at` 同父的成员，不含 `at` 本身。
+
+成员键必须唯一，成员键和 `at` 都不能是 `none`；`at` 不在 `members` 里时，结果是 `none`。`parent` 返回 `none` 的成员是根。所有根都共享 `parent: none`，但根没有兄弟。只看直接父边，自环算错误。
+
+Example - 列出同父的成员：
+''',
+  'Example - 根没有兄弟：',
+  '',
+]
+
+[exports.siblings.parameters]
+
+members = "要搜索的成员。"
+
+at = "要取其兄弟的成员键。"
+
+parent = "返回成员键的容器键，在根处返回 `none`。"
+
+key = "返回一个成员的键。"

@@ -1,0 +1,33 @@
+name: Set up the Rust workspace
+description: Install just, the selected Rust toolchain, and an optional workspace cache.
+inputs:
+  toolchain:
+    description: Rust toolchain; defaults to the repository toolchain.
+    default: ''
+  components:
+    description: Additional Rust components.
+    default: ''
+  target:
+    description: Additional Rust compilation target.
+    default: ''
+  cache-key:
+    description: Shared Rust cache key; an empty key disables caching.
+    default: ''
+  cache-on-failure:
+    description: Save the Rust cache when checks fail.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: extractions/setup-just@f8a3cce218d9f83db3a2ecd90e41ac3de6cdfd9b # v3.1.0
+    - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        target: ${{ inputs.target }}
+        cache: false
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      if: ${{ inputs.cache-key != '' }}
+      with:
+        shared-key: ${{ inputs.cache-key }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}

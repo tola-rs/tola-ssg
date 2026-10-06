@@ -1,0 +1,31 @@
+[package]
+name = "tola-slugify"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Turning text into a slug: the naming rules, the character policy, and the scripts that spell their own pronunciation"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+documentation = "https://docs.rs/tola-slugify"
+readme = "README.md"
+keywords = ["slug", "transliteration", "typst", "static-site"]
+categories = ["text-processing"]
+
+[dependencies]
+deunicode = "1.6.2"
+tola-pronunciations = { workspace = true, optional = true }
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+proptest = "1.11.0"
+
+[features]
+default = ["han-tables"]
+# The tables that name Han text: Chinese words and characters, and Japanese words in kana.
+# A build without them has no table, and Han text takes the character map, as any text
+# no table names does.
+han-tables = [
+    "tola-pronunciations/cedict",
+    "tola-pronunciations/jmdict",
+    "tola-pronunciations/unihan",
+]

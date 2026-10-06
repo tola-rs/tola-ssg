@@ -1,0 +1,19 @@
+{
+  "imports": {
+    "@playwright/test": "npm:@playwright/test@1.62.0"
+  },
+  "tasks": {
+    "test": "deno run -A npm:@playwright/test@1.62.0/playwright test",
+    "list": "deno run -A npm:@playwright/test@1.62.0/playwright test --list",
+    "typecheck": "deno check playwright.config.ts tests support",
+    "browsers": "deno run -A npm:@playwright/test@1.62.0/playwright install chromium"
+  },
+  "lint": {
+    "rules": {
+      // only browser-side code lives here: `window` is the global inside page callbacks and in the
+      // reload runtime served to pages, and Playwright requires fixture functions to take an object
+      // destructuring pattern, so both rules reject code that is correct for this member.
+      "exclude": ["no-window", "no-empty-pattern"]
+    }
+  }
+}

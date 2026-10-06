@@ -1,0 +1,14 @@
+{
+  "scopeName": "markdown.typst.codeblock",
+  "injectionSelector": "L:markup.fenced_code.block.markdown",
+  "patterns": [{ "include": "#typst-block" }],
+  "repository": {
+    "typst-block": {
+      "begin": "(?<=[`~])(?i:(typst|typc|typm|typ|example))(\\s+[^`~]*)?$",
+      "beginCaptures": { "1": { "name": "fenced_code.block.language.typst" } },
+      "end": "(^|\\G)(?=\\s*[`~]{3,}\\s*$)",
+      "contentName": "meta.embedded.block.typst",
+      "patterns": [{ "include": "source.typst" }]
+    }
+  }
+}

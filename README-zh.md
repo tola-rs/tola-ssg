@@ -2,7 +2,7 @@
 
 为 Typst 网站而生的静态网站生成器。
 
-> 注意（v0.7.x）：已发布。可能仍存在一些与缓存相关的 bug。你可以使用 `tola s -c`（`serve --clean`）作为临时解决方案，但请先尝试普通的 `serve` 以便我收集反馈并在后续更新中修复这些问题。感谢你的支持！
+> 注意（v0.8.0）：v0.8.0 是一次大更新。本 README 已经过时：我打算大幅度重写它和 0.7 时代的文档，并在近几天内增添文档站点。目前可以用 `tola help --interactive` 浏览内置 packages。
 
 
 ## 目录
@@ -513,6 +513,7 @@ Typst 的 HTML 输出尚未如 PDF 输出那样成熟。部分功能需要变通
 
 - [typsite](https://github.com/Glomzzz/typsite): 为 typst 打造的静态网站生成器（SSG）
 - [kodama](https://github.com/kokic/kodama): 面向 Typst 的静态 Zettelkästen 站点生成器。
+- [tinymist](https://github.com/Myriad-Dreamin/tinymist): `tola-lsp` 的部分实现改编自它（Apache-2.0）
 
 ## 许可证
 

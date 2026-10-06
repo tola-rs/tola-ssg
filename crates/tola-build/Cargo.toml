@@ -1,0 +1,63 @@
+[package]
+name = "tola-build"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "The site construction engine for Tola"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.1"
+comemo = "0.5.1"
+rayon = "1.12.0"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+serde_ignored = "0.1.14"
+toml = "1.1.4"
+toml_edit = { version = "0.25.13", features = ["serde"] }
+thiserror = "2.0.20"
+tracing = "0.1.44"
+process-wrap = { version = "=10.0.0", default-features = false, features = ["std", "process-group", "job-object"] }
+url = "2.5.8"
+mime = "0.3.17"
+percent-encoding = "2.3.2"
+rss = { version = "2.1.0", default-features = false, features = ["builders", "validation"] }
+atom_syndication = { version = "0.12.10", default-features = false, features = ["builders"] }
+tola-address.workspace = true
+tola-config.workspace = true
+tola-icons.workspace = true
+tola-minify.workspace = true
+tola-typst = { workspace = true, features = ["embed-fonts", "network"] }
+tola-subprocess.workspace = true
+typst.workspace = true
+# Typst's native binding macros name these crates in their generated code.
+typst-library.workspace = true
+typst-utils.workspace = true
+typst-html.workspace = true
+roxmltree = "0.21.1"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "hickory-dns"] }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "time", "net", "macros"] }
+rustc-hash = "2.1.3"
+blake3 = "1.8.7"
+hex = "0.4.3"
+tempfile = "3.27.0"
+tola-image.workspace = true
+tola-packages.workspace = true
+schemars = { version = "1.2.2", optional = true }
+
+[dev-dependencies]
+image = { version = "=0.25.9", default-features = false, features = ["png"] }
+tola-slugify.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[features]
+json-schema = ["dep:schemars"]

@@ -1,13 +1,14 @@
-//! Command-line interface module.
-
 mod args;
-pub mod build;
-pub mod common;
-pub mod deploy;
-pub mod fix;
-pub mod init;
-pub mod query;
-pub mod serve;
-pub mod validate;
+mod commands;
+mod config;
+mod dispatch;
+pub(crate) mod log;
+pub(crate) mod output;
+mod run;
 
-pub use args::{BuildArgs, Cli, Commands, ValidateArgs};
+pub(crate) use args::{
+    BuildOverrideArgs, Cli, Commands, CompletionShell, ConfigFileArgs, DevelopmentArgs,
+    EditorCommand, IconInspectArgs, InspectCommand, ServerArgs, SourceInspectArgs,
+    TypstPackageArgs, VendorArgs,
+};
+pub(crate) use run::run;

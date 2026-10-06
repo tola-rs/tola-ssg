@@ -1,0 +1,42 @@
+[package]
+name = "tola-lsp"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Host-aware language services for Tola sources"
+license = "Apache-2.0"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[features]
+# Enables package-index fetching when the host supplies a downloader.
+network = ["tola-typst/network"]
+
+[dependencies]
+anyhow = "1.0.104"
+# The crates Typst reads bibliographies with, so an editor answer and a published page agree.
+biblatex = "0.12.0"
+crossbeam-channel = "0.5.17"
+hayagriva = { version = "0.10.1", default-features = false, features = ["biblatex"] }
+ignore = "0.4.23"
+lsp-server = "0.10.0"
+lsp-types = "0.97.0"
+percent-encoding = "2.3.2"
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+tola-build.workspace = true
+tola-packages.workspace = true
+tola-typst = { workspace = true }
+tola-typst-syntax = { workspace = true, features = ["format"] }
+typst-ide.workspace = true
+toml = "1.1.4"
+# The YAML scanner Typst's bibliography reader leaves out: entries keep their values, not their
+# positions, and a definition needs the position of a key.
+yaml-rust = "0.4.5"
+tracing = "0.1.44"
+toml_edit = "0.25.13"
+url = "2.5.8"
+
+[dev-dependencies]
+proptest = "1.11.0"
+tempfile = "3.27.0"

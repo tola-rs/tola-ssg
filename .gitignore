@@ -1,10 +1,9 @@
 .DS_Store
-/target
-/docs
-/example-sites
-/test_site/public
-/tola-vdom
-/typst-batch
-/example-sites
+node_modules/
+/e2e/test-results/
+/e2e/playwright-report/
+.tola/
+target/
 /result
-/typst_blog
+/release/
+/THIRD-PARTY-LICENSES.txt

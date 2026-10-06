@@ -1,0 +1,16 @@
+[package]
+name = "tola-config-macros"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+description = "Proc macros for tola-config"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.4", features = ["derive", "parsing"] }
+toml = { version = "1.1.4", default-features = false, features = ["parse", "std"] }

@@ -1,0 +1,69 @@
+# Simplified-Chinese documentation of `@tola/code`. English stays authoritative in the package's
+# own Typst sources; a unit here overrides one of them.
+
+overview = "代码主题、Typst 自带的高亮和共享的代码样式表"
+
+[exports.code-themes]
+
+summary = [
+  '''
+本包自带的主题。
+
+`code-themes.tokyo-night` 是主题文件的路径，传给 `raw.theme` 或 `render-code(dark-theme: …)`。
+
+Example - 检查主题名是否为键：
+''',
+  '',
+]
+
+[exports.render-code]
+
+summary = [
+  '''
+把 raw 元素渲染成代码，保留 Typst 自己的高亮。
+
+用 show rule 应用：`#show raw: render-code`。在代码里构造的 `raw(...)` 值没有行可渲染，把代码写在文档里。HTML 导出之外，原样返回该元素。
+
+每个块长什么样，由 `raw.theme` 在 Typst 高亮之前决定：`auto` 用 Typst 默认主题，路径或主题字节用该主题，`none` 关闭高亮。主题写在代码块处，用 `#set raw(theme: …)` 或 `#show raw.where(…)` 规则。
+
+Example - 用 show rule 渲染文档中的代码块：
+''',
+  'Example - 为站点深色状态传入一个主题值：',
+  '',
+]
+
+[exports.render-code.parameters]
+
+raw = "要渲染的 raw 元素。"
+
+attrs = "Tola 渲染代码所用元素上的 HTML 属性，例如 `class`、`id`、`data-*`。`class` 和 `style` 在 helper 所设值上扩展；`data-lang` 会被拒绝，语言 tag 已经设置了它。"
+
+dark-theme = "站点深色状态用的主题：`code-themes` 里的值、`path(\"/…\")` 值，或主题字节。站点根元素带 `data-theme=\"dark\"` 时生效。文件在构建时读取，主题读不到会让构建失败；普通字符串会被拒绝，因为它会解析到本包内部。"
+
+[exports.code-stylesheet-url]
+
+summary = [
+  '''
+代码样式表挂载到的浏览器 URL。
+
+样式表给 `render-code` 渲染出的代码上色。需要给 head 条目加自己的属性时用这个 URL；`code-stylesheet` 返回现成的条目。
+
+Example - 检查样式表 URL 是否为根相对路径：
+''',
+  'Example - 给 head 条目加上自己的属性：',
+  '',
+]
+
+[exports.code-stylesheet]
+
+summary = [
+  '''
+加载代码样式表的 head 条目。
+
+直接放进 head。条目需要自己的属性时，改用 `code-stylesheet-url()` 构造。
+
+Example - 在文档 head 中加载样式表：
+''',
+  'Example - 检查条目指向的样式表 URL：',
+  '',
+]

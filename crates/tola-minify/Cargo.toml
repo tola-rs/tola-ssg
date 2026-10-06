@@ -1,0 +1,17 @@
+[package]
+name = "tola-minify"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Deterministic CSS and JavaScript minification for Tola's published assets"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+documentation = "https://docs.rs/tola-minify"
+readme = "README.md"
+keywords = ["css", "javascript", "minifier"]
+categories = ["web-programming"]
+
+[dependencies]
+lightningcss.workspace = true
+oxc = { version = "0.147.0", default-features = false, features = ["minifier", "codegen", "mangler"] }
+thiserror = "2.0.20"

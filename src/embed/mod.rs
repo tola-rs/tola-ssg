@@ -1,130 +1,13 @@
-//! Embedded static resources for Tola.
-//!
-//! # Module Structure
-//!
-//! - `template` - Template types for typed variable injection
-//! - `asset` - Embedded asset types with content-hash filenames
-//! - `build` - Build output templates and scripts
-//! - `serve` - Dev server templates (welcome.html, hotreload.js)
-//! - `css` - Embedded stylesheets (enhance.css)
-//!
-//! Typst virtual packages (@tola/*) are in `src/package/embed/`.
-//!
-//! # Usage
-//!
-//! ```ignore
-//! use embed::build::{REDIRECT_HTML, RedirectVars};
-//! use embed::serve::{HOTRELOAD_JS, HotreloadVars};
-//! use embed::css::ENHANCE_CSS;
-//!
-//! // Render redirect template
-//! let html = REDIRECT_HTML.render(&RedirectVars { canonical_url: "/new-url/" });
-//!
-//! // Render hotreload JS with port
-//! let js = HOTRELOAD_JS.render(&HotreloadVars { ws_port: 35729 });
-//! ```
+//! Embedded JavaScript and CSS for development responses.
 
-mod asset;
-mod template;
+pub mod dev {
+    use std::sync::LazyLock;
 
-// Re-export core types
-pub use asset::{AssetKind, EmbeddedAsset};
-pub use template::{Template, TemplateVars};
+    use tola_address::{RESERVED_ROOT, SiteUrlMount, UrlPath};
 
-pub mod build {
-    use super::{AssetKind, EmbeddedAsset, Template, TemplateVars};
-    use crate::config::SiteConfig;
-
-    /// Variables for redirect.html template.
-    pub struct RedirectVars<'a> {
-        pub canonical_url: &'a str,
-    }
-
-    impl TemplateVars for RedirectVars<'_> {
-        fn apply(&self, content: &str) -> String {
-            content.replace("__CANONICAL_URL__", self.canonical_url)
-        }
-    }
-
-    /// Redirect HTML template for alias pages.
-    pub const REDIRECT_HTML: Template<RedirectVars<'static>> =
-        Template::new(include_str!("build/redirect.html"));
-
-    /// Variables for spa.js template.
-    pub struct SpaVars {
-        pub transition: bool,
-        pub preload: bool,
-        pub preload_delay: u32,
-        pub path_prefix: String,
-    }
-
-    impl SpaVars {
-        /// Build SPA runtime variables from site config.
-        pub fn from_config(config: &SiteConfig) -> Self {
-            let nav = &config.site.nav;
-            Self {
-                transition: nav.spa && nav.transition.is_enabled(),
-                preload: nav.spa && nav.preload.enable,
-                preload_delay: nav.preload.delay,
-                path_prefix: normalize_path_prefix(&config.build.path_prefix),
-            }
-        }
-    }
-
-    /// Normalize config path_prefix to URL path format.
-    ///
-    /// Examples:
-    /// - "" -> ""
-    /// - "blog" -> "/blog"
-    /// - "a/b" -> "/a/b"
-    fn normalize_path_prefix(path: &std::path::Path) -> String {
-        let parts: Vec<_> = path
-            .iter()
-            .filter_map(|c| c.to_str())
-            .filter(|s| !s.is_empty())
-            .collect();
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!("/{}", parts.join("/"))
-        }
-    }
-
-    impl TemplateVars for SpaVars {
-        fn apply(&self, content: &str) -> String {
-            content
-                .replace(
-                    "__TOLA_TRANSITION__",
-                    if self.transition { "true" } else { "false" },
-                )
-                .replace(
-                    "__TOLA_PRELOAD__",
-                    if self.preload { "true" } else { "false" },
-                )
-                .replace("__TOLA_PRELOAD_DELAY__", &self.preload_delay.to_string())
-                .replace(
-                    "__TOLA_PATH_PREFIX__",
-                    &serde_json::to_string(&self.path_prefix).unwrap_or_else(|_| "\"\"".into()),
-                )
-        }
-
-        fn hash_input(&self) -> String {
-            format!(
-                "{}{}{}{}",
-                self.transition, self.preload, self.preload_delay, self.path_prefix
-            )
-        }
-    }
-
-    /// SPA navigation JavaScript with configuration injection.
-    pub const SPA_JS: EmbeddedAsset<SpaVars> =
-        EmbeddedAsset::new(AssetKind::JavaScript, "spa", include_str!("build/spa.js"));
-}
-
-pub mod serve {
-    use super::{AssetKind, EmbeddedAsset, Template, TemplateVars};
-
-    const ERROR_OVERLAY_CSS: &str = include_str!("serve/hotreload-error-overlay.css");
+    const HOTRELOAD_FILENAME: &str = "hotreload.js";
+    const HOTRELOAD_SOURCE: &str = include_str!("dev/hotreload.js");
+    const DEV_STATUS_CSS: &str = include_str!("dev/hotreload-status.css");
 
     fn escape_template_literal(input: &str) -> String {
         input
@@ -133,360 +16,130 @@ pub mod serve {
             .replace("${", "\\${")
     }
 
-    /// Variables for hotreload.js.
-    pub struct HotreloadVars {
-        pub ws_port: u16,
+    /// Why Tola could not minify its own development runtime.
+    ///
+    /// The failing step and the minifier's own message stay in Tola's log; the HTTP response
+    /// has only the failure sentence a site author can act on.
+    #[derive(Debug)]
+    pub(crate) enum RuntimeMinifyError {
+        /// The status stylesheet embedded in the runtime could not be minified.
+        StatusStylesheet(String),
+        /// The composed runtime could not be minified.
+        RuntimeSource(String),
     }
 
-    impl TemplateVars for HotreloadVars {
-        fn apply(&self, content: &str) -> String {
-            content
-                .replace("__TOLA_WS_PORT__", &self.ws_port.to_string())
-                .replace(
-                    "__TOLA_ERROR_OVERLAY_CSS__",
-                    &escape_template_literal(ERROR_OVERLAY_CSS),
-                )
-        }
-
-        fn hash_input(&self) -> String {
-            self.ws_port.to_string()
-        }
-    }
-
-    /// Variables for welcome.html.
-    pub struct WelcomeVars {
-        pub version: &'static str,
-    }
-
-    impl TemplateVars for WelcomeVars {
-        fn apply(&self, content: &str) -> String {
-            content.replace("__TOLA_VERSION__", self.version)
-        }
-    }
-
-    /// Welcome page template.
-    pub const WELCOME_HTML: Template<WelcomeVars> =
-        Template::new(include_str!("serve/welcome.html"));
-
-    /// Hot reload JavaScript with WebSocket port injection.
-    pub const HOTRELOAD_JS: EmbeddedAsset<HotreloadVars> = EmbeddedAsset::new(
-        AssetKind::JavaScript,
-        "hotreload",
-        include_str!("serve/hotreload.js"),
-    );
-}
-
-pub mod css {
-    use super::{AssetKind, EmbeddedAsset, TemplateVars};
-    use crate::config::section::site::TransitionStyle;
-
-    /// Typst CSS for SVG color adaptation and math/table layout.
-    const TYPST_CSS: &str = include_str!("css/typst.css");
-
-    /// Nav CSS template for View Transitions.
-    const NAV_CSS_FADE: &str = include_str!("css/nav/fade.css");
-
-    /// Variables for nav.css sub-template (from site.nav config).
-    #[derive(Clone)]
-    pub struct NavVars {
-        /// Transition style.
-        pub style: TransitionStyle,
-        /// View Transitions duration in milliseconds (site.nav.transition.time).
-        pub transition_time: u32,
-    }
-
-    impl NavVars {
-        /// Generate nav CSS content (empty if disabled).
-        pub fn render(&self) -> String {
-            match self.style {
-                TransitionStyle::None => String::new(),
-                TransitionStyle::Fade => {
-                    NAV_CSS_FADE.replace("__TRANSITION_TIME__", &self.transition_time.to_string())
-                }
-            }
-        }
-
-        /// Whether View Transitions are enabled.
-        pub fn is_enabled(&self) -> bool {
-            self.style != TransitionStyle::None
-        }
-    }
-
-    /// Variables for enhance.css template.
-    #[derive(Clone)]
-    pub struct EnhanceVars {
-        pub nav: NavVars,
-    }
-
-    impl TemplateVars for EnhanceVars {
-        fn apply(&self, content: &str) -> String {
-            content
-                .replace("/*! TYPST_CSS */", TYPST_CSS)
-                .replace("/*! NAV_CSS */", &self.nav.render())
-        }
-
-        fn hash_input(&self) -> String {
-            format!("{:?}{}", self.nav.style, self.nav.transition_time)
-        }
-    }
-
-    /// Build EnhanceVars from SiteConfig.
-    pub fn enhance_vars(config: &crate::config::SiteConfig) -> EnhanceVars {
-        let style = if config.site.nav.spa {
-            config.site.nav.transition.style
-        } else {
-            TransitionStyle::None
-        };
-        EnhanceVars {
-            nav: NavVars {
-                style,
-                transition_time: config.site.nav.transition.time,
-            },
-        }
-    }
-
-    /// Enhanced CSS for Typst SVG theme adaptation and View Transitions.
-    pub const ENHANCE_CSS: EmbeddedAsset<EnhanceVars> =
-        EmbeddedAsset::new(AssetKind::Css, "enhance", include_str!("css/enhance.css"));
-}
-
-pub mod typst {
-    use super::{Template, TemplateVars};
-
-    /// Variables for the generated Tola Typst library.
-    pub struct TolaTypstVars {
-        pub version: &'static str,
-    }
-
-    impl Default for TolaTypstVars {
-        fn default() -> Self {
-            Self {
-                version: env!("CARGO_PKG_VERSION"),
+    impl std::fmt::Display for RuntimeMinifyError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::StatusStylesheet(reason) => write!(f, "status stylesheet: {reason}"),
+                Self::RuntimeSource(reason) => write!(f, "runtime source: {reason}"),
             }
         }
     }
 
-    impl TemplateVars for TolaTypstVars {
-        fn apply(&self, content: &str) -> String {
-            content.replace("__VERSION__", self.version)
-        }
+    /// Compose the development runtime from Tola's own sources and minify it.
+    ///
+    /// The status stylesheet is minified before it is embedded: a JavaScript minifier cannot see
+    /// inside the template literal that has it, so minifying the composed runtime alone would
+    /// publish the stylesheet uncompressed.
+    fn render_hotreload_js(source: &str, status_css: &str) -> Result<String, RuntimeMinifyError> {
+        let status_css = tola_minify::minify_css(status_css)
+            .map_err(|error| RuntimeMinifyError::StatusStylesheet(error.to_string()))?;
+        let composed = source.replace(
+            "__TOLA_DEV_STATUS_CSS__",
+            &escape_template_literal(&status_css),
+        );
+        tola_minify::minify_javascript(&composed, tola_minify::JavaScriptKind::Classic)
+            .map_err(|error| RuntimeMinifyError::RuntimeSource(error.to_string()))
     }
 
-    /// Tola Typst library for tola init to generate tola/lib.typ.
-    pub const TOLA_LIB: Template<TolaTypstVars> = Template::new(include_str!("typst/tola/lib.typ"));
-}
-
-pub mod recolor {
-    use super::{AssetKind, EmbeddedAsset, TemplateVars};
-    use crate::config::section::theme::{RecolorConfig, RecolorSource};
-    use std::collections::HashMap;
-
-    /// SVG filter template for dynamic mode.
-    pub const FILTER_SVG: &str = include_str!("recolor/filter.svg");
-
-    /// CSS template (unified for both modes).
-    const RECOLOR_CSS_TEMPLATE: &str = include_str!("recolor/recolor.css");
-
-    /// JS template for dynamic mode.
-    const RECOLOR_JS_TEMPLATE: &str = include_str!("recolor/recolor.js");
-
-    /// Variables for recolor.js (dynamic mode).
-    #[derive(Clone)]
-    pub struct RecolorJsVars {
-        /// Source mode: "auto" or CSS variable name like "--text-color".
-        pub source: String,
+    pub(crate) fn hotreload_browser_path(mount: &SiteUrlMount) -> String {
+        let path = UrlPath::from_decoded(&format!("/{RESERVED_ROOT}/{HOTRELOAD_FILENAME}"))
+            .expect("the development runtime has a fixed portable URL path");
+        mount.browser_path(&path)
     }
 
-    impl TemplateVars for RecolorJsVars {
-        fn apply(&self, content: &str) -> String {
-            let quoted = format!("\"{}\"", self.source);
-            content.replace("__TOLA_RECOLOR_SOURCE__", &quoted)
-        }
-
-        fn hash_input(&self) -> String {
-            self.source.clone()
-        }
-    }
-
-    /// Recolor JS for dynamic mode.
-    pub const RECOLOR_JS: EmbeddedAsset<RecolorJsVars> =
-        EmbeddedAsset::new(AssetKind::JavaScript, "recolor", RECOLOR_JS_TEMPLATE);
-
-    /// Variables for recolor.css.
-    #[derive(Clone)]
-    pub struct RecolorCssVars {
-        /// Static mode variables (empty for dynamic mode).
-        pub static_vars: String,
-        /// Filter value: `url(#tola-recolor)` or `var(--tola-recolor-filter)`.
-        pub filter_value: String,
-    }
-
-    impl TemplateVars for RecolorCssVars {
-        fn apply(&self, content: &str) -> String {
-            content
-                .replace("__STATIC_VARS__", &self.static_vars)
-                .replace("__FILTER_VALUE__", &self.filter_value)
-        }
-
-        fn hash_input(&self) -> String {
-            format!("{}{}", self.static_vars, self.filter_value)
-        }
-    }
-
-    /// Recolor CSS.
-    pub const RECOLOR_CSS: EmbeddedAsset<RecolorCssVars> =
-        EmbeddedAsset::new(AssetKind::Css, "recolor", RECOLOR_CSS_TEMPLATE);
-
-    /// Generate static mode CSS variables.
-    fn generate_static_vars(list: &HashMap<String, String>) -> String {
-        let theme_overrides: Vec<_> = list
-            .keys()
-            .map(|name| {
-                format!(
-                    "[data-theme=\"{name}\"] {{ --tola-recolor-filter: url(#tola-recolor-{name}); }}"
-                )
-            })
-            .collect();
-
+    pub(crate) fn hotreload_script_tag(mount: &SiteUrlMount, bootstrap: &str) -> String {
+        let source = hotreload_browser_path(mount);
         format!(
-            r#":root {{
-  --tola-recolor-filter: url(#tola-recolor-light);
-}}
-
-@media (prefers-color-scheme: dark) {{
-  :root {{
-    --tola-recolor-filter: url(#tola-recolor-dark);
-  }}
-}}
-
-{}"#,
-            theme_overrides.join("\n")
+            r#"<script src="{}" data-tola-runtime data-tola-bootstrap="{}"></script>"#,
+            tola_build::html::escape_attr(&source),
+            tola_build::html::escape_attr(bootstrap),
         )
     }
 
-    /// Build RecolorCssVars from config.
-    pub fn css_vars(config: &RecolorConfig) -> RecolorCssVars {
-        match &config.source {
-            RecolorSource::Static => RecolorCssVars {
-                static_vars: generate_static_vars(&config.list),
-                filter_value: "var(--tola-recolor-filter)".to_string(),
-            },
-            _ => RecolorCssVars {
-                static_vars: String::new(),
-                filter_value: "url(#tola-recolor)".to_string(),
-            },
+    /// The rendered development runtime every HTTP response serves, minified once per process.
+    ///
+    /// An unminifiable source is refused rather than published raw; the failure is logged once,
+    /// where the runtime is prepared.
+    static RENDERED_RUNTIME: LazyLock<Result<String, RuntimeMinifyError>> = LazyLock::new(|| {
+        let rendered = render_hotreload_js(HOTRELOAD_SOURCE, DEV_STATUS_CSS);
+        if let Err(failure) = &rendered {
+            tracing::error!(
+                target: "tola::dev",
+                %failure,
+                "the development runtime could not be minified"
+            );
+        }
+        rendered
+    });
+
+    pub(crate) fn hotreload_js() -> Result<&'static str, &'static RuntimeMinifyError> {
+        match &*RENDERED_RUNTIME {
+            Ok(rendered) => Ok(rendered.as_str()),
+            Err(failure) => Err(failure),
         }
     }
 
-    /// Build RecolorJsVars from config (for dynamic mode).
-    pub fn js_vars(config: &RecolorConfig) -> RecolorJsVars {
-        let source = match &config.source {
-            RecolorSource::Auto => "auto".to_string(),
-            RecolorSource::CssVar(var) => var.clone(),
-            RecolorSource::Static => "auto".to_string(), // Should not happen
-        };
-        RecolorJsVars { source }
-    }
-}
+    #[cfg(test)]
+    mod tests {
+        use super::{hotreload_browser_path, hotreload_js, render_hotreload_js};
 
-// =============================================================================
-// Embedded Assets Writer
-// =============================================================================
-
-use crate::config::SiteConfig;
-use anyhow::Result;
-use std::path::Path;
-
-/// Write all embedded assets to output directory
-///
-/// This centralizes the logic for writing config-dependent embedded assets:
-/// - enhance.css (always)
-/// - spa.js (if site.nav.spa)
-/// - recolor.css + recolor.js (if theme.recolor.enable)
-pub fn write_embedded_assets(config: &SiteConfig, output_dir: &Path) -> Result<()> {
-    // Ensure output directory exists
-    std::fs::create_dir_all(output_dir)?;
-
-    // enhance.css (always written)
-    {
-        use css::{ENHANCE_CSS, enhance_vars};
-        let vars = enhance_vars(config);
-        ENHANCE_CSS.cleanup_old(output_dir)?;
-        ENHANCE_CSS.write_with_vars(output_dir, &vars)?;
-    }
-
-    // spa.js (if spa enabled)
-    if config.site.nav.spa {
-        use build::{SPA_JS, SpaVars};
-
-        let vars = SpaVars::from_config(config);
-
-        SPA_JS.cleanup_old(output_dir)?;
-        SPA_JS.write_with_vars(output_dir, &vars)?;
-    }
-
-    // recolor assets (if enabled)
-    if config.theme.recolor.enable {
-        use recolor::{RECOLOR_CSS, RECOLOR_JS, css_vars, js_vars};
-        let recolor_config = &config.theme.recolor;
-
-        RECOLOR_CSS.cleanup_old(output_dir)?;
-        RECOLOR_CSS.write_with_vars(output_dir, &css_vars(recolor_config))?;
-
-        // JS only needed for dynamic mode (auto or css-var)
-        if !matches!(
-            recolor_config.source,
-            crate::config::section::theme::RecolorSource::Static
-        ) {
-            RECOLOR_JS.cleanup_old(output_dir)?;
-            RECOLOR_JS.write_with_vars(output_dir, &js_vars(recolor_config))?;
+        #[test]
+        fn runtime_path_follows_the_site_mount() {
+            assert_eq!(
+                hotreload_browser_path(&tola_address::SiteUrlMount::root()),
+                "/_tola/hotreload.js"
+            );
+            let mount = tola_address::SiteUrlMount::from_base_path("/docs/blog/").unwrap();
+            assert_eq!(
+                hotreload_browser_path(&mount),
+                "/docs/blog/_tola/hotreload.js"
+            );
         }
-    }
 
-    Ok(())
-}
+        #[test]
+        fn rendered_runtime_parses_as_javascript() {
+            use oxc::allocator::Allocator;
+            use oxc::parser::Parser;
+            use oxc::span::SourceType;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+            let source = hotreload_js().expect("Tola's own runtime sources minify");
+            let allocator = Allocator::default();
+            let parsed = Parser::new(&allocator, source, SourceType::script()).parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{}",
+                parsed
+                    .diagnostics
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
 
-    #[test]
-    fn test_spa_vars_from_config_path_prefix() {
-        let mut config = crate::config::SiteConfig::default();
-        config.build.path_prefix = std::path::PathBuf::from("docs/blog");
-        let vars = build::SpaVars::from_config(&config);
-        assert_eq!(vars.path_prefix, "/docs/blog");
-    }
-
-    #[test]
-    fn enhance_vars_ignore_transition_when_spa_disabled() {
-        let mut config = crate::config::SiteConfig::default();
-        config.site.nav.spa = false;
-        config.site.nav.transition.style = crate::config::section::site::TransitionStyle::Fade;
-        config.site.nav.transition.time = 350;
-
-        let vars = css::enhance_vars(&config);
-
-        assert!(!vars.nav.is_enabled());
-        assert_eq!(vars.nav.render(), "");
-    }
-
-    #[test]
-    fn write_embedded_assets_does_not_emit_spa_js_when_spa_disabled() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let mut config = crate::config::SiteConfig::default();
-        config.site.nav.spa = false;
-        config.site.nav.preload.enable = true;
-        config.site.nav.transition.style = crate::config::section::site::TransitionStyle::Fade;
-
-        write_embedded_assets(&config, dir.path()).unwrap();
-
-        let generated = std::fs::read_dir(dir.path().join(crate::asset::SYSTEM_ASSET_DIR))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert!(generated.iter().any(|name| name.starts_with("enhance-")));
-        assert!(!generated.iter().any(|name| name.starts_with("spa-")));
+        #[test]
+        fn unminifiable_runtime_is_refused() {
+            for (source, status_css) in [
+                ("function =", "#tola-dev-status{color:red}"),
+                ("const runtime = 1;", "@media ("),
+            ] {
+                assert!(
+                    render_hotreload_js(source, status_css).is_err(),
+                    "{source:?} / {status_css:?}"
+                );
+            }
+        }
     }
 }

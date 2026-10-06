@@ -1,0 +1,138 @@
+# Simplified-Chinese documentation of `@tola/address`. English stays authoritative in the
+# package's own Typst sources; a unit here overrides one of them.
+
+overview = "slug、route、输出路径与浏览器 URL"
+
+[exports.slugify]
+
+summary = [
+  '''
+把文本变成一个 slug，也就是一个 URL 安全的名称。
+
+slug 里保留字母、标记、数字，以及 URL 和文件名安全的标点；其余字符都用来分隔单词，结果会做 NFC 规范化。一个 slug 只命名一个路径分段，可以直接交给 `route`。百分号编码留到构建浏览器 URL 时再做。文本里没有任何可命名的内容会报错。
+
+Example - 先用默认设置，再带选项，把标题变成 slug：
+''',
+'''
+
+`ascii` 模式下，汉字读音随 `language`：只有主 `ja` 子 tag 按日语读；其他任何 tag，包括 `en`，都按中文读。
+
+Example - 把汉字与带重音的文本转写成 ASCII；汉字按词读音，多音字跟随它所在的词：''',
+  '',
+]
+
+[exports.slugify.parameters]
+
+text = "要变成 slug 的文本。"
+
+case = "slug 采用的字母大小写：`lower`、`upper`、`capitalize` 或 `preserve`。"
+
+language = "`ascii` 模式下用来选择汉字读音的 tag，例如 `\"zh\"`、`\"ja\"`，默认中文。主 `ja` 子 tag 按日语处理，不区分大小写（`\"JA-JP\"` 也能匹配）；其他 tag 一律按中文处理。"
+
+mode = "规范化模式：`unicode` 或 `ascii`。"
+
+separator = "单词之间的分隔符：`-` 或 `_`。"
+
+[exports.route]
+
+summary = [
+  '''
+把 slug 拼成一条站点根 route。
+
+每个分段都按原样保留，所以想要 slug、其他大小写或转写时，先对分段调用 `slugify`。结果总是以 `/` 结尾；不传分段就得到站点根 `/`。分段为空、为 `.`、为 `..`，或者包含分隔符时报错。
+
+内容源的 `route-segments` 只是文件布局给出的默认 route；文档实际以哪条 route 可达，由它自己的 output 决定。要发布一个内容源，先对每个分段调用 `slugify`，在这里把它们拼成 route，再命名输出文件：
+''',
+  'Example - 取文件布局给出的默认 route：',
+  '',
+]
+
+[exports.route-to-output]
+
+summary = [
+  '''
+一条站点根 route 发布到的输出文件。
+
+route 是本站发布所用的路径，其中的 `%`、`#` 就是普通的文件名字符。以 `/` 结尾时，route 指向一个目录，该目录按自己的 `index.html` 发布：`/` 是 `index.html`，`/guide/` 是 `guide/index.html`。不带结尾 `/` 时，route 按字面指向文件：`/guide` 是 `guide`，`/manual.pdf` 是 `manual.pdf`。百分号编码的 URL 路径要先用 `decode-url-path` 解码，而且只解码一次。
+
+Example - 由 route 得到输出文件：
+''',
+  'Example - 把字面 `%` 或 `#` 保留为文件名字符：',
+  '',
+]
+
+[exports.output-to-route]
+
+summary = [
+  '''
+输出文件可达的站点根 route。
+
+文件名恰为 `index.html` 时，取包含它的目录地址：`index.html` 是 `/`，`guide/index.html` 是 `/guide/`。其他文件名原样保留在 `/` 下：`404.html` 是 `/404.html`，`about` 是 `/about`。
+
+`route-to-output(output-to-route(output))` 能把输出还原；把 `/guide/index.html` 先转成输出再转回来，得到的是规范 route `/guide/`。
+
+Example - 由输出文件还原 route：
+''',
+  '',
+]
+
+[exports.output-to-url]
+
+summary = [
+  '''
+输出文件对外提供服务的浏览器 URL。
+
+传入一个输出，例如 `guide/index.html`：它可以是文档自己的 output，也可以是 `route-to-output` 的结果。`base-path` 是主机根之下的部署路径，默认取本站的 `site.base-path`，所以结果相对于主机，并且已经按当前构建的站点挂载好。根部署传 `"/"`，传其他路径就覆盖站点自身的设置；它必须以 `/` 开头、以 `/` 结尾，其中的转义只解码一次。`origin` 指定一个绝对的 `http`/`https` origin，传入后结果就是绝对 URL；其中不能有部署路径、凭据、query 或 fragment。输出名只编码一次，所以字面 `%20` 会变成 `%2520`。需要绝对 URL 时，传 `origin: site.origin`。
+
+任何输出路径都能在这里解析，包括 hook 产出的：这里不做检查，因为地址只是一个名字，不承诺文件存在。`[assets]` 声明拼写的 URL 不是输出路径——那类由 `asset-url` 解析，并带上它们的字节身份。
+
+Example - 把输出挂到一个部署路径和一个 origin 下：
+''',
+  'Example - 输出名里的字面 `%20` 只编码一次：',
+  'Example - 链接 hook 自己的产出，它没有任何 `assets` 声明为它命名：',
+  '',
+]
+
+[exports.output-to-url.parameters]
+
+output = "要挂载的输出路径。"
+
+base-path = "部署路径；`auto` 取站点自身的 `base-path`。"
+
+origin = "结果的绝对 origin。"
+
+[exports.asset-url]
+
+summary = [
+  '''
+已声明资产 URL 对外提供服务的浏览器 URL。
+
+参数是声明本身拼写的站点根 URL：
+
+- `assets.files`：条目自己的 `url`，例如 `"/styles/base.css"`。
+- `assets.trees`：树的 `url-prefix` 加上成员在树内的路径；`url-prefix = "/assets"`、树里有 `images/logo.svg` 时，对应 `asset-url("/assets/images/logo.svg")`。
+
+URL 写成编码形式或解码形式都可以：`asset-url` 会先按路径解析一次，两种写法都能匹配到声明。构建时，它解析成该声明发布的地址，并在 `assets.cache-busting` 打开时追加 `?h=<identity>`：内容变了，地址跟着变，名称保持不变。检查阶段只解析挂载后的地址，不带 identity，因为资产字节只在构建时渲染。返回的 URL 以 `/` 开头并包含 `site.base-path`，可以在任何文档里直接使用；再挂载一次就会重复。如果没有任何 `assets` 声明发布这个 URL，调用处会直接报错，即使该路径由别的生产者发布，比如 `resize-image` 的派生结果。hook 自己的产出正是这样的路径：页面用 `output-to-url("assets/…")` 链接它，两个调用彼此独立——这里传声明的拼写，绝不传另一个函数的结果。
+
+Example - 解析站点在 `/assets` 下发布的文件：
+''',
+  '',
+]
+
+[exports.asset-url.parameters]
+
+declared-url = "声明拼写的站点根资产 URL，例如 \"/app.js\"。"
+
+[exports.decode-url-path]
+
+summary = [
+  '''
+把百分号编码的站点根 URL 路径恰好解码一次。
+
+参数只能是路径：传入 origin、query string 或 fragment 都会报错；转义的 `/` 或 `\` 同样会报错，因为层级只由未转义的 `/` 划分。其他转义都会还原成它所指的字节，所以 `/caf%C3%A9/` 是 `/café/`，`/Hello%20World/` 是 `/Hello World/`。只在这里解码一次；`route-to-output` 接受解码后的文本。
+
+Example - 把百分号编码的路径恰好解码一次：
+''',
+  'Example - 把路径解码一次，再命名输出文件：',
+  '',
+]

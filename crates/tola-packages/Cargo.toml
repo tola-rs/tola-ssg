@@ -1,0 +1,32 @@
+[package]
+name = "tola-packages"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "The builtin @tola/* Typst packages: their identity, sources, natives, and the engine contract"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8.7"
+comemo = "0.5.1"
+hex = "0.4.3"
+miniz_oxide = "0.9.1"
+roxmltree = "0.21.1"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+tola-address.workspace = true
+tola-slugify.workspace = true
+tola-icons.workspace = true
+tola-image.workspace = true
+tola-typst = { workspace = true, features = ["scan"] }
+tola-typst-syntax.workspace = true
+typst.workspace = true
+# Typst's native binding macros name these crates in their generated code.
+typst-library.workspace = true
+typst-utils.workspace = true
+typst-html.workspace = true
+
+[build-dependencies]
+miniz_oxide = "0.9.1"

@@ -3,6 +3,8 @@
 
 A static site generator for Typst-based websites.
 
+> Note (v0.8.0): v0.8.0 is a big update. This README is outdated: I plan to substantially rewrite it and the 0.7-era docs, and to add a documentation site within the next few days. For now, `tola help --interactive` browses the built-in packages.
+
 
 ## Table of Contents
 
@@ -40,7 +42,7 @@ A static site generator for Typst-based websites.
 <details>
 <summary>How to make "Recent 5 Posts" with Tola's virtual package system</summary>
 
-Thanks to `typst` and Tola Atomic CSS, `tola` offers writing flexibility.
+Thanks to `typst` and `tailwindcss`, `tola` offers writing flexibility.
 Implement `Recent Posts` easily with the `@tola/pages` virtual package.
 This snippet is aligned with the starter virtual package article source:
 `https://github.com/tola-rs/example-sites/blob/main/starter/content/posts/virtual-packages.typ`.
@@ -87,7 +89,7 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 ### Build & Integration
 
 - **build hooks** — Pre/post build hooks for custom scripts (e.g., esbuild, imagemin)
-- **Atomic CSS** — Native Tailwind v4-compatible atomic utility generation
+- **Tailwind CSS** — Built-in CSS processor integration
 - **html/xml minification** — Optional minification for production builds
 - **SPA navigation** — Optional client-side navigation with DOM morphing and View Transitions API (limitation: inline scripts should be idempotent; navigation may execute them more than once)
 
@@ -190,7 +192,7 @@ You can run `tola` from any subdirectory — it will automatically find `tola.to
     ├── fonts/
     │   └── Luciole-math.otf  # Embedded math font (auto-loaded by tola)
     ├── styles/
-    │   └── custom.css        # Optional hand-written styles
+    │   └── tailwind.css      # Tailwind input (if using `build.hooks.css`)
     └── scripts/
 ```
 
@@ -221,26 +223,24 @@ url = "https://example.com"
 custom = "This is my custom data"
 
 [site.header]
-icon = "/images/favicon.ico"
-styles = ["/styles/custom.css"]
+icon = "assets/images/favicon.ico"
+styles = ["assets/styles/custom.css"]
 scripts = [
-  "/scripts/custom.js" # Simple: No defer and async
-  { url = "/scripts/app.js", defer = true }
-  { url = "/scripts/app.js", async = true }
+  "assets/scripts/custom.js" # Simple: No defer and async
+  { path = "assets/scripts/app.js", defer = true }
+  { path = "assets/scripts/app.js", async = true }
 ]
 elements = ['<meta name="darkreader-lock">'] # Extra special html elements
 
 [site.seo]
 auto_og = true   # Auto-inject default OG tags (site_name, locale, description, type, twitter:card)
 
-[[site.seo.feeds]]
+[site.seo.feed]
+enable = true
 format = "rss"   # "rss" | "atom"
-url = "/feed.xml"
-features = ["full-text"]
 
 [site.seo.sitemap]
 enable = true
-url = "/sitemap.xml"
 
 [build]
 content = "content"
@@ -249,22 +249,12 @@ minify = true
 deps = ["templates", "utils"]  # Shared dependencies — changes trigger range rebuild
 
 [build.assets]
-nested = ["assets/images", "assets/styles", "assets/scripts", "assets/fonts"]
+nested = ["assets/images", "assets/styles", "assets/fonts"]
 
-[build.css.atomic]
+[build.hooks.css]
 enable = true
-profile = "tailwind-v4"
-config = "atomic.css.toml"
-```
-
-Optional `atomic.css.toml`:
-
-```toml
-[theme.colors]
-primary = "#e5186a"
-
-[preflight]
-use = { source = "profile", name = "tailwind-v4" }
+path = "assets/styles/tailwind.css"
+command = ["tailwindcss"]
 ```
 
 ### Virtual Packages
@@ -448,7 +438,7 @@ A `flake.nix` is provided in the repo. Pre-built binaries are available at [tola
 ```nix
 {
   inputs.tola = {
-    url = "github:tola-ssg/tola-ssg/v0.8.0";
+    url = "github:tola-ssg/tola-ssg/v0.7.1";
     inputs.nixpkgs.follows = "<your nixpkgs input here>";
     inputs.rust-overlay.follows = "<your rust-overlay input here, if you have one>";
     # ...
@@ -525,6 +515,7 @@ More formal documentation to follow.
 
 - [typsite](https://github.com/Glomzzz/typsite): Static site generator(SSG) for typst
 - [kodama](https://github.com/kokic/kodama): A Typst-friendly static Zettelkästen site generator.
+- [tinymist](https://github.com/Myriad-Dreamin/tinymist): parts of `tola-lsp` are adapted from it (Apache-2.0)
 
 ## License
 

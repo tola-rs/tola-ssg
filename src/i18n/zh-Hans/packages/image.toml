@@ -1,0 +1,77 @@
+# Simplified-Chinese documentation of `@tola/image`. English stays authoritative in the package's
+# own Typst sources; a unit here overrides one of them.
+
+overview = "图片 metadata 与按请求缩放的图片"
+
+[exports.resize-image]
+
+summary = [
+  '''
+请求构建发布对应的派生结果，并返回它的 URL 与尺寸。
+
+`path` 指向输入文件：可以是相对本次调用解析的字符串，也可以是你已经用 `path()` 解析好的路径。字符串要先解析，再传给其他文件或包。即使资产声明发布了这个文件，也要传文件自身的路径；声明给出的 URL 是给浏览器用的。`width` 与 `height` 都是正的像素数。
+
+`op` 指定操作：`scale`、`fit-width`、`fit-height`、`fit` 或 `fill`（默认）。它决定你必须传哪几个尺寸：
+
+- `scale` 需要两个尺寸，并且可能改变宽高比。
+- `fit-width` 需要 `width`，`fit-height` 需要 `height`。两者都保持宽高比。
+- `fit` 需要两个尺寸，把整张图片放进这个框内；图片本来就放得下时保持源图尺寸。
+- `fill` 需要两个尺寸，并围绕图片中心裁剪到该尺寸。
+
+省略的尺寸取 `none`。`fit-width` 只用 `width`，`fit-height` 只用 `height`。除 `fit` 外的操作都能放大源图。派生出的尺寸四舍五入到最近的像素，最少 1 像素。
+
+`format` 为 `auto`、`jpg`、`png` 或 `webp`。`auto` 为有损且不含 alpha 的源图选择 JPEG，其余情况（包括 GIF）一律选择 PNG。JPEG 质量为 1 到 100，默认 75。WebP 在你给出 `quality`（0 到 100）之前都是无损的；PNG 始终无损。有效的 `quality` 只影响 JPEG 与 WebP。JPEG 输出的每轴尺寸不能超过 65,535 像素，WebP 则不能超过 16,383 像素。`quality: none` 表示采用该格式的默认值。
+
+尚不支持 AVIF 输出；请改用 `webp`、`png`、`jpg` 或 `auto`。
+
+`filter` 指定重采样核：`nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`（默认）。只有裁剪出的区域与输出尺寸不同时，这个核才参与重采样。`background` 接受不透明的 Typst 颜色，Typst 会在合成前把它转换成 sRGB。源图的 `has-alpha` 为真时，JPEG 输出必须提供 `background`；源图不带 alpha 时，JPEG 直接编码。不起作用的 `filter` 或 `background`，得到的派生结果与省略它们时相同。
+
+结果包含派生结果发布的 `url`、它的 `width` 与 `height`，以及源图自身的 `original-width` 与 `original-height`。无论你是否用上返回的 URL 与尺寸，这次调用都会请求派生结果：构建会发布收敛求值中请求过的每个派生结果，编辑器检查只报告诊断信息。这次调用只发布派生结果；源图保留其资产声明为它发布的内容。`resize-image` 拒绝动画图片与 SVG 源图。URL 包含 `site.base-path`，可直接用于 `html.img(src: resized.url, ...)`。把整数像素尺寸直接传给 `html.img` 的 `width` 与 `height`。
+
+构建会把这次求值请求过的派生结果并入站点的输出图：每个都落在 `_tola/images/` 下，名字由源图字节与处理参数共同决定，等价的请求共用同一个输出。链接它通常直接用返回的 `url`；手上只有输出路径时，用 `output-to-url` 换成浏览器 URL。`tola inspect outputs` 列出每个已发布的输出，以及它的 `producer` 与 `media-type`。
+
+Example - 缩放到精确的宽高：
+''',
+  'Example - 由宽度推出高度：',
+  'Example - 缩放成固定布局的尺寸：',
+  'Example - 把透明区域合成到不透明底色上再编码为 JPEG：',
+  '',
+]
+
+[exports.resize-image.parameters]
+
+path = "相对本次调用的路径字符串，或已经解析好的路径。"
+
+background = "不透明的颜色；编码前把透明区域合成到它上面。"
+
+filter = "重采样核，取 `nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`。"
+
+format = "输出格式，取 `auto`、`jpg`、`png` 或 `webp`。"
+
+height = "输出的高度（像素），为正数；是否需要由 `op` 决定。"
+
+op = "缩放操作，取 `scale`、`fit-width`、`fit-height`、`fit` 或 `fill`。"
+
+quality = "JPEG 质量为 1 到 100，默认 75。WebP 只有在给出 0 到 100 的质量值时才启用有损压缩。PNG 始终无损。"
+
+width = "输出的宽度（像素），为正数；是否需要由 `op` 决定。"
+
+[exports.image-metadata]
+
+summary = [
+  '''
+查看一张图片，读取它的 metadata。
+
+`path` 的行为与 `resize-image` 相同。结果包含 `width`、`height`、`format`、`mime`、`has-alpha` 与 `is-lossy`。尺寸已经把图片的方向考虑在内。`format` 为 `jpg`、`png`、`webp`、`gif`、`bmp` 或 `svg`。查看只读取文件对自身的声明，所以未使用的 GIF 透明声明与 GIF 画布上没有被覆盖的部分都算作 alpha。原始文件的 URL 来自它自己的资产声明：需要 URL 时，把这个文件声明为资产。
+
+结果决定缩放方案时，先读一次再缩放：`has-alpha` 决定 JPEG 用不用得上 `background`，`width` 决定目标尺寸。
+
+Example - 读取一张图片的 metadata：
+''',
+  'Example - 按源图自身的尺寸与 alpha 分支：',
+  '',
+]
+
+[exports.image-metadata.parameters]
+
+path = "相对本次调用的路径字符串，或已经解析好的路径。"
