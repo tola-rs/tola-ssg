@@ -1,12 +1,12 @@
 {
   "imports": {
-    "@playwright/test": "npm:@playwright/test@1.62.0"
+    "@playwright/test": "npm:@playwright/test@1.63.0"
   },
   "tasks": {
-    "test": "deno run -A npm:@playwright/test@1.62.0/playwright test",
-    "list": "deno run -A npm:@playwright/test@1.62.0/playwright test --list",
+    "test": "deno run -A npm:@playwright/test@1.63.0/playwright test",
+    "list": "deno run -A npm:@playwright/test@1.63.0/playwright test --list",
     "typecheck": "deno check playwright.config.ts tests support",
-    "browsers": "deno run -A npm:@playwright/test@1.62.0/playwright install chromium"
+    "browsers": "deno run -A npm:@playwright/test@1.63.0/playwright install chromium"
   },
   "lint": {
     "rules": {
