@@ -72,6 +72,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: deno run -A scripts/release/check.ts packages "$RELEASE_TAG" --commit "$GITHUB_SHA"
+      - name: Verify freshly packaged sources
+        run: just package-check
       - name: Generate release license material
         run: |
           cargo install cargo-about --version 0.9.2 --features cli --locked

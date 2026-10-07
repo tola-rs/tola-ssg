@@ -1,7 +1,15 @@
 name: Check
 on:
   workflow_call:
+  # A manual run carries the complete set only when its `full` input asks for it.
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Also run the Windows matrix, e2e, and the extension suite."
+        type: boolean
+        default: false
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - main
@@ -20,6 +28,34 @@ defaults:
     shell: bash
 
 jobs:
+  # One place decides how far this run goes, so every heavy job reads the same answer. A
+  # release call always carries everything; a push asks for it with `[full-ci]` in the commit
+  # message, a pull request with the `full-ci` label, and a manual run with its `full` input.
+  # The checks a push always carries are the fast ones.
+  scope:
+    name: Decide which checks this run covers
+    runs-on: ubuntu-latest
+    outputs:
+      full: ${{ steps.decide.outputs.full }}
+    steps:
+      - name: Read the request
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ github.event.inputs.full || 'false' }}
+          MESSAGE: ${{ github.event.head_commit.message || '' }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          full=false
+          case "$EVENT" in
+            workflow_call) full=true ;;
+            workflow_dispatch) if [ "$REQUESTED" = "true" ]; then full=true; fi ;;
+            push) case "$MESSAGE" in *'[full-ci]'*) full=true ;; esac ;;
+            pull_request) case ",$LABELS," in *,full-ci,*) full=true ;; esac ;;
+          esac
+          printf 'full=%s\n' "$full" >> "$GITHUB_OUTPUT"
+
   static-check:
     name: Check formatting, lints, spelling, versions, and workflows
     runs-on: ubuntu-latest
@@ -64,10 +100,10 @@ jobs:
         include:
           - checks: clippy docs
             components: clippy
-            cache-key: check-clippy
-          - checks: test package-check
+            cache-key: check-workspace
+          - checks: test
             components: ''
-            cache-key: check-test
+            cache-key: check-workspace
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -117,23 +153,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
       - run: just scripts::check
 
-  cargo-windows:
-    name: Check Windows ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+  windows-gnu:
+    name: Check Windows x86_64-pc-windows-gnu
+    runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # MSVC runs the native tests; GNU cross-checks the Windows target.
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            checks: windows::msvc
-            cache-key: check-windows
-          - target: x86_64-pc-windows-gnu
-            os: ubuntu-latest
-            checks: windows::gnu
-            cache-key: check-windows-gnu
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -141,20 +164,41 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-rust
         with:
-          target: ${{ matrix.target }}
-          cache-key: ${{ matrix.cache-key }}
+          target: x86_64-pc-windows-gnu
+          cache-key: check-windows-gnu
           cache-on-failure: true
       - name: Install MinGW cross compiler
-        if: ${{ matrix.target == 'x86_64-pc-windows-gnu' }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes gcc-mingw-w64-x86-64
-      - run: just ${{ matrix.checks }}
+      - run: just windows::gnu
+
+  windows-msvc:
+    name: Check Windows x86_64-pc-windows-msvc
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # The native Windows compile and test suite is the slow leg, so it waits for a run that
+    # carries the complete set; the GNU cross-check above rides every push.
+    needs: [scope]
+    if: ${{ needs.scope.outputs.full == 'true' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          target: x86_64-pc-windows-msvc
+          cache-key: check-windows
+          cache-on-failure: true
+      - run: just windows::msvc
 
   e2e:
     name: Exercise CLI, development, and site behavior
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [scope]
+    if: ${{ needs.scope.outputs.full == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -187,6 +231,10 @@ jobs:
     name: Check and package the VS Code extension
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [scope]
+    # VS Code's own download and the integration host are the slow part; the extension is
+    # still type-checked and packaged by every push through `just quality` and the release.
+    if: ${{ needs.scope.outputs.full == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -195,7 +243,7 @@ jobs:
       - uses: ./.github/actions/setup-typescript
       - uses: ./.github/actions/setup-rust
         with:
-          cache-key: check-vscode
+          cache-key: check-workspace
           cache-on-failure: true
       - name: Install the headless VS Code display
         run: |
