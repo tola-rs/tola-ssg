@@ -3,11 +3,13 @@ import { setImmediate } from 'node:timers/promises'
 import { parseArgs } from 'node:util'
 import { CommandCancelled, withCancellation } from '../cancellation.ts'
 import { errorMessage } from '../process.ts'
+import { parseReleaseMode, type ReleaseMode } from './release-mode.ts'
 import { renderNotes } from './release-notes.ts'
 
 const HELP =
-  `Usage: deno run --allow-read --allow-write --allow-run=git --allow-env scripts/release/notes.ts --tag TAG --repository OWNER/REPO --output FILE [--repo PATH] [--commit COMMIT]
+  `Usage: deno run --allow-read --allow-write --allow-run=git --allow-env scripts/release/notes.ts --tag TAG --repository OWNER/REPO --output FILE [--repo PATH] [--commit COMMIT] [--mode MODE]
 Generate notes for the selected release without changing Git refs.
+Modes: create, update-preserve-notes, update-regenerate-notes (default: create).
 `
 interface NotesArguments {
   positionals: string[]
@@ -17,12 +19,14 @@ interface NotesArguments {
     output?: string
     repo?: string
     commit?: string
+    mode?: string
     help?: boolean
   }
 }
 
 export async function main(args: string[] = process.argv.slice(2)): Promise<void> {
   let parsed: NotesArguments
+  let mode: ReleaseMode
   try {
     parsed = parseArgs({
       args,
@@ -33,6 +37,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<void
         output: { type: 'string' },
         repo: { type: 'string', default: '.' },
         commit: { type: 'string' },
+        mode: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
     })
@@ -47,6 +52,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<void
     ) {
       throw new Error('--tag, --repository, and --output are required')
     }
+    mode = parseReleaseMode(parsed.values.mode)
   } catch (error) {
     process.stderr.write(`${HELP}\nerror: ${errorMessage(error)}\n`)
     process.exitCode = 2
@@ -59,7 +65,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<void
         if (tag === undefined || repository === undefined || output === undefined) {
           throw new Error('missing release notes arguments')
         }
-        const notes = await renderNotes(repo ?? '.', tag, repository, commit, signal)
+        const notes = await renderNotes(repo ?? '.', tag, repository, commit, signal, mode)
         await setImmediate()
         signal.throwIfAborted()
         writeFileSync(output, notes, 'utf8')

@@ -5,6 +5,8 @@ export interface Target {
   readonly system: 'linux' | 'darwin' | 'windows'
   readonly machine: 'x86_64' | 'aarch64'
   readonly binary: 'tola' | 'tola.exe'
+  /** How the C runtime is linked: a musl archive is the static one, the others dynamic. */
+  readonly linkage: 'static' | 'dynamic'
 }
 
 export const TARGETS = {
@@ -12,21 +14,37 @@ export const TARGETS = {
     system: 'linux',
     machine: 'x86_64',
     binary: 'tola',
+    linkage: 'static',
   },
   'aarch64-unknown-linux-musl': {
     system: 'linux',
     machine: 'aarch64',
     binary: 'tola',
+    linkage: 'static',
+  },
+  'x86_64-unknown-linux-gnu': {
+    system: 'linux',
+    machine: 'x86_64',
+    binary: 'tola',
+    linkage: 'dynamic',
+  },
+  'aarch64-unknown-linux-gnu': {
+    system: 'linux',
+    machine: 'aarch64',
+    binary: 'tola',
+    linkage: 'dynamic',
   },
   'aarch64-apple-darwin': {
     system: 'darwin',
     machine: 'aarch64',
     binary: 'tola',
+    linkage: 'dynamic',
   },
   'x86_64-pc-windows-msvc': {
     system: 'windows',
     machine: 'x86_64',
     binary: 'tola.exe',
+    linkage: 'dynamic',
   },
 } as const satisfies Record<string, Target>
 

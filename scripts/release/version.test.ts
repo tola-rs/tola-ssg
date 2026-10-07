@@ -18,6 +18,8 @@ import { workspacePackages } from './cargo-metadata.ts'
 import { checkTag, copyCheckout, gitStatus } from './checkout.ts'
 import { updatedManifest } from './manifest.ts'
 import { ReleaseError } from './release-error.ts'
+import { checkSource } from './release-check.ts'
+import { parseReleaseMode } from './release-mode.ts'
 import { git, withGitCheckout, withWorkspace, WORKSPACE_MANIFEST } from './test-checkout.ts'
 import { prepareUpdate, updateVersion } from './version-update.ts'
 import { checkManifests } from './workspace.ts'
@@ -129,6 +131,54 @@ test('a branch with the release name blocks tag selection', async () => {
   await withGitCheckout((root) => {
     git(root, 'branch', 'v0.8.0')
     expect(() => checkTag(root, 'v0.8.0')).toThrow(ReleaseError)
+  })
+})
+
+test('release modes reject unknown publication choices', () => {
+  expect(parseReleaseMode(undefined)).toBe('create')
+  for (const mode of ['create', 'update-preserve-notes', 'update-regenerate-notes']) {
+    expect(parseReleaseMode(mode)).toBe(mode)
+  }
+  for (const mode of ['', 'update', 'force', 'CREATE']) {
+    expect(() => parseReleaseMode(mode)).toThrow(ReleaseError)
+  }
+})
+
+test('release updates validate selected source without moving tags', async () => {
+  await withWorkspace(async (root) => {
+    const tagged = git(root, 'rev-parse', 'HEAD')
+    git(root, 'tag', '-a', 'v0.8.0', '-m', 'release')
+    git(root, 'commit', '--allow-empty', '-qm', 'fix: selected source')
+    const selected = git(root, 'rev-parse', 'HEAD')
+    for (const mode of ['update-preserve-notes', 'update-regenerate-notes'] as const) {
+      expect((await checkSource(root, 'v0.8.0', selected, undefined, mode)).commit).toBe(selected)
+      expect(git(root, 'rev-parse', 'v0.8.0^{commit}')).toBe(tagged)
+      await expect(checkSource(root, 'v0.8.0', tagged, undefined, mode)).rejects.toThrow(ReleaseError)
+      await expect(checkSource(root, 'v0.9.0', selected, undefined, mode)).rejects.toThrow(ReleaseError)
+      for (const commit of ['HEAD', selected.slice(0, 12)]) {
+        expect(() => checkTag(root, 'v0.8.0', commit, mode)).toThrow(ReleaseError)
+      }
+    }
+    await expect(checkSource(root, 'v0.8.0', selected)).rejects.toThrow(ReleaseError)
+    writeFileSync(join(root, 'changed'), 'unsaved source')
+    await expect(checkSource(root, 'v0.8.0', selected, undefined, 'update-preserve-notes')).rejects.toThrow(
+      ReleaseError,
+    )
+  })
+})
+
+test('release updates reject branch conflicts and noncommit tags', async () => {
+  await withGitCheckout((root) => {
+    const selected = git(root, 'rev-parse', 'HEAD')
+    git(root, 'branch', 'v0.8.0')
+    for (const mode of ['update-preserve-notes', 'update-regenerate-notes'] as const) {
+      expect(() => checkTag(root, 'v0.8.0', selected, mode)).toThrow(ReleaseError)
+    }
+    git(root, 'branch', '-D', 'v0.8.0')
+    git(root, 'tag', 'v0.8.0', git(root, 'rev-parse', 'HEAD^{tree}'))
+    for (const mode of ['update-preserve-notes', 'update-regenerate-notes'] as const) {
+      expect(() => checkTag(root, 'v0.8.0', selected, mode)).toThrow(ReleaseError)
+    }
   })
 })
 

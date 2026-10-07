@@ -7,17 +7,22 @@ import { REPOSITORY_ROOT } from '../paths.ts'
 import { errorMessage } from '../process.ts'
 import { checksumContents } from './checksums.ts'
 import { checkTag, requireClean } from './checkout.ts'
-import { checksums, LICENSE_FILES } from './packaging.ts'
+import { checksums, licenseArchiveName } from './packaging.ts'
 import { type PublishAsset, publishRelease } from './publish-release.ts'
 import { checkSource } from './release-check.ts'
+import { parseReleaseMode, type ReleaseMode } from './release-mode.ts'
 import { TARGET_NAMES } from './targets.ts'
 
 const HELP =
-  `Usage: deno run -A scripts/release/publish.ts --tag TAG --commit SHA --repository OWNER/REPO --event {push,workflow_dispatch} --archives DIRECTORY --notes FILE
+  `Usage: deno run -A scripts/release/publish.ts --tag TAG --commit SHA --repository OWNER/REPO --event {push,workflow_dispatch} --archives DIRECTORY [--mode MODE] [--notes FILE]
 Verify the selected source and complete archive set before authenticated GitHub publication.
-Requires GH_TOKEN. Only workflow_dispatch may create a missing tag; existing tags are never moved.
-New releases remain drafts until every asset is uploaded and verified. Existing published releases
-must already match; existing drafts retain their metadata and remain unpublished on reruns.
+Requires GH_TOKEN. Modes:
+  create (default): create a release; existing tags and published assets must already match.
+  update-preserve-notes: replace builds and move the tag, retaining the release title and notes.
+  update-regenerate-notes: replace builds, move the tag, and replace the title and notes.
+Updates require workflow_dispatch and an existing mutable release. Only workflow_dispatch may
+create a missing tag. --notes is required except in update-preserve-notes mode.
+New releases remain drafts until every asset is verified; existing drafts remain unpublished.
 `
 
 type PublishCommand =
@@ -28,6 +33,7 @@ type PublishCommand =
     readonly commit: string
     readonly repository: string
     readonly event: 'push' | 'workflow_dispatch'
+    readonly mode: ReleaseMode
     readonly archives: string
     readonly notes: string
   }
@@ -40,6 +46,7 @@ function parseCommand(args: readonly string[]): PublishCommand {
       commit: { type: 'string' },
       repository: { type: 'string' },
       event: { type: 'string' },
+      mode: { type: 'string' },
       archives: { type: 'string' },
       notes: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
@@ -47,17 +54,20 @@ function parseCommand(args: readonly string[]): PublishCommand {
   })
   if (values.help) return { help: true }
   const { tag, commit, repository, event, archives, notes } = values
+  const mode = parseReleaseMode(values.mode)
   if (
     tag === undefined ||
     commit === undefined ||
     repository === undefined ||
     archives === undefined ||
-    notes === undefined ||
     (event !== 'push' && event !== 'workflow_dispatch')
   ) {
-    throw new Error('--tag, --commit, --repository, --event, --archives, and --notes are required')
+    throw new Error('--tag, --commit, --repository, --event, and --archives are required')
   }
-  return { help: false, tag, commit, repository, event, archives, notes }
+  if (mode !== 'update-preserve-notes' && notes === undefined) {
+    throw new Error('--notes is required for create and update-regenerate-notes')
+  }
+  return { help: false, tag, commit, repository, event, mode, archives, notes: notes ?? '' }
 }
 
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<number> {
@@ -76,7 +86,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     return await withCancellation(async (signal) => {
       const token = process.env.GH_TOKEN
       if (!token) throw new Error('GH_TOKEN is required')
-      const checked = await checkSource(REPOSITORY_ROOT, command.tag, command.commit, signal)
+      const checked = await checkSource(REPOSITORY_ROOT, command.tag, command.commit, signal, command.mode)
       // This is the sole publication-boundary archive verification. Its returned
       // digests also authenticate remote reruns without rereading archive bytes.
       const digests = await checksums(command.archives, checked.version, TARGET_NAMES, signal)
@@ -93,24 +103,26 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         sha256: createHash('sha256').update(manifest, 'ascii').digest('hex'),
         content: new Blob([manifest], { type: 'text/plain' }),
       })
-      for (const name of Object.keys(LICENSE_FILES)) {
-        const content = await Deno.readFile(join(command.archives, name), { signal })
-        assets.push({
-          name,
-          sha256: createHash('sha256').update(content).digest('hex'),
-          content: new Blob([content], { type: name.endsWith('.md') ? 'text/markdown' : 'text/plain' }),
-        })
-      }
-      const notes = await readFile(command.notes, { encoding: 'utf8', signal })
+      const licenseArchive = licenseArchiveName(checked.version)
+      const licenseContents = await Deno.readFile(join(command.archives, licenseArchive), { signal })
+      assets.push({
+        name: licenseArchive,
+        sha256: createHash('sha256').update(licenseContents).digest('hex'),
+        content: new Blob([licenseContents], { type: 'application/gzip' }),
+      })
+      const notes = command.mode === 'update-preserve-notes'
+        ? ''
+        : await readFile(command.notes, { encoding: 'utf8', signal })
       signal.throwIfAborted()
       requireClean(REPOSITORY_ROOT)
-      checkTag(REPOSITORY_ROOT, command.tag, checked.commit)
+      checkTag(REPOSITORY_ROOT, command.tag, checked.commit, command.mode)
       const result = await publishRelease(
         {
           repository: command.repository,
           tag: command.tag,
           commit: checked.commit,
           event: command.event,
+          mode: command.mode,
           notes,
           assets,
         },
@@ -126,6 +138,13 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
         case 'unchanged':
           console.log(`Published release ${command.tag} already matches; no remote changes were made.`)
           break
+        case 'updated':
+          console.log(
+            `Updated ${command.tag} to ${checked.commit}; title and notes ${
+              command.mode === 'update-preserve-notes' ? 'preserved' : 'regenerated'
+            }.`,
+          )
+          break
         case 'draft':
           console.log(
             `Retained existing draft ${command.tag} (release ${result.releaseId}) with complete assets. It is NOT published; review and publish it deliberately.`,
@@ -137,7 +156,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   } catch (error) {
     console.error(`publish: ${errorMessage(error)}`)
     console.error(
-      'Publication stopped. Inspect remote state before rerunning; no rollback or asset deletion is attempted.',
+      'Publication stopped. GitHub updates are not atomic; inspect the tag and assets before rerunning. No automatic rollback is attempted.',
     )
     return error instanceof CommandCancelled ? error.exitCode : 1
   }

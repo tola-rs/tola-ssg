@@ -62,7 +62,7 @@ function parseCommand(args: readonly string[]): PackageCommand {
 function help(topic?: string): string {
   switch (topic) {
     case 'licenses':
-      return 'Usage: deno run --allow-read --allow-write --allow-env scripts/release/package.ts licenses --output DIRECTORY\nCopy the release license material into the output directory.'
+      return 'Usage: deno run --allow-read --allow-write --allow-env scripts/release/package.ts licenses --output DIRECTORY\nWrite the release license material into the output directory as one archive.'
     case 'build':
       return 'Usage: deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts build TARGET --output DIRECTORY\nBuild one Cargo target and atomically replace its verified archive.'
     case 'verify':
@@ -70,7 +70,7 @@ function help(topic?: string): string {
     case 'checksums':
       return 'Usage: deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts checksums DIRECTORY [--target TARGET]\nVerify the selected archives and atomically write SHA-256 checksums.'
     default:
-      return 'Usage: deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts {build,verify,checksums,licenses} ...\nBuild and verify local release archives without publishing.\n\nCommands:\n  build       Build one Cargo target and atomically replace its archive\n  verify      Verify exactly the release archives and any checksums\n  checksums   Verify the selected archives and atomically write SHA-256 checksums\n  licenses    Copy the release license material into the output directory'
+      return 'Usage: deno run --allow-read --allow-write --allow-run --allow-env scripts/release/package.ts {build,verify,checksums,licenses} ...\nBuild and verify local release archives without publishing.\n\nCommands:\n  build       Build one Cargo target and atomically replace its archive\n  verify      Verify exactly the release archives and any checksums\n  checksums   Verify the selected archives and atomically write SHA-256 checksums\n  licenses    Write the release license material into the output directory as one archive'
   }
 }
 
@@ -91,7 +91,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       const version = workspaceVersion(REPOSITORY_ROOT)
       switch (command.command) {
         case 'licenses':
-          await writeLicenseFiles({ root: REPOSITORY_ROOT, output: command.output }, signal)
+          await writeLicenseFiles({ root: REPOSITORY_ROOT, output: command.output }, version, signal)
           break
         case 'build':
           await build(command.target, version, { root: REPOSITORY_ROOT, output: command.output }, signal)

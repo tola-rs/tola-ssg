@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { run } from './command.ts'
 import { ReleaseError } from './release-error.ts'
+import type { ReleaseMode } from './release-mode.ts'
 import { tagVersion } from './semver.ts'
 import { workspaceVersion } from './workspace.ts'
 
@@ -19,7 +20,7 @@ export function requireClean(root: string): void {
   }
 }
 
-export function checkTag(root: string, tag: string, commit?: string): string {
+export function checkTag(root: string, tag: string, commit?: string, mode: ReleaseMode = 'create'): string {
   const expected = tagVersion(tag)
   run(root, ['git', 'check-ref-format', `refs/tags/${tag}`])
   const actual = workspaceVersion(root)
@@ -39,7 +40,9 @@ export function checkTag(root: string, tag: string, commit?: string): string {
   const tags = run(root, ['git', 'for-each-ref', '--format=%(refname)', `refs/tags/${tag}`])
   if (tags.split('\n').includes(`refs/tags/${tag}`)) {
     const tagged = run(root, ['git', 'rev-parse', '--verify', `refs/tags/${tag}^{commit}`])
-    if (tagged !== head) throw new ReleaseError(`tag ${tag} points to ${tagged}, not checked commit ${head}`)
+    if (mode === 'create' && tagged !== head) {
+      throw new ReleaseError(`tag ${tag} points to ${tagged}, not checked commit ${head}`)
+    }
   }
   return head
 }

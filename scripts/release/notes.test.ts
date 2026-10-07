@@ -121,3 +121,21 @@ test('an existing historical tag selects its own message rather than the current
     expect(await renderNotes(root, 'v0.8.0', 'tola-rs/tola-ssg')).toBe('Published release message\n')
   })
 })
+
+test('updated release notes use the selected commit', async () => {
+  await withGitCheckout(async (root) => {
+    git(root, 'tag', 'v0.7.0')
+    git(root, 'commit', '--allow-empty', '-qm', 'feat: published feature')
+    git(root, 'tag', '-a', 'v0.8.0', '-m', 'release')
+    const tagged = git(root, 'rev-parse', 'v0.8.0^{commit}')
+    git(root, 'commit', '--allow-empty', '-qm', 'fix: selected correction')
+    const selected = git(root, 'rev-parse', 'HEAD')
+    for (const mode of ['update-preserve-notes', 'update-regenerate-notes'] as const) {
+      const notes = await renderNotes(root, 'v0.8.0', 'tola-rs/tola-ssg', selected, undefined, mode)
+      expect(notes).toContain('published feature')
+      expect(notes).toContain('selected correction')
+      expect(git(root, 'rev-parse', 'v0.8.0^{commit}')).toBe(tagged)
+    }
+    await expect(renderNotes(root, 'v0.8.0', 'tola-rs/tola-ssg', selected)).rejects.toThrow(ReleaseError)
+  })
+})

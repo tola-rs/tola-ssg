@@ -3,6 +3,7 @@ import { caseFold } from 'unicode-case-folding'
 import { runProcess } from '../process.ts'
 import { checkTag } from './checkout.ts'
 import { ReleaseError } from './release-error.ts'
+import type { ReleaseMode } from './release-mode.ts'
 import { compareVersions, type SemVer, tagVersion, versionKey as semverKey } from './semver.ts'
 
 export type ReleaseCategory = 'Features' | 'Bug Fixes' | 'Refactor' | 'Performance' | 'Other Changes'
@@ -130,11 +131,12 @@ export async function renderNotes(
   repository: string,
   commit?: string,
   signal?: AbortSignal,
+  mode: ReleaseMode = 'create',
 ): Promise<string> {
   signal?.throwIfAborted()
   tagVersion(tag)
   const selected = commit !== undefined
-    ? checkTag(resolve(root), tag, commit)
+    ? checkTag(resolve(root), tag, commit, mode)
     : await gitOutput(root, ['rev-parse', '--verify', `refs/tags/${tag}^{commit}`], signal)
   const previousTag = await findPreviousTag(root, tag, signal)
   if (previousTag === null) {

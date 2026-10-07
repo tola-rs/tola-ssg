@@ -168,6 +168,12 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_Storage_FileSystem",
 ] }
 
+# `typst-kit`'s downloader reaches `native-tls`, and a musl target has no OpenSSL to link: the
+# release archive builds the vendored one, which the runner's `musl-tools`, perl, and make
+# already support.
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
 [dev-dependencies]
 rss = { version = "2.1.0", default-features = false, features = [
     "builders",

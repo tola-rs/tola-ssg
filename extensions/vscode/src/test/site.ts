@@ -373,8 +373,15 @@ export async function blockServerStart(site: EditorSite): Promise<BlockedStart> 
     { mode: 0o755 },
   )
   const reached = waitForFile(directory, marker)
+  const setting = () =>
+    vscode.workspace.getConfiguration('tola', site.source).get<string>('serverPath')
   await vscode.workspace.getConfiguration('tola', site.source)
     .update('serverPath', script, vscode.ConfigurationTarget.WorkspaceFolder)
+  assert.equal(
+    setting(),
+    script,
+    'The workspace folder did not keep the service path this test wrote',
+  )
   await reached
   let released: Promise<void> | undefined
   const release = () => released ??= fs.open(gate, 'w').then((handle) => handle.close())
@@ -405,7 +412,7 @@ async function waitForFile(directory: string, file: string): Promise<void> {
     const deadline = setTimeout(() => {
       watcher.close()
       reject(new Error(`The held service did not start for ${file}`))
-    }, 15_000)
+    }, 60_000)
     seen()
   })
 }

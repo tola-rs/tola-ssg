@@ -3,7 +3,13 @@ import { afterEach, beforeEach, test } from '@std/testing/bdd'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { LICENSE_FILES, packageBinary, verifyDirectory, writeLicenseFiles } from './packaging.ts'
+import {
+  LICENSE_FILES,
+  licenseArchiveName,
+  packageBinary,
+  verifyDirectory,
+  writeLicenseFiles,
+} from './packaging.ts'
 import { archiveName, TARGETS } from './targets.ts'
 import { executableForTarget } from './testing/executables.ts'
 
@@ -30,17 +36,16 @@ test('staged licences complete the release directory', async () => {
     await writeFile(path, `license from ${relative}\n`)
   }
   const licenses = join(root, 'licenses')
-  await writeLicenseFiles({ root, output: licenses })
-  for (const name of Object.keys(LICENSE_FILES)) {
-    await writeFile(join(output, name), await readFile(join(licenses, name)))
-  }
+  await writeLicenseFiles({ root, output: licenses }, '1.0.0')
+  const bundled = licenseArchiveName('1.0.0')
+  await writeFile(join(output, bundled), await readFile(join(licenses, bundled)))
   expect([...(await verifyDirectory(output, '1.0.0', { target })).keys()]).toEqual([
     archiveName(target, '1.0.0'),
   ])
 })
 
 test('missing license sources stop staging', async () => {
-  await expect(writeLicenseFiles({ root, output: join(root, 'licenses') })).rejects.toThrow(
+  await expect(writeLicenseFiles({ root, output: join(root, 'licenses') }, '1.0.0')).rejects.toThrow(
     'missing LICENSE',
   )
 })

@@ -4,9 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v0.8.0 or v0.8.0-pre.1). Created at the selected commit only after all checks pass."
+        description: "Release tag matching the workspace version (e.g. v0.8.0 or v0.8.0-pre.1)."
         required: true
         type: string
+      mode:
+        description: "Create a release, or update its builds and tag to the selected commit while preserving or regenerating its title and notes."
+        required: true
+        type: choice
+        default: create
+        options:
+          - create
+          - update-preserve-notes
+          - update-regenerate-notes
   push:
     tags:
       - 'v*'
@@ -29,6 +38,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       tag: ${{ steps.selection.outputs.tag }}
+      mode: ${{ steps.selection.outputs.mode }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -41,10 +51,11 @@ jobs:
         id: selection
         env:
           DISPATCH_TAG: ${{ github.event.inputs.tag || '' }}
+          RELEASE_MODE: ${{ github.event.inputs.mode || 'create' }}
         run: |
           set -euo pipefail
           tag="${DISPATCH_TAG:-$GITHUB_REF_NAME}"
-          deno run -A scripts/release/check.ts source "$tag" --commit "$GITHUB_SHA"
+          deno run -A scripts/release/check.ts source "$tag" --commit "$GITHUB_SHA" --mode "$RELEASE_MODE"
           if [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
             git rev-parse --verify "refs/tags/$tag^{commit}" >/dev/null
           fi
@@ -52,9 +63,10 @@ jobs:
           # published version always exists in the main line of development.
           git merge-base --is-ancestor "$GITHUB_SHA" "origin/${{ github.event.repository.default_branch }}"
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          printf 'mode=%s\n' "$RELEASE_MODE" >> "$GITHUB_OUTPUT"
 
   packages:
-    name: Check crates.io availability and workspace packages
+    name: Check workspace packages
     runs-on: ubuntu-latest
     timeout-minutes: 60
     needs: validate
@@ -68,10 +80,13 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: release-packages
-      - name: Verify availability and normalized workspace packages
+      - name: Verify workspace packages for the selected release mode
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
-        run: deno run -A scripts/release/check.ts packages "$RELEASE_TAG" --commit "$GITHUB_SHA"
+          RELEASE_MODE: ${{ needs.validate.outputs.mode }}
+        run: deno run -A scripts/release/check.ts packages "$RELEASE_TAG" --commit "$GITHUB_SHA" --mode "$RELEASE_MODE"
+      - name: Verify freshly packaged sources
+        run: just package-check
       - name: Generate release license material
         run: |
           cargo install cargo-about --version 0.9.2 --features cli --locked
@@ -106,6 +121,13 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             packages: musl-tools
+          # The GNU-linked Linux archives link the system OpenSSL each runner carries.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            packages: ''
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            packages: ''
           - target: aarch64-apple-darwin
             os: macos-latest
             packages: ''
@@ -149,6 +171,7 @@ jobs:
       contents: write
     env:
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_MODE: ${{ needs.validate.outputs.mode }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -164,28 +187,34 @@ jobs:
           merge-multiple: true
           path: ${{ runner.temp }}/release-archives
       - name: Generate notes for the selected commit
+        if: ${{ env.RELEASE_MODE != 'update-preserve-notes' }}
         env:
           RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
         run: |
           set -euo pipefail
-          # Publication rechecks source and verifies the entire archive set once.
           deno run --allow-read --allow-write --allow-run=git --allow-env scripts/release/notes.ts \
             --repo . \
             --tag "$RELEASE_TAG" \
             --commit "$GITHUB_SHA" \
+            --mode "$RELEASE_MODE" \
             --repository "$GITHUB_REPOSITORY" \
             --output "$RELEASE_NOTES"
-      - name: Stage verified assets and publish only complete new releases
+      - name: Publish verified assets with the selected release mode
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ARCHIVES: ${{ runner.temp }}/release-archives
           RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
         run: |
           set -euo pipefail
+          notes=()
+          if [ "$RELEASE_MODE" != "update-preserve-notes" ]; then
+            notes=(--notes "$RELEASE_NOTES")
+          fi
           deno run -A scripts/release/publish.ts \
             --tag "$RELEASE_TAG" \
             --commit "$GITHUB_SHA" \
             --repository "$GITHUB_REPOSITORY" \
             --event "$GITHUB_EVENT_NAME" \
+            --mode "$RELEASE_MODE" \
             --archives "$RELEASE_ARCHIVES" \
-            --notes "$RELEASE_NOTES"
+            "${notes[@]}"

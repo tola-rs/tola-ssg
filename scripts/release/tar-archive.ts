@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { createWriteStream } from 'node:fs'
+import { createReadStream, createWriteStream } from 'node:fs'
 import { Transform, type TransformCallback } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
+import { finished, pipeline } from 'node:stream/promises'
 import { createGunzip, createGzip } from 'node:zlib'
-import { pack } from 'tar-stream'
+import { extract, type Headers, pack } from 'tar-stream'
 import { COPY_SIZE, exactFileNumber, openRegularFile, type OpenReleaseFile } from './packaging-file.ts'
 import type { Target } from './targets.ts'
 
@@ -263,4 +263,65 @@ export async function createTarArchive(
   } finally {
     await source.handle.close()
   }
+}
+
+/**
+ * Write the license material as one archive, so a release carries it as a single asset.
+ *
+ * The entries are written in the order given with a fixed modification time, so the same
+ * material always produces the same bytes.
+ */
+export async function createLicenseArchive(
+  entries: readonly { readonly name: string; readonly contents: Buffer }[],
+  archive: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const packer = pack()
+  const writing = pipeline(
+    packer,
+    createGzip(),
+    createWriteStream(archive, { mode: 0o600 }),
+    ...(signal === undefined ? [] : [{ signal }]),
+  )
+  for (const entry of entries) {
+    signal?.throwIfAborted()
+    const file = packer.entry({
+      name: entry.name,
+      type: 'file',
+      size: entry.contents.length,
+      mode: 0o644,
+      uid: 0,
+      gid: 0,
+      mtime: new Date(0),
+      uname: '',
+      gname: '',
+    })
+    file.end(entry.contents)
+    await finished(file)
+  }
+  packer.finalize()
+  await writing
+  signal?.throwIfAborted()
+}
+
+/** The member names one license archive carries, in the order it stores them. */
+export async function licenseArchiveMembers(
+  archive: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const names: string[] = []
+  const extractor = extract()
+  extractor.on('entry', (header: Headers, stream: NodeJS.ReadableStream, next: () => void) => {
+    names.push(header.name)
+    stream.on('end', next)
+    stream.resume()
+  })
+  await pipeline(
+    createReadStream(archive),
+    createGunzip(),
+    extractor,
+    ...(signal === undefined ? [] : [{ signal }]),
+  )
+  signal?.throwIfAborted()
+  return names
 }

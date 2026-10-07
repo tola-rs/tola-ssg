@@ -1,7 +1,13 @@
 import type { Target } from '../targets.ts'
 
-export function elfExecutable(machine: Target['machine'] = 'x86_64'): Buffer {
-  const bytes = Buffer.alloc(128)
+export function elfExecutable(
+  machine: Target['machine'] = 'x86_64',
+  linkage: Target['linkage'] = 'static',
+): Buffer {
+  // A dynamic archive carries the interpreter the loader reads; a static one carries none.
+  const interpreter = '/lib64/ld-linux-x86-64.so.2\0'
+  const size = linkage === 'dynamic' ? 256 : 128
+  const bytes = Buffer.alloc(size)
   Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]).copy(bytes)
   bytes.writeUInt16LE(2, 16)
   bytes.writeUInt16LE(machine === 'x86_64' ? 62 : 183, 18)
@@ -10,12 +16,21 @@ export function elfExecutable(machine: Target['machine'] = 'x86_64'): Buffer {
   bytes.writeBigUInt64LE(64n, 32)
   bytes.writeUInt16LE(64, 52)
   bytes.writeUInt16LE(56, 54)
-  bytes.writeUInt16LE(1, 56)
+  bytes.writeUInt16LE(linkage === 'dynamic' ? 2 : 1, 56)
   bytes.writeUInt32LE(1, 64)
   bytes.writeUInt32LE(5, 68)
   bytes.writeBigUInt64LE(0x400000n, 80)
-  bytes.writeBigUInt64LE(128n, 96)
-  bytes.writeBigUInt64LE(128n, 104)
+  bytes.writeBigUInt64LE(BigInt(size), 96)
+  bytes.writeBigUInt64LE(BigInt(size), 104)
+  if (linkage === 'dynamic') {
+    Buffer.from(interpreter, 'utf8').copy(bytes, 192)
+    bytes.writeUInt32LE(3, 120)
+    bytes.writeUInt32LE(4, 124)
+    bytes.writeBigUInt64LE(192n, 128)
+    bytes.writeBigUInt64LE(BigInt(interpreter.length), 152)
+    bytes.writeBigUInt64LE(BigInt(interpreter.length), 160)
+    bytes.writeBigUInt64LE(4n, 168)
+  }
   return bytes
 }
 
@@ -66,7 +81,7 @@ export function peExecutable(): Buffer {
 export function executableForTarget(target: Target): Buffer {
   switch (target.system) {
     case 'linux':
-      return elfExecutable(target.machine)
+      return elfExecutable(target.machine, target.linkage)
     case 'darwin':
       return machoExecutable()
     case 'windows':

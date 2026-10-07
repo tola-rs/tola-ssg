@@ -1,4 +1,5 @@
 import { ReleaseError } from './release-error.ts'
+import type { ReleaseMode } from './release-mode.ts'
 import { tagVersion, versionKey } from './semver.ts'
 
 export type PublishRequest = (url: string, options: RequestInit) => Promise<Response>
@@ -14,6 +15,7 @@ export interface PublishSelection {
   readonly tag: string
   readonly commit: string
   readonly event: 'push' | 'workflow_dispatch'
+  readonly mode: ReleaseMode
   readonly notes: string
   readonly assets: readonly PublishAsset[]
 }
@@ -23,10 +25,12 @@ interface RemoteRelease {
   readonly tag_name: string
   readonly draft: boolean
   readonly prerelease: boolean
+  readonly immutable: boolean
   readonly upload_url: string
 }
 
 interface RemoteAsset {
+  readonly id: number
   readonly name: string
   readonly size: number
   readonly state: string
@@ -47,7 +51,10 @@ function record(value: unknown): Record<string, unknown> {
 
 function gitObject(value: unknown): GitObject {
   const object = record(value)
-  if (typeof object.type !== 'string' || typeof object.sha !== 'string') {
+  if (
+    typeof object.type !== 'string' || typeof object.sha !== 'string' ||
+    !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(object.sha)
+  ) {
     throw new ReleaseError('GitHub returned an invalid Git object')
   }
   return { type: object.type, sha: object.sha }
@@ -62,6 +69,7 @@ function remoteRelease(value: unknown): RemoteRelease {
     typeof release.tag_name !== 'string' ||
     typeof release.draft !== 'boolean' ||
     typeof release.prerelease !== 'boolean' ||
+    (release.immutable !== undefined && typeof release.immutable !== 'boolean') ||
     typeof release.upload_url !== 'string'
   ) {
     throw new ReleaseError('GitHub returned an invalid release')
@@ -71,6 +79,7 @@ function remoteRelease(value: unknown): RemoteRelease {
     tag_name: release.tag_name,
     draft: release.draft,
     prerelease: release.prerelease,
+    immutable: release.immutable === true,
     upload_url: release.upload_url,
   }
 }
@@ -78,16 +87,25 @@ function remoteRelease(value: unknown): RemoteRelease {
 function remoteAsset(value: unknown): RemoteAsset {
   const asset = record(value)
   if (
+    typeof asset.id !== 'number' ||
+    !Number.isSafeInteger(asset.id) ||
+    asset.id <= 0 ||
     typeof asset.name !== 'string' ||
     typeof asset.size !== 'number' ||
     !Number.isSafeInteger(asset.size) ||
     asset.size < 0 ||
     typeof asset.state !== 'string' ||
-    !(asset.digest === null || typeof asset.digest === 'string')
+    !(asset.digest === undefined || asset.digest === null || typeof asset.digest === 'string')
   ) {
     throw new ReleaseError('GitHub returned an invalid release asset')
   }
-  return { name: asset.name, size: asset.size, state: asset.state, digest: asset.digest }
+  return {
+    id: asset.id,
+    name: asset.name,
+    size: asset.size,
+    state: asset.state,
+    digest: asset.digest ?? null,
+  }
 }
 
 /** Authenticated JSON and uploads share bounded, cancellable, non-redirecting requests. */
@@ -157,6 +175,10 @@ class GitHub {
       if (missing && response.status === 404) return null
       throw new ReleaseError(`GitHub ${method} ${new URL(url).pathname}: HTTP ${response.status}`)
     }
+    if (method === 'DELETE' && response.status === 204) {
+      this.signal?.throwIfAborted()
+      return undefined
+    }
     const result: unknown = await response.json()
     this.signal?.throwIfAborted()
     if (result === null) throw new ReleaseError('GitHub returned an empty object instead of a resource')
@@ -207,8 +229,19 @@ class GitHub {
   }
 }
 
-async function checkedTag(api: GitHub, selection: PublishSelection, allowMissing = false): Promise<boolean> {
-  const { tag, commit } = selection
+function tagReference(value: unknown, tag: string): GitObject {
+  const reference = record(value)
+  if (reference.ref !== `refs/tags/${tag}`) {
+    throw new ReleaseError(`GitHub returned an unexpected ref for ${tag}`)
+  }
+  return gitObject(reference.object)
+}
+
+async function remoteTag(
+  api: GitHub,
+  tag: string,
+  allowMissing = false,
+): Promise<{ reference: GitObject; commit: string } | null> {
   const branch = await api.json(
     `${api.path}/git/ref/heads/${encodeURIComponent(tag)}`,
     'GET',
@@ -218,14 +251,11 @@ async function checkedTag(api: GitHub, selection: PublishSelection, allowMissing
   if (branch !== null) throw new ReleaseError(`Release tag conflicts with an existing branch: ${tag}`)
   const value = await api.json(`${api.path}/git/ref/tags/${encodeURIComponent(tag)}`, 'GET', undefined, true)
   if (value === null) {
-    if (allowMissing) return false
+    if (allowMissing) return null
     throw new ReleaseError(`Release tag is missing: ${tag}`)
   }
-  const reference = record(value)
-  if (reference.ref !== `refs/tags/${tag}`) {
-    throw new ReleaseError(`GitHub returned an unexpected ref for ${tag}`)
-  }
-  let object = gitObject(reference.object)
+  const reference = tagReference(value, tag)
+  let object = reference
   const seen = new Set<string>()
   while (object.type === 'tag') {
     if (seen.has(object.sha)) throw new ReleaseError(`Cyclic annotated tag: ${tag}`)
@@ -233,44 +263,58 @@ async function checkedTag(api: GitHub, selection: PublishSelection, allowMissing
     const annotated = record(await api.json(`${api.path}/git/tags/${encodeURIComponent(object.sha)}`))
     object = gitObject(annotated.object)
   }
-  if (object.type !== 'commit' || object.sha !== commit) {
+  if (object.type !== 'commit') {
+    throw new ReleaseError(`Remote ${tag} resolves to ${object.type} ${object.sha}, not a commit`)
+  }
+  return { reference, commit: object.sha }
+}
+
+async function checkedTag(api: GitHub, selection: PublishSelection, allowMissing = false): Promise<boolean> {
+  const current = await remoteTag(api, selection.tag, allowMissing)
+  if (current === null) return false
+  if (current.commit !== selection.commit) {
     throw new ReleaseError(
-      `Remote ${tag} resolves to ${object.type} ${object.sha}, not checked commit ${commit}`,
+      `Remote ${selection.tag} resolves to commit ${current.commit}, not checked commit ${selection.commit}`,
     )
   }
   return true
 }
 
-function checkRelease(release: RemoteRelease, tag: string, prerelease: boolean): void {
+function checkRelease(release: RemoteRelease, tag: string, prerelease?: boolean): void {
   if (release.tag_name !== tag) {
     throw new ReleaseError(`GitHub returned a release for another tag: ${release.tag_name}`)
   }
-  if (release.prerelease !== prerelease) {
+  if (prerelease !== undefined && release.prerelease !== prerelease) {
     throw new ReleaseError(
       `Existing ${tag} prerelease state conflicts with its SemVer; reconcile it manually`,
     )
   }
 }
 
+function assetMatches(remote: RemoteAsset, local: PublishAsset): boolean {
+  return remote.name === local.name && remote.state === 'uploaded' &&
+    remote.size === local.content.size && remote.digest?.toLowerCase() === `sha256:${local.sha256}`
+}
+
 function checkAsset(remote: RemoteAsset, local: PublishAsset): void {
-  if (
-    remote.name !== local.name ||
-    remote.state !== 'uploaded' ||
-    remote.size !== local.content.size ||
-    remote.digest?.toLowerCase() !== `sha256:${local.sha256}`
-  ) {
+  if (!assetMatches(remote, local)) {
     throw new ReleaseError(
-      `Existing asset ${local.name} differs or lacks a verified SHA-256; refusing replacement`,
+      `Asset ${local.name} differs or lacks a verified SHA-256`,
     )
   }
 }
 
-function missingAssets(remote: readonly RemoteAsset[], local: readonly PublishAsset[]): PublishAsset[] {
+function assetsByName(remote: readonly RemoteAsset[]): Map<string, RemoteAsset> {
   const byName = new Map<string, RemoteAsset>()
   for (const asset of remote) {
     if (byName.has(asset.name)) throw new ReleaseError(`Duplicate remote asset: ${asset.name}`)
     byName.set(asset.name, asset)
   }
+  return byName
+}
+
+function missingAssets(remote: readonly RemoteAsset[], local: readonly PublishAsset[]): PublishAsset[] {
+  const byName = assetsByName(remote)
   return local.filter((asset) => {
     const existing = byName.get(asset.name)
     if (existing === undefined) return true
@@ -280,11 +324,98 @@ function missingAssets(remote: readonly RemoteAsset[], local: readonly PublishAs
 }
 
 export interface PublishResult {
-  readonly state: 'published' | 'draft' | 'unchanged'
+  readonly state: 'published' | 'draft' | 'unchanged' | 'updated'
   readonly releaseId: number
 }
 
-/** Publish only prepared, locally verified assets; never move refs or delete/replace remote content. */
+function requireMutable(release: RemoteRelease): void {
+  if (release.immutable) throw new ReleaseError(`Release ${release.tag_name} is immutable; refusing changes`)
+}
+
+async function updateRelease(
+  api: GitHub,
+  selection: PublishSelection,
+  release: RemoteRelease,
+  originalTag: { reference: GitObject; commit: string },
+): Promise<PublishResult> {
+  const { tag, commit, assets } = selection
+  checkRelease(release, tag)
+  requireMutable(release)
+  const existing = assetsByName((await api.list(`/releases/${release.id}/assets`)).map(remoteAsset))
+  const changed = assets.filter((asset) => {
+    const remote = existing.get(asset.name)
+    return remote === undefined || !assetMatches(remote, asset)
+  })
+  for (const asset of changed) api.uploadUrl(release, asset.name)
+  const requireCurrent = async (): Promise<RemoteRelease> => {
+    const current = remoteRelease(await api.json(`${api.path}/releases/${release.id}`))
+    if (current.id !== release.id) throw new ReleaseError('GitHub returned a different release')
+    checkRelease(current, tag)
+    requireMutable(current)
+    return current
+  }
+  const requireOriginalTag = async (): Promise<void> => {
+    const current = await remoteTag(api, tag)
+    if (
+      current?.reference.type !== originalTag.reference.type ||
+      current.reference.sha !== originalTag.reference.sha || current.commit !== originalTag.commit
+    ) {
+      throw new ReleaseError(`Release tag ${tag} moved during publication; refusing further changes`)
+    }
+  }
+  for (const asset of changed) {
+    await requireCurrent()
+    await requireOriginalTag()
+    const remote = existing.get(asset.name)
+    if (remote !== undefined) {
+      await api.json(`${api.path}/releases/assets/${remote.id}`, 'DELETE')
+    }
+    const current = await requireCurrent()
+    await requireOriginalTag()
+    checkAsset(
+      remoteAsset(
+        await api.send(api.uploadUrl(current, asset.name), 'POST', asset.content, 'application/octet-stream'),
+      ),
+      asset,
+    )
+  }
+  const complete = (await api.list(`/releases/${release.id}/assets`)).map(remoteAsset)
+  if (missingAssets(complete, assets).length > 0) {
+    throw new ReleaseError(`Release ${tag} still lacks required assets`)
+  }
+  await requireCurrent()
+  await requireOriginalTag()
+  // GitHub has no compare-and-swap ref update; this recheck detects observed
+  // movement, while the force write supports amended or force-pushed history.
+  if (originalTag.commit !== commit) {
+    const moved = tagReference(
+      await api.json(`${api.path}/git/refs/tags/${encodeURIComponent(tag)}`, 'PATCH', {
+        sha: commit,
+        force: true,
+      }),
+      tag,
+    )
+    if (moved.type !== 'commit' || moved.sha !== commit) {
+      throw new ReleaseError(`GitHub did not move ${tag} to checked commit ${commit}`)
+    }
+  }
+  await checkedTag(api, selection)
+  if (selection.mode === 'update-regenerate-notes') {
+    await requireCurrent()
+    await checkedTag(api, selection)
+    const updated = remoteRelease(
+      await api.json(`${api.path}/releases/${release.id}`, 'PATCH', {
+        name: tag,
+        body: selection.notes,
+      }),
+    )
+    if (updated.id !== release.id) throw new ReleaseError('GitHub returned a different release')
+    checkRelease(updated, tag)
+  }
+  return { state: 'updated', releaseId: release.id }
+}
+
+/** Publish prepared, verified assets according to the explicitly selected release mode. */
 export async function publishRelease(
   selection: PublishSelection,
   token: string,
@@ -293,6 +424,12 @@ export async function publishRelease(
   apiUrl?: string,
 ): Promise<PublishResult> {
   const { tag, commit, assets } = selection
+  if (
+    !['create', 'update-preserve-notes', 'update-regenerate-notes'].includes(selection.mode) ||
+    (selection.event !== 'workflow_dispatch' && selection.mode !== 'create')
+  ) {
+    throw new ReleaseError('Release updates require workflow_dispatch and an explicit supported mode')
+  }
   const prerelease = versionKey(tagVersion(tag)).prerelease.length > 0
   if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit)) {
     throw new ReleaseError('Publication requires the full checked commit SHA')
@@ -309,6 +446,15 @@ export async function publishRelease(
   // Unconditional access check: a missing ref never hides an inaccessible commit.
   const remoteCommit = record(await api.json(`${api.path}/git/commits/${commit}`))
   if (remoteCommit.sha !== commit) throw new ReleaseError('GitHub returned a different selected commit')
+  if (selection.mode !== 'create') {
+    const originalTag = await remoteTag(api, tag)
+    const release = await api.release(tag)
+    if (release === null) {
+      throw new ReleaseError(`Release ${tag} does not exist; updates require an existing release`)
+    }
+    if (originalTag === null) throw new ReleaseError(`Release tag is missing: ${tag}`)
+    return await updateRelease(api, selection, release, originalTag)
+  }
   const tagExists = await checkedTag(api, selection, selection.event === 'workflow_dispatch')
   let release = await api.release(tag)
   const created = release === null
@@ -322,6 +468,7 @@ export async function publishRelease(
     }
     return { state: 'unchanged', releaseId: release.id }
   }
+  if (release !== null) requireMutable(release)
   // Validate upload destinations before adding any remote state for existing drafts.
   if (release !== null) { for (const asset of missing) api.uploadUrl(release, asset.name) }
   if (!tagExists) {
@@ -350,6 +497,7 @@ export async function publishRelease(
     const current = remoteRelease(await api.json(`${api.path}/releases/${releaseId}`))
     if (current.id !== releaseId) throw new ReleaseError('GitHub returned a different release')
     checkRelease(current, tag, prerelease)
+    requireMutable(current)
     if (!current.draft) {
       throw new ReleaseError(`Release ${tag} is no longer a draft; refusing further changes`)
     }

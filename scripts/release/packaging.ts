@@ -5,10 +5,17 @@ import { errorMessage, runProcess } from '../process.ts'
 import { createArchive, verifyArchive } from './archives.ts'
 import { type ArchiveDigests, checkChecksums, checksumContents } from './checksums.ts'
 import { ordinaryDestination, ordinaryDirectory, regularFile } from './packaging-file.ts'
+import { withoutBuildMetadata } from './semver.ts'
+import { createLicenseArchive, licenseArchiveMembers } from './tar-archive.ts'
 import { archiveName, hostTargetName, TARGET_NAMES, type TargetName, TARGETS } from './targets.ts'
 
+/** The one archive a release carries the license material in. */
+export function licenseArchiveName(version: string): string {
+  return `tola-${withoutBuildMetadata(version)}-licenses.tar.gz`
+}
+
 /**
- * License material shipped beside every archive: release-directory name → repository path.
+ * License material the release's one archive carries: member name → repository path.
  *
  * Every third-party work the binary embeds owes its licence text here: the fonts' notice, the two
  * pronunciation sources' licence and terms, and one snapshot per code theme. `THIRD-PARTY-LICENSES.txt`
@@ -72,9 +79,10 @@ export async function verifyDirectory(
   const expected = new Set<string>(selected.map((name) => archiveName(name, version)))
   const actual = new Set(await readdir(directory))
   const missing = [...expected].filter((name) => !actual.has(name)).sort()
-  const missingLicenses = Object.keys(LICENSE_FILES).filter((name) => !actual.has(name)).sort()
+  const licenses = licenseArchiveName(version)
+  const missingLicenses = actual.has(licenses) ? [] : [licenses]
   const unexpected = [...actual]
-    .filter((name) => name !== 'checksums.txt' && !(name in LICENSE_FILES) && !expected.has(name))
+    .filter((name) => name !== 'checksums.txt' && name !== licenses && !expected.has(name))
     .sort()
   assert(
     missing.length === 0 && missingLicenses.length === 0 && unexpected.length === 0,
@@ -83,7 +91,12 @@ export async function verifyDirectory(
     }, unexpected ${JSON.stringify(unexpected)}`,
   )
   if (actual.has('checksums.txt')) await regularFile(join(directory, 'checksums.txt'))
-  for (const name of Object.keys(LICENSE_FILES)) await regularFile(join(directory, name))
+  if (actual.has(licenses)) {
+    await regularFile(join(directory, licenses))
+    const members = await licenseArchiveMembers(join(directory, licenses), signal)
+    const absent = Object.keys(LICENSE_FILES).filter((name) => !members.includes(name)).sort()
+    assert(absent.length === 0, `license archive lacks ${JSON.stringify(absent)}`)
+  }
   const digests = new Map<string, string>()
   for (const name of selected) {
     const archive = archiveName(name, version)
@@ -113,8 +126,16 @@ export async function build(
     'cargo',
     ['build', '--release', '--locked', '-p', 'tola', '--target', targetName],
     {
-      cwd: options.root,
-      env: { ...process.env, CARGO_PROFILE_RELEASE_LTO: 'fat' },
+      env: {
+        ...process.env,
+        CARGO_PROFILE_RELEASE_LTO: 'fat',
+        // A Linux archive is the static one: the vendored OpenSSL and the C runtime both link
+        // statically. The musl target does this by default; naming it makes the requirement
+        // unmistakable, and a dynamic input then fails the link instead of the archive check.
+        ...(targetName.endsWith('-musl')
+          ? { OPENSSL_STATIC: '1', RUSTFLAGS: '-C target-feature=+crt-static' }
+          : {}),
+      },
       stderr: 'inherit',
       ...(signal === undefined ? {} : { signal }),
     },
@@ -230,15 +251,20 @@ export async function buildAll(
     throw new AggregateError(failures, failures.map((error) => error.message).join('\n'))
   }
   signal?.throwIfAborted()
-  await writeLicenseFiles(options, signal)
+  await writeLicenseFiles(options, version, signal)
   await checksums(options.output, version, targets, signal)
 }
 
-/** Place the license material beside the archives, replacing any previous copies. */
-export async function writeLicenseFiles(options: ReleaseBuildOptions, signal?: AbortSignal): Promise<void> {
+/** Place the release's license material in one archive, replacing any previous one. */
+export async function writeLicenseFiles(
+  options: ReleaseBuildOptions,
+  version: string,
+  signal?: AbortSignal,
+): Promise<void> {
   signal?.throwIfAborted()
   await mkdir(options.output, { recursive: true })
   await ordinaryDirectory(options.output)
+  const entries: { name: string; contents: Buffer }[] = []
   for (const [name, relative] of Object.entries(LICENSE_FILES)) {
     signal?.throwIfAborted()
     let contents: Buffer
@@ -250,26 +276,13 @@ export async function writeLicenseFiles(options: ReleaseBuildOptions, signal?: A
         { cause: error },
       )
     }
-    await replaceLicenseFile(options.output, name, contents, signal)
+    entries.push({ name, contents })
   }
-}
-
-async function replaceLicenseFile(
-  directory: string,
-  name: string,
-  contents: Buffer,
-  signal?: AbortSignal,
-): Promise<void> {
-  const staging = await mkdtemp(join(directory, '.licenses-'))
+  const destination = join(options.output, licenseArchiveName(version))
+  const staging = await mkdtemp(join(options.output, '.licenses-'))
   try {
-    const temporary = join(staging, name)
-    await writeFile(temporary, contents, {
-      flag: 'wx',
-      mode: 0o600,
-      ...(signal === undefined ? {} : { signal }),
-    })
-    await ordinaryDirectory(directory)
-    const destination = join(directory, name)
+    const temporary = join(staging, licenseArchiveName(version))
+    await createLicenseArchive(entries, temporary, signal)
     await ordinaryDestination(destination)
     signal?.throwIfAborted()
     await rename(temporary, destination)

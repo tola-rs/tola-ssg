@@ -7,6 +7,7 @@ import { checkTag, requireClean } from './checkout.ts'
 import { buildAll } from './packaging.ts'
 import { checkAvailable } from './registry.ts'
 import { ReleaseError } from './release-error.ts'
+import type { ReleaseMode } from './release-mode.ts'
 import { checkVersion } from './workspace.ts'
 
 export interface CheckedReleaseSource {
@@ -20,15 +21,16 @@ export async function checkSource(
   tag: string,
   commit?: string,
   signal?: AbortSignal,
+  mode: ReleaseMode = 'create',
 ): Promise<CheckedReleaseSource> {
   signal?.throwIfAborted()
   requireClean(root)
-  const selected = checkTag(root, tag, commit)
+  const selected = checkTag(root, tag, commit, mode)
   const { version, packages } = await checkVersion(root, signal)
   await setImmediate()
   signal?.throwIfAborted()
   requireClean(root)
-  checkTag(root, tag, selected)
+  checkTag(root, tag, selected, mode)
   console.log(`Release source ${tag}: checked commit ${selected} (${packages.length} workspace packages).`)
   return { version, packages, commit: selected }
 }
@@ -57,8 +59,9 @@ export async function checkPackages(
   tag: string,
   source: CheckedReleaseSource,
   signal?: AbortSignal,
+  mode: ReleaseMode = 'create',
 ): Promise<void> {
-  await checkAvailable(source.packages, source.version, undefined, signal)
+  if (mode === 'create') await checkAvailable(source.packages, source.version, undefined, signal)
   await mkdir(join(root, 'target'), { recursive: true })
   const directory = await mkdtemp(join(root, 'target', 'package-check-'))
   try {
@@ -75,7 +78,7 @@ export async function checkPackages(
   await setImmediate()
   signal?.throwIfAborted()
   requireClean(root)
-  checkTag(root, tag, source.commit)
+  checkTag(root, tag, source.commit, mode)
   console.log(
     `Workspace packages for ${tag} passed Cargo packaging and build verification; nothing was uploaded.`,
   )
