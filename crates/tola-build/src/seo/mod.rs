@@ -657,6 +657,33 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
     }
 
     #[test]
+    fn content_violations_name_the_next_action() {
+        for (field, content, expected) in [
+            ("content", "[= Heading]", "(document:, id:)"),
+            (
+                "summary",
+                "strong(delta: 300)[Bad]",
+                "Remove this field from `strong`",
+            ),
+        ] {
+            let source = format!(
+                "#document(\"index.html\", title: [Post])[Document]\n\
+                 #feed(title: \"Feed\", entries: ((id: \"entry\", target: \"index.html\", published: datetime(year: 2026, month: 9, day: 1), {field}: {content}),))"
+            );
+            let error = declaration_error(&source, "[site]\norigin = \"https://example.test\"\n");
+            let diagnostic = error.source_diagnostic();
+            let hints = diagnostic
+                .source()
+                .hints
+                .iter()
+                .map(|hint| hint.v.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(hints.len(), 1, "{field}: {hints:?} ({error})");
+            assert!(hints[0].contains(expected), "{field}: {hints:?} ({error})");
+        }
+    }
+
+    #[test]
     fn feeds_keep_summary_separate_from_content() {
         let outputs = render(
             r#"

@@ -229,7 +229,7 @@ The starter schema accepts these fields (all read by the site's own templates; e
 | `feed`, `sitemap` | Whether the page's feed or sitemap recipe includes it |
 | `id` | Stable feed identity; `auto` derives one from the address |
 | `published`, `updated` | A `datetime` or an RFC 3339 string with timezone |
-| `summary`, `content` | Feed summary and feed body |
+| `feed-summary`, `feed-content` | Feed entry summary and body; see Feeds for the supported markup |
 
 Metadata is analyzed with Eval, not Layout: it retains native Typst values — content, styles, functions, modules, deferred `context` — and Tola does not restrict field names or convert strings to content. A declaration may read other sources; successive evaluation rounds let such metadata settle. Budget exhaustion and a repeated source state are reported separately.
 
@@ -836,7 +836,7 @@ An entry requires `target` and `published`, and may set `id`, `title`, `updated`
 
 `summary` and `content` are independent values. Strings are plain text; directly written content supports text, breaks, emphasis, strong, strike, and URL links. For full page content, select compiled HTML: `content: (document: "notes/index.html")`, optionally with `id:` to select one element. A body selection keeps body attributes in a `div` and includes the head's styles and stylesheet links (not scripts), so the fragment renders under its own dependencies rather than the page's full environment.
 
-The starter's `feed` and `sitemap` metadata flags are conventions your program implements — a hand-written declaration does not read them. For sitemap targets, use the selected records:
+The starter's `feed` and `sitemap` metadata flags are conventions your program implements — a hand-written declaration does not read them. The starter's recipe publishes each page's whole document as the entry body unless the page sets `feed-content`; `feed-summary` becomes the summary and `updated` dates the sitemap target. For sitemap targets, use the selected records:
 
 ```typst
 #import "@tola/web:0.0.0": sitemap

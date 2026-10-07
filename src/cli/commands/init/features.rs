@@ -698,6 +698,9 @@ const FEED_OUTPUT: SeoOutput = SeoOutput {
 /// The feed publishes once `site.origin` and `site.title` name the site; a site without them
 /// declares no feed. Entries keep source order; ordering is the site's to decide.
 ///
+/// Each entry publishes the page's whole document unless the page sets `feed-content`;
+/// `feed-summary` fills the entry's summary.
+///
 /// - output (string): the output file the feed is published at.
 /// - pages (array): the `(source:, output:)` records `select-pages` returns.
 /// -> content
@@ -711,7 +714,13 @@ const FEED_OUTPUT: SeoOutput = SeoOutput {
         id: page.source.meta.id,
         target: page.output,
         published: page.source.meta.published,
-        summary: page.source.meta.summary,
+        updated: page.source.meta.updated,
+        summary: page.source.meta.feed-summary,
+        content: if page.source.meta.feed-content == none {
+          (document: page.output)
+        } else {
+          page.source.meta.feed-content
+        },
       )),
   )
 }"#,
@@ -732,7 +741,8 @@ const SITEMAP_OUTPUT: SeoOutput = SeoOutput {
     file: "sitemap.xml",
     definition: r#"/// Declare the sitemap output `output` for `pages`.
 ///
-/// The sitemap needs `site.origin`. Targets keep source order.
+/// The sitemap needs `site.origin`. Targets keep source order, dated by `updated` where a page
+/// sets one.
 ///
 /// - output (string): the output file the sitemap is published at.
 /// - pages (array): the `(source:, output:)` records `select-pages` returns.
@@ -741,7 +751,9 @@ const SITEMAP_OUTPUT: SeoOutput = SeoOutput {
   if site.origin == none { return }
   sitemap(
     output: output,
-    targets: pages.filter(page => page.source.meta.sitemap).map(page => page.output),
+    targets: pages
+      .filter(page => page.source.meta.sitemap)
+      .map(page => (target: page.output, lastmod: page.source.meta.updated)),
   )
 }"#,
 };

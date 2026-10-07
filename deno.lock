@@ -21,7 +21,9 @@
     "npm:tar-stream@3.1.7": "3.1.7",
     "npm:toml-eslint-parser@1.0.3": "1.0.3",
     "npm:unicode-case-folding@1.1.1": "1.1.1",
-    "npm:vscode-languageclient@9.0.1": "9.0.1"
+    "npm:vscode-languageclient@9.0.1": "9.0.1",
+    "npm:vscode-oniguruma@2.0.1": "2.0.1",
+    "npm:vscode-textmate@9.3.2": "9.3.2"
   },
   "jsr": {
     "@std/assert@1.0.19": {
@@ -2053,6 +2055,12 @@
     "vscode-languageserver-types@3.17.5": {
       "integrity": "sha512-Ld1VelNuX9pdF39h2Hgaeb5hEZM2Z3jUrrMgWQAu82jMtZp7p3vJT3BzToKtZI7NgQssZje5o0zryOrhQvzQAg=="
     },
+    "vscode-oniguruma@2.0.1": {
+      "integrity": "sha512-poJU8iHIWnC3vgphJnrLZyI3YdqRlR27xzqDmpPXYzA93R4Gk8z7T6oqDzDoHjoikA2aS82crdXFkjELCdJsjQ=="
+    },
+    "vscode-textmate@9.3.2": {
+      "integrity": "sha512-n2uGbUcrjhUEBH16uGA0TvUfhWwliFZ1e3+pTjrkim1Mt7ydB41lV08aUvsi70OlzDWp6X7Bx3w/x3fAXIsN0Q=="
+    },
     "whatwg-encoding@3.1.1": {
       "integrity": "sha512-6qN4hJdMwfYBtE3YBTTHhoeuUrDBPZmbQaxWAqSALV/MeEnR5z1xd8UKud2RAkFoPkmB+hli1TZSnyi84xz1vQ==",
       "dependencies": [
@@ -2121,7 +2129,9 @@
             "npm:@vscode/vsce@3.9.2",
             "npm:esbuild@0.25.12",
             "npm:playwright@1.62.0",
-            "npm:vscode-languageclient@9.0.1"
+            "npm:vscode-languageclient@9.0.1",
+            "npm:vscode-oniguruma@2.0.1",
+            "npm:vscode-textmate@9.3.2"
           ]
         }
       },

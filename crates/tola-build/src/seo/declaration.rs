@@ -95,7 +95,8 @@ impl DeclarationViolation {
             }
             Self::Type { expected, .. } => Some(format!("Give `{field}` a {expected} value")),
             Self::Unknown { allowed } => Some(format!("Use one of: {allowed}")),
-            Self::Invalid(_) | Self::Content(_) => None,
+            Self::Invalid(_) => None,
+            Self::Content(violation) => Some(violation.help()),
         }
     }
 }
