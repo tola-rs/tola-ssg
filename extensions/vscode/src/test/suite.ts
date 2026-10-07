@@ -358,14 +358,20 @@ export async function run(): Promise<void> {
         ),
       )
       assert.ok(task)
-      const ended = new Promise<void>((resolve) => {
+      const ended = new Promise<void>((resolve, reject) => {
+        const deadline = setTimeout(
+          () =>
+            reject(new Error('The scoped task never finished')),
+          60_000,
+        )
         const listener = vscode.tasks.onDidEndTaskProcess((event) => {
           if (event.execution.task.name !== task.name) {
             return
           }
+          clearTimeout(deadline)
           listener.dispose()
-          assert.equal(event.exitCode, 0)
-          resolve()
+          if (event.exitCode === 0) resolve()
+          else reject(new Error(`The scoped task exited ${event.exitCode}`))
         })
       })
       await vscode.tasks.executeTask(task)
@@ -375,7 +381,7 @@ export async function run(): Promise<void> {
         /Published editor page/,
       )
       await assert.rejects(fs.stat(path.join(first.root, 'task-output')), { code: 'ENOENT' })
-    }, { configuration: '[site]\ntitle = "Scoped task"\n[build]\noutput = "task-output"\n' }))
+    }, { configuration: '[site]\ntitle = "Scoped task"\n[build]\npublish-dir = "task-output"\n' }))
 
   await check('Workspace tasks refuse ambiguous sites', () =>
     withSites(2, async (sites) => {

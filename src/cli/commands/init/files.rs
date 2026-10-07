@@ -499,7 +499,7 @@ Draft body."#
         scaffold_medium_with_origin(root);
         std::fs::write(
             root.join("content/kept.typ"),
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((published: datetime(year: 2026, month: 9, day: 1), summary: [Kept summary]))\nKept body.",
+            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((published: datetime(year: 2026, month: 9, day: 1), updated: datetime(year: 2026, month: 9, day: 4), feed-summary: [Kept summary]))\nKept body.",
         )
         .unwrap();
         std::fs::write(
@@ -523,6 +523,7 @@ Draft body."#
         assert!(feed.contains("<title>Example</title>"), "{feed}");
         assert!(feed.contains("https://example.com/kept/"), "{feed}");
         assert!(feed.contains("Kept summary"), "{feed}");
+        assert!(feed.contains("Kept body."), "{feed}");
         for absent in ["/undated/", "/hidden/", "/draft/"] {
             assert!(!feed.contains(absent), "{feed}");
         }
@@ -531,6 +532,10 @@ Draft body."#
         for present in ["https://example.com/kept/", "https://example.com/undated/"] {
             assert!(sitemap.contains(present), "{sitemap}");
         }
+        assert!(
+            sitemap.contains("<lastmod>2026-09-04</lastmod>"),
+            "{sitemap}"
+        );
         for absent in ["/hidden/", "/draft/"] {
             assert!(!sitemap.contains(absent), "{sitemap}");
         }

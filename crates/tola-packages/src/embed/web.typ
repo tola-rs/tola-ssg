@@ -404,8 +404,10 @@
 /// `published`. RSS carries no modification date. JSON Feed writes `date_modified` only when the
 /// entry sets `updated`.
 ///
-/// `content` may instead be a `(document:, id:)` dictionary that selects one element of a
-/// document.
+/// `content` and `summary` take a string (plain text), or markup limited to text, breaks, emphasis,
+/// strong, strike, and URL links; other elements are an error. `content` also takes a
+/// `(document:, id:)` dictionary: one element of a document, or its whole body when `id` is
+/// omitted. `summary` takes no document selection.
 ///
 /// A label or location inside a document needs an exported anchor, so link to it somewhere in the
 /// site (`#link(<label>)`, `@label`, or `#outline()`): the export gives an `id` only to an element
@@ -439,15 +441,20 @@
 /// #feed(
 ///   title: "Example",
 ///   entries: (
-///     (target: output, title: post.meta.title, published: post.meta.published),
+///     (
+///       target: output,
+///       title: post.meta.title,
+///       published: post.meta.published,
+///       content: (document: output),
+///     ),
 ///   ),
 /// )
 /// ```
 ///
 /// Related: sitemap
 ///
-/// - output (auto | string): the output path; `auto` follows `format`: `rss` gives `feed.xml`,
-///   `atom` gives `atom.xml`, and `json` gives `feed.json`.
+/// - output (auto | string): the output file, relative to the site output root; `auto` follows
+///   `format`: `rss` gives `feed.xml`, `atom` gives `atom.xml`, and `json` gives `feed.json`.
 /// - format (string): the feed format: `rss`, `atom`, or `json`.
 /// - id (auto | string): the feed identifier; `auto` is the feed's own absolute URL.
 /// - title (auto | content | string): the feed title; `auto` takes the site's title.
@@ -520,7 +527,7 @@
 ///
 /// Related: feed
 ///
-/// - output (string): the output path the sitemap is published at.
+/// - output (string): the output file, relative to the site output root.
 /// - targets (array): the documents the sitemap lists, each entry an output path, a label, a
 ///   location, or a `(target:, lastmod:)` dictionary that dates it.
 /// -> content

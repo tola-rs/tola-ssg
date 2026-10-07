@@ -60,12 +60,12 @@
     optional(nullable(union(datetime, str)), default: none),
     "the last change: a complete `datetime` or an RFC 3339 string with timezone",
   ),
-  summary: describe(
+  feed-summary: describe(
     optional(nullable(union(trim(str), content)), default: none),
-    "the summary a feed shows in place of the whole page",
+    "the summary a feed shows in place of the whole page: plain text, or markup limited to text, breaks, emphasis, strong, strike, and URL links",
   ),
-  content: describe(
+  feed-content: describe(
     optional(nullable(union(str, content, dictionary)), default: none),
-    "the feed body: plain text, markup, or a `(document:, id:)` HTML selection",
+    "the feed body: plain text, markup limited to text, breaks, emphasis, strong, strike, and URL links, or a `(document:, id:)` selection",
   ),
 ))
