@@ -9,6 +9,10 @@ import { runTests } from '@vscode/test-electron'
 
 const require = createRequire(import.meta.url)
 
+/** The VS Code release the integration host downloads: the oldest the extension declares, so
+ * the suite proves its API floor rather than whatever stable shipped this week. */
+const VSCODE_VERSION = '1.97.0'
+
 /** The Playwright surface this driver uses: one CDP connection and the workbench notification. */
 type DriverBrowser = { contexts(): DriverContext[]; close(): Promise<void> }
 
@@ -171,7 +175,7 @@ async function main(): Promise<void> {
       ],
       ...(process.env.VSCODE_EXECUTABLE_PATH
         ? { vscodeExecutablePath: process.env.VSCODE_EXECUTABLE_PATH }
-        : {}),
+        : { version: VSCODE_VERSION }),
     })
   } finally {
     if (browser) await browser.close()

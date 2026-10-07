@@ -131,7 +131,7 @@ mod tests {
         let path = directory.path().join("lock");
         fs::write(&path, b"persistent lock contents").unwrap();
 
-        let _lock = FileLock::acquire(
+        let lock = FileLock::acquire(
             directory.path(),
             &path,
             &BuildCancellation::default(),
@@ -139,6 +139,9 @@ mod tests {
         )
         .unwrap();
 
+        // Windows locks the range it holds, so the contents are read once the handle is gone:
+        // the point is that acquiring a lock over an existing file never rewrites it.
+        drop(lock);
         assert_eq!(fs::read(&path).unwrap(), b"persistent lock contents");
     }
 

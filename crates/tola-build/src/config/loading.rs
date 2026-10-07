@@ -824,7 +824,8 @@ content-dir = "content"
         assert!(
             diagnostics[0]
                 .message
-                .contains(directory.path().to_str().unwrap())
+                .contains(&written_path(directory.path())),
+            "{diagnostics:?}"
         );
         assert!(
             diagnostics[0]

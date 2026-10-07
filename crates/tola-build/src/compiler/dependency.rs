@@ -818,6 +818,12 @@ mod tests {
         )
     }
 
+    /// A reader's path as the decision reports it: a reader carries what the filesystem resolves
+    /// its read to, which gains the current drive on Windows.
+    fn reader_path(path: &str) -> PathBuf {
+        crate::filesystem::normalize_path(Path::new(path))
+    }
+
     fn snapshot(
         root: &Path,
         content_sources: impl IntoIterator<Item = PathBuf>,
@@ -1013,7 +1019,7 @@ mod tests {
         assert_eq!(decision.site_program, RebuildPriority::Affected);
         assert_eq!(
             decision.direct_readers,
-            vec![TypstDependencyReader::ContentSource(PathBuf::from(
+            vec![TypstDependencyReader::ContentSource(reader_path(
                 "/site/content/post.typ"
             ))]
         );
@@ -1049,7 +1055,7 @@ mod tests {
         assert_eq!(content_decision.site_program, RebuildPriority::Affected);
         assert_eq!(
             content_decision.direct_readers,
-            vec![TypstDependencyReader::ContentSource(PathBuf::from(
+            vec![TypstDependencyReader::ContentSource(reader_path(
                 "/site/content/post.typ"
             )),]
         );
@@ -1112,7 +1118,7 @@ mod tests {
         assert_eq!(deleted.site_program, RebuildPriority::Affected);
         assert_eq!(
             deleted.direct_readers,
-            vec![TypstDependencyReader::ContentSource(PathBuf::from(
+            vec![TypstDependencyReader::ContentSource(reader_path(
                 "/site/content/b.typ"
             ))]
         );
