@@ -4,8 +4,8 @@ import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { check } from './site.ts'
 
-// The suite runs bundled as CommonJS inside the extension host: `require` exists at runtime and
-// reaches the installation's own tokenizer, but this module's types do not declare it.
+// The suite runs bundled as CommonJS inside the extension host: esbuild inlines a `require` of
+// this extension's own dependencies, but this module's types do not declare it.
 declare const require: (specifier: string) => unknown
 /** The fence-language tags the extension must embed: Typst's own raw tags for markup, code, and
  * math, plus `example`, the tag Typst's documentation fences its examples with. */
@@ -16,15 +16,14 @@ type TokenizedLine = { text: string; tokens: Token[] }
 
 type Token = { startIndex: number; endIndex: number; scopes: string[] }
 
-/** The oniguruma module of VS Code's own installation. */
+/** The oniguruma module this extension's test dependencies ship. */
 type Oniguruma = {
   loadWASM(data: ArrayBuffer): Promise<unknown>
   createOnigScanner(patterns: string[]): unknown
   createOnigString(text: string): unknown
 }
 
-/** The TextMate engine of VS Code's own installation, so a fence tokenizes exactly as the editor
- * renders it. */
+/** The TextMate engine this extension's test dependencies ship. */
 type TextMate = {
   INITIAL: StateStack
   parseRawGrammar(source: string, filePath: string): RawGrammar
@@ -55,9 +54,11 @@ let markdownGrammar: Promise<Grammar> | undefined
 /** The installation's markdown grammar, with this extension's injection wired the way
  * `package.json` declares it: `markdown.typst.codeblock` injects into `text.html.markdown`. */
 async function loadMarkdown(extensionPath: string): Promise<Grammar> {
-  const bundled = path.join(vscode.env.appRoot, 'node_modules.asar')
-  const textmate = require(path.join(bundled, 'vscode-textmate')) as TextMate
-  const oniguruma = require(path.join(bundled, 'vscode-oniguruma')) as Oniguruma
+  // The engine comes from this extension's own dependencies: the installation keeps its copy
+  // inside an asar the extension host cannot require, and what a fence must tokenize is this
+  // extension's own grammar.
+  const textmate = require('vscode-textmate') as TextMate
+  const oniguruma = require('vscode-oniguruma') as Oniguruma
   const grammar = async (scopeName: string): Promise<RawGrammar | null> => {
     if (scopeName === 'text.html.markdown') {
       return textmate.parseRawGrammar(
@@ -83,7 +84,8 @@ async function loadMarkdown(extensionPath: string): Promise<Grammar> {
     return null
   }
   await oniguruma.loadWASM(
-    (await fs.readFile(path.join(bundled, 'vscode-oniguruma/release/onig.wasm'))).buffer as ArrayBuffer,
+    (await fs.readFile(path.join(extensionPath, 'node_modules/vscode-oniguruma/release/onig.wasm')))
+      .buffer as ArrayBuffer,
   )
   const registry = new textmate.Registry({
     onigLib: Promise.resolve({

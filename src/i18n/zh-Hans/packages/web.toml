@@ -156,7 +156,7 @@ summary = [
 
 每种格式各自填写修改日期。Atom 的 `updated` 默认取 `published`。RSS 不写修改日期。JSON Feed 只在条目设置了 `updated` 时才写 `date_modified`。
 
-`content` 也可以改用一个 `(document:, id:)` 字典，选定文档中的某个元素。
+`content` 和 `summary` 接受字符串（纯文本），或只含文本、换行、强调、加粗、删除线和 URL 链接的 markup；其他元素一律报错。`content` 还接受 `(document:, id:)` 字典：选定文档中的某个元素，省略 `id` 时取整篇正文。`summary` 不接受文档选择。
 
 文档内的 label 或 location 需要一个导出的 anchor，所以在站点某处链接到它（`#link(<label>)`、`@label` 或 `#outline()`）：导出只会给有链接指向的元素分配 `id`。缺少这个 anchor 时，构建会直接失败，绝不会改为链接整篇文档。整篇文档的 label 或 location 不需要正文 anchor。`fragment` 按原样保留，并且必须指向目标文档导出的 anchor。
 
@@ -170,7 +170,7 @@ Example - 声明一个 RSS feed：
 
 [exports.feed.parameters]
 
-output = "输出路径；`auto` 跟随 `format`：`rss` 取 `feed.xml`，`atom` 取 `atom.xml`，`json` 取 `feed.json`。"
+output = "输出文件，相对站点输出根目录；`auto` 跟随 `format`：`rss` 取 `feed.xml`，`atom` 取 `atom.xml`，`json` 取 `feed.json`。"
 
 format = "feed 格式：`rss`、`atom` 或 `json`。"
 
@@ -201,6 +201,6 @@ Example - 列出已发现源发布的文档：
 
 [exports.sitemap.parameters]
 
-output = "sitemap 发布到的输出路径。"
+output = "输出文件，相对站点输出根目录。"
 
 targets = "sitemap 列出的文档，每一项是输出路径、label、location，或为其注明日期的 `(target:, lastmod:)` 字典。"

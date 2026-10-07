@@ -22,11 +22,28 @@ pub(in crate::seo) enum FeedContentViolation {
         actual: String,
     },
     #[error("{message}")]
-    Value { message: &'static str },
+    Value {
+        message: &'static str,
+        help: &'static str,
+    },
     #[error("unsupported content element `{element}`")]
     UnsupportedContent { element: String },
     #[error("this field of content element `{element}` is not supported in feeds")]
     ContentField { element: String },
+}
+
+impl FeedContentViolation {
+    /// The next action this violation asks of the author.
+    pub(in crate::seo) fn help(&self) -> String {
+        match self {
+            Self::Type { expected, .. } => format!("Give this field a {expected} value"),
+            Self::Value { help, .. } => (*help).to_string(),
+            Self::UnsupportedContent { element } => {
+                format!("Remove `{element}`, or select the document's HTML with `(document:, id:)`")
+            }
+            Self::ContentField { element } => format!("Remove this field from `{element}`"),
+        }
+    }
 }
 
 fn type_error(
@@ -191,6 +208,7 @@ impl FeedContent {
                     path: path.to_string(),
                     violation: FeedContentViolation::Value {
                         message: "feed content links cannot be nested",
+                        help: "Remove the inner link",
                     },
                 });
             }
@@ -200,6 +218,7 @@ impl FeedContent {
                     path: field_path(path, "dest"),
                     violation: FeedContentViolation::Value {
                         message: "feed content links must use URL destinations",
+                        help: "Use a URL, not a label or location",
                     },
                 });
             };
@@ -208,6 +227,7 @@ impl FeedContent {
                     path: field_path(path, "dest"),
                     violation: FeedContentViolation::Value {
                         message: "feed content links must be relative, HTTP(S), mailto, or tel URLs",
+                        help: "Write a relative or `http`/`https`/`mailto`/`tel` URL",
                     },
                 });
             };
@@ -428,6 +448,7 @@ fn validate_lifecycle(content: &Content, path: &str) -> Result<(), FeedContentEr
             path: path.to_string(),
             violation: FeedContentViolation::Value {
                 message: "feed content cannot have a label",
+                help: "Remove the label",
             },
         });
     }
@@ -436,6 +457,7 @@ fn validate_lifecycle(content: &Content, path: &str) -> Result<(), FeedContentEr
             path: path.to_string(),
             violation: FeedContentViolation::Value {
                 message: "feed content cannot have a document location",
+                help: "Write the text in the feed declaration",
             },
         });
     }
@@ -444,6 +466,7 @@ fn validate_lifecycle(content: &Content, path: &str) -> Result<(), FeedContentEr
             path: path.to_string(),
             violation: FeedContentViolation::Value {
                 message: "feed content must be authored content, not content already processed for a document",
+                help: "Write the text in the feed declaration",
             },
         });
     }

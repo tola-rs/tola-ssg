@@ -373,8 +373,7 @@ export async function blockServerStart(site: EditorSite): Promise<BlockedStart> 
     { mode: 0o755 },
   )
   const reached = waitForFile(directory, marker)
-  const setting = () =>
-    vscode.workspace.getConfiguration('tola', site.source).get<string>('serverPath')
+  const setting = () => vscode.workspace.getConfiguration('tola', site.source).get<string>('serverPath')
   await vscode.workspace.getConfiguration('tola', site.source)
     .update('serverPath', script, vscode.ConfigurationTarget.WorkspaceFolder)
   assert.equal(
