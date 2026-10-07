@@ -575,13 +575,13 @@
     "test": "deno task test"
   },
   "dependencies": {
-    "vscode-languageclient": "9.0.1"
+    "vscode-languageclient": "10.1.2"
   },
   "devDependencies": {
-    "@types/node": "22.18.6",
-    "@types/vscode": "1.97.0",
+    "@types/node": "26.6.3",
+    "@types/vscode": "1.138.0",
     "@vscode/test-electron": "3.1.0",
-    "@vscode/vsce": "3.9.2",
-    "esbuild": "0.25.12"
+    "@vscode/vsce": "4.0.0",
+    "esbuild": "0.28.2"
   }
 }
