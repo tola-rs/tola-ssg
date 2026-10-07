@@ -1,10 +1,10 @@
 {
   "imports": {
     "@vscode/test-electron": "npm:@vscode/test-electron@3.1.0",
-    "@vscode/vsce": "npm:@vscode/vsce@3.9.2",
-    "esbuild": "npm:esbuild@0.25.12",
-    "vscode": "npm:@types/vscode@1.97.0",
-    "vscode-languageclient": "npm:vscode-languageclient@9.0.1"
+    "@vscode/vsce": "npm:@vscode/vsce@4.0.0",
+    "esbuild": "npm:esbuild@0.28.2",
+    "vscode": "npm:@types/vscode@1.138.0",
+    "vscode-languageclient": "npm:vscode-languageclient@10.1.2"
   },
   "tasks": {
     "typecheck": "deno check src/extension.ts src/test/suite.ts build.ts test/run.ts",
