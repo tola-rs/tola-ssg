@@ -65,7 +65,7 @@ async function extractZip(zip: Buffer): Promise<void> {
   await unpackZip(archive, join(directory, 'extracted.exe'), windows)
 }
 
-test('all four complete generated archives stream, retain their binary, and form a complete checksum list', async () => {
+test('every complete generated archive streams, retains its binary, and forms a complete checksum list', async () => {
   const digests = new Map<string, string>()
   for (const name of TARGET_NAMES) {
     const target = TARGETS[name]
@@ -80,7 +80,11 @@ test('all four complete generated archives stream, retain their binary, and form
     else await unpackTar(path, binary, target)
     expect(await readFile(binary)).toEqual(contents)
     expect(await inspectExecutable(binary, target)).toContain(
-      target.system === 'linux' ? 'Linux static' : target.system === 'darwin' ? 'macOS' : 'Windows',
+      target.system === 'linux'
+        ? target.linkage === 'static' ? 'Linux static' : 'Linux dynamic'
+        : target.system === 'darwin'
+        ? 'macOS'
+        : 'Windows',
     )
     digests.set(archive, await archiveDigest(path))
   }

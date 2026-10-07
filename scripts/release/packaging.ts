@@ -113,8 +113,16 @@ export async function build(
     'cargo',
     ['build', '--release', '--locked', '-p', 'tola', '--target', targetName],
     {
-      cwd: options.root,
-      env: { ...process.env, CARGO_PROFILE_RELEASE_LTO: 'fat' },
+      env: {
+        ...process.env,
+        CARGO_PROFILE_RELEASE_LTO: 'fat',
+        // A Linux archive is the static one: the vendored OpenSSL and the C runtime both link
+        // statically. The musl target does this by default; naming it makes the requirement
+        // unmistakable, and a dynamic input then fails the link instead of the archive check.
+        ...(targetName.endsWith('-musl')
+          ? { OPENSSL_STATIC: '1', RUSTFLAGS: '-C target-feature=+crt-static' }
+          : {}),
+      },
       stderr: 'inherit',
       ...(signal === undefined ? {} : { signal }),
     },

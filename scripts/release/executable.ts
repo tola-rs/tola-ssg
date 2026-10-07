@@ -41,6 +41,7 @@ async function checkElf(
     'invalid ELF program headers',
   )
   let executableEntry = false
+  let interpreter: Buffer | undefined
   for (let index = 0; index < programCount; index++) {
     signal?.throwIfAborted()
     const segment = await readAt(binary, programOffset + BigInt(index * programSize), 56)
@@ -51,7 +52,6 @@ async function checkElf(
     const fileSize = segment.readBigUInt64LE(32)
     const memorySize = segment.readBigUInt64LE(40)
     assert(offset + fileSize <= size, 'ELF segment extends beyond the binary')
-    assert(segmentKind !== 3, 'Linux static binary contains a dynamic interpreter')
     if (segmentKind === 1) {
       assert(fileSize <= memorySize, 'ELF load segment file size exceeds memory size')
       if ((flags & 1) !== 0 && address <= entry && entry < address + memorySize) executableEntry = true
@@ -63,12 +63,31 @@ async function checkElf(
         const dynamic = await readAt(binary, position, 16)
         const tag = dynamic.readBigInt64LE(0)
         if (tag === 0n) break
-        assert(tag !== 1n, 'Linux static binary has a shared-library dependency')
+        assert(
+          tag !== 1n || target.linkage === 'dynamic',
+          'Linux static binary has a shared-library dependency',
+        )
       }
+    }
+    if (segmentKind === 3) {
+      assert(target.linkage === 'dynamic', 'Linux static binary contains a dynamic interpreter')
+      interpreter = await readAt(binary, offset, Number(fileSize))
     }
   }
   signal?.throwIfAborted()
   assert(executableEntry, 'ELF entry point is not in an executable load segment')
+  if (target.linkage === 'dynamic') {
+    assert(interpreter !== undefined, 'Linux dynamic binary carries no interpreter')
+    const terminator = interpreter.indexOf(0)
+    const program = interpreter
+      .subarray(0, terminator === -1 ? interpreter.length : terminator)
+      .toString()
+    assert(
+      !program.includes('/nix/store/'),
+      `Linux binary loads its interpreter from a Nix store: ${JSON.stringify(program)}`,
+    )
+    return `ELF64 ${target.machine}, Linux dynamic; interpreter ${JSON.stringify(program)}`
+  }
   return `ELF64 ${target.machine}, Linux static`
 }
 
@@ -229,9 +248,11 @@ export async function verifyBinary(
   signal?.throwIfAborted()
   assert(!result.timedOut, 'native --version timed out after 30 seconds')
   assert(result.exitCode === 0, `native --version failed (${result.exitCode}): ${result.stderr.trim()}`)
+  // The binary reports its own version first and the Typst release it carries second.
+  const [reported] = result.stdout.trim().split('\n')
   const expected = `tola ${version}`
   assert(
-    result.stdout.trim() === expected,
+    reported === expected,
     `expected ${JSON.stringify(expected)}, got ${JSON.stringify(result.stdout.trim())}`,
   )
   return `${evidence}; native --version verified: ${version}`

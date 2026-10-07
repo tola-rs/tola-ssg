@@ -72,6 +72,8 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
         run: deno run -A scripts/release/check.ts packages "$RELEASE_TAG" --commit "$GITHUB_SHA"
+      - name: Verify freshly packaged sources
+        run: just package-check
       - name: Generate release license material
         run: |
           cargo install cargo-about --version 0.9.2 --features cli --locked
@@ -106,6 +108,13 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
             packages: musl-tools
+          # The GNU-linked Linux archives link the system OpenSSL each runner carries.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            packages: ''
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            packages: ''
           - target: aarch64-apple-darwin
             os: macos-latest
             packages: ''
