@@ -70,7 +70,7 @@ impl BundleExport {
         self.compilation.package_checks()
     }
 
-    /// Actual disk paths used for read attempts by the compilation.
+    /// Physical read paths retained by the compilation.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         self.compilation.disk_reads()
     }

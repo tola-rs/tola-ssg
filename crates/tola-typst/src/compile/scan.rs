@@ -273,7 +273,7 @@ impl ScanResult {
         &self.accessed.package_checks
     }
 
-    /// Get actual disk paths used for read attempts during scanning.
+    /// Physical read paths retained by the scan.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.accessed.disk_reads
     }

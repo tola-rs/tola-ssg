@@ -1690,7 +1690,7 @@ impl RebuildPathFilter {
                 Some(root.join(INTERNAL_DIR)),
                 Some(root.join(SITE_BUILD_LOCK_FILE)),
                 publication_workspace(&config.build().publish_dir),
-                config.vendor.workspace_path().map(|path| root.join(path)),
+                config.vendor().workspace_path().map(|path| root.join(path)),
             ]
             .map(|path| path.map(|path| FilesystemSourceIdentity::from_path(&path))),
         }

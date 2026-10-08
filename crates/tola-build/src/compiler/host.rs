@@ -225,25 +225,18 @@ impl TypstHost {
         root: &Path,
         main: &Path,
         library: &tola_packages::library::SiteLibrary,
-        candidate_files: Arc<CandidateFileSnapshot>,
+        candidate_files: Arc<FileSnapshot>,
         cancellation: &BundleCancellation,
     ) -> Result<TypstWorld, WorldBuildError> {
         TypstWorld::builder(main, root)
-            .with_files(Arc::new(self.files.clone()))
-            .with_candidate_snapshot(candidate_files, Arc::clone(&self.file_cache))
+            .with_file_snapshot(candidate_files, Arc::clone(&self.file_cache))
             .with_fonts(Arc::clone(&self.fonts))
             .with_shared_library(library.shared())
             .build(cancellation)
     }
 
-    pub(crate) fn candidate_files(
-        &self,
-        snapshot: Arc<SourceSnapshot>,
-    ) -> Arc<CandidateFileSnapshot> {
-        Arc::new(CandidateFileSnapshot::new(
-            snapshot,
-            Arc::new(self.files.clone()),
-        ))
+    pub(crate) fn candidate_files(&self, snapshot: Arc<SourceSnapshot>) -> Arc<FileSnapshot> {
+        Arc::new(FileSnapshot::new(snapshot, Arc::new(self.files.clone())))
     }
 
     pub(crate) fn read_is_process_stable(&self, locator: &ReadLocator) -> bool {
@@ -268,28 +261,8 @@ impl TypstHost {
         }
     }
 
-    /// File-cache epochs a revision keeps the parsed source of a file it did not read.
-    ///
-    /// A slot survives while its file was read within `max_age` maintenance epochs, so this window
-    /// decides how long a file the last maintenance skipped stays parsed, not how long its old bytes
-    /// stay: the next build that reads that file — an asset-only build reusing the compilation, or a
-    /// content edit after several builds that read no sources — then skips the read and parse while
-    /// the file is unchanged on disk. Emptying the whole cache after one build released 0.0 MB, so
-    /// the window is small next to the derivations it protects. One maintenance per completed build
-    /// and per editor source check leaves a few seconds of skipped editing parsed.
-    ///
-    /// This window reaches no site content source: a check serves those from its own candidate
-    /// snapshot, so the slots it can release are the files a reader asked for outside that snapshot
-    /// — the entry program and package files. Measured: a session whose content root held 20
-    /// documents retained the same slot count as one holding 4.
-    ///
-    /// The window is the only lever this crate has here, and it is small: what a long editor session
-    /// keeps after the site shrinks is not a Tola cache. Measured on a 1000-document session shrunk
-    /// to one file, live allocations settle at ~14 MB against 1.8 MB for a session that never read
-    /// the larger site, flat from 16 to 64 revisions and linear in the peak document count — the
-    /// signature of capacity booked by upstream memoization, which prunes entries with `retain` and
-    /// never shrinks its tables, plus allocator pages a process does not return. Lowering that floor
-    /// means realizing fewer documents per revision, not evicting harder.
+    /// Keep parsed imports across short runs of builds that reuse their compilation.
+    /// Explicit content sources and the entry program live in the source snapshot.
     pub(crate) const RETAINED_FILE_CACHE_EPOCHS: usize = 10;
 
     pub(crate) fn evict_stale_file_cache_entries(&self, max_age: usize) {

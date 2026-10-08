@@ -26,13 +26,13 @@ const MIN_METADATA_EVALUATION_ROUNDS: usize = 16;
 
 pub(crate) struct SourceScan {
     pub(crate) snapshot: Arc<tola_typst::SourceSnapshot>,
-    pub(crate) candidate_files: Arc<tola_typst::CandidateFileSnapshot>,
+    pub(crate) candidate_files: Arc<tola_typst::FileSnapshot>,
     pub(crate) source_set: SourceSet,
     pub(crate) diagnostics: Arc<tola_typst::Diagnostics>,
     declaration_warnings: Arc<[crate::diagnostic::Diagnostic]>,
     dependency_reads: BTreeMap<PathBuf, Vec<tola_typst::FileRead>>,
     entries: SourceEntryIndex,
-    reused_published_sources: Arc<[PathBuf]>,
+    reused_sources: Arc<[PathBuf]>,
     content_identity: Arc<[ContentIdentity]>,
     sources_identity: SourcesInput,
     package_bindings: crate::package::SiteBindings,
@@ -213,13 +213,13 @@ impl SourceEntryIndex {
             .map(|path| self.get(path).expect("ordered source entry exists"))
     }
 
-    fn reused_from(&self, published: Option<&Self>) -> Arc<[PathBuf]> {
-        let Some(published) = published else {
+    fn reused_from(&self, previous: Option<&Self>) -> Arc<[PathBuf]> {
+        let Some(previous) = previous else {
             return Arc::default();
         };
         self.entries()
             .filter(|entry| {
-                published
+                previous
                     .get(&entry.source)
                     .is_some_and(|cached| Arc::ptr_eq(cached, entry))
             })
@@ -288,7 +288,7 @@ pub(crate) struct SourceAnalysisCache {
     sources_identity: SourcesInput,
     package_bindings: crate::package::SiteBindings,
     entries: SourceEntryIndex,
-    reused_published_sources: Arc<[PathBuf]>,
+    reused_sources: Arc<[PathBuf]>,
     snapshot: Arc<tola_typst::SourceSnapshot>,
     invalidated_sources: Arc<BTreeSet<PathBuf>>,
     snapshot_refresh_paths: Arc<[PathBuf]>,
@@ -299,18 +299,18 @@ pub(crate) struct SourceAnalysisCache {
 pub(crate) enum SourceAnalysisReuse<'a> {
     #[default]
     None,
-    Published {
+    Retained {
         cache: &'a SourceAnalysisCache,
-        dependencies: &'a crate::compiler::PublishedDependencies,
+        dependencies: &'a crate::compiler::CompilationDependencies,
     },
 }
 
 impl<'a> SourceAnalysisReuse<'a> {
-    pub(crate) const fn published(
+    pub(crate) const fn retained(
         cache: &'a SourceAnalysisCache,
-        dependencies: &'a crate::compiler::PublishedDependencies,
+        dependencies: &'a crate::compiler::CompilationDependencies,
     ) -> Self {
-        Self::Published {
+        Self::Retained {
             cache,
             dependencies,
         }
@@ -319,14 +319,14 @@ impl<'a> SourceAnalysisReuse<'a> {
     const fn cache(self) -> Option<&'a SourceAnalysisCache> {
         match self {
             Self::None => None,
-            Self::Published { cache, .. } => Some(cache),
+            Self::Retained { cache, .. } => Some(cache),
         }
     }
 
-    pub(crate) const fn dependencies(self) -> Option<&'a crate::compiler::PublishedDependencies> {
+    pub(crate) const fn dependencies(self) -> Option<&'a crate::compiler::CompilationDependencies> {
         match self {
             Self::None => None,
-            Self::Published { dependencies, .. } => Some(dependencies),
+            Self::Retained { dependencies, .. } => Some(dependencies),
         }
     }
 }
@@ -340,7 +340,7 @@ impl SourceAnalysisCache {
             sources_identity: scan.sources_identity.clone(),
             package_bindings: scan.package_bindings.clone(),
             entries: scan.entries.clone(),
-            reused_published_sources: Arc::clone(&scan.reused_published_sources),
+            reused_sources: Arc::clone(&scan.reused_sources),
             snapshot: Arc::clone(&scan.snapshot),
             invalidated_sources: Arc::default(),
             snapshot_refresh_paths: Arc::default(),
@@ -424,14 +424,14 @@ impl SourceAnalysisCache {
     }
 
     pub(crate) fn reused_dependency_readers(&self) -> Vec<crate::compiler::TypstDependencyReader> {
-        self.reused_published_sources
+        self.reused_sources
             .iter()
             .cloned()
             .map(crate::compiler::TypstDependencyReader::ContentSource)
             .collect()
     }
 
-    fn may_reuse_published_entry(&self, source: &Path) -> bool {
+    fn may_reuse_entry(&self, source: &Path) -> bool {
         !self.invalidated_sources.contains(source)
     }
 }
@@ -700,7 +700,7 @@ fn scan(
                 {
                     reuse
                         .dependencies()
-                        .expect("published source reuse has published dependencies")
+                        .expect("retained source analysis has dependency evidence")
                         .record_reader_reads(inputs, reader);
                 }
             }
@@ -772,8 +772,7 @@ fn scan(
             }
 
             if converged {
-                let reused_published_sources =
-                    entries.reused_from(entry_reuse.map(|cache| &cache.entries));
+                let reused_sources = entries.reused_from(entry_reuse.map(|cache| &cache.entries));
                 return Ok(SourceScan {
                     snapshot: Arc::clone(&snapshot),
                     candidate_files: Arc::clone(&candidate_files),
@@ -782,7 +781,7 @@ fn scan(
                     declaration_warnings: declaration_warnings(&entries, config.get_root()),
                     dependency_reads,
                     entries,
-                    reused_published_sources,
+                    reused_sources,
                     content_identity: Arc::clone(&content_identity),
                     sources_identity: sources_identity.clone(),
                     package_bindings: package_bindings.clone(),
@@ -845,7 +844,7 @@ fn site_world(
     host: &TypstHost,
     package_bindings: &crate::package::SiteBindings,
     sources: &SourcesInput,
-    candidate_files: &Arc<tola_typst::CandidateFileSnapshot>,
+    candidate_files: &Arc<tola_typst::FileSnapshot>,
     cancellation: &tola_typst::BundleCancellation,
 ) -> Option<Arc<tola_typst::TypstWorld>> {
     let library = package_bindings.library(sources.to_source_records());
@@ -889,28 +888,19 @@ fn declaration_warnings(
     if sources.is_empty() {
         return Arc::default();
     }
-    let count = sources.len();
-    let (noun, verb) = if count == 1 {
-        ("source", "declares")
-    } else {
-        ("sources", "declare")
-    };
-    let consequence = if count == 1 {
-        "the source has no metadata"
-    } else {
-        "those sources have no metadata"
-    };
     let warning = crate::diagnostic::Diagnostic::new(
         crate::codes::source::DECLARATION_DEPRECATED,
         crate::diagnostic::Severity::Warning,
-        format!("{count} {noun} {verb} metadata with the `<tola-meta>` label"),
+        "the `<tola-meta>` label does not declare source metadata",
     )
-    .with_help("Import `tola-meta` with `#import \"@tola/source:0.0.0\": tola-meta`")
+    .with_help(
+        "Import `tola-meta` from `@tola/source:0.0.0` and replace \
+         `metadata(...) <tola-meta>` with `tola-meta(...)`",
+    )
     .with_note(crate::diagnostic::bounded_listing(
         &sources,
         ("file", "files"),
-    ))
-    .with_note(consequence);
+    ));
     Arc::from([warning])
 }
 
@@ -922,7 +912,7 @@ fn analyze_source(
     previous_round_entries: Option<&SourceEntryIndex>,
     reuse: Option<&SourceAnalysisCache>,
     library: &tola_packages::library::SiteLibrary,
-    candidate_files: &Arc<tola_typst::CandidateFileSnapshot>,
+    candidate_files: &Arc<tola_typst::FileSnapshot>,
     package_bindings: &crate::package::SiteBindings,
     sources_input: &SourcesInput,
     cancellation: &tola_typst::BundleCancellation,
@@ -948,7 +938,7 @@ fn analyze_source(
     }
     if let Some((entry, accessed)) = reuse.and_then(|cache| {
         cache
-            .may_reuse_published_entry(source.source())
+            .may_reuse_entry(source.source())
             .then(|| cache.entry_for_source(source))
             .flatten()
             .and_then(|entry| {
@@ -1189,10 +1179,9 @@ fn record_reads(
 
 fn entry_candidate_accessed(
     entry: &SourceAnalysisEntry,
-    candidate: &tola_typst::CandidateFileSnapshot,
+    candidate: &tola_typst::FileSnapshot,
 ) -> Option<tola_typst::AccessedDeps> {
     let mut accessed = tola_typst::AccessedDeps::default();
-    accessed.package_checks.clone_from(&entry.package_checks);
     for read in &entry.evidence {
         let id = file_id_for_locator(read.evidence().locator())?;
         let observed = candidate.matching_accessed(id, read)?;
@@ -1200,7 +1189,9 @@ fn entry_candidate_accessed(
         accessed.disk_reads.extend(observed.disk_reads);
         accessed.package_checks.extend(observed.package_checks);
     }
-    Some(accessed)
+    tola_typst::sort_package_checks(&mut accessed.package_checks);
+    accessed.package_checks.dedup();
+    (accessed.package_checks == entry.package_checks).then_some(accessed)
 }
 
 fn file_id_for_locator(locator: &tola_typst::ReadLocator) -> Option<typst::syntax::FileId> {
@@ -1271,7 +1262,7 @@ mod tests {
         reuse: Option<&SourceAnalysisCache>,
     ) -> anyhow::Result<SourceScan> {
         let published = reuse.map(|_| {
-            crate::compiler::PublishedDependencies::new(
+            crate::compiler::CompilationDependencies::new(
                 config.get_root(),
                 content.iter().map(|unit| unit.source.clone()),
                 std::iter::once(config.build.entry.clone()),
@@ -1283,9 +1274,7 @@ mod tests {
             .unwrap()
         });
         let reuse = match (reuse, published.as_ref()) {
-            (Some(cache), Some(dependencies)) => {
-                SourceAnalysisReuse::published(cache, dependencies)
-            }
+            (Some(cache), Some(dependencies)) => SourceAnalysisReuse::retained(cache, dependencies),
             (None, None) => SourceAnalysisReuse::None,
             _ => unreachable!("source analysis test reuse is paired"),
         };
@@ -1526,7 +1515,7 @@ mod tests {
         let package_checks = reads
             .iter()
             .flat_map(|(_, _, checks)| checks.iter().cloned());
-        let dependencies = crate::compiler::PublishedDependencies::new(
+        let dependencies = crate::compiler::CompilationDependencies::new(
             config.get_root(),
             content.iter().map(|unit| unit.source.clone()),
             std::iter::once(config.build.entry.clone()),
@@ -2199,19 +2188,8 @@ Child body"#,
     }
 
     #[test]
-    fn label_warning_counts_declaring_sources() {
-        for (names, message, note) in [
-            (
-                &["alpha", "beta"][..],
-                "2 sources declare metadata with the `<tola-meta>` label",
-                "`content/alpha.typ` and `content/beta.typ`",
-            ),
-            (
-                &["a", "b", "c", "d", "e"][..],
-                "5 sources declare metadata with the `<tola-meta>` label",
-                "`content/a.typ`, `content/b.typ`, `content/c.typ` and 2 more files",
-            ),
-        ] {
+    fn label_warning_identifies_sources() {
+        for names in [&["alpha", "beta"][..], &["a", "b", "c", "d", "e"][..]] {
             let sources = names
                 .iter()
                 .map(|name| {
@@ -2229,8 +2207,13 @@ Child body"#,
 
             assert_eq!(scan.declaration_warnings.len(), 1);
             let warning = &scan.declaration_warnings[0];
-            assert_eq!(warning.message, message);
-            assert_eq!(warning.notes[0], note);
+            assert_eq!(warning.code, crate::codes::source::DECLARATION_DEPRECATED);
+            for (index, name) in names.iter().enumerate() {
+                assert_eq!(
+                    warning.notes[0].contains(&format!("content/{name}.typ")),
+                    index < 3,
+                );
+            }
         }
     }
 
@@ -2249,7 +2232,7 @@ Child body"#,
 
         assert!(scan.metadata_rounds > 1, "alpha declares in a later round");
         assert_eq!(scan.declaration_warnings.len(), 1);
-        assert_eq!(scan.declaration_warnings[0].notes[0], "`content/beta.typ`");
+        assert!(scan.declaration_warnings[0].notes[0].contains("content/beta.typ"));
     }
 
     #[test]

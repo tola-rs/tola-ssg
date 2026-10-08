@@ -29,7 +29,7 @@ impl BuildInputs {
         &mut self.file_reads
     }
 
-    pub(crate) fn record_published_package_checks(
+    pub(crate) fn record_package_checks(
         &mut self,
         checks: impl IntoIterator<Item = tola_typst::PackageCheck>,
     ) {

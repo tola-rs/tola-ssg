@@ -6,21 +6,19 @@
 //! follow the same typed path through compilation and caching.
 
 mod cache;
-mod candidate;
 mod evidence;
-mod local_cache;
 mod provider;
 mod read;
 mod resolver;
+mod snapshot;
 
 pub use cache::SharedFileCache;
-pub use candidate::CandidateFileSnapshot;
 pub use evidence::{
     ContentDigest, DiskReadPath, FileRead, ReadEvidence, ReadLocator, ReadOrigin,
     hash_length_prefixed,
 };
 pub(crate) use evidence::{Loaded, ReadAttempt};
-pub(crate) use local_cache::LocalFileCache;
 pub use provider::{EmptyFiles, FileMap, FileProvider, FileTarget};
 pub use read::{EMPTY_ID, STDIN_ID, decode_utf8, file_id, file_id_from_path, virtual_file_id};
 pub use resolver::FileResolver;
+pub use snapshot::FileSnapshot;

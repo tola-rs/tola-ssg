@@ -234,7 +234,7 @@ impl BundleCompilation {
         self.importers.importing(package)
     }
 
-    /// Actual disk paths used for read attempts during compilation.
+    /// Physical read paths retained by the compilation.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.accessed.disk_reads
     }
@@ -283,6 +283,43 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let world = world_for(&dir, "main.typ", source);
         compile_bundle_world(&world, &BundleCancellation::default()).unwrap()
+    }
+
+    #[test]
+    fn repeated_compilation_keeps_package_evidence() {
+        let dir = TempDir::new().unwrap();
+        let packages = dir.path().join("packages");
+        let package = packages.join("local/demo/1.0.0");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("typst.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("lib.typ"), "#let text = \"payload\"").unwrap();
+        let locations = crate::PackageLocations::from_absolute_roots(Some(packages), None).unwrap();
+        let files = Arc::new(FileResolver::from_package_locations(
+            locations,
+            crate::PackageFetchPolicy::LocalOnly,
+        ));
+        let world = world_with_files(
+            &dir,
+            "site.typ",
+            "#import \"@local/demo:1.0.0\": text\n#asset(\"text.txt\", text)",
+            files,
+        );
+        let first = compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+        let second = compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+        assert!(!first.package_checks().is_empty());
+        assert_eq!(second.package_checks(), first.package_checks());
+        assert_eq!(second.file_reads(), first.file_reads());
+        let first = first
+            .export_default(&BundleCancellation::default(), None)
+            .unwrap();
+        let second = second
+            .export_default(&BundleCancellation::default(), None)
+            .unwrap();
+        assert_eq!(first.entries()[0].bytes(), second.entries()[0].bytes());
     }
 
     fn world_builder(dir: &TempDir, entry: &str, source: &str) -> crate::world::WorldBuilder {

@@ -17,7 +17,7 @@ use crate::diagnostic::package_imports::PackageImporters;
 use crate::diagnostic::{CompileError, Diagnostics, NativeDiagnostic};
 use crate::world::TypstWorld;
 use crate::world::file::{
-    DiskReadPath, FileRead, Loaded, ReadAttempt, ReadEvidence, ReadLocator, ReadOrigin,
+    DiskReadPath, FileRead, FileSnapshot, Loaded, ReadAttempt, ReadLocator, ReadOrigin,
 };
 use crate::world::package::PackageCheck;
 
@@ -26,18 +26,19 @@ use crate::world::package::PackageCheck;
 /// Records runtime-resolved paths, not a directory inventory.
 /// [`Self::disk_reads`] retains failed physical reads so callers can recover
 /// when missing inputs are created.
+/// Cached reuse retains prior read evidence, including physical paths and package checks.
 #[derive(Debug, Clone, Default)]
 pub struct AccessedDeps {
     /// Successful reads consumed by the operation.
     pub reads: Vec<FileRead>,
-    /// Every actual disk read attempt, including failed reads.
+    /// Retained physical read paths, including failed reads.
     pub disk_reads: Vec<DiskReadPath>,
     /// Package-directory checks that determined package selection.
     pub package_checks: Vec<PackageCheck>,
 }
 
 impl AccessedDeps {
-    /// Whether the operation observed no successful reads, disk read attempts, or
+    /// Whether the operation recorded no successful reads, physical read paths, or
     /// package-selection checks.
     pub fn is_empty(&self) -> bool {
         self.reads.is_empty() && self.disk_reads.is_empty() && self.package_checks.is_empty()
@@ -48,7 +49,7 @@ impl AccessedDeps {
         self.reads.len()
     }
 
-    /// Number of physical disk read attempts, including failed reads.
+    /// Number of retained physical read paths.
     pub fn disk_read_count(&self) -> usize {
         self.disk_reads.len()
     }
@@ -63,7 +64,7 @@ impl AccessedDeps {
         &self.reads
     }
 
-    /// Iterate over physical disk read attempts.
+    /// Retained physical read paths.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.disk_reads
     }
@@ -91,7 +92,7 @@ macro_rules! failure_evidence {
                 self.details.accessed.reads()
             }
 
-            #[doc = concat!("Physical disk read attempts observed before ", $stopped, " stopped.")]
+            #[doc = concat!("Physical read paths retained before ", $stopped, " stopped.")]
             pub fn disk_reads(&self) -> &[$crate::world::file::DiskReadPath] {
                 self.details.accessed.disk_reads()
             }
@@ -143,6 +144,7 @@ pub(crate) struct CompileSession<'a> {
     world: &'a TypstWorld,
     /// The file this session compiles: the world's own main, unless a caller chose another file.
     main: FileId,
+    snapshot: Arc<FileSnapshot>,
     files: SessionFiles,
 }
 
@@ -157,6 +159,7 @@ impl<'a> CompileSession<'a> {
         Self {
             world,
             main,
+            snapshot: world.file_snapshot(),
             files: SessionFiles::default(),
         }
     }
@@ -204,7 +207,7 @@ impl<'a> CompileSession<'a> {
         let sources = slots
             .values()
             .filter_map(|slot| {
-                let attempt = slot.file.source.get()?;
+                let attempt = slot.source.get()?;
                 let loaded = attempt.result.as_ref().ok()?;
                 let path = site_path(loaded.read.evidence().locator())?;
                 Some((path, loaded.value.clone()))
@@ -246,8 +249,8 @@ impl<'a> CompileSession<'a> {
             let typst::syntax::VirtualRoot::Package(package) = slot.id.root() else {
                 continue;
             };
-            let failed = unresolved_package(slot.file.source.get())
-                .or_else(|| unresolved_package(slot.file.bytes.get()));
+            let failed = unresolved_package(slot.source.get())
+                .or_else(|| unresolved_package(slot.bytes.get()));
             let Some((checks, reason)) = failed else {
                 continue;
             };
@@ -273,23 +276,23 @@ impl<'a> CompileSession<'a> {
     fn imported_package(&self, diagnostic: &SourceDiagnostic) -> Option<String> {
         let id = diagnostic.span.id()?;
         let slot = self.files.slots.read().get(&id).cloned()?;
-        let attempt = slot.file.source.get()?;
+        let attempt = slot.source.get()?;
         let loaded = attempt.result.as_ref().ok()?;
         crate::diagnostic::package_imports::imported_package(&loaded.value, diagnostic.span)
     }
 
     fn read_source(&self, id: FileId) -> FileResult<Source> {
-        self.files.slot(id).source(self.world)
+        self.files.slot(id).source(self.world, &self.snapshot)
     }
 
     fn read_file(&self, id: FileId) -> FileResult<Bytes> {
-        self.files.slot(id).file(self.world)
+        self.files.slot(id).file(self.world, &self.snapshot)
     }
 }
 
 /// What a read that never reached an installed package observed.
 fn unresolved_package<T>(
-    attempt: Option<&ReadAttempt<Loaded<T>>>,
+    attempt: Option<&ReadAttempt<T>>,
 ) -> Option<(
     &[PackageCheck],
     crate::diagnostic::ResolvedPackageFailureReason,
@@ -371,60 +374,33 @@ impl World for CompileSession<'_> {
 }
 
 struct SessionFile {
+    id: FileId,
     source: OnceLock<ReadAttempt<Loaded<Source>>>,
     bytes: OnceLock<ReadAttempt<Loaded<Bytes>>>,
-    version: OnceLock<ReadEvidence>,
 }
 
 impl SessionFile {
-    /// The first read of this file fixes the evidence every later read must match.
-    fn verify_evidence(&self, id: FileId, evidence: &ReadEvidence) -> FileResult<()> {
-        if self.version.get_or_init(|| evidence.clone()) != evidence {
-            return Err(FileError::Other(Some(
-                format!(
-                    "could not read `{}`: it changed during the build",
-                    id.vpath().get_with_slash()
-                )
-                .into(),
-            )));
-        }
-        Ok(())
-    }
-}
-
-// The FileId belongs to the map key. Keeping it in the slot avoids two separate
-// source/file maps while preserving lazy loading for binary-only files.
-struct SessionFileSlot {
-    id: FileId,
-    file: SessionFile,
-}
-
-impl SessionFileSlot {
-    fn source(&self, world: &TypstWorld) -> FileResult<Source> {
-        let attempt = self.file.source.get_or_init(|| world.get_source(self.id));
-        match &attempt.result {
-            Ok(loaded) => {
-                self.file.verify_evidence(self.id, loaded.read.evidence())?;
-                Ok(loaded.value.clone())
-            }
-            Err(error) => Err(error.clone()),
-        }
+    fn source(&self, world: &TypstWorld, files: &FileSnapshot) -> FileResult<Source> {
+        self.source
+            .get_or_init(|| world.source_from_read(files, self.id, files.read(self.id)))
+            .result
+            .as_ref()
+            .map(|loaded| loaded.value.clone())
+            .map_err(Clone::clone)
     }
 
-    fn file(&self, world: &TypstWorld) -> FileResult<Bytes> {
-        let attempt = self.file.bytes.get_or_init(|| world.get_file(self.id));
-        match &attempt.result {
-            Ok(loaded) => {
-                self.file.verify_evidence(self.id, loaded.read.evidence())?;
-                Ok(loaded.value.clone())
-            }
-            Err(error) => Err(error.clone()),
-        }
+    fn file(&self, world: &TypstWorld, files: &FileSnapshot) -> FileResult<Bytes> {
+        self.bytes
+            .get_or_init(|| world.file_from_read(files, self.id, files.read(self.id)))
+            .result
+            .as_ref()
+            .map(|loaded| loaded.value.clone())
+            .map_err(Clone::clone)
     }
 }
 
 struct SessionFiles {
-    slots: RwLock<FxHashMap<FileId, Arc<SessionFileSlot>>>,
+    slots: RwLock<FxHashMap<FileId, Arc<SessionFile>>>,
 }
 
 impl Default for SessionFiles {
@@ -436,19 +412,16 @@ impl Default for SessionFiles {
 }
 
 impl SessionFiles {
-    fn slot(&self, id: FileId) -> Arc<SessionFileSlot> {
+    fn slot(&self, id: FileId) -> Arc<SessionFile> {
         if let Some(slot) = self.slots.read().get(&id) {
             return Arc::clone(slot);
         }
 
         Arc::clone(self.slots.write().entry(id).or_insert_with(|| {
-            Arc::new(SessionFileSlot {
+            Arc::new(SessionFile {
                 id,
-                file: SessionFile {
-                    source: OnceLock::new(),
-                    bytes: OnceLock::new(),
-                    version: OnceLock::new(),
-                },
+                source: OnceLock::new(),
+                bytes: OnceLock::new(),
             })
         }))
     }
@@ -457,8 +430,8 @@ impl SessionFiles {
     fn finish(self) -> AccessedDeps {
         let mut deps = AccessedDeps::default();
         for slot in self.slots.into_inner().into_values() {
-            extend_observed_inputs(&mut deps, slot.file.source.get());
-            extend_observed_inputs(&mut deps, slot.file.bytes.get());
+            extend_observed_inputs(&mut deps, slot.source.get());
+            extend_observed_inputs(&mut deps, slot.bytes.get());
         }
         deps.reads.sort_by_cached_key(|read| {
             (
@@ -485,7 +458,7 @@ impl SessionFiles {
 }
 
 /// Add every input one initialized slot attempt observed to the frozen evidence.
-fn extend_observed_inputs<T>(deps: &mut AccessedDeps, attempt: Option<&ReadAttempt<Loaded<T>>>) {
+fn extend_observed_inputs<T>(deps: &mut AccessedDeps, attempt: Option<&ReadAttempt<T>>) {
     let Some(attempt) = attempt else {
         return;
     };
@@ -698,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn file_reads_agree_on_one_version() {
+    fn source_and_file_share_bytes() {
         let dir = TempDir::new().unwrap();
         let files = FileResolver::new().with_provider(ChangingFiles {
             reads: AtomicUsize::new(0),
@@ -712,9 +685,54 @@ mod tests {
         let source = session.source(id).unwrap();
         assert!(source.text().contains("Version 1"));
 
-        let error = session.file(id).unwrap_err();
-        assert!(
-            matches!(error, typst::diag::FileError::Other(Some(message)) if message.contains("/changing.typ"))
+        let bytes = session.file(id).unwrap();
+        assert_eq!(bytes.as_slice(), source.text().as_bytes());
+    }
+
+    #[test]
+    fn failed_source_keeps_original_bytes() {
+        let dir = TempDir::new().unwrap();
+        let cache = Arc::new(SharedFileCache::new());
+        let world = world_with(&dir, "main.typ", "", |builder| {
+            builder.with_shared_cache(cache)
+        });
+        let path = dir.path().join("broken.typ");
+        fs::write(&path, [0xff]).unwrap();
+        let id = file_id("broken.typ");
+        let session = CompileSession::start(&world);
+        assert_eq!(
+            session.source(id).unwrap_err(),
+            typst::diag::FileError::InvalidUtf8
+        );
+
+        fs::write(&path, "fixed").unwrap();
+        assert_eq!(session.file(id).unwrap().as_slice(), &[0xff]);
+        let accessed = session.finish();
+        assert_eq!(
+            accessed.reads[0].evidence().digest(),
+            crate::ContentDigest::of(&[0xff])
+        );
+        assert_eq!(
+            CompileSession::start(&world).source(id).unwrap().text(),
+            "fixed"
+        );
+    }
+
+    #[test]
+    fn missing_source_stays_missing() {
+        let dir = TempDir::new().unwrap();
+        let world = world_with(&dir, "main.typ", "", |builder| {
+            builder.with_shared_cache(Arc::new(SharedFileCache::new()))
+        });
+        let id = file_id("missing.typ");
+        let session = CompileSession::start(&world);
+        assert!(session.source(id).is_err());
+        fs::write(dir.path().join("missing.typ"), "created").unwrap();
+        assert!(session.file(id).is_err());
+        assert!(session.finish().reads.is_empty());
+        assert_eq!(
+            CompileSession::start(&world).source(id).unwrap().text(),
+            "created"
         );
     }
 

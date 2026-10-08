@@ -37,19 +37,12 @@ pub struct SourceDiagnosticSession {
     reused_analysis: bool,
 }
 
-/// What one successful check derived and what it read.
-///
-/// A check re-runs on every editor revision. This keeps the revision's source analysis and the
-/// dependency evidence that licenses reusing it: which reader read which path, with the digest it
-/// observed, so the next revision can reuse the analysis exactly while every path still holds what
-/// it read.
+/// Source analysis and the exact inputs it consumed.
 struct CheckAnalysisEvidence {
     cache: crate::compiler::analysis::SourceAnalysisCache,
-    dependencies: crate::compiler::PublishedDependencies,
+    dependencies: crate::compiler::CompilationDependencies,
     /// The unsaved sources the analysis was derived from, by path.
     unsaved: BTreeMap<PathBuf, Arc<str>>,
-    /// Every path the analysis read, with the fingerprint it read.
-    reads: BTreeMap<PathBuf, crate::filesystem::PathFingerprint>,
 }
 
 /// Diagnostics and, when the check reached a world, the prepared compiler revision.
@@ -189,62 +182,43 @@ pub struct RealizedDocument {
 }
 
 impl CheckAnalysisEvidence {
-    /// The decision that licenses reusing this analysis for the current revision.
-    ///
-    /// Identity decides first: changed content membership, changed package bindings, or different
-    /// unsaved text refuses reuse without reading the filesystem. What remains can only have
-    /// changed where the analysis read bytes from disk, so every such read is re-fingerprinted.
     fn decide(
         &self,
         content: &[ContentUnit],
         bindings: &crate::package::SiteBindings,
         unsaved: &BTreeMap<PathBuf, Arc<str>>,
+        boundary: &tola_typst::SourceBoundary,
         cancellation: &BuildCancellation,
-    ) -> Option<crate::compiler::RebuildDecision> {
+    ) -> Result<Option<crate::compiler::RebuildDecision>, BuildCancelled> {
         let reason = if !self.cache.matches_content_identity(content) {
             Some("the site's content membership changed")
         } else if !self.cache.matches_package_bindings(bindings) {
             Some("the site's packages or asset addresses changed")
-        } else if self.unsaved != *unsaved {
-            Some("an unsaved source changed")
         } else {
             None
         };
         if let Some(reason) = reason {
             tracing::debug!(reason, "check re-derives its source analysis");
-            return None;
+            return Ok(None);
         }
 
-        // The checks above establish that the open documents still hold the text the analysis
-        // read, so a source can have changed only where the bytes it read on disk did.
-        let mut changed = Vec::new();
-        for path in self.dependencies.physical_read_paths() {
-            // A path that cannot be fingerprinted is a path that is not what it was.
-            let unchanged = crate::filesystem::path_fingerprint(&path, Some(cancellation))
-                .is_ok_and(|fingerprint| self.reads.get(&path) == Some(&fingerprint));
-            if !unchanged {
-                changed.push(path);
-            }
-        }
-        if changed.is_empty() {
-            // Nothing the analysis read changed, so nothing needs re-reading: a reader a provider
-            // would mark as requiring a rebuild can only be one of this check's own overlays, and
-            // every entry is compared against the candidate files before it is reused.
-            return Some(crate::compiler::RebuildDecision::for_paths(
-                None,
-                &[],
-                false,
-            ));
-        }
-        tracing::debug!(
-            changed = changed.len(),
-            "check re-derives its source analysis"
+        let mut changed = self
+            .dependencies
+            .changed_physical_paths(boundary, cancellation)?;
+        changed.extend(self.dependencies.changed_package_paths(cancellation)?);
+        changed.extend(
+            self.unsaved
+                .keys()
+                .chain(unsaved.keys())
+                .filter(|path| self.unsaved.get(*path) != unsaved.get(*path))
+                .cloned(),
         );
-        Some(crate::compiler::RebuildDecision::for_paths(
-            Some(&self.dependencies),
+        changed.sort_unstable();
+        changed.dedup();
+        Ok(Some(crate::compiler::RebuildDecision::for_observed_paths(
+            &self.dependencies,
             &changed,
-            false,
-        ))
+        )))
     }
 
     /// Collect what one evaluated revision read, in the shape the build path publishes it.
@@ -260,7 +234,7 @@ impl CheckAnalysisEvidence {
         cancellation.ensure_active()?;
         let reader_evidence = evaluated.dependency_readers(compilation);
         let package_checks = evaluated.package_checks(compilation).cloned();
-        let dependencies = crate::compiler::PublishedDependencies::new(
+        let dependencies = crate::compiler::CompilationDependencies::new(
             config.get_root(),
             content.iter().map(|unit| unit.source.clone()),
             std::iter::once(config.build.entry.clone()),
@@ -269,18 +243,10 @@ impl CheckAnalysisEvidence {
             host,
             None,
         )?;
-        let mut reads = BTreeMap::new();
-        for path in dependencies.physical_read_paths() {
-            reads.insert(
-                path.clone(),
-                crate::filesystem::path_fingerprint(&path, Some(cancellation))?,
-            );
-        }
         Ok(Self {
             cache: evaluated.source_analysis().clone(),
             dependencies,
             unsaved: unsaved.clone(),
-            reads,
         })
     }
 }
@@ -312,7 +278,7 @@ impl SourceDiagnosticSession {
         &self.resources
     }
 
-    /// Whether the last revision answered from the previous revision's source analysis.
+    /// Whether every content source reused its previous analysis.
     pub fn reused_source_analysis(&self) -> bool {
         self.reused_analysis
     }
@@ -323,7 +289,7 @@ impl SourceDiagnosticSession {
     /// revision's own snapshot would otherwise stay parsed until the process exits. One call ends a
     /// revision; a slot a live world still references is kept, so no answer changes. Site content
     /// sources are not in this cache — a check serves those from its candidate snapshot — so this
-    /// releases the entry program and package files, never the site's own documents.
+    /// releases imported files, not the explicitly captured content sources and entry program.
     pub fn evict_stale_file_cache_entries(&self) {
         if let Some(host) = &self.host {
             host.evict_stale_file_cache_entries(TypstHost::RETAINED_FILE_CACHE_EPOCHS);
@@ -377,6 +343,7 @@ impl SourceDiagnosticSession {
                 .map_err(tola_typst::CompileError::from)?;
             cancellation.ensure_active()?;
             self.host = Some(host);
+            self.analysis = None;
         }
         let host = self
             .host
@@ -522,32 +489,50 @@ impl SourceDiagnosticSession {
         // A failed evaluation or realization hands back the world it resolved, so a revision still
         // answers about the files that world resolves.
         let mut world: Option<Arc<tola_typst::TypstWorld>> = None;
-        let unsaved = overlays
-            .iter()
-            .map(|(path, text)| (path.clone(), Arc::clone(text)))
-            .collect::<BTreeMap<_, _>>();
+        self.reused_analysis = false;
+        let mut unchanged_program = false;
         let checked = (|| -> anyhow::Result<SourceCompilation> {
             let overrides = crate::filesystem::SourceOverrides::new(overlays, cancellation)?;
+            let unsaved = overrides
+                .sources()
+                .map(|(path, source)| (path.to_path_buf(), Arc::clone(&source.text)))
+                .collect::<BTreeMap<_, _>>();
             let (host, content, bindings) = self.prepared(config, &overrides, cancellation)?;
             let mut prepared = None;
             let mut reuse = crate::compiler::analysis::SourceAnalysisReuse::None;
             if let Some(held) = &self.analysis
-                && let Some(decision) = held.decide(&content, &bindings, &unsaved, cancellation)
-                && decision.reuses_source_analysis()
+                && let Some(decision) = held.decide(
+                    &content,
+                    &bindings,
+                    &unsaved,
+                    host.source_boundary(),
+                    cancellation,
+                )?
             {
+                unchanged_program = decision.reuses_site_program()
+                    && held.dependencies.virtual_reads_match(
+                        |evidence| match evidence.locator() {
+                            tola_typst::ReadLocator::ProvidedRoot(relative) => overrides
+                                .get_physical(&crate::filesystem::normalize_existing_prefix(
+                                    &config.get_root().join(relative),
+                                ))
+                                .is_some_and(|source| source.digest == evidence.digest()),
+                            _ => host.virtual_read_matches(evidence),
+                        },
+                        cancellation,
+                    )?;
                 prepared = Some(
                     held.cache
                         .clone()
                         .prepare_for_rebuild(&decision, Some(config.build.entry.as_path())),
                 );
-                reuse = crate::compiler::analysis::SourceAnalysisReuse::published(
+                reuse = crate::compiler::analysis::SourceAnalysisReuse::retained(
                     prepared
                         .as_ref()
                         .expect("the reuse holds its prepared cache"),
                     &held.dependencies,
                 );
             }
-            self.reused_analysis = prepared.is_some();
             let mut reads = crate::compiler::BuildInputs::default();
             let evaluated = crate::compiler::bundle::evaluate(
                 config,
@@ -566,6 +551,12 @@ impl SourceDiagnosticSession {
                 world.clone_from(&failure.world);
                 failure.error
             })?;
+            self.reused_analysis = prepared.is_some()
+                && evaluated
+                    .source_analysis()
+                    .reused_dependency_readers()
+                    .len()
+                    == content.len();
             warnings.extend_distinct(evaluated.source_analysis().diagnostics());
             diagnostics.extend_from_slice(evaluated.source_analysis().declaration_warnings());
             let realized = crate::compiler::bundle::realize(
@@ -594,12 +585,8 @@ impl SourceDiagnosticSession {
                 world: realized.world,
             })
         })();
-        // The revision has derived everything it can reuse. Whatever it did not touch belongs to
-        // the revisions it superseded, so releasing those generations here keeps a session's
-        // retained state proportional to the site rather than to the edits made in it. A revision
-        // that resumed the previous generation superseded nothing, so it ages nothing: evicting
-        // here would release exactly the derivations the next deriving revision resumes from.
-        if !self.reused_analysis || checked.is_err() {
+        // Repeated queries keep their derivations; an edit ages superseded calculations.
+        if !unchanged_program || !self.reused_analysis || checked.is_err() {
             typst::comemo::evict(RETAINED_DERIVATION_GENERATIONS);
         }
         cancellation.ensure_active()?;
@@ -1817,37 +1804,68 @@ mod tests {
         let document = config.build.content_dir.join("document.typ");
         std::fs::write(&document, "Saved.\n").unwrap();
         let cancellation = BuildCancellation::new();
-        let mut session = SourceDiagnosticSession::new(config);
-
-        counted_derivation(7);
-        counted_derivation(7);
-        assert_eq!(
-            DERIVATION_COMPUTATIONS.load(Ordering::SeqCst),
-            1,
-            "the watched value is memoized before any revision"
-        );
-
-        // Different unsaved text refuses the previous analysis, so both revisions derive.
-        for round in 0..2 {
-            let unsaved = Arc::<str>::from(format!("Round {round}.\n"));
-            session
-                .inspect(vec![(document.clone(), unsaved)], &cancellation)
-                .unwrap();
+        for (key, path) in [(7, document), (8, config.build.entry.clone())] {
+            let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
+            let before = DERIVATION_COMPUTATIONS.load(Ordering::SeqCst);
+            counted_derivation(key);
+            counted_derivation(key);
+            assert_eq!(DERIVATION_COMPUTATIONS.load(Ordering::SeqCst), before + 1);
+            let source = std::fs::read_to_string(&path).unwrap();
+            for round in 0..2 {
+                let unsaved = Arc::<str>::from(format!("{source}\n#let revision = {round}\n"));
+                let checked = session
+                    .inspect(vec![(path.clone(), unsaved)], &cancellation)
+                    .unwrap();
+                assert!(checked.compiled(), "{:?}", checked.diagnostics());
+            }
+            counted_derivation(key);
+            assert_eq!(DERIVATION_COMPUTATIONS.load(Ordering::SeqCst), before + 2);
         }
-        counted_derivation(7);
-        assert_eq!(
-            DERIVATION_COMPUTATIONS.load(Ordering::SeqCst),
-            2,
-            "deriving revisions released no earlier derivation"
+
+        let mut config = config.as_ref().clone();
+        let icons = config.get_root().join("icons.json");
+        config.icons.collections.insert(
+            "brand".into(),
+            crate::config::section::IconCollectionSource::LocalJson {
+                path: icons.clone(),
+            },
         );
+        std::fs::write(
+            &config.build.entry,
+            "#import \"@tola/icon:0.0.0\": icon-bytes\n\
+             #asset(\"icon.svg\", icon-bytes(\"brand:mark\"))",
+        )
+        .unwrap();
+        let write_icon = |fill: &str| {
+            std::fs::write(
+                &icons,
+                format!(
+                    r#"{{"prefix":"brand","icons":{{"mark":{{"body":"<path fill='{fill}' d='M0 0h16v16H0z'/>"}}}}}}"#
+                ),
+            )
+            .unwrap();
+        };
+        write_icon("red");
+        let mut session = SourceDiagnosticSession::new(Arc::new(config));
+        assert!(
+            session
+                .inspect(Vec::new(), &cancellation)
+                .unwrap()
+                .compiled()
+        );
+        let before = DERIVATION_COMPUTATIONS.load(Ordering::SeqCst);
+        counted_derivation(9);
+        for fill in ["green", "blue"] {
+            write_icon(fill);
+            let checked = session.inspect(Vec::new(), &cancellation).unwrap();
+            assert!(checked.compiled(), "{:?}", checked.diagnostics());
+            assert!(session.reused_source_analysis());
+        }
+        counted_derivation(9);
+        assert_eq!(DERIVATION_COMPUTATIONS.load(Ordering::SeqCst), before + 2);
     }
 
-    /// A check keeps the site's own documents out of the shared file cache.
-    ///
-    /// Content sources are served from the check's own candidate snapshot, so the slots the shared
-    /// cache owns are the entry program and package files whatever the site's size. Routing content
-    /// through it would put every parsed document under the eviction window documented at
-    /// [`TypstHost::RETAINED_FILE_CACHE_EPOCHS`], so this pins which files the cache serves.
+    /// Explicit sources belong to the snapshot; imported files use the shared cache.
     #[test]
     fn check_keeps_site_documents_out_of_shared_file_cache() {
         let echo_documents = shared_slots_after_check(4);
@@ -1966,6 +1984,177 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn checks_compare_compiled_bytes() {
+        let (_directory, config) = site();
+        let post = config.build.content_dir.join("post.typ");
+        std::fs::write(&post, "Before").unwrap();
+        let cancellation = BuildCancellation::new();
+        let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
+        let (host, content, bindings) = session
+            .prepared(&config, &Default::default(), &cancellation)
+            .unwrap();
+        let mut reads = crate::compiler::BuildInputs::default();
+        let evaluated = crate::compiler::bundle::evaluate(
+            &config,
+            &host,
+            &content,
+            bindings,
+            &cancellation.bundle_cancellation(),
+            crate::compiler::analysis::SourceAnalysisReuse::None,
+            &mut reads,
+        )
+        .unwrap();
+        let realized = crate::compiler::bundle::realize(
+            &config,
+            &host,
+            &cancellation.bundle_cancellation(),
+            &evaluated,
+            &mut reads,
+        )
+        .unwrap();
+
+        std::fs::write(&post, "After").unwrap();
+        session.analysis = Some(
+            CheckAnalysisEvidence::of(
+                &evaluated,
+                &realized.compilation,
+                &config,
+                &content,
+                &BTreeMap::new(),
+                &host,
+                &cancellation,
+            )
+            .unwrap(),
+        );
+        let revision = session.inspect(Vec::new(), &cancellation).unwrap();
+        assert!(revision.compiled(), "{:?}", revision.diagnostics());
+        let id = tola_typst::file_id_from_path(&post, config.get_root()).unwrap();
+        use tola_typst::typst::World;
+        assert_eq!(realized.world.source(id).unwrap().text(), "Before");
+        assert_eq!(
+            revision
+                .checked()
+                .unwrap()
+                .world()
+                .source(id)
+                .unwrap()
+                .text(),
+            "After",
+        );
+    }
+
+    #[test]
+    fn unsaved_dependencies_refresh_readers() {
+        let (_directory, config) = site();
+        let helper = config.get_root().join("helper.typ");
+        let dependent = config.build.content_dir.join("dependent.typ");
+        let untouched = config.build.content_dir.join("untouched.typ");
+        std::fs::write(&helper, "#let title = \"Saved\"").unwrap();
+        std::fs::write(
+            &dependent,
+            "#import \"/helper.typ\": title\n\
+             #import \"@tola/source:0.0.0\": tola-meta\n\
+             #tola-meta((title: title))\n#title",
+        )
+        .unwrap();
+        std::fs::write(&untouched, "Unchanged").unwrap();
+        let cancellation = BuildCancellation::new();
+        let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
+        session
+            .inspect(
+                vec![(helper.clone(), Arc::from("#let title = \"First\""))],
+                &cancellation,
+            )
+            .unwrap();
+        for overlays in [
+            vec![(helper.clone(), Arc::<str>::from("#let title = \"Second\""))],
+            Vec::new(),
+        ] {
+            let reused = session.inspect(overlays.clone(), &cancellation).unwrap();
+            assert!(reused.compiled(), "{:?}", reused.diagnostics());
+            assert_eq!(
+                session
+                    .analysis
+                    .as_ref()
+                    .unwrap()
+                    .cache
+                    .reused_dependency_readers(),
+                vec![crate::compiler::TypstDependencyReader::ContentSource(
+                    untouched.clone()
+                )],
+            );
+            let mut cold = SourceDiagnosticSession::new(Arc::clone(&config));
+            let fresh = cold.inspect(overlays, &cancellation).unwrap();
+            assert_eq!(rendered(&reused), rendered(&fresh));
+            assert_eq!(
+                exported_entries(&reused, &cancellation).as_slice(),
+                exported_entries(&fresh, &cancellation).as_slice(),
+            );
+        }
+    }
+
+    #[test]
+    fn edits_reuse_unaffected_sources() {
+        for unsaved in [false, true] {
+            let (_directory, config) = site();
+            let changed = config.build.content_dir.join("changed.typ");
+            let untouched = config.build.content_dir.join("untouched.typ");
+            std::fs::write(&changed, "Before").unwrap();
+            std::fs::write(&untouched, "Unchanged").unwrap();
+            let cancellation = BuildCancellation::new();
+            let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
+            session.inspect(Vec::new(), &cancellation).unwrap();
+            let overlays = if unsaved {
+                vec![(changed.clone(), Arc::<str>::from("After"))]
+            } else {
+                std::fs::write(&changed, "After").unwrap();
+                Vec::new()
+            };
+            let reused = session.inspect(overlays.clone(), &cancellation).unwrap();
+            assert!(!session.reused_source_analysis());
+            assert_eq!(
+                session
+                    .analysis
+                    .as_ref()
+                    .unwrap()
+                    .cache
+                    .reused_dependency_readers(),
+                vec![crate::compiler::TypstDependencyReader::ContentSource(
+                    untouched
+                )],
+            );
+            let mut cold = SourceDiagnosticSession::new(Arc::clone(&config));
+            let fresh = cold.inspect(overlays, &cancellation).unwrap();
+            assert_eq!(rendered(&reused), rendered(&fresh));
+            assert_eq!(
+                documents(&reused, &cancellation),
+                documents(&fresh, &cancellation)
+            );
+            assert_eq!(
+                exported_entries(&reused, &cancellation).as_slice(),
+                exported_entries(&fresh, &cancellation).as_slice(),
+            );
+        }
+    }
+
+    fn exported_entries(
+        revision: &SourceRevision,
+        cancellation: &BuildCancellation,
+    ) -> tola_typst::BundleEntries {
+        revision
+            .checked()
+            .unwrap()
+            .bundle()
+            .unwrap()
+            .export_entries(
+                &tola_typst::BundleOptions::default(),
+                &cancellation.bundle_cancellation(),
+                None,
+            )
+            .unwrap()
     }
 
     /// A revision's diagnostics in the shape a comparison can hold.

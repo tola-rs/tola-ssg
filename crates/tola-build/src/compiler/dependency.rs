@@ -1,5 +1,4 @@
-//! The read evidence one successful build leaves behind, the readers it attributes each read
-//! to, and the decision a changed path produces: reuse, re-analyze, or rebuild.
+//! Compiler reads, their source or Bundle readers, and invalidation from changed paths.
 //!
 //! A retained read is only evidence while the bytes it observed are still current, so every
 //! reuse path revalidates against the filesystem before it is trusted.
@@ -48,7 +47,7 @@ impl RebuildDecision {
     }
 
     pub(crate) fn for_paths(
-        snapshot: Option<&PublishedDependencies>,
+        snapshot: Option<&CompilationDependencies>,
         changed_paths: &[PathBuf],
         inventory_may_change: bool,
     ) -> Self {
@@ -61,6 +60,26 @@ impl RebuildDecision {
         let direct_readers = snapshot
             .map(|snapshot| snapshot.direct_readers_for_paths(changed_paths))
             .unwrap_or_default();
+        Self::classify(direct_readers, affected_readers, inventory_may_change)
+    }
+
+    /// Classify changes verified against captured reads and unsaved source versions.
+    pub(crate) fn for_observed_paths(
+        dependencies: &CompilationDependencies,
+        changed_paths: &[PathBuf],
+    ) -> Self {
+        Self::classify(
+            dependencies.direct_readers_for_paths(changed_paths),
+            dependencies.readers_of_paths(changed_paths),
+            false,
+        )
+    }
+
+    fn classify(
+        direct_readers: Vec<TypstDependencyReader>,
+        mut affected_readers: Vec<TypstDependencyReader>,
+        inventory_may_change: bool,
+    ) -> Self {
         let source_direct = inventory_may_change
             || direct_readers
                 .iter()
@@ -209,12 +228,12 @@ impl DependencyReadEvidence {
     }
 }
 
-/// Exact reads observed while producing one successfully published site.
+/// Exact reads observed by source analysis and Bundle compilation.
 #[derive(Debug, Clone)]
-pub(crate) struct PublishedDependencies(Arc<PublishedDependencyReads>);
+pub(crate) struct CompilationDependencies(Arc<DependencyReads>);
 
 #[derive(Debug, Clone)]
-pub(crate) struct PublishedDependencyReads {
+pub(crate) struct DependencyReads {
     content_sources: std::collections::BTreeSet<PathBuf>,
     bundle_entries: std::collections::BTreeSet<PathBuf>,
     reader_evidence: std::collections::BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
@@ -228,8 +247,8 @@ struct DependencyReaderEvidence {
     package_checks: Vec<tola_typst::PackageCheck>,
 }
 
-impl std::ops::Deref for PublishedDependencies {
-    type Target = PublishedDependencyReads;
+impl std::ops::Deref for CompilationDependencies {
+    type Target = DependencyReads;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -237,13 +256,13 @@ impl std::ops::Deref for PublishedDependencies {
 }
 
 pub(crate) struct ReusedDependencyReaders<'a> {
-    dependencies: &'a PublishedDependencies,
+    dependencies: &'a CompilationDependencies,
     readers: &'a [TypstDependencyReader],
 }
 
 impl<'a> ReusedDependencyReaders<'a> {
     pub(crate) fn new(
-        dependencies: &'a PublishedDependencies,
+        dependencies: &'a CompilationDependencies,
         readers: &'a [TypstDependencyReader],
     ) -> Self {
         Self {
@@ -253,7 +272,7 @@ impl<'a> ReusedDependencyReaders<'a> {
     }
 }
 
-impl PublishedDependencies {
+impl CompilationDependencies {
     pub(crate) fn new(
         root: &Path,
         content_sources: impl IntoIterator<Item = PathBuf>,
@@ -320,7 +339,7 @@ impl PublishedDependencies {
         let mut frozen_package_checks = frozen_package_check_set.into_iter().collect::<Vec<_>>();
         sort_package_checks(&mut frozen_package_checks);
         let path_index = DependencyPathIndex::build(&root, &frozen_readers, &frozen_package_checks);
-        Ok(Self(Arc::new(PublishedDependencyReads {
+        Ok(Self(Arc::new(DependencyReads {
             content_sources: content_sources
                 .into_iter()
                 .map(|path| crate::filesystem::normalize_path(&path))
@@ -415,7 +434,7 @@ impl PublishedDependencies {
     /// this process. Every other virtual read must match byte for byte.
     pub(crate) fn virtual_reads_match(
         &self,
-        host: &crate::compiler::TypstHost,
+        matches: impl Fn(&ReadEvidence) -> bool,
         cancellation: &BuildCancellation,
     ) -> Result<bool, BuildCancelled> {
         cancellation.ensure_active()?;
@@ -427,7 +446,7 @@ impl PublishedDependencies {
                 process_stable: false,
             } = read
                 && checked.insert(evidence)
-                && !host.virtual_read_matches(evidence)
+                && !matches(evidence)
             {
                 return Ok(false);
             }
@@ -506,12 +525,21 @@ impl PublishedDependencies {
         boundary: &tola_typst::SourceBoundary,
         cancellation: &BuildCancellation,
     ) -> Result<bool, BuildCancelled> {
+        self.changed_physical_paths(boundary, cancellation)
+            .map(|paths| paths.is_empty())
+    }
+
+    /// Paths whose current bytes or targets differ from the compilation's observations.
+    pub(crate) fn changed_physical_paths(
+        &self,
+        boundary: &tola_typst::SourceBoundary,
+        cancellation: &BuildCancellation,
+    ) -> Result<Vec<PathBuf>, BuildCancelled> {
         cancellation.ensure_active()?;
         let started = std::time::Instant::now();
-        // One verification per logical path: the first read that claims a path proves its bytes,
-        // and a later read claiming the same path must agree on what was observed.
         let mut reads_by_logical_path = std::collections::HashMap::new();
         let mut distinct_reads = Vec::new();
+        let mut changed = std::collections::BTreeSet::new();
         for read in self.all_reads() {
             cancellation.ensure_active()?;
             let DependencyReadEvidence::Physical {
@@ -523,20 +551,17 @@ impl PublishedDependencies {
             else {
                 continue;
             };
-            let identity = PhysicalReadIdentity {
-                evidence,
-                logical_path,
-                canonical_target,
-            };
+            let identity = (evidence.digest(), canonical_target);
             match reads_by_logical_path.entry(logical_path.as_path()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     entry.insert(identity);
                     distinct_reads.push(read);
                 }
                 std::collections::hash_map::Entry::Occupied(entry) if entry.get() == &identity => {}
-                // One candidate cannot be fresh when its producers observed
-                // different bytes or targets through the same logical path.
-                std::collections::hash_map::Entry::Occupied(_) => return Ok(false),
+                std::collections::hash_map::Entry::Occupied(_) => {
+                    changed.insert(logical_path.clone());
+                    changed.insert(canonical_target.clone());
+                }
             }
         }
         let collected = started.elapsed();
@@ -551,30 +576,39 @@ impl PublishedDependencies {
             fence_collect_ms = collected.as_secs_f64() * 1000.0,
             fence_verify_ms = (started.elapsed() - collected).as_secs_f64() * 1000.0,
             "revalidated physical reads");
-        for fresh in verified {
+        for (read, fresh) in distinct_reads.into_iter().zip(verified) {
             if !fresh? {
-                return Ok(false);
+                changed.extend(read.watch_paths().iter().cloned());
             }
         }
         cancellation.ensure_active()?;
-        Ok(true)
+        Ok(changed.into_iter().collect())
+    }
+
+    /// Package candidates whose availability or selected directory changed.
+    pub(crate) fn changed_package_paths(
+        &self,
+        cancellation: &BuildCancellation,
+    ) -> Result<Vec<PathBuf>, BuildCancelled> {
+        let mut changed = Vec::new();
+        for check in &self.package_checks {
+            cancellation.ensure_active()?;
+            if !package_check_is_fresh(check) {
+                changed.push(check.candidate().to_path_buf());
+            }
+        }
+        cancellation.ensure_active()?;
+        changed.sort_unstable();
+        changed.dedup();
+        Ok(changed)
     }
 
     pub(crate) fn package_checks_are_fresh(
         &self,
         cancellation: &BuildCancellation,
     ) -> Result<bool, BuildCancelled> {
-        cancellation.ensure_active()?;
-        for check in &self.package_checks {
-            cancellation.ensure_active()?;
-            let fresh = package_check_is_fresh(check);
-            cancellation.ensure_active()?;
-            if !fresh {
-                return Ok(false);
-            }
-        }
-        cancellation.ensure_active()?;
-        Ok(true)
+        self.changed_package_paths(cancellation)
+            .map(|paths| paths.is_empty())
     }
 
     pub(crate) fn physical_read_paths(&self) -> Vec<PathBuf> {
@@ -592,16 +626,16 @@ impl PublishedDependencies {
         inputs: &mut crate::compiler::BuildInputs,
         reader: &TypstDependencyReader,
     ) {
-        let Some(published) = self.reader_evidence.get(reader) else {
+        let Some(observed) = self.reader_evidence.get(reader) else {
             return;
         };
         inputs.file_reads_mut().record(
-            published
+            observed
                 .reads
                 .iter()
                 .flat_map(|read| read.watch_paths().iter().cloned()),
         );
-        inputs.record_published_package_checks(published.package_checks.iter().cloned());
+        inputs.record_package_checks(observed.package_checks.iter().cloned());
     }
 
     pub(crate) fn record_all_reads(&self, inputs: &mut crate::compiler::BuildInputs) {
@@ -609,19 +643,12 @@ impl PublishedDependencies {
             self.all_reads()
                 .flat_map(|read| read.watch_paths().iter().cloned()),
         );
-        inputs.record_published_package_checks(self.package_checks.iter().cloned());
+        inputs.record_package_checks(self.package_checks.iter().cloned());
     }
 
     pub(crate) fn package_checks(&self) -> &[tola_typst::PackageCheck] {
         &self.package_checks
     }
-}
-
-#[derive(PartialEq, Eq)]
-struct PhysicalReadIdentity<'a> {
-    evidence: &'a ReadEvidence,
-    logical_path: &'a Path,
-    canonical_target: &'a Path,
 }
 
 /// Sort and deduplicate readers; `RebuildDecision` binary-searches them afterwards.
@@ -723,9 +750,9 @@ mod tests {
             DependencyReaderEvidence,
         >,
         package_checks: Vec<tola_typst::PackageCheck>,
-    ) -> PublishedDependencies {
+    ) -> CompilationDependencies {
         let root = crate::filesystem::normalize_path(root);
-        PublishedDependencies(Arc::new(PublishedDependencyReads {
+        CompilationDependencies(Arc::new(DependencyReads {
             path_index: DependencyPathIndex::build(&root, &reader_evidence, &package_checks),
             content_sources: content_sources
                 .into_iter()
@@ -792,7 +819,7 @@ mod tests {
         content_sources: impl IntoIterator<Item = PathBuf>,
         site_program: &Path,
         reader_evidence: impl IntoIterator<Item = (TypstDependencyReader, Vec<ReadEvidence>)>,
-    ) -> PublishedDependencies {
+    ) -> CompilationDependencies {
         let root = crate::filesystem::normalize_path(root);
         let reader_evidence = reader_evidence
             .into_iter()
@@ -830,7 +857,7 @@ mod tests {
         site_program: &Path,
         source_evidence: Vec<ReadEvidence>,
         site_evidence: Vec<ReadEvidence>,
-    ) -> PublishedDependencies {
+    ) -> CompilationDependencies {
         let content_sources = content_sources.into_iter().collect::<Vec<_>>();
         let source = content_sources
             .first()
@@ -1276,7 +1303,7 @@ mod tests {
         let config = crate::config::tests::load_test_config(root, "");
         let host = compiler_host(&config).unwrap();
 
-        let published = PublishedDependencies::new(
+        let published = CompilationDependencies::new(
             root,
             std::iter::empty(),
             std::iter::empty(),
@@ -1391,6 +1418,42 @@ mod tests {
                 .physical_reads_are_fresh(
                     &tola_typst::SourceBoundary::default(),
                     &BuildCancellation::default()
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn shared_bytes_allow_distinct_locators() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let file = root.join("shared.typ");
+        std::fs::write(&file, "Shared").unwrap();
+        let reads = [
+            ReadLocator::Root("shared.typ".into()),
+            ReadLocator::ProvidedRoot("mapped.typ".into()),
+        ]
+        .into_iter()
+        .map(|locator| physical_read(&file, ReadEvidence::new(locator, b"Shared")))
+        .collect();
+        let dependencies = retained_dependencies(
+            root,
+            [],
+            [],
+            std::collections::BTreeMap::from([(
+                TypstDependencyReader::SiteProgram,
+                DependencyReaderEvidence {
+                    reads,
+                    package_checks: Vec::new(),
+                },
+            )]),
+            Vec::new(),
+        );
+        assert!(
+            dependencies
+                .physical_reads_are_fresh(
+                    &tola_typst::SourceBoundary::default(),
+                    &BuildCancellation::default(),
                 )
                 .unwrap()
         );
@@ -1527,26 +1590,18 @@ mod tests {
         );
         let cancellation = BuildCancellation::default();
         assert!(RebuildDecision::for_paths(Some(&dependencies), &[], false).reuses_site_program());
-        assert!(
+        let matches = |host: &crate::compiler::TypstHost| {
             dependencies
-                .virtual_reads_match(&original_host, &cancellation)
+                .virtual_reads_match(
+                    |evidence| host.virtual_read_matches(evidence),
+                    &cancellation,
+                )
                 .unwrap()
-        );
-        assert!(
-            dependencies
-                .virtual_reads_match(&host.with_icons(collections("red", "green")), &cancellation)
-                .unwrap()
-        );
-        assert!(
-            !dependencies
-                .virtual_reads_match(&host.with_icons(collections("tan", "blue")), &cancellation)
-                .unwrap()
-        );
-        assert!(
-            !dependencies
-                .virtual_reads_match(&host.with_icons(Arc::default()), &cancellation)
-                .unwrap()
-        );
+        };
+        assert!(matches(&original_host));
+        assert!(matches(&host.with_icons(collections("red", "green"))));
+        assert!(!matches(&host.with_icons(collections("tan", "blue"))));
+        assert!(!matches(&host.with_icons(Arc::default())));
     }
 
     #[test]
@@ -1578,7 +1633,7 @@ mod tests {
             )
         };
 
-        let priority = |snapshot: PublishedDependencies| {
+        let priority = |snapshot: CompilationDependencies| {
             RebuildDecision::for_paths(Some(&snapshot), &[], false).site_program
         };
         assert_eq!(

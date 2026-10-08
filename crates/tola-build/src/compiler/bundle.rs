@@ -24,7 +24,7 @@ pub(crate) struct EvaluatedSiteProgram {
         Vec<tola_typst::FileRead>,
         Vec<tola_typst::PackageCheck>,
     )>,
-    candidate_files: Arc<tola_typst::CandidateFileSnapshot>,
+    candidate_files: Arc<tola_typst::FileSnapshot>,
     package_bindings: crate::package::SiteBindings,
 }
 

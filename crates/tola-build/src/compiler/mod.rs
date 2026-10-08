@@ -11,7 +11,7 @@ mod inputs;
 pub(crate) mod outputs;
 
 pub(crate) use dependency::{
-    PublishedDependencies, RebuildDecision, ReusedDependencyReaders, TypstDependencyReader,
+    CompilationDependencies, RebuildDecision, ReusedDependencyReaders, TypstDependencyReader,
 };
 pub(crate) use diagnostic::{error_diagnostics, source_location, warning_diagnostics};
 pub(crate) use host::TypstHost;
@@ -69,11 +69,11 @@ pub(crate) fn minified_languages(
 pub(crate) enum CompilationReuse {
     SourceAnalysis {
         source_analysis: Box<analysis::SourceAnalysisCache>,
-        dependencies: Box<PublishedDependencies>,
+        dependencies: Box<CompilationDependencies>,
     },
     SiteProgram {
         site_program: Box<SiteProgramCache>,
-        dependencies: Box<PublishedDependencies>,
+        dependencies: Box<CompilationDependencies>,
         source_analysis: Box<analysis::SourceAnalysisCache>,
     },
 }
@@ -89,7 +89,7 @@ impl CompilationReuse {
                 source_analysis,
                 dependencies,
                 ..
-            } => analysis::SourceAnalysisReuse::published(source_analysis, dependencies),
+            } => analysis::SourceAnalysisReuse::retained(source_analysis, dependencies),
         }
     }
 }

@@ -567,7 +567,7 @@ struct PreparedProducerInputs {
 
 struct CompiledRootBundle {
     site_program: crate::compiler::SiteProgramCache,
-    dependencies: crate::compiler::PublishedDependencies,
+    dependencies: crate::compiler::CompilationDependencies,
     source_analysis: crate::compiler::analysis::SourceAnalysisCache,
 }
 
@@ -606,7 +606,10 @@ fn compile_root_bundle(
                 content,
                 &sources,
             )
-            && dependencies.virtual_reads_match(typst_host, &producers.cancellation)?
+            && dependencies.virtual_reads_match(
+                |evidence| typst_host.virtual_read_matches(evidence),
+                &producers.cancellation,
+            )?
         {
             warnings.extend_distinct(source_analysis.diagnostics());
             warnings.extend_distinct(&cached_site_program.diagnostics);
@@ -706,7 +709,7 @@ fn compile_root_bundle(
     let reused_dependencies = previous_dependencies.map(|dependencies| {
         crate::compiler::ReusedDependencyReaders::new(dependencies, &reused_dependency_readers)
     });
-    let dependencies = crate::compiler::PublishedDependencies::new(
+    let dependencies = crate::compiler::CompilationDependencies::new(
         config.get_root(),
         content_sources,
         std::iter::once(config.build.entry.clone()),

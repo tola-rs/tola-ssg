@@ -1,4 +1,4 @@
-//! Reverse lookup from changed paths to published dependency readers.
+//! Reverse lookup from changed paths to compiler dependency readers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -21,8 +21,8 @@ impl DependencyPathIndex {
         package_checks: &[tola_typst::PackageCheck],
     ) -> Self {
         let mut index = Self::default();
-        for (reader_index, published) in reader_evidence.values().enumerate() {
-            for read in &published.reads {
+        for (reader_index, evidence) in reader_evidence.values().enumerate() {
+            for read in &evidence.reads {
                 match read {
                     DependencyReadEvidence::Physical {
                         logical_path,
@@ -33,7 +33,9 @@ impl DependencyPathIndex {
                         index.add_reader_identity(canonical_target, reader_index);
                     }
                     DependencyReadEvidence::Virtual { evidence, .. } => {
-                        if let ReadLocator::Root(relative) = evidence.locator() {
+                        if let ReadLocator::Root(relative) | ReadLocator::ProvidedRoot(relative) =
+                            evidence.locator()
+                        {
                             index.add_reader_path(&root.join(relative), reader_index);
                         }
                     }

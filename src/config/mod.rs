@@ -274,7 +274,7 @@ impl ConfigCandidate {
             && same_section(self.config.assets(), config.assets())?
             && same_section(self.config.fonts(), config.fonts())?
             && same_section(self.config.icons(), config.icons())?
-            && same_section(&self.config.vendor, &config.vendor)?
+            && same_section(self.config.vendor(), config.vendor())?
             && self.config.warnings().len() == config.warnings().len()
             && self
                 .config

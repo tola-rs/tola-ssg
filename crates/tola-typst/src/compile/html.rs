@@ -103,7 +103,7 @@ impl CompileResult {
         &self.accessed.package_checks
     }
 
-    /// Get actual disk paths used for read attempts during compilation.
+    /// Physical read paths retained by the compilation.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.accessed.disk_reads
     }

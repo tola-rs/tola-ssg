@@ -243,7 +243,7 @@ impl<'a> SiteInputSections<'a> {
             assets: config.assets(),
             fonts: config.fonts(),
             icons: config.icons(),
-            vendor: &config.vendor,
+            vendor: config.vendor(),
         }
     }
 

@@ -96,8 +96,19 @@ Keep responsibilities aligned with this map:
 
 `compiler/bundle.rs::EvaluatedSiteProgram` owns each converged source's paired file reads and package
 checks. Build and editor checks consume one deterministic reader view, with the root Bundle reader
-last. Their content roots, retained-reader reuse, unsaved-source identity, and freshness licences stay
-with their respective callers.
+last. `CompilationDependencies` compares current bytes, physical targets, and package selection
+against those captured reads for both publication checks and editor invalidation. Editor checks keep
+normalized unsaved source versions alongside the reads; changed, opened, and closed overrides enter
+the same reader index. Source analysis reuses unaffected entries and refreshes changed explicit
+sources. A font generation change replaces its source-analysis baseline.
+
+`tola-typst::FileSnapshot` owns explicit and first-observed bytes, failures, package selections, and
+their resolver. Source text and binary reads derive from that same observation; the shared parsed-file
+cache carries no independent provenance. Local worlds keep observations until reset; shared worlds
+observe fresh files per compilation; externally supplied file snapshots remain fixed across worlds
+and resets. These are input lifetimes, not interchangeable performance settings. Files can be first
+observed at different times, so publication still verifies the captured evidence. Removing explicit
+`SourceSnapshot` members releases their storage when older snapshots no longer hold it.
 
 `WorldBuilder::build(&BundleCancellation)` uses the caller's token for font preparation, including
 fontless worlds. Required cache/font selections are checked first. Cancelled font preparation leaves
@@ -253,6 +264,7 @@ Keep source paths, normalized physical paths, logical output paths, public URLs,
 - Production writing stages a complete tree in the validated `.<output-name>-publish` workspace beside the output, which also owns recovery of the transient previous tree. Keep workspace ownership, source overlap, and physical symlink boundaries checked. An empty unowned workspace is adopted in place, a workspace holding any entry stays foreign and is never deleted, and the `staging-*` trees a killed build left are reclaimed once the lock is held and the workspace record names this output. The deployed output remains a normal directory with its `_tola/owner` marker; neither it nor the workspace is a source input. Publishing commands recover an interrupted output before compilation; read-only checks and inspections do not. Failed installation restores the previous tree, while cleanup failure after commit does not revoke publication.
 - Directory replacement is cross-platform and recoverable, not a version store or atomic durability guarantee. The rename sequence can leave the destination briefly absent for external filesystem readers; development serving switches complete immutable in-memory revisions atomically.
 - `--offline` refuses Tola network access but permits host inputs and caches. `--pure` also excludes host package roots, system fonts, and source reads physically outside the site, incl. links inside package trees. Cached remote originals do not prove pure completeness; recomputable derived-image caches may be reused.
+- Resolved vendor settings are borrowed through `ResolvedSiteConfig::vendor`. `with_vendor_root` changes the selected vendor and its package roots together; raw configuration remains editable before resolution.
 
 ## Derived descriptions
 

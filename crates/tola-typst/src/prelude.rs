@@ -41,9 +41,9 @@ pub use crate::diagnostic::{
 pub use crate::introspection::{MetadataCardinalityError, MetadataDeclaration};
 
 pub use crate::world::file::{
-    CandidateFileSnapshot, ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider,
-    FileRead, FileResolver, FileTarget, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache,
-    file_id, file_id_from_path, hash_length_prefixed, virtual_file_id,
+    ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider, FileRead, FileResolver,
+    FileSnapshot, FileTarget, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache, file_id,
+    file_id_from_path, hash_length_prefixed, virtual_file_id,
 };
 
 pub use crate::world::font::{FontLoadError, FontOptions, FontStore};

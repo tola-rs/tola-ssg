@@ -294,7 +294,8 @@ impl SourceSnapshot {
         } else {
             Arc::new(desired)
         };
-        if refreshed.is_empty() {
+        let removed = self.members.iter().any(|id| !members.contains(id));
+        if refreshed.is_empty() && !removed {
             return Ok(SnapshotLoad {
                 snapshot: Self {
                     base: Arc::clone(&self.base),
@@ -309,7 +310,7 @@ impl SourceSnapshot {
 
         let mut overlay = (*self.overlay).clone();
         overlay.extend(refreshed);
-        let (base, overlay) = if overlay.len() <= MAX_SNAPSHOT_OVERLAY_SOURCES {
+        let (base, overlay) = if !removed && overlay.len() <= MAX_SNAPSHOT_OVERLAY_SOURCES {
             (Arc::clone(&self.base), Arc::new(overlay))
         } else {
             let compacted = members
@@ -742,6 +743,8 @@ mod tests {
         fs::write(&kept, "kept").unwrap();
         fs::write(&removed, "removed").unwrap();
         let initial = snapshot(&[kept.clone(), removed.clone()], dir.path());
+        let removed_id = file_id_from_path(&removed, dir.path()).unwrap();
+        let previous = Arc::downgrade(&initial.base);
 
         let loaded = initial
             .refresh_with_files(
@@ -753,7 +756,6 @@ mod tests {
             .unwrap();
         assert!(loaded.accessed().disk_reads.is_empty());
         let refreshed = loaded.into_snapshot_and_accessed().0;
-        let removed_id = file_id_from_path(&removed, dir.path()).unwrap();
 
         assert_eq!(refreshed.source_count(), 1);
         assert!(refreshed.get_source(removed_id).is_none());
@@ -763,6 +765,8 @@ mod tests {
             initial.get_file(removed_id).unwrap().value.as_slice(),
             b"removed"
         );
+        drop(initial);
+        assert!(previous.upgrade().is_none());
     }
 
     #[test]

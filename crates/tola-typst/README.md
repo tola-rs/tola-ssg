@@ -31,6 +31,18 @@ fn render(entry: &Path, root: &Path, cancellation: &BundleCancellation) -> Resul
 compiles one file, which is what an editor needs when the root program never reached it.
 Results carry their diagnostics and file reads.
 
+File inputs have an explicit lifetime. `with_local_cache` keeps the first observation of each
+file, including failures, until `TypstWorld::reset`. `with_shared_cache` reuses parsed values
+while each compilation observes fresh inputs; direct world reads also revalidate on access.
+Within a compilation, source text and raw bytes always come from the same observation.
+
+`with_snapshot` freezes the explicitly listed `SourceSnapshot` members and observes other files
+for each compilation. `with_file_snapshot` shares a `FileSnapshot`, including its resolver,
+across worlds that must retain the same file and package observations. Create another file
+snapshot to observe changes; resetting a world does not change an externally supplied snapshot.
+A file snapshot pins files on first access, rather than capturing a whole filesystem at one
+instant. Callers publishing results must verify that the retained input evidence is still current.
+
 Diagnostics retain Typst's messages, spans, and call traces. `Diagnostics::extend_distinct`
 combines compilation phases by native diagnostic identity and merges package navigation.
 `diagnostic::resolve_source_location` captures bounded excerpts from the compiled source;

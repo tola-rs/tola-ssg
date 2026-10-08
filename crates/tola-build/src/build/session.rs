@@ -7,7 +7,8 @@
 //! advances nothing.
 
 use crate::compiler::{
-    CompilationReuse, PublishedDependencies, RebuildDecision, SiteProgramCache, TypstHost, analysis,
+    CompilationDependencies, CompilationReuse, RebuildDecision, SiteProgramCache, TypstHost,
+    analysis,
 };
 use crate::mode::BuildMode;
 
@@ -26,7 +27,7 @@ pub struct BuildSession {
 
 pub(crate) struct RetainedProducerCaches {
     pub(crate) host: TypstHost,
-    pub(crate) dependencies: PublishedDependencies,
+    pub(crate) dependencies: CompilationDependencies,
     pub(crate) source_analysis: analysis::SourceAnalysisCache,
     pub(crate) site_program: SiteProgramCache,
     pub(crate) configured_assets: crate::asset::ConfiguredAssetInventory,
