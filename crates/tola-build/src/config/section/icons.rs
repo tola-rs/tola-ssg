@@ -218,11 +218,10 @@ preset = \"lucide\"                  # newest release Tola indexes
 
 A preset names a collection Tola already indexes, such as `lucide`, `mdi`, `tabler`, or
 `simple-icons`, so `preset = \"lucide\"` is all you write: Tola supplies the download address and the
-digest of the bytes it serves. Adding `version = \"1.2.136\"` beside the preset holds that release
-still, so a build on another day fetches the same icons.
+digest of the bytes it serves. Add `version = \"1.2.136\"` beside the preset to pin the version.
 
-Write `url` with the `sha256` of its bytes instead when the collection is one Tola does not index,
-or a release it does not pin:
+Write `url` yourself, with the `sha256` of its bytes, when no preset covers the collection or
+version you want:
 
 ```toml
 [icons.collections.brand-remote]

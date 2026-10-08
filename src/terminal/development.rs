@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use anstyle_parse::{DefaultCharAccumulator, Params, Parser, Perform};
 use chrono::{DateTime, Local};
 use crossterm::execute;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
@@ -617,7 +618,7 @@ const ACCEPTED: [Action; 9] = [
 ];
 
 fn styled_paragraph(text: &str) -> Paragraph<'static> {
-    Paragraph::new(Text::from(styled_lines(&text.replace('\t', "    ")))).wrap(Wrap { trim: false })
+    Paragraph::new(Text::from(styled_lines(text))).wrap(Wrap { trim: false })
 }
 
 /// The dev keys whose action still changes the view.
@@ -628,39 +629,77 @@ fn live_actions(rounds: &Rounds) -> Vec<Action> {
         .collect()
 }
 
+/// The dev view's text as styled lines, every control sequence applied or consumed whole.
+///
+/// An SGR sequence chooses the style of what follows; any other sequence, a hyperlink's OSC
+/// included, is control text that never reaches the frame as characters.
 fn styled_lines(text: &str) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::default()];
-    let mut style = Style::default();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let next = rest.find(['\n', '\u{1b}']).unwrap_or(rest.len());
-        push_span(lines.last_mut().expect("one line"), &rest[..next], style);
-        rest = &rest[next..];
-        if let Some(tail) = rest.strip_prefix('\n') {
-            lines.push(Line::default());
-            rest = tail;
-        } else if let Some(tail) = rest.strip_prefix("\u{1b}[") {
-            let end = tail.find(|character: char| ('@'..='~').contains(&character));
-            match end {
-                Some(end) => {
-                    if tail.as_bytes()[end] == b'm' {
-                        apply_sgr(&mut style, &tail[..end]);
-                    }
-                    rest = &tail[end + 1..];
-                }
-                None => break,
+    struct Stylist {
+        lines: Vec<Line<'static>>,
+        run: String,
+        style: Style,
+    }
+
+    impl Stylist {
+        fn flush(&mut self) {
+            if !self.run.is_empty() {
+                push_span(
+                    self.lines.last_mut().expect("one line"),
+                    &self.run,
+                    self.style,
+                );
+                self.run.clear();
             }
-        } else if let Some(tail) = rest.strip_prefix('\u{1b}') {
-            rest = tail;
         }
     }
-    lines
+
+    impl Perform for Stylist {
+        fn print(&mut self, character: char) {
+            self.run.push(character);
+        }
+
+        fn execute(&mut self, byte: u8) {
+            match byte {
+                b'\n' => {
+                    self.flush();
+                    self.lines.push(Line::default());
+                }
+                b'\t' => self.run.push_str("    "),
+                _ => {}
+            }
+        }
+
+        fn csi_dispatch(
+            &mut self,
+            params: &Params,
+            _intermediates: &[u8],
+            _ignore: bool,
+            action: u8,
+        ) {
+            if action == b'm' {
+                self.flush();
+                apply_sgr(&mut self.style, params);
+            }
+        }
+    }
+
+    let mut stylist = Stylist {
+        lines: vec![Line::default()],
+        run: String::new(),
+        style: Style::default(),
+    };
+    let mut parser = Parser::<DefaultCharAccumulator>::new();
+    for byte in text.bytes() {
+        parser.advance(&mut stylist, byte);
+    }
+    stylist.flush();
+    stylist.lines
 }
 
-fn apply_sgr(style: &mut Style, parameters: &str) {
-    let mut values = parameters
-        .split(';')
-        .map(|value| value.parse::<u8>().unwrap_or(0));
+fn apply_sgr(style: &mut Style, params: &Params) {
+    let mut values = params
+        .iter()
+        .map(|values| values.first().copied().unwrap_or(0));
     while let Some(value) = values.next() {
         match value {
             0 => *style = Style::default(),
@@ -669,12 +708,12 @@ fn apply_sgr(style: &mut Style, parameters: &str) {
             4 => *style = style.add_modifier(Modifier::UNDERLINED),
             22 => *style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
             24 => *style = style.remove_modifier(Modifier::UNDERLINED),
-            30..=37 | 90..=97 => *style = style.fg(ansi_color(u16::from(value))),
+            30..=37 | 90..=97 => *style = style.fg(ansi_color(value)),
             38 => {
                 if values.next() == Some(5)
                     && let Some(color) = values.next()
                 {
-                    *style = style.fg(Color::Indexed(color));
+                    *style = style.fg(Color::Indexed(color as u8));
                 }
             }
             39 => *style = style.fg(Color::Reset),
@@ -912,6 +951,26 @@ mod tests {
                     .any(|span| span.style.fg.is_some_and(|color| color != Color::Reset))
             );
         }
+    }
+
+    #[test]
+    fn osc_payloads_never_become_text() {
+        let lines =
+            styled_lines("a\u{1b}]8;;http://127.0.0.1:1/\u{1b}\\link\u{1b}]8;;\u{1b}\\\u{1b}[4mb");
+        let drawn = lines
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(drawn, "alinkb", "a hyperlink's address never becomes text");
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .last()
+                .is_some_and(|span| span.style.add_modifier.contains(Modifier::UNDERLINED)),
+            "the SGR that follows still styles"
+        );
     }
 
     #[test]

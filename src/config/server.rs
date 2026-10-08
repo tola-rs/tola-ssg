@@ -30,8 +30,7 @@ impl Default for ServerConfig {
 impl ServerConfig {
     /// What `tola help config server` adds under its table.
     pub const HELP: &'static str = "\
-The listener `tola dev` and `tola preview` bind so you can read the site in a browser. It
-changes nothing about what the site publishes: `tola build` writes files and never opens a port.
+The listener `tola dev` and `tola preview` bind: `tola build` writes files and never opens a port.
 
 `interface` is the address to bind. It defaults to loopback, reachable only from your own
 machine; an unspecified address such as `0.0.0.0` or `::` accepts connections from the network
@@ -43,15 +42,15 @@ interface = \"127.0.0.1\"    # this machine only; \"0.0.0.0\" accepts the networ
 port = 5277               # 0 asks the operating system for a free port
 ```
 
-Both commands take `--interface` and `--port`, which override this table for that one run:
+Both commands take `--interface` and `--port` to override this table:
 
 ```sh
 tola dev --interface 0.0.0.0 --port 8080
 tola preview --port 0
 ```
 
-The two commands that serve share this listener, while only `tola dev` watches and reloads, so
-that setting lives in `[dev]`.";
+The two commands that serve share this listener; only `tola dev` rebuilds and reloads on file
+changes, and its switch is `[dev]`'s `watch`.";
 }
 
 /// Overrides for the `[server]` section.

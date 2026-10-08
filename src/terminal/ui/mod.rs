@@ -1,6 +1,6 @@
 //! The frame loop and the drawing vocabulary every interactive view shares.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
@@ -22,6 +22,10 @@ pub(crate) mod table;
 
 /// Cancellation is checked between event polls; unchanged surfaces need no redraw.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// How long one frame may answer the input already waiting, before the reader shows the
+/// movement it made.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// What the frame loop does after one action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +71,8 @@ pub(crate) trait Surface {
         None
     }
     /// Whether the session captures the pointer for this screen: the wheel scrolls it.
+    ///
+    /// Read before every frame; the session captures or releases the pointer to match.
     fn wants_mouse(&self) -> bool {
         false
     }
@@ -99,6 +105,8 @@ pub(crate) enum Action {
     Quit,
     /// Leave the current place: close an overlay, or end the view when nothing is open.
     Dismiss,
+    /// Complete the line being edited with the names that reach it.
+    Complete,
     /// Show the next tab.
     NextTab,
     /// Show the previous tab.
@@ -134,9 +142,8 @@ pub(crate) enum Action {
     Preview,
     StopPreview,
     ExportAndEdit,
+    /// Open the preview's address in the default browser.
     OpenBrowser,
-    OpenExport,
-    PreviewOutputs,
     /// Apply the preset at this position of the preset list.
     ApplyPreset(u8),
     /// Select or deselect the row under the cursor.
@@ -189,9 +196,14 @@ impl<B: Backend> Screen<B> {
     where
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        let mut captured = false;
         loop {
             if cancelled() {
                 return Err(InputCancelled.into());
+            }
+            if surface.wants_mouse() != captured {
+                captured = surface.wants_mouse();
+                terminal.set_mouse_capture(captured)?;
             }
             let title = surface.title();
             if title != self.title {
@@ -203,36 +215,36 @@ impl<B: Backend> Screen<B> {
             let drawn = self.draw(terminal, surface, palette);
             terminal.end_synchronized_update()?;
             drawn?;
-            let event = loop {
-                if let Some(event) = session::next_event(terminal, POLL_INTERVAL, cancelled)? {
-                    break Some(event);
-                }
-                if surface.idle() {
-                    break None;
-                }
-            };
-            let run = match event {
-                Some(Event::Key(key)) if key.kind != KeyEventKind::Release => {
-                    if cancels(&key) {
-                        return Err(InputCancelled.into());
+            // One frame per input batch: the events waiting behind the first one are answered
+            // before the next frame, so a wheel burst moves the reader once per frame
+            // instead of leaving its screen behind the pointer.
+            let frame = Instant::now();
+            loop {
+                let Some(event) = session::next_event(terminal, POLL_INTERVAL, cancelled)? else {
+                    if surface.idle() {
+                        break;
                     }
-                    surface.key(&key)
+                    continue;
+                };
+                // A resize is answered by the next frame, which reads the new size.
+                let resized = matches!(event, Event::Resize(_, _));
+                match answer(surface, event)? {
+                    Step::Continue => {}
+                    Step::Done => return Ok(()),
+                    Step::Cancel => return Err(InputCancelled.into()),
                 }
-                Some(Event::Paste(text)) => surface.paste(&text),
-                // The wheel scrolls the same line the arrow keys do; the rest reach the screen,
-                // which acts on a click and ignores what it does not use.
-                Some(Event::Mouse(mouse)) => match mouse.kind {
-                    MouseEventKind::ScrollUp => surface.answer(Action::Up),
-                    MouseEventKind::ScrollDown => surface.answer(Action::Down),
-                    _ => surface.pointer(mouse),
-                },
-                // The next frame picks a resize up from the terminal's size.
-                _ => Step::Continue,
-            };
-            match run {
-                Step::Continue => {}
-                Step::Done => return Ok(()),
-                Step::Cancel => return Err(InputCancelled.into()),
+                while !resized && frame.elapsed() < FRAME_INTERVAL {
+                    let Some(event) = session::next_event(terminal, Duration::ZERO, cancelled)?
+                    else {
+                        break;
+                    };
+                    match answer(surface, event)? {
+                        Step::Continue => {}
+                        Step::Done => return Ok(()),
+                        Step::Cancel => return Err(InputCancelled.into()),
+                    }
+                }
+                break;
             }
         }
     }
@@ -271,6 +283,28 @@ impl<B: Backend> Screen<B> {
         }
         self.terminal.draw(draw).map(|_| ())
     }
+}
+
+/// Answers one event through the screen: a key through its own table, pasted text as an
+/// edit, and the wheel as the same movement the arrow keys make.
+fn answer(surface: &mut impl Surface, event: Event) -> Result<Step> {
+    Ok(match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
+            if cancels(&key) {
+                return Err(InputCancelled.into());
+            }
+            surface.key(&key)
+        }
+        Event::Paste(text) => surface.paste(&text),
+        // The rest reach the screen, which acts on a click and ignores what it does not use.
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => surface.answer(Action::Up),
+            MouseEventKind::ScrollDown => surface.answer(Action::Down),
+            _ => surface.pointer(mouse),
+        },
+        // The next frame picks a resize up from the terminal's size.
+        _ => Step::Continue,
+    })
 }
 
 /// Whether a key press cancels the view.
@@ -419,25 +453,34 @@ mod tests {
         Event::Key(KeyEvent::from(KeyCode::Char('q')))
     }
 
-    /// A surface that records the actions it answers, then quits on the first key.
+    /// A surface that records the actions it answers and the frames it drew, then quits on the
+    /// first key.
     struct Watcher {
         actions: Rc<RefCell<Vec<Action>>>,
+        frames: Rc<RefCell<usize>>,
     }
 
     impl Watcher {
         fn new() -> Self {
             Self {
                 actions: Rc::new(RefCell::new(Vec::new())),
+                frames: Rc::new(RefCell::new(0)),
             }
         }
 
         fn actions(&self) -> Vec<Action> {
             self.actions.borrow().clone()
         }
+
+        fn frames(&self) -> usize {
+            *self.frames.borrow()
+        }
     }
 
     impl Surface for Watcher {
-        fn draw(&mut self, _frame: &mut Frame, _palette: Palette) {}
+        fn draw(&mut self, _frame: &mut Frame, _palette: Palette) {
+            *self.frames.borrow_mut() += 1;
+        }
 
         fn answer(&mut self, action: Action) -> Step {
             self.actions.borrow_mut().push(action);
@@ -536,6 +579,31 @@ mod tests {
             surface.actions(),
             [Action::Down, Action::Up, Action::Quit],
             "the wheel scrolls one line; a move is ignored and the key quits"
+        );
+    }
+
+    #[test]
+    fn wheel_burst_moves_the_view_once_per_frame() {
+        let (sink, _output) = OutputSink::buffered();
+        let mut surface = Watcher::new();
+        let down = || scroll(crossterm::event::MouseEventKind::ScrollDown);
+        let mut terminal = ScriptedTerminal::new((80, 24))
+            .event(down())
+            .event(down())
+            .event(down())
+            .event(quit());
+
+        show(&mut terminal, &sink, &mut surface).unwrap();
+
+        assert_eq!(
+            surface.actions(),
+            [Action::Down, Action::Down, Action::Down, Action::Quit],
+            "every waiting event still moves the reader"
+        );
+        assert_eq!(
+            surface.frames(),
+            1,
+            "the events waiting behind the first share its frame"
         );
     }
 

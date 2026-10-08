@@ -81,64 +81,37 @@ fn resolve_from_environment(lookup: impl Fn(&str) -> Option<String>) -> Option<H
 /// stay English in both languages, because they are what the reader types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HelpText {
-    SiteModel,
     HelpUsage,
-    BuildPaths,
-    SourcePages,
-    PageAddresses,
-    DocumentQueries,
-    WebOutputs,
-    BuildHooks,
-    DefaultValues,
     DemoUsage,
     DemoSource,
     DemoActions,
-    DemoOutputs,
 }
 
 impl HelpText {
     /// The asset key this phrase is translated under.
     fn key(self) -> &'static str {
         match self {
-            Self::SiteModel => "site-model",
             Self::HelpUsage => "help-usage",
-            Self::BuildPaths => "build-paths",
-            Self::SourcePages => "source-pages",
-            Self::PageAddresses => "page-addresses",
-            Self::DocumentQueries => "document-queries",
-            Self::WebOutputs => "web-outputs",
-            Self::BuildHooks => "build-hooks",
-            Self::DefaultValues => "default-values",
             Self::DemoUsage => "demo-usage",
             Self::DemoSource => "demo-source",
             Self::DemoActions => "demo-actions",
-            Self::DemoOutputs => "demo-outputs",
         }
     }
 
     /// The phrase itself, which is what a page without a translation reads.
     fn english(self) -> &'static str {
         match self {
-            Self::SiteModel => {
-                "One root Typst program chooses the pages and other documents to emit. Tola \
-                 combines them with assets and generated files, and validates the complete \
-                 output before publication."
-            }
             Self::HelpUsage => {
-                "These pages are bundled with this executable and need no site. Choose `config`, \
-                 `package`, or `demo`, followed by a table, package, or demo name. Use `tola skill` \
-                 for the site-building guide and `tola <command> --help` for command options. \
-                 Add `-i` to follow links, search, and preview demos."
-            }
-            Self::BuildPaths => {
-                "Choose the entry program, content directory, and published directory"
-            }
-            Self::SourcePages => "Declare metadata, select sources, and emit pages",
-            Self::PageAddresses => "Choose output paths and link pages and assets",
-            Self::DocumentQueries => "Build a table of contents or find incoming links",
-            Self::WebOutputs => "Publish feeds and a sitemap",
-            Self::BuildHooks => {
-                "Run tools before the build, on compiled output, or after publication"
+                "To read a command's own help, use `tola <command> --help`.\n\n\
+                 `tola help` reads Tola's bundled offline documentation: `tola.toml` settings, \
+                 the bundled `@tola/xxx` packages, and small demos (preview the actual HTML they \
+                 publish with `tola preview`, or export one to edit it yourself). It also supports \
+                 `-i`/`--interactive` for interactive browsing: there you can jump by clicking with \
+                 the mouse, or press Tab for quick keyboard navigation. `--lang` switches the \
+                 language (English and Chinese today).\n\n\
+                 Tola also offers `tola skill` for agents to read: with `tola help` and `tola \
+                 skill`, an agent can learn Tola and Typst quickly, help you organize a site, and \
+                 explain Tola's concepts."
             }
             Self::DemoUsage => {
                 "Read complete examples, browse their source files, and preview or export a site when you choose."
@@ -147,14 +120,9 @@ impl HelpText {
                 "Embedded source, read-only. Export the complete demo before editing your own copy."
             }
             Self::DemoActions => {
-                "Use `-i` for Preview, Stop, Export, Export-and-edit, Open-export, and Open-browser. From the command line, add `--preview` or `--export DIR`; `--edit` opens that exported copy in your editor."
-            }
-            Self::DemoOutputs => {
-                "Preview this demo to inspect the files it actually publishes. Opening this page alone does not start a build."
-            }
-            Self::DefaultValues => {
-                "Defaults shown below; `tola config` reports resolved paths and selected settings \
-                 for your site."
+                "Use `-i` for Preview, Stop, Export, Export-and-edit, and Open-browser. From the \
+                 command line, add `--preview` or `--export DIR`; `--edit` opens that exported \
+                 copy in your editor. A running preview shows the address it serves."
             }
         }
     }
@@ -488,35 +456,17 @@ mod tests {
     #[test]
     fn phrases_have_translations() {
         for phrase in [
-            HelpText::SiteModel,
             HelpText::HelpUsage,
-            HelpText::BuildPaths,
-            HelpText::SourcePages,
-            HelpText::PageAddresses,
-            HelpText::DocumentQueries,
-            HelpText::WebOutputs,
-            HelpText::BuildHooks,
-            HelpText::DefaultValues,
             HelpText::DemoUsage,
             HelpText::DemoSource,
             HelpText::DemoActions,
-            HelpText::DemoOutputs,
         ] {
             // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
             match phrase {
-                HelpText::SiteModel
-                | HelpText::HelpUsage
-                | HelpText::BuildPaths
-                | HelpText::SourcePages
-                | HelpText::PageAddresses
-                | HelpText::DocumentQueries
-                | HelpText::WebOutputs
-                | HelpText::BuildHooks
-                | HelpText::DefaultValues
+                HelpText::HelpUsage
                 | HelpText::DemoUsage
                 | HelpText::DemoSource
-                | HelpText::DemoActions
-                | HelpText::DemoOutputs => {}
+                | HelpText::DemoActions => {}
             }
             let translated = text(HelpLanguage::SimplifiedChinese, phrase);
             assert_ne!(translated, phrase.english(), "{:?}", phrase.key());

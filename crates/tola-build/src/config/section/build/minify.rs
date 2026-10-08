@@ -3,18 +3,21 @@
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
 
-/// Minification applied to generated HTML, stylesheets, and scripts before they are published.
+/// Minification, before publication, of the HTML Typst compiles and of the CSS and JavaScript
+/// files in `[assets]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build.minify")]
 pub struct MinifyConfig {
-    /// Minify the HTML of every published page.
+    /// Whether to minify the HTML of every published page.
     pub html: bool,
 
-    /// Minify CSS sources declared under `[assets]` and the stylesheets pages write.
+    /// Whether to minify CSS sources declared under `[assets]` and the `<style>` elements a page
+    /// embeds.
     pub css: bool,
 
-    /// Minify `.js` and `.mjs` sources declared under `[assets]` and the scripts pages write.
+    /// Whether to minify `.js` and `.mjs` sources declared under `[assets]` and the `<script>`
+    /// elements a page embeds, modules included.
     pub javascript: bool,
 }
 
@@ -31,20 +34,13 @@ impl Default for MinifyConfig {
 impl MinifyConfig {
     /// What `tola help config build.minify` adds under its table.
     pub const HELP: &'static str = "\
-Minification happens while building the outputs, so `check`, `dev`, and `preview` use it too.
-Tola compacts the HTML it exports, CSS and `.js`/`.mjs` files declared in `[assets]`, and inline
-stylesheets and scripts. Images, fonts, and `generate-outputs` hook files keep their own bytes.
-All three switches default to `true`:
+Minification happens while building the outputs, and `check`, `dev`, and `preview` all decide
+whether to minify from `[build.minify]`. Because minification is fast, all three switches default
+to `true`.
 
-```toml
-[build.minify]
-html = true
-css = true
-javascript = true
-```
-
-Set a switch to `false` to skip that transformation. `--minify=false` disables all three for one
-invocation. Configured asset URLs identify the bytes after minification, so cache busting tracks
-what the browser receives. A configured CSS or JavaScript asset that cannot be minified produces
-a warning and keeps its original bytes.";
+`--minify=false` disables all three for one invocation. With `cache-busting = true` under
+`[assets]`, `asset-url` (from `@tola/address`) returns a URL with a `?h=` appended, identifying
+the bytes after minification — the content the browser actually receives; the URL changes when
+that content changes. If CSS or JavaScript cannot be minified, it produces a warning and keeps
+its original content.";
 }

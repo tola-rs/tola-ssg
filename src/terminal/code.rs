@@ -24,6 +24,7 @@ pub(crate) fn spans(source: &str, language: &str) -> Vec<(Range<usize>, CodeKind
     match language {
         "typ" | "typst" | "typc" | "typst-code" => typst_spans(source, language == "typst-code"),
         "toml" => toml_spans(source),
+        "json" => json_spans(source),
         "sh" | "bash" | "zsh" | "shell" | "console" => shell_spans(source),
         "just" => just_spans(source),
         "rust" => rust_spans(source),
@@ -228,8 +229,135 @@ fn toml_value(value: &toml_edit::Value, runs: &mut Vec<(Range<usize>, CodeKind)>
         }
     }
 }
+/// The runs of a JSON fence: each member name, string, number, and keyword.
+///
+/// A string whose next non-whitespace byte is `:` is a member name, the role a TOML key takes;
+/// every other string is a value. A `\` escape pair never ends a string.
+fn json_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
+    let mut runs = Vec::new();
+    let mut index = 0;
+    while index < source.len() {
+        let character = source[index..]
+            .chars()
+            .next()
+            .expect("index is a char boundary");
+        match character {
+            '"' => {
+                let end = json_string_end(source, index);
+                let kind = if source[end..].trim_start().starts_with(':') {
+                    CodeKind::Literal
+                } else {
+                    CodeKind::String
+                };
+                push(&mut runs, index, end, Some(kind));
+                index = end;
+            }
+            '0'..='9' | '-' => {
+                let end = source[index..]
+                    .find(|character: char| {
+                        !(character.is_ascii_digit()
+                            || matches!(character, '.' | 'e' | 'E' | '+' | '-'))
+                    })
+                    .map(|end| index + end)
+                    .unwrap_or(source.len());
+                push(&mut runs, index, end, Some(CodeKind::Number));
+                index = end;
+            }
+            character if character.is_ascii_alphabetic() => {
+                let end = source[index..]
+                    .find(|character: char| !character.is_ascii_alphabetic())
+                    .map(|end| index + end)
+                    .unwrap_or(source.len());
+                if matches!(&source[index..end], "true" | "false" | "null") {
+                    push(&mut runs, index, end, Some(CodeKind::Keyword));
+                }
+                index = end;
+            }
+            _ => index += character.len_utf8(),
+        }
+    }
+    runs
+}
 
-/// The runs of a shell fence: its comment, its command word, and its double-quoted words.
+/// The byte after the JSON string that starts at `start`: its closing quote, or the source's end
+/// when it never closes. A `\` escape pair never ends the string.
+fn json_string_end(source: &str, start: usize) -> usize {
+    let mut escaped = false;
+    for (offset, character) in source[start + 1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '"' => return start + 1 + offset + 1,
+            _ => {}
+        }
+    }
+    source.len()
+}
+
+/// Every occurrence of `character` in `line` that stands outside a quoted word, with whether it
+/// also starts a word.
+///
+/// A single-quoted word closes at its next `'`, the way the shell reads one and just's raw
+/// strings spell one; a `\` escape pair inside a double-quoted word does not end it, and a `\`
+/// outside one escapes the character that follows.
+fn outside_quotes(line: &str, character: char) -> Vec<(usize, bool)> {
+    let mut found = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut word_start = true;
+    for (index, current) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            word_start = false;
+            continue;
+        }
+        if let Some(open) = quote {
+            match current {
+                '\\' if open == '"' => escaped = true,
+                _ if current == open => quote = None,
+                _ => {}
+            }
+            word_start = false;
+            continue;
+        }
+        match current {
+            '\\' => escaped = true,
+            '"' | '\'' => {
+                quote = Some(current);
+                word_start = false;
+            }
+            _ if current == character => {
+                found.push((index, word_start));
+                word_start = false;
+            }
+            _ => {
+                word_start = current.is_whitespace()
+                    || matches!(current, ';' | '|' | '&' | '(' | ')' | '<' | '>');
+            }
+        }
+    }
+    found
+}
+
+/// The byte index a shell line's comment starts at, if it has one: a `#` outside a quoted word
+/// and at the start of a word, so `echo a#b` keeps its word while `echo a # b` comments it out.
+fn shell_comment_start(line: &str) -> Option<usize> {
+    outside_quotes(line, '#')
+        .into_iter()
+        .find(|(_, word_start)| *word_start)
+        .map(|(index, _)| index)
+}
+
+/// The byte index one justfile line's own comment starts at, if it has one: the first `#`
+/// outside a quoted word, so `x := "#1"` keeps its value while `x := b#c` comments it out.
+fn just_comment_start(line: &str) -> Option<usize> {
+    outside_quotes(line, '#').first().map(|(index, _)| *index)
+}
+
+/// The runs of a shell fence: its comment, its command word, and its quoted words.
 fn shell_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
     let mut runs = Vec::new();
     let mut offset = 0;
@@ -237,8 +365,8 @@ fn shell_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
         let start = offset;
         offset += line.len();
         let body = line.strip_suffix('\n').unwrap_or(line);
-        let commented = body.find('#');
-        let code = match commented {
+        let comment = shell_comment_start(body);
+        let code = match comment {
             Some(comment) => &body[..comment],
             None => body,
         };
@@ -258,7 +386,7 @@ fn shell_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
                 Some(CodeKind::String),
             );
         }
-        if let Some(comment) = commented {
+        if let Some(comment) = comment {
             push(
                 &mut runs,
                 start + comment,
@@ -270,7 +398,12 @@ fn shell_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
     runs
 }
 
-/// The runs of a justfile fence: each recipe header, its body commands, and its comments.
+/// The runs of a justfile fence: each recipe's name and dependencies, the command each body
+/// line runs, the words its lines quote, and its comments.
+///
+/// A recipe body is shell text — just passes each line to the shell — so a body line reads the
+/// way a shell line does, while one `{{ … }}` interpolation splices a just value into it. A
+/// blank line belongs to the body above it: `body : INDENT line+ DEDENT`.
 fn just_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
     let mut runs = Vec::new();
     let mut offset = 0;
@@ -280,33 +413,27 @@ fn just_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
         offset += line.len();
         let body = line.strip_suffix('\n').unwrap_or(line);
         if body.trim().is_empty() {
-            in_recipe = false;
             continue;
         }
         let indented = body.starts_with(char::is_whitespace);
-        let commented = body.find('#');
-        let code = match commented {
+        let comment = if indented {
+            shell_comment_start(body)
+        } else {
+            just_comment_start(body)
+        };
+        let code = match comment {
             Some(comment) => &body[..comment],
             None => body,
         };
-        let (word, kind) = if indented {
-            (
-                in_recipe.then(|| command_word(code)).flatten(),
-                CodeKind::Keyword,
-            )
+        if indented {
+            if in_recipe {
+                just_body(code, start, &mut runs);
+            }
         } else {
             in_recipe = true;
-            (setting_word(code), CodeKind::Literal)
-        };
-        if let Some((word, word_start)) = word {
-            push(
-                &mut runs,
-                start + word_start,
-                start + word_start + word.len(),
-                Some(kind),
-            );
+            just_header(code, start, &mut runs);
         }
-        if let Some(comment) = commented {
+        if let Some(comment) = comment {
             push(
                 &mut runs,
                 start + comment,
@@ -316,6 +443,154 @@ fn just_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
         }
     }
     runs
+}
+
+/// The runs of one recipe head or statement line: the name it declares, the words its
+/// parameters or value quote, and — after a recipe's `:` — the dependencies it runs.
+fn just_header(code: &str, start: usize, runs: &mut Vec<(Range<usize>, CodeKind)>) {
+    if let Some((word, word_start)) = setting_word(code) {
+        push(
+            runs,
+            start + word_start,
+            start + word_start + word.len(),
+            Some(CodeKind::Literal),
+        );
+    }
+    let (parameters, dependencies) = match separating_colon(code) {
+        Some(colon) => (&code[..colon], Some(colon + 1)),
+        None => (code, None),
+    };
+    for quoted in quoted_words(parameters) {
+        push(
+            runs,
+            start + quoted.start,
+            start + quoted.end,
+            Some(CodeKind::String),
+        );
+    }
+    if let Some(from) = dependencies {
+        just_dependencies(code, from, start, runs);
+    }
+}
+
+/// The runs of the dependencies one recipe head names: each target, and each word it quotes.
+fn just_dependencies(
+    code: &str,
+    from: usize,
+    start: usize,
+    runs: &mut Vec<(Range<usize>, CodeKind)>,
+) {
+    let dependencies = &code[from..];
+    let quoted = quoted_words(dependencies);
+    let mut index = 0;
+    while index < dependencies.len() {
+        if let Some(span) = quoted.iter().find(|span| span.start == index) {
+            push(
+                runs,
+                start + from + span.start,
+                start + from + span.end,
+                Some(CodeKind::String),
+            );
+            index = span.end;
+            continue;
+        }
+        let character = dependencies[index..]
+            .chars()
+            .next()
+            .expect("index is a char boundary");
+        if character.is_alphabetic() || character == '_' {
+            let end = dependencies[index..]
+                .find(|character: char| {
+                    !(character.is_alphanumeric() || character == '_' || character == '-')
+                })
+                .map(|end| index + end)
+                .unwrap_or(dependencies.len());
+            push(
+                runs,
+                start + from + index,
+                start + from + end,
+                Some(CodeKind::Literal),
+            );
+            index = end;
+            continue;
+        }
+        index += character.len_utf8();
+    }
+}
+
+/// The runs of one recipe body line: the command it runs, the words it quotes, and the just
+/// values it splices into them.
+fn just_body(code: &str, start: usize, runs: &mut Vec<(Range<usize>, CodeKind)>) {
+    let splices = interpolations(code);
+    let mut pieces = Vec::new();
+    if let Some((word, word_start)) = command_word(code) {
+        let span = word_start..word_start + word.len();
+        if !splices
+            .iter()
+            .any(|hole| hole.start < span.end && span.start < hole.end)
+        {
+            pieces.push((span, CodeKind::Keyword));
+        }
+    }
+    for quoted in quoted_words(code) {
+        pieces.extend(
+            remaining(quoted, &splices)
+                .into_iter()
+                .map(|span| (span, CodeKind::String)),
+        );
+    }
+    pieces.extend(splices.into_iter().map(|span| (span, CodeKind::Literal)));
+    pieces.sort_by_key(|(span, _)| span.start);
+    for (span, kind) in pieces {
+        push(runs, start + span.start, start + span.end, Some(kind));
+    }
+}
+
+/// The `{{ … }}` spans of `code`: each splices a just value into the line it stands in.
+///
+/// An opening `{{` without a closing `}}` ends the scan: nothing after it closes either.
+fn interpolations(code: &str) -> Vec<Range<usize>> {
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while let Some(open) = code[index..].find("{{") {
+        let open = index + open;
+        let Some(close) = code[open + 2..].find("}}") else {
+            break;
+        };
+        let close = open + 2 + close + 2;
+        spans.push(open..close);
+        index = close;
+    }
+    spans
+}
+
+/// The parts of `span` that remain when the spans of `holes` — given in source order — are cut
+/// out, in order.
+fn remaining(span: Range<usize>, holes: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut parts = Vec::new();
+    let mut start = span.start;
+    for hole in holes {
+        if hole.end <= start || span.end <= hole.start {
+            continue;
+        }
+        if start < hole.start {
+            parts.push(start..hole.start);
+        }
+        start = hole.end;
+    }
+    if start < span.end {
+        parts.push(start..span.end);
+    }
+    parts
+}
+
+/// The byte index of the `:` that separates one recipe head's parameters from its dependencies:
+/// the first colon outside a quoted word that opens no `:=`.
+fn separating_colon(code: &str) -> Option<usize> {
+    outside_quotes(code, ':')
+        .into_iter()
+        .map(|(index, _)| index)
+        .find(|index| !code[index + 1..].starts_with('='))
 }
 
 /// The first whitespace-delimited word of `line`, with the byte index it starts at.
@@ -415,18 +690,39 @@ fn skip_rust_literal(source: &str, start: usize, quote: char) -> usize {
     source.len()
 }
 
-/// The spans of the double-quoted words in `source`.
+/// The spans of the quoted words in `source`: each opening quote through its closing one, or to
+/// the source's end when it never closes. A `\` escape pair does not end a double-quoted word,
+/// and a single-quoted word ends at its next `'`, as a shell word and just's raw string do.
 fn quoted_words(source: &str) -> Vec<Range<usize>> {
     let mut words = Vec::new();
     let mut index = 0;
-    while let Some(open) = source[index..].find('"') {
-        let open = index + open;
-        let Some(close) = source[open + 1..].find('"') else {
-            break;
-        };
-        let close = open + 1 + close + 1;
-        words.push(open..close);
-        index = close;
+    while index < source.len() {
+        let quote = source[index..]
+            .chars()
+            .next()
+            .expect("index is a char boundary");
+        if quote != '"' && quote != '\'' {
+            index += quote.len_utf8();
+            continue;
+        }
+        let mut escaped = false;
+        let mut end = source.len();
+        for (offset, character) in source[index + quote.len_utf8()..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match character {
+                '\\' if quote == '"' => escaped = true,
+                _ if character == quote => {
+                    end = index + quote.len_utf8() + offset + quote.len_utf8();
+                    break;
+                }
+                _ => {}
+            }
+        }
+        words.push(index..end);
+        index = end;
     }
     words
 }
@@ -506,16 +802,40 @@ mod tests {
         );
     }
 
+    /// A JSON fence colours each member name apart from the string it maps to.
+    #[test]
+    fn json_fence_styles_keys_and_values() {
+        let source = "{\"jobs\": 4, \"on\": true, \"note\": null, \"title\": \"a\\\"b\"}\n";
+        let runs = runs_of(source, "json");
+
+        assert_eq!(
+            runs,
+            [
+                ("\"jobs\"", CodeKind::Literal),
+                ("4", CodeKind::Number),
+                ("\"on\"", CodeKind::Literal),
+                ("true", CodeKind::Keyword),
+                ("\"note\"", CodeKind::Literal),
+                ("null", CodeKind::Keyword),
+                ("\"title\"", CodeKind::Literal),
+                ("\"a\\\"b\"", CodeKind::String),
+            ]
+        );
+    }
+
     /// A shell fence colours its comment, the command it runs, and each quoted word.
     #[test]
     fn shell_fence_styles_command_and_comment() {
-        let source = "tola vendor          # commit the result\nls \"$TOLA_HOOK_TEMP_DIR\"\n";
+        let source =
+            "tola vendor          # commit the result\nls \"$TOLA_HOOK_TEMP_DIR\"\necho 'a # b'\n";
         let runs = runs_of(source, "sh");
 
         assert_eq!(runs[0], ("tola", CodeKind::Keyword));
         assert_eq!(runs[1], ("# commit the result", CodeKind::Comment));
         assert_eq!(runs[2], ("ls", CodeKind::Keyword));
         assert_eq!(runs[3], ("\"$TOLA_HOOK_TEMP_DIR\"", CodeKind::String));
+        assert_eq!(runs[4], ("echo", CodeKind::Keyword));
+        assert_eq!(runs[5], ("'a # b'", CodeKind::String));
     }
 
     /// A justfile fence colours each recipe header and every command in its body.
@@ -530,6 +850,75 @@ mod tests {
                 ("search", CodeKind::Literal),
                 ("pagefind", CodeKind::Keyword),
                 ("echo", CodeKind::Keyword),
+            ]
+        );
+    }
+
+    /// A justfile fence colours the dependencies a recipe head names after its `:`.
+    #[test]
+    fn just_fence_styles_recipe_dependencies() {
+        let runs = runs_of("build target: fmt test\n", "just");
+
+        assert_eq!(
+            runs,
+            [
+                ("build", CodeKind::Literal),
+                ("fmt", CodeKind::Literal),
+                ("test", CodeKind::Literal),
+            ]
+        );
+    }
+
+    /// A recipe body continues across a blank line: `body : INDENT line+ DEDENT`.
+    #[test]
+    fn recipe_body_continues_after_blank_line() {
+        let runs = runs_of("fmt:\n    cargo fmt\n\n    cargo clippy\n", "just");
+
+        assert_eq!(
+            runs,
+            [
+                ("fmt", CodeKind::Literal),
+                ("cargo", CodeKind::Keyword),
+                ("cargo", CodeKind::Keyword),
+            ]
+        );
+    }
+
+    /// A `#` inside a quoted word opens no comment.
+    #[test]
+    fn quoted_hash_opens_no_comment() {
+        let runs = runs_of("x := \"#1\"\n", "just");
+
+        assert_eq!(
+            runs,
+            [("x", CodeKind::Literal), ("\"#1\"", CodeKind::String)]
+        );
+    }
+
+    /// In shell text, a `#` inside a word opens no comment.
+    #[test]
+    fn word_hash_opens_no_comment() {
+        let runs = runs_of("run:\n    echo a#b\n", "just");
+
+        assert_eq!(
+            runs,
+            [("run", CodeKind::Literal), ("echo", CodeKind::Keyword)]
+        );
+    }
+
+    /// An interpolation keeps its own run inside the quoted word it stands in.
+    #[test]
+    fn interpolation_has_its_own_run() {
+        let runs = runs_of("fmt:\n    echo \"{{target}}\"\n", "just");
+
+        assert_eq!(
+            runs,
+            [
+                ("fmt", CodeKind::Literal),
+                ("echo", CodeKind::Keyword),
+                ("\"", CodeKind::String),
+                ("{{target}}", CodeKind::Literal),
+                ("\"", CodeKind::String),
             ]
         );
     }

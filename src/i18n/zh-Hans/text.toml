@@ -3,16 +3,7 @@
 # headings and every other label stay English in both languages.
 
 [text]
-site-model = "根 Typst 程序决定生成哪些页面和其他文档。Tola 将它们与资源、生成文件合并，在发布前校验完整的 output。"
-help-usage = "这些帮助页随当前可执行文件提供，无需站点即可查阅。选择 `config`、`package` 或 `demo`，再指定表、包或 Demo 名。建站流程见 `tola skill`，命令选项见 `tola <command> --help`。加上 `-i` 可跟随链接、搜索内容并预览 Demo。"
-build-paths = "设置入口程序、内容目录与发布目录"
-source-pages = "声明 metadata、选择源并生成页面"
-page-addresses = "选择 output 路径，链接页面与资源"
-document-queries = "生成页内目录或查找入链"
-web-outputs = "生成 feed 与 sitemap"
-build-hooks = "在构建前、编译输出上或发布后运行工具"
-default-values = "下面展示默认值；`tola config` 可查看本站解析后的路径与部分设置。"
+help-usage = "查看 CLI 命令本身，请用 `tola <command> --help`。\n\n`tola help` 用于查看 Tola 内置的离线文档：`tola.toml` 的配置选项、`@tola/xxx` 的内置 packages、以及一些用于演示的 demo（可以用 `tola preview` 预览实际发布的 HTML 产物，也可以导出后自行编辑体验）。`tola help` 还支持 `-i`/`--interactive` 交互式浏览；在该模式下，你可以直接用鼠标点击进行跳转，或按下 Tab 进行基于键盘的快速导航。`--lang` 切换语言（目前只有中英文）。\n\nTola 还提供 `tola skill` 命令方便 agent 读取；agent 可以通过 `tola help` 与 `tola skill` 快速了解 Tola 与 Typst，辅助用户组织站点，并向用户讲解 Tola 的概念。"
 demo-usage = "阅读完整示例、浏览源文件，并在需要时预览或导出站点。"
 demo-source = "内嵌源文件，只读。先导出完整 Demo，再编辑自己的副本。"
-demo-actions = "使用 `-i` 进入 Preview、Stop、Export、Export-and-edit、Open-export 与 Open-browser。命令行可添加 `--preview` 或 `--export DIR`；`--edit` 用编辑器打开导出的副本。"
-demo-outputs = "预览这个 Demo，即可查看它实际发布的文件。只打开此页不会开始构建。"
+demo-actions = "使用 `-i` 进入 Preview、Stop、Export、Export-and-edit 与 Open-browser。命令行可添加 `--preview` 或 `--export DIR`；`--edit` 用编辑器打开导出的副本。预览运行时，屏幕上会显示它服务的地址。"

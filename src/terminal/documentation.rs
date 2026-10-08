@@ -2,8 +2,9 @@ use std::ops::Range;
 
 use owo_colors::Style as OwoStyle;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag};
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+use super::wrap;
 
 pub(crate) struct Documentation {
     columns: Option<usize>,
@@ -96,7 +97,7 @@ impl Documentation {
     }
 
     fn wrapped(&self, text: &StyledText, indent: &str) -> String {
-        wrap_ranges(
+        wrap::line_ranges(
             &text.text,
             self.columns().saturating_sub(indent.width()).max(1),
         )
@@ -209,17 +210,24 @@ impl Documentation {
         let available = self.columns().saturating_sub(indent.width());
         let minimum: Vec<usize> = (0..column_count)
             .map(|column| {
+                column_minimum(
+                    rows.iter()
+                        .filter_map(|row| row.get(column))
+                        .map(|cell| cell.text.as_str()),
+                )
+            })
+            .collect();
+        let natural: Vec<usize> = (0..column_count)
+            .map(|column| {
                 rows.iter()
                     .filter_map(|row| row.get(column))
-                    .flat_map(|cell| cell.text.split_whitespace())
-                    .map(UnicodeWidthStr::width)
+                    .map(|cell| cell.text.width())
                     .max()
                     .unwrap_or(0)
-                    .clamp(12, 20)
             })
             .collect();
         let separators = (column_count - 1) * 3;
-        if minimum.iter().sum::<usize>() + separators > available {
+        let Some(widths) = fitted_widths(&minimum, &natural, separators, available) else {
             return rows
                 .iter()
                 .skip(1)
@@ -239,26 +247,13 @@ impl Documentation {
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n");
-        }
-        let mut widths = minimum.clone();
-        for row in &rows {
-            for (width, cell) in widths.iter_mut().zip(row) {
-                *width = (*width).max(cell.text.width());
-            }
-        }
-        while widths.iter().sum::<usize>() + separators > available {
-            let column = (0..column_count)
-                .filter(|&column| widths[column] > minimum[column])
-                .max_by_key(|&column| widths[column])
-                .expect("minimum table widths fit");
-            widths[column] -= 1;
-        }
+        };
         let mut lines = Vec::new();
         for (row_number, row) in rows.iter().enumerate() {
             let cell_lines: Vec<Vec<Range<usize>>> = row
                 .iter()
                 .zip(&widths)
-                .map(|(cell, width)| wrap_ranges(&cell.text, *width))
+                .map(|(cell, width)| wrap::line_ranges(&cell.text, *width))
                 .collect();
             let height = cell_lines.iter().map(Vec::len).max().unwrap_or(1);
             for line_number in 0..height {
@@ -509,50 +504,45 @@ fn inline_text(nodes: &[MarkdownNode<'_>], style: Style, text: &mut StyledText) 
     }
 }
 
-fn wrap_ranges(text: &str, columns: usize) -> Vec<Range<usize>> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut offset = 0;
-    let mut width = 0;
-    let mut whitespace = None;
-    while offset < text.len() {
-        let grapheme = text[offset..].graphemes(true).next().expect("text remains");
-        if grapheme == "\n" {
-            lines.push(start..offset);
-            offset += grapheme.len();
-            start = offset;
-            width = 0;
-            whitespace = None;
-            continue;
-        }
-        if width + grapheme.width() > columns && offset > start {
-            if grapheme.chars().all(char::is_whitespace) {
-                lines.push(start..offset);
-                offset += grapheme.len();
-            } else if let Some((end, next)) = whitespace {
-                lines.push(start..end);
-                offset = next;
-            } else {
-                lines.push(start..offset);
-            }
-            while offset < text.len() && text.as_bytes()[offset] == b' ' {
-                offset += 1;
-            }
-            start = offset;
-            width = 0;
-            whitespace = None;
-            continue;
-        }
-        if grapheme.chars().all(char::is_whitespace) && offset > start {
-            whitespace = Some((offset, offset + grapheme.len()));
-        }
-        width += grapheme.width();
-        offset += grapheme.len();
+/// The narrowest width one column may take: the widest word its cells hold, kept within the
+/// bounds a name stays whole at.
+///
+/// The plain renderer and the help reader size their table columns by the same rules.
+pub(crate) fn column_minimum<'a>(cells: impl Iterator<Item = &'a str>) -> usize {
+    cells
+        .flat_map(str::split_whitespace)
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 20)
+}
+
+/// The width each column takes inside `available`, or `None` when even the narrowest columns
+/// do not fit; `separators` is the room the gaps between the columns need.
+///
+/// The plain renderer and the help reader size their table columns by the same rules.
+pub(crate) fn fitted_widths(
+    minimum: &[usize],
+    natural: &[usize],
+    separators: usize,
+    available: usize,
+) -> Option<Vec<usize>> {
+    if minimum.iter().sum::<usize>() + separators > available {
+        return None;
     }
-    if start < text.len() || lines.is_empty() {
-        lines.push(start..text.len());
+    let mut widths = minimum
+        .iter()
+        .zip(natural)
+        .map(|(minimum, natural)| (*natural).max(*minimum))
+        .collect::<Vec<_>>();
+    while widths.iter().sum::<usize>() + separators > available {
+        let column = (0..widths.len())
+            .filter(|&column| widths[column] > minimum[column])
+            .max_by_key(|&column| widths[column])
+            .expect("the minimum widths fit");
+        widths[column] -= 1;
     }
-    lines
+    Some(widths)
 }
 
 #[cfg(test)]
@@ -613,6 +603,14 @@ mod tests {
         assert_eq!(
             Documentation::new(Some(7), false).render("one two three"),
             "one two\nthree\n"
+        );
+    }
+
+    #[test]
+    fn cjk_breaks_fill_lines() {
+        assert_eq!(
+            Documentation::new(Some(10), false).render("ab 中文中文中文"),
+            "ab 中文中\n文中文\n"
         );
     }
 

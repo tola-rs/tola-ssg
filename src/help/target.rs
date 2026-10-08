@@ -20,34 +20,12 @@ pub(crate) enum PageId {
     PackageSelection { name: String, exports: Vec<String> },
     Demo { id: String },
     DemoFile { id: String, path: String },
-    DemoOutputs { id: String },
-    DemoOutput { id: String, path: String },
 }
 
 impl PageId {
-    pub(crate) fn selector(&self) -> Option<String> {
-        match self {
-            Self::Overview => None,
-            Self::Index(HelpCategory::Config) => Some("config".into()),
-            Self::Index(HelpCategory::Packages) => Some("package".into()),
-            Self::Index(HelpCategory::Demos) => Some("demo".into()),
-            Self::Config { section } => Some(format!("config {section}")),
-            Self::Package { name } => Some(format!("package {name}")),
-            Self::PackageSelection { name, exports } => {
-                Some(format!("package {name} {}", exports.join(" ")))
-            }
-            Self::Demo { id } => Some(format!("demo {id}")),
-            Self::DemoFile { id, path } => Some(format!("demo {id} {}", shell_argument(path))),
-            Self::DemoOutputs { .. } | Self::DemoOutput { .. } => Some(self.uri()),
-        }
-    }
-
     pub(crate) fn demo(&self) -> Option<&str> {
         match self {
-            Self::Demo { id }
-            | Self::DemoFile { id, .. }
-            | Self::DemoOutputs { id }
-            | Self::DemoOutput { id, .. } => Some(id),
+            Self::Demo { id } | Self::DemoFile { id, .. } => Some(id),
             _ => None,
         }
     }
@@ -74,11 +52,6 @@ impl PageId {
             Self::Demo { id } => vec![id],
             Self::DemoFile { id, path } => std::iter::once(id.as_str())
                 .chain(std::iter::once("files"))
-                .chain(path.split('/'))
-                .collect(),
-            Self::DemoOutputs { id } => vec![id, "outputs"],
-            Self::DemoOutput { id, path } => std::iter::once(id.as_str())
-                .chain(std::iter::once("outputs"))
                 .chain(path.split('/'))
                 .collect(),
         };
@@ -194,15 +167,6 @@ impl LinkTarget {
                     path: relative_path(&path.join("/"))?,
                 }
             }
-            ("demos", [id, "outputs"]) if identifier(id) && query.is_empty() => {
-                PageId::DemoOutputs { id: (*id).into() }
-            }
-            ("demos", [id, "outputs", path @ ..]) if identifier(id) && query.is_empty() => {
-                PageId::DemoOutput {
-                    id: (*id).into(),
-                    path: relative_path(&path.join("/"))?,
-                }
-            }
             _ => return None,
         };
         match uri.fragment() {
@@ -276,17 +240,6 @@ fn fragment_anchor(fragment: &str) -> Option<Anchor> {
     ))
 }
 
-fn shell_argument(argument: &str) -> String {
-    if argument
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'-' | b'_'))
-    {
-        argument.into()
-    } else {
-        format!("'{}'", argument.replace('\'', "'\\''"))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,13 +306,6 @@ mod tests {
             PageId::DemoFile {
                 id: "backlinks".into(),
                 path: "site/100% notes.typ".into(),
-            },
-            PageId::DemoOutputs {
-                id: "backlinks".into(),
-            },
-            PageId::DemoOutput {
-                id: "backlinks".into(),
-                path: "index.html".into(),
             },
         ] {
             let target = LinkTarget::Page(page.clone());

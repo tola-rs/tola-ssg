@@ -2,16 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::writes::FileWrites;
 use tola_build::config::SiteConfigSchema;
 use tola_build::config::section::build::hooks::{
     BeforeBuildHookConfig, CommandOutput, HooksConfig, OutputCommandConfig,
 };
 use tola_build::config::section::{
-    AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlPrefix, AssetsConfig,
-    BuildSectionConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig, VendorConfig,
+    AssetTreeDeclaration, AssetUrlPrefix, AssetsConfig, BuildSectionConfig, IconsConfig,
+    SiteSectionConfig, TypstSectionConfig, VendorConfig,
 };
-
-use crate::writes::FileWrites;
 
 use super::features::{Effects, Hook, HookStage};
 
@@ -19,9 +18,6 @@ pub(super) const CONFIG_PATH: &str = "tola.toml";
 
 /// The configuration the scaffold's effects require: default site settings, the browser-delivered
 /// asset subtree mapped, and vendoring pointed at `vendor`.
-///
-/// A Tailwind build's generated stylesheet publishes through an exact `files` entry, which owns
-/// its URL instead of the tree's path.
 pub(super) fn schema(effects: &Effects) -> SiteConfigSchema {
     // Only the browser-delivered subtree is mapped: compiler fonts and processing inputs
     // elsewhere under `static` stay unpublished unless another producer selects them.
@@ -31,16 +27,7 @@ pub(super) fn schema(effects: &Effects) -> SiteConfigSchema {
             AssetUrlPrefix::parse("/assets").expect("the scaffold asset prefix is valid"),
         )],
         cache_busting: effects.cache_busting,
-        files: effects
-            .asset_files
-            .iter()
-            .map(|(source, url)| {
-                AssetFileDeclaration::new(
-                    *source,
-                    AssetUrl::parse(url).expect("the scaffold stylesheet URL is valid"),
-                )
-            })
-            .collect(),
+        ..AssetsConfig::default()
     };
     let build = BuildSectionConfig {
         hooks: HooksConfig {
@@ -284,15 +271,7 @@ mod tests {
             [PathBuf::from("static/web-assets/tailwind-output/site.css")]
         );
         assert!(schema.assets.cache_busting);
-        assert_eq!(schema.assets.files.len(), 1);
-        assert_eq!(
-            schema.assets.files[0].source(),
-            Path::new("static/web-assets/tailwind-output/site.css")
-        );
-        assert_eq!(
-            schema.assets.files[0].url().as_str(),
-            "/assets/css/site.css"
-        );
+        assert!(schema.assets.files.is_empty());
     }
 
     #[test]

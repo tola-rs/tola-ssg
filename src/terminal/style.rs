@@ -140,6 +140,11 @@ impl Palette {
         self.view_style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
     }
 
+    /// The style of the cells one mouse drag selected.
+    pub(crate) fn selection_style(self) -> Style {
+        self.view_style(Style::default().add_modifier(Modifier::REVERSED))
+    }
+
     /// The style of the search hit the reader is on.
     pub(crate) fn hit_style(self) -> Style {
         self.view_style(

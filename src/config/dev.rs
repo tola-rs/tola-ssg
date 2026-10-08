@@ -37,7 +37,11 @@ tola preview    # serve the production build without watching
 ```
 
 The listener both serving commands use is `[server]`; `watch = false` runs `tola dev` as a single
-build that keeps serving.";
+build that keeps serving.
+
+It still differs from `tola preview`: `tola dev` always builds in the `dev` mode (commands read
+`TOLA_BUILD_MODE=dev`) and hooks follow their own `dev` field — after-publish with `dev = \"run\"`
+runs here too; `tola preview` builds with production settings and never runs after-publish.";
 }
 
 impl Default for DevConfig {

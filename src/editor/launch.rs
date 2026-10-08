@@ -81,23 +81,6 @@ fn select_editor(
         })
 }
 
-pub(crate) fn open(
-    path: &Path,
-    cancellation: &tola_build::cancellation::BuildCancellation,
-) -> Result<()> {
-    let path = std::path::absolute(path).map_err(|_| {
-        failure(
-            "could not locate the exported path",
-            "Open the export directory directly",
-        )
-    })?;
-    open_target(
-        path.as_os_str(),
-        "could not open the exported path",
-        cancellation,
-    )
-}
-
 pub(crate) fn open_url(
     address: &str,
     cancellation: &tola_build::cancellation::BuildCancellation,

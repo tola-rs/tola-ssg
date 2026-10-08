@@ -9,8 +9,10 @@ use unicode_width::UnicodeWidthStr;
 
 use super::model::{Anchor, Block, HeadingRole, HelpDocument, Inline, LinkTarget, PageId};
 use crate::terminal::code::CodeKind;
+use crate::terminal::documentation::{column_minimum, fitted_widths};
 use crate::terminal::style::Palette;
 use crate::terminal::ui::pager::Pager;
+use crate::terminal::wrap;
 
 /// A leaf's ordinal and byte offset in its text remain unchanged by terminal reflow.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -47,10 +49,7 @@ struct HeadingLine {
 impl PageLayout {
     pub(super) fn new(document: &HelpDocument, width: usize, palette: Palette) -> Self {
         let width = width.max(1);
-        let numbered = matches!(
-            document.id,
-            PageId::DemoFile { .. } | PageId::DemoOutput { .. }
-        );
+        let numbered = matches!(document.id, PageId::DemoFile { .. });
         let mut writer = DocumentLines::new(palette, numbered);
         writer.blocks(&document.blocks, width, "");
         Self {
@@ -186,18 +185,20 @@ impl DocumentLines {
                     self.leaf += 1;
                 }
                 Block::Table { headers, rows } => {
-                    for row in rows {
-                        let mut spans = Vec::new();
-                        for (column, (header, cell)) in headers.iter().zip(row).enumerate() {
-                            if column > 0 {
-                                spans.push(Inline::Text("  ".to_owned()));
+                    if !self.grid(headers, rows, width, indent) {
+                        for row in rows {
+                            let mut spans = Vec::new();
+                            for (column, (header, cell)) in headers.iter().zip(row).enumerate() {
+                                if column > 0 {
+                                    spans.push(Inline::Text("  ".to_owned()));
+                                }
+                                spans.extend(header.iter().cloned());
+                                spans.push(Inline::Text(": ".to_owned()));
+                                spans.extend(cell.iter().cloned());
                             }
-                            spans.extend(header.iter().cloned());
-                            spans.push(Inline::Text(": ".to_owned()));
-                            spans.extend(cell.iter().cloned());
+                            self.inline(&spans, width, indent, Style::default());
+                            self.leaf += 1;
                         }
-                        self.inline(&spans, width, indent, Style::default());
-                        self.leaf += 1;
                     }
                 }
                 Block::Quote { blocks } => {
@@ -243,7 +244,7 @@ impl DocumentLines {
         text.collect(spans, style, None, self.palette, &mut self.next_link);
         let prefix = clipped_prefix(prefix, width);
         let available = width.saturating_sub(prefix.width()).max(1);
-        for range in wrapped_ranges(&text.text, available) {
+        for range in wrap::line_ranges(&text.text, available) {
             self.write_runs(&text, range, prefix, width);
         }
     }
@@ -339,21 +340,7 @@ impl DocumentLines {
                 && width > 0
                 && column + width <= columns
             {
-                if let Some(previous) = self.links.last_mut().filter(|previous| {
-                    previous.id == *id
-                        && previous.line == self.lines.len()
-                        && previous.column + previous.width == column
-                }) {
-                    previous.width += width;
-                } else {
-                    self.links.push(LinkSpan {
-                        id: *id,
-                        line: self.lines.len(),
-                        column,
-                        width,
-                        target: target.clone(),
-                    });
-                }
+                self.record_link(*id, column, width, target.clone());
             }
             column += width;
         }
@@ -361,6 +348,161 @@ impl DocumentLines {
             spans.push(Span::styled(styled, style));
         }
         self.push_line(Line::from(spans), Some(range.start));
+    }
+
+    /// Draws one block table as a grid of wrapped cells; answers whether its columns fit
+    /// `width`.
+    ///
+    /// A table whose columns cannot shrink that far keeps the labelled form its caller draws
+    /// instead.
+    fn grid(
+        &mut self,
+        headers: &[Vec<Inline>],
+        rows: &[Vec<Vec<Inline>>],
+        width: usize,
+        indent: &str,
+    ) -> bool {
+        let prefix = clipped_prefix(indent, width).to_owned();
+        let available = width.saturating_sub(prefix.width());
+        let Some(widths) = table_widths(headers, rows, available) else {
+            return false;
+        };
+        let cells = TableCells::collect(headers, rows, self.palette, &mut self.next_link);
+        // A grid line is its own location: the separator before the block, the header's
+        // lines, the rule, and every wrapped row line are told apart, so a reader's place
+        // survives a reflow.
+        self.leaf += 1;
+        self.grid_lines(
+            &cells.headers,
+            &widths,
+            self.palette.emphasis_style(),
+            &prefix,
+        );
+        let rule = widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>()
+            .join(COLUMN_RULE);
+        self.leaf += 1;
+        self.push_line(
+            Line::styled(format!("{prefix}{rule}"), self.palette.dim_style()),
+            None,
+        );
+        for row in &cells.rows {
+            self.grid_lines(row, &widths, Style::default(), &prefix);
+        }
+        // The separator of the block that follows needs a leaf the table has not used.
+        self.leaf += 1;
+        true
+    }
+
+    /// Pushes one grid row: every cell wrapped to its column width, columns separated by the
+    /// gap. Every line of the row is its own location.
+    fn grid_lines(
+        &mut self,
+        cells: &[InlineText],
+        widths: &[usize],
+        cell_style: Style,
+        prefix: &str,
+    ) {
+        let wrapped = cells
+            .iter()
+            .zip(widths)
+            .map(|(cell, width)| wrap::line_ranges(&cell.text, *width))
+            .collect::<Vec<_>>();
+        let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+        for line in 0..height {
+            self.leaf += 1;
+            let mut spans = vec![Span::raw(prefix.to_owned())];
+            let mut column = prefix.width();
+            for (index, ((cell, width), ranges)) in
+                cells.iter().zip(widths).zip(&wrapped).enumerate()
+            {
+                if index > 0 {
+                    spans.push(Span::styled(
+                        COLUMN_GAP.to_owned(),
+                        self.palette.dim_style(),
+                    ));
+                    column += COLUMN_GAP.width();
+                }
+                let start = column;
+                if let Some(range) = ranges.get(line) {
+                    column = self.grid_cell(&mut spans, cell, range.clone(), start, cell_style);
+                }
+                if index + 1 < widths.len() {
+                    let padding = width.saturating_sub(column - start);
+                    spans.push(Span::raw(" ".repeat(padding)));
+                    column += padding;
+                }
+            }
+            self.push_line(Line::from(spans), None);
+        }
+    }
+
+    /// Appends one grid cell's styled spans for `range`, recording its links from `column`;
+    /// answers the column the cell's text ends at.
+    fn grid_cell(
+        &mut self,
+        spans: &mut Vec<Span<'static>>,
+        cell: &InlineText,
+        range: Range<usize>,
+        column: usize,
+        cell_style: Style,
+    ) -> usize {
+        let mut column = column;
+        let mut run_index = cell
+            .runs
+            .partition_point(|run| run.range.end <= range.start);
+        let mut styled = String::new();
+        let mut style = Style::default();
+        for (offset, value) in cell.text[range.clone()].grapheme_indices(true) {
+            let start = range.start + offset;
+            while cell.runs[run_index].range.end <= start {
+                run_index += 1;
+            }
+            let run = &cell.runs[run_index];
+            let run_style = if run.style == Style::default() {
+                cell_style
+            } else {
+                run.style
+            };
+            if style != run_style && !styled.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut styled), style));
+            }
+            style = run_style;
+            styled.push_str(value);
+            let width = value.width();
+            if let Some((id, target)) = &run.link
+                && width > 0
+            {
+                self.record_link(*id, column, width, target.clone());
+            }
+            column += width;
+        }
+        if !styled.is_empty() {
+            spans.push(Span::styled(styled, style));
+        }
+        column
+    }
+
+    /// Records one link fragment, continuing the fragment before it when the same link
+    /// reaches this column on the line being built.
+    fn record_link(&mut self, id: usize, column: usize, width: usize, target: LinkTarget) {
+        let line = self.lines.len();
+        let continues = self.links.last().is_some_and(|previous| {
+            previous.id == id && previous.line == line && previous.column + previous.width == column
+        });
+        if continues {
+            self.links.last_mut().expect("checked above").width += width;
+        } else {
+            self.links.push(LinkSpan {
+                id,
+                line,
+                column,
+                width,
+                target,
+            });
+        }
     }
 
     fn push_line(&mut self, line: Line<'static>, offset: Option<usize>) {
@@ -430,6 +572,120 @@ impl InlineText {
     }
 }
 
+/// What separates two grid columns.
+const COLUMN_GAP: &str = " | ";
+
+/// What joins the column rules under a grid's header.
+const COLUMN_RULE: &str = "+";
+
+/// One table's cells: the header row and the body rows, each cell keeping its own styles
+/// and links.
+struct TableCells {
+    headers: Vec<InlineText>,
+    rows: Vec<Vec<InlineText>>,
+}
+
+impl TableCells {
+    fn collect(
+        headers: &[Vec<Inline>],
+        rows: &[Vec<Vec<Inline>>],
+        palette: Palette,
+        next_link: &mut usize,
+    ) -> Self {
+        let cell = |spans: &[Inline], next_link: &mut usize| {
+            let mut text = InlineText::default();
+            text.collect(spans, Style::default(), None, palette, next_link);
+            text
+        };
+        Self {
+            headers: headers.iter().map(|spans| cell(spans, next_link)).collect(),
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|spans| cell(spans, next_link)).collect())
+                .collect(),
+        }
+    }
+}
+
+/// The width each of one table's columns takes inside `available`, or `None` when the table
+/// keeps its labelled form instead: its rows are not as wide as its header, or its columns
+/// cannot shrink to the words they hold.
+fn table_widths(
+    headers: &[Vec<Inline>],
+    rows: &[Vec<Vec<Inline>>],
+    available: usize,
+) -> Option<Vec<usize>> {
+    if headers.is_empty() || rows.iter().any(|row| row.len() != headers.len()) {
+        return None;
+    }
+    let minimum = (0..headers.len())
+        .map(|column| {
+            let texts = column_cells(headers, rows, column)
+                .map(spans_text)
+                .collect::<Vec<_>>();
+            column_minimum(texts.iter().map(String::as_str))
+        })
+        .collect::<Vec<_>>();
+    let natural = (0..headers.len())
+        .map(|column| {
+            column_cells(headers, rows, column)
+                .map(|cell| text_width(&spans_text(cell)))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+    let separators = (headers.len() - 1) * COLUMN_GAP.width();
+    fitted_widths(&minimum, &natural, separators, available)
+}
+
+/// One table column's cells: the header's, then every row's.
+fn column_cells<'a>(
+    headers: &'a [Vec<Inline>],
+    rows: &'a [Vec<Vec<Inline>>],
+    column: usize,
+) -> impl Iterator<Item = &'a [Inline]> + 'a {
+    std::iter::once(headers[column].as_slice()).chain(
+        rows.iter()
+            .filter_map(move |row| row.get(column).map(Vec::as_slice)),
+    )
+}
+
+/// One cell's text, as the grid lays it out.
+fn spans_text(spans: &[Inline]) -> String {
+    let mut text = String::new();
+    for span in spans {
+        match span {
+            Inline::Text(value) | Inline::Code(value) => text.push_str(value),
+            Inline::Emph(children)
+            | Inline::Strong(children)
+            | Inline::Link {
+                label: children, ..
+            } => text.push_str(&spans_text(children)),
+        }
+    }
+    text
+}
+
+/// The columns one text occupies; a grapheme such as a combining mark or a joined emoji
+/// counts as the one cluster it is.
+fn text_width(text: &str) -> usize {
+    text.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
+/// The text one line shows between two display columns; a grapheme counts as the one cluster
+/// it is, so a selection never splits one.
+pub(super) fn slice_columns(text: &str, from: usize, to: usize) -> String {
+    let mut selected = String::new();
+    let mut column = 0;
+    for grapheme in text.graphemes(true) {
+        if column >= from && column < to {
+            selected.push_str(grapheme);
+        }
+        column += grapheme.width();
+    }
+    selected
+}
+
 fn code_style(kind: CodeKind, palette: Palette) -> Style {
     match kind {
         CodeKind::Keyword => palette.keyword_style(),
@@ -470,56 +726,6 @@ fn grapheme_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
     ranges
 }
 
-fn wrapped_ranges(text: &str, width: usize) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
-    let mut offset = 0;
-    for paragraph in text.split('\n') {
-        let mut start = 0;
-        while start < paragraph.len() {
-            while start < paragraph.len() {
-                let character = paragraph[start..]
-                    .chars()
-                    .next()
-                    .expect("a remaining character");
-                if !character.is_whitespace() {
-                    break;
-                }
-                start += character.len_utf8();
-            }
-            if start == paragraph.len() {
-                break;
-            }
-            let mut end = start;
-            let mut used = 0;
-            let mut space = None;
-            for (relative, grapheme) in paragraph[start..].grapheme_indices(true) {
-                if used + grapheme.width() > width && relative > 0 {
-                    break;
-                }
-                end = start + relative + grapheme.len();
-                used += grapheme.width();
-                if grapheme.chars().all(char::is_whitespace) {
-                    space = Some(start + relative);
-                }
-            }
-            if end < paragraph.len()
-                && !paragraph[end..].starts_with(char::is_whitespace)
-                && let Some(space) = space.filter(|space| *space > start)
-            {
-                end = space;
-            }
-            let trimmed = paragraph[start..end].trim_end();
-            ranges.push(offset + start..offset + start + trimmed.len());
-            start = end;
-        }
-        if paragraph.is_empty() {
-            ranges.push(offset..offset);
-        }
-        offset += paragraph.len() + 1;
-    }
-    ranges
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -551,6 +757,21 @@ mod tests {
     fn full_width_words_stay_together() {
         let mut page = page("alpha beta gamma delta", 16);
         assert_eq!(rows(&mut page), ["alpha beta gamma", "delta"]);
+    }
+
+    #[test]
+    fn chinese_prose_fills_full_line() {
+        let mut page = page("或按下 Tab 进行基于键盘的快速导航。", 20);
+        let drawn = rows(&mut page);
+        assert_eq!(drawn.len(), 2);
+        assert_eq!(
+            drawn[0].split_whitespace().collect::<String>(),
+            "或按下Tab进行基于"
+        );
+        assert_eq!(
+            drawn[1].split_whitespace().collect::<String>(),
+            "键盘的快速导航。"
+        );
     }
 
     #[test]
@@ -669,7 +890,8 @@ mod tests {
                 narrow.line_at(*position)
             );
         }
-        assert_eq!(separators, 4);
+        // Four block separators, plus the header and the rule of the empty table.
+        assert_eq!(separators, 6);
     }
 
     #[test]
@@ -725,9 +947,19 @@ mod tests {
             "| Topic |\n| --- |\n| [the **whole** label](#target) |\n",
             12,
         );
-        assert!(page.links.len() > 1);
+        assert!(
+            page.links.len() > 1,
+            "every fragment of a wrapped link stays a target"
+        );
         assert!(page.links.iter().all(|span| span.id == 0));
-        assert_eq!(page.links[0].column, 7);
+        assert_eq!(
+            page.links[0].column, 0,
+            "the cell's link starts where its column does"
+        );
+        assert!(
+            page.links.iter().any(|span| span.line > page.links[0].line),
+            "the fragment on the wrapped line is clickable too"
+        );
     }
 
     #[test]
@@ -894,6 +1126,96 @@ mod tests {
         }
         assert!(
             matches!(&document.blocks[0], Block::Code { source: original, .. } if original == source)
+        );
+    }
+
+    #[test]
+    fn tables_align_columns_by_display_width() {
+        let mut page = page(
+            "| 命令 | 状态 |\n| --- | --- |\n| `tola build` | 运行 |\n",
+            40,
+        );
+        let drawn = rows(&mut page);
+        assert_eq!(drawn.len(), 3, "a header, its rule, and one row");
+        let terminal = rendered(&mut page);
+        let buffer = terminal.backend().buffer();
+        let column_of = |row: u16, symbol: &str| {
+            (0..page.width as u16)
+                .find(|column| buffer[(*column, row)].symbol() == symbol)
+                .unwrap_or_else(|| panic!("row {row} holds no {symbol:?}"))
+        };
+        assert_eq!(
+            column_of(0, "|"),
+            column_of(2, "|"),
+            "a double-width header keeps the rows' columns together: {drawn:?}"
+        );
+        assert_eq!(
+            buffer[(column_of(0, "|") - 1, 1)].symbol(),
+            "+",
+            "the rule spans the first column: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_cell_keeps_the_grid_aligned() {
+        let mut page = page(
+            "| 命令 | 状态 |\n| --- | --- |\n| `tola preview build` | 运行 |\n",
+            30,
+        );
+        let drawn = rows(&mut page);
+        assert_eq!(
+            drawn.len(),
+            4,
+            "a header, the rule, and the row's two wrapped lines: {drawn:?}"
+        );
+        let terminal = rendered(&mut page);
+        let buffer = terminal.backend().buffer();
+        let column_of = |row: u16, symbol: &str| {
+            (0..page.width as u16)
+                .find(|column| buffer[(*column, row)].symbol() == symbol)
+                .unwrap_or_else(|| panic!("row {row} holds no {symbol:?}"))
+        };
+        assert!(drawn[2].starts_with("tola preview"), "{drawn:?}");
+        assert!(drawn[3].starts_with("build"), "{drawn:?}");
+        assert_eq!(
+            column_of(0, "|"),
+            column_of(2, "|"),
+            "the wrapped lines stay in their columns: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn table_too_wide_for_the_reader_keeps_labelled_fields() {
+        let mut page = page(
+            "| 命令 | 状态 |\n| --- | --- |\n| `tola build` | 运行 |\n",
+            8,
+        );
+        let drawn = rows(&mut page);
+        assert!(
+            drawn.iter().all(|row| !row.contains('+')),
+            "no grid fits eight columns: {drawn:?}"
+        );
+        assert!(
+            drawn[0].contains(':'),
+            "the labelled form names each header beside its cell: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn cell_wraps_before_the_grid_gives_way() {
+        let mut page = page(
+            "| Field | Note |\n| --- | --- |\n| alpha beta gamma delta epsilon | 运行 |\n",
+            30,
+        );
+        let drawn = rows(&mut page);
+        assert!(
+            drawn.iter().any(|row| row.contains('+')),
+            "columns shrink to their minimum before the grid gives way: {drawn:?}"
+        );
+        assert!(drawn[0].starts_with("Field"), "{drawn:?}");
+        assert!(
+            drawn.iter().any(|row| row.starts_with("alpha beta")),
+            "the long cell wraps into its column: {drawn:?}"
         );
     }
 }

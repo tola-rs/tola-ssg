@@ -136,10 +136,9 @@ test('configuration tables and the overview follow the language', async ({ binar
 
   const table = await run(['help', 'config', 'build', '--lang', 'zh-Hans'], root)
   expectExited(table)
-  // The prose is Chinese; the key names, the fenced template, and the headings stay English.
+  // The prose is Chinese; the key names and the headings stay English.
   expect(table.stdout).toMatch(/\p{Script=Han}/u)
   expect(table.stdout).toContain('[build]')
-  expect(table.stdout).toContain('entry = "site.typ"')
   expect(table.stdout).toContain('content-dir')
   expect(table.stdout).toContain('publish-dir')
   expect(table.stderr).toBe('')
@@ -147,8 +146,8 @@ test('configuration tables and the overview follow the language', async ({ binar
   const overview = await run(['help', '--lang', 'zh-Hans'], root)
   expectExited(overview)
   expect(overview.stdout).toMatch(/\p{Script=Han}/u)
-  for (const category of ['config', 'package', 'demo']) {
-    expect(overview.stdout).toContain(`tola help ${category}`)
+  for (const target of ['config', 'package']) {
+    expect(overview.stdout).toContain(`tola help ${target}`)
   }
   expect(overview.stderr).toBe('')
 })

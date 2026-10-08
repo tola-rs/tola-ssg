@@ -7,8 +7,6 @@
 浏览器资源树与本地 SVG 集合承担不同职责。资源 URL 指向 `[assets]` 发布的文件；图标 ID 指向配置集合中的成员。字体只供编译器读取，并关闭系统字体。
 
 {{file:tola.toml}}
-{{file:static/icons/leaf.svg}}
-{{file:static/icons/sun.svg}}
 
 ## 读取输入信息并缩放
 
