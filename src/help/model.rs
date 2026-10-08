@@ -11,6 +11,8 @@ use std::ops::Range;
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 
+use crate::terminal::code::{self, CodeKind};
+
 /// The reserved scheme of a cross-reference between help pages.
 pub(crate) const CROSS_REFERENCE_SCHEME: &str = "tola://";
 
@@ -150,11 +152,10 @@ pub(crate) enum Block {
         start: Option<u64>,
         items: Vec<Vec<Block>>,
     },
-    /// A code block: the fence's language word (empty when it carries none) and its source text,
-    /// exactly as the fences hold it.
     Code {
-        language: String,
         source: String,
+        /// Language-level runs depend on source, not terminal width or palette.
+        runs: Vec<(Range<usize>, CodeKind)>,
     },
     /// A table; its first row heads the rest.
     Table {
@@ -464,10 +465,11 @@ fn block(nodes: &[Node<'_>], position: usize, page: &PageId) -> Option<Block> {
                 role: *role,
             })
         }
-        Node::Branch(Tag::CodeBlock(kind), children) => Some(Block::Code {
-            language: fence_language(kind),
-            source: code_source(children),
-        }),
+        Node::Branch(Tag::CodeBlock(kind), children) => {
+            let source = code_source(children);
+            let runs = code::spans(&source, &fence_language(kind));
+            Some(Block::Code { source, runs })
+        }
         Node::Branch(Tag::List(start), children) => Some(Block::List {
             start: *start,
             items: children

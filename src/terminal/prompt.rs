@@ -11,9 +11,9 @@ use crossterm::terminal::{self, Clear, ClearType};
 use owo_colors::OwoColorize;
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use super::input::InputLine;
 use super::session::{Claim, Holder};
 use super::sink::OutputSink;
 
@@ -291,11 +291,11 @@ impl<'a> PromptTerminal<'a> {
             match next_event(cancelled)? {
                 Event::Key(key) if key.code == KeyCode::Enter => {
                     self.newline()?;
-                    return Ok(input.text);
+                    return Ok(input.into_text());
                 }
                 Event::Key(key) => input.edit(key),
                 Event::Paste(source) => {
-                    input.insert(&source.replace("\r\n", "\n").replace('\n', " "));
+                    input.paste(&source);
                 }
                 _ => {}
             }
@@ -360,8 +360,8 @@ impl<'a> PromptTerminal<'a> {
         let label = super::text::single_line(label);
         let label = super::text::window(&label, columns.saturating_sub(4), 0);
         let available = columns.saturating_sub(label.text.width());
-        let displayed = super::text::single_line(&input.text);
-        let cursor = super::text::single_line(&input.text[..input.cursor]).width();
+        let displayed = super::text::single_line(input.text());
+        let cursor = super::text::single_line(input.before_cursor()).width();
         let window = super::text::window(&displayed, available, cursor);
         let cursor = label.text.width() + cursor.saturating_sub(window.start_column).min(available);
         if self.cursor_controls {
@@ -589,79 +589,6 @@ impl Drop for PromptTerminal<'_> {
     }
 }
 
-#[derive(Default)]
-struct InputLine {
-    text: String,
-    cursor: usize,
-}
-
-impl InputLine {
-    fn insert(&mut self, source: &str) {
-        self.text.insert_str(self.cursor, source);
-        self.cursor += source.len();
-        self.align_cursor();
-    }
-
-    fn align_cursor(&mut self) {
-        self.cursor = self
-            .text
-            .grapheme_indices(true)
-            .map(|(byte, _)| byte)
-            .find(|&byte| byte >= self.cursor)
-            .unwrap_or(self.text.len());
-    }
-
-    fn previous(&self) -> usize {
-        self.text[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map_or(0, |(byte, _)| byte)
-    }
-
-    fn next(&self) -> usize {
-        self.text[self.cursor..]
-            .graphemes(true)
-            .next()
-            .map_or(self.cursor, |grapheme| self.cursor + grapheme.len())
-    }
-
-    fn edit(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Left => self.cursor = self.previous(),
-            KeyCode::Right => self.cursor = self.next(),
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.text.len(),
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => self.cursor = 0,
-            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.cursor = self.text.len()
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.text.replace_range(..self.cursor, "");
-                self.cursor = 0;
-            }
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.text.truncate(self.cursor);
-            }
-            KeyCode::Backspace => {
-                let start = self.previous();
-                self.text.replace_range(start..self.cursor, "");
-                self.cursor = start;
-                self.align_cursor();
-            }
-            KeyCode::Delete => {
-                let end = self.next();
-                self.text.replace_range(self.cursor..end, "");
-                self.align_cursor();
-            }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert(&character.to_string());
-            }
-            KeyCode::Tab => self.insert("\t"),
-            _ => {}
-        }
-    }
-}
-
 fn selected_numbers(source: &str, count: usize) -> Option<Vec<usize>> {
     let mut selected = Vec::new();
     for number in source
@@ -728,54 +655,6 @@ mod tests {
 
     fn control(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
-    }
-
-    #[test]
-    fn editing_respects_grapheme_boundaries() {
-        let mut input = InputLine::default();
-        input.insert("界👩‍💻e\u{301}");
-        input.edit(key(KeyCode::Left));
-        input.edit(key(KeyCode::Backspace));
-        assert_eq!(input.text, "界e\u{301}");
-        assert_eq!(input.cursor, "界".len());
-        input.edit(key(KeyCode::Delete));
-        assert_eq!(input.text, "界");
-        input.edit(key(KeyCode::Home));
-        input.insert("前");
-        input.edit(key(KeyCode::End));
-        assert_eq!(input.cursor, input.text.len());
-        assert_eq!(input.text, "前界");
-    }
-
-    #[test]
-    fn combining_character_stays_whole() {
-        let mut input = InputLine::default();
-        input.insert("e");
-        input.insert("\u{301}");
-        input.edit(key(KeyCode::Backspace));
-        assert_eq!(input.text, "");
-        assert_eq!(input.cursor, 0);
-    }
-
-    #[test]
-    fn character_keys_insert_at_cursor() {
-        let mut input = InputLine::default();
-        input.edit(key(KeyCode::Char('a')));
-        input.edit(key(KeyCode::Char('b')));
-        input.edit(key(KeyCode::Left));
-        input.edit(key(KeyCode::Char('c')));
-        assert_eq!(input.text, "acb");
-        assert_eq!(input.cursor, 2);
-    }
-
-    #[test]
-    fn backspace_removes_previous_character() {
-        let mut input = InputLine::default();
-        input.edit(key(KeyCode::Char('a')));
-        input.edit(key(KeyCode::Char('b')));
-        input.edit(key(KeyCode::Backspace));
-        assert_eq!(input.text, "a");
-        assert_eq!(input.cursor, 1);
     }
 
     #[test]

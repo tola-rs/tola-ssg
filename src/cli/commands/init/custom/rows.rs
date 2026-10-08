@@ -171,7 +171,7 @@ static ROWS: LazyLock<Vec<Row>> = LazyLock::new(|| {
 });
 
 /// Feature marks and file marks describe the same completed selection.
-pub(super) fn line(row: Row, selected: &FeatureSet, focused: bool) -> Vec<StyledText> {
+pub(super) fn line(row: Row, selected: &FeatureSet, focused: bool, width: u16) -> Vec<StyledText> {
     let mut pieces = vec![leading(focused), mark(row, selected)];
     let used = pieces
         .iter()
@@ -184,12 +184,17 @@ pub(super) fn line(row: Row, selected: &FeatureSet, focused: bool) -> Vec<Styled
         }
         Row::Atom(feature) => {
             let in_effect = selected.contains(feature);
-            pieces.push(styled(
-                fielded(features::feature_name(feature), field),
-                name_role(in_effect),
-            ));
-            if let Some(hint) = hint(selected, feature) {
-                pieces.push(styled(hint.text(), hint.role()));
+            let hint = hint(selected, feature).map(|hint| (hint.text(), hint.role()));
+            let name = features::feature_name(feature);
+            let field = match &hint {
+                Some((text, _)) if hint_column() + text.width() > usize::from(width) => {
+                    name.width() + 1
+                }
+                _ => field,
+            };
+            pieces.push(styled(fielded(name, field), name_role(in_effect)));
+            if let Some((text, role)) = hint {
+                pieces.push(styled(text, role));
             }
         }
         Row::Files => {

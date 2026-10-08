@@ -69,6 +69,32 @@ test('development errors stay in the view', async ({ binary, directory: root }) 
   }
 })
 
+test('development history returns to the successful build', async ({ binary, directory: root }) => {
+  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
+  await writeMinimalSite(root, {
+    program: '#document("index.html")[Home]\n#document("404.html")[Missing]\n',
+  })
+  const configuration = await readFile(join(root, 'tola.toml'), 'utf8')
+  const terminal = openDevelopmentTerminal(binary, root)
+  const shown = () => screenText(terminal.stdout())
+  try {
+    await expect.poll(shown).toContain('Watching for changes')
+    await writeFile(join(root, 'tola.toml'), '[server]\nport = "history-error"\n')
+    await expect.poll(shown).toContain('error[config.toml]')
+    await writeFile(join(root, 'tola.toml'), configuration)
+    await expect.poll(shown).toContain('Ready')
+    expect(shown()).toContain('←')
+    terminal.running.child.stdin.write('\x1b[D')
+    await expect.poll(shown).toContain('error[config.toml]')
+    expect(shown()).toContain('→')
+    terminal.running.child.stdin.write('\x1b[C')
+    await expect.poll(shown).toContain('Ready')
+    expect(shown()).not.toContain('error[config.toml]')
+  } finally {
+    await terminal.running.terminate()
+  }
+})
+
 test('development interrupt restores terminal modes', async ({ binary, directory: root }) => {
   test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
   await writeMinimalSite(root)
@@ -258,7 +284,7 @@ test('consumer can check the same site', async ({ binary, directory: root }) => 
       const checkExit = spawnSync(${JSON.stringify(binary)}, ['check', '--color', 'never'], {
         cwd: process.cwd(),
         stdio: 'inherit',
-      });
+});
       if (checkExit.error) throw checkExit.error;
       if (checkExit.status !== 0) process.exit(checkExit.status ?? 1);
       const response = await fetch(${JSON.stringify(gate.url)});

@@ -150,7 +150,12 @@ fn run_interactive(
 ) -> Result<()> {
     let requested = page(targets, language, CrossRefs::Emit)?;
     let load = |id: &PageId| page_of(id, language, CrossRefs::Emit).map(HelpDocument::parse);
-    let mut view = View::new(HelpDocument::parse(requested), &load);
+    let mut view = View::new(
+        HelpDocument::parse(requested),
+        &load,
+        output.terminal().columns().unwrap_or(80),
+        output.terminal().palette(),
+    );
     view.set_mouse(mouse);
     let token = cancellation.token();
     let sink = output.terminal().sink();

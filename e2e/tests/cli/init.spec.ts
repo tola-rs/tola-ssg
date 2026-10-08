@@ -280,9 +280,9 @@ async function confirmInteractiveInit(init: InteractiveInit, screen = true): Pro
   expect((await init.running.waitForClose(COMMAND_TIMEOUT_MS.standard)).code).toBe(0)
 }
 
-async function filterInit(init: InteractiveInit, query: string): Promise<void> {
+async function filterInit(init: InteractiveInit, query: string, previous = ''): Promise<void> {
   init.running.child.stdin.write('/')
-  init.running.child.stdin.write(query)
+  init.running.child.stdin.write('\x7f'.repeat(previous.length) + query)
   await expect.poll(() => screenText(init.output.stdout())).toContain(`filter: ${query}`)
   init.running.child.stdin.write('\r')
   await expect.poll(() => screenText(init.output.stdout())).toContain(`/${query}`)
@@ -311,7 +311,7 @@ test('interactive file selection uses its available writers', async ({ binary, d
     await expect.poll(() => screenText(init.output.stdout())).toContain(
       'check pagefind or deno-toolchain or tailwind-css',
     )
-    await filterInit(init, 'static/web-assets/css/site.css')
+    await filterInit(init, 'static/web-assets/css/site.css', 'justfile')
     init.running.child.stdin.write(' ')
     await expect.poll(() => screenText(init.output.stdout())).toContain('[■] static/web-assets/css/site.css')
     await confirmInteractiveInit(init)
@@ -327,7 +327,7 @@ test('interactive feature selection completes the toolchain', async ({ binary, d
     await filterInit(init, 'tailwind-css')
     init.running.child.stdin.write(' ')
     await expect.poll(() => screenText(init.output.stdout())).toContain('[■] tailwind-css')
-    await filterInit(init, 'deno-toolchain')
+    await filterInit(init, 'deno-toolchain', 'tailwind-css')
     await expect.poll(() => screenText(init.output.stdout())).toContain('[■] deno-toolchain')
     await confirmInteractiveInit(init)
     const configuration = JSON.parse(await readFile(join(init.site, 'deno.json'), 'utf8'))

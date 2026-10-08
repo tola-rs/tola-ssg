@@ -8,7 +8,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::model::{Anchor, Block, HeadingRole, HelpDocument, Inline, LinkTarget};
-use crate::terminal::code::{self, CodeKind};
+use crate::terminal::code::CodeKind;
 use crate::terminal::style::Palette;
 use crate::terminal::ui::pager::Pager;
 
@@ -175,8 +175,8 @@ impl DocumentLines {
                         self.item(blocks, width, &prefix, &hanging);
                     }
                 }
-                Block::Code { language, source } => {
-                    self.code(source, language, width, indent);
+                Block::Code { source, runs } => {
+                    self.code(source, runs, width, indent);
                     self.leaf += 1;
                 }
                 Block::Table { headers, rows } => {
@@ -242,8 +242,13 @@ impl DocumentLines {
         }
     }
 
-    fn code(&mut self, source: &str, language: &str, width: usize, indent: &str) {
-        let runs = code::spans(source, language);
+    fn code(
+        &mut self,
+        source: &str,
+        runs: &[(Range<usize>, CodeKind)],
+        width: usize,
+        indent: &str,
+    ) {
         let mut text = InlineText {
             text: source.to_owned(),
             runs: Vec::new(),
@@ -259,8 +264,8 @@ impl DocumentLines {
             }
             cursor = range.end;
             text.runs.push(InlineRun {
-                range,
-                style: code_style(kind, self.palette),
+                range: range.clone(),
+                style: code_style(*kind, self.palette),
                 link: None,
             });
         }

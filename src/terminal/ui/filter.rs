@@ -5,9 +5,9 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::terminal::input::InputLine;
 use crate::terminal::style::Palette;
 use crate::terminal::text;
 
@@ -25,9 +25,7 @@ pub(crate) enum Reply {
 /// The layer's one line of editable text.
 pub(crate) struct TextLine {
     label: String,
-    text: String,
-    /// The cursor's byte offset, always on a grapheme boundary.
-    cursor: usize,
+    input: InputLine,
 }
 
 impl TextLine {
@@ -35,14 +33,13 @@ impl TextLine {
     pub(crate) fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            text: String::new(),
-            cursor: 0,
+            input: InputLine::default(),
         }
     }
 
     /// The line as it stands.
     pub(crate) fn text(&self) -> &str {
-        &self.text
+        self.input.text()
     }
 
     /// Answers one key press: Enter accepts, Esc dismisses, everything else edits the line.
@@ -50,42 +47,18 @@ impl TextLine {
         match key.code {
             KeyCode::Enter => Reply::Accepted,
             KeyCode::Esc => Reply::Dismissed,
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert(&character.to_string());
+            KeyCode::Tab => Reply::Editing,
+            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => Reply::Editing,
+            _ => {
+                self.input.edit(*key);
                 Reply::Editing
             }
-            KeyCode::Backspace => {
-                self.remove_before();
-                Reply::Editing
-            }
-            KeyCode::Delete => {
-                self.remove_after();
-                Reply::Editing
-            }
-            KeyCode::Left => {
-                self.cursor = self.before().unwrap_or(0);
-                Reply::Editing
-            }
-            KeyCode::Right => {
-                self.cursor = self.after().unwrap_or(self.text.len());
-                Reply::Editing
-            }
-            KeyCode::Home => {
-                self.cursor = 0;
-                Reply::Editing
-            }
-            KeyCode::End => {
-                self.cursor = self.text.len();
-                Reply::Editing
-            }
-            _ => Reply::Editing,
         }
     }
 
     /// Inserts pasted text as one edit; its line breaks become spaces.
     pub(crate) fn paste(&mut self, text: &str) {
-        let single = text.replace("\r\n", "\n").replace('\n', " ");
-        self.insert(&single);
+        self.input.paste(text);
     }
 
     /// Draws the labelled line with its cursor inside `area`.
@@ -93,11 +66,16 @@ impl TextLine {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        let label = format!("{}: ", self.label);
         let columns = area.width as usize;
+        let label = format!("{}: ", self.label);
+        let label = if label.width() + 1 < columns {
+            label
+        } else {
+            String::new()
+        };
         let visible = columns.saturating_sub(label.width()).saturating_sub(1);
-        let focused = text::single_line(&self.text[..self.cursor]).width();
-        let displayed = text::single_line(&self.text);
+        let focused = text::single_line(self.input.before_cursor()).width();
+        let displayed = text::single_line(self.input.text());
         let window = text::window(&displayed, visible, focused);
         let cursor = label.width() + focused.saturating_sub(window.start_column);
         let line = Line::from(vec![
@@ -107,42 +85,6 @@ impl TextLine {
         frame.render_widget(Paragraph::new(line), area);
         let cursor = area.x + u16::try_from(cursor).unwrap_or(u16::MAX);
         frame.set_cursor_position(Position::new(cursor.min(area.right() - 1), area.y));
-    }
-
-    /// The cursor position before its grapheme, when the line has one.
-    fn before(&self) -> Option<usize> {
-        self.text[..self.cursor]
-            .grapheme_indices(true)
-            .next_back()
-            .map(|(byte, _)| byte)
-    }
-
-    /// The cursor position after its grapheme, when the line has one.
-    fn after(&self) -> Option<usize> {
-        self.text[self.cursor..]
-            .grapheme_indices(true)
-            .next()
-            .map(|(byte, grapheme)| self.cursor + byte + grapheme.len())
-    }
-
-    fn insert(&mut self, source: &str) {
-        self.text.insert_str(self.cursor, source);
-        self.cursor += source.len();
-    }
-
-    fn remove_before(&mut self) {
-        let Some(before) = self.before() else {
-            return;
-        };
-        self.text.replace_range(before..self.cursor, "");
-        self.cursor = before;
-    }
-
-    fn remove_after(&mut self) {
-        let Some(after) = self.after() else {
-            return;
-        };
-        self.text.replace_range(self.cursor..after, "");
     }
 }
 
@@ -173,15 +115,6 @@ mod tests {
     }
 
     #[test]
-    fn editing_follows_graphemes() {
-        let mut line = TextLine::new("filter");
-        typed(&mut line, "a👩‍💻b");
-        line.key(&KeyEvent::from(KeyCode::Left));
-        line.key(&KeyEvent::from(KeyCode::Backspace));
-        assert_eq!(line.text(), "ab");
-    }
-
-    #[test]
     fn enter_accepts_the_text() {
         let mut line = TextLine::new("filter");
         typed(&mut line, "tag");
@@ -195,13 +128,6 @@ mod tests {
         typed(&mut line, "tag");
         assert_eq!(line.key(&KeyEvent::from(KeyCode::Esc)), Reply::Dismissed);
         assert_eq!(line.text(), "tag");
-    }
-
-    #[test]
-    fn paste_keeps_the_line_single() {
-        let mut line = TextLine::new("path");
-        line.paste("one\r\ntwo\nthree");
-        assert_eq!(line.text(), "one two three");
     }
 
     #[test]
@@ -231,6 +157,25 @@ mod tests {
             let buffer = terminal.backend().buffer();
             assert_eq!(buffer[cursor].symbol(), " ");
             assert_eq!(buffer[Position::new(cursor.x - 1, cursor.y)].symbol(), "b");
+        }
+    }
+
+    #[test]
+    fn narrow_input_keeps_text_visible() {
+        let mut line = TextLine::new("filter");
+        line.paste("abcdef");
+        for width in 2..=9 {
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            terminal
+                .draw(|frame| line.draw(frame, frame.area(), Palette::new(false)))
+                .unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert!(cursor.x < width);
+            assert_eq!(terminal.backend().buffer()[cursor].symbol(), " ");
+            assert_eq!(
+                terminal.backend().buffer()[Position::new(cursor.x - 1, 0)].symbol(),
+                "f"
+            );
         }
     }
 }

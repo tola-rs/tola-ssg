@@ -7,6 +7,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::widgets::Paragraph;
 
 use super::jump::Jump;
 use super::layout::{DocumentPosition, LinkSpan, PageLayout};
@@ -64,9 +65,10 @@ impl<'a> View<'a> {
     pub(crate) fn new(
         document: HelpDocument,
         load: &'a dyn Fn(&PageId) -> Result<HelpDocument>,
+        columns: usize,
+        palette: Palette,
     ) -> Self {
-        let palette = Palette::new(false);
-        let page = PageLayout::new(&document, 80, palette);
+        let page = PageLayout::new(&document, columns, palette);
         Self {
             document: Rc::new(document),
             page,
@@ -298,13 +300,20 @@ impl<'a> View<'a> {
         );
         let query = self.active_query();
         if !query.is_empty() {
+            status = format!("{} · {status}", self.search_status());
             let _ = write!(status, " · /{query}");
         }
         status
     }
 
-    /// Whether one action still scrolls the page: a page that fits, or an end already reached,
-    /// earns no hint.
+    fn search_status(&self) -> String {
+        match self.page.pager.search_position() {
+            Some((_, 0)) => "no matches".to_owned(),
+            Some((current, total)) => format!("{current}/{total} matches"),
+            None => String::new(),
+        }
+    }
+
     fn scroll_changes(&self, action: Action) -> bool {
         let pager = &self.page.pager;
         match action {
@@ -323,7 +332,7 @@ impl<'a> View<'a> {
 
 impl Surface for View<'_> {
     fn draw(&mut self, frame: &mut Frame, palette: Palette) {
-        let (content, footer) = split_footer(frame.area());
+        let (content, footer) = split_footer(frame.area(), matches!(self.mode, Mode::Search(_)));
         self.resize(content, palette);
         self.page.pager.draw(frame, content, palette);
         self.draw_hover(frame);
@@ -333,30 +342,69 @@ impl Surface for View<'_> {
             self.mode = Mode::Reading;
             self.notice = Some("no links on screen".to_owned());
         }
-        let caption = self.caption();
-        let status = self.status();
-        let line = self
-            .notice
-            .as_deref()
-            .or(caption.as_deref())
-            .unwrap_or(&status);
-        hints::draw(frame, footer, line, &self.live(), self.bindings(), palette);
         if let Mode::Search(search) = &self.mode {
+            let status = self.search_status();
+            let status_width = status.len() as u16;
+            let feedback =
+                footer.height > 1 && !status.is_empty() && footer.width >= status_width + 12;
             search.line.draw(
                 frame,
                 Rect {
                     height: footer.height.min(1),
+                    width: if feedback {
+                        footer.width - status_width - 2
+                    } else {
+                        footer.width
+                    },
                     ..footer
                 },
                 palette,
             );
+            if feedback {
+                frame.render_widget(
+                    Paragraph::new(status).style(palette.notice_style()),
+                    Rect::new(
+                        footer.right() - status_width,
+                        footer.y,
+                        status_width,
+                        footer.height.min(1),
+                    ),
+                );
+            }
+            hints::draw(
+                frame,
+                Rect {
+                    y: footer.y + footer.height.min(1),
+                    height: footer.height.saturating_sub(1),
+                    ..footer
+                },
+                "",
+                &self.live(),
+                self.bindings(),
+                palette,
+            );
+        } else {
+            let caption = self.caption();
+            let status = self.status();
+            let line = self
+                .notice
+                .as_deref()
+                .or(caption.as_deref())
+                .unwrap_or(&status);
+            hints::draw(frame, footer, line, &self.live(), self.bindings(), palette);
         }
     }
 
     fn answer(&mut self, action: Action) -> Step {
+        if matches!(self.mode, Mode::Search(_))
+            && !matches!(action, Action::Open | Action::Dismiss | Action::Quit)
+        {
+            return Step::Continue;
+        }
         self.notice = None;
         match action {
             Action::Quit => return Step::Done,
+            Action::Open if matches!(self.mode, Mode::Search(_)) => self.finish_search(true),
             Action::Dismiss => match self.mode {
                 Mode::Search(_) => self.finish_search(false),
                 Mode::Jump(_) => self.mode = Mode::Reading,
@@ -412,7 +460,7 @@ impl Surface for View<'_> {
         self.notice = None;
         match &mut self.mode {
             Mode::Jump(jump) => {
-                if key.code == KeyCode::Esc || keymap::HELP.action(key) == Some(Action::Label) {
+                if keymap::HELP_JUMP.action(key) == Some(Action::Dismiss) {
                     self.mode = Mode::Reading;
                 } else if let KeyCode::Char(character) = key.code
                     && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
@@ -467,7 +515,11 @@ impl Surface for View<'_> {
     }
 
     fn bindings(&self) -> &'static keymap::Table {
-        &keymap::HELP
+        match self.mode {
+            Mode::Search(_) => &keymap::TEXT_INPUT,
+            Mode::Jump(_) => &keymap::HELP_JUMP,
+            Mode::Reading => &keymap::HELP,
+        }
     }
 
     fn title(&self) -> Option<String> {
@@ -479,11 +531,21 @@ impl Surface for View<'_> {
     }
 
     fn live(&self) -> Vec<Action> {
+        if matches!(self.mode, Mode::Search(_)) {
+            return vec![Action::Open, Action::Dismiss];
+        }
         if !matches!(self.mode, Mode::Reading) {
             return vec![Action::Dismiss];
         }
         let mut live = ACCEPTED.to_vec();
         live.retain(|action| self.scroll_changes(*action));
+        if !self.page.links.iter().any(|link| {
+            self.page.pager.visible().contains(&link.line)
+                && link.column < usize::from(self.content.width)
+                && link.width > 0
+        }) {
+            live.retain(|action| *action != Action::Label);
+        }
         let top = self.page.pager.top();
         if self.page.next_section(top).is_some() {
             live.push(Action::NextSection);
@@ -515,8 +577,12 @@ fn page_label(id: &PageId) -> String {
     id.selector().unwrap_or_else(|| "tola help".to_owned())
 }
 
-fn split_footer(area: Rect) -> (Rect, Rect) {
-    let height = area.height.min(2);
+fn split_footer(area: Rect, search_is_open: bool) -> (Rect, Rect) {
+    let height = if search_is_open {
+        area.height.min(2)
+    } else {
+        area.height.saturating_sub(1).min(2)
+    };
     (
         Rect {
             height: area.height - height,
@@ -538,6 +604,13 @@ mod tests {
 
     use super::*;
     use crate::help::model::{HelpPage, anchor};
+
+    fn reader<'a>(
+        document: HelpDocument,
+        load: &'a dyn Fn(&PageId) -> Result<HelpDocument>,
+    ) -> View<'a> {
+        View::new(document, load, 80, Palette::new(false))
+    }
 
     fn document(markdown: &str) -> HelpDocument {
         HelpDocument::parse(HelpPage::new(PageId::Overview, markdown.to_owned()))
@@ -611,7 +684,7 @@ mod tests {
 
     #[test]
     fn jump_keys_follow_visible_links() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         let area = Rect::new(0, 0, 60, 10);
         let plain = frame(&mut view, area);
         press(&mut view, KeyCode::Tab);
@@ -626,7 +699,7 @@ mod tests {
     #[test]
     fn cancelling_jump_restores_the_page() {
         for cancel in [KeyCode::Esc, KeyCode::Tab] {
-            let mut view = View::new(linked(), &load);
+            let mut view = reader(linked(), &load);
             let area = Rect::new(0, 0, 60, 10);
             let plain = frame(&mut view, area);
             press(&mut view, KeyCode::Tab);
@@ -640,7 +713,7 @@ mod tests {
 
     #[test]
     fn reflow_relabels_current_targets() {
-        let mut view = View::new(
+        let mut view = reader(
             document(
                 "# A title that wraps across several lines\n\nfirst [go](tola://package/@tola/schema)\n\nmore content\n",
             ),
@@ -655,7 +728,7 @@ mod tests {
 
     #[test]
     fn shrinking_hides_jump_targets() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
         press(&mut view, KeyCode::Tab);
         frame(&mut view, Rect::new(0, 0, 60, 3));
@@ -663,14 +736,15 @@ mod tests {
         press(&mut view, KeyCode::Char('a'));
         assert_eq!(view.document.id, PageId::Overview);
         frame(&mut view, Rect::new(0, 0, 60, 2));
-        assert!(view.page.pager.visible().is_empty());
+        assert!(!view.page.pager.visible().is_empty());
+        assert!(!view.live().contains(&Action::Label));
         press(&mut view, KeyCode::Tab);
         assert!(matches!(view.mode, Mode::Reading));
     }
 
     #[test]
     fn scrolling_dismisses_jump_labels() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 6));
         press(&mut view, KeyCode::Tab);
         view.answer(Action::Down);
@@ -684,7 +758,7 @@ mod tests {
 
     #[test]
     fn same_page_anchors_stay_out_of_history() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         let area = Rect::new(0, 0, 60, 3);
         frame(&mut view, area);
         view.follow(&LinkTarget::PageAnchor(PageId::Overview, anchor("Details")));
@@ -695,7 +769,7 @@ mod tests {
 
     #[test]
     fn back_returns_to_the_page_that_was_left() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         let area = Rect::new(0, 0, 60, 3);
         frame(&mut view, area);
         view.follow(&destination());
@@ -717,7 +791,7 @@ mod tests {
             "A paragraph of the first export.\n\n".repeat(10),
         ));
         page.push_export("\n## second - value\n\nShort description.\n".to_owned());
-        let mut view = View::new(HelpDocument::parse(page), &load);
+        let mut view = reader(HelpDocument::parse(page), &load);
         let area = Rect::new(0, 0, 60, 8);
         frame(&mut view, area);
         press(&mut view, KeyCode::Char('f'));
@@ -751,7 +825,7 @@ mod tests {
 
     #[test]
     fn tail_anchor_keeps_top_alignment() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         let area = Rect::new(0, 0, 60, 20);
         frame(&mut view, area);
         view.follow(&LinkTarget::PageAnchor(PageId::Overview, anchor("Tail")));
@@ -766,7 +840,7 @@ mod tests {
             .map(|index| format!("word{index}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut view = View::new(document(&format!("# Index\n\n{words}\n\nTail.\n")), &load);
+        let mut view = reader(document(&format!("# Index\n\n{words}\n\nTail.\n")), &load);
         frame(&mut view, Rect::new(0, 0, 28, 6));
         view.page.pager.set_top(8);
         let narrow = Rect::new(0, 0, 28, 6);
@@ -787,7 +861,7 @@ mod tests {
 
     #[test]
     fn new_navigation_discards_forward_history() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
         view.follow(&destination());
         view.answer(Action::Back);
@@ -800,7 +874,7 @@ mod tests {
 
     #[test]
     fn missing_anchors_preserve_navigation() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 6));
         view.follow(&destination());
         view.answer(Action::Back);
@@ -823,7 +897,7 @@ mod tests {
     #[test]
     fn failed_page_keeps_current_document() {
         let failed = |_: &PageId| anyhow::bail!("private implementation detail");
-        let mut view = View::new(linked(), &failed);
+        let mut view = reader(linked(), &failed);
         frame(&mut view, Rect::new(0, 0, 60, 6));
         view.follow(&destination());
         assert_eq!(view.document.id, PageId::Overview);
@@ -836,7 +910,7 @@ mod tests {
 
     #[test]
     fn pasted_search_updates_visible_matches() {
-        let mut view = View::new(search_page(), &load);
+        let mut view = reader(search_page(), &load);
         let area = Rect::new(0, 0, 30, 4);
         frame(&mut view, area);
         press(&mut view, KeyCode::Char('/'));
@@ -853,8 +927,84 @@ mod tests {
     }
 
     #[test]
+    fn search_reports_match_position() {
+        let mut view = reader(search_page(), &load);
+        let area = Rect::new(0, 0, 50, 6);
+        frame(&mut view, area);
+        press(&mut view, KeyCode::Char('/'));
+        view.paste("absent");
+        let shown = frame(&mut view, area);
+        assert!(row(&shown, area, view.content.bottom()).contains("no matches"));
+        assert_eq!(view.live(), [Action::Open, Action::Dismiss]);
+        assert_eq!(
+            view.bindings().action(&KeyEvent::from(KeyCode::Enter)),
+            Some(Action::Open)
+        );
+        press(&mut view, KeyCode::Enter);
+        assert!(view.status().contains("no matches"));
+        search(&mut view, "needle");
+        assert_eq!(view.page.pager.search_position(), Some((1, 2)));
+        press(&mut view, KeyCode::Char('n'));
+        assert_eq!(view.page.pager.search_position(), Some((2, 2)));
+        search(&mut view, "");
+        assert_eq!(view.page.pager.search_position(), None);
+        assert!(!view.status().contains("matches"));
+    }
+
+    #[test]
+    fn tiny_viewport_keeps_document_content() {
+        for height in [1, 2] {
+            let mut view = reader(document("visible documentation"), &load);
+            let area = Rect::new(3, 2, 40, height);
+            let shown = frame(&mut view, area);
+            assert!(!view.page.pager.visible().is_empty());
+            assert!(row(&shown, area, view.content.y).contains("visible documentation"));
+            assert_eq!(press(&mut view, KeyCode::Char('q')), Step::Done);
+        }
+    }
+
+    #[test]
+    fn tiny_search_keeps_text_editable() {
+        for height in [1, 2] {
+            let mut view = reader(search_page(), &load);
+            let area = Rect::new(3, 2, 40, height);
+            frame(&mut view, area);
+            press(&mut view, KeyCode::Char('/'));
+            view.paste("needle");
+            let shown = frame(&mut view, area);
+            assert!(row(&shown, area, area.y).contains("needle"));
+            press(&mut view, KeyCode::Enter);
+            assert_eq!(view.query, "needle");
+            assert!(matches!(view.mode, Mode::Reading));
+            press(&mut view, KeyCode::Char('/'));
+            view.paste("absent");
+            frame(&mut view, area);
+            press(&mut view, KeyCode::Esc);
+            assert_eq!(view.query, "needle");
+            assert!(matches!(view.mode, Mode::Reading));
+        }
+    }
+
+    #[test]
+    fn search_ignores_scroll_actions() {
+        let mut view = reader(search_page(), &load);
+        frame(&mut view, Rect::new(0, 0, 30, 5));
+        press(&mut view, KeyCode::Char('/'));
+        view.paste("second needle");
+        let position = view.position();
+        let focus = view.focus();
+        for action in [Action::Up, Action::Down, Action::Back, Action::NextSection] {
+            view.answer(action);
+            assert!(matches!(view.mode, Mode::Search(_)));
+            assert_eq!(view.position(), position);
+            assert_eq!(view.focus(), focus);
+        }
+        assert_eq!(view.active_query(), "second needle");
+    }
+
+    #[test]
     fn draft_search_survives_reflow() {
-        let mut view = View::new(search_page(), &load);
+        let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 30, 4));
         search(&mut view, "first needle");
         let origin = view.position();
@@ -875,7 +1025,7 @@ mod tests {
 
     #[test]
     fn reflow_preserves_selected_search_occurrence() {
-        let mut view = View::new(search_page(), &load);
+        let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 30, 5));
         search(&mut view, "needle");
         let first = view.focus().unwrap();
@@ -890,7 +1040,7 @@ mod tests {
 
     #[test]
     fn history_preserves_search_focus() {
-        let mut view = View::new(search_page(), &load);
+        let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 80, 20));
         search(&mut view, "needle");
         let first = view.focus().unwrap();
@@ -906,7 +1056,7 @@ mod tests {
 
     #[test]
     fn cancelled_search_restores_scroll_exactly() {
-        let mut view = View::new(search_page(), &load);
+        let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 30, 5));
         search(&mut view, "needle");
         press(&mut view, KeyCode::Char('n'));
@@ -922,7 +1072,7 @@ mod tests {
 
     #[test]
     fn cancelled_search_restores_separator_row() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 5));
         view.answer(Action::Down);
         let top = view.page.pager.top();
@@ -934,7 +1084,7 @@ mod tests {
 
     #[test]
     fn wrapped_hover_uses_content_coordinates() {
-        let mut view = View::new(
+        let mut view = reader(
             document(
                 "[one two three four five six](tola://package/@tola/schema) [other](https://example.com)\n",
             ),
@@ -983,7 +1133,7 @@ mod tests {
 
     #[test]
     fn search_movement_clears_hover() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         view.set_mouse(true);
         frame(&mut view, Rect::new(0, 0, 60, 6));
         let link = &view.page.links[0];
@@ -1001,7 +1151,7 @@ mod tests {
 
     #[test]
     fn mouse_respects_input_mode() {
-        let mut view = View::new(linked(), &load);
+        let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
         let link = &view.page.links[0];
         let click = mouse(
@@ -1023,7 +1173,7 @@ mod tests {
 
     #[test]
     fn external_jump_shows_destination() {
-        let mut view = View::new(
+        let mut view = reader(
             document("[read manual](https://example.com/manual)\n"),
             &load,
         );
@@ -1039,7 +1189,7 @@ mod tests {
     #[test]
     fn scrolling_hints_follow_the_page() {
         let short = document("# Index\n\nOne line.\n");
-        let mut view = View::new(short, &load);
+        let mut view = reader(short, &load);
         frame(&mut view, Rect::new(0, 0, 60, 20));
         for action in [
             Action::Up,
@@ -1057,7 +1207,7 @@ mod tests {
         let paragraphs = (0..60)
             .map(|index| format!("Paragraph {index}.\n\n"))
             .collect::<String>();
-        let mut view = View::new(document(&format!("# Index\n\n{paragraphs}")), &load);
+        let mut view = reader(document(&format!("# Index\n\n{paragraphs}")), &load);
         let area = Rect::new(0, 0, 60, 10);
         frame(&mut view, area);
         assert!(!view.live().contains(&Action::Up));
@@ -1072,5 +1222,24 @@ mod tests {
         assert!(!view.live().contains(&Action::Last));
         assert!(view.live().contains(&Action::Up));
         assert!(view.live().contains(&Action::First));
+    }
+
+    #[test]
+    fn jump_hints_require_visible_links() {
+        for markdown in ["", "# Index\n\nOne line.\n"] {
+            let mut view = reader(document(markdown), &load);
+            frame(&mut view, Rect::new(0, 0, 40, 6));
+            assert!(!view.live().contains(&Action::Label));
+        }
+        let mut view = reader(linked(), &load);
+        frame(&mut view, Rect::new(0, 0, 40, 10));
+        assert!(view.live().contains(&Action::Label));
+        press(&mut view, KeyCode::Tab);
+        assert_eq!(
+            view.bindings().action(&KeyEvent::from(KeyCode::Tab)),
+            Some(Action::Dismiss)
+        );
+        frame(&mut view, Rect::new(0, 0, 40, 2));
+        assert!(!view.live().contains(&Action::Label));
     }
 }

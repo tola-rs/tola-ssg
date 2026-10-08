@@ -20,7 +20,7 @@ pub(crate) mod keymap;
 pub(crate) mod pager;
 pub(crate) mod table;
 
-/// How long one frame waits for an event before it draws again.
+/// Cancellation is checked between event polls; unchanged surfaces need no redraw.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// What the frame loop does after one action.
@@ -193,8 +193,10 @@ impl<B: Backend> Screen<B> {
             let drawn = self.draw(terminal, surface, palette);
             terminal.end_synchronized_update()?;
             drawn?;
-            let Some(event) = session::next_event(terminal, POLL_INTERVAL, cancelled)? else {
-                continue;
+            let event = loop {
+                if let Some(event) = session::next_event(terminal, POLL_INTERVAL, cancelled)? {
+                    break event;
+                }
             };
             let run = match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -293,6 +295,7 @@ mod tests {
     struct ScriptedTerminal {
         sizes: RefCell<VecDeque<(u16, u16)>>,
         events: VecDeque<Event>,
+        idle_polls: usize,
     }
 
     impl ScriptedTerminal {
@@ -300,6 +303,7 @@ mod tests {
             Self {
                 sizes: RefCell::new(VecDeque::from([size])),
                 events: VecDeque::new(),
+                idle_polls: 0,
             }
         }
 
@@ -356,6 +360,10 @@ mod tests {
         }
 
         fn poll(&mut self, _timeout: Duration) -> std::io::Result<bool> {
+            if self.idle_polls > 0 {
+                self.idle_polls -= 1;
+                return Ok(false);
+            }
             Ok(!self.events.is_empty())
         }
 
@@ -543,6 +551,16 @@ mod tests {
             .run(&mut terminal, &mut surface, Palette::new(false), &cancelled)
             .unwrap_err();
         assert!(error.downcast_ref::<InputCancelled>().is_some());
+        assert_eq!(surface.areas.borrow().len(), 1);
+    }
+
+    #[test]
+    fn idle_view_keeps_its_frame() {
+        let (sink, _output) = OutputSink::buffered();
+        let mut terminal = ScriptedTerminal::new((80, 24)).event(quit());
+        terminal.idle_polls = 4;
+        let mut surface = Recorder::new("frame");
+        show(&mut terminal, &sink, &mut surface).unwrap();
         assert_eq!(surface.areas.borrow().len(), 1);
     }
 

@@ -106,15 +106,13 @@ impl Jump {
 
     pub(super) fn caption(&self) -> String {
         if self.labels.is_empty() {
-            return "no links on screen · Esc/Tab cancels".to_owned();
+            return "no links on screen".to_owned();
         }
         let mut caption = match self.selection {
-            Selection::Narrowed => "press the second label key · Esc/Tab cancels",
-            Selection::Pairs => "press a label pair · Esc/Tab cancels",
-            Selection::Undrawn if self.labels.len() > ALPHABET.len() => {
-                "press a label pair · Esc/Tab cancels"
-            }
-            _ => "press a label · Esc/Tab cancels",
+            Selection::Narrowed => "press the second label key",
+            Selection::Pairs => "press a label pair",
+            Selection::Undrawn if self.labels.len() > ALPHABET.len() => "press a label pair",
+            _ => "press a label",
         }
         .to_owned();
         if self.overflow {

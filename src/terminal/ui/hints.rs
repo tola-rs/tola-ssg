@@ -2,10 +2,8 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Span, Text};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::terminal::style::Palette;
 
@@ -21,12 +19,36 @@ pub(crate) fn draw(
     table: &keymap::Table,
     palette: Palette,
 ) {
-    let mut lines = Vec::new();
-    if !caption.is_empty() {
-        lines.push(Line::from(Span::styled(caption, palette.notice_style())));
+    if area.is_empty() {
+        return;
     }
+    let mut row = Rect { height: 1, ..area };
+    if !caption.is_empty() && area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(caption, palette.notice_style())),
+            row,
+        );
+        row.y += 1;
+    }
+    let mut groups = grouped(table, actions);
+    let mut line = Line::from(hint_spans(&groups, palette));
+    if line.width() > usize::from(area.width) {
+        let exits = table
+            .hints(&[Action::Quit, Action::Dismiss])
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>();
+        groups.sort_by_key(|(label, _)| !exits.contains(label));
+        line = Line::from(hint_spans(&groups, palette));
+    }
+    draw_line(frame, row, &line);
+}
+
+fn hint_spans(
+    groups: &[(&'static str, Vec<&'static str>)],
+    palette: Palette,
+) -> Vec<Span<'static>> {
     let mut hints = Vec::new();
-    for (label, spellings) in grouped(table, actions) {
+    for (label, spellings) in groups {
         if !hints.is_empty() {
             hints.push(Span::raw("  "));
         }
@@ -38,11 +60,10 @@ pub(crate) fn draw(
         }
         if !label.is_empty() {
             hints.push(Span::raw(" "));
-            hints.push(Span::styled(label, palette.dim_style()));
+            hints.push(Span::styled(*label, palette.dim_style()));
         }
     }
-    lines.push(Line::from(clipped(hints, usize::from(area.width))));
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    hints
 }
 
 /// The keys one action's row shows, in table order: one group per label, each spelling once, so
@@ -75,46 +96,36 @@ fn grouped(table: &keymap::Table, actions: &[Action]) -> Vec<(&'static str, Vec<
     groups
 }
 
-/// The spans trimmed to `width` columns, ending with an ellipsis when anything was cut.
-///
-/// Span-aware rather than a call to the elide helper: each span holds the style the key table
-/// gives it, which a plain string would drop.
-///
-/// Trimming happens on grapheme boundaries: half a grapheme is not text, and a wide grapheme
-/// that would straddle the edge goes whole. A row that fits is returned untouched, so nothing
-/// is spelled differently than the table spells it.
-fn clipped(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
-    if spans.iter().map(|span| span.content.width()).sum::<usize>() <= width {
-        return spans;
+fn draw_line(frame: &mut Frame, area: Rect, line: &Line<'_>) {
+    if area.is_empty() {
+        return;
     }
-    let limit = width.saturating_sub(1);
-    let mut used = 0;
-    let mut kept: Vec<Span<'static>> = Vec::new();
-    'spans: for span in spans {
-        let mut text = String::new();
-        for grapheme in span.content.graphemes(true) {
-            let columns = grapheme.width();
-            if used + columns > limit {
-                if !text.is_empty() {
-                    kept.push(Span::styled(text, span.style));
-                }
-                break 'spans;
-            }
-            used += columns;
-            text.push_str(grapheme);
-        }
-        if !text.is_empty() {
-            kept.push(Span::styled(text, span.style));
+    let truncated = line.width() > usize::from(area.width);
+    let end = area.right() - u16::from(truncated);
+    let mut column = area.x;
+    for span in &line.spans {
+        let (next, _) = frame
+            .buffer_mut()
+            .set_span(column, area.y, span, end - column);
+        let written = usize::from(next - column);
+        column = next;
+        if written < span.width() {
+            break;
         }
     }
-    kept.push(Span::raw("…"));
-    kept
+    if truncated {
+        frame
+            .buffer_mut()
+            .set_string(column, area.y, "…", ratatui::style::Style::default());
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
 
@@ -147,9 +158,19 @@ mod tests {
             .collect()
     }
 
-    /// The text of one clipped row, read back for its display width.
-    fn row_text(spans: &[Span<'static>]) -> String {
-        spans.iter().map(|span| span.content.as_ref()).collect()
+    fn rendered(line: &Line<'_>, area: Rect) -> Buffer {
+        let mut terminal =
+            Terminal::new(TestBackend::new(area.right().max(1), area.bottom().max(1))).unwrap();
+        terminal.draw(|frame| draw_line(frame, area, line)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &Buffer, area: Rect) -> String {
+        (area.x..area.right())
+            .map(|column| buffer[(column, area.y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 
     #[test]
@@ -161,25 +182,46 @@ mod tests {
 
     #[test]
     fn fitting_row_is_left_alone() {
-        let untouched = clipped(vec![Span::raw("q quit")], 20);
-        let too_narrow = clipped(vec![Span::raw("q quit")], 6);
-
-        assert_eq!(row_text(&untouched), "q quit", "no ellipsis is added");
-        assert_eq!(
-            row_text(&too_narrow),
-            "q quit",
-            "a row exactly as wide fits"
-        );
-        assert_eq!(untouched.len(), 1, "the span the table built is kept");
+        for width in [6, 20] {
+            let area = Rect::new(3, 2, width, 1);
+            let buffer = rendered(&Line::from("q quit"), area);
+            assert_eq!(row_text(&buffer, area), "q quit");
+        }
     }
 
     #[test]
     fn clipping_ends_on_grapheme_boundaries() {
-        // Three wide graphemes need six columns; the fourth would straddle the fifth.
-        let spans = clipped(vec![Span::raw("名称裁剪测试")], 5);
+        for (width, count) in [(1, 0), (3, 1), (4, 1), (5, 2)] {
+            let area = Rect::new(3, 2, width, 1);
+            let buffer = rendered(&Line::from("名称裁剪测试"), area);
+            for (ordinal, glyph) in ["名", "称"].into_iter().take(count as usize).enumerate() {
+                assert_eq!(
+                    buffer[(area.x + ordinal as u16 * 2, area.y)].symbol(),
+                    glyph
+                );
+            }
+            assert_eq!(buffer[(area.x + count * 2, area.y)].symbol(), "…");
+        }
+    }
 
-        assert_eq!(row_text(&spans), "名称…");
-        assert!(row_text(&spans).width() <= 5, "{:?}", row_text(&spans));
+    #[test]
+    fn clipping_preserves_styled_prefix() {
+        let palette = Palette::new(true);
+        let area = Rect::new(3, 2, 3, 1);
+        let line = Line::from(vec![
+            Span::styled("a名", palette.accent_style()),
+            Span::styled("z", palette.dim_style()),
+        ]);
+        let buffer = rendered(&line, area);
+        assert_eq!(row_text(&buffer, area), "a…");
+        assert_eq!(
+            buffer[(area.x, area.y)].fg,
+            palette.accent_style().fg.unwrap()
+        );
+        assert_eq!(
+            buffer[(area.x + 1, area.y)].fg,
+            ratatui::style::Color::Reset
+        );
     }
 
     #[test]
@@ -200,5 +242,27 @@ mod tests {
     fn empty_status_draws_only_hints() {
         let lines = drawn("", &[Action::Quit], Rect::new(0, 0, 24, 1));
         assert_eq!(lines[0], "q quit");
+    }
+
+    #[test]
+    fn narrow_footer_keeps_exit_visible() {
+        let lines = drawn(
+            "3 of 40 rows",
+            &[
+                Action::Up,
+                Action::Down,
+                Action::Open,
+                Action::Search,
+                Action::Quit,
+            ],
+            Rect::new(0, 0, 18, 1),
+        );
+        assert!(lines[0].contains("q quit"));
+        assert!(lines[0].width() <= 18);
+        let area = Rect::new(3, 2, 0, 1);
+        assert_eq!(
+            rendered(&Line::from("text"), area),
+            Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()))
+        );
     }
 }

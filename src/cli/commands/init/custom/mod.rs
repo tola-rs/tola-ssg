@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{List, ListState, Paragraph};
+use ratatui::widgets::{List, ListState, Paragraph, Wrap};
 
 use crate::terminal::display_path_toward_home;
 use crate::terminal::style::Palette;
@@ -44,9 +44,14 @@ pub(super) struct View {
     /// What the last action changed; the next key clears it.
     footnote: Option<String>,
     /// The open filter line, when the reader is typing one.
-    filter: Option<TextLine>,
-    /// Updated while typing; only names containing the text stay visible.
+    filter: Option<Filter>,
+    /// Accepted filter; edits preview their own text until accepted.
     query: String,
+}
+
+struct Filter {
+    line: TextLine,
+    cursor_before: usize,
 }
 
 impl View {
@@ -74,11 +79,17 @@ impl View {
         rows::rows()
     }
 
+    fn query(&self) -> &str {
+        self.filter
+            .as_ref()
+            .map_or(&self.query, |filter| filter.line.text())
+    }
+
     /// The rows the frame draws: the visible items, and every title that has one.
     fn visible_rows(&self, rows: &[Row]) -> Vec<usize> {
         let mut kept = Vec::new();
         let mut title = None;
-        let query = self.query.to_ascii_lowercase();
+        let query = self.query().to_ascii_lowercase();
         for (index, row) in rows.iter().enumerate() {
             if !rows::is_item(*row) {
                 title = Some(index);
@@ -132,10 +143,12 @@ impl View {
             Action::Last => self.cursor = items.saturating_sub(1),
             Action::Toggle => self.toggle(rows),
             Action::Search => {
-                self.filter = Some(TextLine::new("filter"));
-                self.query.clear();
-                self.cursor = 0;
-                self.settle(rows);
+                let mut line = TextLine::new("filter");
+                line.paste(&self.query);
+                self.filter = Some(Filter {
+                    line,
+                    cursor_before: self.cursor,
+                });
             }
             Action::ApplyPreset(position) => {
                 apply_preset(&mut self.selected, &mut self.footnote, position);
@@ -195,13 +208,13 @@ impl View {
         ]
     }
 
-    /// The row under the preset bar: the accepted filter, or a blank that keeps the layout.
+    /// An empty filter keeps its header row so editing does not shift the list.
     fn filter_indicator(&self, palette: Palette) -> Line<'static> {
-        if self.query.is_empty() {
+        if self.query().is_empty() {
             Line::default()
         } else {
             Line::from(Span::styled(
-                format!("/{}", self.query),
+                format!("/{}", self.query()),
                 palette.accent_style(),
             ))
         }
@@ -214,6 +227,7 @@ impl View {
         rows: &[Row],
         palette: Palette,
         focused: Option<usize>,
+        width: u16,
     ) -> Vec<Line<'static>> {
         visible
             .iter()
@@ -225,12 +239,17 @@ impl View {
                     Style::default()
                 };
                 Line::from(
-                    rows::line(rows[*index], &self.selected, Some(position) == focused)
-                        .into_iter()
-                        .map(|piece| {
-                            Span::styled(piece.text, role_style(piece.role, palette).patch(bar))
-                        })
-                        .collect::<Vec<_>>(),
+                    rows::line(
+                        rows[*index],
+                        &self.selected,
+                        Some(position) == focused,
+                        width,
+                    )
+                    .into_iter()
+                    .map(|piece| {
+                        Span::styled(piece.text, role_style(piece.role, palette).patch(bar))
+                    })
+                    .collect::<Vec<_>>(),
                 )
             })
             .collect()
@@ -279,7 +298,23 @@ impl Surface for View {
             return;
         }
         let header_lines = self.header_lines(&self.selected, palette);
-        let footer_rows = u16::from(area.height > 1);
+        let notice = self.footnote.as_deref().map(|footnote| {
+            Paragraph::new(footnote)
+                .style(palette.notice_style())
+                .wrap(Wrap { trim: false })
+        });
+        let extra_rows = if self.filter.is_some() {
+            1
+        } else {
+            notice.as_ref().map_or(0, |notice| {
+                u16::try_from(notice.line_count(area.width)).unwrap_or(u16::MAX)
+            })
+        };
+        let footer_rows = if area.height == 1 && self.filter.is_some() {
+            1
+        } else {
+            (u16::from(area.height > 1) + extra_rows).min(area.height.saturating_sub(1))
+        };
         let header_rows =
             (header_lines.len() as u16).min(area.height.saturating_sub(footer_rows + 1));
         let [header, list, footer] = Layout::vertical([
@@ -302,23 +337,34 @@ impl Surface for View {
             );
         } else {
             frame.render_stateful_widget(
-                List::new(self.list_items(&visible, rows, palette, item)),
+                List::new(self.list_items(&visible, rows, palette, item, list.width)),
                 list,
                 &mut self.list,
             );
         }
-        // The footer: the open filter line, the change just made, or the live keys.
         if let Some(filter) = &self.filter {
-            filter.draw(frame, footer, palette);
+            let [line, keys] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(footer);
+            filter.line.draw(frame, line, palette);
+            hints::draw(
+                frame,
+                keys,
+                "",
+                &[Action::Open, Action::Dismiss],
+                &keymap::TEXT_INPUT,
+                palette,
+            );
             return;
         }
-        match self.footnote.as_deref() {
-            Some(footnote) => frame.render_widget(
-                Paragraph::new(footnote).style(palette.notice_style()),
-                footer,
-            ),
-            None => hints::draw(frame, footer, "", &self.live(), self.bindings(), palette),
+        let [message, keys] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(u16::from(footer.height > 0)),
+        ])
+        .areas(footer);
+        if let Some(notice) = notice {
+            frame.render_widget(notice, message);
         }
+        hints::draw(frame, keys, "", &self.live(), self.bindings(), palette);
     }
 
     fn answer(&mut self, action: Action) -> Step {
@@ -332,22 +378,24 @@ impl Surface for View {
 
     fn key(&mut self, key: &KeyEvent) -> Step {
         self.footnote = None;
-        if let Some(filter) = &mut self.filter {
+        if let Some(mut filter) = self.filter.take() {
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && keymap::INIT.action(key) == Some(Action::Dismiss)
             {
                 return Step::Cancel;
             }
-            let reply = filter.key(key);
-            self.query = filter.text().to_owned();
-            if reply != Reply::Editing {
-                if reply == Reply::Dismissed {
-                    self.query.clear();
+            let before = filter.line.text().to_owned();
+            match filter.line.key(key) {
+                Reply::Editing => {
+                    if filter.line.text() != before {
+                        self.cursor = 0;
+                    }
+                    self.filter = Some(filter);
                 }
-                self.filter = None;
+                Reply::Accepted => self.query = filter.line.text().to_owned(),
+                Reply::Dismissed => self.cursor = filter.cursor_before,
             }
             let rows = self.rows();
-            self.cursor = 0;
             self.settle(rows);
             return Step::Continue;
         }
@@ -356,9 +404,11 @@ impl Surface for View {
 
     fn paste(&mut self, text: &str) -> Step {
         if let Some(filter) = &mut self.filter {
-            filter.paste(text);
-            self.query = filter.text().to_owned();
-            self.cursor = 0;
+            let before = filter.line.text().to_owned();
+            filter.line.paste(text);
+            if filter.line.text() != before {
+                self.cursor = 0;
+            }
         }
         Step::Continue
     }
@@ -499,16 +549,16 @@ mod tests {
     }
 
     /// The text one frame shows, line by line, with each line's right margin trimmed.
-    fn drawn(view: &mut View) -> Vec<String> {
+    fn drawn(view: &mut View, width: u16, height: u16) -> Vec<String> {
         let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 28)).unwrap();
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| view.draw(frame, Palette::new(false)))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         buffer
             .content()
-            .chunks(100)
+            .chunks(usize::from(width))
             .map(|row| {
                 row.iter()
                     .map(|cell| cell.symbol().to_owned())
@@ -707,9 +757,8 @@ mod tests {
     fn filter_editing_consumes_list_keys() {
         let mut view = rich_view(Row::Atom(Feature::TailwindCss));
         view.key(&key(KeyCode::Char('/')));
-        // `q` types instead of cancelling, and `Esc` clears the filter without leaving the screen.
         assert_eq!(view.key(&key(KeyCode::Char('q'))), Step::Continue);
-        assert_eq!(view.query, "q");
+        assert_eq!(view.query(), "q");
         assert_eq!(view.key(&key(KeyCode::Esc)), Step::Continue);
         assert!(view.query.is_empty());
         assert!(view.filter.is_none());
@@ -781,7 +830,7 @@ mod tests {
         view.key(&key(KeyCode::Char('/')));
         view.paste("no-matching-feature");
         assert!(
-            drawn(&mut view)
+            drawn(&mut view, 100, 28)
                 .iter()
                 .any(|line| line.contains("no matching"))
         );
@@ -809,7 +858,89 @@ mod tests {
         }
         view.key(&key(KeyCode::Char('/')));
         view.key(&key(KeyCode::Esc));
+        assert_eq!(cursor_row(&view), None);
+        view.key(&key(KeyCode::Char('/')));
+        for _ in 0.."no-matching-feature".len() {
+            view.key(&key(KeyCode::Backspace));
+        }
+        view.key(&key(KeyCode::Enter));
         assert!(cursor_row(&view).is_some());
+    }
+
+    #[test]
+    fn filter_cancel_restores_focus() {
+        let mut view = rich_view(Row::Atom(Feature::TailwindCss));
+        view.key(&key(KeyCode::Char('/')));
+        view.paste("DENO");
+        view.key(&key(KeyCode::Enter));
+        focus(&mut view, Row::File("deno.json"));
+
+        view.key(&key(KeyCode::Char('/')));
+        assert_eq!(view.query(), "DENO");
+        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+        view.key(&key(KeyCode::Left));
+        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+        view.paste("no-matching-feature");
+        assert_eq!(cursor_row(&view), None);
+        view.key(&key(KeyCode::Esc));
+
+        assert_eq!(view.query(), "DENO");
+        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+    }
+
+    #[test]
+    fn changes_keep_acceptance_keys_visible() {
+        let mut view = view(&[]);
+        focus(&mut view, Row::Atom(Feature::TailwindCss));
+        view.key(&key(KeyCode::Char(' ')));
+        for (width, height) in [(80, 12), (45, 8), (80, 2)] {
+            let lines = drawn(&mut view, width, height);
+            let footer = lines.last().unwrap();
+            for action in [Action::Quit, Action::Dismiss] {
+                let spelling = keymap::INIT.key_spelling(action).unwrap();
+                assert!(footer.contains(spelling), "{lines:?}");
+            }
+            if height > 2 {
+                let displayed = lines.join("\n");
+                assert!(displayed.contains("deno-toolchain"), "{displayed}");
+                assert!(displayed.contains("tailwind-css"), "{displayed}");
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_rows_show_dependencies() {
+        let mut view = view(&[]);
+        focus(&mut view, Row::Atom(Feature::TailwindCss));
+        let lines = drawn(&mut view, 60, 12);
+        let row = lines
+            .iter()
+            .find(|line| line.contains("tailwind-css"))
+            .unwrap();
+        assert!(row.contains("deno-toolchain"), "{lines:?}");
+    }
+
+    #[test]
+    fn filter_shows_editing_keys() {
+        let mut view = view(&[]);
+        view.key(&key(KeyCode::Char('/')));
+        let lines = drawn(&mut view, 80, 10);
+        let footer = lines.last().unwrap();
+        for action in [Action::Open, Action::Dismiss] {
+            let spelling = keymap::TEXT_INPUT.key_spelling(action).unwrap();
+            assert!(footer.contains(spelling), "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn tiny_filter_keeps_text_visible() {
+        let mut view = view(&[]);
+        view.key(&key(KeyCode::Char('/')));
+        view.paste("DENO");
+        for height in [1, 2] {
+            let lines = drawn(&mut view, 40, height);
+            assert!(lines.iter().any(|line| line.contains("DENO")), "{lines:?}");
+        }
     }
 
     #[test]

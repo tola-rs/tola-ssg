@@ -2,12 +2,10 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::terminal::style::Palette;
-
-use super::stepped_index;
 
 /// The open search over the page's lines.
 struct Search {
@@ -78,20 +76,14 @@ impl Pager {
         self.top = self.scrolled_top(lines);
     }
 
-    /// Whether scrolling by `lines` moves the viewport: a page that fits shows no scrolling key.
+    /// Whether scrolling by `lines` moves the viewport.
     pub(crate) fn can_move_by(&self, lines: isize) -> bool {
-        self.overflows_viewport() && self.scrolled_top(lines) != self.top
+        self.scrolled_top(lines) != self.top
     }
 
     /// Scrolls the viewport by `pages` of the lines the last frame showed.
     pub(crate) fn page_by(&mut self, pages: isize) {
         self.move_by(self.page_rows(pages));
-    }
-
-    /// Whether the page is taller than the last drawn viewport: a page that fits shows no
-    /// scrolling key.
-    pub(crate) fn overflows_viewport(&self) -> bool {
-        self.lines.len() > self.height.max(1)
     }
 
     /// Whether paging `pages` moves the viewport.
@@ -104,12 +96,10 @@ impl Pager {
         (self.height.max(1) as isize) * pages
     }
 
-    /// The top `lines` away from the current one, stopping at the last screenful: past it the
-    /// viewport would only add blank rows.
     fn scrolled_top(&self, lines: isize) -> usize {
-        let last = self.height.max(1);
-        let top_max = self.lines.len().saturating_sub(last).min(self.top_max());
-        stepped_index(self.top.min(top_max), lines, top_max + 1)
+        // Anchors may lie below the last screenful; scrolling must not reverse or skip rows.
+        let top_max = self.last_top().max(self.top);
+        self.top.saturating_add_signed(lines).min(top_max)
     }
 
     /// Scrolls the viewport by half a page: the lines the last frame showed, halved.
@@ -131,7 +121,7 @@ impl Pager {
 
     /// Whether scrolling to the first line moves the viewport.
     pub(crate) fn can_first(&self) -> bool {
-        self.overflows_viewport() && self.top != 0
+        self.top != 0
     }
 
     /// Scrolls the viewport to the last screenful.
@@ -141,7 +131,7 @@ impl Pager {
 
     /// Whether scrolling to the last screenful moves the viewport.
     pub(crate) fn can_last(&self) -> bool {
-        self.overflows_viewport() && self.top != self.last_top()
+        self.top != self.last_top()
     }
 
     /// The top of the last screenful.
@@ -179,6 +169,13 @@ impl Pager {
         search.hits.get(search.current).copied()
     }
 
+    /// The one-based match ordinal and total matching lines; no matches has ordinal zero.
+    pub(crate) fn search_position(&self) -> Option<(usize, usize)> {
+        let search = self.search.as_ref()?;
+        let total = search.hits.len();
+        Some((if total == 0 { 0 } else { search.current + 1 }, total))
+    }
+
     /// Focuses the nearest matching line without changing the restored viewport.
     pub(crate) fn select_hit(&mut self, line: usize) {
         if let Some(search) = &mut self.search
@@ -209,11 +206,19 @@ impl Pager {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        // Only the viewport's lines are cloned: the rest of the page is not drawn this frame.
-        let lines = (self.top..(self.top + self.height).min(self.lines.len()))
-            .map(|index| match self.hit_style(index, palette) {
-                Some(hit) => self.lines[index].clone().style(hit),
-                None => self.lines[index].clone(),
+        let lines = self
+            .visible()
+            .map(|index| {
+                let line = &self.lines[index];
+                Line {
+                    spans: line
+                        .spans
+                        .iter()
+                        .map(|span| Span::styled(span.content.as_ref(), span.style))
+                        .collect(),
+                    style: self.hit_style(index, palette).unwrap_or(line.style),
+                    alignment: line.alignment,
+                }
             })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(Text::from(lines)), area);
@@ -362,7 +367,6 @@ mod tests {
     fn movement_hints_follow_viewport_and_top() {
         let mut pager = page();
         pager.resize(20);
-        assert!(!pager.overflows_viewport());
         assert!(!pager.can_page_by(1));
         assert!(!pager.can_move_by(1));
         assert!(!pager.can_last());
@@ -397,6 +401,29 @@ mod tests {
         pager.resize(0);
         assert_eq!(pager.top(), 11);
         assert!(pager.visible().is_empty());
+    }
+
+    #[test]
+    fn anchored_scroll_preserves_direction() {
+        for height in [4, 20] {
+            let mut pager = page();
+            pager.resize(height);
+            pager.set_top(11);
+            assert!(pager.can_first());
+            assert!(pager.can_move_by(-1));
+            assert!(!pager.can_move_by(1));
+            assert!(!pager.can_page_by(1));
+            pager.move_by(1);
+            assert_eq!(pager.top(), 11);
+            pager.move_by(-1);
+            assert_eq!(pager.top(), 10);
+            pager.move_by(0);
+            assert_eq!(pager.top(), 10);
+            pager.page_by(-1);
+            assert_eq!(pager.top(), 10usize.saturating_sub(height));
+            pager.first();
+            assert_eq!(pager.top(), 0);
+        }
     }
 
     #[test]
@@ -439,5 +466,34 @@ mod tests {
         assert_eq!(pager.top(), 3);
         pager.next_hit();
         assert_eq!(pager.top(), 3);
+    }
+
+    #[test]
+    fn search_keeps_span_colors() {
+        use ratatui::style::{Color, Style};
+
+        let mut pager = Pager::new(vec![
+            Line::from(vec![
+                Span::raw("hit "),
+                Span::styled("blue", Style::new().fg(Color::Blue)),
+            ])
+            .style(Style::new().fg(Color::Red)),
+        ]);
+        let palette = Palette::new(true);
+        let area = Rect::new(3, 1, 12, 1);
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        pager.search("hit");
+        terminal
+            .draw(|frame| pager.draw(frame, area, palette))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(area.x, area.y)].fg, palette.hit_style().fg.unwrap());
+        assert_eq!(buffer[(area.x + 4, area.y)].fg, Color::Blue);
+        assert!(
+            buffer[(area.x + 4, area.y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        );
+        assert!(buffer[(area.x + 8, area.y)].modifier.is_empty());
     }
 }

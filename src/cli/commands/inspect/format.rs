@@ -54,14 +54,6 @@ pub(super) fn encode(rows: &[Value], options: &SourceFormat) -> Result<String> {
     })
 }
 
-/// The rows of an array `value` that `keep` holds, in projection order.
-pub(super) fn filtered(value: &Value, keep: impl Fn(&Value) -> bool) -> Value {
-    let Value::Array(rows) = value else {
-        return value.clone();
-    };
-    Value::Array(rows.iter().filter(|row| keep(row)).cloned().collect())
-}
-
 /// Reduce Typst content objects in serialized metadata to the text they render.
 fn plain_text(json: &Value) -> Value {
     match json {
@@ -307,20 +299,6 @@ mod tests {
         let row = selected_fields("content/post.typ", json!({"draft":true}), Some(&url), false);
         assert_eq!(row["path"], "content/post.typ");
         assert_eq!(row["url"], Value::Null);
-    }
-
-    #[test]
-    fn filtered_keeps_rows_matching_predicate() {
-        let rows = json!([{"title": "one"}, {"title": "two"}]);
-
-        assert_eq!(
-            filtered(&rows, |row| row["title"] == "two"),
-            json!([{"title": "two"}])
-        );
-        assert_eq!(
-            filtered(&json!("not an array"), |_| false),
-            json!("not an array")
-        );
     }
 
     #[test]

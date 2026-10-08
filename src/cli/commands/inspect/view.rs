@@ -13,7 +13,7 @@ use crate::terminal::style::Palette;
 use crate::terminal::text;
 use crate::terminal::ui::filter::{Reply, TextLine};
 use crate::terminal::ui::table::Table;
-use crate::terminal::ui::{Action, Step, Surface, answer_key, hints};
+use crate::terminal::ui::{Action, Step, Surface, answer_key, hints, keymap};
 
 /// The actions the table answers; `Export` writes the rows it currently shows.
 const ACCEPTED: &[Action] = &[
@@ -31,9 +31,6 @@ const ACCEPTED: &[Action] = &[
     Action::Open,
     Action::Export,
 ];
-
-/// The narrowest a cell keeps before the table clips it.
-const MINIMUM_CELL_COLUMNS: usize = 8;
 
 /// The interactive table over one projection's rows.
 pub(crate) struct View<'a> {
@@ -56,8 +53,6 @@ pub(crate) struct View<'a> {
     notice: Option<String>,
     /// The line above the hints: what the reader is looking at.
     status: String,
-    /// The width the cells were rendered at.
-    width: usize,
     /// Whether the table still shows the current rows and filter.
     built: bool,
     /// Whether cells render the serialized JSON instead of content text.
@@ -109,7 +104,6 @@ impl<'a> View<'a> {
             target: None,
             notice: None,
             status: String::new(),
-            width: 0,
             built: false,
             raw: false,
             stdout: None,
@@ -140,9 +134,7 @@ impl<'a> View<'a> {
         self.stdout.take()
     }
 
-    /// Renders the visible rows into the table component at `width`.
-    fn build(&mut self, width: usize) {
-        let share = (width / self.columns.len().max(1)).max(MINIMUM_CELL_COLUMNS);
+    fn build(&mut self) {
         let rows = self
             .visible
             .iter()
@@ -150,7 +142,7 @@ impl<'a> View<'a> {
                 let row = &self.rows[*index];
                 self.columns
                     .iter()
-                    .map(|column| cell(value_at(row, &column.path), share, self.raw))
+                    .map(|column| cell(value_at(row, &column.path), self.raw))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -161,7 +153,6 @@ impl<'a> View<'a> {
                 .position(|index| Some(*index) == self.row)
                 .unwrap_or(0),
         );
-        self.width = width;
         self.built = true;
     }
 
@@ -189,7 +180,7 @@ impl<'a> View<'a> {
         };
         let query = query.to_lowercase();
         self.columns.iter().any(|column| {
-            cell(value_at(row, &column.path), usize::MAX, self.raw)
+            cell(value_at(row, &column.path), self.raw)
                 .to_lowercase()
                 .contains(&query)
         })
@@ -255,12 +246,11 @@ impl<'a> View<'a> {
 
     /// Accepts the export prompt's target: empty means stdout once the view ends.
     fn accept_export(&mut self, target: &str) -> Step {
-        // The helper derives the same rows as `visible`: both hold `matches` over every row.
-        let kept =
-            super::format::filtered(&Value::Array(self.rows.clone()), |row| self.matches(row));
-        let Value::Array(rows) = kept else {
-            unreachable!("filtering an array of rows keeps an array");
-        };
+        let rows = self
+            .visible
+            .iter()
+            .map(|index| self.rows[*index].clone())
+            .collect::<Vec<_>>();
         let encoded = match (self.encode)(&rows) {
             Ok(encoded) => encoded,
             Err(error) => {
@@ -293,14 +283,19 @@ impl Surface for View<'_> {
         if area.height == 0 || area.width == 0 {
             return;
         }
-        if !self.built || self.width != usize::from(area.width) {
-            self.build(usize::from(area.width));
+        if !self.built {
+            self.build();
         }
-        let (content, footer) = split_footer(area);
+        let (content, footer) = split_footer(area, !matches!(self.prompt, Prompt::Closed));
         self.table.draw(frame, content, palette);
         self.refresh_status();
         let line = self.notice.as_deref().unwrap_or(&self.status);
-        hints::draw(frame, footer, line, &self.live(), self.bindings(), palette);
+        let bindings = if matches!(self.prompt, Prompt::Closed) {
+            self.bindings()
+        } else {
+            &keymap::TEXT_INPUT
+        };
+        hints::draw(frame, footer, line, &self.live(), bindings, palette);
         if let Prompt::Filter(prompt) | Prompt::Export(prompt) = &self.prompt {
             let line = Rect {
                 y: footer.y,
@@ -352,7 +347,7 @@ impl Surface for View<'_> {
             return match filter.key(key) {
                 Reply::Editing => Step::Continue,
                 Reply::Accepted => {
-                    self.query = Some(filter.text().to_owned());
+                    self.query = (!filter.text().is_empty()).then(|| filter.text().to_owned());
                     self.prompt = Prompt::Closed;
                     self.apply_query();
                     Step::Continue
@@ -389,7 +384,7 @@ impl Surface for View<'_> {
 
     fn live(&self) -> Vec<Action> {
         if !matches!(self.prompt, Prompt::Closed) {
-            return vec![Action::Dismiss];
+            return vec![Action::Open, Action::Dismiss];
         }
         let mut live = ACCEPTED.to_vec();
         if self.row.is_none() {
@@ -413,7 +408,11 @@ impl Surface for View<'_> {
 
 impl View<'_> {
     fn search(&mut self) {
-        self.prompt = Prompt::Filter(TextLine::new("filter"));
+        let mut prompt = TextLine::new("filter");
+        if let Some(query) = &self.query {
+            prompt.paste(query);
+        }
+        self.prompt = Prompt::Filter(prompt);
     }
 
     /// Opens the export prompt, starting from the command's own output path when it has one.
@@ -458,7 +457,8 @@ impl View<'_> {
                 Action::Down => self.table.can_scroll_detail(1),
                 Action::PageUp => self.table.can_page_detail_by(-1),
                 Action::PageDown => self.table.can_page_detail_by(1),
-                _ => false,
+                Action::First | Action::Last => false,
+                _ => true,
             }
         } else {
             match action {
@@ -514,8 +514,7 @@ fn value_at<'a>(row: &'a Value, path: &[String]) -> &'a Value {
     value
 }
 
-/// One cell as the table shows it: a single line, bounded by the column's share.
-fn cell(value: &Value, columns: usize, raw: bool) -> String {
+fn cell(value: &Value, raw: bool) -> String {
     let text = match value {
         Value::Null => "·".to_owned(),
         Value::String(value) if !raw => value.clone(),
@@ -530,8 +529,7 @@ fn cell(value: &Value, columns: usize, raw: bool) -> String {
             crate::terminal::plural_count(object.len(), "field")
         ),
     };
-    let text = text::single_line(&text);
-    text::window(&text, columns, 0).text.to_owned()
+    text::single_line(&text)
 }
 
 /// One row's detail lines: the row's JSON, unmodified and pretty-printed.
@@ -541,8 +539,12 @@ fn detail_lines(row: &Value) -> Vec<String> {
 }
 
 /// The content above the status line and the key hints.
-fn split_footer(area: Rect) -> (Rect, Rect) {
-    let footer = area.height.min(2);
+fn split_footer(area: Rect, prompt_is_open: bool) -> (Rect, Rect) {
+    let footer = if prompt_is_open {
+        area.height.min(2)
+    } else {
+        area.height.saturating_sub(1).min(2)
+    };
     (
         Rect {
             height: area.height - footer,
@@ -695,14 +697,14 @@ mod tests {
         // The detail is one line in a taller overlay: nothing to scroll.
         assert!(!view.live().contains(&Action::Down));
         view.key(&key(KeyCode::Char('/')));
-        assert_eq!(view.live(), [Action::Dismiss]);
+        assert_eq!(view.live(), [Action::Open, Action::Dismiss]);
         type_and_accept(&mut view, "absent");
         frame(&mut view, 40, 10);
         assert!(!view.live().contains(&Action::Open));
         assert!(!view.live().contains(&Action::Down));
         assert!(view.live().contains(&Action::Export));
         view.key(&key(KeyCode::Char('e')));
-        assert_eq!(view.live(), [Action::Dismiss]);
+        assert_eq!(view.live(), [Action::Open, Action::Dismiss]);
     }
 
     #[test]
@@ -745,11 +747,11 @@ mod tests {
 
     #[test]
     fn cells_fit_one_line() {
-        assert_eq!(cell(&json!("a\nb"), 40, false), "a\\nb");
-        assert_eq!(cell(&json!("a"), 40, true), "\"a\"");
-        assert_eq!(cell(&json!(null), 40, false), "·");
-        assert_eq!(cell(&json!(["a", "b"]), 40, false), "[2 items]");
-        assert_eq!(cell(&json!({"a": 1}), 40, false), "{1 field}");
+        assert_eq!(cell(&json!("a\nb"), false), "a\\nb");
+        assert_eq!(cell(&json!("a"), true), "\"a\"");
+        assert_eq!(cell(&json!(null), false), "·");
+        assert_eq!(cell(&json!(["a", "b"]), false), "[2 items]");
+        assert_eq!(cell(&json!({"a": 1}), false), "{1 field}");
     }
 
     #[test]
@@ -764,6 +766,82 @@ mod tests {
 
         assert_eq!(view.visible, vec![0, 2]);
         assert_eq!(view.row, Some(0));
+    }
+
+    #[test]
+    fn cancelled_filter_preserves_detail() {
+        let mut view = view(json!([
+            {"name": "Alpha"},
+            {"name": "Alpha two", "values": (0..24).collect::<Vec<_>>()},
+            {"name": "Beta"},
+        ]));
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Down));
+        view.key(&key(KeyCode::Char('/')));
+        type_and_accept(&mut view, "Alpha");
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Enter));
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::PageDown));
+        let before = frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Char('/')));
+        let Prompt::Filter(prompt) = &view.prompt else {
+            panic!("filter is open");
+        };
+        assert_eq!(prompt.text(), "Alpha");
+        view.paste("absent");
+        view.key(&key(KeyCode::Esc));
+        assert_eq!(view.visible, [0, 1]);
+        assert_eq!(view.row, Some(1));
+        assert_eq!(frame(&mut view, 40, 10), before);
+    }
+
+    #[test]
+    fn empty_filter_restores_rows() {
+        let mut view = view(json!([{"name": "Alpha"}, {"name": "Beta"}]));
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Char('/')));
+        type_and_accept(&mut view, "Beta");
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Char('/')));
+        for _ in 0..4 {
+            view.key(&key(KeyCode::Backspace));
+        }
+        view.key(&key(KeyCode::Enter));
+        frame(&mut view, 40, 10);
+        assert_eq!(view.visible, [0, 1]);
+        assert_eq!(view.row, Some(1));
+        assert!(view.query.is_none());
+        assert!(!view.live().contains(&Action::NextMatch));
+    }
+
+    #[test]
+    fn detail_retains_available_actions() {
+        let mut view = view(json!([
+            {"name": "Alpha", "group": "match"},
+            {"name": "Beta", "group": "match"},
+        ]));
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Char('/')));
+        type_and_accept(&mut view, "match");
+        frame(&mut view, 40, 10);
+        view.key(&key(KeyCode::Enter));
+        frame(&mut view, 40, 10);
+        for action in [
+            Action::Quit,
+            Action::Dismiss,
+            Action::Search,
+            Action::Export,
+            Action::NextMatch,
+            Action::PreviousMatch,
+        ] {
+            assert!(view.live().contains(&action), "{action:?}");
+        }
+        assert!(!view.live().contains(&Action::First));
+        assert!(!view.live().contains(&Action::Last));
+        view.key(&key(KeyCode::Esc));
+        assert!(!view.table.detail_is_open());
+        assert_eq!(view.key(&key(KeyCode::Char('q'))), Step::Done);
     }
 
     #[test]
@@ -841,5 +919,21 @@ mod tests {
 
         assert_eq!(view.answer(Action::Open), Step::Continue);
         assert!(!view.table.detail_is_open());
+    }
+
+    #[test]
+    fn short_view_keeps_row_reachable() {
+        let mut view = view(json!([{"name": "Alpha"}]));
+        for height in [1, 2] {
+            assert!(frame_text(&frame(&mut view, 20, height)).contains("Alpha"));
+            view.key(&key(KeyCode::Enter));
+            assert!(frame_text(&frame(&mut view, 20, height)).contains('{'));
+            view.key(&key(KeyCode::Esc));
+        }
+        view.key(&key(KeyCode::Char('/')));
+        view.paste("Alpha");
+        assert!(frame_text(&frame(&mut view, 20, 1)).contains("Alpha"));
+        view.key(&key(KeyCode::Enter));
+        assert_eq!(view.visible, [0]);
     }
 }

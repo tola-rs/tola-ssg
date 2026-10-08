@@ -106,6 +106,32 @@ impl Table {
     }
 }
 
+pub(crate) const TEXT_INPUT: Table = Table {
+    bindings: &[
+        Binding {
+            keys: &[Key::named(KeyCode::Enter, "Enter")],
+            label: "apply",
+            action: Action::Open,
+        },
+        Binding {
+            keys: &[Key::named(KeyCode::Esc, "Esc")],
+            label: "cancel",
+            action: Action::Dismiss,
+        },
+    ],
+};
+
+pub(crate) const HELP_JUMP: Table = Table {
+    bindings: &[Binding {
+        keys: &[
+            Key::named(KeyCode::Esc, "Esc"),
+            Key::named(KeyCode::Tab, "Tab"),
+        ],
+        label: "cancel",
+        action: Action::Dismiss,
+    }],
+};
+
 /// The keys every screen shares: moving, paging, searching, and leaving.
 pub(crate) const DEFAULT: Table = Table {
     bindings: &[
@@ -428,7 +454,7 @@ mod tests {
 
     #[test]
     fn keys_are_bound_once() {
-        for table in [&DEFAULT, &HELP, &INIT, &DEV] {
+        for table in [&DEFAULT, &HELP, &INIT, &DEV, &TEXT_INPUT, &HELP_JUMP] {
             let mut bound: Vec<(KeyCode, KeyModifiers)> = Vec::new();
             for binding in table.bindings {
                 assert!(!binding.keys.is_empty(), "{} binds no key", binding.label);
@@ -447,7 +473,7 @@ mod tests {
 
     #[test]
     fn bound_keys_spell_themselves() {
-        for table in [&DEFAULT, &HELP, &INIT] {
+        for table in [&DEFAULT, &HELP, &INIT, &DEV, &TEXT_INPUT, &HELP_JUMP] {
             for binding in table.bindings {
                 for key in binding.keys {
                     assert!(

@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::stepped_index;
 use crate::terminal::style::Palette;
+use crate::terminal::text;
 /// The detail of one row, drawn over the table.
 struct Detail {
     title: String,
@@ -24,7 +25,6 @@ struct Detail {
 pub(crate) struct Table {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
-    selected: usize,
     /// The selection and scroll position, as the table keeps them.
     state: TableState,
     /// The rows the last frame had room for.
@@ -38,8 +38,7 @@ impl Table {
         Self {
             headers,
             rows,
-            selected: 0,
-            state: TableState::default(),
+            state: TableState::default().with_selected(Some(0)),
             height: 0,
             detail: None,
         }
@@ -47,13 +46,13 @@ impl Table {
 
     /// The selected row's index.
     pub(crate) fn selected(&self) -> usize {
-        self.selected
+        self.state.selected().unwrap_or(0)
     }
 
     /// Reformatting cells preserves the selection and the open detail's scroll position.
     pub(crate) fn set_rows(&mut self, rows: Vec<Vec<String>>) {
         self.rows = rows;
-        self.select(self.selected);
+        self.select(self.selected());
     }
 
     /// Whether a row detail is open.
@@ -63,17 +62,18 @@ impl Table {
 
     /// Selects the row at `row`, stopping at either end.
     pub(crate) fn select(&mut self, row: usize) {
-        self.selected = row.min(self.rows.len().saturating_sub(1));
+        self.state
+            .select(Some(row.min(self.rows.len().saturating_sub(1))));
     }
 
     /// Moves the selection one row, stopping at either end.
     pub(crate) fn select_by(&mut self, rows: isize) {
-        self.selected = stepped_index(self.selected, rows, self.rows.len());
+        self.select(self.selected().saturating_add_signed(rows));
     }
 
     /// Whether moving the selection `rows` changes it.
     pub(crate) fn can_select_by(&self, rows: isize) -> bool {
-        stepped_index(self.selected, rows, self.rows.len()) != self.selected
+        stepped_index(self.selected(), rows, self.rows.len()) != self.selected()
     }
 
     /// Moves the selection one page, by the rows the last frame showed.
@@ -99,22 +99,22 @@ impl Table {
 
     /// Selects the first row.
     pub(crate) fn select_first(&mut self) {
-        self.selected = 0;
+        self.select(0);
     }
 
     /// Whether selecting the first row changes the selection.
     pub(crate) fn can_select_first(&self) -> bool {
-        self.selected != 0
+        self.selected() != 0
     }
 
     /// Selects the last row.
     pub(crate) fn select_last(&mut self) {
-        self.selected = self.rows.len().saturating_sub(1);
+        self.select(usize::MAX);
     }
 
     /// Whether selecting the last row changes the selection.
     pub(crate) fn can_select_last(&self) -> bool {
-        self.selected != self.rows.len().saturating_sub(1)
+        self.selected() != self.rows.len().saturating_sub(1)
     }
 
     /// Opens `lines` under `title` over the table, at their first line.
@@ -170,64 +170,64 @@ impl Table {
     /// Draws the table, and the open row detail over it.
     pub(crate) fn draw(&mut self, frame: &mut Frame, area: Rect, palette: Palette) {
         if area.height == 0 || area.width == 0 {
+            self.height = 0;
             if let Some(detail) = &mut self.detail {
                 detail.height = 0;
             }
             return;
         }
-        self.height = usize::from(area.height.saturating_sub(1));
-        let widths = self
-            .column_widths()
-            .into_iter()
-            .enumerate()
-            .map(|(column, width)| {
-                if column + 1 == self.headers.len() {
-                    Constraint::Fill(1)
-                } else {
-                    Constraint::Length(width as u16)
-                }
-            })
+        let header_is_visible = area.height > 1;
+        self.height = usize::from(area.height - u16::from(header_is_visible));
+        let widths = self.column_widths(usize::from(area.width));
+        let constraints = widths
+            .iter()
+            .map(|width| Constraint::Length(*width as u16))
             .collect::<Vec<_>>();
         let header = GridRow::new(
             self.headers
                 .iter()
+                .take(widths.len())
                 .enumerate()
-                .map(|(column, cell)| Cell::from(self.cell(cell, column)))
+                .map(|(column, cell)| Cell::from(self.cell(cell, column, widths[column])))
                 .collect::<Vec<_>>(),
         )
         .style(palette.accent_style());
         let rows = self.rows.iter().map(|row| {
             GridRow::new(
                 row.iter()
+                    .take(widths.len())
                     .enumerate()
-                    .map(|(column, cell)| Cell::from(self.cell(cell, column)))
+                    .map(|(column, cell)| Cell::from(self.cell(cell, column, widths[column])))
                     .collect::<Vec<_>>(),
             )
         });
-        let table = Grid::new(rows, widths)
-            .header(header)
+        let table = Grid::new(rows, constraints)
             .column_spacing(1)
             .row_highlight_style(palette.selected_style());
-        self.state.select(Some(self.selected));
+        let table = if header_is_visible {
+            table.header(header)
+        } else {
+            table
+        };
         frame.render_stateful_widget(table, area, &mut self.state);
         self.draw_detail(frame, area, palette);
     }
 
     /// One cell's text: the separator before the next column rides in this cell.
-    fn cell(&self, text: &str, column: usize) -> String {
-        if column + 1 == self.headers.len() {
-            text.to_owned()
+    fn cell(&self, source: &str, column: usize, width: usize) -> String {
+        if column + 1 == self.headers.len() || width < 3 {
+            text::window(source, width, 0).text.to_owned()
         } else {
+            let text = text::window(source, width - 2, 0).text;
             format!("{text} |")
         }
     }
 
-    /// The width each column needs: its longest text, and the separator for every column but the
-    /// last.
-    fn column_widths(&self) -> Vec<usize> {
+    fn column_widths(&self, columns: usize) -> Vec<usize> {
         let mut widths = self
             .headers
             .iter()
+            .take(columns.div_ceil(2))
             .map(|text| text.width())
             .collect::<Vec<_>>();
         for row in &self.rows {
@@ -238,11 +238,24 @@ impl Table {
             }
         }
         let last = widths.len().saturating_sub(1);
-        widths
+        let desired = widths
             .iter()
             .enumerate()
             .map(|(column, width)| if column == last { *width } else { width + 2 })
-            .collect()
+            .collect::<Vec<_>>();
+        let available = columns.saturating_sub(desired.len().saturating_sub(1));
+        let share = available / desired.len().max(1);
+        let mut widths = desired
+            .iter()
+            .map(|width| (*width).min(share))
+            .collect::<Vec<_>>();
+        let mut remaining = available - widths.iter().sum::<usize>();
+        for (width, desired) in widths.iter_mut().zip(desired) {
+            let extra = (desired - *width).min(remaining);
+            *width += extra;
+            remaining -= extra;
+        }
+        widths
     }
 
     fn draw_detail(&mut self, frame: &mut Frame, area: Rect, palette: Palette) {
@@ -251,10 +264,13 @@ impl Table {
         };
         let overlay = overlay_area(area);
         frame.render_widget(Clear, overlay);
-        let block = Block::bordered()
-            .title(detail.title.clone())
-            .title_style(palette.accent_style())
-            .border_style(palette.dim_style());
+        let block = if overlay.width >= 3 && overlay.height >= 3 {
+            Block::bordered().title(detail.title.clone())
+        } else {
+            Block::default()
+        }
+        .title_style(palette.accent_style())
+        .border_style(palette.dim_style());
         let inner = block.inner(overlay);
         detail.height = usize::from(inner.height);
         let lines = detail.lines.iter().map(|line| Line::from(line.as_str()));
@@ -281,11 +297,15 @@ fn scrolled_offset(offset: usize, lines: isize, line_count: usize, height: usize
         .min(line_count.saturating_sub(height.max(1)))
 }
 
-/// The area an overlay covers: the middle of `area`, with a margin of one row and column.
 fn overlay_area(area: Rect) -> Rect {
-    let width = area.width.saturating_sub(2).max(1);
-    let height = area.height.saturating_sub(2).max(1);
-    Rect::new(area.x + 1, area.y + 1, width, height)
+    let horizontal_margin = u16::from(area.width > 4);
+    let vertical_margin = u16::from(area.height > 4);
+    Rect::new(
+        area.x + horizontal_margin,
+        area.y + vertical_margin,
+        area.width - horizontal_margin * 2,
+        area.height - vertical_margin * 2,
+    )
 }
 
 #[cfg(test)]
@@ -328,10 +348,33 @@ mod tests {
     #[test]
     fn selection_stops_at_both_ends() {
         let mut table = table();
-        table.select_by(-3);
+        for (steps, selected) in [(-3, 0), (100, 9), (-100, 0)] {
+            table.select_by(steps);
+            assert_eq!(table.selected(), selected);
+            drawn(&mut table, Rect::new(0, 0, 24, 4));
+            assert_eq!(table.selected(), selected);
+        }
+    }
+
+    #[test]
+    fn replacement_clamps_selection_before_draw() {
+        let mut table = table();
+        table.select_last();
+        drawn(&mut table, Rect::new(0, 0, 24, 4));
+        table.set_rows((0..3).map(|row| vec![format!("row {row}")]).collect());
+        assert_eq!(table.selected(), 2);
+        assert!(!table.can_select_last());
+        drawn(&mut table, Rect::new(0, 0, 24, 4));
+        assert_eq!(table.selected(), 2);
+
+        table.set_rows(Vec::new());
+        table.select_last();
+        table.select_by(1);
         assert_eq!(table.selected(), 0);
-        table.select_by(100);
-        assert_eq!(table.selected(), 9);
+        assert!(!table.can_select_by(1));
+        assert!(!table.can_select_first());
+        drawn(&mut table, Rect::new(0, 0, 24, 4));
+        assert_eq!(table.selected(), 0);
     }
 
     #[test]
@@ -400,6 +443,48 @@ mod tests {
         );
         let rows = drawn(&mut table, Rect::new(0, 0, 12, 3));
         assert!(rows.iter().any(|row| row.contains("tail")), "{rows:?}");
+    }
+
+    #[test]
+    fn narrow_table_keeps_later_columns() {
+        let mut table = Table::new(
+            vec!["properties.description".to_owned(), "name".to_owned()],
+            vec![vec!["a long description".to_owned(), "tail".to_owned()]],
+        );
+        let rows = drawn(&mut table, Rect::new(0, 0, 12, 3));
+        assert!(rows.iter().any(|row| row.contains("tail")), "{rows:?}");
+        let rows = drawn(&mut table, Rect::new(0, 0, 60, 3));
+        assert!(
+            rows.iter().any(|row| row.contains("a long description")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn many_columns_keep_row_visible() {
+        let mut table = Table::new(
+            (0..12).map(|column| format!("column {column}")).collect(),
+            vec![(0..12).map(|column| format!("value {column}")).collect()],
+        );
+        let rows = drawn(&mut table, Rect::new(0, 0, 3, 1));
+        assert!(rows[0].contains('v'), "{rows:?}");
+    }
+
+    #[test]
+    fn small_detail_stays_inside_viewport() {
+        let mut table = table();
+        table.open_detail("row".to_owned(), vec!["detail".to_owned()]);
+        for width in 1..=4 {
+            for height in 1..=4 {
+                let area = Rect::new(0, 0, width, height);
+                let overlay = overlay_area(area);
+                assert!(area.contains((overlay.x, overlay.y).into()));
+                assert!(overlay.right() <= area.right());
+                assert!(overlay.bottom() <= area.bottom());
+                let rows = drawn(&mut table, area);
+                assert!(rows.iter().any(|row| row.contains('d')), "{rows:?}");
+            }
+        }
     }
 
     #[test]

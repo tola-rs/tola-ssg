@@ -12,7 +12,7 @@ use chrono::{DateTime, Local};
 use crossterm::execute;
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Size};
+use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
@@ -217,14 +217,14 @@ struct Rounds {
 
 impl Rounds {
     /// A result takes over the view: whatever the reader was reading is a superseded attempt, so
-    /// the position it held goes with it. The one exception is a result repeating the selected
+    /// the position it held goes with it. The one exception is a result repeating the visible
     /// diagnostics, which refreshes that entry where it sits and keeps the reading offset.
     fn push(&mut self, round: Round) {
         let round = Arc::new(round);
-        let refreshing = self
-            .selected
-            .as_ref()
-            .is_some_and(|selected| selected.same_diagnostics(&round));
+        let refreshing = !round.diagnostics.is_empty()
+            && self
+                .current()
+                .is_some_and(|current| current.same_diagnostics(&round));
         if !round.diagnostics.is_empty() {
             if let Some(index) = self
                 .entries
@@ -270,6 +270,9 @@ impl Rounds {
     }
 
     fn previous(&mut self) {
+        if !self.live(Action::PreviousRound) {
+            return;
+        }
         let index = self
             .index()
             .map_or(self.entries.len().saturating_sub(1), |index| {
@@ -280,6 +283,9 @@ impl Rounds {
     }
 
     fn next(&mut self) {
+        if !self.live(Action::NextRound) {
+            return;
+        }
         self.selected = self
             .index()
             .and_then(|index| self.entries.get(index + 1).cloned());
@@ -300,14 +306,18 @@ impl Rounds {
     /// single round earns no hint.
     fn live(&self, action: Action) -> bool {
         match action {
-            Action::Up => self.top > 0,
-            Action::Down => self.top < self.last_top(),
+            Action::Up | Action::PageUp => self.top > 0,
+            Action::Down | Action::PageDown => self.top < self.last_top(),
             Action::First => self.top != 0,
             Action::Last => self.top != self.last_top(),
-            Action::PreviousRound => self.index().is_some_and(|index| index > 0),
-            Action::NextRound => self
+            Action::PreviousRound => self
                 .index()
-                .is_some_and(|index| index + 1 < self.entries.len()),
+                .map_or(!self.entries.is_empty(), |index| index > 0),
+            Action::NextRound => self
+                .selected
+                .as_ref()
+                .zip(self.latest.as_ref())
+                .is_some_and(|(selected, latest)| !Arc::ptr_eq(selected, latest)),
             _ => true,
         }
     }
@@ -407,16 +417,14 @@ impl DevScreen {
         event: &crossterm::event::Event,
         cancellation: &crate::cancellation::Cancellation,
     ) -> bool {
-        use crossterm::event::{Event, KeyEventKind, KeyModifiers, MouseEventKind};
+        use crossterm::event::{Event, KeyEventKind, MouseEventKind};
         match event {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                if key.modifiers == KeyModifiers::CONTROL && super::ui::cancels(key) {
+                if super::ui::cancels(key) {
                     cancellation.interrupt();
                     return true;
                 }
-                if key.modifiers.is_empty()
-                    && let Some(action) = keymap::DEV.action(key)
-                {
+                if let Some(action) = keymap::DEV.action(key) {
                     self.answer(action);
                 }
             }
@@ -469,47 +477,31 @@ impl DevScreen {
             return Ok(());
         }
         let header = [
+            self.serving.as_deref(),
             self.log.as_deref(),
             self.hooks.as_deref(),
-            self.serving.as_deref(),
         ]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join("\n");
         let header = styled_paragraph(&header);
-        let counter_rows = u16::from(self.size.height > 1);
-        let header_rows = if self.log.is_none() && self.hooks.is_none() && self.serving.is_none() {
+        let header_lines = if self.log.is_none() && self.hooks.is_none() && self.serving.is_none() {
             0
         } else {
-            header
-                .line_count(self.size.width)
-                .min(usize::from(self.size.height.saturating_sub(3))) as u16
+            header.line_count(self.size.width)
         };
-        let free = self
-            .size
-            .height
-            .saturating_sub(header_rows + counter_rows + 1);
         let job_lines = self
             .jobs
             .iter()
             .map(|job| styled_paragraph(&job.body().join("\n")).line_count(self.size.width))
             .sum::<usize>();
         let jobs = &self.jobs;
-        let job_rows = job_lines.min(usize::from(free.saturating_sub(1) / 2)) as u16;
-        let body_rows = free - job_rows;
-        let mut body = self
-            .message
-            .as_ref()
-            .map_or_else(String::new, |message| format!("{message}\n"));
-        if let Some(round) = self.rounds.current() {
-            body.push_str(round.transcript.trim_end_matches('\n'));
-        }
-        let body = styled_paragraph(&body);
-        self.rounds.body_rows = usize::from(body_rows);
-        self.rounds.body_lines = body.line_count(self.size.width);
-        self.rounds.top = self.rounds.top.min(self.rounds.last_top());
-        let body = body.scroll((u16::try_from(self.rounds.top).unwrap_or(u16::MAX), 0));
+        let [header_area, counter_area, body_area, jobs_area, footer_area] = frame_areas(
+            Rect::new(0, 0, self.size.width, self.size.height),
+            header_lines,
+            job_lines,
+        );
         let counter = match self.rounds.current() {
             Some(round) => {
                 let time = round.observed_at.format("%H:%M:%S");
@@ -522,19 +514,25 @@ impl DevScreen {
             }
             None => "Building site…".to_owned(),
         };
+        let mut body = self
+            .message
+            .as_ref()
+            .map_or_else(String::new, |message| format!("{message}\n"));
+        if let Some(round) = self.rounds.current() {
+            body.push_str(round.transcript.trim_end_matches('\n'));
+        }
+        if body.trim().is_empty() && counter_area.height == 0 {
+            body.push_str(&counter);
+        }
+        let body = styled_paragraph(&body);
+        self.rounds.body_rows = usize::from(body_area.height);
+        self.rounds.body_lines = body.line_count(self.size.width);
+        self.rounds.top = self.rounds.top.min(self.rounds.last_top());
+        let body = body.scroll((u16::try_from(self.rounds.top).unwrap_or(u16::MAX), 0));
         let palette = self.palette;
         let counter = Line::from(Span::styled(counter, palette.dim_style()));
         execute!(self.writer, BeginSynchronizedUpdate)?;
         let drawn = self.screen.draw_frame(self.size, |frame| {
-            let [header_area, counter_area, body_area, jobs_area, footer_area] =
-                Layout::vertical([
-                    Constraint::Length(header_rows),
-                    Constraint::Length(counter_rows),
-                    Constraint::Length(body_rows),
-                    Constraint::Length(job_rows),
-                    Constraint::Length(1),
-                ])
-                .areas(frame.area());
             frame.render_widget(header, header_area);
             frame.render_widget(Paragraph::new(counter), counter_area);
             frame.render_widget(body, body_area);
@@ -564,20 +562,36 @@ impl DevScreen {
     }
 }
 
-fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, jobs: &[Job]) {
+fn frame_areas(area: Rect, header_lines: usize, job_lines: usize) -> [Rect; 5] {
+    let footer = u16::from(area.height > 1);
+    let counter = u16::from(area.height > 2);
+    let available = area.height.saturating_sub(footer + counter);
+    // Header and running hooks each leave room to read the build result.
+    let header = header_lines.min(usize::from(available.saturating_sub(1) / 2)) as u16;
+    let free = available - header;
+    let jobs = job_lines.min(usize::from(free.saturating_sub(1) / 2)) as u16;
+    Layout::vertical([
+        Constraint::Length(header),
+        Constraint::Length(counter),
+        Constraint::Length(free - jobs),
+        Constraint::Length(jobs),
+        Constraint::Length(footer),
+    ])
+    .areas(area)
+}
+
+fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: Rect, jobs: &[Job]) {
     let mut top = area.y;
-    for (index, job) in jobs.iter().enumerate() {
-        let rows = usize::from(area.bottom() - top) / (jobs.len() - index);
-        if rows == 0 {
-            break;
-        }
+    let visible = jobs.len().min(usize::from(area.height));
+    for (index, job) in jobs.iter().take(visible).enumerate() {
+        let rows = usize::from(area.bottom() - top) / (visible - index);
         let rows = rows as u16;
         let lines = job.body();
         frame.render_widget(
             Paragraph::new(lines[0].clone()),
-            ratatui::layout::Rect::new(area.x, top, area.width, 1),
+            Rect::new(area.x, top, area.width, 1),
         );
-        let tail_area = ratatui::layout::Rect::new(area.x, top + 1, area.width, rows - 1);
+        let tail_area = Rect::new(area.x, top + 1, area.width, rows - 1);
         let tail = styled_paragraph(&lines[1..].join("\n"));
         let offset = tail
             .line_count(area.width)
@@ -590,11 +604,13 @@ fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect, jobs: 
     }
 }
 
-const ACCEPTED: [Action; 7] = [
+const ACCEPTED: [Action; 9] = [
     Action::PreviousRound,
     Action::NextRound,
     Action::Up,
     Action::Down,
+    Action::PageUp,
+    Action::PageDown,
     Action::First,
     Action::Last,
     Action::Quit,
@@ -796,6 +812,88 @@ mod tests {
             "another failure shows its own result"
         );
         assert_eq!(rounds.current().unwrap().transcript, "failed again");
+    }
+
+    #[test]
+    fn history_returns_to_clean_result() {
+        let mut rounds = Rounds::default();
+        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
+        rounds.push(round(Vec::new(), 2, "Built site"));
+        assert!(rounds.live(Action::PreviousRound));
+        assert!(!rounds.live(Action::NextRound));
+        rounds.previous();
+        assert_eq!(rounds.current().unwrap().transcript, "failed");
+        assert!(!rounds.live(Action::PreviousRound));
+        assert!(rounds.live(Action::NextRound));
+        rounds.next();
+        assert_eq!(rounds.current().unwrap().transcript, "Built site");
+        assert!(!rounds.live(Action::NextRound));
+    }
+
+    #[test]
+    fn unchanged_diagnostics_keep_scroll() {
+        let mut rounds = Rounds::default();
+        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
+        rounds.top = 9;
+        rounds.push(round(
+            vec![diagnostic("content/first.typ")],
+            2,
+            "failed again",
+        ));
+        assert_eq!(rounds.top, 9);
+        assert_eq!(rounds.current().unwrap().transcript, "failed again");
+        rounds.previous();
+        rounds.next();
+        assert_eq!(
+            rounds.top, 9,
+            "unavailable history movements leave the view alone"
+        );
+    }
+
+    #[test]
+    fn short_frames_preserve_body() {
+        for width in [1, 20, 40, 80, 160] {
+            for height in [1, 2, 3, 8, 24, 50] {
+                let area = Rect::new(0, 0, width, height);
+                let areas = frame_areas(area, 200, 200);
+                assert!(areas[2].height > 0);
+                assert_eq!(areas[4].height, u16::from(height > 1));
+                assert_eq!(areas.iter().map(|part| part.height).sum::<u16>(), height);
+                assert!(
+                    areas
+                        .iter()
+                        .all(|part| area.contains(part.as_position()) || part.is_empty())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_hook_area_shows_jobs() {
+        let jobs = ["styles", "search", "assets"].map(|name| Job {
+            run: HookRun {
+                scope: 0,
+                name: name.to_owned(),
+            },
+            stage: "generate".to_owned(),
+            lines: VecDeque::new(),
+            partial: Default::default(),
+            carriage_return: [false; 2],
+        });
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(24, 2)).unwrap();
+        terminal
+            .draw(|frame| draw_jobs(frame, frame.area(), &jobs))
+            .unwrap();
+        let drawn = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(drawn.contains("styles"));
+        assert!(drawn.contains("search"));
     }
 
     #[test]

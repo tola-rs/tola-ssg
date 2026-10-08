@@ -6,6 +6,7 @@ pub(crate) mod development;
 mod diagnostic;
 pub(crate) mod documentation;
 mod hooks;
+mod input;
 mod limits;
 mod pager;
 mod path;
