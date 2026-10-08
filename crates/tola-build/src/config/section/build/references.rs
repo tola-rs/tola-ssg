@@ -29,7 +29,7 @@ pub enum ReferenceLevel {
 }
 
 impl ReferencesConfig {
-    /// What `tola help "[build.references]"` adds under its table.
+    /// What `tola help config build.references` adds under its table.
     pub const HELP: &'static str = "\
 A published page is checked for addresses that land on nothing: `navigation` covers links to
 other pages, `resources` the images, stylesheets, and scripts a page loads, and `fragments`
@@ -57,7 +57,7 @@ HTML anchor uses `fragments`. `#top` needs no declared id. Browser fragment dire
 
 `references()` from `@tola/document` is a separate query over native Bundle links and refs. It
 does not include raw HTML or other producers' outputs, and `found` does not guarantee that the
-final HTML defines the fragment (`tola help \"@tola/document\" references`).";
+final HTML defines the fragment (`tola help package document references`).";
 }
 
 #[cfg(test)]

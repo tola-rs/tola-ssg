@@ -5,6 +5,20 @@ A static site generator for Typst-based websites.
 
 > Note (v0.8.0): v0.8.0 is a big update. This README is outdated: I plan to substantially rewrite it and the 0.7-era docs, and to add a documentation site within the next few days. For now, `tola help --interactive` browses the built-in packages.
 
+The bundled guide and runnable examples follow the installed executable:
+
+```sh
+tola help -i
+tola help package document headings
+tola help config build
+tola help demo backlinks --preview
+tola help demo backlinks --export ./backlinks-site
+```
+
+The export directory must not already exist, even if it is empty; its parent must exist.
+Add `--edit` to open the exported source with `TOLA_EDITOR`, `VISUAL`, or `EDITOR`; use `--editor`
+for one invocation. `tola skill` gives the site-authoring workflow.
+
 
 ## Table of Contents
 

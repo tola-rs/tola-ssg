@@ -8,6 +8,45 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
+/// ShellExecute keeps file associations separate from command-shell interpretation.
+pub(crate) fn open_default(
+    target: &OsStr,
+    cancellation: &tola_build::cancellation::BuildCancellation,
+) -> io::Result<()> {
+    cancellation.ensure_active().map_err(io::Error::other)?;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let mut target = target.encode_wide().collect::<Vec<_>>();
+    if target.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the target contains a null character",
+        ));
+    }
+    target.push(0);
+    // The nul-terminated target remains alive through the call; null optional parameters
+    // request the registered default application and its normal window.
+    let opened = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if opened > 32 {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "the default application did not accept the target",
+        ))
+    }
+}
+
 /// Open one log path for reading.
 pub(crate) fn open_log_for_read(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).open(path)

@@ -29,12 +29,12 @@ impl Default for MinifyConfig {
 }
 
 impl MinifyConfig {
-    /// What `tola help "[build.minify]"` adds under its table.
+    /// What `tola help config build.minify` adds under its table.
     pub const HELP: &'static str = "\
-Minification reaches only the bytes Tola publishes itself: the HTML it writes for every page, and
-the CSS and scripts it publishes from `[assets]` declarations or from the pages that write them.
-Images, fonts, and anything a `generate-outputs` hook writes are published byte for byte. It runs
-during publication and costs little, so all three keys are on by default:
+Minification happens while building the outputs, so `check`, `dev`, and `preview` use it too.
+Tola compacts the HTML it exports, CSS and `.js`/`.mjs` files declared in `[assets]`, and inline
+stylesheets and scripts. Images, fonts, and `generate-outputs` hook files keep their own bytes.
+All three switches default to `true`:
 
 ```toml
 [build.minify]
@@ -43,7 +43,8 @@ css = true
 javascript = true
 ```
 
-Set one to `false` to publish that kind of file exactly as written. One caveat: minified CSS may
-drop the quotes from attribute selectors — `[data-width=\"fixed\"]` becomes `[data-width=fixed]` —
-so write selectors that read the same either way.";
+Set a switch to `false` to skip that transformation. `--minify=false` disables all three for one
+invocation. Configured asset URLs identify the bytes after minification, so cache busting tracks
+what the browser receives. A configured CSS or JavaScript asset that cannot be minified produces
+a warning and keeps its original bytes.";
 }

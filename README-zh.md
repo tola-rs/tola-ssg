@@ -4,6 +4,19 @@
 
 > 注意（v0.8.0）：v0.8.0 是一次大更新。本 README 已经过时：我打算大幅度重写它和 0.7 时代的文档，并在近几天内增添文档站点。目前可以用 `tola help --interactive` 浏览内置 packages。
 
+内置文档与可运行示例随当前可执行文件提供：
+
+```sh
+tola help -i
+tola help package document headings
+tola help config build
+tola help demo backlinks --preview
+tola help demo backlinks --export ./backlinks-site
+```
+
+Demo 导出要求目标尚不存在，空目录也不覆盖；父目录需要已存在。加 `--edit` 可通过 `TOLA_EDITOR`、`VISUAL` 或 `EDITOR`
+打开导出的源码；`--editor` 可为本次操作指定编辑器。建站流程见 `tola skill`。
+
 
 ## 目录
 

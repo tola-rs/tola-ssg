@@ -4,4 +4,6 @@ mod jump;
 mod layout;
 pub(crate) mod model;
 mod navigation;
+pub(crate) mod pages;
+mod target;
 pub(crate) mod view;

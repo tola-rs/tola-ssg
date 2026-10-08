@@ -127,6 +127,24 @@
 /// address is a name, not a promise that the file exists. A URL a `[assets]` declaration spells is
 /// not an output path — `asset-url` resolves those, and adds their byte identity.
 ///
+/// Keep the document output unprefixed, and use the returned URL directly in a link. With
+/// `site.base-path = "/docs/"`, this page links to `/docs/guide/` while the output stays
+/// `guide/index.html`. Final reference checks verify that the linked output exists.
+///
+/// Example - publish a page and link it from another document:
+///
+/// ```typst
+/// #import "@tola/address:0.0.0": output-to-url
+/// #let guide-output = "guide/index.html"
+/// #document("index.html", title: [Home])[
+///   #link(output-to-url(guide-output))[Read the guide]
+/// ]
+/// #document(guide-output, title: [Guide])[
+///   #title()
+///   Start here.
+/// ]
+/// ```
+///
 /// Example - mount an output under a base path and an origin:
 ///
 /// ```typst
@@ -180,11 +198,16 @@
 /// Write the URL either encoded or decoded: `asset-url` parses it once as a path, so the lookup
 /// matches the declaration either way. A build resolves it to the address that declaration
 /// publishes, and appends `?h=<identity>` when `assets.cache-busting` is on, so changed bytes
-/// become a changed address under an unchanged name. A check resolves the mounted address
-/// without the identity, because only a build renders asset bytes. The returned URL starts with
-/// `/` and includes `site.base-path`, so use it directly from any document: mounting it again
-/// duplicates it. Calling it for a URL that no `assets` declaration publishes is an error at the
-/// call site, even when something else publishes that path, such as a `resize-image` derivative.
+/// become a changed address under an unchanged name.
+///
+/// An editor source check resolves the mounted
+/// address without the identity, because it does not render asset bytes. `tola check` prepares
+/// the complete outputs, including asset identities, without publishing them.
+///
+/// The returned URL starts with `/` and includes `site.base-path`, so use it directly from any
+/// document: mounting it again duplicates it. Calling it for a URL that no `assets` declaration
+/// publishes is an error at the call site, even when something else publishes that path, such as a
+/// `resize-image` derivative.
 /// A hook's own output is such a path: pages link it with `output-to-url("assets/…")`, and the two
 /// calls stay apart — pass a declaration's spelling here, never another function's result.
 ///
@@ -192,10 +215,9 @@
 ///
 /// ```typst site
 /// #import "@tola/address:0.0.0": asset-url
-/// #import "@tola/site:0.0.0": site
-/// #let logo = asset-url("/assets/logo.png")
-/// #assert(logo.starts-with("/"))
-/// #assert(logo.contains(site.base-path))
+/// #document("index.html")[
+///   #html.img(src: asset-url("/assets/logo.png"), alt: "Example logo")
+/// ]
 /// ```
 /// Related: output-to-url, @tola/site, @tola/image
 #import "@tola/host:0.0.0": asset-url

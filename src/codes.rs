@@ -72,6 +72,16 @@ pub mod editor {
 
     /// Editor setup configured a directory that is not a Tola site.
     pub const NO_SITE: DiagnosticCode = DiagnosticCode::new("editor.no_site");
+    /// A selected editor or desktop application could not be opened.
+    pub const LAUNCH: DiagnosticCode = DiagnosticCode::new("editor.launch");
+}
+
+/// Built-in demo projects.
+pub mod demo {
+    use tola_build::diagnostic::DiagnosticCode;
+
+    pub const EXPORT: DiagnosticCode = DiagnosticCode::new("demo.export");
+    pub const PREVIEW: DiagnosticCode = DiagnosticCode::new("demo.preview");
 }
 
 /// Hook execution around publication.
@@ -143,6 +153,7 @@ pub mod terminal {
 
     /// Terminal output could not be written.
     pub const WRITE: DiagnosticCode = DiagnosticCode::new("terminal.write");
+    pub const PAGER: DiagnosticCode = DiagnosticCode::new("terminal.pager");
 }
 
 /// Filesystem observation.
@@ -170,7 +181,7 @@ mod tests {
     use tola_build::diagnostic::DiagnosticCode;
 
     /// Every code this module declares or re-exports, keyed by the surface that owns it.
-    const DECLARED_CODES_BY_SURFACE: [(&str, &[DiagnosticCode]); 14] = [
+    const DECLARED_CODES_BY_SURFACE: [(&str, &[DiagnosticCode]); 15] = [
         ("build", &[build::TASK]),
         ("command", &[command::FAILED, command::SIGNAL]),
         (
@@ -192,7 +203,11 @@ mod tests {
                 doctor::VENDOR_PATH_MISSING,
             ],
         ),
-        ("editor", &[editor::CONFIGURATION, editor::NO_SITE]),
+        ("demo", &[demo::EXPORT, demo::PREVIEW]),
+        (
+            "editor",
+            &[editor::CONFIGURATION, editor::NO_SITE, editor::LAUNCH],
+        ),
         ("help", &[help::TARGET, help::MEMBER]),
         ("hook", &[hook::AFTER_PUBLISH]),
         ("init", &[init::CONFLICT, init::SELECTION]),
@@ -200,7 +215,7 @@ mod tests {
         ("log", &[log::LOCATION, log::UNAVAILABLE, log::WRITE]),
         ("reload", &[reload::PORT_IN_USE]),
         ("server", &[server::NETWORK_EXPOSED, server::PORT_IN_USE]),
-        ("terminal", &[terminal::WRITE]),
+        ("terminal", &[terminal::WRITE, terminal::PAGER]),
         (
             "watch",
             &[

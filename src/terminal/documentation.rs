@@ -685,8 +685,8 @@ mod tests {
         // The builder links the code spans it already writes, so the label renders as the span
         // did and only the reserved target is hidden.
         for color in [false, true] {
-            let linked = "See [`@tola/schema`](tola://package/@tola/schema) and\n[`tola help \"[site]\"`](tola://table/[site]).\n\nExternals keep their address: [Typst](https://typst.app).\n";
-            let unlinked = "See `@tola/schema` and\n`tola help \"[site]\"`.\n\nExternals keep their address: [Typst](https://typst.app).\n";
+            let linked = "See [`@tola/schema`](tola-help://packages/schema) and\n[`tola help config site`](tola-help://config/site).\n\nExternals keep their address: [Typst](https://typst.app).\n";
+            let unlinked = "See `@tola/schema` and\n`tola help config site`.\n\nExternals keep their address: [Typst](https://typst.app).\n";
             let documentation = Documentation::new(Some(80), color);
             assert_eq!(
                 documentation.render(linked),
@@ -694,7 +694,7 @@ mod tests {
                 "color={color}"
             );
             let rendered = documentation.render(linked);
-            assert!(!rendered.contains("tola://"), "color={color}");
+            assert!(!rendered.contains("tola-help://"), "color={color}");
             // An external address stays visible in either mode once escapes are stripped.
             assert!(
                 unpainted(&rendered).contains("(https://typst.app)"),

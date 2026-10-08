@@ -212,8 +212,58 @@ pub(crate) const DEFAULT: Table = Table {
 };
 
 /// Sections and screenfuls are separate movements in the help reader.
+pub(crate) const HELP_EXPORT: Table = Table {
+    bindings: &[
+        Binding {
+            keys: &[Key::named(KeyCode::Enter, "Enter")],
+            label: "export",
+            action: Action::Open,
+        },
+        Binding {
+            keys: &[Key::named(KeyCode::Esc, "Esc")],
+            label: "cancel",
+            action: Action::Dismiss,
+        },
+    ],
+};
+
 pub(crate) const HELP: Table = Table {
     bindings: &[
+        Binding {
+            keys: &[Key::character('p', "p")],
+            label: "preview",
+            action: Action::Preview,
+        },
+        Binding {
+            keys: &[Key::character('x', "x")],
+            label: "stop",
+            action: Action::StopPreview,
+        },
+        Binding {
+            keys: &[Key::character('e', "e")],
+            label: "export",
+            action: Action::Export,
+        },
+        Binding {
+            keys: &[Key::character('E', "E")],
+            label: "export+edit",
+            action: Action::ExportAndEdit,
+        },
+        Binding {
+            keys: &[Key::character('o', "o")],
+            label: "browser",
+            action: Action::OpenBrowser,
+        },
+        Binding {
+            keys: &[Key::character('v', "v")],
+            label: "open export",
+            action: Action::OpenExport,
+        },
+        Binding {
+            keys: &[Key::character('O', "O")],
+            label: "outputs",
+            action: Action::PreviewOutputs,
+        },
         Binding {
             keys: &[Key::named(KeyCode::Down, "↓")],
             label: "scroll",
@@ -454,7 +504,15 @@ mod tests {
 
     #[test]
     fn keys_are_bound_once() {
-        for table in [&DEFAULT, &HELP, &INIT, &DEV, &TEXT_INPUT, &HELP_JUMP] {
+        for table in [
+            &DEFAULT,
+            &HELP,
+            &INIT,
+            &DEV,
+            &TEXT_INPUT,
+            &HELP_JUMP,
+            &HELP_EXPORT,
+        ] {
             let mut bound: Vec<(KeyCode, KeyModifiers)> = Vec::new();
             for binding in table.bindings {
                 assert!(!binding.keys.is_empty(), "{} binds no key", binding.label);
@@ -473,7 +531,15 @@ mod tests {
 
     #[test]
     fn bound_keys_spell_themselves() {
-        for table in [&DEFAULT, &HELP, &INIT, &DEV, &TEXT_INPUT, &HELP_JUMP] {
+        for table in [
+            &DEFAULT,
+            &HELP,
+            &INIT,
+            &DEV,
+            &TEXT_INPUT,
+            &HELP_JUMP,
+            &HELP_EXPORT,
+        ] {
             for binding in table.bindings {
                 for key in binding.keys {
                     assert!(

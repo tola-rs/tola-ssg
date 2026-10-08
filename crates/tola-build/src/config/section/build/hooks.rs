@@ -1,7 +1,7 @@
 //! Finite commands around candidate construction and publication.
 //!
 //! The environment a hook command receives, and what a superseded build cancels, is written
-//! for the site author in the section's and each stage's `HELP`, which `tola help "[build.hooks]"`
+//! for the site author in the section's and each stage's `HELP`, which `tola help config build.hooks`
 //! and its stage pages render.
 
 use crate::config::{ConfigDiagnostics, FieldPath};
@@ -27,41 +27,55 @@ pub struct HooksConfig {
 }
 
 impl HooksConfig {
-    /// What `tola help "[build.hooks]"` adds under its child tables.
+    /// What `tola help config build.hooks` adds under its child tables.
     pub const HELP: &'static str = "\
-Three stages run in lifecycle order: `before-build` produces declared site inputs before source
-discovery, `generate-outputs` produces declared final outputs after the site program compiles, and
-`after-publish` consumes a committed revision through a read-only view.
+Choose the stage by what the command produces: `before-build` writes site inputs before source
+discovery; `generate-outputs` adds final files after the Bundle compiles; `after-publish` consumes
+the committed site. Bundle, configured assets, and generated outputs pass the same conflict and
+reference checks before publication.
 
-Commands run from the site root and finish before their stage continues. Each receives
-`TOLA_HOOK_STAGE`, `TOLA_BUILD_MODE` (`dev` or `prod`), `TOLA_HOOK_CACHE_DIR` for results kept
-between builds, and `TOLA_HOOK_TEMP_DIR`, which `TMPDIR`, `TMP`, and `TEMP` also name.
-`TOLA_HOOK_INPUT_DIR` names what the stage reads; `generate-outputs` also gets
-`TOLA_HOOK_OUTPUT_DIR`, the private directory it writes, whose paths are relative to the site
-output. A variable a stage does not define is absent, never inherited.
+The commands differ in which stages they run. Every entry below also requires `enable = true`:
 
-A command is one finite argv array, run without a shell. A hook names a command to run, so the
-sequencing, conditions, and tooling belong to the site's own runner: declare
-`command = [\"just\", \"css\"]` and let that recipe decide how the stylesheet is built. Nothing
-Tola does depends on `just` — it is only what the scaffold uses, and the examples below read from
-one `justfile` at the site root.
+| Command | Build mode | before-build | generate-outputs | after-publish |
+| --- | --- | --- | --- | --- |
+| `tola build` | `prod` | run | run | run |
+| `tola check` | `prod` | run | run | skip |
+| `tola preview` | `prod` | run | run | skip |
+| `tola dev` | `dev` | per `dev` | per `dev` | per `dev` |
+| `tola inspect` | — | skip | skip | skip |
+| `tola vendor` | `prod` | skip | skip | skip |
 
-Each stage's page shows one worked example. Write one stage at a time:
+`check` and `preview` build from sources with production settings; they do not write
+`build.publish-dir`. `dev` serves successful builds in memory. The `dev` field defaults to `run`
+for the first two stages and `skip` for after-publish.
 
-```toml
-[[build.hooks.before-build]]
-name = \"tailwind\"
-command = [\"just\", \"css\"]
-generates = [\"static/web-assets/tailwind-output/site.css\"]
+Commands run from the site root as finite argv arrays, without an implicit shell. Within a stage,
+entries run in configuration order; failure stops the remaining entries. Put dependent steps or
+conditions in the site's own runner, for example `command = [\"just\", \"css\"]`. Tola does not
+require `just`. Output generators each read the same upstream snapshot and write to a private
+directory: a later generator cannot read an earlier generator's new outputs.
 
-[[build.hooks.generate-outputs]]
-name = \"search\"
-command = [\"just\", \"search\"]
-outputs = [{ tree = \"assets/pagefind-search\" }]
-```
+Every invocation receives `TOLA_HOOK_STAGE`, `TOLA_BUILD_MODE`, `TOLA_HOOK_CACHE_DIR`, and
+`TOLA_HOOK_TEMP_DIR`. The cache directory persists per site, stage, and entry name; the command
+owns its contents and decides when they are reusable. Tola runs the command again, not a cached
+result. The temporary directory lasts for this invocation, and `TMPDIR`, `TMP`, and `TEMP` name
+it too.
 
-These are trusted scripts: Tola validates declared paths, and a superseded development build
-cancels its pre-publication commands, but nothing undoes their side effects.";
+`before-build` writes directly to the site and receives no input or output directory variable.
+`generate-outputs` reads a read-only snapshot at `TOLA_HOOK_INPUT_DIR` and writes under
+`TOLA_HOOK_OUTPUT_DIR`, using final output-relative paths. `after-publish` reads a read-only view
+of the committed site at `TOLA_HOOK_INPUT_DIR` and receives no output directory variable.
+A variable a stage does not define is absent, never inherited from the caller.
+
+`rerun-on` adds literal site-relative paths, not globs; directories are watched recursively.
+Their edits trigger a whole development build, not just one command. Add paths a tool reads but
+Tola does not otherwise observe, such as its input directory, runner, manifest, or lockfile.
+The stage pages show a stylesheet producer, a search index, and a publication consumer.
+
+Hooks are trusted scripts with the caller's permissions. `--offline` and `--pure` restrict Tola's
+own input reads, not these commands. Superseded development builds cancel their pre-publication
+commands, but script side effects are not rolled back. After-publish development scheduling is
+explained on that stage's page.";
 }
 
 /// Chain one projection over the three hook stages in lifecycle order.
@@ -277,10 +291,10 @@ pub struct BeforeBuildHookConfig {
 }
 
 impl BeforeBuildHookConfig {
-    /// What `tola help "[[build.hooks.before-build]]"` adds under its table.
+    /// What `tola help config build.hooks.before-build` adds under its table.
     pub const HELP: &'static str = "\
-A tool that runs before source discovery can produce a site input; here `just css` compiles the
-site's Tailwind stylesheet with the version the site pinned:
+Use this stage for inputs Typst or `[assets]` must read. The scaffold's Tailwind feature runs one
+finite stylesheet build before discovery:
 
 ```toml
 [[build.hooks.before-build]]
@@ -290,10 +304,33 @@ generates = [\"static/web-assets/tailwind-output/site.css\"]
 rerun-on = [\"static/tailwind-sources\", \"deno.json\", \"deno.lock\", \"justfile\"]
 ```
 
-`css` is a recipe in the site's `justfile`, and `tailwind` is only the name this entry runs under.
-Tola runs the argv, so any runner works. `rerun-on` covers what the tool reads but the build never
-does — the stylesheet source and the runner's own files — while `generates` is the input Tola
-checks after the command and watches during `tola dev`.";
+`just css` invokes the site's pinned task. A minimal recipe and task configuration are:
+
+```just
+css:
+    deno task css
+```
+
+```json
+{
+  \"imports\": {
+    \"@tailwindcss/cli\": \"npm:@tailwindcss/cli@4.3.3\",
+    \"tailwindcss\": \"npm:tailwindcss@4.3.3\"
+  },
+  \"tasks\": {
+    \"css\": \"deno run -A npm:@tailwindcss/cli@4.3.3 -i static/tailwind-sources/site.css -o static/web-assets/tailwind-output/site.css --minify\"
+  }
+}
+```
+
+Run `deno install` to resolve the toolchain and retain its lockfile. Tailwind's input must name the
+content and template files it scans; the scaffold writes those sources explicitly. Use a finite
+command, not the tool's watch mode: Tola owns development watching.
+
+`generates` declares the site input to check after the command and watch during development; it
+does not publish that input. The scaffold publishes this stylesheet through an `[assets]` exact
+file mapping at `/assets/css/site.css`, and templates link it with `asset-url`. Generated data may
+instead be read by Typst to produce a document or another output.";
 }
 
 /// Produces declared final output files after the site program compiles, adding them to the
@@ -333,30 +370,45 @@ pub struct OutputCommandConfig {
 }
 
 impl OutputCommandConfig {
-    /// What `tola help "[[build.hooks.generate-outputs]]"` adds under its table.
+    /// What `tola help config build.hooks.generate-outputs` adds under its table.
     pub const HELP: &'static str = "\
-A search index built from the compiled site joins the published output directly:
+Use this stage for final files derived from the compiled site. Pagefind reads the HTML snapshot
+and writes a search index that joins the same output set as the pages it indexes:
 
 ```toml
 [[build.hooks.generate-outputs]]
 name = \"search\"
 command = [\"just\", \"search\"]
 outputs = [{ tree = \"assets/pagefind-search\" }]
-rerun-on = [\"justfile\"]
+rerun-on = [\"deno.json\", \"deno.lock\", \"justfile\"]
 ```
+
+The scaffold's `pagefind` feature supplies this hook, its search UI, and a pinned task:
 
 ```just
 search:
-    pagefind --site \"$TOLA_HOOK_INPUT_DIR\" \\
-        --output-path \"$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search\"
+    deno task search
 ```
 
-The declared tree needs no `[assets]` entry, and only this hook owns that path. Link it with
-`output-to-url(\"assets/pagefind-search/pagefind-ui.css\")`: `asset-url` answers for `[assets]`
-declarations alone. No cache busting either — these bytes appear after the site compiles, so the
-command names them itself; Pagefind hashes its data files while pages keep linking `pagefind.js`.
+```json
+{
+  \"imports\": { \"pagefind\": \"npm:pagefind@1.5.2\" },
+  \"tasks\": {
+    \"search\": \"deno run -A npm:pagefind@1.5.2 --site \\\"$TOLA_HOOK_INPUT_DIR\\\" --output-path \\\"$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search\\\"\"
+  }
+}
+```
 
-`search` is a recipe in the site's `justfile`, doing exactly the two lines above.";
+Run `deno install` and keep the lockfile. Tola waits for the hook on every participating build,
+including development; its index is checked and published together with the pages.
+
+Each generator reads the same compiled site; combine dependent transformations in one runner.
+
+The declared output needs no `[assets]` entry. Link a known output path with
+`output-to-url(\"assets/pagefind-search/pagefind-ui.css\")`; `asset-url` resolves only `[assets]`
+declarations. These files do not exist during the preceding Typst compilation, so Tola cannot
+compute their asset URLs then. Hook bytes are not minified or cache-busted by Tola; the command
+owns their names and transformations, and Pagefind versions its own data files.";
 }
 
 /// Consumes one committed revision through a read-only view, without declaring further site
@@ -387,10 +439,9 @@ pub struct AfterPublishHookConfig {
 }
 
 impl AfterPublishHookConfig {
-    /// What `tola help "[[build.hooks.after-publish]]"` adds under its table.
+    /// What `tola help config build.hooks.after-publish` adds under its table.
     pub const HELP: &'static str = "\
-A consumer reads the committed revision through `TOLA_HOOK_INPUT_DIR`, which no later build
-changes:
+Use this stage to consume a successfully committed site, for example to upload it:
 
 ```toml
 [[build.hooks.after-publish]]
@@ -398,8 +449,19 @@ name = \"deploy\"
 command = [\"just\", \"deploy\"]
 ```
 
-`deploy` is a recipe in the site's `justfile`: it can upload that view or notify a host that a new
-revision is live. A failure is reported without undoing the publication.";
+The site's `deploy` recipe reads `TOLA_HOOK_INPUT_DIR`, a read-only view of that committed site.
+Later builds cannot change the view while the command reads it. This stage adds no outputs;
+produce files needed by the site in `generate-outputs` so they pass validation before publication.
+A consumer failure is reported after the site is committed and cannot undo publication.
+
+`tola build` waits for these commands before exiting; a failure gives a failing command result
+even though the output was written. `check`, `preview`, `inspect`, and `vendor` never run them.
+
+Development skips this stage by default. With `dev = \"run\"`, consumers run serially without
+holding up browser updates. While one revision is running, only the latest waiting revision is
+kept, so intermediate revisions may receive no consumer call. Stopping `tola dev` cancels the
+running command and discards waiting work. Use this mode for consumers that can handle the latest
+site, rather than for an audit of every revision.";
 }
 
 /// One declared generated file or exclusive generated directory tree.

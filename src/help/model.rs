@@ -2,8 +2,7 @@
 //!
 //! The page builders write the Markdown once; the plain renderer parses it through
 //! `terminal::documentation`, and the interactive view reads it through this model. `PageId`
-//! names a page, `selector()` spells the `tola help` argument that shows it, and the two codecs
-//! give that page and its anchors a `tola://` spelling for cross-references.
+//! names a page; the target module gives CLI requests and help URLs the same identity.
 
 use std::collections::BTreeSet;
 use std::iter::Peekable;
@@ -13,8 +12,7 @@ use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 
 use crate::terminal::code::{self, CodeKind};
 
-/// The reserved scheme of a cross-reference between help pages.
-pub(crate) const CROSS_REFERENCE_SCHEME: &str = "tola://";
+pub(crate) use super::target::{CROSS_REFERENCE_SCHEME, HelpCategory, LinkTarget, PageId};
 
 /// One page a `tola help` builder writes, before it is parsed.
 pub(crate) struct HelpPage {
@@ -49,75 +47,6 @@ impl HelpPage {
                 }
             })
             .collect()
-    }
-}
-
-/// The identity of one `tola help` page.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PageId {
-    /// The bare `tola help` index.
-    Overview,
-    /// One configuration table: `[site]`, `[[build.hooks.before-build]]`.
-    Table {
-        section: String,
-        /// Whether the section is an array of tables, as its selector spells it.
-        array: bool,
-    },
-    /// One bundled package: `@tola/address`.
-    Package { name: String },
-    /// One bundled package narrowed to the selected exports, in request order.
-    PackageSelection { name: String, exports: Vec<String> },
-}
-
-impl PageId {
-    /// The arguments `tola help` shows this page with, without the shell quoting a table selector
-    /// needs; `None` for the overview, which is the bare command.
-    pub(crate) fn selector(&self) -> Option<String> {
-        match self {
-            Self::Overview => None,
-            Self::Table {
-                section,
-                array: false,
-            } => Some(format!("[{section}]")),
-            Self::Table {
-                section,
-                array: true,
-            } => Some(format!("[[{section}]]")),
-            Self::Package { name } => Some(name.clone()),
-            Self::PackageSelection { name, exports } if exports.is_empty() => Some(name.clone()),
-            Self::PackageSelection { name, exports } => {
-                Some(format!("{name} {}", exports.join(" ")))
-            }
-        }
-    }
-
-    /// The `tola://` reference naming this page, without any fragment.
-    fn uri(&self) -> String {
-        match self {
-            Self::Overview => format!("{CROSS_REFERENCE_SCHEME}overview"),
-            Self::Table {
-                section,
-                array: false,
-            } => {
-                format!("{CROSS_REFERENCE_SCHEME}table/[{section}]")
-            }
-            Self::Table {
-                section,
-                array: true,
-            } => {
-                format!("{CROSS_REFERENCE_SCHEME}table/[[{section}]]")
-            }
-            Self::Package { name } => format!("{CROSS_REFERENCE_SCHEME}package/{name}"),
-            Self::PackageSelection { name, exports } if exports.is_empty() => {
-                format!("{CROSS_REFERENCE_SCHEME}selection/{name}")
-            }
-            Self::PackageSelection { name, exports } => {
-                format!(
-                    "{CROSS_REFERENCE_SCHEME}selection/{name}:{}",
-                    exports.join(",")
-                )
-            }
-        }
     }
 }
 
@@ -182,101 +111,15 @@ pub(crate) enum Inline {
     },
 }
 
-/// Where a link goes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum LinkTarget {
-    /// Another help page.
-    Page(PageId),
-    /// One heading on a help page.
-    PageAnchor(PageId, Anchor),
-    /// A URL outside the help pages.
-    External(String),
-}
-
-impl LinkTarget {
-    /// The URL a link carries, written on `page`: its `tola://` reference, or its own external URL
-    /// unchanged. A same-page anchor omits the page selector.
-    pub(crate) fn uri(&self, page: &PageId) -> String {
-        match self {
-            Self::Page(target) => target.uri(),
-            Self::PageAnchor(target, anchor) if target == page => {
-                format!("{CROSS_REFERENCE_SCHEME}anchor#{}", anchor.as_str())
-            }
-            Self::PageAnchor(target, anchor) => format!("{}#{}", target.uri(), anchor.as_str()),
-            Self::External(url) => url.clone(),
-        }
-    }
-
-    /// The target one URL names when written on `page`. A URL outside the reserved scheme is an
-    /// external target; a malformed `tola://` reference has no target at all.
-    pub(crate) fn from_uri(uri: &str, page: &PageId) -> Option<Self> {
-        if let Some(fragment) = uri.strip_prefix('#') {
-            return (!fragment.is_empty())
-                .then(|| Self::PageAnchor(page.clone(), Anchor(fragment.to_owned())));
-        }
-        let Some(reference) = uri.strip_prefix(CROSS_REFERENCE_SCHEME) else {
-            return Some(Self::External(uri.to_owned()));
-        };
-        let (id, anchor) = match reference.split_once('#') {
-            None => (reference, None),
-            Some((_, "")) => return None,
-            Some((id, anchor)) => (id, Some(Anchor(anchor.to_owned()))),
-        };
-        let target = match (id, &anchor) {
-            // A fragment without a page names an anchor on the page the link sits on.
-            ("anchor", Some(_)) => page.clone(),
-            ("anchor", None) => return None,
-            _ => page_id(id)?,
-        };
-        Some(match anchor {
-            Some(anchor) => Self::PageAnchor(target, anchor),
-            None => Self::Page(target),
-        })
-    }
-}
-
-/// The page one `tola://` reference names, without its fragment.
-fn page_id(reference: &str) -> Option<PageId> {
-    if reference == "overview" {
-        return Some(PageId::Overview);
-    }
-    let (authority, path) = reference.split_once('/')?;
-    match authority {
-        "table" => {
-            let (section, array) = match path
-                .strip_prefix("[[")
-                .and_then(|rest| rest.strip_suffix("]]"))
-            {
-                Some(section) => (section, true),
-                None => (path.strip_prefix('[')?.strip_suffix(']')?, false),
-            };
-            (!section.is_empty()).then_some(PageId::Table {
-                section: section.to_owned(),
-                array,
-            })
-        }
-        "package" => (!path.is_empty()).then_some(PageId::Package {
-            name: path.to_owned(),
-        }),
-        "selection" => {
-            let (name, exports) = match path.split_once(':') {
-                Some((name, exports)) => (name, exports.split(',').map(str::to_owned).collect()),
-                None => (path, Vec::new()),
-            };
-            (!name.is_empty()).then_some(PageId::PackageSelection {
-                name: name.to_owned(),
-                exports,
-            })
-        }
-        _ => None,
-    }
-}
-
 /// Heading slugs are unique throughout a parsed document, including nested blocks.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Anchor(String);
 
 impl Anchor {
+    pub(super) fn from_fragment(fragment: String) -> Self {
+        Self(fragment)
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -597,42 +440,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn page_selectors_preserve_selection() {
-        for (page, selector) in [
-            (PageId::Overview, None),
-            (
-                PageId::Table {
-                    section: "site".to_owned(),
-                    array: false,
-                },
-                Some("[site]"),
-            ),
-            (
-                PageId::Table {
-                    section: "build.hooks.before-build".to_owned(),
-                    array: true,
-                },
-                Some("[[build.hooks.before-build]]"),
-            ),
-            (
-                PageId::Package {
-                    name: "@tola/schema".to_owned(),
-                },
-                Some("@tola/schema"),
-            ),
-            (
-                PageId::PackageSelection {
-                    name: "@tola/source".to_owned(),
-                    exports: vec!["parse-sources".to_owned(), "all-sources".to_owned()],
-                },
-                Some("@tola/source parse-sources all-sources"),
-            ),
-        ] {
-            assert_eq!(page.selector().as_deref(), selector);
-        }
-    }
-
-    #[test]
     fn heading_slugs_keep_domain_spelling() {
         for (heading, slug) in [
             ("slugify - function", "slugify-function"),
@@ -645,51 +452,6 @@ mod tests {
             ("名称 — 类型", "名称-类型"),
         ] {
             assert_eq!(anchor(heading).as_str(), slug);
-        }
-    }
-
-    #[test]
-    fn link_targets_round_trip() {
-        let page = PageId::Package {
-            name: "@tola/address".to_owned(),
-        };
-        for target in [
-            LinkTarget::Page(PageId::Overview),
-            LinkTarget::Page(PageId::Table {
-                section: "site".to_owned(),
-                array: false,
-            }),
-            LinkTarget::Page(PageId::Table {
-                section: "build.hooks.before-build".to_owned(),
-                array: true,
-            }),
-            LinkTarget::Page(PageId::Package {
-                name: "@tola/schema".to_owned(),
-            }),
-            LinkTarget::Page(PageId::PackageSelection {
-                name: "@tola/source".to_owned(),
-                exports: Vec::new(),
-            }),
-            LinkTarget::Page(PageId::PackageSelection {
-                name: "@tola/source".to_owned(),
-                exports: vec!["parse-sources".to_owned()],
-            }),
-            LinkTarget::PageAnchor(page.clone(), anchor("Related")),
-            LinkTarget::PageAnchor(
-                PageId::Package {
-                    name: "@tola/schema".to_owned(),
-                },
-                anchor("parse-sources"),
-            ),
-            LinkTarget::External("https://typst.app/docs".to_owned()),
-        ] {
-            assert_eq!(
-                LinkTarget::from_uri(&target.uri(&page), &page),
-                Some(target)
-            );
-        }
-        for uri in ["tola://table/", "tola://anchor", "tola://anchor#", "#"] {
-            assert_eq!(LinkTarget::from_uri(uri, &page), None);
         }
     }
 
@@ -729,7 +491,9 @@ mod tests {
             PageId::Overview,
             "Read [the overview][destination].\n\n".to_owned(),
         );
-        page.push_export("## callable - function\n\n[destination]: tola://overview\n".to_owned());
+        page.push_export(
+            "## callable - function\n\n[destination]: tola-help://overview\n".to_owned(),
+        );
         let document = HelpDocument::parse(page);
         let Block::Paragraph { spans, .. } = &document.blocks[0] else {
             panic!("a paragraph")

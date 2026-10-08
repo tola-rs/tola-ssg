@@ -86,8 +86,11 @@ summary = [
 
 任何输出路径都能在这里解析，包括 hook 产出的：这里不做检查，因为地址只是一个名字，不承诺文件存在。`[assets]` 声明拼写的 URL 不是输出路径——那类由 `asset-url` 解析，并带上它们的字节身份。
 
-Example - 把输出挂到一个部署路径和一个 origin 下：
+文档 output 不加部署前缀，返回的 URL 直接用于链接。设置 `site.base-path = "/docs/"` 时，这个页面链接到 `/docs/guide/`，output 仍是 `guide/index.html`。最终 reference 检查会校验链接指向的 output 是否存在。
+
+Example - 发布一个页面，并从另一篇文档链接到它：
 ''',
+  'Example - 把输出挂到一个部署路径和一个 origin 下：',
   'Example - 输出名里的字面 `%20` 只编码一次：',
   'Example - 链接 hook 自己的产出，它没有任何 `assets` 声明为它命名：',
   '',
@@ -112,7 +115,11 @@ summary = [
 - `assets.files`：条目自己的 `url`，例如 `"/styles/base.css"`。
 - `assets.trees`：树的 `url-prefix` 加上成员在树内的路径；`url-prefix = "/assets"`、树里有 `images/logo.svg` 时，对应 `asset-url("/assets/images/logo.svg")`。
 
-URL 写成编码形式或解码形式都可以：`asset-url` 会先按路径解析一次，两种写法都能匹配到声明。构建时，它解析成该声明发布的地址，并在 `assets.cache-busting` 打开时追加 `?h=<identity>`：内容变了，地址跟着变，名称保持不变。检查阶段只解析挂载后的地址，不带 identity，因为资产字节只在构建时渲染。返回的 URL 以 `/` 开头并包含 `site.base-path`，可以在任何文档里直接使用；再挂载一次就会重复。如果没有任何 `assets` 声明发布这个 URL，调用处会直接报错，即使该路径由别的生产者发布，比如 `resize-image` 的派生结果。hook 自己的产出正是这样的路径：页面用 `output-to-url("assets/…")` 链接它，两个调用彼此独立——这里传声明的拼写，绝不传另一个函数的结果。
+URL 写成编码形式或解码形式都可以：`asset-url` 会先按路径解析一次，两种写法都能匹配到声明。构建时，它解析成该声明发布的地址，并在 `assets.cache-busting` 打开时追加 `?h=<identity>`：内容变了，地址跟着变，名称保持不变。
+
+编辑器源检查只解析挂载后的地址，不带 identity，因为它不渲染资产字节。`tola check` 会准备完整 output，包括资产 identity，但不发布它们。
+
+返回的 URL 以 `/` 开头并包含 `site.base-path`，可以在任何文档里直接使用；再挂载一次就会重复。如果没有任何 `assets` 声明发布这个 URL，调用处会直接报错，即使该路径由别的生产者发布，比如 `resize-image` 的派生结果。hook 自己的产出正是这样的路径：页面用 `output-to-url("assets/…")` 链接它，两个调用彼此独立——这里传声明的拼写，绝不传另一个函数的结果。
 
 Example - 解析站点在 `/assets` 下发布的文件：
 ''',

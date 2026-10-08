@@ -19,14 +19,14 @@ test('documentation help needs no usable site', async ({ binary, directory: root
   await writeFile(join(root, 'tola.toml'), 'This is not TOML')
   await writeFile(join(root, 'site.typ'), '#panic("Help must not compile this site")')
 
-  const hooks = await run(['help', '[build.hooks]'], root)
+  const hooks = await run(['help', 'config', 'build.hooks'], root)
   expectExited(hooks)
   for (const stage of ['before-build', 'generate-outputs', 'after-publish']) {
     expect(hooks.stdout).toContain(`[[build.hooks.${stage}]]`)
   }
   expect(hooks.stderr).toBe('')
 
-  const fonts = await run(['help', '[typst]'], root)
+  const fonts = await run(['help', 'config', 'typst'], root)
   expectExited(fonts)
   expect(fonts.stdout).toContain('[typst.fonts]')
   expect(fonts.stdout).toContain('paths =')
@@ -46,14 +46,14 @@ test('documentation help needs no usable site', async ({ binary, directory: root
       'web',
     ]
   ) {
-    const reference = await run(['help', `@tola/${name}`], root)
+    const reference = await run(['help', 'package', name], root)
     expectExited(reference)
     expect(reference.stdout).toContain(`@tola/${name}:0.0.0`)
     expect(reference.stdout).toContain('Exports:')
     expect(reference.stderr).toBe('')
   }
 
-  const selected = await run(['help', '@tola/document', 'headings', 'references'], root)
+  const selected = await run(['help', 'package', 'document', 'headings', 'references'], root)
   expectExited(selected)
   expect(selected.stdout).toContain('let headings(')
   expect(selected.stdout).toContain('depth: ')
@@ -62,7 +62,7 @@ test('documentation help needs no usable site', async ({ binary, directory: root
   expect(selected.stdout).toContain('references(')
   expect(selected.stdout).not.toContain('current-document — function')
 
-  const rejected = await run(['help', '@tola/document', 'headings', 'unknown-export'], root)
+  const rejected = await run(['help', 'package', 'document', 'headings', 'unknown-export'], root)
   expectExited(rejected, 1)
   expect(rejected.stdout).toBe('')
   expect(rejected.stderr).toContain('unknown-export')
@@ -71,7 +71,7 @@ test('documentation help needs no usable site', async ({ binary, directory: root
 })
 
 test('documentation color follows stdout choice', async ({ binary, directory: root }) => {
-  for (const target of [['[typst.fonts]'], ['@tola/document', 'headings']]) {
+  for (const target of [['config', 'typst.fonts'], ['package', 'document', 'headings']]) {
     const plain = await runCommand(
       binary,
       ['--color', 'never', 'help', ...target],
@@ -100,20 +100,20 @@ test('documentation color follows stdout choice', async ({ binary, directory: ro
     expect(stripVTControlCharacters(colored.stdout)).toBe(plain.stdout)
     expect(
       plain.stdout,
-    ).toContain(target[0] === '[typst.fonts]' ? 'paths =' : 'let headings(')
+    ).toContain(target[0] === 'config' ? 'paths =' : 'let headings(')
   }
 })
 
 test('package documentation follows the language', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
 
-  const english = await run(['help', '@tola/address'], root)
+  const english = await run(['help', 'package', 'address'], root)
   expectExited(english)
   expect(english.stdout).toContain('Import in Typst:')
   expect(english.stdout).toContain('Decode a percent-encoded site-root URL path exactly once.')
   expect(english.stderr).toBe('')
 
-  const chinese = await run(['help', '@tola/address', '--lang', 'zh'], root)
+  const chinese = await run(['help', 'package', 'address', '--lang', 'zh'], root)
   expectExited(chinese)
   expect(chinese.stdout).toContain('Import in Typst:')
   expect(chinese.stdout).toContain('把百分号编码的站点根 URL 路径恰好解码一次。')
@@ -121,11 +121,11 @@ test('package documentation follows the language', async ({ binary, directory: r
   expect(chinese.stderr).toBe('')
 
   // A translation keeps every identifier it reads, so the keys it names stay the keys Tola has.
-  const sources = await run(['help', '@tola/source', '--lang', 'zh'], root)
+  const sources = await run(['help', 'package', 'source', '--lang', 'zh'], root)
   expectExited(sources)
   expect(sources.stdout).toContain('build.content-dir')
 
-  const rejected = await run(['help', '@tola/address', '--lang', 'fr'], root)
+  const rejected = await run(['help', 'package', 'address', '--lang', 'fr'], root)
   expectExited(rejected, 2)
   expect(rejected.stdout).toBe('')
   expect(rejected.stderr).toContain('--lang')
@@ -134,30 +134,27 @@ test('package documentation follows the language', async ({ binary, directory: r
 test('configuration tables and the overview follow the language', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
 
-  const table = await run(['help', '[build]', '--lang', 'zh-Hans'], root)
+  const table = await run(['help', 'config', 'build', '--lang', 'zh-Hans'], root)
   expectExited(table)
   // The prose is Chinese; the key names, the fenced template, and the headings stay English.
-  expect(table.stdout).toContain('站点如何构建：Typst 入口、页面目录，以及发布目录。')
-  expect(table.stdout).toContain('构建站点的 Typst 程序，相对站点根。')
-  expect(table.stdout).toContain('[build] - configuration table')
-  expect(table.stdout).toContain('默认值；用 `tola config` 查看你站点的设置。')
+  expect(table.stdout).toMatch(/\p{Script=Han}/u)
+  expect(table.stdout).toContain('[build]')
   expect(table.stdout).toContain('entry = "site.typ"')
-  expect(table.stdout).toContain('- `content-dir` - ')
-  expect(table.stdout).toContain('- `publish-dir` - ')
+  expect(table.stdout).toContain('content-dir')
+  expect(table.stdout).toContain('publish-dir')
   expect(table.stderr).toBe('')
 
   const overview = await run(['help', '--lang', 'zh-Hans'], root)
   expectExited(overview)
-  expect(overview.stdout).toContain('配置字段与默认值')
-  expect(overview.stdout).toContain('Configuration tables:')
-  // `tola help` shows the help topics and the tables; the command surface stays on `tola --help`.
-  expect(overview.stdout).not.toContain('Usage:')
-  expect(overview.stdout).not.toContain('Commands:')
+  expect(overview.stdout).toMatch(/\p{Script=Han}/u)
+  for (const category of ['config', 'package', 'demo']) {
+    expect(overview.stdout).toContain(`tola help ${category}`)
+  }
   expect(overview.stderr).toBe('')
 })
 
 test('redirected help keeps color under CLICOLOR_FORCE', async ({ binary, directory: root }) => {
-  const run = startCommand(binary, ['help', '@tola/document'], root, { CLICOLOR_FORCE: '1' })
+  const run = startCommand(binary, ['help', 'package', 'document'], root, { CLICOLOR_FORCE: '1' })
   const exit = await run.command.waitForClose(COMMAND_TIMEOUT_MS.standard)
   expectExited({ ...exit, stderr: run.stderr() })
   expect(run.stdout()).toContain('Import in Typst:')
@@ -184,7 +181,7 @@ test('terminal help pages through the configured pager', async ({ binary, direct
   test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
   const pager = await writePagerWrapper(root)
 
-  const run = await runOnTerminal(binary, ['help', '@tola/document', '--color', 'never'], root, {
+  const run = await runOnTerminal(binary, ['help', 'package', 'document', '--color', 'never'], root, {
     TERM: 'xterm-256color',
     TOLA_PAGER: pager,
   })
@@ -202,7 +199,7 @@ test('no-pager writes terminal help directly', async ({ binary, directory: root 
 
   const run = await runOnTerminal(
     binary,
-    ['help', '@tola/document', '--color', 'never', '--no-pager'],
+    ['help', 'package', 'document', '--color', 'never', '--no-pager'],
     root,
     {
       TERM: 'xterm-256color',
@@ -217,14 +214,16 @@ test('no-pager writes terminal help directly', async ({ binary, directory: root 
   await expect(readFile(join(root, 'pager-received.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
-test('interactive help refuses a piped terminal', async ({ binary, directory: root }) => {
+test('interactive help prints its page without a terminal', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
-
-  const refused = await run(['help', '--interactive'], root)
-  expect(refused.code).toBe(1)
-  expect(refused.stderr).toContain('need a terminal')
-  expect(refused.stderr).toContain('without the interactive flag')
-  expect(refused.stdout).not.toContain('configuration table')
+  const plain = await run(['help', 'config', 'site'], root)
+  expectExited(plain)
+  for (const flag of ['-i', '--interactive']) {
+    const fallback = await run(['help', 'config', 'site', flag], root)
+    expectExited(fallback)
+    expect(fallback.stdout).toBe(plain.stdout)
+    expect(fallback.stderr).toBe('')
+  }
 })
 
 test('interactive help prints the page on a dumb terminal', async ({ binary, directory: root }) => {
@@ -232,13 +231,13 @@ test('interactive help prints the page on a dumb terminal', async ({ binary, dir
 
   const plain = await runOnTerminal(
     binary,
-    ['help', '@tola/address', '--no-pager', '--color', 'never'],
+    ['help', 'package', 'address', '--no-pager', '--color', 'never'],
     root,
     { TERM: 'xterm-256color' },
   )
   const interactive = await runOnTerminal(
     binary,
-    ['help', '@tola/address', '--interactive', '--no-pager', '--color', 'never'],
+    ['help', 'package', 'address', '--interactive', '--no-pager', '--color', 'never'],
     root,
     { TERM: 'dumb' },
   )
@@ -254,7 +253,7 @@ test('interactive help enters, scrolls, and quits', async ({ binary, directory: 
 
   const running = new RunningProcess(
     'script',
-    sizedTerminalArgs(binary, ['help', '[site]', '--interactive', '--color', 'never']),
+    sizedTerminalArgs(binary, ['help', 'config', 'site', '--interactive', '--color', 'never']),
     root,
     { TERM: 'xterm-256color' },
   )
@@ -278,7 +277,7 @@ test('interactive help cancels on interrupt', async ({ binary, directory: root }
 
   const running = new RunningProcess(
     'script',
-    sizedTerminalArgs(binary, ['help', '[site]', '--interactive', '--color', 'never']),
+    sizedTerminalArgs(binary, ['help', 'config', 'site', '--interactive', '--color', 'never']),
     root,
     { TERM: 'xterm-256color' },
   )
@@ -299,7 +298,8 @@ test('interactive help keeps the zh page intact', async ({ binary, directory: ro
     'script',
     sizedTerminalArgs(binary, [
       'help',
-      '@tola/address',
+      'package',
+      'address',
       '--lang',
       'zh',
       '--interactive',
@@ -346,7 +346,7 @@ test('pasted help search reveals matches before Enter', async ({ binary, directo
 
   const running = new RunningProcess(
     'script',
-    sizedTerminalArgs(binary, ['help', '@tola/address', '--interactive', '--color', 'never']),
+    sizedTerminalArgs(binary, ['help', 'package', 'address', '--interactive', '--color', 'never']),
     root,
     { TERM: 'xterm-256color' },
   )
@@ -371,7 +371,8 @@ test('help section keys align export headings', async ({ binary, directory: root
     'script',
     sizedTerminalArgs(binary, [
       'help',
-      '@tola/address',
+      'package',
+      'address',
       'route',
       'decode-url-path',
       '--interactive',

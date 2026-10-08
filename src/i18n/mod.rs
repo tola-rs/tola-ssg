@@ -1,9 +1,9 @@
 //! The language `tola help` writes its pages in, and the packaged translations of those pages.
 //!
 //! The documentation's own spelling is English: a bundled package's overview and export
-//! documentation come from its Typst sources, and the index prose is written in `help.rs`. A
+//! documentation come from its Typst sources, and the index prose is written in the help page builders. A
 //! translation overrides one unit of that spelling; a unit without one reads English, so a
-//! partially translated page stays readable. Page sections and labels are never translated.
+//! partially translated page stays readable. Configuration and package identifiers stay unchanged; demo tutorials have their own translations.
 //! Nothing outside `tola help` follows this language: commands, their help, and diagnostics stay
 //! English.
 
@@ -81,31 +81,80 @@ fn resolve_from_environment(lookup: impl Fn(&str) -> Option<String>) -> Option<H
 /// stay English in both languages, because they are what the reader types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HelpText {
-    SiteFields,
-    PackageOverview,
-    SelectedExports,
+    SiteModel,
+    HelpUsage,
+    BuildPaths,
+    SourcePages,
+    PageAddresses,
+    DocumentQueries,
+    WebOutputs,
+    BuildHooks,
     DefaultValues,
+    DemoUsage,
+    DemoSource,
+    DemoActions,
+    DemoOutputs,
 }
 
 impl HelpText {
     /// The asset key this phrase is translated under.
     fn key(self) -> &'static str {
         match self {
-            Self::SiteFields => "site-fields",
-            Self::PackageOverview => "package-overview",
-            Self::SelectedExports => "selected-exports",
+            Self::SiteModel => "site-model",
+            Self::HelpUsage => "help-usage",
+            Self::BuildPaths => "build-paths",
+            Self::SourcePages => "source-pages",
+            Self::PageAddresses => "page-addresses",
+            Self::DocumentQueries => "document-queries",
+            Self::WebOutputs => "web-outputs",
+            Self::BuildHooks => "build-hooks",
             Self::DefaultValues => "default-values",
+            Self::DemoUsage => "demo-usage",
+            Self::DemoSource => "demo-source",
+            Self::DemoActions => "demo-actions",
+            Self::DemoOutputs => "demo-outputs",
         }
     }
 
     /// The phrase itself, which is what a page without a translation reads.
     fn english(self) -> &'static str {
         match self {
-            Self::SiteFields => "Configuration fields and defaults",
-            Self::PackageOverview => "Package overview and exports",
-            Self::SelectedExports => "Selected exports",
+            Self::SiteModel => {
+                "One root Typst program chooses the pages and other documents to emit. Tola \
+                 combines them with assets and generated files, and validates the complete \
+                 output before publication."
+            }
+            Self::HelpUsage => {
+                "These pages are bundled with this executable and need no site. Choose `config`, \
+                 `package`, or `demo`, followed by a table, package, or demo name. Use `tola skill` \
+                 for the site-building guide and `tola <command> --help` for command options. \
+                 Add `-i` to follow links, search, and preview demos."
+            }
+            Self::BuildPaths => {
+                "Choose the entry program, content directory, and published directory"
+            }
+            Self::SourcePages => "Declare metadata, select sources, and emit pages",
+            Self::PageAddresses => "Choose output paths and link pages and assets",
+            Self::DocumentQueries => "Build a table of contents or find incoming links",
+            Self::WebOutputs => "Publish feeds and a sitemap",
+            Self::BuildHooks => {
+                "Run tools before the build, on compiled output, or after publication"
+            }
+            Self::DemoUsage => {
+                "Read complete examples, browse their source files, and preview or export a site when you choose."
+            }
+            Self::DemoSource => {
+                "Embedded source, read-only. Export the complete demo before editing your own copy."
+            }
+            Self::DemoActions => {
+                "Use `-i` for Preview, Stop, Export, Export-and-edit, Open-export, and Open-browser. From the command line, add `--preview` or `--export DIR`; `--edit` opens that exported copy in your editor."
+            }
+            Self::DemoOutputs => {
+                "Preview this demo to inspect the files it actually publishes. Opening this page alone does not start a build."
+            }
             Self::DefaultValues => {
-                "Default values; use `tola config` to inspect your site's settings."
+                "Defaults shown below; `tola config` reports resolved paths and selected settings \
+                 for your site."
             }
         }
     }
@@ -439,25 +488,39 @@ mod tests {
     #[test]
     fn phrases_have_translations() {
         for phrase in [
-            HelpText::SiteFields,
-            HelpText::PackageOverview,
-            HelpText::SelectedExports,
+            HelpText::SiteModel,
+            HelpText::HelpUsage,
+            HelpText::BuildPaths,
+            HelpText::SourcePages,
+            HelpText::PageAddresses,
+            HelpText::DocumentQueries,
+            HelpText::WebOutputs,
+            HelpText::BuildHooks,
             HelpText::DefaultValues,
+            HelpText::DemoUsage,
+            HelpText::DemoSource,
+            HelpText::DemoActions,
+            HelpText::DemoOutputs,
         ] {
             // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
             match phrase {
-                HelpText::SiteFields
-                | HelpText::PackageOverview
-                | HelpText::SelectedExports
-                | HelpText::DefaultValues => {}
+                HelpText::SiteModel
+                | HelpText::HelpUsage
+                | HelpText::BuildPaths
+                | HelpText::SourcePages
+                | HelpText::PageAddresses
+                | HelpText::DocumentQueries
+                | HelpText::WebOutputs
+                | HelpText::BuildHooks
+                | HelpText::DefaultValues
+                | HelpText::DemoUsage
+                | HelpText::DemoSource
+                | HelpText::DemoActions
+                | HelpText::DemoOutputs => {}
             }
             let translated = text(HelpLanguage::SimplifiedChinese, phrase);
             assert_ne!(translated, phrase.english(), "{:?}", phrase.key());
         }
-        assert_eq!(
-            text(HelpLanguage::English, HelpText::SiteFields),
-            "Configuration fields and defaults"
-        );
     }
 
     /// Every bundled package carries a translation, every translated unit names a real export or

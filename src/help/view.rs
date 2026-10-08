@@ -1,6 +1,7 @@
 //! The help reader coordinates navigation and input over one laid-out document.
 
 use std::fmt::Write as _;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -13,6 +14,7 @@ use super::jump::Jump;
 use super::layout::{DocumentPosition, LinkSpan, PageLayout};
 use super::model::{Anchor, HelpDocument, LinkTarget, PageId};
 use super::navigation::{History, Visit};
+use crate::i18n::HelpLanguage;
 use crate::terminal::style::Palette;
 use crate::terminal::ui::filter::{Reply, TextLine};
 use crate::terminal::ui::pager::Pager;
@@ -35,6 +37,40 @@ const ACCEPTED: &[Action] = &[
     Action::Label,
 ];
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreviewState {
+    pub demo: String,
+    pub title: String,
+    pub phase: PreviewPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PreviewPhase {
+    Preparing,
+    Ready { url: String },
+    Failed { message: String },
+    Stopped,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReaderAction {
+    Preview {
+        demo: String,
+    },
+    StopPreview,
+    Export {
+        demo: String,
+        destination: PathBuf,
+        edit: bool,
+    },
+    OpenBrowser {
+        url: String,
+    },
+    OpenExport {
+        demo: String,
+    },
+}
+
 pub(crate) struct View<'a> {
     document: Rc<HelpDocument>,
     page: PageLayout,
@@ -45,14 +81,26 @@ pub(crate) struct View<'a> {
     content: Rect,
     mouse: bool,
     hovered: Option<usize>,
+    hovered_button: Option<Action>,
+    buttons: Vec<(Rect, Action)>,
     palette: Palette,
     load: &'a dyn Fn(&PageId) -> Result<HelpDocument>,
+    language: HelpLanguage,
+    preview: Option<PreviewState>,
+    poll: Option<&'a dyn Fn() -> Option<PreviewState>>,
+    pending: Option<ReaderAction>,
+    has_export: Option<&'a dyn Fn(&str) -> bool>,
 }
 
 enum Mode {
     Reading,
     Search(Search),
     Jump(Jump),
+    Destination {
+        demo: String,
+        line: TextLine,
+        edit: bool,
+    },
 }
 
 struct Search {
@@ -79,14 +127,191 @@ impl<'a> View<'a> {
             content: Rect::default(),
             mouse: false,
             hovered: None,
+            hovered_button: None,
+            buttons: Vec::new(),
             palette,
             load,
+            language: HelpLanguage::English,
+            preview: None,
+            poll: None,
+            pending: None,
+            has_export: None,
         }
     }
 
     pub(crate) fn set_mouse(&mut self, mouse: bool) {
         self.mouse = mouse;
         self.hovered = None;
+    }
+
+    pub(crate) fn set_language(&mut self, language: HelpLanguage) {
+        self.language = language;
+    }
+
+    pub(crate) fn set_preview(&mut self, poll: &'a dyn Fn() -> Option<PreviewState>) {
+        self.poll = Some(poll);
+    }
+
+    pub(crate) fn set_exports(&mut self, has_export: &'a dyn Fn(&str) -> bool) {
+        self.has_export = Some(has_export);
+    }
+
+    pub(crate) fn set_notice(&mut self, notice: impl Into<String>) {
+        self.notice = Some(notice.into());
+    }
+
+    pub(crate) fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    pub(crate) fn take_action(&mut self) -> Option<ReaderAction> {
+        self.pending.take()
+    }
+
+    pub(crate) fn navigate(&mut self, target: &LinkTarget) {
+        self.follow(target);
+    }
+
+    fn poll_preview(&mut self) -> bool {
+        let Some(poll) = self.poll else { return false };
+        let next = poll();
+        if next == self.preview {
+            return false;
+        }
+        self.preview = next;
+        if matches!(
+            self.document.id,
+            PageId::DemoOutputs { .. } | PageId::DemoOutput { .. }
+        ) {
+            let position = self.position();
+            let focus = self.focus();
+            match (self.load)(&self.document.id) {
+                Ok(document) => {
+                    self.document = Rc::new(document);
+                    self.page = PageLayout::new(&self.document, self.page.width, self.palette);
+                    self.page.pager.resize(usize::from(self.content.height));
+                    self.restore_position(position, focus);
+                }
+                Err(error) => {
+                    tracing::debug!(?error, "could not refresh demo outputs");
+                    self.notice = Some("could not read this preview output".into());
+                }
+            }
+        }
+        true
+    }
+
+    fn request(&mut self, action: ReaderAction) -> Step {
+        self.pending = Some(action);
+        Step::Done
+    }
+
+    fn begin_export(&mut self, edit: bool) {
+        if let Some(demo) = self.document.id.demo() {
+            self.mode = Mode::Destination {
+                demo: demo.into(),
+                line: TextLine::new("export directory"),
+                edit,
+            };
+        }
+    }
+
+    fn finish_export(&mut self) -> Step {
+        let Mode::Destination { demo, line, edit } = &self.mode else {
+            return Step::Continue;
+        };
+        let destination = line.text().trim();
+        if destination.is_empty() {
+            self.notice = Some("choose a new export directory".into());
+            return Step::Continue;
+        }
+        let action = ReaderAction::Export {
+            demo: demo.clone(),
+            destination: PathBuf::from(destination),
+            edit: *edit,
+        };
+        self.mode = Mode::Reading;
+        self.request(action)
+    }
+
+    fn demo_actions(&self) -> Vec<(Action, &'static str)> {
+        let live = self.live();
+        [
+            (Action::Preview, "Preview"),
+            (Action::StopPreview, "Stop"),
+            (Action::Export, "Export"),
+            (Action::ExportAndEdit, "Export & edit"),
+            (Action::OpenExport, "Open export"),
+            (Action::OpenBrowser, "Open browser"),
+            (Action::PreviewOutputs, "Outputs"),
+        ]
+        .into_iter()
+        .filter(|(action, _)| live.contains(action))
+        .collect()
+    }
+
+    fn draw_buttons(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        actions: &[(Action, &'static str)],
+        palette: Palette,
+    ) -> u16 {
+        self.buttons.clear();
+        let mut column = area.x;
+        let mut row = area.y;
+        for (action, label) in actions {
+            let text = format!("[{label}]");
+            let width = text.len() as u16;
+            if width > area.right().saturating_sub(column) {
+                if row + 1 == area.bottom() {
+                    break;
+                }
+                row += 1;
+                column = area.x;
+            }
+            if width > area.width {
+                continue;
+            }
+            let rectangle = Rect::new(column, row, width, 1);
+            let style = if self.hovered_button == Some(*action) {
+                palette.selected_style()
+            } else {
+                palette.accent_style()
+            };
+            frame.render_widget(Paragraph::new(text).style(style), rectangle);
+            self.buttons.push((rectangle, *action));
+            column = column.saturating_add(width + 1);
+        }
+        row - area.y + 1
+    }
+
+    fn browser_url(&self) -> Option<String> {
+        let preview = self.preview.as_ref()?;
+        let PreviewPhase::Ready { url } = &preview.phase else {
+            return None;
+        };
+        match &self.document.id {
+            PageId::DemoOutput { id, path } if *id == preview.demo => {
+                super::pages::output_url(url, path).ok()
+            }
+            PageId::DemoOutput { .. } | PageId::DemoOutputs { .. }
+                if self.document.id.demo() != Some(preview.demo.as_str()) =>
+            {
+                None
+            }
+            _ => Some(url.clone()),
+        }
+    }
+
+    fn preview_line(&self) -> Option<String> {
+        let preview = self.preview.as_ref()?;
+        Some(match &preview.phase {
+            PreviewPhase::Preparing => format!("{} · Building", preview.title),
+            PreviewPhase::Ready { url } => format!("{} · Ready · {url}", preview.title),
+            PreviewPhase::Failed { message } => format!("{} · Failed · {message}", preview.title),
+            PreviewPhase::Stopped => format!("{} · Stopped", preview.title),
+        })
     }
 
     fn position(&self) -> DocumentPosition {
@@ -130,6 +355,11 @@ impl<'a> View<'a> {
         let changed = content != self.content || reflow;
         let position = self.position();
         let focus = self.focus();
+        let visible_hit = self
+            .page
+            .pager
+            .current_hit()
+            .filter(|hit| self.page.pager.visible().contains(hit));
         if reflow {
             self.page = PageLayout::new(&self.document, usize::from(content.width), palette);
         }
@@ -138,6 +368,8 @@ impl<'a> View<'a> {
         self.page.pager.resize(usize::from(content.height));
         if reflow {
             self.restore_position(position, focus);
+        } else if changed && let Some(hit) = visible_hit {
+            self.page.pager.move_to(hit);
         }
         if changed {
             self.hovered = None;
@@ -170,14 +402,29 @@ impl<'a> View<'a> {
         scroll(&mut self.page.pager);
     }
 
-    fn follow(&mut self, target: &LinkTarget) {
+    fn follow(&mut self, target: &LinkTarget) -> Step {
         self.hovered = None;
         self.mode = Mode::Reading;
         match target {
-            LinkTarget::External(url) => self.notice = Some(url.clone()),
+            LinkTarget::External(url) => {
+                let url = if matches!(self.document.id, PageId::DemoOutput { .. }) {
+                    match self.browser_url() {
+                        Some(url) => url,
+                        None => {
+                            self.notice =
+                                Some("preview this demo before opening its output".into());
+                            return Step::Continue;
+                        }
+                    }
+                } else {
+                    url.clone()
+                };
+                return self.request(ReaderAction::OpenBrowser { url });
+            }
             LinkTarget::Page(id) => self.open(id, None),
             LinkTarget::PageAnchor(id, anchor) => self.open(id, Some(anchor)),
         }
+        Step::Continue
     }
 
     fn open(&mut self, id: &PageId, anchor: Option<&Anchor>) {
@@ -188,7 +435,10 @@ impl<'a> View<'a> {
                 Ok(document) => Rc::new(document),
                 Err(error) => {
                     tracing::debug!(?error, "could not open help page");
-                    self.notice = Some(format!("could not open `{}`", page_label(id)));
+                    self.notice = Some(format!(
+                        "could not open `{}`",
+                        super::pages::label(id, self.language)
+                    ));
                     return;
                 }
             }
@@ -206,7 +456,7 @@ impl<'a> View<'a> {
             })
         };
         // A jump inside the current page moves within it; history keeps pages.
-        if *id == self.document.id {
+        if document.id == self.document.id {
             self.page.pager.set_top(destination_line(&self.page));
             return;
         }
@@ -224,7 +474,7 @@ impl<'a> View<'a> {
         self.notice = Some(format!(
             "`{}` is not on `{}`",
             anchor.as_str(),
-            page_label(id)
+            super::pages::label(id, self.language)
         ));
     }
 
@@ -232,6 +482,13 @@ impl<'a> View<'a> {
         self.mode = Mode::Reading;
         self.hovered = None;
         self.document = visit.document;
+        if matches!(
+            self.document.id,
+            PageId::DemoOutputs { .. } | PageId::DemoOutput { .. }
+        ) && let Ok(document) = (self.load)(&self.document.id)
+        {
+            self.document = Rc::new(document);
+        }
         self.page = PageLayout::new(&self.document, self.page.width, self.palette);
         self.page.pager.resize(usize::from(self.content.height));
         self.restore_position(visit.position, visit.focus);
@@ -294,7 +551,7 @@ impl<'a> View<'a> {
     fn status(&self) -> String {
         let mut status = format!(
             "{} - {}/{} lines",
-            page_label(&self.document.id),
+            super::pages::label(&self.document.id, self.language),
             (self.page.pager.top() + 1).min(self.page.pager.line_count()),
             self.page.pager.line_count()
         );
@@ -332,17 +589,72 @@ impl<'a> View<'a> {
 
 impl Surface for View<'_> {
     fn draw(&mut self, frame: &mut Frame, palette: Palette) {
-        let (content, footer) = split_footer(frame.area(), matches!(self.mode, Mode::Search(_)));
-        self.resize(content, palette);
-        self.page.pager.draw(frame, content, palette);
+        self.poll_preview();
+        let input = matches!(self.mode, Mode::Search(_) | Mode::Destination { .. });
+        let mut area = frame.area();
+        let actions = self.demo_actions();
+        self.buttons.clear();
+        if !actions.is_empty() && area.height > 3 {
+            let rows = self.draw_buttons(
+                frame,
+                Rect {
+                    height: 2.min(area.height - 3),
+                    ..area
+                },
+                &actions,
+                palette,
+            );
+            area.y += rows;
+            area.height -= rows;
+        }
+        let (content, mut footer) = split_footer(area, input);
+        if let Some(preview) = self.preview_line()
+            && content.height > 1
+        {
+            let status = Rect::new(content.x, content.bottom() - 1, content.width, 1);
+            let content = Rect {
+                height: content.height - 1,
+                ..content
+            };
+            self.resize(content, palette);
+            frame.render_widget(
+                Paragraph::new(preview).style(palette.notice_style()),
+                status,
+            );
+        } else {
+            self.resize(content, palette);
+        }
+        footer.y = self.content.bottom() + u16::from(self.preview.is_some() && content.height > 1);
+        self.page.pager.draw(frame, self.content, palette);
         self.draw_hover(frame);
         if let Mode::Jump(jump) = &mut self.mode
-            && !jump.draw(frame, content, self.page.pager.top(), palette)
+            && !jump.draw(frame, self.content, self.page.pager.top(), palette)
         {
             self.mode = Mode::Reading;
             self.notice = Some("no links on screen".to_owned());
         }
-        if let Mode::Search(search) = &self.mode {
+        if let Mode::Destination { line, .. } = &self.mode {
+            line.draw(
+                frame,
+                Rect {
+                    height: footer.height.min(1),
+                    ..footer
+                },
+                palette,
+            );
+            hints::draw(
+                frame,
+                Rect {
+                    y: footer.y + footer.height.min(1),
+                    height: footer.height.saturating_sub(1),
+                    ..footer
+                },
+                self.notice.as_deref().unwrap_or(""),
+                &self.live(),
+                self.bindings(),
+                palette,
+            );
+        } else if let Mode::Search(search) = &self.mode {
             let status = self.search_status();
             let status_width = status.len() as u16;
             let feedback =
@@ -396,7 +708,7 @@ impl Surface for View<'_> {
     }
 
     fn answer(&mut self, action: Action) -> Step {
-        if matches!(self.mode, Mode::Search(_))
+        if matches!(self.mode, Mode::Search(_) | Mode::Destination { .. })
             && !matches!(action, Action::Open | Action::Dismiss | Action::Quit)
         {
             return Step::Continue;
@@ -405,9 +717,44 @@ impl Surface for View<'_> {
         match action {
             Action::Quit => return Step::Done,
             Action::Open if matches!(self.mode, Mode::Search(_)) => self.finish_search(true),
+            Action::Open if matches!(self.mode, Mode::Destination { .. }) => {
+                return self.finish_export();
+            }
+            Action::Preview => {
+                if let Some(demo) = self.document.id.demo() {
+                    return self.request(ReaderAction::Preview { demo: demo.into() });
+                }
+            }
+            Action::StopPreview if self.preview.is_some() => {
+                return self.request(ReaderAction::StopPreview);
+            }
+            Action::Export => self.begin_export(false),
+            Action::ExportAndEdit => self.begin_export(true),
+            Action::OpenExport => {
+                if let Some(demo) = self.document.id.demo()
+                    && self.has_export.is_some_and(|has_export| has_export(demo))
+                {
+                    return self.request(ReaderAction::OpenExport { demo: demo.into() });
+                }
+            }
+            Action::OpenBrowser => {
+                if let Some(url) = self.browser_url() {
+                    return self.request(ReaderAction::OpenBrowser { url });
+                }
+            }
+            Action::PreviewOutputs => {
+                if let Some(preview) = &self.preview
+                    && matches!(preview.phase, PreviewPhase::Ready { .. })
+                {
+                    let id = PageId::DemoOutputs {
+                        id: preview.demo.clone(),
+                    };
+                    self.open(&id, None);
+                }
+            }
             Action::Dismiss => match self.mode {
                 Mode::Search(_) => self.finish_search(false),
-                Mode::Jump(_) => self.mode = Mode::Reading,
+                Mode::Jump(_) | Mode::Destination { .. } => self.mode = Mode::Reading,
                 Mode::Reading => match self.history.back(self.visit()) {
                     Some(visit) => self.restore_visit(visit),
                     None => return Step::Cancel,
@@ -449,7 +796,7 @@ impl Surface for View<'_> {
             Action::Label => match self.mode {
                 Mode::Jump(_) => self.mode = Mode::Reading,
                 Mode::Reading => self.begin_jump(),
-                Mode::Search(_) => {}
+                Mode::Search(_) | Mode::Destination { .. } => {}
             },
             _ => {}
         }
@@ -466,7 +813,7 @@ impl Surface for View<'_> {
                     && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
                     && let Some(target) = jump.key(character)
                 {
-                    self.follow(&target);
+                    return self.follow(&target);
                 }
                 Step::Continue
             }
@@ -480,14 +827,26 @@ impl Surface for View<'_> {
                 }
                 Step::Continue
             }
+            Mode::Destination { line, .. } => match line.key(key) {
+                Reply::Editing => Step::Continue,
+                Reply::Dismissed => {
+                    self.mode = Mode::Reading;
+                    Step::Continue
+                }
+                Reply::Accepted => self.finish_export(),
+            },
             Mode::Reading => answer_key(self, key),
         }
     }
 
     fn paste(&mut self, text: &str) -> Step {
-        if let Mode::Search(search) = &mut self.mode {
-            search.line.paste(text);
-            self.edit_search();
+        match &mut self.mode {
+            Mode::Search(search) => {
+                search.line.paste(text);
+                self.edit_search();
+            }
+            Mode::Destination { line, .. } => line.paste(text),
+            _ => {}
         }
         Step::Continue
     }
@@ -498,15 +857,28 @@ impl Surface for View<'_> {
         }
         match event.kind {
             MouseEventKind::Moved => {
+                self.hovered_button = self
+                    .buttons
+                    .iter()
+                    .find(|(area, _)| area.contains((event.column, event.row).into()))
+                    .map(|(_, action)| *action);
                 self.hovered = self.link_at(event.column, event.row).map(|link| link.id);
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(action) = self
+                    .buttons
+                    .iter()
+                    .find(|(area, _)| area.contains((event.column, event.row).into()))
+                    .map(|(_, action)| *action)
+                {
+                    return self.answer(action);
+                }
                 if let Some(target) = self
                     .link_at(event.column, event.row)
                     .map(|link| link.target.clone())
                 {
                     self.notice = None;
-                    self.follow(&target);
+                    return self.follow(&target);
                 }
             }
             _ => {}
@@ -518,12 +890,16 @@ impl Surface for View<'_> {
         match self.mode {
             Mode::Search(_) => &keymap::TEXT_INPUT,
             Mode::Jump(_) => &keymap::HELP_JUMP,
+            Mode::Destination { .. } => &keymap::HELP_EXPORT,
             Mode::Reading => &keymap::HELP,
         }
     }
 
     fn title(&self) -> Option<String> {
-        Some(format!("tola help - {}", page_label(&self.document.id)))
+        Some(format!(
+            "tola help - {}",
+            super::pages::label(&self.document.id, self.language)
+        ))
     }
 
     fn wants_mouse(&self) -> bool {
@@ -531,7 +907,7 @@ impl Surface for View<'_> {
     }
 
     fn live(&self) -> Vec<Action> {
-        if matches!(self.mode, Mode::Search(_)) {
+        if matches!(self.mode, Mode::Search(_) | Mode::Destination { .. }) {
             return vec![Action::Open, Action::Dismiss];
         }
         if !matches!(self.mode, Mode::Reading) {
@@ -562,7 +938,30 @@ impl Surface for View<'_> {
         if self.history.has_forward() {
             live.push(Action::Forward);
         }
+        if self.document.id.demo().is_some() {
+            live.extend([Action::Preview, Action::Export, Action::ExportAndEdit]);
+            if let Some(demo) = self.document.id.demo()
+                && self.has_export.is_some_and(|has_export| has_export(demo))
+            {
+                live.push(Action::OpenExport);
+            }
+        }
+        if let Some(preview) = &self.preview {
+            if !matches!(preview.phase, PreviewPhase::Stopped) {
+                live.push(Action::StopPreview);
+            }
+            if matches!(preview.phase, PreviewPhase::Ready { .. }) {
+                live.push(Action::PreviewOutputs);
+                if self.browser_url().is_some() {
+                    live.push(Action::OpenBrowser);
+                }
+            }
+        }
         live
+    }
+
+    fn idle(&mut self) -> bool {
+        self.poll_preview()
     }
 
     fn caption(&self) -> Option<String> {
@@ -571,10 +970,6 @@ impl Surface for View<'_> {
             _ => None,
         }
     }
-}
-
-fn page_label(id: &PageId) -> String {
-    id.selector().unwrap_or_else(|| "tola help".to_owned())
 }
 
 fn split_footer(area: Rect, search_is_open: bool) -> (Rect, Rect) {
@@ -618,7 +1013,7 @@ mod tests {
 
     fn linked() -> HelpDocument {
         document(
-            "# Index\n\nRead [the whole manual](tola://package/@tola/schema).\n\n## Details\n\nMore text.\n\n## Tail\n\nEnd.\n",
+            "# Index\n\nRead [the whole manual](tola-help://packages/schema).\n\n## Details\n\nMore text.\n\n## Tail\n\nEnd.\n",
         )
     }
 
@@ -631,7 +1026,7 @@ mod tests {
 
     fn destination() -> LinkTarget {
         LinkTarget::Page(PageId::Package {
-            name: "@tola/schema".to_owned(),
+            name: "schema".to_owned(),
         })
     }
 
@@ -715,7 +1110,7 @@ mod tests {
     fn reflow_relabels_current_targets() {
         let mut view = reader(
             document(
-                "# A title that wraps across several lines\n\nfirst [go](tola://package/@tola/schema)\n\nmore content\n",
+                "# A title that wraps across several lines\n\nfirst [go](tola-help://packages/schema)\n\nmore content\n",
             ),
             &load,
         );
@@ -882,7 +1277,7 @@ mod tests {
         for id in [
             PageId::Overview,
             PageId::Package {
-                name: "@tola/schema".to_owned(),
+                name: "schema".to_owned(),
             },
         ] {
             view.follow(&LinkTarget::PageAnchor(id, anchor("absent")));
@@ -1086,7 +1481,7 @@ mod tests {
     fn wrapped_hover_uses_content_coordinates() {
         let mut view = reader(
             document(
-                "[one two three four five six](tola://package/@tola/schema) [other](https://example.com)\n",
+                "[one two three four five six](tola-help://packages/schema) [other](https://example.com)\n",
             ),
             &load,
         );
@@ -1172,7 +1567,7 @@ mod tests {
     }
 
     #[test]
-    fn external_jump_shows_destination() {
+    fn external_jump_requests_browser() {
         let mut view = reader(
             document("[read manual](https://example.com/manual)\n"),
             &load,
@@ -1182,7 +1577,12 @@ mod tests {
         press(&mut view, KeyCode::Tab);
         frame(&mut view, area);
         press(&mut view, KeyCode::Char('a'));
-        assert_eq!(view.notice.as_deref(), Some("https://example.com/manual"));
+        assert_eq!(
+            view.take_action(),
+            Some(ReaderAction::OpenBrowser {
+                url: "https://example.com/manual".into()
+            })
+        );
         assert!(!view.history.has_back());
     }
 
@@ -1241,5 +1641,217 @@ mod tests {
         );
         frame(&mut view, Rect::new(0, 0, 40, 2));
         assert!(!view.live().contains(&Action::Label));
+    }
+
+    fn demo_document() -> HelpDocument {
+        HelpDocument::parse(HelpPage::new(
+            PageId::Demo {
+                id: "backlinks".into(),
+            },
+            format!("# Backlinks\n\n{}", "A useful paragraph.\n\n".repeat(12)),
+        ))
+    }
+
+    fn ready_preview() -> Option<PreviewState> {
+        Some(PreviewState {
+            demo: "backlinks".into(),
+            title: "Backlinks".into(),
+            phase: PreviewPhase::Ready {
+                url: "http://127.0.0.1:1234/".into(),
+            },
+        })
+    }
+
+    #[test]
+    fn source_navigation_starts_no_operations() {
+        let mut view = reader(demo_document(), &load);
+        frame(&mut view, Rect::new(0, 0, 80, 10));
+        let file = PageId::DemoFile {
+            id: "backlinks".into(),
+            path: "site/page.typ".into(),
+        };
+        assert_eq!(view.follow(&LinkTarget::Page(file.clone())), Step::Continue);
+        assert_eq!(view.document.id, file);
+        assert!(view.take_action().is_none());
+        view.answer(Action::Back);
+        assert_eq!(view.document.id.demo(), Some("backlinks"));
+        assert!(view.take_action().is_none());
+    }
+
+    #[test]
+    fn export_requires_entered_directory() {
+        for edit in [false, true] {
+            let mut view = reader(demo_document(), &load);
+            frame(&mut view, Rect::new(0, 0, 80, 10));
+            view.answer(if edit {
+                Action::ExportAndEdit
+            } else {
+                Action::Export
+            });
+            assert_eq!(press(&mut view, KeyCode::Enter), Step::Continue);
+            assert!(view.take_action().is_none());
+            view.paste("my demo");
+            assert!(view.take_action().is_none());
+            assert_eq!(press(&mut view, KeyCode::Enter), Step::Done);
+            assert_eq!(
+                view.take_action(),
+                Some(ReaderAction::Export {
+                    demo: "backlinks".into(),
+                    destination: PathBuf::from("my demo"),
+                    edit
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn export_cancel_keeps_the_document() {
+        let mut view = reader(demo_document(), &load);
+        frame(&mut view, Rect::new(0, 0, 80, 10));
+        view.page.pager.set_top(4);
+        let position = view.position();
+        view.answer(Action::Export);
+        view.paste("discarded directory");
+        press(&mut view, KeyCode::Esc);
+        assert_eq!(view.position(), position);
+        assert!(view.take_action().is_none());
+        assert!(matches!(view.mode, Mode::Reading));
+    }
+
+    #[test]
+    fn buttons_match_keyboard_operations() {
+        let has_export = |_: &str| true;
+        for (action, key) in [
+            (Action::Preview, 'p'),
+            (Action::StopPreview, 'x'),
+            (Action::OpenExport, 'v'),
+            (Action::OpenBrowser, 'o'),
+            (Action::PreviewOutputs, 'O'),
+        ] {
+            let mut keyboard = reader(demo_document(), &load);
+            keyboard.set_preview(&ready_preview);
+            keyboard.set_exports(&has_export);
+            frame(&mut keyboard, Rect::new(0, 0, 100, 12));
+            let key_step = press(&mut keyboard, KeyCode::Char(key));
+
+            let mut pointer = reader(demo_document(), &load);
+            pointer.set_mouse(true);
+            pointer.set_preview(&ready_preview);
+            pointer.set_exports(&has_export);
+            frame(&mut pointer, Rect::new(0, 0, 100, 12));
+            let button = pointer
+                .buttons
+                .iter()
+                .find(|(_, candidate)| *candidate == action)
+                .unwrap()
+                .0;
+            let click_step = pointer.pointer(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                button.x,
+                button.y,
+            ));
+            assert_eq!(click_step, key_step);
+            assert_eq!(pointer.take_action(), keyboard.take_action());
+            assert_eq!(pointer.document.id, keyboard.document.id);
+        }
+    }
+
+    #[test]
+    fn browser_outputs_require_ready_preview() {
+        let mut view = reader(demo_document(), &load);
+        for phase in [
+            PreviewPhase::Preparing,
+            PreviewPhase::Stopped,
+            PreviewPhase::Failed {
+                message: "a page could not compile".into(),
+            },
+        ] {
+            view.preview = Some(PreviewState {
+                demo: "backlinks".into(),
+                title: "Backlinks".into(),
+                phase,
+            });
+            assert!(!view.live().contains(&Action::OpenBrowser));
+            assert!(!view.live().contains(&Action::PreviewOutputs));
+        }
+        view.preview.as_mut().unwrap().phase = PreviewPhase::Stopped;
+        assert!(!view.live().contains(&Action::StopPreview));
+        view.preview = ready_preview();
+        assert!(view.live().contains(&Action::OpenBrowser));
+        assert!(view.live().contains(&Action::PreviewOutputs));
+        assert!(view.live().contains(&Action::StopPreview));
+    }
+
+    #[test]
+    fn open_export_requires_saved_copy() {
+        let mut view = reader(demo_document(), &load);
+        assert!(!view.live().contains(&Action::OpenExport));
+        assert_eq!(view.answer(Action::OpenExport), Step::Continue);
+        assert!(view.take_action().is_none());
+        let has_export = |id: &str| id == "backlinks";
+        view.set_exports(&has_export);
+        assert!(view.live().contains(&Action::OpenExport));
+        assert_eq!(view.answer(Action::OpenExport), Step::Done);
+        assert_eq!(
+            view.take_action(),
+            Some(ReaderAction::OpenExport {
+                demo: "backlinks".into()
+            })
+        );
+    }
+
+    #[test]
+    fn preview_changes_keep_the_reading_position() {
+        let preview = std::cell::RefCell::new(Some(PreviewState {
+            demo: "backlinks".into(),
+            title: "Backlinks".into(),
+            phase: PreviewPhase::Preparing,
+        }));
+        let poll = || preview.borrow().clone();
+        let mut view = reader(demo_document(), &load);
+        view.set_preview(&poll);
+        frame(&mut view, Rect::new(0, 0, 80, 10));
+        view.page.pager.set_top(4);
+        let position = view.position();
+        assert!(!view.idle());
+        *preview.borrow_mut() = ready_preview();
+        assert!(view.idle());
+        assert_eq!(view.position(), position);
+        assert!(!view.idle());
+        view.follow(&destination());
+        assert_eq!(view.preview, ready_preview());
+        view.answer(Action::Back);
+        assert_eq!(view.preview, ready_preview());
+        assert_eq!(view.position(), position);
+        assert!(view.take_action().is_none());
+    }
+
+    #[test]
+    fn accepted_search_keeps_its_hit_visible() {
+        let markdown = format!(
+            "# Backlinks\n\n{}\nsite/backlinks.typ\n\n{}",
+            "Before the file.\n\n".repeat(12),
+            "After the file.\n\n".repeat(12)
+        );
+        let document = HelpDocument::parse(HelpPage::new(
+            PageId::Demo {
+                id: "backlinks".into(),
+            },
+            markdown,
+        ));
+        let mut view = reader(document, &load);
+        let area = Rect::new(0, 0, 80, 10);
+        frame(&mut view, area);
+        press(&mut view, KeyCode::Char('/'));
+        frame(&mut view, area);
+        view.paste("site/backlinks.typ");
+        frame(&mut view, area);
+        let hit = view.page.pager.current_hit().unwrap();
+        assert!(view.page.pager.visible().contains(&hit));
+        press(&mut view, KeyCode::Enter);
+        frame(&mut view, area);
+        assert_eq!(view.page.pager.current_hit(), Some(hit));
+        assert!(view.page.pager.visible().contains(&hit));
+        assert_eq!(view.query, "site/backlinks.typ");
     }
 }

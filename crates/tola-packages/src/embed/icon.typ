@@ -6,7 +6,7 @@
 /// return values any target can use.
 ///
 /// Ids come from the collections the site declares in `tola.toml` under `icons.collections`:
-/// `tola help "[icons]"` documents each source type, and `tola inspect icons` lists the configured
+/// `tola help config icons` documents each source type, and `tola inspect icons` lists the configured
 /// namespaces and, in one you name, its icon names.
 ///
 /// An icon is colored by its own SVG. Artwork drawn with `currentColor` follows the `color` of the

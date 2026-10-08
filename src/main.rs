@@ -7,7 +7,9 @@
 mod cancellation;
 mod cli;
 mod codes;
+mod command_line;
 mod config;
+mod demos;
 mod dev;
 mod editor;
 mod embed;

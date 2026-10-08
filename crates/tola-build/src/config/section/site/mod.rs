@@ -63,8 +63,8 @@ pub struct SiteSectionConfig {
 
     /// The languages a multilingual site publishes, written as `["en", "zh-Hans"]` or with the
     /// parts of a tag: `[{ lang = "en" }, { lang = "zh", script = "Hans" }]`. Each entry takes
-    /// the shape `language` takes, and is validated the same way. Declaring it makes `language`
-    /// the default: `language` must then be written, and must name one of the entries.
+    /// the shape `language` takes, and is validated the same way. `language` names the site's
+    /// default language (`"en"` when omitted); a nonempty list must include it.
     ///
     /// Tola reads this as data and does not act on it. How a site routes, pairs, and switches
     /// between its languages is the site's own to decide.
@@ -103,9 +103,9 @@ impl Default for SiteSectionConfig {
 }
 
 impl SiteSectionConfig {
-    /// What `tola help "[site]"` adds under its table.
+    /// What `tola help config site` adds under its table.
     pub const HELP: &'static str = "\
-A template reads these as `site.<key>` (`tola help \"@tola/site\"` documents the object):
+A template reads these as `site.<key>` (`tola help package site` documents the object):
 
 ```toml
 [site]

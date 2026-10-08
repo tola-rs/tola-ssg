@@ -74,6 +74,10 @@ pub(crate) trait Surface {
     fn pointer(&mut self, _event: MouseEvent) -> Step {
         Step::Continue
     }
+    /// Poll a background operation; only a changed snapshot requests another frame.
+    fn idle(&mut self) -> bool {
+        false
+    }
     /// The window title this screen wants while it is open, when it wants one.
     fn title(&self) -> Option<String> {
         None
@@ -127,6 +131,12 @@ pub(crate) enum Action {
     Open,
     /// Write the table's current rows to a file or standard output.
     Export,
+    Preview,
+    StopPreview,
+    ExportAndEdit,
+    OpenBrowser,
+    OpenExport,
+    PreviewOutputs,
     /// Apply the preset at this position of the preset list.
     ApplyPreset(u8),
     /// Select or deselect the row under the cursor.
@@ -195,20 +205,23 @@ impl<B: Backend> Screen<B> {
             drawn?;
             let event = loop {
                 if let Some(event) = session::next_event(terminal, POLL_INTERVAL, cancelled)? {
-                    break event;
+                    break Some(event);
+                }
+                if surface.idle() {
+                    break None;
                 }
             };
             let run = match event {
-                Event::Key(key) if key.kind != KeyEventKind::Release => {
+                Some(Event::Key(key)) if key.kind != KeyEventKind::Release => {
                     if cancels(&key) {
                         return Err(InputCancelled.into());
                     }
                     surface.key(&key)
                 }
-                Event::Paste(text) => surface.paste(&text),
+                Some(Event::Paste(text)) => surface.paste(&text),
                 // The wheel scrolls the same line the arrow keys do; the rest reach the screen,
                 // which acts on a click and ignores what it does not use.
-                Event::Mouse(mouse) => match mouse.kind {
+                Some(Event::Mouse(mouse)) => match mouse.kind {
                     MouseEventKind::ScrollUp => surface.answer(Action::Up),
                     MouseEventKind::ScrollDown => surface.answer(Action::Down),
                     _ => surface.pointer(mouse),

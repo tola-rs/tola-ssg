@@ -128,7 +128,7 @@ impl Drop for TraceWriter {
     fn drop(&mut self) {
         if !self.bytes.is_empty() {
             let rendered = normalize_trace_event(&self.bytes);
-            let _ = self.sink.write_stderr(rendered.as_bytes());
+            let _ = self.sink.write_trace(rendered.as_bytes());
         }
     }
 }
@@ -653,6 +653,33 @@ mod tests {
                 "timestamp"
             ]
         );
+    }
+
+    #[test]
+    fn held_console_keeps_file_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = LogFile::prepare(&path, |_, error| panic!("log write failed: {error}")).unwrap();
+        log.start().unwrap();
+        let (sink, captured) = OutputSink::buffered();
+        let subscriber = subscriber(
+            1,
+            Terminal::with_sink(sink.clone(), false, false),
+            Some(log),
+            None,
+        )
+        .unwrap();
+        sink.with_stderr_lock(|_| -> io::Result<()> {
+            tracing::dispatcher::with_default(&subscriber, || {
+                tracing::debug!(target: "tola::compile", "preview became ready");
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert!(captured.is_empty());
+        let recorded: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(path).unwrap().trim()).unwrap();
+        assert_eq!(recorded["fields"]["message"], "preview became ready");
     }
 
     #[test]

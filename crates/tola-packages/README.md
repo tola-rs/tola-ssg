@@ -15,7 +15,7 @@ it to install local package views for editors, so an editor resolves every impor
 
 `TolaPackage::exports` reads an entrypoint's top-level `#let` bindings and explicit imports, and
 each export's hover documentation comes from the entrypoint too. Usage and export documentation
-live in the repository README, `tola skill`, and `tola help @tola/<package> [export ...]` (no site
+live in the repository README, `tola skill`, and `tola help package <name> [export ...]` (no site
 needed).
 
 Every exported function documents its parameters and its return in the shape Tinymist and typlite

@@ -1,0 +1,12 @@
+[site]
+title = "One source, several outputs"
+origin = "https://example.test"
+base-path = "/demo/"
+language = "en"
+
+[typst.fonts]
+paths = []
+system = false
+
+[assets]
+trees = [{ source = "static/web", url-prefix = "/assets" }]

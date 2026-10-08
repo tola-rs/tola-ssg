@@ -164,8 +164,11 @@
 /// - title (string): the page's title.
 /// - kind (string): the page's Open Graph type, such as `website` or `article`.
 /// - url (string): the page's absolute URL.
-/// - images (array): the images to declare. Each image's entries stay together and in the order
-///   you give them; `alt` describes the image, and every other key is optional.
+/// - images (array): a nonempty array of image dictionaries. Each requires an absolute HTTP(S)
+///   `url` and a non-blank `alt`. Optional fields are `secure-url` (an absolute HTTPS URL),
+///   `media-type` (a string such as `image/png`), and `width` and `height` (positive integer pixel
+///   counts). Optional fields accept `none`; blank text omits the entry. Each image's entries stay
+///   together, in the order you give the images.
 /// - description (none | string): the page's description; written only when set.
 /// - site-name (none | string): the site's name; written only when set.
 /// - locale (none | string): the page's locale; written only when set.
@@ -392,7 +395,8 @@
 /// Declare one feed output through metadata.
 ///
 /// Put the returned content in the root program: the declaration takes effect only there. The site
-/// needs `site.origin`, because every feed address is absolute.
+/// needs `site.origin`, because every feed address is absolute, and a non-blank feed title from
+/// `title` or `site.title`.
 ///
 /// An entry requires `target` and `published`, and may set `id`, `title`, `updated`, `summary`,
 /// `content`, and `authors`. A `target` is an output path, an `(output:, fragment:)` dictionary, a
@@ -400,14 +404,50 @@
 /// An `auto` or omitted `id` is the resolved target URL, and an `auto` or omitted `title` is the
 /// target document's own title.
 ///
+/// `summary` is the excerpt and `content` is the entry body, usually the full text. They are
+/// independent: setting only `summary` publishes an excerpt, and naming `target` does not copy the
+/// target document's body into the feed. Each format writes the two fields separately:
+///
+/// | Format | Summary | Content |
+/// | --- | --- | --- |
+/// | RSS | `<description>` | `<content:encoded>`, for full-text readers |
+/// | Atom | `<summary>` | `<content>`: plain strings as `text`, fragments or selections as `html` |
+/// | JSON Feed | `summary`, as plain text | Strings as `content_text`, fragments or selections as `content_html` |
+///
+/// An omitted or `none` body writes no RSS or Atom content element; JSON Feed writes an empty
+/// `content_text`.
+///
 /// Each format fills in the modification date in its own way. Atom's `updated` defaults to
 /// `published`. RSS carries no modification date. JSON Feed writes `date_modified` only when the
 /// entry sets `updated`.
 ///
-/// `content` and `summary` take a string (plain text), or markup limited to text, breaks, emphasis,
-/// strong, strike, and URL links; other elements are an error. `content` also takes a
-/// `(document:, id:)` dictionary: one element of a document, or its whole body when `id` is
-/// omitted. `summary` takes no document selection.
+/// Strings are plain text: `"<strong>Note</strong>"` stays literal text. Typst content supports
+/// text, breaks, emphasis, strong, strike, and URL links. Tola walks those authored elements to
+/// make a portable HTML fragment; it runs no document show rules or layout. For example,
+/// `content: [*Note*]` becomes `<strong>Note</strong>`, while `content: [= Heading]` raises an error.
+/// Styled, contextual, or already processed content is also rejected. Use a document selection
+/// for headings, tables, images, mathematics, or rendered code. Links accept relative paths and
+/// fragments, absolute HTTP(S), `mailto`, and `tel` URLs. Relative links resolve against the
+/// entry's target URL.
+///
+/// `content: (document: output, id: "post-body")` selects the final HTML element with that id and
+/// its descendants. Omit `id` or pass `none` to select the whole body; `summary` accepts no
+/// document selection.
+/// Give the article an explicit HTML id to keep navigation and footers out. The id must occur
+/// exactly once in the selected HTML document: an empty id, a missing or repeated id, or a
+/// non-HTML document fails the build. An id in another output does not match.
+///
+/// The selection keeps ancestor containers around that subtree, without their other children,
+/// and includes the head's styles and stylesheet links. HTML document containers become `div`s.
+/// URL attributes resolve to absolute addresses under the original document's URL and first
+/// `<base href>`. URLs inside CSS are not rewritten, and the full page's CSS cascade is not
+/// reproduced.
+///
+/// The three ids have different purposes: the feed's `id` identifies the Atom feed, an entry's
+/// `id` identifies that item to subscribers, and `content.id` selects an HTML element. Keep an
+/// explicit entry id stable when a page moves. Entry ids must be non-blank and unique within the
+/// feed. Atom requires absolute URI identifiers, and authors on the feed or on every entry of a
+/// nonempty feed.
 ///
 /// A label or location inside a document needs an exported anchor, so link to it somewhere in the
 /// site (`#link(<label>)`, `@label`, or `#outline()`): the export gives an `id` only to an element
@@ -417,38 +457,71 @@
 ///
 /// Typst datetime values are read as UTC, and RFC 3339 strings keep their own timezone.
 ///
-/// Example - declare an RSS feed:
+/// Example - publish an RSS excerpt without a full-text body:
 ///
 /// ```typst
 /// #import "@tola/web:0.0.0": feed
-/// #document("index.html")[Home]
+/// #document("notes/index.html", title: [A note])[An idea and its explanation.]
 /// #feed(
-///   id: "https://example.test/feed.xml", title: "Example", description: "Example posts",
-///   language: "en", authors: ("Example",), entries: (),
+///   title: "Notes",
+///   entries: ((
+///     id: "urn:notes:first",
+///     target: "notes/index.html",
+///     published: datetime(year: 2026, month: 9, day: 1),
+///     summary: "An idea in brief.",
+///   ),),
 /// )
 /// ```
 ///
-/// Example - publish one entry for a discovered source:
+/// Example - publish an excerpt and full article HTML, leaving navigation out:
+///
+/// ```typst
+/// #import "@tola/web:0.0.0": feed
+/// #let output = "notes/index.html"
+/// #document(output, title: [A note])[
+///   #html.html[
+///     #html.head(html.title("A note"))
+///     #html.body[
+///       #html.nav[Site navigation]
+///       #html.article(id: "post-body")[
+///         #title()
+///         = A useful idea
+///         Keep this paragraph in the feed.
+///       ]
+///     ]
+///   ]
+/// ]
+/// #feed(
+///   title: "Notes",
+///   entries: ((
+///     id: "urn:notes:first",
+///     target: output,
+///     published: datetime(year: 2026, month: 9, day: 1),
+///     summary: [A useful idea in brief.],
+///     content: (document: output, id: "post-body"),
+///   ),),
+/// )
+/// ```
+///
+/// The starter's `site/seo.typ` maps source metadata `feed-summary` to an entry's `summary`, and
+/// `feed-content` to its `content`. When `feed-content` is omitted or `none`, that recipe selects
+/// the page's whole body. Setting only `feed-summary` therefore still publishes full-text RSS.
+/// For an excerpt-only feed, change that recipe to pass `content: none`.
+///
+/// Example - give a starter page a separate, portable feed body:
+///
+/// In a site created with the `feed` feature, put this declaration at the start of
+/// `content/note.typ`, followed by the page's normal body. Set `site.origin` and `site.title` for
+/// the starter's feed output. `feed-content` below uses only the supported text fragment elements.
 ///
 /// ```typst site
-/// #import "@tola/address:0.0.0": route, route-to-output
-/// #import "@tola/source:0.0.0": all-sources
-/// #import "@tola/web:0.0.0": feed
-/// #let post = all-sources().last()
-/// #let output = route-to-output(route(post.route-segments))
-/// #assert.eq(output, "notes/second-post/index.html")
-/// #document(output)[Hello]
-/// #feed(
-///   title: "Example",
-///   entries: (
-///     (
-///       target: output,
-///       title: post.meta.title,
-///       published: post.meta.published,
-///       content: (document: output),
-///     ),
-///   ),
-/// )
+/// #import "@tola/source:0.0.0": tola-meta
+/// #tola-meta((
+///   title: "A note",
+///   published: datetime(year: 2026, month: 9, day: 1),
+///   feed-summary: [An idea in _brief_.],
+///   feed-content: [*The full feed text.* Read #link("https://example.test/more/")[more].],
+/// ))
 /// ```
 ///
 /// Related: sitemap
@@ -513,16 +586,16 @@
 /// target twice. Every listed URL is absolute, so the site needs `site.origin`. Typst datetime
 /// values are read as UTC, and RFC 3339 strings keep their own timezone.
 ///
-/// Example - list the documents discovered sources publish:
+/// Example - select whole documents, dating one of them:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": route, route-to-output
-/// #import "@tola/source:0.0.0": all-sources
+/// ```typst
 /// #import "@tola/web:0.0.0": sitemap
-/// #let pages = all-sources().map(source => route-to-output(route(source.route-segments)))
-/// #assert.eq(pages.last(), "notes/second-post/index.html")
-/// #for page in pages { document(page)[Hello] }
-/// #sitemap(targets: pages)
+/// #document("index.html")[Home]
+/// #document("guide/index.html")[Guide]
+/// #sitemap(targets: (
+///   "index.html",
+///   (target: "guide/index.html", lastmod: datetime(year: 2026, month: 9, day: 1)),
+/// ))
 /// ```
 ///
 /// Related: feed

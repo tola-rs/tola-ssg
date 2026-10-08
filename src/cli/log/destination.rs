@@ -218,6 +218,14 @@ pub(crate) fn check_file(log: Option<&Path>, path: &Path) -> Result<()> {
     check_file_within(log, path, None)
 }
 
+/// A command exporting a complete directory keeps its session log outside that directory.
+pub(crate) fn check_directory(log: Option<&Path>, path: &Path) -> Result<()> {
+    match log {
+        Some(log) => check_tree_within(&normalize_existing_prefix(log), path, None),
+        None => Ok(()),
+    }
+}
+
 /// The configuration sections whose declared paths a log destination must stay clear of.
 pub(crate) struct SiteInputSections<'a> {
     build: &'a BuildSectionConfig,

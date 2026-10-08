@@ -29,11 +29,10 @@ impl Default for FontsConfig {
 }
 
 impl FontsConfig {
-    /// What `tola help "[typst.fonts]"` adds under its table.
+    /// What `tola help config typst.fonts` adds under its table.
     pub const HELP: &'static str = "\
-The compiler may use a font only to lay text out and export it; the file itself is never published.
-A site lists the directories to search in `paths`, and decides with `system` whether the host's
-own fonts count too. `static/typst-fonts`, the directory a new site scaffolds, is the default:
+Compiler fonts lay out and export Typst content; their files are not published. `paths` lists
+site-relative directories to search recursively. The scaffold's directory is the default:
 
 ```toml
 [typst.fonts]
@@ -41,21 +40,18 @@ paths = [\"static/typst-fonts\"]
 system = false
 ```
 
-A web font a page loads is an asset, not a compiler font, so declare it under `[assets]` and link
-it from your stylesheet:
+Vendored fonts join these directories before system-font discovery. Tola also carries embedded
+fonts, which remain available with `--pure`. `system = true` adds host fonts when the invocation
+permits them; `--pure` excludes them even if this setting is on. Keep it off when another machine
+must build with the same font inputs.
+
+Browser fonts are separate: publish them through `[assets]` and load them with CSS `@font-face`.
+A Typst font setting does not install a browser font:
 
 ```toml
-[typst.fonts]
-paths = [\"static/typst-fonts\"]
-system = false
-
 [assets]
 trees = [{ source = \"static/web-fonts\", url-prefix = \"/fonts\" }]
-```
-
-`paths` are searched recursively. A font `tola vendor` froze into `[vendor]` resolves from the site
-before any of these directories. `system = true` adds the host's own fonts, so the result can
-differ from one machine to the next — leave it off when a build must reproduce on another machine.";
+```";
 
     /// Validate the paths before site-root normalization.
     pub fn validate_paths(&self, diag: &mut ConfigDiagnostics) {

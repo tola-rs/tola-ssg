@@ -13,7 +13,7 @@ pub(crate) struct DevConfig {
 }
 
 impl DevConfig {
-    /// What `tola help "[dev]"` adds under its table.
+    /// What `tola help config dev` adds under its table.
     pub const HELP: &'static str = "\
 Three commands take a site from sources to a page you can read. `tola build` builds once, writes
 the publish directory, and exits. `tola dev` builds, serves the site locally, and keeps watching

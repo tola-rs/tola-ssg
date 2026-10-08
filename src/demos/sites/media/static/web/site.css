@@ -1,0 +1,6 @@
+body { max-width: 52rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.6 system-ui, sans-serif; color: #243044; background: #fbfaf6; }
+nav, aside { padding: .8rem; background: #eceff4; border-radius: .5rem; }
+a { color: #2355a5; }
+main { margin-block: 1.5rem; }
+img { max-width: 100%; height: auto; }
+code, pre { font-family: ui-monospace, monospace; }

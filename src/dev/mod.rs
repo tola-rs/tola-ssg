@@ -9,4 +9,4 @@ mod site;
 mod watch;
 
 pub(crate) use session::run;
-pub(crate) use session::run_preview;
+pub(crate) use session::{run_preview, run_preview_with_ready};

@@ -220,7 +220,7 @@ fn show_created_site(
         let setup = "Editor setup:\n  `tola editor setup` chooses interactively\n  `tola editor setup --list` shows supported editors";
         output.styled_block(setup, &styled_report(setup, palette))?;
     }
-    let help = "Help:\n  Site settings: `tola help \"[site]\"`\n  Package reference: `tola help \"@tola/web\"`\n  Function reference: `tola help \"@tola/address\" slugify output-to-url`\n  Authoring guide: `tola skill`";
+    let help = "Help:\n  Site settings: `tola help config site`\n  Package reference: `tola help package web`\n  Function reference: `tola help package address slugify output-to-url`\n  Runnable examples: `tola help -i demo`\n  Authoring guide: `tola skill`";
     output.styled_block(help, &styled_report(help, palette))?;
     Ok(())
 }

@@ -17,6 +17,8 @@ use tola_build::config::ResolvedSiteConfig;
 
 const DEFAULT_WS_PORT: u16 = 35729;
 
+type PreviewObserver<'a> = dyn Fn(&str, Arc<tola_build::site::SiteRevision>) -> Result<()> + 'a;
+
 enum ServerPurpose {
     Development(DevConfig),
     Preview,
@@ -50,6 +52,7 @@ pub(crate) fn run(
         output,
         ServerPurpose::Development(dev),
         shutdown,
+        None,
     )
 }
 
@@ -70,9 +73,33 @@ pub(crate) fn run_preview(
         output,
         ServerPurpose::Preview,
         shutdown,
+        None,
     )
 }
 
+/// Observe the same production preview after its revision is installed and its address is bound.
+pub(crate) fn run_preview_with_ready(
+    config: Arc<ResolvedSiteConfig>,
+    server: ServerConfig,
+    config_loader: ConfigLoader,
+    resources: tola_build::BuildResources,
+    output: CommandOutput,
+    shutdown: Cancellation,
+    ready: &PreviewObserver<'_>,
+) -> Result<()> {
+    run_server(
+        config,
+        server,
+        config_loader,
+        resources,
+        output,
+        ServerPurpose::Preview,
+        shutdown,
+        Some(ready),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_server(
     config: Arc<ResolvedSiteConfig>,
     server: ServerConfig,
@@ -81,6 +108,7 @@ fn run_server(
     output: CommandOutput,
     purpose: ServerPurpose,
     shutdown: Cancellation,
+    ready: Option<&PreviewObserver<'_>>,
 ) -> Result<()> {
     shutdown.token().ensure_active()?;
     let view = match &purpose {
@@ -236,6 +264,12 @@ fn run_server(
                     (true, false) => output.status("Watching for changes")?,
                     (false, true) => output.status("Press Ctrl+C to stop")?,
                     (false, false) => {}
+                }
+                if let Some(ready) = ready {
+                    let revision = sites.revision().ok_or_else(|| {
+                        anyhow::anyhow!("Tola could not prepare the preview; run the demo again")
+                    })?;
+                    ready(&url, revision)?;
                 }
                 let http = super::http::serve_http(
                     listener,

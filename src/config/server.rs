@@ -28,7 +28,7 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// What `tola help "[server]"` adds under its table.
+    /// What `tola help config server` adds under its table.
     pub const HELP: &'static str = "\
 The listener `tola dev` and `tola preview` bind so you can read the site in a browser. It
 changes nothing about what the site publishes: `tola build` writes files and never opens a port.

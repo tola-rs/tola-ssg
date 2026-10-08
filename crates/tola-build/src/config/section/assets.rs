@@ -250,10 +250,10 @@ pub struct AssetsConfig {
 }
 
 impl AssetsConfig {
-    /// What `tola help "[assets]"` adds under its table.
+    /// What `tola help config assets` adds under its table.
     pub const HELP: &'static str = "\
 A declared source is published whether or not a document references or reads it. A directory
-publishes below one URL prefix, and a single file keeps a URL of its own:
+publishes its members below a URL prefix; an exact file declaration gives one source its own URL:
 
 ```toml
 [assets]
@@ -262,14 +262,16 @@ trees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]
 files = [{ source = \"static/web-assets/tailwind-output/site.css\", url = \"/assets/css/site.css\" }]
 ```
 
-This is the scaffold's mapping: everything under `static/web-assets` publishes below `/assets`, and
-one generated file keeps a URL of its own. A `before-build` hook writes such a file; a
-`generate-outputs` hook declares its own outputs instead, and needs no entry here.
+Here `files` takes over the generated stylesheet from the tree: it publishes at `/assets/css/site.css`,
+not `/assets/tailwind-output/site.css`. The tree still publishes its other members. `source` is a
+path relative to the site root; `url` and `url-prefix` are site-root URL paths, before `site.base-path`.
+A `before-build` hook can write that source; a `generate-outputs` hook adds its outputs directly
+and needs no `[assets]` entry.
 
-Link a declaration with `asset-url`, which takes the URL the declaration writes. When
-`cache-busting` is on it appends `?h=...` once the bytes change, so browsers fetch the new bytes
-while the published path keeps its name. The address it returns already carries `site.base-path`,
-so use it as it is and never mount it again:
+Link a published declaration with `asset-url`, passing its declared URL rather than its source
+path. With `cache-busting = true`, the result carries `?h=...` identifying the published bytes;
+changed bytes give a new URL while the output filename stays the same. The result already includes
+`site.base-path`, so use it directly:
 
 ```typst
 #import \"@tola/address:0.0.0\": asset-url
@@ -277,10 +279,9 @@ so use it as it is and never mount it again:
 #let script = asset-url(\"/assets/app.js\")
 ```
 
-Publish a file under one URL only: a file inside a declared tree keeps its place in the tree, and a
-`files` entry is for a path the tree does not already carry. Two declarations that overlap the same
-address, or a declaration inside a tree that already owns it, fail the build rather than pick a
-winner.";
+Each output path has one owner. Give tree declarations disjoint source paths and URL prefixes;
+an exact file may take over a tree member, but two producers claiming the same output fail the
+build. Tola checks configured assets together with Bundle and hook outputs before publishing.";
 
     pub fn tree_sources(&self) -> impl Iterator<Item = &Path> {
         self.trees.iter().map(AssetTreeDeclaration::source)

@@ -109,21 +109,18 @@
 ///
 /// Example - list the pages that link to the page you are rendering:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": output-to-url, route, route-to-output
+/// ```typst
+/// #import "@tola/address:0.0.0": output-to-url
 /// #import "@tola/document:0.0.0": references
-/// #import "@tola/source:0.0.0": all-sources
 ///
-/// #let guide = all-sources().at(1)
-/// #let install = all-sources().at(2)
-/// #let guide-output = route-to-output(route(guide.route-segments))
-/// #let install-output = route-to-output(route(install.route-segments))
+/// #let guide-output = "guide/index.html"
+/// #let install-output = "guide/install/index.html"
 ///
-/// #document(guide-output, title: guide.meta.title)[
+/// #document(guide-output, title: [Guide])[
 ///   #html.main[#link(output-to-url(install-output))[Install]] <body>
 /// ]
 ///
-/// #document(install-output, title: install.meta.title)[
+/// #document(install-output, title: [Install])[
 ///   #html.main[Install] <body>
 ///   #context {
 ///     let incoming = references(to: auto, from-within: <body>)
@@ -138,15 +135,13 @@
 ///
 /// Example - point at one heading rather than its whole document:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": output-to-url, route, route-to-output
+/// ```typst
+/// #import "@tola/address:0.0.0": output-to-url
 /// #import "@tola/document:0.0.0": references
-/// #import "@tola/source:0.0.0": all-sources
 ///
-/// #let page = all-sources().at(2)
-/// #let output = route-to-output(route(page.route-segments))
+/// #let output = "guide/install/index.html"
 ///
-/// #document(output, title: page.meta.title)[
+/// #document(output, title: [Install])[
 ///   #link(<intro>)[Jump to the introduction]
 ///   #link(output-to-url(output))[Whole page]
 ///   = Introduction <intro>
@@ -160,15 +155,10 @@
 ///
 /// Example - read only the references one document writes:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": route, route-to-output
+/// ```typst
 /// #import "@tola/document:0.0.0": references
-/// #import "@tola/source:0.0.0": all-sources
 ///
-/// #let guide = all-sources().at(1)
-/// #let output = route-to-output(route(guide.route-segments))
-///
-/// #document(output, title: guide.meta.title)[
+/// #document("guide/index.html", title: [Guide])[
 ///   #html.main[#link("https://typst.app/")[Typst]] <body>
 ///   #context {
 ///     let written = references(from: auto, from-within: <body>)

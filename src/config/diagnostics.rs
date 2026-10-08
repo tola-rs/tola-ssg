@@ -34,7 +34,7 @@ impl Default for DiagnosticsConfig {
 }
 
 impl DiagnosticsConfig {
-    /// What `tola help "[diagnostics]"` adds under its table.
+    /// What `tola help config diagnostics` adds under its table.
     pub const HELP: &'static str = "\
 `max_errors` and `max_warnings` limit how many diagnostics one batch of terminal output shows.
 Errors print before warnings, each severity counted against its own limit, and every development

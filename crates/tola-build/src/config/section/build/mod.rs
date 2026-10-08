@@ -79,44 +79,40 @@ impl Default for BuildSectionConfig {
 }
 
 impl BuildSectionConfig {
-    /// What `tola help "[build]"` adds under its table.
+    /// What `tola help config build` adds under its table.
     pub const HELP: &'static str = "\
-The site is one Typst Bundle, and `entry` is the program it starts from: Typst compiles the
-Bundle beginning at that file, so every import it reaches — templates, helpers, page programs —
-joins the same compilation. Keep it at the site root; the scaffold's `site.typ` lists the pages
-with `select-pages(all-sources())`, emits each one with `page-template`, then closes with
-`not-found-template()`. The defaults below are what a site gets when it writes nothing:
+The site is one Typst Bundle, and `entry` is its starting program. Its imports — templates,
+helpers, and page programs — join the same compilation. The scaffold keeps `site.typ` at the
+site root; an entry elsewhere in the site works too.
 
-```toml
-[build]
-entry = \"site.typ\"
-content-dir = \"content\"
-publish-dir = \"public\"
-```
+`content-dir` defines source identity: `content/guide/install.typ` arrives in `all-sources()` as
+`guide/install.typ`, with the route segments its file layout suggests. Moving or renaming it
+changes that identity and those segments. The entry file is never a source; keep shared helpers
+and templates outside this directory so discovery does not treat them as content.
 
-`content-dir` is the identity root for content: a `.typ` file below it is one source, and its
-path below that directory is the source's identity — the `id` and `path` `all-sources()` reports,
-and the layout its default route segments follow. `content/guide/install.typ` therefore arrives
-as `guide/install.typ`, and renaming or moving the file changes its address. The entry file is
-never a source, and helpers and templates belong outside this directory so discovery does not
-pick them up.
+Discovery does not publish a page. The entry chooses which sources become documents and which
+output paths they use. For example, this converts the discovered segments to default output paths:
 
 ```typst
 #import \"@tola/address:0.0.0\": route, route-to-output
 #import \"@tola/source:0.0.0\": all-sources
-#let pages = all-sources().map(source => route-to-output(route(source.route-segments)))
+#let outputs = all-sources().map(source => route-to-output(route(source.route-segments)))
 ```
 
-`publish-dir` belongs to Tola: each build replaces everything it owns there, recording what that
-is in `_tola/owner`, so hand-written files go through `[assets]` or a hook instead.
+The scaffold's `select-pages` also validates metadata, filters drafts, and slugs default route
+segments for the site's language. A source's `permalink` overrides its default route, so its URL
+can stay unchanged when the source moves. These policies live in editable site code.
 
-Four tables tune and extend the result. `minify` compacts the bytes Tola publishes, and
-`references` decides how a published page pointing at nothing is reported — `error` fails the
-build there, so that severity belongs to `[build.references]`, not to `[diagnostics]`, which
-limits only how many diagnostics the terminal shows. `hooks` runs the site's own commands around
-the build, in three stages: one produces inputs before discovery, one produces final outputs
-after the site compiles, and one consumes the published site. Each of the four has its rules and
-worked examples on its own page.";
+`publish-dir` is the directory `tola build` replaces as a whole, removing stale outputs. Choose an
+empty directory or one Tola already owns for this site; hand-maintained files belong in `[assets]`
+or a hook's declared outputs. Errors or cancellation before publication leave the previous output intact.
+`check`, `dev`, and `preview` do not replace this directory.
+
+Three child tables tune the build: `[build.minify]` compacts supported output bytes;
+`[build.references]` chooses `error` or `warn` for broken references; `[build.hooks]` runs the
+site's own commands before compilation, during output generation, or after publication. Their
+pages explain each contract. All outputs meet in one complete set: conflicts and references are
+checked before the site is published, so one producer cannot silently replace another's file.";
 
     pub(crate) fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         super::path::validate_site_relative_path(

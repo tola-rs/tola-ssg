@@ -1,24 +1,30 @@
 // @tola/source:0.0.0 - discovered content sources, the source a call runs in, and metadata declarations
+//
+// A discovered source is an input, not a published page: one source can appear in several
+// documents, or none. The root program reads the settled declarations, validates the metadata
+// it needs, and chooses which documents to emit. Metadata fields and selection rules belong to
+// your site; Tola gives no built-in meaning to `title`, `draft`, or `permalink`.
 
-/// Every content source the build discovered, in discovery order.
+/// Every content source the build discovered, ordered by its complete content path.
 ///
 /// Discovery reads the `build.content-dir` directory and accepts only files whose extension is the
-/// lowercase `.typ`. A name that begins with a dot is hidden, and discovery passes over it. A
-/// directory index is named after its directory.
+/// lowercase `.typ`. It skips hidden names (those beginning with a dot), symbolic links, and the
+/// site entry. Directory indexes are ordinary sources in this ordering; sort explicitly for an
+/// editorial order.
 ///
 /// Each record carries:
 ///
 /// - `id` and `path`: the complete path of the source below `build.content-dir`, extension included,
 ///   such as `posts/deep.typ`. The directory index of `about` is `about/index.typ`.
-/// - `file`: the same file addressed from the site root. It is the input path that `include` and
-///   `read` take, never a browser URL.
+/// - `file`: a Typst `path` value addressing the same file from the site root. Pass it directly to
+///   `include` or `read`; it is an input path, never a browser URL.
 /// - `filename`: the last component of `path`, such as `deep.typ`.
 /// - `route-segments`: the identity segments the file layout gives the source. A root index has
 ///   `()`, both `about.typ` and `about/index.typ` have `("about",)`, and `posts/deep.typ` has
 ///   `("posts", "deep")`.
 /// - `meta`: the metadata the source declares, as this evaluation round sees it. A source whose
 ///   metadata reads other sources settles over several rounds, so its value can differ from one
-///   round to the next.
+///   round to the next. The root program receives the settled values.
 ///
 /// `tola inspect sources` reads the metadata each source declares, without building the site.
 ///
@@ -31,23 +37,18 @@
 /// #import "@tola/source:0.0.0": all-sources
 /// #let sources = all-sources()
 /// #assert.eq(sources.len(), 0)
-/// #assert.eq(sources.map(source => source.path), ())
 /// ```
 ///
-/// Example - read a site's source records:
+/// Example - publish a source selected by its path:
+///
+/// Here `content/guide/index.typ` declares a `title` and contains the page's body.
 ///
 /// ```typst site
 /// #import "@tola/source:0.0.0": all-sources
-/// #let sources = all-sources()
-/// #assert.eq(sources.map(source => source.path), (
-///   "index.typ",
-///   "guide/index.typ",
-///   "guide/install.typ",
-///   "guide/deploy.typ",
-///   "guide/advanced/plugins.typ",
-///   "notes/first-post.typ",
-///   "notes/second-post.typ",
-/// ))
+/// #let guide = all-sources().find(source => source.path == "guide/index.typ")
+/// #document("guide/index.html", format: "html", title: guide.meta.title)[
+///   #include guide.file
+/// ]
 /// ```
 /// Related: current-source, tola-meta, parse-sources, @tola/address
 #import "@tola/host:0.0.0": all-sources
@@ -67,9 +68,10 @@
 
 /// Declare the metadata of this source.
 ///
-/// The call is the declaration: pass a dictionary that describes the source. A build reads it even
-/// when the rest of the source fails, so the source still contributes the fields it declared.
-/// Write the call once, directly in the source.
+/// The call is the declaration: pass a dictionary that describes the source. Write it once,
+/// directly in the source's ordinary evaluation, outside deferred `context` or show rules. If
+/// later evaluation fails, Tola still reads a declaration whose call already ran; the source's
+/// errors still fail the build, even when your site excludes that source as a draft.
 ///
 /// The call returns an invisible `<tola-meta>` marker that carries the same dictionary, and
 /// `query(<tola-meta>)` finds it. Where the marker ends up changes nothing: the declaration comes
@@ -93,33 +95,38 @@
 /// Pass the complete records from `all-sources()`, or a subset of them, together with a
 /// `@tola/schema` declaration of the metadata you expect. The call resolves every record before it
 /// reports, so one build names every source that disagrees with the declaration. Each diagnostic
-/// points at the `<tola-meta>` declaration of the source that raised it.
+/// points at that source's `tola-meta` call, or the file start when it declares no metadata. Put
+/// complete-set validation in the root program: declarations may still be incomplete while the
+/// content sources themselves are being evaluated.
 ///
 /// Each returned record is the record you passed, with `meta` replaced by the value the
 /// declaration resolved for it. A source that declares no metadata carries `meta: none`, which
 /// this function alone reads as an empty dictionary. Resolved metadata is always a dictionary.
+/// The input order and identity fields stay unchanged. Parsing does not write back to
+/// `all-sources()` or the declarations that `tola inspect sources` reads.
 ///
-/// Example - resolve metadata through a schema:
+/// Example - validate, select, and publish sources in the root program:
 ///
-/// ```typst
-/// #import "@tola/source:0.0.0": parse-sources
-/// #import "@tola/schema:0.0.0": schema
-/// #let records = ((path: "posts/deep.typ", meta: (title: "Deep notes")),)
-/// #let parsed = parse-sources(records, schema((title: str)))
-/// #assert.eq(parsed.first().meta, (title: "Deep notes"))
-/// ```
-///
-/// Example - resolve every source of a site, keeping fields you do not declare:
+/// This site chooses `title` and `draft` as metadata fields, validates every source before
+/// excluding drafts, and slugs the file-layout segments to choose each document's output.
 ///
 /// ```typst site
-/// #import "@tola/schema:0.0.0": array-of, optional, schema
+/// #import "@tola/address:0.0.0": route, route-to-output, slugify
+/// #import "@tola/schema:0.0.0": non-empty, optional, schema, trim
 /// #import "@tola/source:0.0.0": all-sources, parse-sources
-/// #let pages = parse-sources(all-sources(), schema((
-///   title: str,
-///   tags: optional(array-of(str), default: ()),
-/// ), unknown: "keep"))
-/// #assert.eq(pages.len(), 7)
-/// #assert.eq(pages.last().meta.tags, ("web", "typst"))
+///
+/// #let page-schema = schema((
+///   title: non-empty(trim(str)),
+///   draft: optional(bool, default: false),
+/// ), unknown: "keep")
+/// #let pages = {
+///   parse-sources(all-sources(), page-schema)
+///     .filter(source => not source.meta.draft)
+/// }
+/// #for page in pages {
+///   let output = route-to-output(route(page.route-segments.map(slugify)))
+///   document(output, format: "html", title: page.meta.title)[#include page.file]
+/// }
 /// ```
 /// Related: @tola/schema, all-sources, tola-meta
 /// - sources (array): the records to resolve, from `all-sources()` or a subset of it.

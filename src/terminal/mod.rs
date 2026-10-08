@@ -68,6 +68,11 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// A background service reports through its owner, without writing or retaining a transcript.
+    pub(crate) fn silent() -> Self {
+        Self::with_sink(OutputSink::discard(), false, true)
+    }
+
     pub fn new(color: ColorChoice, quiet: bool, pager: Option<PagerCommand>) -> Self {
         let mut terminal = Self::with_sink(
             OutputSink::process(),

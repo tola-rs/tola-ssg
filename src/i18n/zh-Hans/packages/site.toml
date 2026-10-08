@@ -9,11 +9,13 @@ summary = [
   '''
 本站的配置值，解析自 `tola.toml`。
 
-`site` 为每项 `[site]` 设置提供一个条目，另外还有派生出来的 `url`：`origin`、`base-path`、`url`、`title`、`authors`、`description`、`language`、`copyright` 和 `extra`。在 `[site.extra]` 下声明自己的值，它们会出现在 `extra` 中；其中的 TOML 日期或日期时间会以字符串形式出现。
+`site` 为每项 `[site]` 设置提供一个条目，另外还有派生出来的 `url`：`origin`、`base-path`、`url`、`title`、`authors`、`description`、`language`、`languages`、`copyright` 和 `extra`。在 `[site.extra]` 下声明自己的值，它们会出现在 `extra` 中；其中的 TOML 日期或日期时间会以字符串形式出现。
 
 `base-path` 是主机根之下的部署路径，默认是 `/`。`url` 把 `origin` 和 `base-path` 拼成站点的规范地址。没有声明 `site.origin` 的站点只发布相对地址，所以它的 `url` 是 `none`。
 
 `title`、`description` 和 `copyright` 是你写在 `tola.toml` 里的文本；没有配置该项时它们为空。`authors` 为每位作者保存一条 `(name:, email:, url:)` 记录。`language` 包含 `tag`、`lang`、`script` 和 `region`：`tag` 是完整的规范 tag，例如 `zh-Hans-CN`，各部分就是 `#set text` 接受的值。声明的语言缺少对应部分时，`script` 是 `auto`，`region` 是 `none`。
+
+`language` 是站点的默认语言，未设置时为 `en`。`languages` 是配置的语言数组，各项带有相同的四个字段，保持配置顺序，默认为 `()`。非空数组必须包含默认语言。它们是模板的输入：语言的路由、配对与切换由你的站点决定。
 
 Example - 读取默认站点的配置值：
 ''',

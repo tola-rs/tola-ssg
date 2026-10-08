@@ -157,6 +157,37 @@ impl FileWrites {
         Ok(())
     }
 
+    /// Install a complete private source tree without replacing a competing destination.
+    pub(crate) fn apply_new_root(
+        self,
+        cancellation: &tola_build::cancellation::BuildCancellation,
+    ) -> Result<()> {
+        cancellation.ensure_active()?;
+        self.check()?;
+        let parent = self
+            .root
+            .parent()
+            .context("choose a new directory for the export")?;
+        let name = self
+            .root
+            .file_name()
+            .context("choose a new directory for the export")?;
+        let parent = Directory::open_existing(parent)
+            .context("cannot open the export's parent directory")?;
+        match parent.dir().symlink_metadata(name) {
+            Ok(_) => bail!("the export directory already exists; choose a new path"),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("cannot check the export directory"),
+        }
+        let private = ExportDirectory::create(parent).context(
+            "cannot prepare the exported site; check the parent directory's permissions",
+        )?;
+        private.write(&self, cancellation).context(
+            "cannot prepare the exported site; check the parent directory's permissions",
+        )?;
+        private.install(name, cancellation)
+    }
+
     pub(crate) fn apply(
         &self,
         cancellation: &tola_build::cancellation::BuildCancellation,
@@ -551,6 +582,122 @@ impl Directory {
     }
 }
 
+/// The private name belongs to the parent capability until installation transfers ownership.
+struct ExportDirectory {
+    parent: Directory,
+    name: Option<std::ffi::OsString>,
+    root: Option<Dir>,
+}
+
+impl ExportDirectory {
+    fn create(parent: Directory) -> Result<Self> {
+        let mut reservation = parent.stage(&[], "export")?;
+        let name = reservation.name.clone();
+        reservation.remove()?;
+        parent.dir().create_dir(&name)?;
+        let mut private = Self {
+            parent,
+            name: Some(name),
+            root: None,
+        };
+        private.root = Some(crate::sys::open_directory_nofollow(
+            private.parent.dir(),
+            private
+                .name
+                .as_deref()
+                .expect("a private export has a name"),
+        )?);
+        Ok(private)
+    }
+
+    fn directory(
+        &self,
+        path: &Path,
+        cancellation: &tola_build::cancellation::BuildCancellation,
+    ) -> Result<Dir> {
+        let mut directory = self
+            .root
+            .as_ref()
+            .expect("writing owns the private directory")
+            .try_clone()?;
+        for component in path.components() {
+            cancellation.ensure_active()?;
+            let std::path::Component::Normal(name) = component else {
+                bail!("an export path must remain below its private directory");
+            };
+            let child = match crate::sys::open_directory_nofollow(&directory, name) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    directory.create_dir(name)?;
+                    crate::sys::open_directory_nofollow(&directory, name)?
+                }
+                opened => opened?,
+            };
+            directory = child;
+        }
+        Ok(directory)
+    }
+
+    fn write(
+        &self,
+        writes: &FileWrites,
+        cancellation: &tola_build::cancellation::BuildCancellation,
+    ) -> Result<()> {
+        for path in &writes.directories {
+            self.directory(path.strip_prefix(&writes.root)?, cancellation)?;
+        }
+        for source in &writes.files {
+            cancellation.ensure_active()?;
+            let path = source.path.strip_prefix(&writes.root)?;
+            let directory = self.directory(path.parent().unwrap_or(Path::new("")), cancellation)?;
+            let name = path
+                .file_name()
+                .context("an exported file must have a name")?;
+            let mut file = crate::sys::create_new_file(&directory, name)?;
+            file.write_all(&source.contents)?;
+        }
+        cancellation.ensure_active()?;
+        Ok(())
+    }
+
+    fn install(
+        mut self,
+        destination: &std::ffi::OsStr,
+        cancellation: &tola_build::cancellation::BuildCancellation,
+    ) -> Result<()> {
+        use cap_fs_ext::MetadataExt;
+        cancellation.ensure_active()?;
+        let current = Directory::open_existing(&self.parent.path)
+            .context("the export's parent directory moved; choose a new path")?;
+        let expected = self.parent.dir().dir_metadata()?;
+        let current = current.dir().dir_metadata()?;
+        anyhow::ensure!(
+            expected.dev() == current.dev() && expected.ino() == current.ino(),
+            "the export's parent directory changed; choose a new path"
+        );
+        // Windows cannot rename the private root while its directory handle is open.
+        drop(self.root.take());
+        let name = self
+            .name
+            .as_deref()
+            .expect("an unpublished export has a name");
+        cancellation.ensure_active()?;
+        self.parent.publish(name, destination)
+            .context("cannot install the exported site without replacing a path; choose an unused directory on a local filesystem")?;
+        self.name = None;
+        Ok(())
+    }
+}
+
+impl Drop for ExportDirectory {
+    fn drop(&mut self) {
+        // Windows needs the private root closed before capability-relative removal.
+        drop(self.root.take());
+        if let Some(name) = self.name.as_deref() {
+            let _ = self.parent.dir().remove_dir_all(name);
+        }
+    }
+}
+
 struct StoredFile {
     directory: Directory,
     name: std::ffi::OsString,
@@ -917,5 +1064,105 @@ mod tests {
             fs::read_to_string(root.join("content/posts/index.typ")).unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    fn new_root_refuses_empty_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("export");
+        std::fs::create_dir(&root).unwrap();
+        let mut writes = FileWrites::new(&root).unwrap();
+        writes.create_file("site.typ", "Home").unwrap();
+        assert!(writes.apply_new_root(&Default::default()).is_err());
+        assert!(!root.join("site.typ").exists());
+    }
+
+    #[test]
+    fn concurrent_exports_have_one_owner() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("export");
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                let mut writes = FileWrites::new(&root).unwrap();
+                writes.create_file("site.typ", "First").unwrap();
+                barrier.wait();
+                writes.apply_new_root(&Default::default())
+            });
+            let second = scope.spawn(|| {
+                let mut writes = FileWrites::new(&root).unwrap();
+                writes.create_file("site.typ", "Second").unwrap();
+                barrier.wait();
+                writes.apply_new_root(&Default::default())
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        let source = std::fs::read_to_string(root.join("site.typ")).unwrap();
+        assert!(source == "First" || source == "Second");
+    }
+
+    #[test]
+    fn failed_preparation_leaves_no_export() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("export");
+        let mut writes = FileWrites::new(&root).unwrap();
+        writes.create_file("site.typ", "Home").unwrap();
+        writes.create_file("content", "File").unwrap();
+        writes.create_file("content/page.typ", "Unwritten").unwrap();
+        assert!(writes.apply_new_root(&Default::default()).is_err());
+        assert!(!root.exists());
+        assert_eq!(std::fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancellation_leaves_export_absent() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("export");
+        let mut writes = FileWrites::new(&root).unwrap();
+        writes.create_file("site.typ", "Home").unwrap();
+        let cancelled = tola_build::cancellation::BuildCanceller::new();
+        cancelled.cancel();
+        assert!(writes.apply_new_root(&cancelled.token()).is_err());
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moved_parent_cannot_publish_another_tree() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(temporary.path()).unwrap();
+        let parent = root.join("parent");
+        fs::create_dir(&parent).unwrap();
+        let destination = parent.join("export");
+        let mut writes = FileWrites::new(&destination).unwrap();
+        writes.create_file("site.typ", "Home").unwrap();
+        writes.create_file("content/page.typ", "Page").unwrap();
+        let private = ExportDirectory::create(Directory::open_existing(&parent).unwrap()).unwrap();
+        let moved = root.join("moved");
+        fs::rename(&parent, &moved).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(parent.join("author.txt"), "Author content").unwrap();
+        private.write(&writes, &Default::default()).unwrap();
+        let prepared = moved.join(private.name.as_deref().unwrap());
+        assert_eq!(
+            fs::read_to_string(prepared.join("site.typ")).unwrap(),
+            "Home"
+        );
+        assert_eq!(
+            fs::read_to_string(prepared.join("content/page.typ")).unwrap(),
+            "Page"
+        );
+        assert!(
+            private
+                .install(std::ffi::OsStr::new("export"), &Default::default())
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("author.txt")).unwrap(),
+            "Author content"
+        );
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
     }
 }

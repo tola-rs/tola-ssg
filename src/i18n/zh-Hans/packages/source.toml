@@ -1,29 +1,39 @@
 # Simplified-Chinese documentation of `@tola/source`. English stays authoritative in the package's
 # own Typst sources; a unit here overrides one of them.
 
-overview = "发现的内容源、调用所在的源，以及 metadata 声明"
+overview = '''
+发现的内容源、调用所在的源，以及 metadata 声明
+
+发现的源是输入，不等于发布的页面：同一个源可以出现在多篇文档里，也可以不发布。根程序读取稳定后的声明，校验所需 metadata，再决定输出哪些文档。metadata 字段和选择规则属于你的站点；Tola 不为 `title`、`draft` 或 `permalink` 赋予内置含义。
+'''
 
 [exports.all-sources]
 
 summary = [
   '''
-按发现顺序列出构建所发现的全部内容源。
+按完整内容路径的顺序列出构建所发现的全部内容源。
 
-发现会读取 `build.content-dir` 目录，并且只接受扩展名为小写 `.typ` 的文件。以点开头的名称是隐藏文件，发现会跳过它。目录索引以所在目录命名。
+发现会读取 `build.content-dir` 目录，并且只接受扩展名为小写 `.typ` 的文件。隐藏名称（以点开头）、符号链接和站点入口都会跳过。目录索引在这个顺序中也是普通源；需要编辑顺序时请显式排序。
 
 每条记录包含：
 
 - `id` 与 `path`：内容源在 `build.content-dir` 下的完整路径，含扩展名，例如 `posts/deep.typ`；`about` 的目录索引是 `about/index.typ`。
-- `file`：同一个文件从站点根出发的路径，也就是 `include` 与 `read` 接受的输入路径，绝不是浏览器 URL。
+- `file`：从站点根出发、指向同一个文件的 Typst `path` 值。直接传给 `include` 或 `read`；它是输入路径，绝不是浏览器 URL。
 - `filename`：`path` 的最后一段，例如 `deep.typ`。
 - `route-segments`：文件布局赋予该源的身份分段：根索引为 `()`，`about.typ` 与 `about/index.typ` 都是 `("about",)`，`posts/deep.typ` 是 `("posts", "deep")`。
-- `meta`：该源在本轮求值中被看到的 metadata。若它的 metadata 会读取其他源，就要经过多轮才能收敛，因此记录在这几轮之间可能变化。
+- `meta`：该源在本轮求值中被看到的 metadata。若它的 metadata 会读取其他源，就要经过多轮才能收敛，因此记录在这几轮之间可能变化。根程序拿到的是稳定后的值。
+
+`tola inspect sources` 读取各源的声明 metadata，不构建站点。
 
 这些分段只是 route 的建议。用 `@tola/address` 对分段做 slug 并连接起来，而文档实际以哪条 route 可达，由它自己的 output 决定。
 
 Example - 列出空站点的源：
 ''',
-  'Example - 读取站点的源记录：',
+  '''
+Example - 按路径选择并发布一个源：
+
+这里的 `content/guide/index.typ` 声明了 `title`，并包含页面正文。
+''',
   '',
 ]
 
@@ -45,7 +55,7 @@ summary = [
   '''
 声明本内容源的 metadata。
 
-这次调用就是声明：传入一个描述该源的字典。即使内容源的其余部分失败，构建也会读取它，所以该源仍然贡献它已经声明的字段。把这次调用写一次，直接写在内容源里。
+这次调用就是声明：传入一个描述该源的字典。直接在源的普通求值中写一次，不要放进延迟执行的 `context` 或 show rule。后续求值失败时，Tola 仍会读取已经执行过的声明；源自身的错误仍会使构建失败，即使你的站点把这个源当作 draft 排除。
 
 调用返回一个不可见的 `<tola-meta>` 标记，其中含有同一个字典，`query(<tola-meta>)` 能找到它。标记最终放在哪里都不影响结果：声明只来自这次调用。在同一个源里再调用一次会报错，因为一个源只声明一次 metadata。只有写在源里的调用才声明；由其他文件里的 helper 发出的调用属于那个文件，在这里不声明任何东西。
 
@@ -64,13 +74,16 @@ summary = [
   '''
 按 metadata 字段的声明解析源记录。
 
-传入 `all-sources()` 给出的完整记录，或它的子集，再传入一份 `@tola/schema` 声明，说明你期望的 metadata。这次调用会先解析完全部记录再报告，所以一次构建就能点名每个与声明不符的源。每条诊断都指向引发它的那个源的 `<tola-meta>` 声明。
+传入 `all-sources()` 给出的完整记录，或它的子集，再传入一份 `@tola/schema` 声明，说明你期望的 metadata。这次调用会先解析完全部记录再报告，所以一次构建就能点名每个与声明不符的源。每条诊断都指向该源的 `tola-meta` 调用；没有声明 metadata 时指向文件起点。完整源集合的校验放在根程序中：内容源自身求值时，声明可能还不完整。
 
 返回的每条记录就是你传入的那条记录，只是 `meta` 换成了按声明解析得到的值。未声明 metadata 的源带 `meta: none`，只有这个函数把它读作空字典。解析出的 metadata 始终是字典。
 
-Example - 通过 schema 解析 metadata：
+输入顺序和身份字段保持不变。解析不会写回 `all-sources()`，也不会改动 `tola inspect sources` 读取的声明。
+
+Example - 在根程序中校验、选择并发布源：
+
+这个站点选择 `title` 与 `draft` 作为 metadata 字段，先校验全部源再排除 draft，并将文件布局的各分段做 slug，决定每篇文档的 output。
 ''',
-  'Example - 通过 schema 解析站点的源记录：',
   '',
 ]
 

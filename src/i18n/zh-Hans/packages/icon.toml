@@ -13,7 +13,7 @@ summary = [
 
 它产生的是 HTML 元素，所以要在 HTML 文档里调用。`icon-bytes` 与 `icon-url` 的返回值任何目标都能用。
 
-图标 id 取自站点在 `tola.toml` 的 `icons.collections` 下声明的 collection：`tola help "[icons]"` 说明每种来源类型，`tola inspect icons` 列出已配置的 namespace，指定其中一个还会列出它底下的图标名。
+图标 id 取自站点在 `tola.toml` 的 `icons.collections` 下声明的 collection：`tola help config icons` 说明每种来源类型，`tola inspect icons` 列出已配置的 namespace，指定其中一个还会列出它底下的图标名。
 
 图标染成什么颜色由它自己的 SVG 决定。用 `currentColor` 画的图标跟随所在页面的 `color`，主题或 CSS 类就能改变它的颜色；fills 与 strokes 写死颜色的图标保持自己的颜色。collection 本来就可以画成前者：`lucide` 集合的每个图标都用 `currentColor` 画，拿来就直接跟着页面的文字颜色走。
 

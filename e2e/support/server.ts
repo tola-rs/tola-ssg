@@ -104,6 +104,22 @@ async function stopServer(command: RunningProcess): Promise<void> {
   }
 }
 
+/** Starts the embedded demo itself, without replacing its sources with a scaffold. */
+export async function previewDemo(binary: string, id: string, directory: string) {
+  const server = startCommand(
+    binary,
+    ['help', 'demo', id, '--preview', '--no-log-file', '--color', 'never'],
+    directory,
+  )
+  try {
+    const url = await waitForServing(server)
+    return { ...server, url, close: () => stopServer(server.command) }
+  } catch (error) {
+    await server.command.terminate()
+    throw error
+  }
+}
+
 type Sites = {
   dev: (options?: SiteOptions) => Promise<RunningSite>
   preview: (options?: SiteOptions) => Promise<RunningSite>

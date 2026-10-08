@@ -232,7 +232,7 @@ pub enum Commands {
         packages: TypstPackageArgs,
     },
 
-    /// Print or export the Tola and Typst authoring skill.
+    /// Print or export the Tola site authoring skill.
     Skill(SkillArgs),
 
     /// Show resolved site paths and selected settings as JSON.
@@ -251,22 +251,41 @@ pub enum Commands {
     /// Generate a roff manual page.
     Manpage(ManpageArgs),
 
-    /// Show the command overview, configuration tables, or bundled package documentation.
-    Help {
-        /// Quoted TOML table header, or `@tola/package` and exports.
-        #[arg(value_name = "TARGET", num_args = 0..)]
-        targets: Vec<String>,
+    /// Read configuration, package documentation, and runnable demos.
+    Help(HelpArgs),
+}
 
-        /// Read the page as an interactive view with cross-references, search, and scrolling.
-        #[arg(long)]
-        interactive: bool,
+#[derive(clap::Args, Debug, Clone, Default)]
+#[command(group(clap::ArgGroup::new("editor_action").args(["edit", "interactive"]).multiple(true)))]
+pub struct HelpArgs {
+    /// `config TABLE`, `package NAME [EXPORT...]`, `demo NAME [FILE]`, or a `tola-help://` address.
+    #[arg(value_name = "TARGET", num_args = 0..)]
+    pub targets: Vec<String>,
 
-        /// Do not capture the pointer: the wheel and clicks do nothing, and the terminal keeps
-        /// its own text selection. Without this the view follows links on click and scrolls on
-        /// the wheel, which turns the terminal's own selection off while it runs.
-        #[arg(long)]
-        no_mouse: bool,
-    },
+    /// Browse documentation, source files, and demo actions in the terminal.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// Leave mouse selection to the terminal; use the keyboard to navigate.
+    #[arg(long)]
+    pub no_mouse: bool,
+
+    /// Build and serve the selected demo locally until stopped.
+    #[arg(long, conflicts_with = "export")]
+    pub preview: bool,
+
+    /// Export the demo's complete source to a directory that does not yet exist.
+    /// Its parent directory must already exist; existing empty directories are refused too.
+    #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    pub export: Option<PathBuf>,
+
+    /// Open the exported site in your editor; requires --export.
+    #[arg(long, requires = "export")]
+    pub edit: bool,
+
+    /// Editor command for --edit or interactive exports; otherwise use TOLA_EDITOR, VISUAL, then EDITOR.
+    #[arg(long, requires = "editor_action", value_name = "COMMAND")]
+    pub editor: Option<String>,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -592,7 +611,7 @@ impl Commands {
             Self::Config { .. } => "config",
             Self::Completions(_) => "completions",
             Self::Manpage(_) => "manpage",
-            Self::Help { .. } => "help",
+            Self::Help(_) => "help",
         }
     }
 

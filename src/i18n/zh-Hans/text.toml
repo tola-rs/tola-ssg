@@ -3,7 +3,16 @@
 # headings and every other label stay English in both languages.
 
 [text]
-site-fields = "配置字段与默认值"
-package-overview = "包概览与导出"
-selected-exports = "选定的导出"
-default-values = "默认值；用 `tola config` 查看你站点的设置。"
+site-model = "根 Typst 程序决定生成哪些页面和其他文档。Tola 将它们与资源、生成文件合并，在发布前校验完整的 output。"
+help-usage = "这些帮助页随当前可执行文件提供，无需站点即可查阅。选择 `config`、`package` 或 `demo`，再指定表、包或 Demo 名。建站流程见 `tola skill`，命令选项见 `tola <command> --help`。加上 `-i` 可跟随链接、搜索内容并预览 Demo。"
+build-paths = "设置入口程序、内容目录与发布目录"
+source-pages = "声明 metadata、选择源并生成页面"
+page-addresses = "选择 output 路径，链接页面与资源"
+document-queries = "生成页内目录或查找入链"
+web-outputs = "生成 feed 与 sitemap"
+build-hooks = "在构建前、编译输出上或发布后运行工具"
+default-values = "下面展示默认值；`tola config` 可查看本站解析后的路径与部分设置。"
+demo-usage = "阅读完整示例、浏览源文件，并在需要时预览或导出站点。"
+demo-source = "内嵌源文件，只读。先导出完整 Demo，再编辑自己的副本。"
+demo-actions = "使用 `-i` 进入 Preview、Stop、Export、Export-and-edit、Open-export 与 Open-browser。命令行可添加 `--preview` 或 `--export DIR`；`--edit` 用编辑器打开导出的副本。"
+demo-outputs = "预览这个 Demo，即可查看它实际发布的文件。只打开此页不会开始构建。"

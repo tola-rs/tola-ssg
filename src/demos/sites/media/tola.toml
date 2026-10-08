@@ -1,0 +1,16 @@
+[site]
+title = "Images and local icons"
+origin = "https://example.test"
+base-path = "/demo/"
+language = "en"
+
+[typst.fonts]
+paths = []
+system = false
+
+[assets]
+trees = [{ source = "static/web", url-prefix = "/assets" }]
+
+[icons.collections.demo]
+source-type = "local-svg-dir"
+path = "static/icons"

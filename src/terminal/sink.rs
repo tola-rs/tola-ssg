@@ -39,6 +39,7 @@ pub(crate) struct StdoutClosed;
 
 #[derive(Clone)]
 enum StreamTarget {
+    Discard,
     Stderr,
     Stdout,
     Buffered(BufferedOutput),
@@ -80,6 +81,10 @@ impl BufferedOutput {
 }
 
 impl OutputSink {
+    pub(crate) fn discard() -> Self {
+        Self::new(StreamTarget::Discard, StreamTarget::Discard)
+    }
+
     pub(crate) fn process() -> Self {
         Self::new(StreamTarget::Stderr, StreamTarget::Stdout)
     }
@@ -111,6 +116,19 @@ impl OutputSink {
 
     pub(crate) fn write_stderr(&self, bytes: &[u8]) -> io::Result<()> {
         let mut presentation = self.lock()?;
+        self.finish_hook_line(&mut presentation)?;
+        self.print(&mut presentation, bytes)
+    }
+
+    /// Console tracing cannot wait for a view holding this lock. The tracing file layer
+    /// records the event independently, including while the console belongs to a view.
+    pub(crate) fn write_trace(&self, bytes: &[u8]) -> io::Result<()> {
+        let Some(mut presentation) = self.inner.lock.try_lock() else {
+            return Ok(());
+        };
+        if let Some(screen) = &mut presentation.development {
+            screen.prepare()?;
+        }
         self.finish_hook_line(&mut presentation)?;
         self.print(&mut presentation, bytes)
     }
@@ -381,6 +399,7 @@ impl OutputSink {
 impl StreamTarget {
     fn write(&self, bytes: &[u8]) -> io::Result<()> {
         match self {
+            Self::Discard => Ok(()),
             Self::Stderr => crate::sys::write_process_stderr(bytes),
             Self::Stdout => {
                 let mut stdout = io::stdout();

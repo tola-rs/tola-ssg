@@ -1,0 +1,26 @@
+## 看运行结果
+
+内联叶子使用周围文字的蓝色；太阳保留自身的橙色 fill。单独发布的叶子是另一张图片，不继承段落颜色。128×64 的输入生成 48×24 的 PNG。资源树中的原图副本仍是 128×64。
+
+## 先配置，再使用 URL
+
+浏览器资源树与本地 SVG 集合承担不同职责。资源 URL 指向 `[assets]` 发布的文件；图标 ID 指向配置集合中的成员。字体只供编译器读取，并关闭系统字体。
+
+{{file:tola.toml}}
+{{file:static/icons/leaf.svg}}
+{{file:static/icons/sun.svg}}
+
+## 读取输入信息并缩放
+
+`image-metadata` 读取私有输入的尺寸。`resize-image` 同样接收输入路径，请求生成缩放版本，并返回已经带部署路径的 URL 和尺寸。`fit-width` 保持 2:1 比例。两个调用都不会自动发布原图。
+
+{{file:content/index.typ}}
+
+`static/web/` 下的副本会发布，因为配置映射了该目录。只想发布缩放版本时，把原图留在映射树之外。图标 label 命名的是图标；外层按钮仍需要自己的可访问名称。
+
+## 组合页面
+
+根程序通过原生 `file` 路径 include 源，模板通过 `asset-url` 加载已声明的样式表。
+
+{{file:site.typ}}
+{{file:site/page.typ}}

@@ -8,7 +8,7 @@ mod run;
 
 pub(crate) use args::{
     BuildOverrideArgs, Cli, Commands, CompletionShell, ConfigFileArgs, DevelopmentArgs,
-    EditorCommand, IconInspectArgs, InspectCommand, ServerArgs, SourceInspectArgs,
+    EditorCommand, HelpArgs, IconInspectArgs, InspectCommand, ServerArgs, SourceInspectArgs,
     TypstPackageArgs, VendorArgs,
 };
 pub(crate) use run::run;

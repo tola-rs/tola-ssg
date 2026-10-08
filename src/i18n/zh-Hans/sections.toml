@@ -4,7 +4,7 @@
 
 [sections.site]
 documentation = "站点的身份信息，以及模板可读取的值。"
-help = '''模板把这些读作 `site.<key>`（`tola help "@tola/site"` 说明这个对象）：
+help = '''模板把这些读作 `site.<key>`（`tola help package site` 说明这个对象）：
 
 ```toml
 [site]
@@ -28,31 +28,35 @@ sitemap 需要它的原因：它们列出的每条地址都是绝对地址。`to
 
 ```typst
 #import "@tola/site:0.0.0": site
-#let url = site.url                     // 没设 `origin` 时为 none
+#let url = site.url                     // none when `origin` is unset
 #let tag = site.language.tag            // "zh-Hant-TW"
-#let script = site.language.script      // "Hant"，没有时为 `auto`
+#let script = site.language.script      // "Hant", or `auto` when none
 #let names = site.authors.map(author => author.name)
 ```'''
 
 [sections.build]
 documentation = "站点如何构建：Typst 入口、页面目录，以及发布目录。"
-help = '''站点是一个 Typst Bundle，`entry` 就是它的起点程序：Typst 从该文件开始编译整个 Bundle，它引用到的文件——模板、helper、页面程序——都进入同一次编译。把它放在站点根；脚手架的 `site.typ` 用 `select-pages(all-sources())` 列出页面，用 `page-template` 逐个输出，最后以 `not-found-template()` 收尾。
+help = '''站点是一个 Typst Bundle，`entry` 是起点程序。它 import 的模板、helper 与页面程序进入同一次编译。脚手架把 `site.typ` 放在站点根；入口也可以放在站点内其他位置。
 
-`content-dir` 是内容的身份根：它之下某个 `.typ` 文件就是一个源，而它在那个目录之下的路径就是这个源的身份——`all-sources()` 报告的 `id`、`path`，以及默认 route segments 依据的布局。改名或移动文件，地址跟着变；entry 文件本身永远不是源。模板与 helper 放在该目录之外，免得被发现成源。
+`content-dir` 定义源的身份：`content/guide/install.typ` 在 `all-sources()` 中是 `guide/install.typ`，并带有由文件布局推导的 route segments。改名或移动文件会改变这个身份与这些 segments。入口文件永远不是源；共享 helper 与模板放在这个目录之外，避免被发现为内容。
+
+发现源不会直接发布页面。入口程序决定哪些源成为文档，以及它们使用哪些 output 路径。例如，下面把已发现的 segments 转为默认 output 路径：
 
 ```typst
 #import "@tola/address:0.0.0": route, route-to-output
 #import "@tola/source:0.0.0": all-sources
-#let pages = all-sources().map(source => route-to-output(route(source.route-segments)))
+#let outputs = all-sources().map(source => route-to-output(route(source.route-segments)))
 ```
 
-`publish-dir` 归 Tola 所有：每次构建替换它在那里拥有的内容（记录在 `_tola/owner`），手写文件请通过 `[assets]` 或 hook 发布。
+脚手架的 `select-pages` 还会校验 metadata、筛掉草稿，并按站点语言 slug 化默认 route segments。源的 `permalink` 会覆盖默认 route，因此移动源时可以保持 URL 不变。这些策略写在可编辑的站点代码中。
 
-另有两张表调整发布结果：`minify` 压缩 Tola 发布的字节，`references` 决定已发布页面指向空处时怎么报告——`error` 会让构建失败，所以这个严重级别留在这里，而不放进只限制终端显示条数的 `[diagnostics]`；两张表都在自己的页面上写明规则与例子。'''
+`publish-dir` 是 `tola build` 整体替换的目录，旧 output 会被移除。选择空目录，或 Tola 已为此站点拥有的目录；手写文件通过 `[assets]` 或 hook 声明的 output 发布。发布前失败或取消会保留上次输出。`check`、`dev` 与 `preview` 不替换这个目录。
+
+三张子表调整构建：`[build.minify]` 压缩支持的 output 字节；`[build.references]` 为无效引用选择 `error` 或 `warn`；`[build.hooks]` 在编译前、output 生成时或发布后运行站点自己的命令。各自的页面说明完整约定。所有 output 汇入同一份完整结果，发布前统一检查冲突与引用，因此一个生产者不能悄悄替换另一个的文件。'''
 
 [sections."build.minify"]
 documentation = "发布前对生成的 HTML、样式表与脚本做的压缩。"
-help = '''压缩只触及 Tola 自己发布的字节：它为每个页面写出的 HTML，以及它从 `[assets]` 声明发布、或页面自己写下的 CSS 与脚本。图片、字体，以及 `generate-outputs` hook 写出的任何内容都按字节原样发布。压缩在发布期间进行，开销很小，所以三项默认全开：
+help = '''压缩发生在构建 output 时，`check`、`dev` 与 `preview` 也使用它。Tola 压缩自己导出的 HTML、`[assets]` 声明的 CSS 与 `.js`/`.mjs` 文件，以及内联样式表与脚本。图片、字体和 `generate-outputs` hook 文件保持原字节。三个开关默认都是 `true`：
 
 ```toml
 [build.minify]
@@ -61,7 +65,7 @@ css = true
 javascript = true
 ```
 
-把某一项设为 `false`，就按原样发布那一类文件。一个注意点：CSS 压缩可能去掉属性选择器的引号——`[data-width="fixed"]` 会变成 `[data-width=fixed]`——请让选择器在两种写法下读起来一致。'''
+把一个开关设为 `false` 就跳过那类转换。`--minify=false` 为单次运行关闭三项。配置资源的 URL 标识压缩后的字节，因此 cache-busting 跟随浏览器收到的内容。无法压缩的配置 CSS 或 JavaScript 资源会产生警告并保留原字节。'''
 
 [sections."build.references"]
 documentation = "已发布页面里指向空处的链接、资源或 fragment 怎么报告。`error` 让构建失败；`warn` 只报告，不让构建失败。"
@@ -78,35 +82,38 @@ fragments = "warn"
 
 检查读取最终 HTML 中的 URL 属性，包括手写 HTML，按文档第一个 `<base href>` 解析。`<base href>` 指明别的 origin 时，整页相对地址都归那个站点，因而不再检查，构建会明确告知这一点。解析出的每个地址都会对照站点的完整 output，所以任何生产者写出的目标都算数。目标缺失与资源类型不符使用 `navigation` 或 `resources`；只有 HTML anchor 缺失才使用 `fragments`。`#top` 不要求声明 id。浏览器 fragment 指令（例如 `#:~:text=words`）以及非 HTML 资源的 fragment 不作为 HTML id 检查。
 
-`@tola/document` 的 `references()` 是独立的原生 Bundle 链接与 ref 查询。它不包含手写 HTML 或其他生产者的 output，`found` 也不保证最终 HTML 定义了该 fragment（`tola help "@tola/document" references`）。'''
+`@tola/document` 的 `references()` 是独立的原生 Bundle 链接与 ref 查询。它不包含手写 HTML 或其他生产者的 output，`found` 也不保证最终 HTML 定义了该 fragment（`tola help package document references`）。'''
 
 [sections."build.hooks"]
 documentation = "Tola 在构建前后运行的外部命令，按阶段分组。每个阶段等自己的命令都退出后才继续。"
-help = '''三个阶段按生命周期顺序运行：`before-build` 在源文件发现之前产出声明的站点输入，`generate-outputs` 在站点程序编译完成后产出声明的最终输出，`after-publish` 通过只读视图消费一个已提交的 revision。
+help = '''按命令产出什么来选择阶段：`before-build` 在源发现之前写站点输入；`generate-outputs` 在 Bundle 编译后添加最终文件；`after-publish` 消费已提交的站点。Bundle、配置资源与生成的 output 在发布前统一检查冲突与引用。
 
-命令都从站点根运行，并在本阶段继续之前结束。每次调用会收到 `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`（`dev` 或 `prod`）、可在两次构建之间保留结果的 `TOLA_HOOK_CACHE_DIR`，以及 `TOLA_HOOK_TEMP_DIR`（`TMPDIR`、`TMP`、`TEMP` 也指向它）。`TOLA_HOOK_INPUT_DIR` 指明本阶段读什么；`generate-outputs` 还会拿到 `TOLA_HOOK_OUTPUT_DIR`，即它写入的私有目录，其中的路径相对站点输出。阶段未定义的变量不存在，也绝不会从宿主继承。
+各命令运行的阶段不同。下表中的每项还要求 `enable = true`：
 
-一条命令就是一个有限的 argv 数组，不经过 shell。hook 只负责点名要跑的命令，先后顺序、条件与具体工具都属于站点自己的执行器：声明 `command = ["just", "css"]`，让那条 recipe 决定样式表怎么构建。Tola 不依赖 `just`——它只是脚手架用的工具，下面这些例子都读站点根的那一个 `justfile`。
+| 命令 | 构建模式 | before-build | generate-outputs | after-publish |
+| --- | --- | --- | --- | --- |
+| `tola build` | `prod` | 运行 | 运行 | 运行 |
+| `tola check` | `prod` | 运行 | 运行 | 跳过 |
+| `tola preview` | `prod` | 运行 | 运行 | 跳过 |
+| `tola dev` | `dev` | 按 `dev` | 按 `dev` | 按 `dev` |
+| `tola inspect` | — | 跳过 | 跳过 | 跳过 |
+| `tola vendor` | `prod` | 跳过 | 跳过 | 跳过 |
 
-每个阶段页各有一个可照抄的例子。一次写一个阶段：
+`check` 与 `preview` 用生产设置从源构建，不写 `build.publish-dir`。`dev` 在内存中提供成功的构建。前两个阶段的 `dev` 字段默认 `run`，after-publish 默认 `skip`。
 
-```toml
-[[build.hooks.before-build]]
-name = "tailwind"
-command = ["just", "css"]
-generates = ["static/web-assets/tailwind-output/site.css"]
+命令从站点根运行，是会退出的 argv 数组，不经过隐式 shell。同阶段条目按配置顺序执行，一条失败就停止剩余条目。相互依赖的步骤与条件放在站点自己的执行器里，例如 `command = ["just", "css"]`；Tola 不要求使用 `just`。每个 output 生成命令读取同一份上游快照、写入私有目录：后面的生成命令看不到前一个刚写出的 output。
 
-[[build.hooks.generate-outputs]]
-name = "search"
-command = ["just", "search"]
-outputs = [{ tree = "assets/pagefind-search" }]
-```
+每次调用收到 `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`、`TOLA_HOOK_CACHE_DIR` 与 `TOLA_HOOK_TEMP_DIR`。缓存目录按站点、阶段与条目名持久保存；命令拥有其中的内容，自行决定何时可以复用。Tola 重新运行命令，不复用缓存结果。临时目录只为本次调用保留，`TMPDIR`、`TMP` 与 `TEMP` 也指向它。
 
-这些是受信任的脚本：Tola 会校验声明的路径，被取代的开发构建会取消自己发布前的命令，但没有任何东西能撤销它们的副作用。'''
+`before-build` 直接写站点，不接收输入或输出目录变量。`generate-outputs` 读取 `TOLA_HOOK_INPUT_DIR` 的只读快照，在 `TOLA_HOOK_OUTPUT_DIR` 下按最终 output 的相对路径写文件。`after-publish` 读取 `TOLA_HOOK_INPUT_DIR` 的已提交站点只读视图，不接收输出目录变量。阶段没有定义的变量不存在，也不会从调用者继承。
+
+`rerun-on` 添加相对站点根的字面路径，不是 glob；目录被递归观察。编辑它们触发整个开发构建，不只是一条命令。工具会读、Tola 原本不会观察的路径才需要添加，例如工具输入目录、执行器、manifest 或 lockfile。各阶段页分别演示样式表生产、搜索索引与发布结果消费。
+
+hook 是以调用者权限运行的受信任脚本。`--offline` 与 `--pure` 限制 Tola 自己读取输入，不限制这些命令。被取代的开发构建会取消自己发布前的命令，但脚本副作用不会回滚。after-publish 的开发调度见该阶段页。'''
 
 [sections."build.hooks.before-build"]
 documentation = "在源文件发现之前生成声明的站点输入，供 Typst 与已配置的资源读取。"
-help = '''源文件发现之前运行的工具可以产出一个站点输入；这里 `just css` 用站点钉住的版本编译 Tailwind 样式表：
+help = '''Typst 或 `[assets]` 必须读取的输入适合在这个阶段生成。脚手架的 Tailwind 功能在源发现之前运行一次会退出的样式表构建：
 
 ```toml
 [[build.hooks.before-build]]
@@ -116,33 +123,66 @@ generates = ["static/web-assets/tailwind-output/site.css"]
 rerun-on = ["static/tailwind-sources", "deno.json", "deno.lock", "justfile"]
 ```
 
-`css` 是站点 `justfile` 里的一条 recipe，`tailwind` 只是这一条运行时的名字。Tola 执行的是 argv，换任何执行器都一样。`rerun-on` 覆盖工具会读、而构建从不读的那些文件——样式表源与执行器自己的文件；`generates` 则是命令结束后 Tola 会检查、并在 `tola dev` 期间观察的那个输入。'''
+`just css` 调用站点固定版本的 task。最小 recipe 与 task 配置如下：
+
+```just
+css:
+    deno task css
+```
+
+```json
+{
+  "imports": {
+    "@tailwindcss/cli": "npm:@tailwindcss/cli@4.3.3",
+    "tailwindcss": "npm:tailwindcss@4.3.3"
+  },
+  "tasks": {
+    "css": "deno run -A npm:@tailwindcss/cli@4.3.3 -i static/tailwind-sources/site.css -o static/web-assets/tailwind-output/site.css --minify"
+  }
+}
+```
+
+运行 `deno install` 解析工具链并保留 lockfile。Tailwind 输入必须点名要扫描的内容与模板文件，脚手架显式写出了这些源。使用会退出的命令，不使用工具的 watch 模式：Tola 负责开发监听。
+
+`generates` 声明命令结束后要检查、开发期间要观察的站点输入，不发布这个输入。脚手架通过 `[assets]` 的精确文件映射把此样式表发布在 `/assets/css/site.css`，模板用 `asset-url` 链接它。生成数据也可以由 Typst 读取，产出文档或其他 output。'''
 
 [sections."build.hooks.generate-outputs"]
 documentation = "在站点程序编译完成后产出声明的最终输出文件，并在引用检查之前把它们并入候选输出图。它们对之前的 Typst 编译不可见，但页面可以链接它们已知的 URL，无需 `[assets]` 声明，引用检查也会校验这些链接。"
-help = '''由编译结果构建的搜索索引直接并入已发布输出：
+help = '''从编译结果生成的最终文件适合在这个阶段生产。Pagefind 读取 HTML 快照，写出的搜索索引与它索引的页面进入同一份 output：
 
 ```toml
 [[build.hooks.generate-outputs]]
 name = "search"
 command = ["just", "search"]
 outputs = [{ tree = "assets/pagefind-search" }]
-rerun-on = ["justfile"]
+rerun-on = ["deno.json", "deno.lock", "justfile"]
 ```
+
+脚手架的 `pagefind` 功能提供这个 hook、搜索 UI 与固定版本的 task：
 
 ```just
 search:
-    pagefind --site "$TOLA_HOOK_INPUT_DIR" \\
-        --output-path "$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search"
+    deno task search
 ```
 
-声明的那个树不需要 `[assets]` 条目，且只有这个 hook 拥有该路径。链接它要用 `output-to-url("assets/pagefind-search/pagefind-ui.css")`：`asset-url` 只回答 `[assets]` 声明。这里的字节也不做 cache-busting——它们在站点编译之后才出现，由命令自己命名；Pagefind 给自己的数据文件加哈希，而页面始终链接 `pagefind.js`。
+```json
+{
+  "imports": { "pagefind": "npm:pagefind@1.5.2" },
+  "tasks": {
+    "search": "deno run -A npm:pagefind@1.5.2 --site \"$TOLA_HOOK_INPUT_DIR\" --output-path \"$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search\""
+  }
+}
+```
 
-`search` 是站点 `justfile` 里的一条 recipe，内容就是上面那两行。'''
+运行 `deno install` 并保留 lockfile。Tola 在每次参与的构建中等待 hook，开发构建也一样；索引与页面一起检查、发布。
+
+每个生成命令读取同一份编译结果；相互依赖的转换放进同一个执行器。
+
+声明的 output 无需 `[assets]` 条目。用 `output-to-url("assets/pagefind-search/pagefind-ui.css")` 链接已知 output 路径；`asset-url` 只解析 `[assets]` 声明。这些文件在之前的 Typst 编译时尚不存在，因此 Tola 当时无法计算它们的资源 URL。Tola 不为 hook 字节做压缩或 cache-busting；命令负责命名与转换，Pagefind 自行为数据文件区分版本。'''
 
 [sections."build.hooks.after-publish"]
 documentation = "通过只读视图消费一个已提交的 revision，不再声明站点输出。"
-help = '''消费者通过 `TOLA_HOOK_INPUT_DIR` 读取已提交的 revision，之后的构建不会再改动它：
+help = '''成功提交的站点可以在这个阶段被消费，例如上传：
 
 ```toml
 [[build.hooks.after-publish]]
@@ -150,11 +190,15 @@ name = "deploy"
 command = ["just", "deploy"]
 ```
 
-`deploy` 是站点 `justfile` 里的一条 recipe：它可以把那份视图上传，或通知主机新 revision 已上线。失败会被报告，但不会撤销已经完成的发布。'''
+站点的 `deploy` recipe 读取 `TOLA_HOOK_INPUT_DIR`，即该已提交站点的只读视图。命令读取期间，后续构建不会改变这份视图。此阶段不添加 output；站点需要的文件放在 `generate-outputs` 生产，在发布前接受校验。消费者失败在站点提交后报告，不能撤销发布。
+
+`tola build` 等这些命令完成才退出；即使 output 已写出，消费者失败仍使命令结果失败。`check`、`preview`、`inspect` 与 `vendor` 从不运行它们。
+
+开发模式默认跳过此阶段。设 `dev = "run"` 后，消费者串行运行，不阻塞浏览器更新。一个 revision 运行期间，只保留最新的等待 revision，因此中间 revision 可能没有消费者调用。停止 `tola dev` 会取消正在运行的命令，并丢弃等待任务。这个模式适合处理最新站点的消费者，不适合审计每一个 revision。'''
 
 [sections.assets]
 documentation = "把声明的文件与目录发布到它们自己写明的站点根 URL 上。"
-help = '''一个已声明的源无论有没有文档引用或读取它，都会被发布。目录发布在一个 URL prefix 之下，单个文件则保有自己的 URL：
+help = '''声明的源无论有没有文档引用或读取它，都会被发布。目录把成员发布到一个 URL prefix 之下；精确的文件声明则给某个源自己的 URL：
 
 ```toml
 [assets]
@@ -163,9 +207,9 @@ trees = [{ source = "static/web-assets", url-prefix = "/assets" }]
 files = [{ source = "static/web-assets/tailwind-output/site.css", url = "/assets/css/site.css" }]
 ```
 
-这是脚手架里的映射：`static/web-assets` 下的一切都发布在 `/assets` 之下，而那个生成出来的文件保有自己的 URL。写这个文件的是 `before-build` hook；`generate-outputs` hook 则自己声明输出，不需要在这里登记。
+这里 `files` 从树中接管生成的样式表：它发布在 `/assets/css/site.css`，不再发布在 `/assets/tailwind-output/site.css`。树仍然发布其余成员。`source` 是相对站点根的路径；`url` 与 `url-prefix` 是尚未加上 `site.base-path` 的站点根 URL 路径。`before-build` hook 可以写这个源；`generate-outputs` hook 直接添加自己的 output，无需 `[assets]` 条目。
 
-用 `asset-url` 链接一处声明：传入声明里写的 URL，字节一变、`cache-busting` 打开时，它就会追加 `?h=...`，浏览器于是取到新字节，而已发布的路径本身不改名。这里返回的地址已经带有 `site.base-path`，直接使用即可，不要再挂载一次：
+用 `asset-url` 链接声明发布的文件，传入声明的 URL，而非源路径。`cache-busting = true` 时，结果带有标识发布字节的 `?h=...`；字节变化就得到新 URL，output 文件名保持不变。结果已包含 `site.base-path`，直接使用即可：
 
 ```typst
 #import "@tola/address:0.0.0": asset-url
@@ -173,14 +217,14 @@ files = [{ source = "static/web-assets/tailwind-output/site.css", url = "/assets
 #let script = asset-url("/assets/app.js")
 ```
 
-一个文件只能发布在一个 URL 下：落在已声明树里的文件保留它在树中的位置，`files` 条目用于树里还没覆盖的路径。两处声明指向同一个地址，或一处声明落在已经拥有它的树里，都会让构建失败，而不是替你挑一个赢家。'''
+每条 output 路径只有一个所有者。树声明使用互不重叠的源路径与 URL prefix；精确文件声明可以接管树成员，但两个生产者争用同一 output 会让构建失败。发布之前，Tola 将配置资源、Bundle 与 hook 的 output 一起检查。'''
 
 [sections.typst]
 documentation = "Typst 编译器如何找到可用的字体。"
 
 [sections."typst.fonts"]
 documentation = "Typst 编译器可以使用的字体。编译器字体不会被发布：网页字体请在 `[assets]` 下声明。"
-help = '''编译器读一个字体只是为了排版与导出，字体文件本身不会被发布。站点在 `paths` 里列出要搜索的目录，用 `system` 决定宿主机自己的字体算不算数。新脚手架出来的 `static/typst-fonts` 就是默认值：
+help = '''编译器字体用于 Typst 内容的排版与导出，字体文件本身不会被发布。`paths` 列出相对站点根的目录，递归查找字体。脚手架的目录就是默认值：
 
 ```toml
 [typst.fonts]
@@ -188,18 +232,14 @@ paths = ["static/typst-fonts"]
 system = false
 ```
 
-页面要加载的网页字体属于资产，不是编译器字体，所以在 `[assets]` 下声明，再从样式表里链接：
+vendored 字体与这些目录一起加载，均先于系统字体发现。Tola 也自带嵌入字体，`--pure` 下仍然可用。调用允许时，`system = true` 加上宿主字体；`--pure` 即使在这个设置开启时也排除它们。需要另一台机器使用相同字体输入构建时，保持关闭。
+
+浏览器字体是另一回事：通过 `[assets]` 发布，再用 CSS `@font-face` 加载。Typst 字体设置不会为浏览器安装字体：
 
 ```toml
-[typst.fonts]
-paths = ["static/typst-fonts"]
-system = false
-
 [assets]
 trees = [{ source = "static/web-fonts", url-prefix = "/fonts" }]
-```
-
-`paths` 会递归查找。`tola vendor` 冻结进 `[vendor]` 的字体优先于这些目录、直接从站点解析。`system = true` 会加上宿主机自己的字体，结果可能一台机器一个样——构建需要在别的机器上复现时别打开它。'''
+```'''
 
 [sections.icons]
 documentation = "从 `@tola/icon:0.0.0` 引入 `icon`；`icon(\"namespace:name\")` 会在 HTML 中插入一个 SVG。"
@@ -209,14 +249,14 @@ help = '''`[icons.collections]` 下的每一条就是一个 namespace，而 name
 一个是自己的 SVG 目录，一个是 Tola 已索引的 collection：
 
 ```toml
-# 你自己的 SVG：icons/brand/mark.svg 成为 brand:mark。
+# SVG files you own: icons/brand/mark.svg becomes brand:mark.
 [icons.collections.brand]
-source-type = "local-svg-dir"     # 或 "local-json"，指向一个 IconifyJSON 文件
+source-type = "local-svg-dir"     # or "local-json" for one IconifyJSON file
 path = "icons/brand"
 
 [icons.collections.lucide]
 source-type = "remote-json"
-preset = "lucide"                  # 取 Tola 索引的最新版本
+preset = "lucide"                  # newest release Tola indexes
 ```
 
 preset 指明一个 Tola 已索引的 collection，比如 `lucide`、`mdi`、`tabler`、`simple-icons`，所以你只要能写
@@ -229,7 +269,7 @@ collection 是 Tola 没有索引的，或你要的版本它没有固定，那就
 [icons.collections.brand-remote]
 source-type = "remote-json"
 url = "https://cdn.example.com/brand/1.0.0/icons.json"
-sha256 = "<64 位十六进制摘要>"
+sha256 = "<64 hexadecimal digits>"
 ```
 
 两种远程写法互斥：`version` 跟 `preset` 一起用，`sha256` 跟 `url` 一起用。要拿到摘要，把那个文件原样下载下来，执行 `shasum -a 256 icons.json`，把它打印的 64 位十六进制数粘进来；字节对不上时构建会拒绝。
@@ -244,14 +284,22 @@ sha256 = "<64 位十六进制摘要>"
 ]
 ```
 
+自己的图标请导出为自包含 SVG：把文字转为路径，把外部 symbol 放进这个文件，并让引用指向同一文件内的内容。根元素使用宽高为正的 `viewBox`，或绝对单位下为正的 `width` 与 `height`。显式尺寸即使搭配 `viewBox` 也必须使用绝对单位，百分比与 `em` 会被拒绝。例如 `icons/brand/mark.svg` 可以写成：
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path fill="currentColor" d="M12 2 22 22H2Z"/>
+</svg>
+```
+
 图标保留它自己 SVG 画的颜色。用 `currentColor` 画的图标跟随所在页面的 `color`，主题或 CSS 类就能改变它的颜色；fills 与 strokes 写死颜色的图标不受页面影响。`lucide` 的每个图标都是用 `currentColor` 画的，所以这个 collection 适合会换主题的站点。像 `icon-url("brand:mark")` 这样发布出去的文件不继承任何东西，想让图标跟着主题走就用 `icon()`。
 
 看看站点能用什么：
 
 ```sh
-tola inspect icons                       # 每个 namespace、它的来源与图标数
-tola inspect icons lucide                # 再加上那个 namespace 的图标名
-tola inspect icons lucide --interactive  # 在表格里浏览这些名字
+tola inspect icons                       # every namespace, its source, and its icon count
+tola inspect icons lucide                # adds that namespace's icon names
+tola inspect icons lucide --interactive  # browse those names in a table
 ```
 
 命令打印一个 JSON 数组，每个 namespace 一行：解析后的来源、collection 自己的图标前缀，以及图标数量；点名一个 namespace 会额外带上该 collection 的 `names`。
@@ -260,38 +308,34 @@ tola inspect icons lucide --interactive  # 在表格里浏览这些名字
 
 [sections.vendor]
 documentation = "把 packages、字体与图标随站点一起保留，以便在其他机器上离线构建。"
-help = '''`tola vendor` 把这次构建选中的外部输入冻结进 `path`，好让另一台机器无需联网也能构建同一个站点。搜索输入时，Tola 会先看这里，再看任何宿主根目录，离线构建才能复现在线构建的结果：
+help = '''`tola vendor` 把生产构建选中的外部输入冻结到这个目录。使用命令之前声明 `path`：
 
 ```toml
 [vendor]
 path = "vendor"
 ```
 
-`path` 之下有三个子目录归 Tola 所有，其余文件都是你的：
+命令不运行 hook，也不发布站点 output；构建所需的生成输入必须已存在。Tola 准备依赖，检查准备好的副本能否在 `--pure` 下构建，然后才替换已安装副本。准备失败会保留上次输入。
 
-- `typst-packages/` —— 这次构建解析到的每个 package，按 `{namespace}/{name}/{version}/` 存放
-- `icons/` —— 每个 `remote-json` collection 对应一个 `<namespace>.json`
-- `fonts/` —— 这次构建读取过、且没有任何 `typst.fonts.paths` 目录提供的编译器字体
+三个子目录归 Tola 所有，`path` 下的其他文件仍然是你的：
 
-从宿主根目录或 `--package-path` 选中的 package 会同样被复制进来，之后的 `--pure` 构建就能从站点自身解析它。任何 namespace 都优先从这里解析，`@preview` 也不例外。上面那个站点最后会变成：
+- `typst-packages/` —— 按 `{namespace}/{name}/{version}/` 存放解析到的 package，包括从宿主根目录或 `--package-path` 选中的 package
+- `icons/` —— 每个配置的 `remote-json` collection 对应一个 `<namespace>.json`
+- `fonts/` —— 构建读取过、且没有 `typst.fonts.paths` 目录提供的编译器字体
 
-```text
-vendor/
-  typst-packages/preview/cetz/0.3.4/
-  icons/brand.json
-  fonts/
-```
-
-无法联网的机器就从这些冻结的输入构建：
+所有 namespace 的 package，包括 `@preview`，都先从 vendor 解析，再查宿主根目录。远程图标 collection 也优先读取 vendored 副本。把这些输入随站点提交：
 
 ```sh
-tola vendor          # 在能联网的机器上执行，然后提交结果
-tola build --pure    # 在 CI 里：只用站点自带的输入
+tola vendor --dry-run   # prepare and verify without replacing vendor
+tola vendor             # install the verified dependencies
+tola build --pure       # build from site-owned inputs
 ```
 
-两个选项覆盖常见场合：`tola vendor --refresh` 不读现有副本、重新解析，并在校验通过后替换它；`tola vendor --dry-run` 只准备与校验，不触碰 `path`。
+`--refresh` 不读取已安装的 vendor 副本，重新选择输入。`--dry-run` 保持该副本不变，但可能获取依赖、更新缓存，或等待另一个站点命令完成。
 
-`--offline` 拒绝 Tola 的网络请求，但仍然使用宿主 package 根目录、本地缓存与系统字体；`--pure` 连这些也一并排除，站外源文件同样不可读，因此没有 vendored 副本的 import 会直接失败，而不是去下载。两个标志都不会把你的 hook 命令放进沙箱。'''
+`--offline` 拒绝 Tola 的网络请求，但允许宿主 package 根目录与缓存，以及已开启的系统字体。`--pure` 还排除这些宿主输入与物理上位于站外的源文件，包括指向站外的符号链接。嵌入 package 与字体仍然可用；图像的派生缓存也可使用，因为其源字节仍能复现结果。
+
+这些标志限制 Tola 读取输入，不限制 hook 脚本及其工具链。整个构建需要在其他机器上复现时，另外固定 hook 的工具与依赖。'''
 
 [sections.server]
 documentation = "`tola dev` 与 `tola preview` 监听的 HTTP 服务器设置。"
@@ -301,8 +345,8 @@ help = '''`tola dev` 与 `tola preview` 绑定这张表的监听器，好让你�
 
 ```toml
 [server]
-interface = "127.0.0.1"    # 只有本机；"0.0.0.0" 接受网络连接
-port = 5277               # 0 让操作系统挑一个空闲端口
+interface = "127.0.0.1"    # this machine only; "0.0.0.0" accepts the network
+port = 5277               # 0 asks the operating system for a free port
 ```
 
 两个命令都接受 `--interface` 与 `--port`，为那一次运行覆盖这张表：
@@ -328,9 +372,9 @@ watch = true
 用三种方式跑同一个站点：
 
 ```sh
-tola build      # 写出发布目录后退出
-tola dev        # 在本地提供，每次编辑都重建
-tola preview    # 提供生产构建，不监听
+tola build      # write the publish directory and exit
+tola dev        # serve locally and rebuild on every edit
+tola preview    # serve the production build without watching
 ```
 
 两个提供服务的命令共用的监听器是 `[server]`；`watch = false` 让 `tola dev` 只构建一次，但继续提供服务。'''
@@ -359,7 +403,7 @@ max_warnings = 3
 "site.title" = "站点自称的名字，出现在浏览器标签页与 feed 里。"
 "site.authors" = "署名的作者，模板里读作 `site.authors`。每项形如 `{ name = \"…\", email = \"…\", url = \"…\" }`。"
 "site.description" = "feed 与搜索引擎展示的站点摘要。"
-"site.languages" = "多语言站点发布的语言，写成 `[\"en\", \"zh-Hans\"]`，或按标签各部分写成 `[{ lang = \"en\" }, { lang = \"zh\", script = \"Hans\" }]`。每项的写法与校验都与 `site.language` 相同；声明它即令 `site.language` 成为默认语言：此时必须写出，且必须是其中一项。Tola 只把它当数据读取，不做任何处理：站点如何在语言之间路由、配对与切换，由站点自己决定。"
+"site.languages" = "多语言站点发布的语言，写成 `[\"en\", \"zh-Hans\"]`，或按标签各部分写成 `[{ lang = \"en\" }, { lang = \"zh\", script = \"Hans\" }]`。每项的写法与校验都与 `site.language` 相同；`site.language` 是默认语言（未填写时为 `\"en\"`）；列表非空时，必须包含它。Tola 只把它当数据读取，不做任何处理：站点如何在语言之间路由、配对与切换，由站点自己决定。"
 "site.language" = "语言标签，例如 `\"zh-Hant-TW\"`，或写成 `{ lang = \"zh\", script = \"Hant\", region = \"TW\" }`。模板读 `site.language.lang`（主语言）、`.script`（书写系统）、`.region` 与 `.tag`（组合形式）。Typst 文本使用各部分，HTML 的 `lang` 使用 `.tag`。ASCII 模式下把 `.lang` 传给 `slugify` 决定汉字读音：`ja` 取日文，其余语言取中文。书写系统与地区不参与 slug 化。"
 "site.copyright" = "版权声明，模板可直接输出，例如 `© 2026 Alice`。"
 "site.extra" = "你自己的值，模板里读作 `site.extra`。"

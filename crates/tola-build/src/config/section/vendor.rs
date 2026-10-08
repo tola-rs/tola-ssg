@@ -18,49 +18,46 @@ pub struct VendorConfig {
 }
 
 impl VendorConfig {
-    /// What `tola help "[vendor]"` adds under its table.
+    /// What `tola help config vendor` adds under its table.
     pub const HELP: &'static str = "\
-`tola vendor` freezes the external inputs a build selected into `path`, so another machine can
-build the same site without network access. Tola searches that directory before every host root,
-so the offline build reproduces the online one:
+`tola vendor` freezes the external inputs selected by a production build into this directory.
+Declare `path` before using the command:
 
 ```toml
 [vendor]
 path = \"vendor\"
 ```
 
-Three subdirectories under `path` belong to Tola; every other file there is yours:
+It runs no hooks and publishes no site output. Generated site inputs must already be available
+for that build. Tola prepares the dependencies, checks that the prepared copy builds under
+`--pure`, and only then replaces the installed copy. Failed preparation keeps the previous inputs.
 
-- `typst-packages/` — every package the build resolved, under `{namespace}/{name}/{version}/`
+Three subdirectories belong to Tola; other files below `path` remain yours:
+
+- `typst-packages/` — resolved packages under `{namespace}/{name}/{version}/`, including packages
+  selected from host roots or `--package-path`
 - `icons/` — one `<namespace>.json` per configured `remote-json` collection
-- `fonts/` — the compiler fonts the build read that no configured `typst.fonts.paths` directory
-  contains
+- `fonts/` — compiler fonts the build read that no `typst.fonts.paths` directory provides
 
-A package the build selected from a host root or from `--package-path` is copied in the same way,
-so a later `--pure` build resolves it from the site itself. Every namespace resolves from here
-first, `@preview` among them. The site above ends up holding:
-
-```text
-vendor/
-  typst-packages/preview/cetz/0.3.4/
-  icons/brand.json
-  fonts/
-```
-
-A machine without network access builds from them:
+Packages of every namespace, including `@preview`, resolve from vendor before host roots. A
+remote icon collection also prefers its vendored copy. Commit these inputs with the site:
 
 ```sh
-tola vendor          # on a machine with network access; commit the result
-tola build --pure    # in CI: the site's own inputs only
+tola vendor --dry-run   # prepare and verify without replacing vendor
+tola vendor             # install the verified dependencies
+tola build --pure       # build from site-owned inputs
 ```
 
-Two options cover the common cases: `tola vendor --refresh` resolves again without reading the
-existing copy and replaces it after validation, and `tola vendor --dry-run` prepares and validates
-without touching `path`.
+`--refresh` selects again without reading the installed vendor copy. `--dry-run` leaves that
+copy unchanged but may fetch dependencies, update caches, and wait for another site command.
 
-`--offline` refuses Tola's network requests but still resolves host package roots, local caches, and
-system fonts. `--pure` refuses those too, and source files outside the site, so an import with no
-vendored copy fails instead of downloading. Neither flag sandboxes a hook command.";
+`--offline` refuses Tola's network requests but permits host package roots and caches, and system
+fonts when enabled. `--pure` also excludes those host inputs and source files physically outside
+the site, including symlinks that leave it. Embedded packages and fonts stay available; derived
+image caches may be used because their source bytes can still reproduce the result.
+
+These flags restrict Tola's input reads, not hook scripts or their toolchains. Keep a hook's tools
+and dependencies pinned separately when the whole build must reproduce on another machine.";
 
     /// The directory a site keeps its vendored Typst packages in.
     pub fn typst_packages(&self) -> Option<PathBuf> {

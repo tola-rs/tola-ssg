@@ -7,6 +7,33 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
+/// Pass a path or URL as one argument to the desktop's opener.
+pub(crate) fn open_default(
+    target: &OsStr,
+    cancellation: &tola_build::cancellation::BuildCancellation,
+) -> io::Result<()> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = super::run_command(
+        std::process::Command::new(program)
+            .arg(target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        cancellation,
+    )?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "the desktop opener did not accept the target",
+        ))
+    }
+}
+
 /// Open one log path for reading without following links or waiting on a FIFO.
 pub(crate) fn open_log_for_read(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();

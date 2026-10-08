@@ -118,15 +118,9 @@ pub(crate) fn dispatch(
             commands::lsp::run(config, packages, scope, cancellation, output)
         }
         Commands::Skill(args) => commands::skill::run(args.output.as_deref(), output, cancellation),
-        Commands::Help {
-            targets,
-            interactive,
-            no_mouse,
-        } => commands::help::run(
-            &targets,
+        Commands::Help(args) => commands::help::run(
+            &args,
             crate::i18n::HelpLanguage::resolve(cli.lang),
-            interactive,
-            !no_mouse,
             output,
             cancellation,
         ),
@@ -145,6 +139,11 @@ fn validate_log_outputs(command: &Commands, output: &CommandOutput) -> Result<()
     let Some(log_path) = output.log().map(LogFile::path) else {
         return Ok(());
     };
+    if let Commands::Help(args) = command
+        && let Some(directory) = &args.export
+    {
+        destination::check_directory(Some(log_path), directory)?;
+    }
     if let Some(config) = command.config_file() {
         let cwd = std::env::current_dir()?;
         let path = config.path.clone().unwrap_or_else(|| {

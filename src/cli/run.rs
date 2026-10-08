@@ -43,10 +43,20 @@ fn default_session_log_path(config: &super::ConfigFileArgs) -> Option<std::path:
 
 pub(crate) fn run() -> ExitCode {
     let cli = Cli::parse_for_process();
-    let pager = if cli.no_pager {
-        None
+    let pages_documentation = matches!(&cli.command, super::Commands::Help(args)
+        if !args.interactive && !args.preview && args.export.is_none());
+    let pager = match if cli.no_pager || !pages_documentation {
+        Ok(None)
     } else {
         PagerCommand::for_process()
+    } {
+        Ok(pager) => pager,
+        Err(error) => {
+            let terminal = Terminal::new(cli.color, cli.quiet, None);
+            let _ =
+                terminal.diagnostic(&diagnostic::fallback(crate::codes::terminal::PAGER, &error));
+            return ExitCode::FAILURE;
+        }
     };
     let terminal = Terminal::new(cli.color, cli.quiet, pager);
     let cancellation = match Cancellation::install() {

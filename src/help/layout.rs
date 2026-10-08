@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::model::{Anchor, Block, HeadingRole, HelpDocument, Inline, LinkTarget};
+use super::model::{Anchor, Block, HeadingRole, HelpDocument, Inline, LinkTarget, PageId};
 use crate::terminal::code::CodeKind;
 use crate::terminal::style::Palette;
 use crate::terminal::ui::pager::Pager;
@@ -47,7 +47,11 @@ struct HeadingLine {
 impl PageLayout {
     pub(super) fn new(document: &HelpDocument, width: usize, palette: Palette) -> Self {
         let width = width.max(1);
-        let mut writer = DocumentLines::new(palette);
+        let numbered = matches!(
+            document.id,
+            PageId::DemoFile { .. } | PageId::DemoOutput { .. }
+        );
+        let mut writer = DocumentLines::new(palette, numbered);
         writer.blocks(&document.blocks, width, "");
         Self {
             pager: Pager::new(writer.lines),
@@ -119,10 +123,11 @@ struct DocumentLines {
     leaf: usize,
     next_link: usize,
     palette: Palette,
+    numbered_code: bool,
 }
 
 impl DocumentLines {
-    fn new(palette: Palette) -> Self {
+    fn new(palette: Palette, numbered_code: bool) -> Self {
         Self {
             lines: Vec::new(),
             positions: Vec::new(),
@@ -131,6 +136,7 @@ impl DocumentLines {
             leaf: 0,
             next_link: 0,
             palette,
+            numbered_code,
         }
     }
 
@@ -276,17 +282,32 @@ impl DocumentLines {
                 link: None,
             });
         }
-        let prefix = format!("{indent}  ");
-        let prefix = clipped_prefix(&prefix, width);
-        let available = width.saturating_sub(prefix.width()).max(1);
+        let digits = source.lines().count().max(1).to_string().len();
+        let continuation = if self.numbered_code {
+            format!("{indent}{}", " ".repeat(digits + 3))
+        } else {
+            format!("{indent}  ")
+        };
         let mut offset = 0;
-        for line in source.split_inclusive('\n') {
+        for (number, line) in source.split_inclusive('\n').enumerate() {
+            let first = if self.numbered_code {
+                format!("{indent}{:>digits$} │ ", number + 1)
+            } else {
+                continuation.clone()
+            };
+            let available = width
+                .saturating_sub(clipped_prefix(&first, width).width())
+                .max(1);
             let end = offset + line.strip_suffix('\n').unwrap_or(line).len();
-            for range in grapheme_ranges(&source[offset..end], available) {
+            for (part, range) in grapheme_ranges(&source[offset..end], available)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if part == 0 { &first } else { &continuation };
                 self.write_runs(
                     &text,
                     offset + range.start..offset + range.end,
-                    prefix,
+                    clipped_prefix(prefix, width),
                     width,
                 );
             }
@@ -511,13 +532,19 @@ mod tests {
     #[test]
     fn styled_boundaries_keep_adjacent_text() {
         let mut page = page(
-            "`tola help` \"[`@tola/web`](tola://package/@tola/web)\" a**b**c, `x`!\n",
+            "`tola help package` [`web`](tola-help://packages/web) a**b**c, `x`!\n",
             120,
         );
-        assert_eq!(rows(&mut page)[0], "tola help \"@tola/web\" abc, x!");
+        let rendered = rows(&mut page)[0].clone();
+        assert_eq!(rendered, "tola help package web abc, x!");
         assert_eq!(page.links.len(), 1);
         let link = &page.links[0];
-        assert_eq!((link.column, link.width), (11, 9));
+        assert_eq!(link.column, rendered.find("web").unwrap());
+        assert_eq!(link.width, "web".width());
+        assert_eq!(
+            link.target,
+            LinkTarget::Page(PageId::Package { name: "web".into() })
+        );
     }
 
     #[test]
@@ -836,5 +863,37 @@ mod tests {
             .draw(|frame| page.pager.draw(frame, frame.area(), Palette::new(false)))
             .unwrap();
         terminal
+    }
+
+    #[test]
+    fn file_numbers_preserve_source_positions() {
+        let source =
+            "first_long_source_line_with_a_value\nsecond_名称_source_line_with_another_value\n";
+        let document = HelpDocument::parse(HelpPage::new(
+            PageId::DemoFile {
+                id: "backlinks".into(),
+                path: "site/page.typ".into(),
+            },
+            format!("```text\n{source}```\n"),
+        ));
+        let mut narrow = PageLayout::new(&document, 16, Palette::new(false));
+        let wide = PageLayout::new(&document, 80, Palette::new(false));
+        let numbers = rows(&mut narrow)
+            .iter()
+            .filter_map(|row| row.split_once('│')?.0.trim().parse::<usize>().ok())
+            .collect::<Vec<_>>();
+        assert_eq!(numbers, [1, 2]);
+        for position in &narrow.positions {
+            let row = wide.line_at(*position);
+            let translated = wide.position(row);
+            assert_eq!(translated.leaf, position.leaf);
+            assert!(translated.offset <= position.offset);
+            if let Some(next) = wide.positions.get(row + 1) {
+                assert!(next.offset > position.offset);
+            }
+        }
+        assert!(
+            matches!(&document.blocks[0], Block::Code { source: original, .. } if original == source)
+        );
     }
 }
