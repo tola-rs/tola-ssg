@@ -41,7 +41,7 @@ pub(super) enum JobOwner {
     Check(u64),
     /// One selection index a revision's corrections wait for, answered with the revision and site
     /// it was asked about.
-    Selection(u64, PathBuf),
+    Selection(u64, u64, PathBuf),
     /// A client request, answered under the id and serial it was admitted with.
     Request(RequestId, u64),
     /// A job nothing waits on.
@@ -62,7 +62,7 @@ impl JobOwner {
             SourceJob::IncomingCalls(request) => Self::Request(request.id.clone(), request.serial),
             SourceJob::RouteIndex(request) => Self::Request(request.id.clone(), request.serial),
             SourceJob::Selection(request) => {
-                Self::Selection(request.revision, request.root.clone())
+                Self::Selection(request.revision, request.serial, request.root.clone())
             }
             SourceJob::ReleaseIdle => Self::None,
         }
@@ -85,8 +85,9 @@ impl JobOwner {
                 serial,
                 response: Err(SourceFailure::Failed(error)),
             },
-            Self::Selection(revision, root) => SourceCompilation::Selected {
+            Self::Selection(revision, serial, root) => SourceCompilation::Selected {
                 revision,
+                serial,
                 root,
                 selected: Err(SourceFailure::Failed(error)),
             },

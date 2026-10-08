@@ -19,7 +19,7 @@
       "\t$0",
       "]"
     ],
-    "description": "Publish this source at the route its output path names."
+    "description": "Create a document in the site program or a publishing template."
   },
   "Heading with anchor": {
     "prefix": [
@@ -48,7 +48,7 @@
       "#import \"@tola/source:0.0.0\": tola-meta",
       "#tola-meta((${1:title: [My document]}))$0"
     ],
-    "description": "Declare this source's metadata in one eager call."
+    "description": "Declare metadata at the start of a content source."
   },
   "Template function": {
     "prefix": [
@@ -57,6 +57,6 @@
     "body": [
       "#let ${1:page}(body) = document(\"${2:index.html}\", format: \"html\")[#body]"
     ],
-    "description": "A function that publishes the body it is given."
+    "description": "Define a publishing template that wraps source content in a document."
   }
 }

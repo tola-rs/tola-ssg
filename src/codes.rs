@@ -70,8 +70,6 @@ pub mod editor {
 
     use tola_build::diagnostic::DiagnosticCode;
 
-    /// Editor setup configured a directory that is not a Tola site.
-    pub const NO_SITE: DiagnosticCode = DiagnosticCode::new("editor.no_site");
     /// A selected editor or desktop application could not be opened.
     pub const LAUNCH: DiagnosticCode = DiagnosticCode::new("editor.launch");
 }
@@ -204,10 +202,7 @@ mod tests {
             ],
         ),
         ("demo", &[demo::EXPORT, demo::PREVIEW]),
-        (
-            "editor",
-            &[editor::CONFIGURATION, editor::NO_SITE, editor::LAUNCH],
-        ),
+        ("editor", &[editor::CONFIGURATION, editor::LAUNCH]),
         ("help", &[help::TARGET, help::MEMBER]),
         ("hook", &[hook::AFTER_PUBLISH]),
         ("init", &[init::CONFLICT, init::SELECTION]),

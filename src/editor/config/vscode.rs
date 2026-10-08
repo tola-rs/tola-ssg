@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use std::path::Path;
 
 use super::EditorDirectory;
 
@@ -17,28 +18,20 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
         settings.push('\n');
         return Ok(settings);
     };
+    let actual = jsonc_value(source)
+        .context("`.vscode/settings.json` is not valid JSONC; fix the syntax, then rerun `tola editor setup`")?;
     let object = scan_object(source)
         .context("`.vscode/settings.json` is not valid JSONC; fix the syntax, then rerun `tola editor setup`")?;
     let expected = expected(directory);
     let expected = expected.as_object().expect("expected settings object");
     let mut missing = Vec::new();
     for (key, value) in expected {
-        if let Some(property) = object
-            .properties
-            .iter()
-            .find(|property| property.key == *key)
-        {
-            let raw = &source[property.value_start..property.value_end];
-            let actual: Value = serde_json::from_str(&strip_comments(raw)?).with_context(|| {
-                format!(
-                    "the `{key}` value in `.vscode/settings.json` is not valid JSON; fix it, then rerun `tola editor setup`"
-                )
-            })?;
-            if actual != *value {
+        if let Some(actual) = actual.get(key) {
+            if !same_setting(key, actual, value, directory.root()) {
                 return Err(super::setting_conflict(
                     "VS Code",
                     key,
-                    serde_json::to_string(&actual)?,
+                    serde_json::to_string(actual)?,
                     serde_json::to_string(value)?,
                 ));
             }
@@ -79,15 +72,56 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
 }
 
 fn expected(directory: &EditorDirectory) -> Value {
+    let root = tola_build::filesystem::normalize_existing_prefix(directory.root());
     let mut settings = serde_json::Map::new();
     for (key, value) in directory
         .tola_settings()
         .as_object()
         .expect("Tola settings are an object")
     {
-        settings.insert(format!("tola.{key}"), value.clone());
+        let value = value.as_str().map_or_else(
+            || value.clone(),
+            |value| {
+                let path = Path::new(value);
+                let normalized = tola_build::filesystem::normalize_existing_prefix(path);
+                let relative = normalized.strip_prefix(&root).unwrap_or(path);
+                Value::String(if relative.as_os_str().is_empty() {
+                    ".".to_owned()
+                } else {
+                    relative.to_string_lossy().into_owned()
+                })
+            },
+        );
+        settings.insert(format!("tola.{key}"), value);
     }
     Value::Object(settings)
+}
+
+fn same_setting(key: &str, actual: &Value, required: &Value, root: &Path) -> bool {
+    if actual == required {
+        return true;
+    }
+    if !matches!(
+        key,
+        "tola.configPath" | "tola.packagePath" | "tola.packageCachePath"
+    ) {
+        return false;
+    }
+    let (Some(actual), Some(required)) = (actual.as_str(), required.as_str()) else {
+        return false;
+    };
+    if actual.trim().is_empty() {
+        return false;
+    }
+    let Ok(absolute_root) = std::path::absolute(root) else {
+        return false;
+    };
+    let resolve = |value: &str| {
+        let expanded = value.replace("${workspaceFolder}", &absolute_root.to_string_lossy());
+        let path = tola_build::filesystem::lexical_path_identity(&absolute_root.join(expanded));
+        tola_build::filesystem::normalize_existing_prefix(&path)
+    };
+    resolve(actual) == resolve(required)
 }
 
 struct JsonObject {
@@ -98,7 +132,6 @@ struct JsonObject {
 
 struct JsonProperty {
     key: String,
-    value_start: usize,
     value_end: usize,
 }
 
@@ -142,13 +175,8 @@ fn scan_object(source: &str) -> Result<JsonObject> {
             bail!("`{key}` in `.vscode/settings.json` is missing its `:` separator");
         }
         index = skip_space_and_comments(bytes, index + 1)?;
-        let value_start = index;
         let value_end = scan_value(bytes, index)?;
-        properties.push(JsonProperty {
-            key,
-            value_start,
-            value_end,
-        });
+        properties.push(JsonProperty { key, value_end });
         index = skip_space_and_comments(bytes, value_end)?;
         match bytes.get(index) {
             Some(b',') => {
@@ -263,23 +291,40 @@ fn skip_comment(bytes: &[u8], index: usize) -> Result<Option<usize>> {
     }
 }
 
-fn strip_comments(source: &str) -> Result<String> {
+fn jsonc_value(source: &str) -> Result<Value> {
     let bytes = source.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
+    let mut previous = None;
     while index < bytes.len() {
         if bytes[index] == b'"' {
             let end = scan_string_bytes(bytes, index)?;
             output.extend_from_slice(&bytes[index..end]);
             index = end;
+            previous = Some(b'"');
         } else if let Some(end) = skip_comment(bytes, index)? {
+            output.push(b' ');
             index = end;
         } else {
+            // A trailing comma needs a preceding value; `[ , ]` is still invalid JSONC.
+            if bytes[index] == b','
+                && previous.is_some_and(|byte| !matches!(byte, b'[' | b'{' | b':' | b','))
+                && matches!(
+                    bytes.get(skip_space_and_comments(bytes, index + 1)?),
+                    Some(b']' | b'}')
+                )
+            {
+                index += 1;
+                continue;
+            }
             output.push(bytes[index]);
+            if !bytes[index].is_ascii_whitespace() {
+                previous = Some(bytes[index]);
+            }
             index += 1;
         }
     }
-    Ok(String::from_utf8(output).expect("comment removal preserves UTF-8"))
+    Ok(serde_json::from_slice(&output)?)
 }
 
 #[cfg(test)]
@@ -301,14 +346,14 @@ mod tests {
 
         let source = "{\r \"editor.custom\": {\"values\": [1, /* inside */ \"// text\"]} /* after */ // keep\r}\r";
         let merged = merge(Some(source), &directory).unwrap();
-        let settings: Value = serde_json::from_str(&strip_comments(&merged).unwrap()).unwrap();
+        let settings: Value = jsonc_value(&merged).unwrap();
         assert_eq!(settings["editor.custom"], json!({"values": [1, "// text"]}));
         assert!(merged.contains("/* inside */"));
         assert!(merged.contains("}, /* after */ // keep\r"));
 
         let source = "{\n \"editor.fontSize\":14 // keep\n}\n";
         let merged = merge(Some(source), &directory).unwrap();
-        let settings: Value = serde_json::from_str(&strip_comments(&merged).unwrap()).unwrap();
+        let settings: Value = jsonc_value(&merged).unwrap();
         assert_eq!(settings["editor.fontSize"], 14);
         assert!(merged.contains("14, // keep\n"));
         assert_eq!(merge(Some(&merged), &directory).unwrap(), merged);
@@ -318,7 +363,7 @@ mod tests {
     fn fresh_settings_include_required_keys() {
         let settings: Value =
             serde_json::from_str(&merge(None, &editor_directory(".")).unwrap()).unwrap();
-        assert_eq!(settings["tola.configPath"], "./tola.toml");
+        assert_eq!(settings["tola.configPath"], "tola.toml");
         assert!(settings.get("tola.serverPath").is_none());
     }
 
@@ -334,16 +379,73 @@ mod tests {
 
     #[test]
     fn selected_config_keeps_author_settings() {
-        let (_root, config_path, directory) = selected_directory();
+        let (_root, _config_path, directory) = selected_directory();
         let source =
             "{\n // a server the author installed\n \"other.serverPath\": \"/custom/other\"\n}";
 
         let merged = merge(Some(source), &directory).unwrap();
-        let settings: Value = serde_json::from_str(&strip_comments(&merged).unwrap()).unwrap();
+        let settings: Value = jsonc_value(&merged).unwrap();
 
         assert_eq!(settings["other.serverPath"], "/custom/other");
-        assert_eq!(settings["tola.configPath"], json!(config_path));
+        assert_eq!(settings["tola.configPath"], "selected config.toml");
         assert!(merged.contains("// a server the author installed"));
+    }
+
+    #[test]
+    fn equivalent_paths_keep_author_spelling() {
+        let (_root, config_path, directory) = selected_directory();
+        for path in [
+            "selected config.toml".to_owned(),
+            "./selected config.toml".to_owned(),
+            "missing/../selected config.toml".to_owned(),
+            "${workspaceFolder}/selected config.toml".to_owned(),
+            config_path.to_str().unwrap().to_owned(),
+        ] {
+            let source = format!("{}\n", json!({"tola.configPath": path}));
+            assert_eq!(merge(Some(&source), &directory).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn jsonc_keeps_nested_trailing_commas() {
+        let source = r#"{"editor.custom": {"values": [1, /* keep */ 2,],},}"#;
+        let merged = merge(Some(source), &editor_directory(".")).unwrap();
+        assert_eq!(
+            jsonc_value(&merged).unwrap()["editor.custom"],
+            json!({"values": [1, 2]})
+        );
+        assert!(merged.contains("/* keep */"));
+        assert_eq!(
+            merge(Some(&merged), &editor_directory(".")).unwrap(),
+            merged
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn path_parents_follow_editor_resolution() {
+        let (root, _config_path, directory) = selected_directory();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("alias")).unwrap();
+        let source = "{\"tola.configPath\": \"alias/../selected config.toml\"}\n";
+        assert_eq!(merge(Some(source), &directory).unwrap(), source);
+    }
+
+    #[test]
+    fn invalid_settings_are_refused() {
+        for source in [
+            r#"{"editor.fontSize": banana}"#,
+            r#"{"editor.custom": [,]}"#,
+            r#"{"editor.custom": [1,,]}"#,
+            r#"{"editor.custom": {"value":,}}"#,
+            r#"{"editor.custom": tr/* comment */ue}"#,
+            r#"{"editor.custom": 1 2}"#,
+        ] {
+            assert!(
+                merge(Some(source), &editor_directory(".")).is_err(),
+                "{source}"
+            );
+        }
     }
 
     #[test]

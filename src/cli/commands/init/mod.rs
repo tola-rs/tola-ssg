@@ -210,12 +210,7 @@ fn show_created_site(
             editor, &settings,
         ))?;
     }
-    if !editors.is_empty() {
-        if editors.contains(&Editor::Vscode) {
-            output.status(crate::editor::VSCODE_EXTENSION_NOTICE)?;
-        }
-        output.status(crate::editor::RESTART_CLIENTS_NOTICE)?;
-    }
+    output.status(crate::editor::startup_instructions(editors))?;
     if editors.is_empty() {
         let setup = "Editor setup:\n  `tola editor setup` chooses interactively\n  `tola editor setup --list` shows supported editors";
         output.styled_block(setup, &styled_report(setup, palette))?;

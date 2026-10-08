@@ -1,4 +1,3 @@
-import { type ChildProcess, spawn } from 'node:child_process'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import {
@@ -10,7 +9,6 @@ import {
   DidOpenTextDocumentNotification,
   DidSaveTextDocumentNotification,
   ErrorAction,
-  LanguageClient,
   type LanguageClientOptions,
   type ServerOptions,
   State,
@@ -42,7 +40,8 @@ import {
   VirtualSources,
 } from './virtual.ts'
 import { checkedRoutes, checkedSiteRoutes } from './routes.ts'
-import type { PreviewSite } from './preview.ts'
+import { LanguageService, TolaClient } from './service.ts'
+import type { PreviewSite, PreviewStatus } from './preview.ts'
 
 export interface SourceCheckStatus {
   readonly revision: number
@@ -56,10 +55,7 @@ interface WorkspaceClient extends SiteClient {
   readonly extraDocuments: Set<string>
   /** The untitled Typst buffers this server holds open; the client's own synchronization sends their changes. */
   readonly untitledDocuments: Set<string>
-  /** The `tola lsp` process the client speaks to; the client holds its two streams, Tola the process. */
-  service?: ChildProcess | undefined
-  /** True once Tola has asked the service to stop, so its exit is a stop and not a failure. */
-  stopping: boolean
+  readonly service: LanguageService
   sourceCheck: SourceCheckStatus
 }
 
@@ -73,17 +69,13 @@ type CancellationScope = {
   dispose(): void
 }
 
-/** What a stopped service leaves the author: the one sentence saying how to start it again. */
-const RESTART_NOTICE = 'Tola stopped. Run Tola: Restart Language Services to start it again.'
-
-/** Per-folder detail belongs to the output channel, so the author reads one sentence. */
 function startFailureMessage(folders: readonly string[]): string {
   const [first] = folders
   return folders.length === 1
-    ? `Tola could not start for ${first}. Run Tola: Show Output for details, then Tola: Restart Language Services.`
+    ? `Tola could not start language services for ${first}.`
     : `Tola could not start for ${first} and ${folders.length - 1} other folder${
       folders.length === 2 ? '' : 's'
-    }. Open the Tola output channel for details, then run Tola: Restart Language Services.`
+    }.`
 }
 
 /** A path as a flat glob: separators read forward, and glob characters inside a real path stay literal. */
@@ -146,15 +138,18 @@ export class Sites {
       this.pages.register(),
       vscode.commands.registerCommand(
         'tola.vendorPackages',
-        () => this.verb((site) => this.siteCli.vendorPackages(site.selection)),
+        () => this.verb((selected) => this.siteCli.vendorPackages(selected)),
       ),
       vscode.commands.registerCommand(
         'tola.editorSetup',
-        () => this.verb((site) => this.siteCli.editorSetup(site.selection)),
+        () => this.verb((selected) => this.siteCli.editorSetup(selected)),
       ),
       vscode.commands.registerCommand('tola.initSite', () => this.initSite()),
       this.siteCli.register(),
-      vscode.commands.registerCommand('tola.restart', () => this.refresh(true)),
+      vscode.commands.registerCommand(
+        'tola.restart',
+        () => this.refresh(true).catch((error) => this.report(error)),
+      ),
       vscode.commands.registerCommand('tola.goToDefinition', () => this.goToDefinition()),
       vscode.commands.registerCommand('tola.onEnter', () => insertNewline(this.enterSite())),
       vscode.commands.registerCommand('tola.applyCodeAction', (apply: () => Promise<boolean>) => apply()),
@@ -277,7 +272,9 @@ export class Sites {
   }
 
   refresh(restart = false): Promise<void> {
-    if (restart) { for (const site of this.workspaces.values()) site.cancellation.cancel() }
+    for (const site of this.workspaces.values()) {
+      if (restart || site.client.state === State.Starting) site.cancellation.cancel()
+    }
     const operation = this.queue.then(() => this.reconcile(restart))
     // Later transitions still run; the caller gets the original rejection.
     this.queue = operation.catch(() => {})
@@ -327,26 +324,59 @@ export class Sites {
     }
   }
 
-  /** The site the active editor belongs to, or a message saying no enabled site answers for it. */
-  private commandSite(): Site | undefined {
+  private async commandSite(): Promise<Selection | undefined> {
     const document = vscode.window.activeTextEditor?.document
-    const folder = document && vscode.workspace.getWorkspaceFolder(document.uri)
-    const site = folder && this.clientForSite(folder.uri.toString())
-    if (!document || !site) {
-      void vscode.window.showInformationMessage('Open a file from an enabled Tola site first.')
+    const selected = document && this.selectionForUri(document.uri)
+    if (selected) return selected
+    const candidates = [...this.selections.values()]
+    const [only, ...others] = candidates
+    if (!only) {
+      void vscode.window.showInformationMessage('Open a Tola site folder first.')
       return undefined
     }
-    return site
+    if (!others.length) return only
+    const chosen = await vscode.window.showQuickPick(
+      candidates.map((selection) => ({
+        label: selection.folder.name,
+        description: selection.config.fsPath,
+        selection,
+      })),
+      { title: 'Tola: choose the site', ignoreFocusOut: true },
+    )
+    return chosen?.selection
   }
 
-  private build(): void {
-    const site = this.commandSite()
-    if (site) void this.siteCli.build(site.selection).catch((error) => this.report(error))
+  private async build(): Promise<void> {
+    await this.verb((selected) => this.siteCli.build(selected))
   }
 
-  private revealOutput(): void {
-    const site = this.commandSite()
-    if (site) void this.siteCli.revealOutput(site.selection).catch((error) => this.report(error))
+  private async revealOutput(): Promise<void> {
+    await this.verb((selected) => this.siteCli.revealOutput(selected))
+  }
+
+  private selectionForUri(uri: vscode.Uri): Selection | undefined {
+    const folder = vscode.workspace.getWorkspaceFolder(uri)
+    if (folder) return this.selections.get(folder.uri.toString())
+    if (uri.scheme !== 'file') return undefined
+    const owners = [...this.selections.values()].filter((selected) =>
+      uri.fsPath === selected.config.fsPath || uri.fsPath === selected.configurationFile ||
+      selected.inputRoots.some((root) => containsFile(root, uri.fsPath))
+    )
+    return owners.length === 1 ? owners[0] : undefined
+  }
+
+  statusSite(uri?: vscode.Uri): PreviewStatus | undefined {
+    const selected = uri && this.selectionForUri(uri)
+    if (!selected) return undefined
+    const workspace = this.workspaces.get(selected.folder.uri.toString())
+    return {
+      selection: selected,
+      state: workspace?.client.state === State.Starting
+        ? 'starting'
+        : this.clientForSite(selected.folder.uri.toString())
+        ? 'ready'
+        : 'stopped',
+    }
   }
 
   previewSite(uri?: vscode.Uri, siteKey?: string): PreviewSite | undefined {
@@ -362,19 +392,8 @@ export class Sites {
     }
     const source = uri ?? vscode.window.activeTextEditor?.document.uri
     if (!source || source.scheme !== 'file') return undefined
-    const folder = vscode.workspace.getWorkspaceFolder(source)
-    const owners = folder ? [] : [...this.workspaces.values()].flatMap((workspace) => {
-      const site = this.clientForSite(workspace.key)
-      return site && (source.fsPath === site.selection.configurationFile ||
-          site.selection.inputRoots.some((root) => containsFile(root, source.fsPath)))
-        ? [site]
-        : []
-    })
-    const site = folder
-      ? this.clientForSite(folder.uri.toString())
-      : owners.length === 1
-      ? owners[0]
-      : undefined
+    const selected = this.selectionForUri(source)
+    const site = selected && this.clientForSite(selected.folder.uri.toString())
     return site ? this.previewSiteFor(site) : undefined
   }
 
@@ -410,10 +429,9 @@ export class Sites {
     })
   }
 
-  /** Run one of a site's own CLI verbs for the active site's selection. */
-  private verb(action: (site: Site) => Promise<void>): void {
-    const site = this.commandSite()
-    if (site) void action(site).catch((error) => this.report(error))
+  private async verb(action: (selected: Selection) => Promise<void>): Promise<void> {
+    const selected = await this.commandSite()
+    if (selected) await action(selected).catch((error) => this.report(error))
   }
 
   /** `tola init`: create a site in a directory the author picks, with the executable this window configures. */
@@ -432,7 +450,14 @@ export class Sites {
     if (this.closing || isCancellation(error)) return
     const message = error instanceof Error ? error.message : String(error)
     this.output.appendLine(message)
-    void vscode.window.showErrorMessage(message.startsWith('Tola ') ? message : `Tola: ${message}`)
+    void vscode.window.showErrorMessage(
+      message.startsWith('Tola ') ? message : `Tola: ${message}`,
+      'Restart',
+      'Show Output',
+    ).then((selected) => {
+      if (selected === 'Restart') void this.refresh(true).catch((error) => this.report(error))
+      if (selected === 'Show Output') this.output.show()
+    })
   }
 
   private scopedCancellation(
@@ -521,10 +546,10 @@ export class Sites {
       outputChannel: this.output,
       synchronize: { fileEvents: sourceWatchers },
       errorHandler: {
-        error: () => ({ action: ErrorAction.Shutdown }),
+        error: () => ({ action: ErrorAction.Shutdown, handled: true }),
         closed: () => ({
           action: CloseAction.DoNotRestart,
-          message: RESTART_NOTICE,
+          handled: true,
         }),
       },
       middleware: {
@@ -738,53 +763,7 @@ export class Sites {
     return watcher
   }
 
-  /**
-   * The service one folder's client speaks to: Tola spawns `tola lsp` and hands the client the two
-   * streams, so the library holds no process and renders no exit of its own — an exit is Tola's to
-   * report, and one Tola asked for is not a failure.
-   */
-  private serviceOptions(selected: ServedWorkspace, site: () => WorkspaceClient): ServerOptions {
-    return () => {
-      const child = spawn(selected.command, selected.args, {
-        cwd: selected.folder.uri.fsPath,
-        shell: false,
-      })
-      site().service = child
-      child.stderr?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
-      child.once('error', (error: Error) => {
-        site().service = undefined
-        if (!this.closing && !site().stopping) {
-          this.report(
-            new Error(
-              `Tola could not start its language service for ${selected.folder.name}: ${error.message}`,
-            ),
-          )
-        }
-      })
-      child.once('exit', (code, signal) => this.serviceExited(site(), code, signal))
-      // Both stdio pipes are the transport the client speaks the protocol over.
-      return Promise.resolve({ reader: child.stdout!, writer: child.stdin! })
-    }
-  }
-
-  /**
-   * What one service's exit means: a stop Tola asked for leaves its notice, and one the author has
-   * to see goes through the error path.
-   */
-  private serviceExited(site: WorkspaceClient, code: number | null, signal: NodeJS.Signals | null): void {
-    site.service = undefined
-    const outcome = signal === null ? `code ${code ?? 'unknown'}` : `signal ${signal}`
-    if (this.closing || site.stopping) {
-      this.output.appendLine(RESTART_NOTICE)
-      return
-    }
-    this.report(
-      new Error(`The language service for ${site.selection.folder.name} exited (${outcome}).`),
-    )
-  }
-
   private async stop(site: WorkspaceClient): Promise<void> {
-    site.stopping = true
     site.cancellation.cancel()
     this.virtual.forget(site)
     for (const resource of site.resources) resource.dispose()
@@ -796,13 +775,7 @@ export class Sites {
       const failed = stopped.find((completion) => completion.status === 'rejected')
       if (failed?.status === 'rejected') throw failed.reason
     } finally {
-      const service = site.service
-      if (service && service.exitCode === null && service.signalCode === null) {
-        // SIGINT lets the service end the work it owns; one that outlives it is killed.
-        service.kill('SIGINT')
-        const timer = setTimeout(() => service.kill('SIGKILL'), 5_000)
-        timer.unref()
-      }
+      await site.service.close()
       site.cancellation.dispose()
       site.extraDocuments.clear()
       site.untitledDocuments.clear()
@@ -814,7 +787,14 @@ export class Sites {
     const resources: vscode.Disposable[] = []
     let site: WorkspaceClient | undefined
     try {
-      const server: ServerOptions = this.serviceOptions(selected, () => site!)
+      const cancellation = new vscode.CancellationTokenSource()
+      resources.push(cancellation)
+      const service = new LanguageService(selected, this.output, () => {
+        if (!this.closing && this.workspaces.get(key) === site) {
+          this.report(new Error(`Tola language services stopped for ${selected.folder.name}.`))
+        }
+      })
+      const server: ServerOptions = () => Promise.resolve(service.start(cancellation.token))
       const sourceWatchers: vscode.FileSystemWatcher[] = []
       for (const root of selected.inputRoots) {
         const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(root, '**/*'))
@@ -836,7 +816,7 @@ export class Sites {
       }
       // The client id is the section its own `trace.server` setting is read from, so it stays
       // stable rather than naming the folder.
-      const client = new LanguageClient(
+      const client = new TolaClient(
         'tola',
         `Tola (${selected.folder.name})`,
         server,
@@ -854,7 +834,6 @@ export class Sites {
         },
         clear() {},
       })
-      const cancellation = new vscode.CancellationTokenSource()
       site = {
         key,
         selection: selected,
@@ -864,7 +843,7 @@ export class Sites {
         resources,
         extraDocuments: new Set(),
         untitledDocuments: new Set(),
-        stopping: false,
+        service,
         sourceCheck: { revision: -1, state: 'notChecked' },
       }
       if (selected.kind === 'site') resources.push(this.watchConfig(selected.config))
@@ -883,8 +862,10 @@ export class Sites {
         }),
         client.onDidChangeState((event) => {
           if (event.newState === State.Stopped) {
+            site!.service.detachStartup()
             cancellation.cancel()
             this.virtual.forget(site!)
+            this.pages.refresh()
           }
           this.changed()
           if (this.workspaces.get(key) !== site || site!.lifetime.isCancellationRequested) return
@@ -897,15 +878,15 @@ export class Sites {
       )
       this.workspaces.set(key, site)
       await client.start()
-      if (this.closing) {
-        this.workspaces.delete(key)
-        await this.stop(site)
-        return
+      service.ready()
+      if (this.closing || cancellation.token.isCancellationRequested) {
+        throw new vscode.CancellationError()
       }
       for (const document of vscode.workspace.textDocuments) this.synchronize(document, 'open')
       this.virtual.ready(site)
       this.output.appendLine(`Started Tola language service for ${selected.folder.name}.`)
     } catch (error) {
+      const cancelled = this.closing || site?.service.stopRequested
       this.workspaces.delete(key)
       if (site) {
         try {
@@ -918,6 +899,8 @@ export class Sites {
       } else {
         for (const resource of resources) resource.dispose()
       }
+      this.changed()
+      if (cancelled) throw new vscode.CancellationError()
       throw error
     }
   }
@@ -975,12 +958,15 @@ export class Sites {
       try {
         await this.start(selected)
       } catch (error) {
+        if (isCancellation(error)) continue
         failures.push(selected.folder.name)
         this.output.appendLine(
           `Tola could not start its language service for ${selected.folder.name}: ${String(error)}`,
         )
       }
     }
+    this.pages.refresh()
+    this.changed()
     if (failures.length) throw new Error(startFailureMessage(failures))
   }
 

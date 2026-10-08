@@ -95,10 +95,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// A typing change settles before its check runs; every other change checks at once.
     pub(super) fn sources_changed(&mut self, typing: bool) -> Result<()> {
         self.checking.cancel();
+        self.cancel_selection();
         self.cancel_requests(REVISION_CHANGED_ERROR.0, REVISION_CHANGED_ERROR.1)?;
         self.queries.clear();
         self.analyses.clear();
-        self.selection_build = None;
         self.revision = self
             .revision
             .checked_add(1)

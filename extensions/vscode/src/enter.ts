@@ -15,6 +15,7 @@ interface EnterReply {
 const onEnterRequest = new RequestType<{ uri: string; position: vscode.Position }, EnterReply, void>(
   'tola/onEnter',
 )
+const entering = new WeakMap<vscode.TextEditor, Promise<boolean>>()
 
 /**
  * Insert what the site's own syntax calls for at the cursor.
@@ -24,8 +25,27 @@ const onEnterRequest = new RequestType<{ uri: string; position: vscode.Position 
  */
 export async function insertNewline(site: EnterSite | undefined): Promise<void> {
   const editor = vscode.window.activeTextEditor
-  const document = editor?.document
-  if (!editor || !document || !site) return newline()
+  if (!editor) return
+  // The next Enter reads the cursor after the previous insertion; an obsolete insertion ends
+  // the queued keys as well, so they cannot edit a context the author has already left.
+  const previous = entering.get(editor) ?? Promise.resolve(true)
+  const insertion = previous.then((inserted) =>
+    inserted && vscode.window.activeTextEditor === editor ? insert(editor, site) : false
+  )
+  entering.set(editor, insertion)
+  try {
+    await insertion
+  } finally {
+    if (entering.get(editor) === insertion) entering.delete(editor)
+  }
+}
+
+async function insert(editor: vscode.TextEditor, site: EnterSite | undefined): Promise<boolean> {
+  const document = editor.document
+  if (!site) {
+    await newline()
+    return true
+  }
   const version = document.version
   const selection = editor.selection
   const current = () =>
@@ -43,21 +63,35 @@ export async function insertNewline(site: EnterSite | undefined): Promise<void> 
     vscode.workspace.onDidCloseTextDocument(changed),
     site.lifetime.onCancellationRequested(() => cancellation.cancel()),
   ]
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<undefined>((resolve) => {
+    deadline = setTimeout(() => resolve(undefined), 1_000)
+    listeners.push(cancellation.token.onCancellationRequested(() => resolve(undefined)))
+  })
   try {
-    const edits = await site.client
-      .sendRequest(
-        onEnterRequest,
-        { uri: document.uri.toString(), position: selection.active },
-        cancellation.token,
-      )
-      .then((reply) => site.client.protocol2CodeConverter.asTextEdits(reply?.edits))
-      .catch(() => undefined)
-    if (cancellation.token.isCancellationRequested || !current()) return
-    if (!edits?.length) return newline()
+    if (cancellation.token.isCancellationRequested || !current()) return false
+    const edits = await Promise.race([
+      site.client
+        .sendRequest(
+          onEnterRequest,
+          { uri: document.uri.toString(), position: selection.active },
+          cancellation.token,
+        )
+        .then((reply) => site.client.protocol2CodeConverter.asTextEdits(reply?.edits))
+        .catch(() => undefined),
+      expired,
+    ])
+    if (cancellation.token.isCancellationRequested || !current()) return false
+    if (!edits?.length) {
+      await newline()
+      return true
+    }
     const workspaceEdit = new vscode.WorkspaceEdit()
     workspaceEdit.set(document.uri, edits.map(withTabStops))
-    await vscode.workspace.applyEdit(workspaceEdit)
+    return await vscode.workspace.applyEdit(workspaceEdit)
   } finally {
+    clearTimeout(deadline)
+    cancellation.cancel()
     for (const listener of listeners) listener.dispose()
     cancellation.dispose()
   }

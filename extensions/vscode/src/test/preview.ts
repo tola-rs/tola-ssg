@@ -11,6 +11,7 @@ import {
   replace,
   withPreview,
   withSite,
+  withSites,
   workbenchText,
 } from './site.ts'
 
@@ -221,6 +222,48 @@ export async function runPreviewChecks(): Promise<void> {
           assert.equal(await fs.readFile(site.source.fsPath, 'utf8'), 'Published editor page.\n')
           assert.equal(await fs.readFile(site.plain.fsPath, 'utf8'), 'Unrelated saved source.\n')
           assert.deepEqual(opened, [])
+        })
+      ),
+  )
+
+  await check(
+    'Preview saves cross-workspace dependencies',
+    () =>
+      withPreview((opened) =>
+        withSites(2, async ([site, other]) => {
+          assert.ok(site && other)
+          const dependency = await vscode.workspace.openTextDocument(
+            vscode.Uri.file(path.join(other.root, 'packages/local/shared/0.1.0/lib.typ')),
+          )
+          const unrelated = await vscode.workspace.openTextDocument(other.source)
+          await replace(dependency, '#let message = [Saved cross-workspace dependency.]\n')
+          await replace(unrelated, 'Unrelated workspace edit.\n')
+          await vscode.window.showTextDocument(site.source)
+          const preview = vscode.commands.executeCommand('tola.openPreview', site.source)
+          const prompt = await workbenchText({ button: 'Save and Preview' })
+          assert.match(prompt, /lib\.typ/)
+          assert.doesNotMatch(prompt, /page\.typ/)
+          await within(preview, 'Cross-workspace preview')
+          assert.equal(dependency.isDirty, false)
+          assert.equal(unrelated.isDirty, true)
+          assert.equal(await fs.readFile(other.source.fsPath, 'utf8'), 'Published editor page.\n')
+          assert.match(opened.at(-1)!.html, /Saved cross-workspace dependency\./)
+        }, {
+          prepare: async (site) => {
+            const packages = path.join(path.dirname(site.root), 'selected site [2]', 'packages')
+            const shared = path.join(packages, 'local/shared/0.1.0')
+            await fs.mkdir(shared, { recursive: true })
+            await fs.writeFile(
+              path.join(shared, 'typst.toml'),
+              '[package]\nname = "shared"\nversion = "0.1.0"\nentrypoint = "lib.typ"\n',
+            )
+            await fs.writeFile(path.join(shared, 'lib.typ'), '#let message = [Saved dependency.]\n')
+            await fs.writeFile(site.source.fsPath, '#import "@local/shared:0.1.0": message\n#message\n')
+            const settings = path.join(site.root, '.vscode/settings.json')
+            const configured = JSON.parse(await fs.readFile(settings, 'utf8'))
+            configured['tola.packagePath'] = packages
+            await fs.writeFile(settings, JSON.stringify(configured))
+          },
         })
       ),
   )

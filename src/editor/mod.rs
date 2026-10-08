@@ -25,12 +25,19 @@ pub(crate) use packages::{
     remove_obsolete_package_paths,
 };
 
-/// `init` and `editor setup` report the same policy, so the wording lives here once.
-pub(crate) const VSCODE_EXTENSION_NOTICE: &str =
-    "Install the Tola VS Code extension; it never changes settings it does not own";
-
-pub(crate) const RESTART_CLIENTS_NOTICE: &str =
-    "Restart the selected editors after saving their settings";
+pub(crate) fn startup_instructions(editors: &[Editor]) -> String {
+    let mut steps = Vec::new();
+    if editors.contains(&Editor::Vscode) {
+        steps.push("VS Code: install the Tola extension if needed.");
+    }
+    if editors.contains(&Editor::Helix) {
+        steps.push("Helix: run `:lsp-restart` to apply the settings.");
+    }
+    if !manual_editors(editors).is_empty() {
+        steps.push("Save the copied settings, then restart the selected language services.");
+    }
+    steps.join("\n")
+}
 
 /// Where one editor's settings go and what its client needs to know about them.
 pub(crate) fn settings_instructions(editor: Editor) -> String {
@@ -46,7 +53,7 @@ pub(crate) fn settings_instructions(editor: Editor) -> String {
 /// to know about them.
 pub(crate) fn manual_settings_instructions(editor: Editor, settings: &str) -> String {
     format!(
-        "{} — copy these settings manually\n{}\n\n{}",
+        "{}\n{}\n\n{}",
         editor.name(),
         settings_instructions(editor),
         settings.trim_end()
@@ -57,13 +64,9 @@ pub(crate) fn manual_settings_instructions(editor: Editor, settings: &str) -> St
 pub(crate) fn selection_choices() -> Vec<String> {
     <Editor as clap::ValueEnum>::value_variants()
         .iter()
-        .map(|editor| {
-            let action = if writes_settings(*editor) {
-                "update settings file"
-            } else {
-                "print settings to copy manually"
-            };
-            format!("{} ({action})", editor.name())
+        .map(|editor| match editor.settings_file() {
+            Some(path) => format!("{} — {}", editor.name(), path.display()),
+            None => format!("{} — copy settings", editor.name()),
         })
         .collect()
 }

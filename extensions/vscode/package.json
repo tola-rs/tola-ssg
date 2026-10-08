@@ -1,7 +1,7 @@
 {
   "name": "tola",
   "displayName": "Tola",
-  "description": "Tola language services for Typst sources and site configuration: diagnostics, completion, hover, definitions, references, renames, highlights, code actions, colours, workspace symbol search, highlighting, formatting, folding, outlines, links, and preview commands.",
+  "description": "Language support and live preview for Tola sites and Typst sources.",
   "version": "0.1.0",
   "publisher": "tola",
   "license": "MIT",
@@ -304,19 +304,19 @@
           "type": "string",
           "default": "tola",
           "scope": "resource",
-          "description": "Command name or path of the Tola executable. A relative path resolves from the workspace folder; Tola runs it directly, without a shell."
+          "description": "Tola executable. Relative paths use the workspace folder."
         },
         "tola.onEnter": {
           "type": "boolean",
           "default": true,
           "scope": "resource",
-          "description": "Let Tola insert what the site's own syntax calls for when Enter is pressed in a Typst source, such as continuing a list, comment, or equation."
+          "description": "Continue lists, comments and equations when pressing Enter."
         },
         "tola.configPath": {
           "type": "string",
           "default": "tola.toml",
           "scope": "resource",
-          "description": "Site configuration file, absolute or relative to the workspace folder. If the file is missing, Tola does not fall back to `tola.toml`."
+          "description": "Site configuration file, absolute or relative to the workspace folder. An explicitly selected file never falls back to another configuration."
         },
         "tola.packagePath": {
           "type": "string",
@@ -357,7 +357,7 @@
           "type": "string",
           "default": "assets",
           "scope": "resource",
-          "description": "Directory a dropped or pasted file is copied into, relative to the site root. The file is published through the Bundle as `asset(<path>, read(<path>))`."
+          "description": "Directory for dropped or pasted files, relative to the site root."
         },
         "tola.previewTarget": {
           "type": "string",
@@ -450,16 +450,14 @@
           "when": "!tola.site"
         },
         {
-          "command": "tola.restart",
-          "when": "tola.site"
+          "command": "tola.restart"
         },
         {
           "command": "tola.revealOutput",
           "when": "tola.site"
         },
         {
-          "command": "tola.showLog",
-          "when": "tola.site"
+          "command": "tola.showLog"
         },
         {
           "command": "tola.refreshPages",
@@ -518,12 +516,23 @@
       {
         "id": "tola.gettingStarted",
         "title": "Get started with Tola",
-        "description": "Set up this folder's editor integration, build the site, then preview it. Every step asks before it writes into the workspace.",
+        "description": "Create or open a Tola site, then build and preview it.",
         "steps": [
           {
+            "id": "create",
+            "title": "Create a site",
+            "description": "Create a site with VS Code settings included.\n[Create a site](command:tola.initSite)",
+            "media": {
+              "image": "icon.png"
+            },
+            "completionEvents": [
+              "onCommand:tola.initSite"
+            ]
+          },
+          {
             "id": "setup",
-            "title": "Set up editor integration",
-            "description": "Regenerates the editor package mirror for this site and merges the workspace settings it needs.\n[Set up this folder](command:tola.editorSetup)",
+            "title": "Configure an existing site",
+            "description": "For an existing site, add editor settings and refresh package sources. Sites created here already include these settings.\n[Set up this folder](command:tola.editorSetup)",
             "media": {
               "image": "icon.png"
             },
@@ -534,7 +543,7 @@
           {
             "id": "build",
             "title": "Build the site",
-            "description": "Writes the site's output files with the same CLI invocation the Build Site command uses.\n[Build the site](command:tola.build)",
+            "description": "Build the site and write its output files.\n[Build the site](command:tola.build)",
             "media": {
               "image": "icon.png"
             },
@@ -545,23 +554,12 @@
           {
             "id": "preview",
             "title": "Preview a page",
-            "description": "Publishes the current source through the loopback preview server and opens the page it is served at.\n[Preview the current source](command:tola.startPreview)",
+            "description": "Save the site and open a live preview of the current page.\n[Open preview](command:tola.openPreview)",
             "media": {
               "image": "icon.png"
             },
             "completionEvents": [
-              "onCommand:tola.startPreview"
-            ]
-          },
-          {
-            "id": "create",
-            "title": "Create a site",
-            "description": "For a folder that has no site yet, `tola init` writes a starting site after asking for the directory and confirming.\n[Create a site](command:tola.initSite)",
-            "media": {
-              "image": "icon.png"
-            },
-            "completionEvents": [
-              "onCommand:tola.initSite"
+              "onCommand:tola.openPreview"
             ]
           }
         ]

@@ -21,13 +21,7 @@ pub(super) fn snippet(directory: &EditorDirectory) -> String {
             },
         },
     });
-    let mut text = String::from(
-        "// Install the Typst syntax package, then keep this in the site's `.sublime-project`:\n\
-         // Sublime Text reads comments and trailing commas in its project files.\n",
-    );
-    text.push_str(
-        &serde_json::to_string_pretty(&settings).expect("editor settings are serializable"),
-    );
+    let text = serde_json::to_string_pretty(&settings).expect("editor settings are serializable");
     crate::writes::with_final_newline(text)
 }
 

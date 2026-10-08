@@ -69,6 +69,7 @@ pub(crate) enum SourceCompilation {
     /// The selection index one correction asked for, which no completed check could return.
     Selected {
         revision: u64,
+        serial: u64,
         root: PathBuf,
         selected: Result<Arc<SelectedInterfaces>, SourceFailure>,
     },
@@ -154,6 +155,7 @@ where
             },
             SourceJob::Selection(request) => SourceCompilation::Selected {
                 revision: request.revision,
+                serial: request.serial,
                 root: request.root.clone(),
                 selected: crate::analysis::site_selected_interfaces(
                     &request.root,

@@ -37,17 +37,20 @@ export class SiteCli {
     const child = this.start(selection.command, args, selection.folder.uri.fsPath)
     this.building.set(key, child)
     await new Promise<void>((resolve) => {
+      let failedToStart = false
       const finish = () => {
         this.building.delete(key)
         resolve()
       }
-      child.once('error', (error) => {
+      child.once('error', () => {
+        failedToStart = true
         this.report(
-          new Error(`Tola could not start the build for ${selection.folder.name}: ${error.message}`),
+          new Error(`Tola could not start the build for ${selection.folder.name}.`),
         )
         finish()
       })
       child.once('close', (code, signal) => {
+        if (failedToStart) return
         const seconds = ((Date.now() - started) / 1000).toFixed(1)
         if (code === 0) {
           this.output.appendLine(`Tola built ${selection.folder.name} in ${seconds}s.`)
@@ -86,12 +89,9 @@ export class SiteCli {
       printed += chunk.toString()
     })
     child.stderr?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
-    const code = await new Promise<number | null>((resolve) => {
-      child.once('error', (error) => {
-        this.report(
-          new Error(`Tola could not read the configuration of ${selection.folder.name}: ${error.message}`),
-        )
-        resolve(null)
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.once('error', () => {
+        reject(new Error(`Tola could not read the configuration of ${selection.folder.name}.`))
       })
       child.once('close', resolve)
     })
@@ -156,7 +156,7 @@ export class SiteCli {
     ) return
     await this.run(
       command,
-      ['init', directory.fsPath, '--no-interactive', '--editor', 'vscode'],
+      ['init', directory.fsPath, '--editor', 'vscode'],
       directory.fsPath,
       'Create Site',
     )
@@ -176,7 +176,7 @@ export class SiteCli {
       child.once('close', (code: number | null) => resolve({ code }))
     })
     if (outcome.error) {
-      this.report(new Error(`Tola could not start ${label} in ${cwd}: ${outcome.error.message}`))
+      this.report(new Error(`Tola could not start ${label}. Open Tola output for details.`))
     } else if (outcome.code === 0) {
       void vscode.window.showInformationMessage(`Tola ran ${label} in ${cwd}.`)
     } else {
@@ -197,6 +197,7 @@ export class SiteCli {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     this.children.add(child)
+    child.once('error', (error: Error) => this.output.appendLine(error.message))
     child.stdout?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
     child.stderr?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
     child.once('close', () => this.children.delete(child))

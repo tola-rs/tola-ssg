@@ -32,6 +32,9 @@ pub(super) fn imports(
         // spells, and a link target by the path the filesystem resolves.
         let configured = config.get_root().join(id.vpath().get_without_slash());
         let resolved = root.join(id.vpath().get_without_slash());
+        if resolved.extension() != Some(std::ffi::OsStr::new("typ")) {
+            continue;
+        }
         if boundary.check(&resolved).is_err() {
             continue;
         }
@@ -252,6 +255,8 @@ mod tests {
             &[
                 ("content/head.typ", "Head\n"),
                 ("content/data.json", "{}\n"),
+                ("README.md", "#include \"content/head.typ\"\n"),
+                ("notes.txt", "#read(\"content/data.json\")\n"),
             ],
         );
         let edit = rename(
@@ -266,6 +271,7 @@ mod tests {
             ],
         )
         .expect("one edit");
+        assert_eq!(edit.changes.as_ref().unwrap().len(), 1);
         let edits = document_edits(edit, &root);
         let texts: Vec<&str> = edits.iter().map(|edit| edit.new_text.as_str()).collect();
         assert_eq!(texts, ["part.typ", "site.json"], "{edits:?}");

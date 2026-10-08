@@ -171,6 +171,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         };
         let settings = Settings::read(&parameters.settings);
         if !settings.is_empty() {
+            self.settings_pull = None;
             self.apply_settings(settings);
             return Ok(());
         }
@@ -376,6 +377,36 @@ mod tests {
 
     /// A settings notification that has no settings asks the client for the one section Tola
     /// reads, and an answer with no section leaves every setting as it stands.
+    #[test]
+    fn inline_settings_supersede_pulls() {
+        let mut connection = ready(Vec::new());
+        ready_workspace(&mut connection).features.configuration = true;
+        let _ = connection
+            .notification(Notification::new(
+                notification::DidChangeConfiguration::METHOD.into(),
+                json!({"settings": null}),
+            ))
+            .unwrap();
+        let Message::Request(pulled) = messages(&mut connection).remove(0) else {
+            panic!("settings request");
+        };
+        let _ = connection
+            .notification(Notification::new(
+                notification::DidChangeConfiguration::METHOD.into(),
+                json!({"settings": {"formatter": {"printWidth": 80}}}),
+            ))
+            .unwrap();
+        connection
+            .response(Response::new_ok(
+                pulled.id,
+                json!([{
+                    "formatter": {"printWidth": 120}
+                }]),
+            ))
+            .unwrap();
+        assert_eq!(connection.workspace().formatter.print_width, 80);
+    }
+
     #[test]
     fn settings_pull_reads_only_the_tola_section() {
         let mut connection = ready(Vec::new());
