@@ -17,12 +17,9 @@ use crate::help::model::{Anchor, HelpCategory, HelpPage, LinkTarget, PageId, anc
 use crate::i18n::{HelpLanguage, HelpText, PackageTranslations};
 use crate::terminal::documentation::Documentation;
 
-type Template = fn() -> std::result::Result<String, tola_config::ConfigTemplateError>;
-
 struct ConfigTable {
     section: &'static str,
     array: bool,
-    template: Template,
 }
 
 impl ConfigTable {
@@ -39,82 +36,66 @@ const TABLES: &[ConfigTable] = &[
     ConfigTable {
         section: SiteSectionConfig::TEMPLATE_SECTION,
         array: false,
-        template: SiteSectionConfig::try_template_with_header,
     },
     ConfigTable {
         section: BuildSectionConfig::TEMPLATE_SECTION,
         array: false,
-        template: BuildSectionConfig::try_template_with_header,
     },
     ConfigTable {
         section: MinifyConfig::TEMPLATE_SECTION,
         array: false,
-        template: MinifyConfig::try_template_with_header,
     },
     ConfigTable {
         section: ReferencesConfig::TEMPLATE_SECTION,
         array: false,
-        template: ReferencesConfig::try_template_with_header,
     },
     ConfigTable {
         section: HooksConfig::TEMPLATE_SECTION,
         array: false,
-        template: HooksConfig::try_template_with_header,
     },
     ConfigTable {
         section: BeforeBuildHookConfig::TEMPLATE_SECTION,
         array: true,
-        template: BeforeBuildHookConfig::try_template_with_header,
     },
     ConfigTable {
         section: OutputCommandConfig::TEMPLATE_SECTION,
         array: true,
-        template: OutputCommandConfig::try_template_with_header,
     },
     ConfigTable {
         section: AfterPublishHookConfig::TEMPLATE_SECTION,
         array: true,
-        template: AfterPublishHookConfig::try_template_with_header,
     },
     ConfigTable {
         section: AssetsConfig::TEMPLATE_SECTION,
         array: false,
-        template: AssetsConfig::try_template_with_header,
     },
     ConfigTable {
         section: TypstSectionConfig::TEMPLATE_SECTION,
         array: false,
-        template: TypstSectionConfig::try_template_with_header,
     },
     ConfigTable {
         section: FontsConfig::TEMPLATE_SECTION,
         array: false,
-        template: FontsConfig::try_template_with_header,
     },
     ConfigTable {
         section: IconsConfig::TEMPLATE_SECTION,
         array: false,
-        template: IconsConfig::try_template_with_header,
     },
     ConfigTable {
         section: VendorConfig::TEMPLATE_SECTION,
         array: false,
-        template: VendorConfig::try_template_with_header,
     },
     ConfigTable {
         section: ServerConfig::TEMPLATE_SECTION,
         array: false,
-        template: ServerConfig::try_template_with_header,
     },
     ConfigTable {
         section: DevConfig::TEMPLATE_SECTION,
         array: false,
-        template: DevConfig::try_template_with_header,
     },
     ConfigTable {
         section: DiagnosticsConfig::TEMPLATE_SECTION,
         array: false,
-        template: DiagnosticsConfig::try_template_with_header,
     },
 ];
 
@@ -161,8 +142,6 @@ pub(crate) fn page_of(
         }
         PageId::Demo { id } => demo_page(id, language, cross_refs),
         PageId::DemoFile { id, path } => demo_file_page(id, path, language),
-        PageId::DemoOutputs { id } => output_page(id, None, None, language, cross_refs),
-        PageId::DemoOutput { id, path } => output_page(id, Some(path), None, language, cross_refs),
     }
 }
 
@@ -219,62 +198,56 @@ pub(crate) fn render(
 fn overview_page(language: HelpLanguage, cross_refs: CrossRefs) -> HelpPage {
     let id = PageId::Overview;
     let text = |phrase| crate::i18n::text(language, phrase);
-    let mut markdown = format!(
-        "# Tola help\n\n{}\n\n{}\n",
-        text(HelpText::SiteModel),
-        text(HelpText::HelpUsage)
-    );
-    for (title, category, command) in [
-        ("Configuration", HelpCategory::Config, "config"),
-        ("Packages", HelpCategory::Packages, "package"),
-        ("Demos", HelpCategory::Demos, "demo"),
+    let mut markdown = format!("# Tola help\n\n{}\n", text(HelpText::HelpUsage));
+    for (title, category) in [
+        ("Configuration", HelpCategory::Config),
+        ("Packages", HelpCategory::Packages),
+        ("Demos", HelpCategory::Demos),
     ] {
         let linked = cross_reference(
             title,
             &LinkTarget::Page(PageId::Index(category)),
             cross_refs,
         );
-        markdown.push_str(&format!("\n- {linked} — `tola help {command}`\n"));
+        markdown.push_str(&format!("\n- {linked}\n"));
     }
-    markdown.push_str("\n## Find a topic\n\n");
-    for (name, exports, phrase) in [
-        (
-            "source",
-            &["tola-meta", "all-sources", "parse-sources"][..],
-            HelpText::SourcePages,
-        ),
+    markdown.push_str("\n## Examples\n\n");
+    for (name, exports) in [
+        ("source", &["tola-meta", "all-sources", "parse-sources"][..]),
         (
             "address",
             &["route-to-output", "output-to-url", "asset-url"][..],
-            HelpText::PageAddresses,
         ),
-        (
-            "document",
-            &["headings", "references"][..],
-            HelpText::DocumentQueries,
-        ),
-        ("web", &["feed", "sitemap"][..], HelpText::WebOutputs),
+        ("document", &["headings", "references"][..]),
+        ("web", &["feed", "sitemap"][..]),
     ] {
         let command = format!("tola help package {name} {}", exports.join(" "));
         markdown.push_str(&format!(
-            "- {} — {}\n",
-            named(&command, package_target(name, exports), cross_refs),
-            text(phrase)
+            "- {}\n",
+            named(&command, package_target(name, exports), cross_refs)
         ));
     }
     markdown.push_str(&format!(
-        "- {} — {}\n",
-        named("tola help config build", table_target("build"), cross_refs),
-        text(HelpText::BuildPaths)
+        "- {}\n",
+        named("tola help config build", table_target("build"), cross_refs)
     ));
     markdown.push_str(&format!(
-        "- {} — {}\n",
+        "- {}\n",
         named(
             "tola help config build.hooks",
             table_target("build.hooks"),
             cross_refs
-        ),
-        text(HelpText::BuildHooks)
+        )
+    ));
+    markdown.push_str(&format!(
+        "- {}\n",
+        named(
+            "tola help demo sources",
+            Some(LinkTarget::Page(PageId::Demo {
+                id: "sources".into(),
+            })),
+            cross_refs,
+        )
     ));
     HelpPage::new(id, markdown)
 }
@@ -285,18 +258,13 @@ fn index_page(category: HelpCategory, language: HelpLanguage, cross_refs: CrossR
     match category {
         HelpCategory::Config => {
             markdown.push_str("# Configuration tables\n\n");
-            for table in TABLES
-                .iter()
-                .filter(|table| !is_empty_container(table.section))
-            {
-                let shown = sole_child_table(table.section).unwrap_or(table);
-                let label = named(&shown.header(), table_target(shown.section), cross_refs);
-                let command = PageId::Config {
-                    section: shown.section.into(),
-                }
-                .selector()
-                .expect("a configuration page has CLI arguments");
-                markdown.push_str(&format!("- {label} — `tola help {command}`\n"));
+            // A table with settings of its own is an entry; so is a container grouping several
+            // child tables, such as `[build.hooks]`.
+            for table in TABLES.iter().filter(|table| {
+                has_own_key(table.section) || child_tables(table.section).count() > 1
+            }) {
+                let label = named(&table.header(), table_target(table.section), cross_refs);
+                markdown.push_str(&format!("- {label}\n"));
             }
         }
         HelpCategory::Packages => {
@@ -308,10 +276,7 @@ fn index_page(category: HelpCategory, language: HelpLanguage, cross_refs: CrossR
                     package_target(&name, &[]),
                     cross_refs,
                 );
-                let command = PageId::Package { name }
-                    .selector()
-                    .expect("a package page has CLI arguments");
-                markdown.push_str(&format!("- {label} — `tola help {command}`\n"));
+                markdown.push_str(&format!("- {label}\n"));
             }
         }
         HelpCategory::Demos => {
@@ -322,13 +287,7 @@ fn index_page(category: HelpCategory, language: HelpLanguage, cross_refs: CrossR
             for demo in crate::demos::all() {
                 let target = LinkTarget::Page(PageId::Demo { id: demo.id.into() });
                 let title = cross_reference(demo.title(language), &target, cross_refs);
-                let command = PageId::Demo { id: demo.id.into() }
-                    .selector()
-                    .expect("a demo has CLI arguments");
-                markdown.push_str(&format!(
-                    "- {title} — {} — `tola help {command}`\n",
-                    demo.summary(language)
-                ));
+                markdown.push_str(&format!("- {title} — {}\n", demo.summary(language)));
             }
         }
     }
@@ -353,14 +312,6 @@ pub(crate) fn label(id: &PageId, language: HelpLanguage) -> String {
             .unwrap_or(id)
             .into(),
         PageId::DemoFile { id, path } => format!(
-            "{} · {path}",
-            label(&PageId::Demo { id: id.clone() }, language)
-        ),
-        PageId::DemoOutputs { id } => format!(
-            "{} · Outputs",
-            label(&PageId::Demo { id: id.clone() }, language)
-        ),
-        PageId::DemoOutput { id, path } => format!(
             "{} · {path}",
             label(&PageId::Demo { id: id.clone() }, language)
         ),
@@ -411,7 +362,6 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
     let id = PageId::Config {
         section: table.section.to_owned(),
     };
-    let template = (table.template)()?;
     let mut markdown = format!("# {} - configuration table\n", table.header());
     let translations = crate::i18n::sections(language);
     if let Some(documentation) = documented(table.section).map(|english| {
@@ -421,7 +371,9 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
     }) {
         markdown.push_str(&format!("\n{documentation}\n"));
     }
-    if template.trim().is_empty() {
+    if has_own_key(table.section) {
+        markdown.push_str(&declared_keys(table.section, translations, cross_refs));
+    } else {
         markdown.push_str("\nConfigure this section through its child tables:\n");
         for child in child_tables(table.section) {
             let child_id = PageId::Config {
@@ -431,17 +383,10 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
             // A table header is an array when its declaration is, so it includes its own brackets.
             let table = cross_reference(&header, &LinkTarget::Page(child_id), cross_refs);
             markdown.push_str(&format!(
-                "- {table} — `tola help config {}`\n",
-                child.section
+                "- {table} - {}\n",
+                child_description(child, translations)
             ));
         }
-    } else {
-        markdown.push_str(&format!(
-            "\n{}\n\n",
-            crate::i18n::text(language, HelpText::DefaultValues)
-        ));
-        markdown.push_str(&code_block("toml", &template));
-        markdown.push_str(&declared_keys(table.section, translations, cross_refs));
     }
     if let Some(english) = section_help(table.section) {
         let help = translations
@@ -471,9 +416,9 @@ fn table_page(target: &str, language: HelpLanguage, cross_refs: CrossRefs) -> Re
     Ok(HelpPage::new(id, markdown))
 }
 
-/// Every key this section's own page lists, in schema order: the keys its declaration writes,
-/// without the nested ones. A key that opens a child table points at that table's page, and the
-/// map-shaped `[site.extra]` is explained by the table that holds it.
+/// Every key this section's declaration writes, in schema order, without the nested ones: its
+/// settings, and the keys opening child tables, each rendered as one bullet. The map-shaped
+/// `[site.extra]` is explained by the table that holds it.
 ///
 /// The renderer and the translation guard share this one enumeration.
 fn documented_fields(section: &str) -> Vec<&'static str> {
@@ -521,6 +466,19 @@ fn child_tables(section: &str) -> impl Iterator<Item = &'static ConfigTable> {
     })
 }
 
+/// The one rendered line describing one child table: the documentation its own page opens with.
+fn child_description(
+    child: &ConfigTable,
+    translations: Option<&crate::i18n::SectionTranslations>,
+) -> String {
+    let english = documented(child.section).expect("every table documents itself");
+    one_line(
+        translations
+            .and_then(|tables| tables.documentation(child.section))
+            .unwrap_or(english),
+    )
+}
+
 /// Whether a table holds nothing but one child table: no key of its own, and exactly one key
 /// opening a table, so that table's page is the whole content the container has.
 fn is_empty_container(section: &str) -> bool {
@@ -531,26 +489,29 @@ fn is_empty_container(section: &str) -> bool {
     if children.next().is_some() {
         return false;
     }
+    !has_own_key(section)
+}
+
+/// Whether a table writes a key of its own: one that names a setting instead of opening a child
+/// table.
+fn has_own_key(section: &str) -> bool {
     documented_fields(section)
         .iter()
-        .all(|path| child_table(path).is_some())
+        .any(|path| child_table(path).is_none())
 }
 
 /// The one child table `section` reaches, when a container has nothing but it.
-///
-/// A table that declares no key of its own still reaches its child through the key naming it, so
-/// the child is the whole content: the index lists the child, and the container's page shows it.
 fn sole_child_table(section: &str) -> Option<&'static ConfigTable> {
     is_empty_container(section)
         .then(|| child_tables(section).next())
         .flatten()
 }
 
-/// Every key the section's own declaration writes, with what each one means.
+/// Every key the section's own declaration writes, one bullet each: a setting with its
+/// documentation, a child table with the description its own page opens with.
 ///
-/// The template prints the values; the meaning is the declaration's documentation, and a key that
-/// opens a child table points at the table that documents it. One key's documentation is one
-/// rendered line: the page wraps it.
+/// The meaning is the declaration's documentation, and one key is one rendered line: the page
+/// wraps it.
 fn declared_keys(
     section: &str,
     translations: Option<&crate::i18n::SectionTranslations>,
@@ -558,27 +519,30 @@ fn declared_keys(
 ) -> String {
     let mut markdown = String::new();
     for path in documented_fields(section) {
-        let name = path
-            .strip_prefix(section)
-            .unwrap_or(path)
-            .trim_start_matches('.');
-        let meaning = match child_table(path) {
-            Some(child) => cross_reference(
+        if let Some(child) = child_table(path) {
+            let header = cross_reference(
                 &child.header(),
                 &LinkTarget::Page(PageId::Config {
                     section: child.section.to_owned(),
                 }),
                 cross_refs,
-            ),
-            None => {
-                let english = documented(path).expect("the enumeration documents every field");
-                one_line(
-                    translations
-                        .and_then(|tables| tables.field(path))
-                        .unwrap_or(english),
-                )
-            }
-        };
+            );
+            markdown.push_str(&format!(
+                "\n- {header} - {}",
+                child_description(child, translations)
+            ));
+            continue;
+        }
+        let name = path
+            .strip_prefix(section)
+            .unwrap_or(path)
+            .trim_start_matches('.');
+        let english = documented(path).expect("the enumeration documents every field");
+        let meaning = one_line(
+            translations
+                .and_then(|tables| tables.field(path))
+                .unwrap_or(english),
+        );
         markdown.push_str(&format!("\n- `{name}` - {meaning}"));
     }
     markdown.push('\n');
@@ -928,74 +892,6 @@ fn demo_file_page(id: &str, path: &str, language: HelpLanguage) -> Result<HelpPa
     Ok(HelpPage::new(page, markdown))
 }
 
-pub(crate) fn output_page(
-    id: &str,
-    path: Option<&str>,
-    ready: Option<&crate::demos::preview::PreviewReady>,
-    language: HelpLanguage,
-    cross_refs: CrossRefs,
-) -> Result<HelpPage> {
-    demo(id)?;
-    let page = match path {
-        Some(path) => PageId::DemoOutput {
-            id: id.into(),
-            path: path.into(),
-        },
-        None => PageId::DemoOutputs { id: id.into() },
-    };
-    let mut markdown = format!("# {}\n\n", label(&page, language));
-    let Some(ready) = ready else {
-        markdown.push_str(crate::i18n::text(language, HelpText::DemoOutputs));
-        markdown.push('\n');
-        return Ok(HelpPage::new(page, markdown));
-    };
-    if let Some(path) = path {
-        let output = ready
-            .outputs
-            .iter()
-            .find(|output| output.path == path)
-            .ok_or_else(|| {
-                help_error(
-                    crate::codes::help::TARGET,
-                    format!("`{path}` is not an output of demo `{id}`"),
-                    "Choose a file from the demo's output list".into(),
-                )
-            })?;
-        markdown.push_str(&file_content(
-            &output.path,
-            &output.bytes,
-            &output.media_type,
-        ));
-        let uri = output_url(&ready.url, &output.path)?;
-        markdown.push_str(&format!("\n[Open in browser]({uri})\n"));
-    } else {
-        markdown.push_str("| Output | Media type | Bytes |\n| --- | --- | --- |\n");
-        for output in ready.outputs.iter() {
-            let target = LinkTarget::Page(PageId::DemoOutput {
-                id: id.into(),
-                path: output.path.clone(),
-            });
-            let file = cross_reference(&output.path, &target, cross_refs);
-            markdown.push_str(&format!(
-                "| {file} | `{}` | {} |\n",
-                output.media_type,
-                output.bytes.len()
-            ));
-        }
-    }
-    Ok(HelpPage::new(page, markdown))
-}
-
-pub(crate) fn output_url(landing: &str, path: &str) -> Result<String> {
-    let output = tola_address::OutputPath::parse(path)?;
-    let mut uri = url::Url::parse(landing)?;
-    uri.path_segments_mut()
-        .map_err(|_| anyhow::anyhow!("the demo has no browser address"))?
-        .pop_if_empty()
-        .extend(output.as_str().split('/'));
-    Ok(uri.into())
-}
-
 fn file_content(path: &str, bytes: &[u8], media_type: &str) -> String {
     let mut markdown = format!("`{media_type}` · {} bytes\n\n", bytes.len());
     let text_type = media_type.starts_with("text/")
@@ -1007,9 +903,7 @@ fn file_content(path: &str, bytes: &[u8], media_type: &str) -> String {
     if text_type && let Ok(source) = std::str::from_utf8(bytes) {
         markdown.push_str(&code_block(source_language(path), source));
     } else {
-        markdown.push_str(
-            "Binary file. Preview the demo to open its published output in the browser.\n",
-        );
+        markdown.push_str("Binary file. The address below serves it while the preview runs.\n");
     }
     markdown
 }
@@ -1240,6 +1134,19 @@ mod tests {
     }
 
     #[test]
+    fn config_index_lists_grouping_containers() {
+        let index = page(
+            &targets(&["config"]),
+            HelpLanguage::English,
+            CrossRefs::Suppress,
+        )
+        .unwrap();
+        let markdown = index.markdown();
+        assert!(markdown.contains("- `[build.hooks]`"), "{markdown}");
+        assert!(!markdown.contains("- `[typst]`"), "{markdown}");
+    }
+
+    #[test]
     fn help_links_resolve_registered_pages() {
         let mut loaded: Vec<(PageId, HelpDocument)> = Vec::new();
         for arguments in requests() {
@@ -1416,56 +1323,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn output_views_use_ready_bytes() {
-        let ready = crate::demos::preview::PreviewReady {
-            url: "http://127.0.0.1:1234/docs/".into(),
-            outputs: std::sync::Arc::from([
-                crate::demos::preview::DemoOutput {
-                    path: "feed.xml".into(),
-                    media_type: "application/rss+xml".into(),
-                    bytes: bytes::Bytes::from_static(b"<rss>content</rss>"),
-                },
-                crate::demos::preview::DemoOutput {
-                    path: "download.bin".into(),
-                    media_type: "application/octet-stream".into(),
-                    bytes: bytes::Bytes::from_static(b"binary"),
-                },
-            ]),
-        };
-        let text = HelpDocument::parse(
-            output_page(
-                "feeds",
-                Some("feed.xml"),
-                Some(&ready),
-                HelpLanguage::English,
-                CrossRefs::Emit,
-            )
-            .unwrap(),
-        );
-        assert!(text.blocks.iter().any(|block| matches!(block, Block::Code { source, .. } if source.trim_end_matches('\n') == "<rss>content</rss>")));
-        let binary = HelpDocument::parse(
-            output_page(
-                "feeds",
-                Some("download.bin"),
-                Some(&ready),
-                HelpLanguage::English,
-                CrossRefs::Emit,
-            )
-            .unwrap(),
-        );
-        assert!(
-            !binary
-                .blocks
-                .iter()
-                .any(|block| matches!(block, Block::Code { .. }))
-        );
-        assert_eq!(
-            output_url(&ready.url, "100% notes.html").unwrap(),
-            "http://127.0.0.1:1234/docs/100%25%20notes.html"
-        );
     }
 
     #[test]

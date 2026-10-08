@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use tola_build::InputScope;
 use tola_build::site::SiteRevision;
 
@@ -16,17 +15,9 @@ use crate::cli::output::CommandOutput;
 use crate::config::{ConfigOverrides, ServerOverrides};
 use crate::terminal::Terminal;
 
-#[derive(Clone, Debug)]
-pub(crate) struct DemoOutput {
-    pub(crate) path: String,
-    pub(crate) media_type: String,
-    pub(crate) bytes: Bytes,
-}
-
 #[derive(Debug)]
 pub(crate) struct PreviewReady {
     pub(crate) url: String,
-    pub(crate) outputs: Arc<[DemoOutput]>,
 }
 
 #[derive(Clone, Debug)]
@@ -164,7 +155,7 @@ fn serve(
     let (config, server, _, loader) = loaded.into_parts();
     let ready = |url: &str, revision: Arc<SiteRevision>| {
         token.ensure_active()?;
-        let ready = ready_outputs(demo, url, &revision)?;
+        let ready = ready_preview(demo, url, &revision)?;
         *status
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -182,7 +173,7 @@ fn serve(
     )
 }
 
-fn ready_outputs(demo: &Demo, url: &str, revision: &SiteRevision) -> Result<PreviewReady> {
+fn ready_preview(demo: &Demo, url: &str, revision: &SiteRevision) -> Result<PreviewReady> {
     let landing = tola_address::OutputPath::parse(demo.landing_output())?;
     anyhow::ensure!(
         revision.outputs().output(&landing).is_some(),
@@ -191,17 +182,7 @@ fn ready_outputs(demo: &Demo, url: &str, revision: &SiteRevision) -> Result<Prev
     let route = tola_address::route_for_output(&landing);
     let path = revision.config().url_mount().browser_path(&route);
     let url = url::Url::parse(url)?.join(&path)?.to_string();
-    let outputs = revision
-        .outputs()
-        .outputs()
-        .iter()
-        .map(|output| DemoOutput {
-            path: output.path().as_str().to_owned(),
-            media_type: output.declaration().media_type().as_str().to_owned(),
-            bytes: Bytes::from_owner(output.bytes_owner()),
-        })
-        .collect();
-    Ok(PreviewReady { url, outputs })
+    Ok(PreviewReady { url })
 }
 
 #[cfg(test)]
@@ -251,12 +232,12 @@ mod tests {
             .position(|bytes| bytes == b"\r\n\r\n")
             .unwrap()
             + 4;
-        let landing = ready
-            .outputs
-            .iter()
-            .find(|output| output.path == demo.landing_output())
-            .unwrap();
-        assert_eq!(&response[body..], landing.bytes.as_ref());
+        assert!(
+            response[body..]
+                .windows("Body links become backlinks".len())
+                .any(|window| window == b"Body links become backlinks"),
+            "the served landing page is the demo's own output"
+        );
         preview.stop().unwrap();
         preview.stop().unwrap();
         assert!(!temporary.exists());
@@ -281,8 +262,7 @@ mod tests {
         let mut second = DemoPreview::start(demo).unwrap();
         first.stop().unwrap();
         assert!(!second.cancellation.is_requested());
-        let ready = wait_until_ready(&mut second);
-        assert!(!ready.outputs.is_empty());
+        wait_until_ready(&mut second);
         second.stop().unwrap();
     }
 

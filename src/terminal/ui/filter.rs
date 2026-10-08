@@ -61,6 +61,11 @@ impl TextLine {
         self.input.paste(text);
     }
 
+    /// Replaces the line's text; the cursor rests at its end.
+    pub(crate) fn set_text(&mut self, text: impl Into<String>) {
+        self.input.set(text.into());
+    }
+
     /// Draws the labelled line with its cursor inside `area`.
     pub(crate) fn draw(&self, frame: &mut Frame, area: Rect, palette: Palette) {
         if area.height == 0 || area.width == 0 {
@@ -80,7 +85,7 @@ impl TextLine {
         let cursor = label.width() + focused.saturating_sub(window.start_column);
         let line = Line::from(vec![
             Span::styled(label.clone(), palette.accent_style()),
-            Span::styled(window.text.to_owned(), palette.selected_style()),
+            Span::styled(window.text.to_owned(), palette.emphasis_style()),
         ]);
         frame.render_widget(Paragraph::new(line), area);
         let cursor = area.x + u16::try_from(cursor).unwrap_or(u16::MAX);

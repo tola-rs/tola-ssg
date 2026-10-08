@@ -1,6 +1,5 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,10 +10,12 @@ use crate::cancellation::Cancellation;
 use crate::cli::HelpArgs;
 use crate::cli::log::{LogFile, destination};
 use crate::cli::output::CommandOutput;
-use crate::demos::preview::{DemoPreview, PreviewReady, PreviewStatus};
+use crate::demos::preview::{DemoPreview, PreviewStatus};
 use crate::help::model::{HelpDocument, LinkTarget, PageId};
 use crate::help::pages::{self, CrossRefs};
-use crate::help::view::{PreviewPhase, PreviewState, ReaderAction, View};
+use crate::help::view::{
+    Clipboard, DestinationSource, PreviewPhase, PreviewState, ReaderAction, View,
+};
 use crate::i18n::HelpLanguage;
 use crate::terminal::session::Terminal as _;
 use crate::terminal::session::{self, ProcessTerminal, Shown, TerminalRefused};
@@ -104,25 +105,17 @@ fn run_interactive(
 ) -> Result<()> {
     let preview = Rc::new(RefCell::new(DemoSession::default()));
     let completed = (|| -> Result<()> {
-        let read_preview = Rc::clone(&preview);
         let load = |id: &PageId| {
-            let page = match id {
-                PageId::DemoOutputs { id } => {
-                    let ready = read_preview.borrow_mut().ready(id);
-                    pages::output_page(id, None, ready.as_deref(), language, CrossRefs::Emit)
-                }
-                PageId::DemoOutput { id, path } => {
-                    let ready = read_preview.borrow_mut().ready(id);
-                    pages::output_page(id, Some(path), ready.as_deref(), language, CrossRefs::Emit)
-                }
-                _ => pages::page_of(id, language, CrossRefs::Emit),
-            }?;
+            let page = pages::page_of(id, language, CrossRefs::Emit)?;
             Ok(HelpDocument::parse(page))
         };
         let poll_preview = Rc::clone(&preview);
+        let destinations = ExportDestinations;
         let poll = || poll_preview.borrow_mut().display(language);
-        let exported_sites = Rc::clone(&preview);
-        let has_export = |id: &str| exported_sites.borrow().exported_sites.contains_key(id);
+        let clipboard = ReaderClipboard {
+            sink: output.terminal().sink(),
+            cancellation: cancellation.token(),
+        };
         let requested_id = requested.id.clone();
         let mut view = View::new(
             HelpDocument::parse(requested),
@@ -133,7 +126,8 @@ fn run_interactive(
         view.set_language(language);
         view.set_mouse(!args.no_mouse);
         view.set_preview(&poll);
-        view.set_exports(&has_export);
+        view.set_destinations(&destinations);
+        view.set_clipboard(&clipboard);
         if let LinkTarget::PageAnchor(_, anchor) = &target {
             view.navigate(&LinkTarget::PageAnchor(requested_id, anchor.clone()));
         }
@@ -157,7 +151,6 @@ fn run_interactive(
                 args.edit,
                 args.editor.as_deref(),
                 output,
-                &preview,
                 cancellation,
             ) {
                 Ok(notice) => view.set_notice(notice),
@@ -226,22 +219,11 @@ fn run_interactive(
                     edit,
                     args.editor.as_deref(),
                     output,
-                    &preview,
                     cancellation,
                 ),
                 ReaderAction::OpenBrowser { url } => {
                     crate::editor::launch::open_url(&url, &cancellation.token())
                         .map(|()| format!("Opened {url}"))
-                }
-                ReaderAction::OpenExport { demo } => {
-                    let exported = preview.borrow().exported_sites.get(demo.as_str()).cloned();
-                    match exported {
-                        Some(path) => crate::editor::launch::open(&path, &cancellation.token())
-                            .map(|()| format!("Opened {}", path.display())),
-                        None => Err(anyhow::anyhow!(
-                            "export this demo before opening its directory"
-                        )),
-                    }
                 }
             };
             match acted {
@@ -269,16 +251,11 @@ fn export_demo(
     edit: bool,
     editor: Option<&str>,
     output: &CommandOutput,
-    session: &RefCell<DemoSession>,
     cancellation: &Cancellation,
 ) -> Result<String> {
     destination::check_directory(output.log().map(LogFile::path), destination)?;
     let demo = pages::demo(id)?;
     let exported = crate::demos::export::write(demo, destination, &cancellation.token())?;
-    session
-        .borrow_mut()
-        .exported_sites
-        .insert(demo.id, exported.clone());
     if edit
         && let Err(error) = crate::editor::launch::edit(&exported, editor, &cancellation.token())
     {
@@ -293,7 +270,10 @@ fn export_demo(
             friendly_error(&error, "could not open the editor")
         ));
     }
-    Ok(format!("Exported to {}", exported.display()))
+    Ok(format!(
+        "Exported to {} · press v to open",
+        exported.display()
+    ))
 }
 
 fn preview_plain(
@@ -372,8 +352,6 @@ impl std::error::Error for SharedPreviewFailure {
 #[derive(Default)]
 struct DemoSession {
     current: Option<ActivePreview>,
-    // Registry IDs bound the map; another export replaces that demo's previous directory.
-    exported_sites: BTreeMap<&'static str, std::path::PathBuf>,
 }
 
 struct ActivePreview {
@@ -408,17 +386,6 @@ impl DemoSession {
         Ok(())
     }
 
-    fn ready(&mut self, id: &str) -> Option<Arc<PreviewReady>> {
-        let current = self.current.as_mut()?;
-        if current.demo.id != id {
-            return None;
-        }
-        match current.preview.status() {
-            PreviewStatus::Ready(ready) => Some(ready),
-            _ => None,
-        }
-    }
-
     fn display(&mut self, language: HelpLanguage) -> Option<PreviewState> {
         let current = self.current.as_mut()?;
         let phase = match current.preview.status() {
@@ -436,6 +403,57 @@ impl DemoSession {
             title: current.demo.title(language).into(),
             phase,
         })
+    }
+}
+
+/// What the export prompt reads: the directories under a path, and the absolute path a
+/// typed destination names.
+struct ExportDestinations;
+
+impl DestinationSource for ExportDestinations {
+    fn directories(&self, directory: &Path, prefix: &str) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut names = entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+            .filter(|name| name.starts_with(prefix))
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn resolve(&self, typed: &Path) -> PathBuf {
+        std::path::absolute(typed).unwrap_or_else(|_| typed.to_path_buf())
+    }
+
+    fn base(&self) -> PathBuf {
+        std::env::current_dir().unwrap_or_default()
+    }
+}
+
+/// The reader's clipboard: the terminal's own escape, and this system's pasteboard when it
+/// has one.
+///
+/// A terminal only reads the escape when it allows programs to write the clipboard, so the
+/// system's own pasteboard decides what the reader can trust.
+struct ReaderClipboard {
+    sink: crate::terminal::OutputSink,
+    cancellation: tola_build::cancellation::BuildCancellation,
+}
+
+impl Clipboard for ReaderClipboard {
+    fn copy(&self, text: &str) -> bool {
+        let escape = crate::terminal::clipboard::escape(text);
+        let _ = self.sink.write_stderr_locked(escape.as_bytes());
+        let Some(program) = crate::sys::clipboard_command() else {
+            return true;
+        };
+        let mut command = std::process::Command::new(program);
+        crate::sys::run_command_with_input(&mut command, text.as_bytes(), &self.cancellation)
+            .is_ok_and(|status| status.success())
     }
 }
 

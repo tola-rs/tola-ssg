@@ -1,17 +1,18 @@
 //! The help reader coordinates navigation and input over one laid-out document.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::jump::Jump;
-use super::layout::{DocumentPosition, LinkSpan, PageLayout};
+use super::layout::{DocumentPosition, LinkSpan, PageLayout, slice_columns};
 use super::model::{Anchor, HelpDocument, LinkTarget, PageId};
 use super::navigation::{History, Visit};
 use crate::i18n::HelpLanguage;
@@ -36,6 +37,17 @@ const ACCEPTED: &[Action] = &[
     Action::PreviousMatch,
     Action::Label,
 ];
+
+/// Where the export prompt reads the filesystem: the directories under one path, the
+/// absolute path a typed destination names, and the directory a relative one starts from.
+pub(crate) trait DestinationSource {
+    /// The directories directly under `directory` whose name starts with `prefix`.
+    fn directories(&self, directory: &Path, prefix: &str) -> Vec<String>;
+    /// `typed`, as an absolute path.
+    fn resolve(&self, typed: &Path) -> PathBuf;
+    /// The directory a relative destination starts from.
+    fn base(&self) -> PathBuf;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PreviewState {
@@ -66,9 +78,6 @@ pub(crate) enum ReaderAction {
     OpenBrowser {
         url: String,
     },
-    OpenExport {
-        demo: String,
-    },
 }
 
 pub(crate) struct View<'a> {
@@ -89,7 +98,12 @@ pub(crate) struct View<'a> {
     preview: Option<PreviewState>,
     poll: Option<&'a dyn Fn() -> Option<PreviewState>>,
     pending: Option<ReaderAction>,
-    has_export: Option<&'a dyn Fn(&str) -> bool>,
+    destinations: Option<&'a dyn DestinationSource>,
+    clipboard: Option<&'a dyn Clipboard>,
+    selection: Option<Selection>,
+    /// The press a release still decides: a click opens what it landed on, a drag copies.
+    pressed: Option<(u16, u16)>,
+    dragging: bool,
 }
 
 enum Mode {
@@ -107,6 +121,53 @@ struct Search {
     line: TextLine,
     origin: DocumentPosition,
     focus: Option<DocumentPosition>,
+}
+
+/// Where a copied selection goes.
+pub(crate) trait Clipboard {
+    /// Copies `text`; answers whether a clipboard the reader can trust took it. A terminal's
+    /// own escape is written either way.
+    fn copy(&self, text: &str) -> bool;
+}
+
+/// The content cells one mouse drag selected, in page lines and display columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    from_line: usize,
+    from_column: usize,
+    to_line: usize,
+    to_column: usize,
+}
+
+impl Selection {
+    fn at(cell: (usize, usize)) -> Self {
+        Self {
+            from_line: cell.0,
+            from_column: cell.1,
+            to_line: cell.0,
+            to_column: cell.1,
+        }
+    }
+
+    fn extend(&mut self, cell: (usize, usize)) {
+        self.to_line = cell.0;
+        self.to_column = cell.1;
+    }
+
+    /// The selection's ends, from the earliest cell to the latest.
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if (self.from_line, self.from_column) <= (self.to_line, self.to_column) {
+            (
+                (self.from_line, self.from_column),
+                (self.to_line, self.to_column),
+            )
+        } else {
+            (
+                (self.to_line, self.to_column),
+                (self.from_line, self.from_column),
+            )
+        }
+    }
 }
 
 impl<'a> View<'a> {
@@ -135,13 +196,24 @@ impl<'a> View<'a> {
             preview: None,
             poll: None,
             pending: None,
-            has_export: None,
+            destinations: None,
+            clipboard: None,
+            selection: None,
+            pressed: None,
+            dragging: false,
         }
     }
 
+    /// Whether this reader holds the pointer: the wheel scrolls it, a click opens what it is
+    /// on, and a drag selects the text under it. A released pointer leaves all of that to the
+    /// terminal, and `--no-mouse` starts it released.
     pub(crate) fn set_mouse(&mut self, mouse: bool) {
         self.mouse = mouse;
         self.hovered = None;
+    }
+
+    pub(crate) fn set_clipboard(&mut self, clipboard: &'a dyn Clipboard) {
+        self.clipboard = Some(clipboard);
     }
 
     pub(crate) fn set_language(&mut self, language: HelpLanguage) {
@@ -152,8 +224,8 @@ impl<'a> View<'a> {
         self.poll = Some(poll);
     }
 
-    pub(crate) fn set_exports(&mut self, has_export: &'a dyn Fn(&str) -> bool) {
-        self.has_export = Some(has_export);
+    pub(crate) fn set_destinations(&mut self, destinations: &'a dyn DestinationSource) {
+        self.destinations = Some(destinations);
     }
 
     pub(crate) fn set_notice(&mut self, notice: impl Into<String>) {
@@ -179,25 +251,6 @@ impl<'a> View<'a> {
             return false;
         }
         self.preview = next;
-        if matches!(
-            self.document.id,
-            PageId::DemoOutputs { .. } | PageId::DemoOutput { .. }
-        ) {
-            let position = self.position();
-            let focus = self.focus();
-            match (self.load)(&self.document.id) {
-                Ok(document) => {
-                    self.document = Rc::new(document);
-                    self.page = PageLayout::new(&self.document, self.page.width, self.palette);
-                    self.page.pager.resize(usize::from(self.content.height));
-                    self.restore_position(position, focus);
-                }
-                Err(error) => {
-                    tracing::debug!(?error, "could not refresh demo outputs");
-                    self.notice = Some("could not read this preview output".into());
-                }
-            }
-        }
         true
     }
 
@@ -234,6 +287,53 @@ impl<'a> View<'a> {
         self.request(action)
     }
 
+    /// Completes the destination being typed with the directories under it, and names the
+    /// candidates when the matches do not decide the rest of the name.
+    fn complete_destination(&mut self) {
+        let Some(source) = self.destinations else {
+            return;
+        };
+        let Mode::Destination { line, .. } = &self.mode else {
+            return;
+        };
+        let typed = line.text().to_owned();
+        let (directory, prefix) = completion_parts(&typed);
+        let matches = source.directories(&directory, &prefix);
+        let head = &typed[..typed.len() - prefix.len()];
+        let completion = match matches.as_slice() {
+            [] => None,
+            [only] => Some(format!("{head}{only}/")),
+            matches => Some(format!("{head}{}", shared_prefix(matches))),
+        };
+        if let Some(completion) = completion.filter(|completion| completion.len() > typed.len()) {
+            if let Mode::Destination { line, .. } = &mut self.mode {
+                line.set_text(completion);
+            }
+            return;
+        }
+        self.notice = Some(match matches.as_slice() {
+            [] => "no matching directory".to_owned(),
+            matches => format!("matches {}", listed(matches)),
+        });
+    }
+
+    /// What the export prompt tells the reader about the destination it names: where a
+    /// relative path starts, or the absolute path it writes to.
+    fn destination_caption(&self) -> String {
+        let Mode::Destination { line, .. } = &self.mode else {
+            return String::new();
+        };
+        let Some(source) = self.destinations else {
+            return String::new();
+        };
+        let typed = line.text().trim();
+        if typed.is_empty() {
+            format!("relative to {}", source.base().display())
+        } else {
+            format!("writes to {}", source.resolve(Path::new(typed)).display())
+        }
+    }
+
     fn demo_actions(&self) -> Vec<(Action, &'static str)> {
         let live = self.live();
         [
@@ -241,9 +341,7 @@ impl<'a> View<'a> {
             (Action::StopPreview, "Stop"),
             (Action::Export, "Export"),
             (Action::ExportAndEdit, "Export & edit"),
-            (Action::OpenExport, "Open export"),
             (Action::OpenBrowser, "Open browser"),
-            (Action::PreviewOutputs, "Outputs"),
         ]
         .into_iter()
         .filter(|(action, _)| live.contains(action))
@@ -286,31 +384,18 @@ impl<'a> View<'a> {
         row - area.y + 1
     }
 
-    fn browser_url(&self) -> Option<String> {
-        let preview = self.preview.as_ref()?;
-        let PreviewPhase::Ready { url } = &preview.phase else {
-            return None;
-        };
-        match &self.document.id {
-            PageId::DemoOutput { id, path } if *id == preview.demo => {
-                super::pages::output_url(url, path).ok()
-            }
-            PageId::DemoOutput { .. } | PageId::DemoOutputs { .. }
-                if self.document.id.demo() != Some(preview.demo.as_str()) =>
-            {
-                None
-            }
-            _ => Some(url.clone()),
-        }
-    }
-
-    fn preview_line(&self) -> Option<String> {
+    /// The preview's status: the row it shows, and the address that row ends in once ready.
+    fn preview_status(&self) -> Option<(String, Option<String>)> {
         let preview = self.preview.as_ref()?;
         Some(match &preview.phase {
-            PreviewPhase::Preparing => format!("{} · Building", preview.title),
-            PreviewPhase::Ready { url } => format!("{} · Ready · {url}", preview.title),
-            PreviewPhase::Failed { message } => format!("{} · Failed · {message}", preview.title),
-            PreviewPhase::Stopped => format!("{} · Stopped", preview.title),
+            PreviewPhase::Preparing => (format!("{} · Building", preview.title), None),
+            PreviewPhase::Ready { url } => {
+                (format!("{} · Ready · ", preview.title), Some(url.clone()))
+            }
+            PreviewPhase::Failed { message } => {
+                (format!("{} · Failed · {message}", preview.title), None)
+            }
+            PreviewPhase::Stopped => (format!("{} · Stopped", preview.title), None),
         })
     }
 
@@ -406,21 +491,7 @@ impl<'a> View<'a> {
         self.hovered = None;
         self.mode = Mode::Reading;
         match target {
-            LinkTarget::External(url) => {
-                let url = if matches!(self.document.id, PageId::DemoOutput { .. }) {
-                    match self.browser_url() {
-                        Some(url) => url,
-                        None => {
-                            self.notice =
-                                Some("preview this demo before opening its output".into());
-                            return Step::Continue;
-                        }
-                    }
-                } else {
-                    url.clone()
-                };
-                return self.request(ReaderAction::OpenBrowser { url });
-            }
+            LinkTarget::External(url) => self.notice = Some(url.clone()),
             LinkTarget::Page(id) => self.open(id, None),
             LinkTarget::PageAnchor(id, anchor) => self.open(id, Some(anchor)),
         }
@@ -482,13 +553,6 @@ impl<'a> View<'a> {
         self.mode = Mode::Reading;
         self.hovered = None;
         self.document = visit.document;
-        if matches!(
-            self.document.id,
-            PageId::DemoOutputs { .. } | PageId::DemoOutput { .. }
-        ) && let Ok(document) = (self.load)(&self.document.id)
-        {
-            self.document = Rc::new(document);
-        }
         self.page = PageLayout::new(&self.document, self.page.width, self.palette);
         self.page.pager.resize(usize::from(self.content.height));
         self.restore_position(visit.position, visit.focus);
@@ -548,6 +612,93 @@ impl<'a> View<'a> {
         }
     }
 
+    /// The content cell one screen position names, kept inside the content and the page.
+    fn cell_at(&self, column: u16, row: u16) -> (usize, usize) {
+        let line = self.page.pager.top() + usize::from(row.saturating_sub(self.content.y));
+        let line = line.min(self.page.pager.line_count().saturating_sub(1));
+        let column = usize::from(column.saturating_sub(self.content.x));
+        (
+            line,
+            column.min(usize::from(self.content.width.saturating_sub(1))),
+        )
+    }
+
+    /// The content cell one screen position names, kept inside the content's rows.
+    fn clamped_cell(&self, column: u16, row: u16) -> (usize, usize) {
+        let row = row.clamp(self.content.y, self.content.bottom().saturating_sub(1));
+        self.cell_at(column, row)
+    }
+
+    /// Copies the selected cells and tells the reader what was taken.
+    fn copy_selection(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let text = self.selected_text(selection);
+        if text.is_empty() {
+            self.notice = Some("nothing selected".to_owned());
+            return;
+        }
+        let lines = text.lines().count();
+        let taken = self
+            .clipboard
+            .is_some_and(|clipboard| clipboard.copy(&text));
+        self.notice = Some(match (taken, lines) {
+            (false, _) => format!("could not copy {lines} lines"),
+            (true, 1) => "copied 1 line".to_owned(),
+            (true, lines) => format!("copied {lines} lines"),
+        });
+    }
+
+    /// The text the selected cells show, one source line at a time.
+    fn selected_text(&self, selection: Selection) -> String {
+        let ((from_line, from_column), (to_line, to_column)) = selection.ordered();
+        let mut text = String::new();
+        for line in from_line..=to_line {
+            let Some(source) = self.page.pager.text(line) else {
+                continue;
+            };
+            let from = if line == from_line { from_column } else { 0 };
+            let to = if line == to_line {
+                to_column
+            } else {
+                usize::MAX
+            };
+            text.push_str(&slice_columns(&source, from, to));
+            if line != to_line {
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    /// Marks the selected cells, so the reader sees what a release copies.
+    fn draw_selection(&self, frame: &mut Frame) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let ((from_line, from_column), (to_line, to_column)) = selection.ordered();
+        let top = self.page.pager.top();
+        for line in self.page.pager.visible() {
+            if !(from_line..=to_line).contains(&line) {
+                continue;
+            }
+            let y = self.content.y + (line - top) as u16;
+            let from = if line == from_line { from_column } else { 0 };
+            let to = if line == to_line {
+                to_column
+            } else {
+                usize::from(self.content.width)
+            };
+            for column in from..to {
+                let x = self.content.x + u16::try_from(column).unwrap_or(u16::MAX);
+                if x < self.content.right() {
+                    frame.buffer_mut()[(x, y)].set_style(self.palette.selection_style());
+                }
+            }
+        }
+    }
+
     fn status(&self) -> String {
         let mut status = format!(
             "{} - {}/{} lines",
@@ -590,7 +741,6 @@ impl<'a> View<'a> {
 impl Surface for View<'_> {
     fn draw(&mut self, frame: &mut Frame, palette: Palette) {
         self.poll_preview();
-        let input = matches!(self.mode, Mode::Search(_) | Mode::Destination { .. });
         let mut area = frame.area();
         let actions = self.demo_actions();
         self.buttons.clear();
@@ -607,8 +757,8 @@ impl Surface for View<'_> {
             area.y += rows;
             area.height -= rows;
         }
-        let (content, mut footer) = split_footer(area, input);
-        if let Some(preview) = self.preview_line()
+        let (content, mut footer) = split_footer(area, &self.mode);
+        if let Some((text, address)) = self.preview_status()
             && content.height > 1
         {
             let status = Rect::new(content.x, content.bottom() - 1, content.width, 1);
@@ -617,15 +767,17 @@ impl Surface for View<'_> {
                 ..content
             };
             self.resize(content, palette);
-            frame.render_widget(
-                Paragraph::new(preview).style(palette.notice_style()),
-                status,
-            );
+            let mut spans = vec![Span::styled(text, palette.notice_style())];
+            if let Some(address) = address {
+                spans.push(Span::styled(address, palette.link_style()));
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), status);
         } else {
             self.resize(content, palette);
         }
         footer.y = self.content.bottom() + u16::from(self.preview.is_some() && content.height > 1);
         self.page.pager.draw(frame, self.content, palette);
+        self.draw_selection(frame);
         self.draw_hover(frame);
         if let Mode::Jump(jump) = &mut self.mode
             && !jump.draw(frame, self.content, self.page.pager.top(), palette)
@@ -634,6 +786,7 @@ impl Surface for View<'_> {
             self.notice = Some("no links on screen".to_owned());
         }
         if let Mode::Destination { line, .. } = &self.mode {
+            let caption = self.destination_caption();
             line.draw(
                 frame,
                 Rect {
@@ -649,7 +802,7 @@ impl Surface for View<'_> {
                     height: footer.height.saturating_sub(1),
                     ..footer
                 },
-                self.notice.as_deref().unwrap_or(""),
+                self.notice.as_deref().unwrap_or(&caption),
                 &self.live(),
                 self.bindings(),
                 palette,
@@ -716,6 +869,13 @@ impl Surface for View<'_> {
         self.notice = None;
         match action {
             Action::Quit => return Step::Done,
+            Action::OpenBrowser => {
+                if let Some(preview) = &self.preview
+                    && let PreviewPhase::Ready { url } = &preview.phase
+                {
+                    return self.request(ReaderAction::OpenBrowser { url: url.clone() });
+                }
+            }
             Action::Open if matches!(self.mode, Mode::Search(_)) => self.finish_search(true),
             Action::Open if matches!(self.mode, Mode::Destination { .. }) => {
                 return self.finish_export();
@@ -730,28 +890,6 @@ impl Surface for View<'_> {
             }
             Action::Export => self.begin_export(false),
             Action::ExportAndEdit => self.begin_export(true),
-            Action::OpenExport => {
-                if let Some(demo) = self.document.id.demo()
-                    && self.has_export.is_some_and(|has_export| has_export(demo))
-                {
-                    return self.request(ReaderAction::OpenExport { demo: demo.into() });
-                }
-            }
-            Action::OpenBrowser => {
-                if let Some(url) = self.browser_url() {
-                    return self.request(ReaderAction::OpenBrowser { url });
-                }
-            }
-            Action::PreviewOutputs => {
-                if let Some(preview) = &self.preview
-                    && matches!(preview.phase, PreviewPhase::Ready { .. })
-                {
-                    let id = PageId::DemoOutputs {
-                        id: preview.demo.clone(),
-                    };
-                    self.open(&id, None);
-                }
-            }
             Action::Dismiss => match self.mode {
                 Mode::Search(_) => self.finish_search(false),
                 Mode::Jump(_) | Mode::Destination { .. } => self.mode = Mode::Reading,
@@ -805,6 +943,13 @@ impl Surface for View<'_> {
 
     fn key(&mut self, key: &KeyEvent) -> Step {
         self.notice = None;
+        // The destination line completes from the names under it; every other key edits it.
+        if matches!(self.mode, Mode::Destination { .. })
+            && self.bindings().action(key) == Some(Action::Complete)
+        {
+            self.complete_destination();
+            return Step::Continue;
+        }
         match &mut self.mode {
             Mode::Jump(jump) => {
                 if keymap::HELP_JUMP.action(key) == Some(Action::Dismiss) {
@@ -851,8 +996,13 @@ impl Surface for View<'_> {
         Step::Continue
     }
 
+    /// Answers one pointer event: the jump overlay opens what the pointer rests on, and the
+    /// text prompts leave the pointer to the terminal.
+    /// Answers one pointer event: a drag selects the text under it and copies it when the
+    /// pointer is released, a press that does not move opens what it landed on, and a text
+    /// prompt leaves the pointer to the terminal.
     fn pointer(&mut self, event: MouseEvent) -> Step {
-        if !self.mouse || !matches!(self.mode, Mode::Reading) {
+        if !self.mouse || matches!(self.mode, Mode::Search(_) | Mode::Destination { .. }) {
             return Step::Continue;
         }
         match event.kind {
@@ -873,9 +1023,29 @@ impl Surface for View<'_> {
                 {
                     return self.answer(action);
                 }
-                if let Some(target) = self
-                    .link_at(event.column, event.row)
-                    .map(|link| link.target.clone())
+                if self.content.contains((event.column, event.row).into()) {
+                    self.selection = Some(Selection::at(self.cell_at(event.column, event.row)));
+                    self.pressed = Some((event.column, event.row));
+                    self.dragging = false;
+                    self.hovered = None;
+                    self.hovered_button = None;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection.is_some() {
+                    let cell = self.clamped_cell(event.column, event.row);
+                    self.dragging = true;
+                    if let Some(selection) = &mut self.selection {
+                        selection.extend(cell);
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let pressed = self.pressed.take();
+                if std::mem::take(&mut self.dragging) {
+                    self.copy_selection();
+                } else if let Some((column, row)) = pressed
+                    && let Some(target) = self.link_at(column, row).map(|link| link.target.clone())
                 {
                     self.notice = None;
                     return self.follow(&target);
@@ -907,11 +1077,13 @@ impl Surface for View<'_> {
     }
 
     fn live(&self) -> Vec<Action> {
-        if matches!(self.mode, Mode::Search(_) | Mode::Destination { .. }) {
-            return vec![Action::Open, Action::Dismiss];
-        }
-        if !matches!(self.mode, Mode::Reading) {
-            return vec![Action::Dismiss];
+        match &self.mode {
+            Mode::Search(_) => return vec![Action::Open, Action::Dismiss],
+            Mode::Destination { .. } => {
+                return vec![Action::Open, Action::Complete, Action::Dismiss];
+            }
+            Mode::Jump(_) => return vec![Action::Dismiss],
+            Mode::Reading => {}
         }
         let mut live = ACCEPTED.to_vec();
         live.retain(|action| self.scroll_changes(*action));
@@ -940,21 +1112,13 @@ impl Surface for View<'_> {
         }
         if self.document.id.demo().is_some() {
             live.extend([Action::Preview, Action::Export, Action::ExportAndEdit]);
-            if let Some(demo) = self.document.id.demo()
-                && self.has_export.is_some_and(|has_export| has_export(demo))
-            {
-                live.push(Action::OpenExport);
-            }
         }
         if let Some(preview) = &self.preview {
             if !matches!(preview.phase, PreviewPhase::Stopped) {
                 live.push(Action::StopPreview);
             }
             if matches!(preview.phase, PreviewPhase::Ready { .. }) {
-                live.push(Action::PreviewOutputs);
-                if self.browser_url().is_some() {
-                    live.push(Action::OpenBrowser);
-                }
+                live.push(Action::OpenBrowser);
             }
         }
         live
@@ -972,11 +1136,65 @@ impl Surface for View<'_> {
     }
 }
 
-fn split_footer(area: Rect, search_is_open: bool) -> (Rect, Rect) {
-    let height = if search_is_open {
-        area.height.min(2)
+/// The directory to read and the name prefix to match, for the destination being typed.
+fn completion_parts(typed: &str) -> (PathBuf, String) {
+    if typed.is_empty() || typed.ends_with('/') || typed.ends_with(std::path::MAIN_SEPARATOR) {
+        let directory = if typed.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(typed)
+        };
+        return (directory, String::new());
+    }
+    let path = Path::new(typed);
+    let prefix = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    (directory, prefix)
+}
+
+/// The longest name every match starts with.
+fn shared_prefix(names: &[String]) -> String {
+    let Some(first) = names.first() else {
+        return String::new();
+    };
+    let mut end = first.len();
+    for name in &names[1..] {
+        end = first[..end]
+            .char_indices()
+            .zip(name.chars())
+            .take_while(|((_, left), right)| left == right)
+            .map(|((offset, left), _)| offset + left.len_utf8())
+            .last()
+            .unwrap_or(0);
+        if end == 0 {
+            break;
+        }
+    }
+    first[..end].to_owned()
+}
+
+/// The matches one notice names: at most four of them, then how many follow.
+fn listed(matches: &[String]) -> String {
+    let (shown, rest) = matches.split_at(matches.len().min(4));
+    if rest.is_empty() {
+        shown.join(" ")
     } else {
-        area.height.saturating_sub(1).min(2)
+        format!("{} +{}", shown.join(" "), rest.len())
+    }
+}
+
+fn split_footer(area: Rect, mode: &Mode) -> (Rect, Rect) {
+    let height = match mode {
+        // A destination line, the path it names, and the keys it answers.
+        Mode::Destination { .. } => area.height.saturating_sub(1).min(3),
+        Mode::Search(_) => area.height.min(2),
+        _ => area.height.saturating_sub(1).min(2),
     };
     (
         Rect {
@@ -993,8 +1211,11 @@ fn split_footer(area: Rect, search_is_open: bool) -> (Rect, Rect) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     use super::*;
@@ -1523,6 +1744,7 @@ mod tests {
             Palette::new(true).link_style().add_modifier
         );
         view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, y));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, y));
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
@@ -1548,26 +1770,128 @@ mod tests {
     fn mouse_respects_input_mode() {
         let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
-        let link = &view.page.links[0];
-        let click = mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            link.column as u16,
-            link.line as u16,
-        );
-        view.pointer(click);
+        let (column, line) = {
+            let link = &view.page.links[0];
+            (link.column as u16, link.line as u16)
+        };
+        let click = |kind| mouse(kind, column, line);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(view.document.id, PageId::Overview);
         view.set_mouse(true);
         press(&mut view, KeyCode::Char('/'));
-        view.pointer(click);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
         assert!(matches!(view.mode, Mode::Search(_)));
         assert_eq!(view.document.id, PageId::Overview);
         press(&mut view, KeyCode::Esc);
-        view.pointer(click);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
+    /// The clipboard a test reader copies into.
+    #[derive(Default)]
+    struct FakeClipboard {
+        copied: RefCell<Vec<String>>,
+    }
+
+    impl Clipboard for FakeClipboard {
+        fn copy(&self, text: &str) -> bool {
+            self.copied.borrow_mut().push(text.to_owned());
+            true
+        }
+    }
+
     #[test]
-    fn external_jump_requests_browser() {
+    fn dragging_copies_the_selected_text() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        let clipboard = FakeClipboard::default();
+        view.set_clipboard(&clipboard);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
+        view.pointer(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 4));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), 7, 4));
+
+        assert_eq!(
+            clipboard.copied.borrow().as_slice(),
+            ["Read the whole manual.\n\nDetails"],
+            "the drag copies the text the selected cells show"
+        );
+        assert_eq!(view.notice(), Some("copied 3 lines"));
+    }
+
+    #[test]
+    fn press_without_drag_copies_nothing() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        let clipboard = FakeClipboard::default();
+        view.set_clipboard(&clipboard);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        let link = view.page.links[0].clone();
+        let (column, line) = (link.column as u16, link.line as u16);
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
+
+        assert!(
+            clipboard.copied.borrow().is_empty(),
+            "a click copies nothing"
+        );
+        assert_eq!(
+            view.document.id,
+            PageId::Package {
+                name: "schema".to_owned()
+            },
+            "it opened the link instead"
+        );
+    }
+
+    #[test]
+    fn open_browser_requests_address() {
+        let mut view = reader(demo_document(), &load);
+        assert!(!view.live().contains(&Action::OpenBrowser));
+        view.preview = ready_preview();
+        assert!(view.live().contains(&Action::OpenBrowser));
+        assert_eq!(view.answer(Action::OpenBrowser), Step::Done);
+        assert_eq!(
+            view.take_action(),
+            Some(ReaderAction::OpenBrowser {
+                url: "http://127.0.0.1:1234/".into()
+            })
+        );
+    }
+
+    #[test]
+    fn dragged_cells_are_marked() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
+        view.pointer(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 4));
+        let shown = frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        // The mark is added to what the cell already shows, as a terminal's own selection is.
+        let reversed = Modifier::REVERSED;
+        assert!(
+            shown[(3, 2)].modifier.contains(reversed),
+            "the first line is marked"
+        );
+        assert!(
+            shown[(3, 4)].modifier.contains(reversed),
+            "the line reached is marked"
+        );
+        assert!(
+            !shown[(20, 4)].modifier.contains(reversed),
+            "the last line stops at the pointer"
+        );
+    }
+
+    #[test]
+    fn external_link_shows_address() {
         let mut view = reader(
             document("[read manual](https://example.com/manual)\n"),
             &load,
@@ -1577,12 +1901,8 @@ mod tests {
         press(&mut view, KeyCode::Tab);
         frame(&mut view, area);
         press(&mut view, KeyCode::Char('a'));
-        assert_eq!(
-            view.take_action(),
-            Some(ReaderAction::OpenBrowser {
-                url: "https://example.com/manual".into()
-            })
-        );
+        assert_eq!(view.notice(), Some("https://example.com/manual"));
+        assert!(view.take_action().is_none());
         assert!(!view.history.has_back());
     }
 
@@ -1720,24 +2040,15 @@ mod tests {
 
     #[test]
     fn buttons_match_keyboard_operations() {
-        let has_export = |_: &str| true;
-        for (action, key) in [
-            (Action::Preview, 'p'),
-            (Action::StopPreview, 'x'),
-            (Action::OpenExport, 'v'),
-            (Action::OpenBrowser, 'o'),
-            (Action::PreviewOutputs, 'O'),
-        ] {
+        for (action, key) in [(Action::Preview, 'p'), (Action::StopPreview, 'x')] {
             let mut keyboard = reader(demo_document(), &load);
             keyboard.set_preview(&ready_preview);
-            keyboard.set_exports(&has_export);
             frame(&mut keyboard, Rect::new(0, 0, 100, 12));
             let key_step = press(&mut keyboard, KeyCode::Char(key));
 
             let mut pointer = reader(demo_document(), &load);
             pointer.set_mouse(true);
             pointer.set_preview(&ready_preview);
-            pointer.set_exports(&has_export);
             frame(&mut pointer, Rect::new(0, 0, 100, 12));
             let button = pointer
                 .buttons
@@ -1757,46 +2068,39 @@ mod tests {
     }
 
     #[test]
-    fn browser_outputs_require_ready_preview() {
+    fn stop_requires_running_preview() {
         let mut view = reader(demo_document(), &load);
-        for phase in [
-            PreviewPhase::Preparing,
-            PreviewPhase::Stopped,
-            PreviewPhase::Failed {
-                message: "a page could not compile".into(),
-            },
-        ] {
-            view.preview = Some(PreviewState {
-                demo: "backlinks".into(),
-                title: "Backlinks".into(),
-                phase,
-            });
-            assert!(!view.live().contains(&Action::OpenBrowser));
-            assert!(!view.live().contains(&Action::PreviewOutputs));
-        }
+        view.preview = ready_preview();
+        assert!(view.live().contains(&Action::StopPreview));
         view.preview.as_mut().unwrap().phase = PreviewPhase::Stopped;
         assert!(!view.live().contains(&Action::StopPreview));
-        view.preview = ready_preview();
-        assert!(view.live().contains(&Action::OpenBrowser));
-        assert!(view.live().contains(&Action::PreviewOutputs));
-        assert!(view.live().contains(&Action::StopPreview));
     }
 
     #[test]
-    fn open_export_requires_saved_copy() {
+    fn ready_address_is_underlined() {
+        let area = Rect::new(0, 0, 80, 10);
+        let url = "http://127.0.0.1:1234/";
         let mut view = reader(demo_document(), &load);
-        assert!(!view.live().contains(&Action::OpenExport));
-        assert_eq!(view.answer(Action::OpenExport), Step::Continue);
-        assert!(view.take_action().is_none());
-        let has_export = |id: &str| id == "backlinks";
-        view.set_exports(&has_export);
-        assert!(view.live().contains(&Action::OpenExport));
-        assert_eq!(view.answer(Action::OpenExport), Step::Done);
-        assert_eq!(
-            view.take_action(),
-            Some(ReaderAction::OpenExport {
-                demo: "backlinks".into()
+        view.preview = ready_preview();
+        let buffer = frame(&mut view, area);
+        let status = (0..area.height)
+            .find(|line| row(&buffer, area, *line).contains(url))
+            .expect("the status row names the preview address");
+        assert!(
+            (0..area.width).all(|column| !buffer[(column, status)].symbol().contains("]8;;")),
+            "the address is plain text, so selecting it copies what it shows"
+        );
+        let underlined = (0..area.width)
+            .filter(|column| {
+                buffer[(*column, status)]
+                    .modifier
+                    .contains(Modifier::UNDERLINED)
             })
+            .count();
+        assert_eq!(
+            underlined,
+            url.chars().count(),
+            "every address character is underlined"
         );
     }
 
@@ -1853,5 +2157,112 @@ mod tests {
         assert_eq!(view.page.pager.current_hit(), Some(hit));
         assert!(view.page.pager.visible().contains(&hit));
         assert_eq!(view.query, "site/backlinks.typ");
+    }
+
+    /// The export prompt's filesystem: the names a test offers, resolved under `/site`.
+    struct FakeDestinations {
+        names: &'static [&'static str],
+    }
+
+    impl DestinationSource for FakeDestinations {
+        fn directories(&self, directory: &Path, prefix: &str) -> Vec<String> {
+            assert_eq!(directory, Path::new("."), "the test types a bare name");
+            self.names
+                .iter()
+                .filter(|name| name.starts_with(prefix))
+                .map(|name| (*name).to_owned())
+                .collect()
+        }
+
+        fn resolve(&self, typed: &Path) -> PathBuf {
+            Path::new("/site").join(typed)
+        }
+
+        fn base(&self) -> PathBuf {
+            PathBuf::from("/site")
+        }
+    }
+
+    fn demo_reader() -> HelpDocument {
+        HelpDocument::parse(HelpPage::new(
+            PageId::Demo {
+                id: "backlinks".into(),
+            },
+            "# Demo\n\nText.\n".to_owned(),
+        ))
+    }
+
+    #[test]
+    fn tab_completes_the_export_destination() {
+        let mut view = reader(demo_reader(), &load);
+        view.set_destinations(&FakeDestinations {
+            names: &["site", "static", "stash"],
+        });
+
+        assert_eq!(view.answer(Action::Export), Step::Continue);
+        assert_eq!(
+            view.destination_caption(),
+            "relative to /site",
+            "an empty line says where a relative destination starts"
+        );
+
+        press(&mut view, KeyCode::Char('s'));
+        press(&mut view, KeyCode::Tab);
+        assert_eq!(
+            view.notice(),
+            Some("matches site static stash"),
+            "matches that share nothing more than the typed name are named"
+        );
+        press(&mut view, KeyCode::Char('t'));
+        press(&mut view, KeyCode::Tab);
+        assert_eq!(
+            view.destination_caption(),
+            "writes to /site/sta",
+            "the shared prefix extends the destination"
+        );
+        press(&mut view, KeyCode::Char('t'));
+        press(&mut view, KeyCode::Tab);
+        assert_eq!(view.destination_caption(), "writes to /site/static/");
+
+        press(&mut view, KeyCode::Enter);
+        assert_eq!(
+            view.take_action(),
+            Some(ReaderAction::Export {
+                demo: "backlinks".to_owned(),
+                destination: PathBuf::from("static/"),
+                edit: false,
+            })
+        );
+    }
+
+    #[test]
+    fn jump_overlay_keeps_the_pointer_working() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+        press(&mut view, KeyCode::Tab);
+        assert!(matches!(view.mode, Mode::Jump(_)), "Tab opens the overlay");
+
+        let link = view.page.links[0].clone();
+        let (column, line) = (link.column as u16, link.line as u16);
+        view.pointer(mouse(MouseEventKind::Moved, column, line));
+        assert_eq!(
+            view.hovered,
+            Some(link.id),
+            "hover marks the link under the pointer"
+        );
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
+        assert!(
+            matches!(view.mode, Mode::Reading),
+            "a click leaves the overlay"
+        );
+        assert_eq!(
+            view.document.id,
+            PageId::Package {
+                name: "schema".to_owned()
+            },
+            "the click followed the link"
+        );
     }
 }

@@ -44,7 +44,7 @@ fn base_href_diagnostic(
     base: &crate::site::references::UncheckedBase,
 ) -> Diagnostic {
     let message = format!(
-        "`{}` names another origin, so this page's relative references are not checked",
+        "`{}` names a host, so this page's relative references are not checked",
         base.value
     );
     match &base.origin {
@@ -61,7 +61,7 @@ fn base_href_diagnostic(
             message,
         ),
     }
-    .with_help("remove the `<base href>` or point it at this site's own address")
+    .with_help("remove the `<base href>` or write it as a relative address (`/`, `/docs/`)")
 }
 fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> Option<Diagnostic> {
     let ReferenceResolution::Unresolved { reason } = reference.resolution() else {

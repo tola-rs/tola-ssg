@@ -211,7 +211,7 @@ pub(crate) const DEFAULT: Table = Table {
     ],
 };
 
-/// Sections and screenfuls are separate movements in the help reader.
+/// The keys the export prompt answers: applying the destination it names, or leaving it.
 pub(crate) const HELP_EXPORT: Table = Table {
     bindings: &[
         Binding {
@@ -223,6 +223,11 @@ pub(crate) const HELP_EXPORT: Table = Table {
             keys: &[Key::named(KeyCode::Esc, "Esc")],
             label: "cancel",
             action: Action::Dismiss,
+        },
+        Binding {
+            keys: &[Key::named(KeyCode::Tab, "Tab")],
+            label: "complete",
+            action: Action::Complete,
         },
     ],
 };
@@ -253,16 +258,6 @@ pub(crate) const HELP: Table = Table {
             keys: &[Key::character('o', "o")],
             label: "browser",
             action: Action::OpenBrowser,
-        },
-        Binding {
-            keys: &[Key::character('v', "v")],
-            label: "open export",
-            action: Action::OpenExport,
-        },
-        Binding {
-            keys: &[Key::character('O', "O")],
-            label: "outputs",
-            action: Action::PreviewOutputs,
         },
         Binding {
             keys: &[Key::named(KeyCode::Down, "↓")],

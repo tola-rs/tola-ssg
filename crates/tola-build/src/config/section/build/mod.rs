@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tola_config::Config;
 
-/// How the site is built: its Typst entry, pages directory, and published output.
+/// How the site is built: its Typst entry, content directory, and published output.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "build")]
@@ -43,14 +43,15 @@ pub struct BuildSectionConfig {
     /// Typst program that builds the site, relative to the site root.
     pub entry: PathBuf,
 
-    /// Directory the site's pages are written in, relative to the site root. Tola reads the
+    /// Directory the site's sources are written in, relative to the site root. Tola reads the
     /// `.typ` files below it.
     #[config(name = "content-dir")]
     #[serde(rename = "content-dir")]
     pub content_dir: PathBuf,
 
     /// Directory the built site is published to, relative to the site root. Tola owns everything
-    /// below it, so keep nothing else there.
+    /// below it: a non-empty directory Tola did not write fails the build, and every successful
+    /// build replaces the whole directory. Keep nothing else there.
     #[config(name = "publish-dir")]
     #[serde(rename = "publish-dir")]
     pub publish_dir: PathBuf,
@@ -82,13 +83,15 @@ impl BuildSectionConfig {
     /// What `tola help config build` adds under its table.
     pub const HELP: &'static str = "\
 The site is one Typst Bundle, and `entry` is its starting program. Its imports — templates,
-helpers, and page programs — join the same compilation. The scaffold keeps `site.typ` at the
-site root; an entry elsewhere in the site works too.
+helpers, and page programs — join the same compilation. The `tola init` scaffold sets `entry` to
+the site root's `site.typ`; `entry` is yours to configure, so it can name other files.
 
 `content-dir` defines source identity: `content/guide/install.typ` arrives in `all-sources()` as
-`guide/install.typ`, with the route segments its file layout suggests. Moving or renaming it
-changes that identity and those segments. The entry file is never a source; keep shared helpers
-and templates outside this directory so discovery does not treat them as content.
+a source whose `path` field is `guide/install.typ`. The file layout does not affect `permalink`;
+the route segments it suggests are just the default route's segments, which you can replace with
+your own. Moving or renaming it changes that identity and those segments. The entry file is never
+a source; keep shared helpers and templates outside this directory so discovery does not treat
+them as content.
 
 Discovery does not publish a page. The entry chooses which sources become documents and which
 output paths they use. For example, this converts the discovered segments to default output paths:
@@ -99,20 +102,42 @@ output paths they use. For example, this converts the discovered segments to def
 #let outputs = all-sources().map(source => route-to-output(route(source.route-segments)))
 ```
 
-The scaffold's `select-pages` also validates metadata, filters drafts, and slugs default route
-segments for the site's language. A source's `permalink` overrides its default route, so its URL
-can stay unchanged when the source moves. These policies live in editable site code.
+For example, the `tola init` scaffold's `select-pages` validates metadata, drops sources that
+declare `draft: true`, and slugifies each source's default `route-segments` field into the final
+route; these policies are yours to define and handle. A source's `permalink` overrides its
+default route, so its URL can stay unchanged when the source moves.
+
+```typst
+#let source-route(source) = {
+  if source.meta.permalink == none {
+    route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
+  } else {
+    decode-url-path(source.meta.permalink)
+  }
+}
+
+#let select-pages(sources) = {
+  // Every source is validated here, drafts included, before choosing which to publish.
+  parse-sources(sources, page-schema)
+    .filter(source => not source.meta.draft)
+    .map(source => (
+      source: source,
+      output: route-to-output(source-route(source)),
+    ))
+}
+```
 
 `publish-dir` is the directory `tola build` replaces as a whole, removing stale outputs. Choose an
-empty directory or one Tola already owns for this site; hand-maintained files belong in `[assets]`
-or a hook's declared outputs. Errors or cancellation before publication leave the previous output intact.
-`check`, `dev`, and `preview` do not replace this directory.
+empty directory or one Tola already owns for this site; a non-empty directory Tola did not write
+fails the build. Hand-maintained files belong in `[assets]` or in outputs declared under
+`[[build.hooks.generate-outputs]]`. Errors or cancellation before publication leave the previous
+output intact. `check`, `dev`, and `preview` do not replace this directory.
 
 Three child tables tune the build: `[build.minify]` compacts supported output bytes;
 `[build.references]` chooses `error` or `warn` for broken references; `[build.hooks]` runs the
-site's own commands before compilation, during output generation, or after publication. Their
-pages explain each contract. All outputs meet in one complete set: conflicts and references are
-checked before the site is published, so one producer cannot silently replace another's file.";
+site's own commands before compilation, during output generation, or after publication. All
+outputs meet in one complete set: conflicts and references are checked before the site is
+published, so one producer cannot silently replace another's file.";
 
     pub(crate) fn validate_paths(&self, diag: &mut ConfigDiagnostics) {
         super::path::validate_site_relative_path(

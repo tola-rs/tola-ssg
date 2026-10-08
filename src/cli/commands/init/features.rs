@@ -528,10 +528,18 @@ pub(super) struct HeadFragment {
     pub(super) head: &'static str,
 }
 
-/// The stylesheet every linked page has: `asset-url` imported and the published URL linked.
-const STYLESHEET_HEAD: HeadFragment = HeadFragment {
+/// The starter stylesheet every linked page has: `asset-url` imported and the published URL
+/// linked.
+const STARTER_STYLESHEET_HEAD: HeadFragment = HeadFragment {
     import: "#import \"@tola/address:0.0.0\": asset-url",
     head: "#html.link(rel: \"stylesheet\", href: asset-url(\"/assets/css/site.css\"))",
+};
+
+/// The Tailwind stylesheet every linked page has: `asset-url` imported and the published URL
+/// linked.
+const TAILWIND_STYLESHEET_HEAD: HeadFragment = HeadFragment {
+    import: "#import \"@tola/address:0.0.0\": asset-url",
+    head: "#html.link(rel: \"stylesheet\", href: asset-url(\"/assets/tailwind-output/site.css\"))",
 };
 
 /// The canonical link one page has.
@@ -579,8 +587,6 @@ struct Effect {
     head: &'static [HeadFragment],
     /// Whether published asset URLs get a content-derived `?h=…`.
     cache_busting: bool,
-    /// Exact `[assets] files` declarations, each as its source path and URL.
-    asset_files: &'static [(&'static str, &'static str)],
     /// The hooks this feature declares.
     hooks: &'static [Hook],
     /// The site `justfile` recipes this feature contributes.
@@ -661,7 +667,6 @@ const NO_EFFECT: Effect = Effect {
     ignore: &[],
     head: &[],
     cache_busting: false,
-    asset_files: &[],
     hooks: &[],
     recipes: &[],
     deno: None,
@@ -674,7 +679,7 @@ const STARTER_STYLESHEET: Effect = Effect {
         "static/web-assets/css/site.css",
         include_str!("templates/stylesheet.css"),
     )],
-    head: &[STYLESHEET_HEAD],
+    head: &[STARTER_STYLESHEET_HEAD],
     next_steps: &["Edit the starter stylesheet `static/web-assets/css/site.css`."],
     ..NO_EFFECT
 };
@@ -847,13 +852,9 @@ const TAILWIND_CSS: Effect = Effect {
         "static/tailwind-sources/site.css",
         include_str!("templates/tailwind-input.css"),
     )],
-    head: &[STYLESHEET_HEAD],
+    head: &[TAILWIND_STYLESHEET_HEAD],
     ignore: &["/static/web-assets/tailwind-output/"],
     cache_busting: true,
-    asset_files: &[(
-        "static/web-assets/tailwind-output/site.css",
-        "/assets/css/site.css",
-    )],
     hooks: &[Hook {
         stage: HookStage::BeforeBuild,
         name: "tailwind",
@@ -888,7 +889,6 @@ pub(super) struct Effects {
     pub(super) seo: Vec<SeoCode>,
     pub(super) head: Vec<HeadFragment>,
     pub(super) cache_busting: bool,
-    pub(super) asset_files: Vec<(&'static str, &'static str)>,
     pub(super) hooks: Vec<Hook>,
     pub(super) next_steps: Vec<&'static str>,
 }
@@ -910,7 +910,6 @@ impl Effects {
             effects.seo.push(effect.seo);
             effects.head.extend_from_slice(effect.head);
             effects.cache_busting |= effect.cache_busting;
-            effects.asset_files.extend_from_slice(effect.asset_files);
             effects.hooks.extend_from_slice(effect.hooks);
             recipes.extend_from_slice(effect.recipes);
             for step in effect.next_steps {

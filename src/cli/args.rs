@@ -266,7 +266,8 @@ pub struct HelpArgs {
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
-    /// Leave mouse selection to the terminal; use the keyboard to navigate.
+    /// Leave mouse selection to the terminal; use the keyboard to navigate. The reader's `c`
+    /// key hands the pointer over and back.
     #[arg(long)]
     pub no_mouse: bool,
 

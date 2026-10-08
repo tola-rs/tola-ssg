@@ -36,7 +36,9 @@ pub struct SiteAuthor {
     pub url: Option<String>,
 }
 
-/// Site identity and values available to templates.
+/// One site's values: Tola parses and validates their formats — `language` must be a BCP 47
+/// language tag, for example; templates read them through `@tola/site`, and your own values
+/// live under `[site.extra]`.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "site")]

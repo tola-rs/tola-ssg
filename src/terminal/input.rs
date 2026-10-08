@@ -33,6 +33,11 @@ impl InputLine {
         self.align_cursor();
     }
 
+    pub(super) fn set(&mut self, text: String) {
+        self.text = text;
+        self.cursor = self.text.len();
+    }
+
     fn align_cursor(&mut self) {
         self.cursor = self
             .text

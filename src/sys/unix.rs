@@ -7,6 +7,14 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
+/// The command that reads text on its standard input and puts it on this system's
+/// clipboard, when the system has one.
+///
+/// The other systems rely on the terminal's own OSC 52 escape alone.
+pub(crate) fn clipboard_command() -> Option<&'static str> {
+    cfg!(target_os = "macos").then_some("pbcopy")
+}
+
 /// Pass a path or URL as one argument to the desktop's opener.
 pub(crate) fn open_default(
     target: &OsStr,

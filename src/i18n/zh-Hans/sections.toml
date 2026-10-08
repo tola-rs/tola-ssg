@@ -3,7 +3,7 @@
 # ends with, and one field's meaning keyed by its full path.
 
 [sections.site]
-documentation = "站点的身份信息，以及模板可读取的值。"
+documentation = "站点的信息：Tola 会解析并校验这些值的格式，例如 `language` 必须符合 BCP 47 语言标签格式；你通过 `@tola/site` 读取它们，自定义的额外信息放在 `[site.extra]` 中。"
 help = '''模板把这些读作 `site.<key>`（`tola help package site` 说明这个对象）：
 
 ```toml
@@ -35,12 +35,12 @@ sitemap 需要它的原因：它们列出的每条地址都是绝对地址。`to
 ```'''
 
 [sections.build]
-documentation = "站点如何构建：Typst 入口、页面目录，以及发布目录。"
-help = '''站点是一个 Typst Bundle，`entry` 是起点程序。它 import 的模板、helper 与页面程序进入同一次编译。脚手架把 `site.typ` 放在站点根；入口也可以放在站点内其他位置。
+documentation = "站点如何构建：Typst 入口程序、源文件目录，以及发布目录。"
+help = '''站点是一个 Typst Bundle，`entry` 是它的入口程序。它 import 的模板、helper 与页面程序都进入同一次编译。`tola init` 默认生成的脚手架将 `entry` 设置为站点根目录下的 `site.typ`；当然，`entry` 由你自己配置，可以指向其他文件。
 
-`content-dir` 定义源的身份：`content/guide/install.typ` 在 `all-sources()` 中是 `guide/install.typ`，并带有由文件布局推导的 route segments。改名或移动文件会改变这个身份与这些 segments。入口文件永远不是源；共享 helper 与模板放在这个目录之外，避免被发现为内容。
+`content-dir` 决定源的身份：`content/guide/install.typ` 在 `all-sources()` 对应的 source 里，其 `path` 字段是 `guide/install.typ`。文件层级不影响 `permalink`；route segments 是由文件层级映射而来的“默认路由的分段”，方便你自定义路由。改名或移动源文件，身份与这些 segments 都会随之改变。`entry` 本身永远不是源；共享 helper 与模板请放在这个目录之外，这样就不会被当成内容。
 
-发现源不会直接发布页面。入口程序决定哪些源成为文档，以及它们使用哪些 output 路径。例如，下面把已发现的 segments 转为默认 output 路径：
+发现过程不会发布页面：哪些源成为文档、各自使用哪个 output 路径，都由 `entry` 决定。例如，下面把已发现的 segments 转成默认 output 路径：
 
 ```typst
 #import "@tola/address:0.0.0": route, route-to-output
@@ -48,45 +48,61 @@ help = '''站点是一个 Typst Bundle，`entry` 是起点程序。它 import �
 #let outputs = all-sources().map(source => route-to-output(route(source.route-segments)))
 ```
 
-脚手架的 `select-pages` 还会校验 metadata、筛掉草稿，并按站点语言 slug 化默认 route segments。源的 `permalink` 会覆盖默认 route，因此移动源时可以保持 URL 不变。这些策略写在可编辑的站点代码中。
+比如，`tola init` 默认生成的脚手架里，`select-pages` 会校验 metadata、筛掉 `draft: true` 的草稿文章，并根据每个 `source` 默认的 `route-segments` 字段进行 slugify，得到最终的一个路由；这些逻辑都由你自己定义与处理。源的 `permalink` 会覆盖默认 route，所以源移动后 URL 可以保持不变。
 
-`publish-dir` 是 `tola build` 整体替换的目录，旧 output 会被移除。选择空目录，或 Tola 已为此站点拥有的目录；手写文件通过 `[assets]` 或 hook 声明的 output 发布。发布前失败或取消会保留上次输出。`check`、`dev` 与 `preview` 不替换这个目录。
+```typst
+#let source-route(source) = {
+  if source.meta.permalink == none {
+    route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
+  } else {
+    decode-url-path(source.meta.permalink)
+  }
+}
 
-三张子表调整构建：`[build.minify]` 压缩支持的 output 字节；`[build.references]` 为无效引用选择 `error` 或 `warn`；`[build.hooks]` 在编译前、output 生成时或发布后运行站点自己的命令。各自的页面说明完整约定。所有 output 汇入同一份完整结果，发布前统一检查冲突与引用，因此一个生产者不能悄悄替换另一个的文件。'''
+#let select-pages(sources) = {
+  // Every source is validated here, drafts included, before choosing which to publish.
+  parse-sources(sources, page-schema)
+    .filter(source => not source.meta.draft)
+    .map(source => (
+      source: source,
+      output: route-to-output(source-route(source)),
+    ))
+}
+```
+
+`publish-dir` 是 `tola build` 整体接管的目录：每次成功构建都替换整棵目录，旧 output 一并清掉。它要么是空目录，要么是 Tola 为这个站点写过的目录；已经放着别的内容、又不是 Tola 写出的目录，会让构建失败。手工维护的文件请通过 `[assets]` 或 `[[build.hooks.generate-outputs]]` 声明的 output 发布。发布前失败或取消会保留上次输出；`check`、`dev` 与 `preview` 不替换这个目录。
+
+三张子表调整构建：`[build.minify]` 压缩支持的 output 字节；`[build.references]` 为无效引用选择 `error` 或 `warn`；`[build.hooks]` 在编译前、output 生成时或发布后运行站点自己的命令。所有 output 汇入同一份完整结果，发布前统一检查冲突与引用，因此一个生产者不能悄悄替换另一个的文件。'''
 
 [sections."build.minify"]
-documentation = "发布前对生成的 HTML、样式表与脚本做的压缩。"
-help = '''压缩发生在构建 output 时，`check`、`dev` 与 `preview` 也使用它。Tola 压缩自己导出的 HTML、`[assets]` 声明的 CSS 与 `.js`/`.mjs` 文件，以及内联样式表与脚本。图片、字体和 `generate-outputs` hook 文件保持原字节。三个开关默认都是 `true`：
+documentation = "在发布前，对由 Typst 编译而来的 HTML、`[assets]` 中的 CSS 与 JavaScript 文件进行压缩。"
+help = '''压缩发生在构建 output 时，`check`、`dev`、`preview` 都会根据 `[build.minify]` 选择是否压缩。因为进行压缩的时间很快，因此默认全部压缩。
 
-```toml
-[build.minify]
-html = true
-css = true
-javascript = true
-```
-
-把一个开关设为 `false` 就跳过那类转换。`--minify=false` 为单次运行关闭三项。配置资源的 URL 标识压缩后的字节，因此 cache-busting 跟随浏览器收到的内容。无法压缩的配置 CSS 或 JavaScript 资源会产生警告并保留原字节。'''
+`--minify=false` 为单次运行关闭三项。`[assets]` 下的 `cache-busting` 设置为 `true` 时，`asset-url`（位于 `@tola/address`）返回的 URL 上会被追加 `?h=`，标识压缩之后的字节——也就是浏览器实际收到的内容；压缩结果一变，URL 就变。如果 CSS 或 JavaScript 无法被成功压缩，那么会产生警告，保留原内容。'''
 
 [sections."build.references"]
-documentation = "已发布页面里指向空处的链接、资源或 fragment 怎么报告。`error` 让构建失败；`warn` 只报告，不让构建失败。"
-help = '''已发布的页面会被检查地址是否指向空处：`navigation` 管指向其他页面的链接，`resources` 管页面加载的图片、样式表与脚本，`fragments` 管目标页并未定义的 fragment。`error` 让构建失败；`warn` 报告该引用后继续。每个键都默认 `error`：
+documentation = "对已发布页面中指向空处的链接、资源或 fragment 的检查的诊断级别（检查总是发生）。"
+help = '''只有两种地址会被检查：相对地址（例如 `guide/`、`../guide/`，按所在页面的 URL 解析）与站点根地址（例如 `/guide/`，按站点根解析）。写明 scheme 或 host 的地址是外链，构建无法检验——例如 `https://example.com/guide/`。
 
-```toml
-[build.references]
-navigation = "warn"
-resources = "error"
-fragments = "warn"
-```
+检查时会读取最终 HTML 里的 URL 属性（`href`、`src` 等），手写 HTML 也算。解析与浏览器一致：相对地址按页面自身的地址解析，页面声明了 `<base href>` 时改按它解析（取第一个）。这个 `<base href>` 指向别的 origin 时，整页相对地址都指向那个站点，Tola 不检查它们，并给出一条警告（`reference.base_href_external_origin`）说明该页未被检查；去掉 `<base href>`，或把它写成相对地址（例如 `/`，站点挂在 `site.base-path` 下时用 `/docs/`）即可。
 
-只有相对地址与站点根地址会被检查；写明自身 scheme 与 host 的地址一律不管，写的是 `site.origin` 也一样，因为这个地址可能由别的站点提供。
+未解析的引用按类别报出诊断，级别取对应字段：
 
-检查读取最终 HTML 中的 URL 属性，包括手写 HTML，按文档第一个 `<base href>` 解析。`<base href>` 指明别的 origin 时，整页相对地址都归那个站点，因而不再检查，构建会明确告知这一点。解析出的每个地址都会对照站点的完整 output，所以任何生产者写出的目标都算数。目标缺失与资源类型不符使用 `navigation` 或 `resources`；只有 HTML anchor 缺失才使用 `fragments`。`#top` 不要求声明 id。浏览器 fragment 指令（例如 `#:~:text=words`）以及非 HTML 资源的 fragment 不作为 HTML id 检查。
+- `navigation`：链接的目标页面不在 output 里，例如 `<a href="/missing/">`，报 `reference.navigation_missing`
+- `resources`：页面加载的资源不在 output 里，例如 `<img src="/assets/missing.png">`，报 `reference.resource_missing`；目标存在但媒体类型不符时，例如 `<script src="/assets/site.css">`，报 `reference.resource_media_mismatch`
+- `fragments`：链接点名的 fragment 在目标页面里不存在，例如 `<a href="/guide/#missing">`，报 `reference.fragment_missing`；目标页面本身不存在时，整条引用按 `navigation` 报，fragment 不再单独报告
+
+`#top` 由浏览器内置：URL 里 `#` 后面那段就是 fragment，写 `top` 时浏览器回到页首，页面上不需要 `id="top"`。`#:~:text=words` 这类浏览器文本片段，以及指向非 HTML 文件的 fragment（例如 `/data.json#missing`），都不会报 `reference.fragment_missing`。
+
+这些检查在全部 output 生成完毕之后、发布到 `publish-dir` 之前运行，对照的是本次构建的完整 output：Typst Bundle 编译出的 HTML 页面、`[assets]` 声明的文件、`generate-outputs` hook 写出的文件——链接指向 hook 写出的文件同样有效，不会被报缺失。
+
+`tola check` 与 `tola build`、`tola dev`、`tola preview` 跑同一段检查，只是不替换发布目录。
 
 `@tola/document` 的 `references()` 是独立的原生 Bundle 链接与 ref 查询。它不包含手写 HTML 或其他生产者的 output，`found` 也不保证最终 HTML 定义了该 fragment（`tola help package document references`）。'''
 
 [sections."build.hooks"]
 documentation = "Tola 在构建前后运行的外部命令，按阶段分组。每个阶段等自己的命令都退出后才继续。"
-help = '''按命令产出什么来选择阶段：`before-build` 在源发现之前写站点输入；`generate-outputs` 在 Bundle 编译后添加最终文件；`after-publish` 消费已提交的站点。Bundle、配置资源与生成的 output 在发布前统一检查冲突与引用。
+help = '''按命令产出什么来选择阶段：`before-build` 在发现源文件之前写站点输入；`generate-outputs` 在 Bundle 编译后添加最终文件；`after-publish` 消费已提交的站点。Bundle、配置资源与生成的 output 在发布前统一检查冲突与引用。
 
 各命令运行的阶段不同。下表中的每项还要求 `enable = true`：
 
@@ -99,36 +115,45 @@ help = '''按命令产出什么来选择阶段：`before-build` 在源发现之�
 | `tola inspect` | — | 跳过 | 跳过 | 跳过 |
 | `tola vendor` | `prod` | 跳过 | 跳过 | 跳过 |
 
+一次 `tola build` 的顺序：`before-build` hook 先跑 → 按 `content-dir` 发现源、编译 Bundle、收集 `[assets]`（这份完整结果就是候选）→ `generate-outputs` hook 把生成文件并入候选 → 检查冲突与引用 → 发布：把整份候选写进 `build.publish-dir` → `after-publish` hook 消费已发布的站点。
+
+构建与发布的区别：构建产出候选并接受检查，发布只做一件事——把检查过的结果整棵写进 `build.publish-dir`（成功构建会替换整棵目录）。前两个阶段都在发布之前，任何一步失败就不会发布，上次输出保持不动；`after-publish` 在发布之后，失败不会撤销发布。
+
 `check` 与 `preview` 用生产设置从源构建，不写 `build.publish-dir`。`dev` 在内存中提供成功的构建。前两个阶段的 `dev` 字段默认 `run`，after-publish 默认 `skip`。
 
 命令从站点根运行，是会退出的 argv 数组，不经过隐式 shell。同阶段条目按配置顺序执行，一条失败就停止剩余条目。相互依赖的步骤与条件放在站点自己的执行器里，例如 `command = ["just", "css"]`；Tola 不要求使用 `just`。每个 output 生成命令读取同一份上游快照、写入私有目录：后面的生成命令看不到前一个刚写出的 output。
 
-每次调用收到 `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`、`TOLA_HOOK_CACHE_DIR` 与 `TOLA_HOOK_TEMP_DIR`。缓存目录按站点、阶段与条目名持久保存；命令拥有其中的内容，自行决定何时可以复用。Tola 重新运行命令，不复用缓存结果。临时目录只为本次调用保留，`TMPDIR`、`TMP` 与 `TEMP` 也指向它。
+每次调用都会收到这些环境变量：
 
-`before-build` 直接写站点，不接收输入或输出目录变量。`generate-outputs` 读取 `TOLA_HOOK_INPUT_DIR` 的只读快照，在 `TOLA_HOOK_OUTPUT_DIR` 下按最终 output 的相对路径写文件。`after-publish` 读取 `TOLA_HOOK_INPUT_DIR` 的已提交站点只读视图，不接收输出目录变量。阶段没有定义的变量不存在，也不会从调用者继承。
+| 变量 | 用途 | 提供的阶段 |
+| --- | --- | --- |
+| `TOLA_HOOK_STAGE` | 当前阶段：`before-build`、`generate-outputs` 或 `after-publish` | 全部 |
+| `TOLA_BUILD_MODE` | 本次构建模式：`prod` 或 `dev` | 全部 |
+| `TOLA_HOOK_CACHE_DIR` | `.tola/hook-cache/<阶段>/<条目名>`，跨次运行保留，例如 `.tola/hook-cache/generate-outputs/search` | 全部 |
+| `TOLA_HOOK_TEMP_DIR` | 本次调用独有的临时目录，结束即删 | 全部 |
+| `TOLA_HOOK_INPUT_DIR` | 命令的输入：上游已产出的整站的只读快照，布局与发布后的目录一致 | `generate-outputs`、`after-publish` |
+| `TOLA_HOOK_OUTPUT_DIR` | 每次运行都是空目录；写进去的相对路径就是 `build.publish-dir` 下的相对路径 | `generate-outputs` |
+
+缓存目录里的内容归命令所有，Tola 只创建、不清理，也不复用其中的结果；临时目录与输出目录每次运行都新建。`TMPDIR`、`TMP` 与 `TEMP` 指向 `TOLA_HOOK_TEMP_DIR`。阶段没有定义的变量不存在，也不会从调用者继承。
 
 `rerun-on` 添加相对站点根的字面路径，不是 glob；目录被递归观察。编辑它们触发整个开发构建，不只是一条命令。工具会读、Tola 原本不会观察的路径才需要添加，例如工具输入目录、执行器、manifest 或 lockfile。各阶段页分别演示样式表生产、搜索索引与发布结果消费。
 
 hook 是以调用者权限运行的受信任脚本。`--offline` 与 `--pure` 限制 Tola 自己读取输入，不限制这些命令。被取代的开发构建会取消自己发布前的命令，但脚本副作用不会回滚。after-publish 的开发调度见该阶段页。'''
 
 [sections."build.hooks.before-build"]
-documentation = "在源文件发现之前生成声明的站点输入，供 Typst 与已配置的资源读取。"
-help = '''Typst 或 `[assets]` 必须读取的输入适合在这个阶段生成。脚手架的 Tailwind 功能在源发现之前运行一次会退出的样式表构建：
+documentation = "在发现源文件之前运行，先把站点随后要读的文件写好：Typst 的输入、`[assets]` 声明的文件。"
+help = '''这个阶段生成 Typst 与 `[assets]` 随后要读的文件。
 
-```toml
-[[build.hooks.before-build]]
-name = "tailwind"
-command = ["just", "css"]
-generates = ["static/web-assets/tailwind-output/site.css"]
-rerun-on = ["static/tailwind-sources", "deno.json", "deno.lock", "justfile"]
-```
+下面用 Tailwind CSS 举一个完整例子：`just` 跑 task，Deno 执行 `@tailwindcss/cli` 生成样式表；`before-build` hook 在发现源文件之前运行它，`[assets]` 把 `static/web-assets/tailwind-output` 映射到 `/assets/tailwind-output`。处理前与处理后的资产在路径上分开：输入是 `static/tailwind-sources/site.css`（不发布），产物是 `static/web-assets/tailwind-output/site.css`（随树发布，URL 为 `/assets/tailwind-output/site.css`）。
 
-`just css` 调用站点固定版本的 task。最小 recipe 与 task 配置如下：
+`justfile`：
 
 ```just
 css:
     deno task css
 ```
+
+`deno.json`：
 
 ```json
 {
@@ -142,28 +167,59 @@ css:
 }
 ```
 
-运行 `deno install` 解析工具链并保留 lockfile。Tailwind 输入必须点名要扫描的内容与模板文件，脚手架显式写出了这些源。使用会退出的命令，不使用工具的 watch 模式：Tola 负责开发监听。
+`tola.toml`：
 
-`generates` 声明命令结束后要检查、开发期间要观察的站点输入，不发布这个输入。脚手架通过 `[assets]` 的精确文件映射把此样式表发布在 `/assets/css/site.css`，模板用 `asset-url` 链接它。生成数据也可以由 Typst 读取，产出文档或其他 output。'''
+```toml
+[[build.hooks.before-build]]
+name = "tailwind"
+command = ["just", "css"]
+generates = ["static/web-assets/tailwind-output/site.css"]
+rerun-on = ["static/tailwind-sources", "deno.json", "deno.lock", "justfile"]
+```
+
+文件要让浏览器读到，得先发布出去：下面的 `[assets]` 把 `static/web-assets` 整棵树映射到 `/assets`，产物因此随树发布在 `/assets/tailwind-output/site.css`。生成的数据也可以不发布，只给 Typst 读：页面 import 它，用来产出文档或其他 output。
+
+`tola.toml`：
+
+```toml
+[assets]
+trees = [{ source = "static/web-assets", url-prefix = "/assets" }]
+```
+
+页面模板的 head 里链接它（`site/page.typ` 与 `site/not-found.typ`）：
+
+```typst
+#html.link(rel: "stylesheet", href: asset-url("/assets/tailwind-output/site.css"))
+```
+
+Tailwind 的输入 CSS 要写明扫描哪些内容与模板文件。hooks 面向单次运行的命令：Tola 目前没有支持 watch 这类长驻命令的打算——那会给开发、构建流程、hook 机制与分析带来极大的复杂性。开发监听由 Tola 负责，hooks 机制只提供必要的基础设施：命令自己的增量编译、缓存与持久化由生产者自己编写，`TOLA_HOOK_CACHE_DIR`、`TOLA_HOOK_TEMP_DIR` 等环境变量是 Tola 提供的接口。
+
+`generates` 声明命令会写出哪些文件：Tola 在命令结束后检查这些路径是否存在，开发期间监听它们的变化。
+
+它们是站点的输入，不是输出：等本阶段的 hook 全部跑完，Tola 才开始构建——按 `content-dir` 发现源、编译 Bundle、收集 `[assets]` 声明的文件，然后检查引用、发布。
+
+本阶段的命令环境：
+- `TOLA_HOOK_STAGE`：每次调用都是 `before-build`。
+- `TOLA_BUILD_MODE`：`prod`（`build`、`check`、`preview`、`vendor`）或 `dev`（`tola dev`）。
+- `TOLA_HOOK_CACHE_DIR`：跨次运行保留在 `.tola/hook-cache/before-build/<条目名>`；内容归命令、Tola 只创建目录——增量产物放这里，例如 `"$TOLA_HOOK_CACHE_DIR"/tailwind`。
+- `TOLA_HOOK_TEMP_DIR`：本次调用独有的临时目录，结束即删；`TMPDIR`、`TMP`、`TEMP` 也指向它。
+
+没有 `TOLA_HOOK_INPUT_DIR` 与 `TOLA_HOOK_OUTPUT_DIR`：命令直接写站点根下的输入文件。'''
 
 [sections."build.hooks.generate-outputs"]
 documentation = "在站点程序编译完成后产出声明的最终输出文件，并在引用检查之前把它们并入候选输出图。它们对之前的 Typst 编译不可见，但页面可以链接它们已知的 URL，无需 `[assets]` 声明，引用检查也会校验这些链接。"
-help = '''从编译结果生成的最终文件适合在这个阶段生产。Pagefind 读取 HTML 快照，写出的搜索索引与它索引的页面进入同一份 output：
+help = '''这个阶段从编译结果生成最终文件。
 
-```toml
-[[build.hooks.generate-outputs]]
-name = "search"
-command = ["just", "search"]
-outputs = [{ tree = "assets/pagefind-search" }]
-rerun-on = ["deno.json", "deno.lock", "justfile"]
-```
+下面用 Pagefind 举一个完整例子：它读取 HTML 快照，写出的搜索索引与它索引的页面进入同一份 output。
 
-脚手架的 `pagefind` 功能提供这个 hook、搜索 UI 与固定版本的 task：
+`justfile`：
 
 ```just
 search:
     deno task search
 ```
+
+`deno.json`：
 
 ```json
 {
@@ -174,27 +230,68 @@ search:
 }
 ```
 
-运行 `deno install` 并保留 lockfile。Tola 在每次参与的构建中等待 hook，开发构建也一样；索引与页面一起检查、发布。
+`tola.toml`：
 
-每个生成命令读取同一份编译结果；相互依赖的转换放进同一个执行器。
+```toml
+[[build.hooks.generate-outputs]]
+name = "search"
+command = ["just", "search"]
+outputs = [{ tree = "assets/pagefind-search" }]
+rerun-on = ["deno.json", "deno.lock", "justfile"]
+```
 
-声明的 output 无需 `[assets]` 条目。用 `output-to-url("assets/pagefind-search/pagefind-ui.css")` 链接已知 output 路径；`asset-url` 只解析 `[assets]` 声明。这些文件在之前的 Typst 编译时尚不存在，因此 Tola 当时无法计算它们的资源 URL。Tola 不为 hook 字节做压缩或 cache-busting；命令负责命名与转换，Pagefind 自行为数据文件区分版本。'''
+每个生成命令读的是同一份编译结果；几步转换相互依赖时，把它们放进同一个命令里。
+
+与所有 hook 阶段一样，这个阶段只跑单次命令：Tola 不做 watch 这类长驻运行，开发监听由 Tola 负责；命令自己的增量编译与缓存由生产者自己编写，可用 `TOLA_HOOK_CACHE_DIR`。
+
+页面这样用它：模板的 head 里直接链接生成的 CSS 与 JS：
+
+```typst
+#import "@tola/address:0.0.0": output-to-url
+
+#html.link(rel: "stylesheet", href: output-to-url("assets/pagefind-search/pagefind-ui.css"))
+#html.elem("script", attrs: (src: output-to-url("assets/pagefind-search/pagefind-ui.js")))
+```
+
+声明的 output 无需 `[assets]` 条目。`asset-url` 只解析 `[assets]` 声明，并校验该文件确实已发布，否则报错。用 `output-to-url("assets/pagefind-search/pagefind-ui.css")` 链接已知 output 路径。这些文件在之前的 Typst 编译时尚不存在，因此 Tola 当时无法计算它们的资源 URL。Tola 不会为 hook 的产物做压缩、cache-busting 等，全部由生产者/命令自己解决：例如 Pagefind 会给自己的索引与片段文件起带哈希的名字。
+
+本阶段的命令环境：
+- `TOLA_HOOK_INPUT_DIR`：命令的输入——上游已产出的整站的只读快照：页面与 `[assets]` 文件都在、布局与发布后的目录一致、文件不可写；本阶段其它 hook 刚写出的 output 不在里面，它也不是 `build.content-dir` 或 `build.publish-dir`，只在这条命令运行期间存在。例子里的 `--site "$TOLA_HOOK_INPUT_DIR"` 就是读它。
+- `TOLA_HOOK_OUTPUT_DIR`：每次运行都是空目录；写进去的相对路径就是 `build.publish-dir` 下的相对路径——写到 `"$TOLA_HOOK_OUTPUT_DIR"/assets/pagefind-search` 会发布成 `assets/pagefind-search`，URL 是 `/assets/pagefind-search/…`。
+- `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`、`TOLA_HOOK_CACHE_DIR`、`TOLA_HOOK_TEMP_DIR`：与其它阶段相同——阶段名、模式（`prod` 或 `dev`）、跨次缓存目录（例如 `"$TOLA_HOOK_CACHE_DIR"/search/index.json`）、本次临时目录。命中缓存也要重新写出声明的 output。'''
 
 [sections."build.hooks.after-publish"]
 documentation = "通过只读视图消费一个已提交的 revision，不再声明站点输出。"
-help = '''成功提交的站点可以在这个阶段被消费，例如上传：
+help = '''这个阶段消费已成功提交的站点，例如把它同步到主机：
+
+`justfile`：
+
+```just
+rsync:
+    rsync -a --delete "$TOLA_HOOK_INPUT_DIR/" user@example.com:/srv/site/
+```
+
+`tola.toml`：
 
 ```toml
 [[build.hooks.after-publish]]
-name = "deploy"
-command = ["just", "deploy"]
+name = "rsync"
+command = ["just", "rsync"]
 ```
 
-站点的 `deploy` recipe 读取 `TOLA_HOOK_INPUT_DIR`，即该已提交站点的只读视图。命令读取期间，后续构建不会改变这份视图。此阶段不添加 output；站点需要的文件放在 `generate-outputs` 生产，在发布前接受校验。消费者失败在站点提交后报告，不能撤销发布。
+上面的 recipe 把刚发布的站点同步到主机。after-publish 在发布完成之后运行：`TOLA_HOOK_INPUT_DIR` 是一份只读快照，就是刚发布的那个站点，命令读取期间不会变。该阶段的 hook 执行时，视作先前构建已经成功：命令失败不会撤销发布（站点的构建结果已经写入 `build.publish-dir`）。这个阶段是发布之后的收尾：hook 可以用这份站点做事（上传、通知等）；它在这里写出的文件不属于这次发布，也不会被检查。要让站点多出文件，请在 `generate-outputs` 里生成——那里的输出会在发布前被检查，并随站点发布。
 
 `tola build` 等这些命令完成才退出；即使 output 已写出，消费者失败仍使命令结果失败。`check`、`preview`、`inspect` 与 `vendor` 从不运行它们。
 
-开发模式默认跳过此阶段。设 `dev = "run"` 后，消费者串行运行，不阻塞浏览器更新。一个 revision 运行期间，只保留最新的等待 revision，因此中间 revision 可能没有消费者调用。停止 `tola dev` 会取消正在运行的命令，并丢弃等待任务。这个模式适合处理最新站点的消费者，不适合审计每一个 revision。'''
+与所有 hook 阶段一样，这里的命令也只跑单次：开发监听由 Tola 负责，命令自己的增量与缓存由生产者自己编写（可用 `TOLA_HOOK_CACHE_DIR`）。
+
+开发模式默认跳过此阶段。设 `dev = "run"` 后，消费者串行运行，不阻塞浏览器更新。一个 revision 运行期间，只保留最新的等待 revision，因此中间 revision 可能没有消费者调用。停止 `tola dev` 会取消正在运行的命令，并丢弃等待任务。这个模式适合处理最新站点的消费者，不适合审计每一个 revision。
+
+本阶段的命令环境：
+- `TOLA_HOOK_INPUT_DIR`：命令的输入——刚提交的那个站点的只读快照，布局与发布后的目录一致，整棵就是要上传的站点。
+- `TOLA_HOOK_STAGE`、`TOLA_BUILD_MODE`、`TOLA_HOOK_CACHE_DIR`、`TOLA_HOOK_TEMP_DIR`：与其它阶段相同——阶段名、模式（`prod` 或 `dev`）、跨次缓存目录、本次临时目录。
+
+没有 `TOLA_HOOK_OUTPUT_DIR`：本阶段不添加 output。'''
 
 [sections.assets]
 documentation = "把声明的文件与目录发布到它们自己写明的站点根 URL 上。"
@@ -261,9 +358,9 @@ preset = "lucide"                  # newest release Tola indexes
 
 preset 指明一个 Tola 已索引的 collection，比如 `lucide`、`mdi`、`tabler`、`simple-icons`，所以你只要能写
 `preset = "lucide"`：下载地址与那份字节的摘要都由 Tola 提供。在 preset 旁边加上
-`version = "1.2.136"`，就把版本固定住，换一天构建取到的还是同一批图标。
+`version = "1.2.136"` 来固定版本。
 
-collection 是 Tola 没有索引的，或你要的版本它没有固定，那就改写 `url` 并配上那份字节的 `sha256`：
+若 `preset` 里没有你想要的 collection 或版本，就自己写 `url`，并配上那份字节的 `sha256`：
 
 ```toml
 [icons.collections.brand-remote]
@@ -339,7 +436,7 @@ tola build --pure       # build from site-owned inputs
 
 [sections.server]
 documentation = "`tola dev` 与 `tola preview` 监听的 HTTP 服务器设置。"
-help = '''`tola dev` 与 `tola preview` 绑定这张表的监听器，好让你在浏览器里读站点。它不改变站点发布什么：`tola build` 只写文件，永远不开端口。
+help = '''`tola dev` 与 `tola preview` 绑定这张表的监听器：`tola build` 只写文件，永远不开端口。
 
 `interface` 是要绑定的地址，默认回环地址，只有本机能访问；写成 `0.0.0.0`、`::` 这类未指定地址，就会接受网络上的连接。`port` 是要监听的端口，写 `0` 让操作系统挑一个空闲端口：
 
@@ -349,14 +446,14 @@ interface = "127.0.0.1"    # this machine only; "0.0.0.0" accepts the network
 port = 5277               # 0 asks the operating system for a free port
 ```
 
-两个命令都接受 `--interface` 与 `--port`，为那一次运行覆盖这张表：
+两个命令都接受 `--interface` 与 `--port` 进行覆盖：
 
 ```sh
 tola dev --interface 0.0.0.0 --port 8080
 tola preview --port 0
 ```
 
-两个提供服务的命令共用这个监听器，而只有 `tola dev` 监听文件变动并刷新，所以那个开关属于 `[dev]`。'''
+两个命令共用这个监听器；文件变动时重建并刷新浏览器只有 `tola dev` 会做，它的开关是 `[dev]` 的 `watch`。'''
 
 [sections.dev]
 documentation = "`tola dev` 的开发监听设置。"
@@ -377,7 +474,9 @@ tola dev        # serve locally and rebuild on every edit
 tola preview    # serve the production build without watching
 ```
 
-两个提供服务的命令共用的监听器是 `[server]`；`watch = false` 让 `tola dev` 只构建一次，但继续提供服务。'''
+两个提供服务的命令共用的监听器是 `[server]`；`watch = false` 让 `tola dev` 只构建一次，但继续提供服务。
+
+但它和 `tola preview` 仍不一样：`tola dev` 始终以 `dev` 模式构建（命令里能读到 `TOLA_BUILD_MODE=dev`），hook 按各自的 `dev` 字段参与——`after-publish` 设成 `dev = "run"` 时在这里也会跑；`tola preview` 用生产设置构建，从不运行 `after-publish`。'''
 
 [sections.diagnostics]
 documentation = "限制终端每个批次显示多少诊断；构建结果与编辑器诊断保持完整。"
@@ -408,36 +507,36 @@ max_warnings = 3
 "site.copyright" = "版权声明，模板可直接输出，例如 `© 2026 Alice`。"
 "site.extra" = "你自己的值，模板里读作 `site.extra`。"
 "build.entry" = "构建站点的 Typst 程序，相对站点根。"
-"build.content-dir" = "站点页面所在的目录，相对站点根。Tola 读取其下的 `.typ` 文件。"
-"build.publish-dir" = "构建结果发布到哪个目录，相对站点根。该目录之下的一切都归 Tola，别放其他东西。"
+"build.content-dir" = "站点源文件所在的目录，相对站点根。Tola 读取其下的 `.typ` 文件。"
+"build.publish-dir" = "构建结果发布到的目录，相对站点根。该目录整棵归 Tola：Tola 没写过的非空目录会让构建失败；Tola 写过的目录，每次成功构建都会整棵替换。不要往里放其他东西。"
 
-"build.minify.html" = "压缩每个已发布页面的 HTML。"
-"build.minify.css" = "压缩 `[assets]` 下声明的 CSS 源，以及页面自己写下的样式表。"
-"build.minify.javascript" = "压缩 `[assets]` 下声明的 `.js` 与 `.mjs` 源，以及页面自己写下的脚本。"
+"build.minify.html" = "是否压缩每个已发布页面的 HTML。"
+"build.minify.css" = "是否压缩 `[assets]` 下声明的 CSS 源，以及页面 HTML 里内嵌的 `<style>`。"
+"build.minify.javascript" = "是否压缩 `[assets]` 下声明的 `.js` 与 `.mjs` 源，以及页面 HTML 里内嵌的 `<script>`（含 module）。"
 
-"build.references.navigation" = "指向站点另一页面的链接。"
-"build.references.resources" = "页面加载的图片、样式表或脚本。"
-"build.references.fragments" = "目标页面没有定义的 fragment。"
+"build.references.navigation" = "指向站点内其他页面的链接，例如 `<a href=\"/missing/\">`。"
+"build.references.resources" = "页面加载的子资源：图片、样式表、脚本等，例如 `<img src=\"/assets/missing.png\">`。"
+"build.references.fragments" = "链接里的 fragment，例如 `<a href=\"/page/#missing\">`。"
 
-"build.hooks.before-build.enable" = "这一条是否运行。被禁用的条目什么都不占用，因此别的 hook 可以声明同样的路径。"
-"build.hooks.before-build.name" = "给这一条起名，好让状态行与诊断点得到它：一个不含空格的词，在本阶段内唯一。"
-"build.hooks.before-build.command" = "可执行文件及其参数，从站点根运行，不经过隐式 shell。命令直接写出声明的站点输入，也不读任何构建目录，因此不会收到输入或输出目录变量。"
+"build.hooks.before-build.enable" = "是否运行该 hook。"
+"build.hooks.before-build.name" = "该 hook 的名字，出现在状态行与诊断里。必须是一个不含空白的词，且在本阶段内唯一：为空、含空白、或在本阶段内重名都会报错。"
+"build.hooks.before-build.command" = "运行的命令，从站点根执行，不经过隐式 shell。这个阶段不设置 `TOLA_HOOK_INPUT_DIR`、`TOLA_HOOK_OUTPUT_DIR`（`generate-outputs` 才有）：命令直接生成站点要读的输入，没有构建目录可读。"
 "build.hooks.before-build.dev" = "`tola dev` 是否运行这一条：`\"run\"`（默认）或 `\"skip\"`。"
-"build.hooks.before-build.rerun-on" = "额外的文件或目录，相对站点根；这些路径被编辑会触发一次 `tola dev` 构建，而不只是这条命令。该字段既不筛选命令执行，也不缓存命令结果。"
-"build.hooks.before-build.generates" = "这一条生成的文件或目录，相对站点根；`build.publish-dir` 与 `.tola` 不可用。Tola 会在命令结束后检查每个声明路径是否存在，并在 `tola dev` 期间观察它。声明它或读取它的字节都不会发布它：要发布请走 `[assets]` 或 Bundle 的 `asset(...)`，也可以用它产出文档或别的输出。"
+"build.hooks.before-build.rerun-on" = "该 hook 监听的路径，相对站点根；这些路径被编辑会触发一次 `tola dev` 构建，而不仅仅是 hook 运行的命令。"
+"build.hooks.before-build.generates" = "该 hook 执行命令后生成的文件或目录，相对站点根；不可位于 `build.publish-dir` 与 `.tola` 中。Tola 在 hook 的命令执行后，会检查这些声明的路径是否存在——这是 hook 需要显式传给 Tola 的信息：Tola 不打算推断命令本身生成了哪些内容。声明它并不会发布它：要发布，就用 `[assets]` 或 Bundle 的 `asset(...)`；也可以让 Typst 读它，产出文档或其他 output。"
 
-"build.hooks.generate-outputs.enable" = "这一条是否运行。被禁用的条目什么都不占用，因此别的 hook 可以声明同样的路径。"
-"build.hooks.generate-outputs.name" = "给这一条起名，好让状态行与诊断点得到它：一个不含空格的词，在本阶段内唯一。"
-"build.hooks.generate-outputs.command" = "可执行文件及其参数，从站点根运行，不经过隐式 shell。读取 `TOLA_HOOK_INPUT_DIR` 下的上游快照，把声明的输出写到 `TOLA_HOOK_OUTPUT_DIR` 之下；写出的路径相对站点最终输出。"
-"build.hooks.generate-outputs.dev" = "`tola dev` 是否运行这一条：`\"run\"`（默认）或 `\"skip\"`。"
-"build.hooks.generate-outputs.rerun-on" = "额外的文件或目录，相对站点根；这些路径被编辑会触发一次 `tola dev` 构建，而不只是这条命令。该字段既不筛选命令执行，也不缓存命令结果。"
-"build.hooks.generate-outputs.outputs" = "这一条并入候选的最终站点输出路径，相对站点输出根，写成 `{ file = \"index.json\" }` 或 `{ tree = \"search\" }`。必填：实际写出的文件必须与这些声明一致，每条路径都要在 `_tola` 之外，而别的生产者已拥有的路径会让构建失败，而不是覆盖那条输出。"
+"build.hooks.generate-outputs.enable" = "是否运行该 hook。"
+"build.hooks.generate-outputs.name" = "该 hook 的名字，出现在状态行与诊断里。必须是一个不含空白的词，且在本阶段内唯一：为空、含空白、或在本阶段内重名都会报错。"
+"build.hooks.generate-outputs.command" = "运行的命令，从站点根执行，不经过隐式 shell。命令读 `TOLA_HOOK_INPUT_DIR` 下的上游快照，把声明的输出写到 `TOLA_HOOK_OUTPUT_DIR` 下；写出的路径相对站点最终输出。"
+"build.hooks.generate-outputs.dev" = "`tola dev` 是否运行该 hook：`\"run\"`（默认）或 `\"skip\"`。"
+"build.hooks.generate-outputs.rerun-on" = "该 hook 监听的路径，相对站点根；这些路径被编辑会触发一次 `tola dev` 构建，而不仅仅是 hook 运行的命令。"
+"build.hooks.generate-outputs.outputs" = "该 hook 并入候选的最终站点输出路径，写成以 `build.publish-dir`（默认 `public`）为根的相对路径：`{ file = \"manifest.json\" }` 或 `{ tree = \"assets/thumbnails\" }`。必填：实际写出的文件必须与这些声明一致，每条路径都要在 `_tola` 之外，而别的生产者已拥有的路径会让构建失败，而不是覆盖那条输出。"
 
-"build.hooks.after-publish.enable" = "这一条是否运行。"
-"build.hooks.after-publish.name" = "给这一条起名，好让状态行与诊断点得到它：一个不含空格的词，在本阶段内唯一。"
-"build.hooks.after-publish.command" = "可执行文件及其参数，从站点根运行，不经过隐式 shell。`TOLA_HOOK_INPUT_DIR` 是已发布站点的一份只读临时视图，因此这里失败不会撤销发布。"
-"build.hooks.after-publish.dev" = "`tola dev` 是否运行这一条：`\"skip\"`（默认）或 `\"run\"`。"
-"build.hooks.after-publish.rerun-on" = "额外的文件或目录，相对站点根；这些路径被编辑会触发一次 `tola dev` 构建，而不只是这条命令。该字段既不筛选命令执行，也不缓存命令结果。"
+"build.hooks.after-publish.enable" = "是否运行该 hook。"
+"build.hooks.after-publish.name" = "该 hook 的名字，出现在状态行与诊断里。必须是一个不含空白的词，且在本阶段内唯一：为空、含空白、或在本阶段内重名都会报错。"
+"build.hooks.after-publish.command" = "运行的命令，从站点根执行，不经过隐式 shell。`TOLA_HOOK_INPUT_DIR` 是已发布站点的一份只读视图，因此这里失败不会撤销发布。"
+"build.hooks.after-publish.dev" = "`tola dev` 是否运行该 hook：`\"skip\"`（默认）或 `\"run\"`。"
+"build.hooks.after-publish.rerun-on" = "该 hook 监听的路径，相对站点根；这些路径被编辑会触发一次 `tola dev` 构建，而不仅仅是 hook 运行的命令。"
 
 "assets.cache-busting" = "让内容变过的已发布字节在 `asset-url` 返回的 URL 里获得新的 `?h=...`。已发布的路径本身不改名。默认关闭。"
 "assets.trees" = "发布在某个 URL prefix 之下的源目录，每项写成 `{ source = \"static/icons\", url-prefix = \"/icons\" }`。"

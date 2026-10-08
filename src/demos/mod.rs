@@ -1,8 +1,11 @@
 //! Complete bundled sites and tutorials, shared by help, preview, export, and verification.
 
+use std::path::Path;
+
 use anyhow::{Result, bail};
 
 use crate::i18n::HelpLanguage;
+use crate::tree::{EntryKind, Tree};
 
 pub(crate) mod export;
 pub(crate) mod preview;
@@ -188,23 +191,15 @@ impl Demo {
             self.title(language),
             self.summary(language)
         );
-        let mut paths = self
-            .directories
-            .iter()
-            .map(|path| (*path, true))
-            .chain(self.files.iter().map(|file| (file.path, false)))
-            .collect::<Vec<_>>();
-        paths.sort_by_key(|(path, _)| *path);
-        for (path, directory) in paths {
-            let components = path.split('/').collect::<Vec<_>>();
-            document.push_str(&"  ".repeat(components.len() - 1));
-            document.push_str(components.last().expect("a demo member has a name"));
-            if directory {
-                document.push('/');
-            }
-            document.push('\n');
+        let mut tree = Tree::default();
+        for directory in self.directories {
+            tree.insert(Path::new(directory), EntryKind::Directory);
         }
-        document.push_str("```\n\n");
+        for file in self.files {
+            tree.insert(Path::new(file.path), EntryKind::File);
+        }
+        document.push_str(&tree.render());
+        document.push_str("\n```\n\n");
         let guide = match language {
             HelpLanguage::English => self.guide,
             HelpLanguage::SimplifiedChinese => self.guide_zh,

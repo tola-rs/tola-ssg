@@ -20,8 +20,6 @@ pub(crate) enum PageId {
     PackageSelection { name: String, exports: Vec<String> },
     Demo { id: String },
     DemoFile { id: String, path: String },
-    DemoOutputs { id: String },
-    DemoOutput { id: String, path: String },
 }
 
 impl PageId {
@@ -38,16 +36,12 @@ impl PageId {
             }
             Self::Demo { id } => Some(format!("demo {id}")),
             Self::DemoFile { id, path } => Some(format!("demo {id} {}", shell_argument(path))),
-            Self::DemoOutputs { .. } | Self::DemoOutput { .. } => Some(self.uri()),
         }
     }
 
     pub(crate) fn demo(&self) -> Option<&str> {
         match self {
-            Self::Demo { id }
-            | Self::DemoFile { id, .. }
-            | Self::DemoOutputs { id }
-            | Self::DemoOutput { id, .. } => Some(id),
+            Self::Demo { id } | Self::DemoFile { id, .. } => Some(id),
             _ => None,
         }
     }
@@ -74,11 +68,6 @@ impl PageId {
             Self::Demo { id } => vec![id],
             Self::DemoFile { id, path } => std::iter::once(id.as_str())
                 .chain(std::iter::once("files"))
-                .chain(path.split('/'))
-                .collect(),
-            Self::DemoOutputs { id } => vec![id, "outputs"],
-            Self::DemoOutput { id, path } => std::iter::once(id.as_str())
-                .chain(std::iter::once("outputs"))
                 .chain(path.split('/'))
                 .collect(),
         };
@@ -190,15 +179,6 @@ impl LinkTarget {
             }
             ("demos", [id, "files", path @ ..]) if identifier(id) && query.is_empty() => {
                 PageId::DemoFile {
-                    id: (*id).into(),
-                    path: relative_path(&path.join("/"))?,
-                }
-            }
-            ("demos", [id, "outputs"]) if identifier(id) && query.is_empty() => {
-                PageId::DemoOutputs { id: (*id).into() }
-            }
-            ("demos", [id, "outputs", path @ ..]) if identifier(id) && query.is_empty() => {
-                PageId::DemoOutput {
                     id: (*id).into(),
                     path: relative_path(&path.join("/"))?,
                 }
@@ -353,13 +333,6 @@ mod tests {
             PageId::DemoFile {
                 id: "backlinks".into(),
                 path: "site/100% notes.typ".into(),
-            },
-            PageId::DemoOutputs {
-                id: "backlinks".into(),
-            },
-            PageId::DemoOutput {
-                id: "backlinks".into(),
-                path: "index.html".into(),
             },
         ] {
             let target = LinkTarget::Page(page.clone());

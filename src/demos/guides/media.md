@@ -7,8 +7,6 @@ The inline leaf takes the blue text color; the sun retains its orange fill. The 
 The browser asset tree and local SVG collection have different jobs. A public asset URL names what `[assets]` publishes; an icon ID names a member of the configured collection. Fonts stay local to the compiler, with system fonts disabled.
 
 {{file:tola.toml}}
-{{file:static/icons/leaf.svg}}
-{{file:static/icons/sun.svg}}
 
 ## Inspect and resize a file input
 
