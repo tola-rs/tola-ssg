@@ -31,19 +31,13 @@ pub use crate::diagnostic::{
     ResolvedPackageSearch, ResolvedSource, SourceContextLimit, SourceDiagnostic, SourceLine,
     SourceLocation, SourcePosition, SourceRange, SourceTruncation, Trace, TraceKind,
 };
-#[cfg(feature = "legacy-serialization")]
-#[allow(deprecated)]
-pub use crate::diagnostic::{
-    ResolvedDiagnostic, ResolvedHint, ResolvedLocationFailure, ResolvedSeverity,
-    ResolvedSourceLine, ResolvedSpan, ResolvedTrace, ResolvedTraceKind, ResolvedTruncation,
-};
 
 pub use crate::introspection::{MetadataCardinalityError, MetadataDeclaration};
 
 pub use crate::world::file::{
-    CandidateFileSnapshot, ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider,
-    FileRead, FileResolver, FileTarget, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache,
-    file_id, file_id_from_path, hash_length_prefixed, virtual_file_id,
+    ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider, FileRead, FileResolver,
+    FileSnapshot, FileTarget, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache, file_id,
+    file_id_from_path, hash_length_prefixed, virtual_file_id,
 };
 
 pub use crate::world::font::{FontLoadError, FontOptions, FontStore};

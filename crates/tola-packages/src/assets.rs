@@ -25,7 +25,7 @@ pub(super) fn tola_code_stylesheet_url(engine: &mut Engine, span: Span) -> Sourc
 }
 
 #[func]
-pub(super) fn tola_asset_url(
+pub(super) fn tola_url_of_asset(
     engine: &mut Engine,
     /// A declared site-root asset URL, such as "/app.js".
     declared_url: Spanned<Str>,
@@ -63,7 +63,7 @@ pub(super) fn tola_asset_url(
 /// author's spelling of it, or the package an author imported it from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgumentDomain {
-    /// A site-root URL one `assets` declaration publishes, as `asset-url` takes it.
+    /// A site-root URL one `assets` declaration publishes, as `url-of-asset` takes it.
     SiteAssetUrl,
 }
 
@@ -86,7 +86,7 @@ pub struct ArgumentDomainDeclaration {
 /// The row's names are checked against the native they describe by this module's own test, so a
 /// rename of the function or its parameter cannot leave the table describing nothing.
 pub const ARGUMENT_DOMAINS: &[ArgumentDomainDeclaration] = &[ArgumentDomainDeclaration {
-    function: "tola-asset-url",
+    function: "tola-url-of-asset",
     parameter: "declared-url",
     domain: ArgumentDomain::SiteAssetUrl,
 }];
@@ -102,7 +102,7 @@ mod tests {
     fn argument_domains_name_their_native_parameter() {
         for row in ARGUMENT_DOMAINS {
             let data = match row.function {
-                "tola-asset-url" => tola_asset_url::data(),
+                "tola-url-of-asset" => tola_url_of_asset::data(),
                 other => panic!("no native of this crate is named `{other}`"),
             };
             assert_eq!(Func::from(data).name(), Some(row.function));

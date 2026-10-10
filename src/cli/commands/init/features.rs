@@ -20,12 +20,14 @@ pub(super) enum Feature {
     OpenGraph,
     /// Twitter card head entries naming the page and the site's social image.
     TwitterCard,
-    /// A Pagefind search index and the search box that reads it.
+    /// A Pagefind search index built by a generate-outputs hook.
     Pagefind,
     /// The Deno toolchain files and their install step.
     DenoToolchain,
     /// A Tailwind stylesheet input, its published mapping, and the hook that builds it.
     TailwindCss,
+    /// A site `justfile` holding the selected tools' recipes.
+    Justfile,
 }
 
 /// A selection of features, iterated in [`Feature`] declaration order.
@@ -69,10 +71,12 @@ pub(super) enum SlotId {
     OpenGraph,
     /// The Twitter card head entries.
     TwitterCard,
-    /// The search index and the search box that reads it.
+    /// The generate-outputs hook that builds the search index.
     Search,
     /// The toolchain used by Tailwind and Pagefind.
     Runner,
+    /// The site `justfile` and its recipes.
+    Justfile,
 }
 
 /// One output position and the features that can fill it.
@@ -116,6 +120,10 @@ pub(super) const SLOTS: &[Slot] = &[
         id: SlotId::Runner,
         providers: &[Feature::DenoToolchain],
     },
+    Slot {
+        id: SlotId::Justfile,
+        providers: &[Feature::Justfile],
+    },
 ];
 
 /// The features filling `slot`, in declaration order.
@@ -136,7 +144,7 @@ pub(super) struct Preset {
     pub(super) recommended: bool,
 }
 
-/// The presets from the smallest scaffold upward; `rich`'s justfile is derived, not selected.
+/// The presets from the smallest scaffold upward; `rich` selects the justfile.
 pub(super) const PRESETS: &[Preset] = &[
     Preset {
         name: "minimal",
@@ -159,6 +167,7 @@ pub(super) const PRESETS: &[Preset] = &[
             Feature::Sitemap,
             Feature::DenoToolchain,
             Feature::TailwindCss,
+            Feature::Justfile,
         ],
         recommended: true,
     },
@@ -247,6 +256,11 @@ const FEATURE_VALUES: &[FeatureValue] = &[
         feature: Feature::TailwindCss,
         name: "tailwind-css",
         summary: "a Tailwind input stylesheet and the build hook",
+    },
+    FeatureValue {
+        feature: Feature::Justfile,
+        name: "justfile",
+        summary: "a justfile running the selected tools' recipes",
     },
 ];
 
@@ -337,7 +351,7 @@ pub(super) const GROUPS: &[Group] = &[
     },
     Group {
         name: "Tooling",
-        slots: &[SlotId::Runner],
+        slots: &[SlotId::Runner, SlotId::Justfile],
     },
 ];
 
@@ -392,7 +406,7 @@ impl SeoValue {
     /// travel together: a feature that asks for the value gets the import without naming it.
     pub(super) fn imports(self) -> &'static [(&'static str, &'static [&'static str])] {
         match self {
-            Self::Url => &[("@tola/address:0.0.0", &["output-to-url"])],
+            Self::Url => &[("@tola/address:0.0.0", &["url-of"])],
             Self::Image => &[],
             Self::Title | Self::Description => &[("@tola/web:0.0.0", &["plain-text"])],
         }
@@ -402,7 +416,7 @@ impl SeoValue {
     pub(super) fn bindings(self) -> &'static str {
         match self {
             Self::Url => {
-                "    let url = if site.origin == none { none } else { output-to-url(page.output, origin: site.origin) }\n"
+                "    let url = if site.origin == none { none } else { url-of(page.output, origin: site.origin) }\n"
             }
             Self::Image => {
                 "    let social = site.extra.at(\"social-image\", default: \"\")\n    \
@@ -475,33 +489,22 @@ pub(super) fn decided_files() -> Vec<&'static str> {
     files
 }
 
-/// Every feature that can write `file`, in declaration order: the recipe contributors for the
-/// derived `justfile`, the features whose staged files hold the path otherwise.
-pub(super) fn file_writers(file: &'static str) -> Vec<Feature> {
-    selectable_features()
-        .filter(|feature| writes(*feature, file))
-        .collect()
-}
-
-/// The names of the selected features that write `file`, in declaration order.
-pub(super) fn writers(file: &'static str, canonical: &FeatureSet) -> Vec<&'static str> {
-    file_writers(file)
-        .into_iter()
-        .filter(|feature| canonical.contains(*feature))
-        .map(feature_name)
-        .collect()
-}
-
-/// `selected` has already resolved competing providers.
+/// `selected` has already resolved competing providers. The derived `justfile` needs both its
+/// feature and at least one recipe to have anything to write.
 pub(super) fn file_selected(file: &'static str, selected: &FeatureSet) -> bool {
-    selected.iter().any(|feature| writes(feature, file))
+    if file == "justfile" {
+        selected.contains(Feature::Justfile)
+            && selected.iter().any(|feature| !feature.recipes().is_empty())
+    } else {
+        selected.iter().any(|feature| writes(feature, file))
+    }
 }
 
 /// Whether `feature` writes `file`: a recipe contributor for the derived `justfile`, a staged file
 /// with the path otherwise.
 fn writes(feature: Feature, file: &'static str) -> bool {
     if file == "justfile" {
-        !feature.recipes().is_empty()
+        feature == Feature::Justfile
     } else {
         feature.files().iter().any(|(name, _)| *name == file)
     }
@@ -528,10 +531,18 @@ pub(super) struct HeadFragment {
     pub(super) head: &'static str,
 }
 
-/// The stylesheet every linked page has: `asset-url` imported and the published URL linked.
-const STYLESHEET_HEAD: HeadFragment = HeadFragment {
-    import: "#import \"@tola/address:0.0.0\": asset-url",
-    head: "#html.link(rel: \"stylesheet\", href: asset-url(\"/assets/css/site.css\"))",
+/// The starter stylesheet every linked page has: `url-of-asset` imported and the published URL
+/// linked.
+const STARTER_STYLESHEET_HEAD: HeadFragment = HeadFragment {
+    import: "#import \"@tola/address:0.0.0\": url-of-asset",
+    head: "#html.link(rel: \"stylesheet\", href: url-of-asset(\"/assets/css/site.css\"))",
+};
+
+/// The Tailwind stylesheet every linked page has: `url-of-asset` imported and the published URL
+/// linked.
+const TAILWIND_STYLESHEET_HEAD: HeadFragment = HeadFragment {
+    import: "#import \"@tola/address:0.0.0\": url-of-asset",
+    head: "#html.link(rel: \"stylesheet\", href: url-of-asset(\"/assets/tailwind-output/site.css\"))",
 };
 
 /// The canonical link one page has.
@@ -565,10 +576,6 @@ const TWITTER_CARD_ENTRIES: &str = r#"
       )
     }"#;
 
-/// The search entries each page has; the search box itself belongs to one page.
-const SEARCH_ENTRIES: &str = r#"
-    entries += search-head()"#;
-
 /// What one feature stages and changes.
 struct Effect {
     /// Files this feature stages, each as its path and contents.
@@ -579,8 +586,6 @@ struct Effect {
     head: &'static [HeadFragment],
     /// Whether published asset URLs get a content-derived `?h=…`.
     cache_busting: bool,
-    /// Exact `[assets] files` declarations, each as its source path and URL.
-    asset_files: &'static [(&'static str, &'static str)],
     /// The hooks this feature declares.
     hooks: &'static [Hook],
     /// The site `justfile` recipes this feature contributes.
@@ -641,6 +646,7 @@ impl Feature {
             Feature::Pagefind => &PAGEFIND,
             Feature::TailwindCss => &TAILWIND_CSS,
             Feature::DenoToolchain => &DENO_TOOLCHAIN,
+            Feature::Justfile => &NO_EFFECT,
         }
     }
 
@@ -661,7 +667,6 @@ const NO_EFFECT: Effect = Effect {
     ignore: &[],
     head: &[],
     cache_busting: false,
-    asset_files: &[],
     hooks: &[],
     recipes: &[],
     deno: None,
@@ -674,7 +679,7 @@ const STARTER_STYLESHEET: Effect = Effect {
         "static/web-assets/css/site.css",
         include_str!("templates/stylesheet.css"),
     )],
-    head: &[STYLESHEET_HEAD],
+    head: &[STARTER_STYLESHEET_HEAD],
     next_steps: &["Edit the starter stylesheet `static/web-assets/css/site.css`."],
     ..NO_EFFECT
 };
@@ -805,18 +810,11 @@ const PAGEFIND_RECIPE: Recipe = Recipe {
 };
 
 const PAGEFIND: Effect = Effect {
-    files: &[
-        ("site/search.typ", include_str!("templates/search.typ")),
-        (
-            "content/search.typ",
-            include_str!("templates/search-page.typ"),
-        ),
-    ],
     hooks: &[Hook {
         stage: HookStage::GenerateOutputs,
         name: "search",
-        command: &["just", "search"],
-        rerun_on: &["deno.json", "deno.lock", "justfile"],
+        command: &["deno", "task", "search"],
+        rerun_on: &["deno.json", "deno.lock"],
         outputs: &["assets/pagefind-search"],
     }],
     recipes: &[PAGEFIND_RECIPE],
@@ -825,12 +823,9 @@ const PAGEFIND: Effect = Effect {
         command: "deno run -A npm:pagefind@1.5.2 --site \"$TOLA_HOOK_INPUT_DIR\" --output-path \"$TOLA_HOOK_OUTPUT_DIR/assets/pagefind-search\"",
         imports: &[("pagefind", "npm:pagefind@1.5.2")],
     }),
-    seo: SeoCode {
-        imports: &[("search.typ", &["search-head"])],
-        entries: SEARCH_ENTRIES,
-        ..NO_SEO
-    },
-    next_steps: &["Every build runs `just search` to update the search index."],
+    next_steps: &[
+        "The search hook runs `deno task search` on every build; the search UI is yours to add.",
+    ],
     ..NO_EFFECT
 };
 
@@ -838,7 +833,7 @@ const DENO_TOOLCHAIN: Effect = Effect {
     files: &[("deno.json", include_str!("templates/deno.json"))],
     ignore: &["/node_modules/"],
     recipes: &[DENO_SETUP_RECIPE],
-    next_steps: &["Run `just setup` before the first build."],
+    next_steps: &["Run `deno install` before the first build."],
     ..NO_EFFECT
 };
 
@@ -847,23 +842,14 @@ const TAILWIND_CSS: Effect = Effect {
         "static/tailwind-sources/site.css",
         include_str!("templates/tailwind-input.css"),
     )],
-    head: &[STYLESHEET_HEAD],
+    head: &[TAILWIND_STYLESHEET_HEAD],
     ignore: &["/static/web-assets/tailwind-output/"],
     cache_busting: true,
-    asset_files: &[(
-        "static/web-assets/tailwind-output/site.css",
-        "/assets/css/site.css",
-    )],
     hooks: &[Hook {
         stage: HookStage::BeforeBuild,
         name: "tailwind",
-        command: &["just", "css"],
-        rerun_on: &[
-            "static/tailwind-sources",
-            "deno.json",
-            "deno.lock",
-            "justfile",
-        ],
+        command: &["deno", "task", "css"],
+        rerun_on: &["static/tailwind-sources", "deno.json", "deno.lock"],
         outputs: &["static/web-assets/tailwind-output/site.css"],
     }],
     recipes: &[TAILWIND_CSS_RECIPE],
@@ -875,7 +861,7 @@ const TAILWIND_CSS: Effect = Effect {
             ("tailwindcss", "npm:tailwindcss@4.3.3"),
         ],
     }),
-    next_steps: &["Edit `static/tailwind-sources/site.css`; every build runs `just css`."],
+    next_steps: &["Edit `static/tailwind-sources/site.css`; every build runs `deno task css`."],
     ..NO_EFFECT
 };
 
@@ -888,7 +874,6 @@ pub(super) struct Effects {
     pub(super) seo: Vec<SeoCode>,
     pub(super) head: Vec<HeadFragment>,
     pub(super) cache_busting: bool,
-    pub(super) asset_files: Vec<(&'static str, &'static str)>,
     pub(super) hooks: Vec<Hook>,
     pub(super) next_steps: Vec<&'static str>,
 }
@@ -910,7 +895,6 @@ impl Effects {
             effects.seo.push(effect.seo);
             effects.head.extend_from_slice(effect.head);
             effects.cache_busting |= effect.cache_busting;
-            effects.asset_files.extend_from_slice(effect.asset_files);
             effects.hooks.extend_from_slice(effect.hooks);
             recipes.extend_from_slice(effect.recipes);
             for step in effect.next_steps {
@@ -919,7 +903,9 @@ impl Effects {
                 }
             }
         }
-        if let Some(source) = justfile_source(&recipes) {
+        if canonical.contains(Feature::Justfile)
+            && let Some(source) = justfile_source(&recipes)
+        {
             effects.files.push(("justfile", Cow::Owned(source)));
         }
         if canonical.contains(Feature::DenoToolchain) {
@@ -1004,6 +990,7 @@ mod tests {
             Feature::Pagefind,
             Feature::DenoToolchain,
             Feature::TailwindCss,
+            Feature::Justfile,
         ]
         .into_iter()
         .map(|feature| match feature {
@@ -1015,7 +1002,8 @@ mod tests {
             | Feature::TwitterCard
             | Feature::Pagefind
             | Feature::DenoToolchain
-            | Feature::TailwindCss => feature,
+            | Feature::TailwindCss
+            | Feature::Justfile => feature,
         })
         .collect()
     }
@@ -1129,10 +1117,14 @@ mod tests {
         for set in subsets() {
             let selected = canon(&set);
             let effects = Effects::combine(&selected);
+            // The derived justfile needs a selected recipe as well as its feature; every other
+            // file follows the features that stage it.
+            let recipes = selected.iter().any(|feature| !feature.recipes().is_empty());
             for path in decided_files() {
+                let expected = file_selected(path, &selected) && (path != "justfile" || recipes);
                 assert_eq!(
-                    file_selected(path, &selected),
                     effects.files.iter().any(|(file, _)| *file == path),
+                    expected,
                     "{selected:?}: {path}"
                 );
             }
@@ -1299,19 +1291,11 @@ mod tests {
             .find(|hook| hook.name == "search")
             .expect("pagefind declares the search hook");
         assert_eq!(hook.stage, HookStage::GenerateOutputs);
-        assert_eq!(hook.command, ["just", "search"]);
+        assert_eq!(hook.command, ["deno", "task", "search"]);
         assert_eq!(hook.outputs, ["assets/pagefind-search"]);
         assert_eq!(
             Feature::Pagefind.recipes()[0].commands,
             ["deno task search"]
-        );
-        assert!(
-            effects
-                .files
-                .iter()
-                .any(|(path, _)| *path == "site/search.typ"),
-            "{:?}",
-            effects.files
         );
     }
     #[test]

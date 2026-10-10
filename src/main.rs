@@ -7,6 +7,7 @@
 mod cancellation;
 mod cli;
 mod codes;
+mod command_line;
 mod config;
 mod dev;
 mod editor;
@@ -15,6 +16,7 @@ mod help;
 mod i18n;
 mod sys;
 mod terminal;
+mod tree;
 mod writes;
 
 fn main() -> std::process::ExitCode {

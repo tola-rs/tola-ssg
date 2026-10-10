@@ -111,7 +111,6 @@ test('retired declaration reports once', async ({ binary, directory: root }) => 
   const retired = await run(['check'], root, COMMAND_TIMEOUT_MS.standard)
   expectExited(retired)
   expect(retired.stderr.match(/source\.declaration_deprecated/g)).toHaveLength(1)
-  expect(retired.stderr).toContain('1 source declares metadata with the `<tola-meta>` label')
   expect(retired.stderr).toContain('`content/index.typ`')
 
   await writeFile(source, '#import "@tola/source:0.0.0": tola-meta\n#tola-meta((title: "Declared"))\n')

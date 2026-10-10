@@ -1,4 +1,4 @@
-#import "@tola/address:0.0.0": decode-url-path, route, route-to-output, slugify
+#import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify
 #import "@tola/site:0.0.0": site
 #import "@tola/source:0.0.0": parse-sources
 #import "schema.typ": page-schema
@@ -12,7 +12,7 @@
 /// -> string
 #let source-route(source) = {
   if source.meta.permalink == none {
-    route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
+    join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
   } else {
     decode-url-path(source.meta.permalink)
   }
@@ -29,6 +29,6 @@
     .filter(source => not source.meta.draft)
     .map(source => (
       source: source,
-      output: route-to-output(source-route(source)),
+      output: output-of(source-route(source)),
     ))
 }

@@ -28,6 +28,9 @@
 // becomes an Issue. Callbacks may run again when an enclosing Typst context is reevaluated, so
 // every parse starts fresh.
 //
+// Parse where a value enters: the root program parses all source metadata up front, and
+// selection and templates then read the parsed fields without checking them again.
+//
 // Declarations and parsing work on values alone. For source metadata, use `@tola/source`'s
 // `parse-sources`.
 

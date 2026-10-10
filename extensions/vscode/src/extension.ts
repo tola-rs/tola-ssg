@@ -16,6 +16,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     output,
     (uri, siteKey) => connections.previewSite(uri, siteKey),
     (error) => connections.report(error),
+    (uri) => connections.statusSite(uri),
   )
   preview = previews
   sites = connections
@@ -25,7 +26,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     connections.register(),
     previews.register(),
   )
-  await connections.refresh()
+  await connections.refresh().catch((error) => connections.report(error))
   previews.refreshStatus()
 }
 

@@ -26,7 +26,7 @@ build-library:
     cargo check --locked -p tola-typst-syntax --all-targets --no-default-features
     cargo check --locked -p tola-typst-syntax --all-targets --no-default-features --features format
     cargo check --locked -p tola-typst --all-targets --no-default-features
-    for feature in scan parallel embed-fonts network legacy-serialization; do cargo check --locked -p tola-typst --all-targets --no-default-features --features "$feature" || exit; done
+    for feature in scan parallel embed-fonts network; do cargo check --locked -p tola-typst --all-targets --no-default-features --features "$feature" || exit; done
     cargo check --locked -p tola-lsp --all-targets --no-default-features
     cargo check --locked -p tola-lsp --all-targets --no-default-features --features network
 

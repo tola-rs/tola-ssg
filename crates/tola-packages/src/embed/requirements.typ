@@ -851,7 +851,7 @@
 /// The result is the normalized array.
 /// The fixed members set the minimum count even when their schemas are optional, and `none` for
 /// `rest` fixes the count and forbids extra members. Present members are still checked when the
-/// count is wrong; the count issue is a type issue, and everything else is an ordinary issue.
+/// count is wrong: a `schema.arity` issue reports the count, alongside any member issues.
 ///
 /// Example - parse fixed positions with a homogeneous rest:
 /// ```typst
@@ -990,6 +990,8 @@
 /// Reject a successful value when the predicate returns `false`.
 /// The successful value is returned unchanged. A nonboolean return or a callback panic is a
 /// programming error.
+/// Pass `message` explicitly as a string. Although the declaration's signature defaults it to
+/// `none`, construction rejects both `none` and an omitted message.
 ///
 /// Example - reject a value with a predicate:
 /// ```typst
@@ -1002,7 +1004,7 @@
 /// Related: check
 /// - member (type | dictionary): the schema whose successful value is passed to the predicate.
 /// - predicate (function): the boolean predicate applied to the successful value.
-/// - message (none | string): the message of the `custom` issue a `false` predicate reports.
+/// - message (string): the required message of the `custom` issue a `false` predicate reports.
 /// -> dictionary
 #let refine = core.refine
 

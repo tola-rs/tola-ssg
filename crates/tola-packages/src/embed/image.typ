@@ -47,7 +47,7 @@
 /// A build adds each requested derivative to the site's output graph, under `_tola/images/` and
 /// a name derived from the source bytes and the recipe; equivalent requests land on one output.
 /// The returned `url` is the ordinary way to link it. When only an output path is at hand,
-/// `output-to-url` turns it into the browser URL; `tola inspect outputs` lists every published
+/// `url-of` turns it into the browser URL; `tola inspect outputs` lists every published
 /// output with its `producer` and `media-type`.
 ///
 /// Example - resize to an exact width and height:

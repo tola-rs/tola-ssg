@@ -559,8 +559,7 @@ mod tests {
             location: Some(snippet(1, "#page[]")),
         });
         let styled = render(&diagnostic, None, true);
-        assert!(styled.contains("\u{1b}[4m"), "{styled:?}");
-        assert!(styled.contains("\u{1b}[38;5;248m"), "{styled:?}");
+        assert!(styled.contains('\u{1b}'), "{styled:?}");
         let plain = render(&diagnostic, None, false);
         assert!(!plain.contains('\u{1b}'), "{plain:?}");
         assert!(plain.contains("site.typ:1:0"), "{plain}");

@@ -41,7 +41,6 @@ test('editor setup dry-run writes nothing', async ({ binary, directory: root }) 
   expect(report).toContain('tola-lsp')
   expect(report).toContain(OBSOLETE_VERSION)
   expect(report).toContain(PACKAGE_VIEW)
-  expect(report).not.toContain('warning[editor.no_site]')
 
   expect(await readFile(join(root, '.vscode/settings.json'), 'utf8')).toBe(SETTINGS)
   await expect(readdir(join(root, PACKAGE_VIEW))).rejects.toMatchObject({ code: 'ENOENT' })
@@ -72,7 +71,6 @@ test('editor setup applies its previewed changes', async ({ binary, directory: r
   const appliedReport = applied.stdout + applied.stderr
   expect(appliedReport).toContain('tola-lsp')
   expect(appliedReport).toContain('`.vscode/settings.json` updated')
-  expect(appliedReport).toContain('Neovim — copy these settings manually')
 
   const repeated = await run(['editor', 'setup', 'vscode'], root, COMMAND_TIMEOUT_MS.standard)
   expectExited(repeated)
@@ -130,13 +128,6 @@ test('editor setup omits configuration and discovered packages', async ({ binary
   expect(settings).not.toContain('tola.configPath')
 })
 
-test('editor setup warns outside a site', async ({ binary, directory: root }) => {
-  const run = commandRunner(binary)
-  const listed = await run(['editor', 'setup', '--list'], root, COMMAND_TIMEOUT_MS.standard)
-  expectExited(listed)
-  expect(listed.stdout + listed.stderr).toContain('warning[editor.no_site]')
-})
-
 test('editor listing skips package preparation', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
   await writeMinimalSite(root)
@@ -159,4 +150,30 @@ test('editor setup requires selection without terminal', async ({ binary, direct
   expect(unselected.stdout + unselected.stderr).toContain('no editor specified')
   expect(await readFile(join(root, '.tola'), 'utf8'))
     .toBe('This is not an editor package directory.\n')
+})
+
+test('editor setup preserves equivalent configuration paths', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  await writeMinimalSite(root)
+  await mkdir(join(root, '.vscode'))
+  const settings = join(root, '.vscode/settings.json')
+  const source = '{"tola.configPath": "./tola.toml", "editor.fontSize": 14}\n'
+  await writeFile(settings, source)
+  expectExited(await run(['editor', 'setup', 'vscode'], root))
+  expect(await readFile(settings, 'utf8')).toBe(source)
+  expect(await readdir(join(root, MIRRORED_VERSION))).toContain('typst.toml')
+})
+
+test('editor setup refuses malformed settings before writing', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  await writeMinimalSite(root)
+  await mkdir(join(root, '.vscode'))
+  const settings = join(root, '.vscode/settings.json')
+  const source = '{"editor.fontSize": banana}\n'
+  await writeFile(settings, source)
+  const refused = await run(['editor', 'setup', 'vscode'], root)
+  expect(refused.code).not.toBe(0)
+  expect(refused.stderr).toContain('editor.configuration')
+  expect(await readFile(settings, 'utf8')).toBe(source)
+  await expect(readdir(join(root, MIRRORED_VERSION))).rejects.toMatchObject({ code: 'ENOENT' })
 })

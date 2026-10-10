@@ -80,7 +80,7 @@ impl TextLine {
         let cursor = label.width() + focused.saturating_sub(window.start_column);
         let line = Line::from(vec![
             Span::styled(label.clone(), palette.accent_style()),
-            Span::styled(window.text.to_owned(), palette.selected_style()),
+            Span::styled(window.text.to_owned(), palette.emphasis_style()),
         ]);
         frame.render_widget(Paragraph::new(line), area);
         let cursor = area.x + u16::try_from(cursor).unwrap_or(u16::MAX);

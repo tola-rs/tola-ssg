@@ -855,12 +855,12 @@ mod tests {
     #[test]
     fn native_imports_show_signatures() {
         for marked in [
-            "#import \"@tola/address:0.0.0\": route-to-o|\nBody",
-            "#import \"@tola/address:0.0.0\": *\n#route-to-o|",
+            "#import \"@tola/address:0.0.0\": output-o|\nBody",
+            "#import \"@tola/address:0.0.0\": *\n#output-o|",
         ] {
             let mut site = QuerySession::new();
             let items = site.completion(marked);
-            let detail = item_labeled(&items, "route-to-output")
+            let detail = item_labeled(&items, "output-of")
                 .label_details
                 .as_ref()
                 .and_then(|details| details.description.as_deref())
@@ -872,11 +872,10 @@ mod tests {
     #[test]
     fn named_imports_hide_already_imported() {
         let mut site = QuerySession::new();
-        let items =
-            site.completion("#import \"@tola/address:0.0.0\": output-to-route, output-|\nBody");
+        let items = site.completion("#import \"@tola/address:0.0.0\": url-of, url-|\nBody");
         let names = completion_labels(&items);
-        assert!(names.contains(&"output-to-url"), "{names:?}");
-        assert!(!names.contains(&"output-to-route"), "{names:?}");
+        assert!(names.contains(&"url-of-asset"), "{names:?}");
+        assert!(!names.contains(&"url-of"), "{names:?}");
     }
 
     #[test]

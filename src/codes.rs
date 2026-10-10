@@ -67,11 +67,6 @@ pub mod doctor {
 /// Editor integration: the language service's diagnostics and the setup command's.
 pub mod editor {
     pub use tola_lsp::codes::editor::CONFIGURATION;
-
-    use tola_build::diagnostic::DiagnosticCode;
-
-    /// Editor setup configured a directory that is not a Tola site.
-    pub const NO_SITE: DiagnosticCode = DiagnosticCode::new("editor.no_site");
 }
 
 /// Hook execution around publication.
@@ -143,6 +138,7 @@ pub mod terminal {
 
     /// Terminal output could not be written.
     pub const WRITE: DiagnosticCode = DiagnosticCode::new("terminal.write");
+    pub const PAGER: DiagnosticCode = DiagnosticCode::new("terminal.pager");
 }
 
 /// Filesystem observation.
@@ -192,7 +188,7 @@ mod tests {
                 doctor::VENDOR_PATH_MISSING,
             ],
         ),
-        ("editor", &[editor::CONFIGURATION, editor::NO_SITE]),
+        ("editor", &[editor::CONFIGURATION]),
         ("help", &[help::TARGET, help::MEMBER]),
         ("hook", &[hook::AFTER_PUBLISH]),
         ("init", &[init::CONFLICT, init::SELECTION]),
@@ -200,7 +196,7 @@ mod tests {
         ("log", &[log::LOCATION, log::UNAVAILABLE, log::WRITE]),
         ("reload", &[reload::PORT_IN_USE]),
         ("server", &[server::NETWORK_EXPOSED, server::PORT_IN_USE]),
-        ("terminal", &[terminal::WRITE]),
+        ("terminal", &[terminal::WRITE, terminal::PAGER]),
         (
             "watch",
             &[

@@ -3,7 +3,4 @@
 # headings and every other label stay English in both languages.
 
 [text]
-site-fields = "配置字段与默认值"
-package-overview = "包概览与导出"
-selected-exports = "选定的导出"
-default-values = "默认值；用 `tola config` 查看你站点的设置。"
+help-usage = "查看 CLI 命令本身，请用 `tola <command> --help`。\n\n`tola help` 用于查看 Tola 内置的离线文档：`tola.toml` 的配置选项（`tola help \"[build]\"`）与 `@tola/xxx` 的内置 packages（`tola help \"@tola/address\" slugify`）。`tola help` 还支持 `-i`/`--interactive` 交互式浏览；在该模式下，你可以直接用鼠标点击进行跳转，或按下 Tab 进行基于键盘的快速导航。`--lang` 切换语言（目前只有中英文）。\n\nTola 还提供 `tola skill` 命令方便 agent 读取；agent 可以通过 `tola help` 与 `tola skill` 快速了解 Tola 与 Typst，辅助用户组织站点，并向用户讲解 Tola 的概念。"

@@ -48,6 +48,16 @@ impl Pager {
         self.lines.len()
     }
 
+    /// The plain text of one page line, as the reader shows it.
+    pub(crate) fn text(&self, line: usize) -> Option<String> {
+        self.lines.get(line).map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+    }
+
     /// Reconciles the viewport before the screen derives interaction targets from it.
     pub(crate) fn resize(&mut self, height: usize) {
         self.height = height;

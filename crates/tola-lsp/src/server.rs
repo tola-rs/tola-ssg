@@ -49,17 +49,17 @@ pub(crate) mod tests {
 
     const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/site:0.0.0": site
-#import "@tola/address:0.0.0": decode-url-path, route, route-to-output, slugify
+#import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify
 #for source in all-sources() {
   let declared = if source.meta == none { none } else {
     source.meta.at("permalink", default: none)
   }
   let route = if declared == none {
-    route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
+    join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
   } else {
     decode-url-path(declared)
   }
-  document(route-to-output(route))[#include source.file]
+  document(output-of(route))[#include source.file]
 }
 "#;
 

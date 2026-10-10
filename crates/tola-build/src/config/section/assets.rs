@@ -231,7 +231,7 @@ impl AssetFileDeclaration {
 #[serde(default)]
 #[config(section = "assets")]
 pub struct AssetsConfig {
-    /// Give changed published bytes a new `?h=...` in URLs returned by `asset-url`.
+    /// Give changed published bytes a new `?h=...` in URLs returned by `url-of-asset`.
     /// Published paths are not renamed. Off by default.
     #[serde(rename = "cache-busting")]
     #[config(name = "cache-busting")]
@@ -253,7 +253,7 @@ impl AssetsConfig {
     /// What `tola help "[assets]"` adds under its table.
     pub const HELP: &'static str = "\
 A declared source is published whether or not a document references or reads it. A directory
-publishes below one URL prefix, and a single file keeps a URL of its own:
+publishes its members below a URL prefix; an exact file declaration gives one source its own URL:
 
 ```toml
 [assets]
@@ -262,25 +262,50 @@ trees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]
 files = [{ source = \"static/web-assets/tailwind-output/site.css\", url = \"/assets/css/site.css\" }]
 ```
 
-This is the scaffold's mapping: everything under `static/web-assets` publishes below `/assets`, and
-one generated file keeps a URL of its own. A `before-build` hook writes such a file; a
-`generate-outputs` hook declares its own outputs instead, and needs no entry here.
+Here `files` takes over the generated stylesheet from the tree: it publishes at `/assets/css/site.css`,
+not `/assets/tailwind-output/site.css`. The tree still publishes its other members. `source` is a
+path relative to the site root; `url` and `url-prefix` are site-root URL paths, before `site.base-path`.
+A `before-build` hook can write that source; a `generate-outputs` hook adds its outputs directly
+and needs no `[assets]` entry.
 
-Link a declaration with `asset-url`, which takes the URL the declaration writes. When
-`cache-busting` is on it appends `?h=...` once the bytes change, so browsers fetch the new bytes
-while the published path keeps its name. The address it returns already carries `site.base-path`,
-so use it as it is and never mount it again:
+Link a published declaration with `url-of-asset`, passing its declared URL rather than its source
+path. With `cache-busting = true`, the result carries `?h=...` identifying the published bytes;
+changed bytes give a new URL while the output filename stays the same. The result already includes
+`site.base-path`, so use it directly:
 
 ```typst
-#import \"@tola/address:0.0.0\": asset-url
-#let styles = asset-url(\"/assets/css/site.css\")
-#let script = asset-url(\"/assets/app.js\")
+#import \"@tola/address:0.0.0\": url-of-asset
+
+#let style = url-of-asset(\"/assets/css/site.css\")   // /assets/css/site.css (or /assets/css/site.css?h=... with cache-busting)
+#let script = url-of-asset(\"/assets/app.js\")        // /assets/app.js (or /assets/app.js?h=... with cache-busting)
+
 ```
 
-Publish a file under one URL only: a file inside a declared tree keeps its place in the tree, and a
-`files` entry is for a path the tree does not already carry. Two declarations that overlap the same
-address, or a declaration inside a tree that already owns it, fail the build rather than pick a
-winner.";
+One producer per output path: the Bundle's compiled result, an `[assets]` declaration, or a hook.
+One hard rule governs declarations: **no two declarations may claim the same output path.**
+
+Two `trees` sources cannot nest. A second tree inside the first fails the build:
+
+```toml
+[assets]
+trees = [
+  { source = \"static/assets\", url-prefix = \"/assets\" },
+  { source = \"static/assets/css\", url-prefix = \"/css\" },
+]
+```
+
+Two declarations claiming one output path fail the same way — two `files` writing to one `url`:
+
+```toml
+files = [
+  { source = \"static/a.css\", url = \"/app.css\" },
+  { source = \"static/b.css\", url = \"/app.css\" },
+]
+```
+
+One exception: a `files` declaration may take a member over from a tree (the stylesheet above) —
+that member is then published by the declaration, and the tree publishes the rest. Before
+publishing, Tola checks these rules across `[assets]`, the Bundle, and hook outputs at once.";
 
     pub fn tree_sources(&self) -> impl Iterator<Item = &Path> {
         self.trees.iter().map(AssetTreeDeclaration::source)

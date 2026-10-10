@@ -1,4 +1,4 @@
-//! Candidate-scoped first-observation file snapshot.
+//! Explicit and first-observed compiler files.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -13,7 +13,7 @@ use crate::world::SourceSnapshot;
 use crate::world::package::{PackageCheck, PackageSpec, PackageStore};
 
 type ObservationCell<V> = Arc<OnceLock<V>>;
-type FileObservation = ObservationCell<ReadAttempt<Arc<[u8]>>>;
+type FileObservation = ObservationCell<ReadAttempt<Bytes>>;
 type PackageObservationCell = ObservationCell<PackageObservation>;
 
 /// Return the cell holding the first observation of `key`.
@@ -38,59 +38,78 @@ where
     )
 }
 
-/// One immutable file view for a complete compilation candidate.
+/// One file view shared by compilations that must observe the same inputs.
 ///
 /// Explicit source bytes come from the supplied [`SourceSnapshot`]. Every
 /// other successful read, failure, and package selection is retained from its
-/// first observation. Discard the instance before the next candidate.
-pub struct CandidateFileSnapshot {
-    sources: Arc<SourceSnapshot>,
+/// first observation. Create another snapshot to observe changed files.
+/// Different files can be first observed at different times.
+pub struct FileSnapshot {
+    root: PathBuf,
+    sources: Option<Arc<SourceSnapshot>>,
     files: Arc<FileResolver>,
     observations: RwLock<FxHashMap<FileId, FileObservation>>,
-    packages: CandidatePackageSnapshot,
+    packages: PackageSnapshot,
 }
 
-impl CandidateFileSnapshot {
-    /// Create one candidate view over `sources`, reading every other file through `files`.
+impl FileSnapshot {
+    /// Retain explicit sources and the resolver's first observations.
+    ///
+    /// Sources captured under different restrictions are read again through the resolver.
     pub fn new(sources: Arc<SourceSnapshot>, files: Arc<FileResolver>) -> Self {
+        let same_boundary = sources.source_boundary() == files.source_boundary();
+        let mut snapshot = Self::from_resolver(sources.root(), files);
+        snapshot.sources = same_boundary.then_some(sources);
+        snapshot
+    }
+
+    /// Normalized compilation root owned by this snapshot view.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn from_resolver(root: &Path, files: Arc<FileResolver>) -> Self {
         Self {
-            sources,
+            root: root.to_path_buf(),
+            sources: None,
             files,
             observations: RwLock::new(FxHashMap::default()),
-            packages: CandidatePackageSnapshot::default(),
+            packages: PackageSnapshot::default(),
         }
     }
 
-    /// Normalized compilation root owned by this candidate view.
-    pub fn root(&self) -> &Path {
-        self.sources.root()
-    }
-
-    pub(crate) fn source_boundary(&self) -> &crate::world::SourceBoundary {
-        self.files.source_boundary()
+    pub(crate) fn resolver(&self) -> &Arc<FileResolver> {
+        &self.files
     }
 
     pub(crate) fn source(&self, id: FileId) -> Option<Loaded<Source>> {
-        (self.sources.source_boundary() == self.files.source_boundary())
-            .then(|| self.sources.get_source(id))
-            .flatten()
+        self.sources.as_ref()?.get_source(id)
     }
 
     pub(crate) fn file(&self, id: FileId) -> Option<Loaded<Bytes>> {
-        (self.sources.source_boundary() == self.files.source_boundary())
-            .then(|| self.sources.get_file(id))
-            .flatten()
+        self.sources.as_ref()?.get_file(id)
     }
 
-    pub(crate) fn read(&self, id: FileId) -> ReadAttempt<Arc<[u8]>> {
-        debug_assert!(
-            !self.sources.contains(id)
-                || self.sources.source_boundary() != self.files.source_boundary()
-        );
+    pub(crate) fn read(&self, id: FileId) -> ReadAttempt<Bytes> {
+        if let Some(bytes) = self.file(id) {
+            return ReadAttempt {
+                result: Ok(bytes.value),
+                reads: Some(bytes.read),
+                disk_reads: Vec::new(),
+                package_checks: Vec::new(),
+            };
+        }
         observation_cell(&self.observations, &id)
             .get_or_init(|| {
-                self.files
-                    .read_attempt_with_candidate(id, self.root(), &self.packages)
+                let read = self
+                    .files
+                    .read_attempt_with_snapshot(id, self.root(), &self.packages);
+                ReadAttempt {
+                    result: read.result.map(Bytes::new),
+                    reads: read.reads,
+                    disk_reads: read.disk_reads,
+                    package_checks: read.package_checks,
+                }
             })
             .clone()
     }
@@ -106,12 +125,6 @@ impl CandidateFileSnapshot {
         id: FileId,
         expected: &FileRead,
     ) -> Option<crate::session::AccessedDeps> {
-        if let Some(source) = self.source(id) {
-            return (source.read == *expected).then_some(crate::session::AccessedDeps {
-                reads: vec![source.read],
-                ..crate::session::AccessedDeps::default()
-            });
-        }
         let observed = self.read(id);
         (observed.result.is_ok() && observed.reads.as_ref() == Some(expected)).then_some(
             crate::session::AccessedDeps {
@@ -124,7 +137,7 @@ impl CandidateFileSnapshot {
 }
 
 #[derive(Default)]
-pub(crate) struct CandidatePackageSnapshot {
+pub(crate) struct PackageSnapshot {
     observations: RwLock<FxHashMap<PackageSpec, PackageObservationCell>>,
 }
 
@@ -134,7 +147,7 @@ pub(crate) struct PackageObservation {
     pub(crate) checks: Vec<PackageCheck>,
 }
 
-impl CandidatePackageSnapshot {
+impl PackageSnapshot {
     pub(crate) fn observe(
         &self,
         package: &PackageSpec,
@@ -185,22 +198,22 @@ mod tests {
         ))
     }
 
-    fn candidate(root: &Path, files: Arc<FileResolver>) -> CandidateFileSnapshot {
+    fn file_snapshot(root: &Path, files: Arc<FileResolver>) -> FileSnapshot {
         let snapshot = SourceSnapshot::build(&[], root)
             .unwrap()
             .into_snapshot_and_accessed()
             .0;
-        CandidateFileSnapshot::new(Arc::new(snapshot), files)
+        FileSnapshot::new(Arc::new(snapshot), files)
     }
 
     #[test]
-    fn candidate_freezes_first_observation() {
+    fn snapshot_freezes_first_observation() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("value.txt");
         let files = Arc::new(FileResolver::new());
 
         fs::write(&path, "first").unwrap();
-        let present = candidate(directory.path(), Arc::clone(&files));
+        let present = file_snapshot(directory.path(), Arc::clone(&files));
         assert_eq!(
             present.read(id("value.txt")).result.unwrap().as_ref(),
             b"first"
@@ -211,7 +224,7 @@ mod tests {
             b"first"
         );
         assert_eq!(
-            candidate(directory.path(), Arc::clone(&files))
+            file_snapshot(directory.path(), Arc::clone(&files))
                 .read(id("value.txt"))
                 .result
                 .unwrap()
@@ -220,12 +233,12 @@ mod tests {
         );
 
         fs::remove_file(&path).unwrap();
-        let absent = candidate(directory.path(), Arc::clone(&files));
+        let absent = file_snapshot(directory.path(), Arc::clone(&files));
         assert!(absent.read(id("value.txt")).result.is_err());
         fs::write(&path, "created").unwrap();
         assert!(absent.read(id("value.txt")).result.is_err());
         assert_eq!(
-            candidate(directory.path(), files)
+            file_snapshot(directory.path(), files)
                 .read(id("value.txt"))
                 .result
                 .unwrap()
@@ -238,18 +251,21 @@ mod tests {
     fn repeated_reads_share_bytes() {
         let directory = TempDir::new().unwrap();
         fs::write(directory.path().join("shared.bin"), vec![42; 1024 * 1024]).unwrap();
-        let candidate = candidate(directory.path(), Arc::new(FileResolver::new()));
-        let first = candidate.read(id("shared.bin"));
+        let snapshot = file_snapshot(directory.path(), Arc::new(FileResolver::new()));
+        let first = snapshot.read(id("shared.bin"));
         let expected = first.reads.clone().expect("a successful read has evidence");
         let bytes = first.result.unwrap();
 
-        assert!(candidate.matches_read(id("shared.bin"), &expected));
-        let repeated = candidate.read(id("shared.bin")).result.unwrap();
-        assert!(Arc::ptr_eq(&bytes, &repeated));
+        assert!(snapshot.matches_read(id("shared.bin"), &expected));
+        let repeated = snapshot.read(id("shared.bin")).result.unwrap();
+        assert!(std::ptr::eq(
+            bytes.as_slice().as_ptr(),
+            repeated.as_slice().as_ptr()
+        ));
     }
 
     #[test]
-    fn selection_frozen_within_candidate() {
+    fn snapshot_keeps_package_selection() {
         let directory = TempDir::new().unwrap();
         let data = directory.path().join("data");
         let cache = directory.path().join("cache");
@@ -267,7 +283,7 @@ mod tests {
             crate::world::package::PackageFetchPolicy::LocalOnly,
         ));
         let package: PackageSpec = "@preview/demo:1.0.0".parse().unwrap();
-        let first = candidate(directory.path(), Arc::clone(&files));
+        let first = file_snapshot(directory.path(), Arc::clone(&files));
 
         assert_eq!(
             first
@@ -289,7 +305,7 @@ mod tests {
             b"cache other"
         );
 
-        let second = candidate(directory.path(), files);
+        let second = file_snapshot(directory.path(), files);
         assert_eq!(
             second
                 .read(package_id(&package, "other.txt"))
@@ -322,7 +338,7 @@ mod tests {
             crate::world::package::PackageFetchPolicy::LocalOnly,
         ));
         let package: PackageSpec = "@local/demo:1.0.0".parse().unwrap();
-        let frozen = candidate(directory.path(), Arc::clone(&files));
+        let frozen = file_snapshot(directory.path(), Arc::clone(&files));
         assert_eq!(
             frozen
                 .read(package_id(&package, "value.txt"))
@@ -342,7 +358,7 @@ mod tests {
             Some(first_directory.canonicalize().unwrap().as_path())
         );
         assert_eq!(
-            candidate(directory.path(), files)
+            file_snapshot(directory.path(), files)
                 .read(package_id(&package, "value.txt"))
                 .result
                 .unwrap()
@@ -366,18 +382,18 @@ mod tests {
         .unwrap();
         let (snapshot, accessed) = loaded.into_snapshot_and_accessed();
         let expected = accessed.reads.first().unwrap().clone();
-        let candidate = CandidateFileSnapshot::new(Arc::new(snapshot), files);
+        let snapshot = FileSnapshot::new(Arc::new(snapshot), files);
         fs::write(&path, "= Changed").unwrap();
 
         assert_eq!(
-            candidate.source(id("main.typ")).unwrap().value.text(),
+            snapshot.source(id("main.typ")).unwrap().value.text(),
             "= Frozen"
         );
         assert_eq!(
-            candidate.file(id("main.typ")).unwrap().value.as_slice(),
+            snapshot.file(id("main.typ")).unwrap().value.as_slice(),
             original
         );
-        assert!(candidate.matches_read(id("main.typ"), &expected));
+        assert!(snapshot.matches_read(id("main.typ"), &expected));
     }
 
     #[test]
@@ -406,11 +422,11 @@ mod tests {
             .into_snapshot_and_accessed()
             .0,
         );
-        let candidate = Arc::new(CandidateFileSnapshot::new(snapshot, files));
+        let snapshot = Arc::new(FileSnapshot::new(snapshot, files));
         fs::write(&path, "changed disk source").unwrap();
         let world = crate::world::TypstWorld::builder(&path, directory.path())
-            .with_candidate_snapshot(
-                candidate.clone(),
+            .with_file_snapshot(
+                snapshot.clone(),
                 Arc::new(super::super::SharedFileCache::new()),
             )
             .no_fonts()
@@ -423,11 +439,11 @@ mod tests {
             b"editor source"
         );
         assert_eq!(world.source(id("added.typ")).unwrap().text(), "new source");
-        let read = candidate.source(world.main()).unwrap().read;
+        let read = snapshot.source(world.main()).unwrap().read;
         assert!(matches!(
             read.origin(),
             crate::world::file::ReadOrigin::Provider
         ));
-        assert!(candidate.matches_read(world.main(), &read));
+        assert!(snapshot.matches_read(world.main(), &read));
     }
 }

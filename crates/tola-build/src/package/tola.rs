@@ -911,11 +911,11 @@ path = "icons/brand"
     #[test]
     fn directory_route_keeps_decoded_segments() {
         let (_directory, compilation) = compiled_from_default_config(
-            r#"#import "@tola/address:0.0.0": route
-#assert.eq(route(()), "/")
-#assert.eq(route(("Posts", "Deep")), "/Posts/Deep/")
-#assert.eq(route(("Café", "Leaf")), "/Café/Leaf/")
-#let route = route(("guide",))
+            r#"#import "@tola/address:0.0.0": join-route
+#assert.eq(join-route(()), "/")
+#assert.eq(join-route(("Posts", "Deep")), "/Posts/Deep/")
+#assert.eq(join-route(("Café", "Leaf")), "/Café/Leaf/")
+#let route = join-route(("guide",))
 #document(route.slice(1) + "index.html")[Guide]"#,
         );
         assert!(
@@ -928,13 +928,13 @@ path = "icons/brand"
     #[test]
     fn output_path_maps_each_route() {
         let (_directory, compilation) = compiled_from_default_config(
-            r#"#import "@tola/address:0.0.0": route-to-output
-#assert.eq(route-to-output("/"), "index.html")
-#assert.eq(route-to-output("/guide/"), "guide/index.html")
-#assert.eq(route-to-output("/guide"), "guide")
-#assert.eq(route-to-output("/manual.pdf"), "manual.pdf")
-#assert.eq(route-to-output("/404.html"), "404.html")
-#document(route-to-output("/about.html"))[About]"#,
+            r#"#import "@tola/address:0.0.0": output-of
+#assert.eq(output-of("/"), "index.html")
+#assert.eq(output-of("/guide/"), "guide/index.html")
+#assert.eq(output-of("/guide"), "guide")
+#assert.eq(output-of("/manual.pdf"), "manual.pdf")
+#assert.eq(output-of("/404.html"), "404.html")
+#document(output-of("/about.html"))[About]"#,
         );
         assert!(
             compilation
@@ -946,11 +946,11 @@ path = "icons/brand"
     #[test]
     fn output_route_inverse_maps_index() {
         assert_default_compiles(
-            r#"#import "@tola/address:0.0.0": route-to-output, output-to-route
-#assert.eq(output-to-route("guide/index.html"), "/guide/")
-#assert.eq(output-to-route("404.html"), "/404.html")
-#assert.eq(output-to-route("about"), "/about")
-#assert.eq(route-to-output(output-to-route("guide/index.html")), "guide/index.html")
+            r#"#import "@tola/address:0.0.0": output-of, route-of
+#assert.eq(route-of("guide/index.html"), "/guide/")
+#assert.eq(route-of("404.html"), "/404.html")
+#assert.eq(route-of("about"), "/about")
+#assert.eq(output-of(route-of("guide/index.html")), "guide/index.html")
 #document("index.html")[Routes]"#,
         );
     }
@@ -958,12 +958,12 @@ path = "icons/brand"
     #[test]
     fn output_url_renders_mount_and_origin() {
         assert_default_compiles(
-            r#"#import "@tola/address:0.0.0": output-to-url
-#assert.eq(output-to-url("guide/index.html"), "/guide/")
-#assert.eq(output-to-url("Hello World/index.html", base-path: "/docs/"), "/docs/Hello%20World/")
-#assert.eq(output-to-url("404.html", base-path: "/docs/"), "/docs/404.html")
+            r#"#import "@tola/address:0.0.0": url-of
+#assert.eq(url-of("guide/index.html"), "/guide/")
+#assert.eq(url-of("Hello World/index.html", base-path: "/docs/"), "/docs/Hello%20World/")
+#assert.eq(url-of("404.html", base-path: "/docs/"), "/docs/404.html")
 #assert.eq(
-  output-to-url("guide/index.html", base-path: "/docs/", origin: "https://example.test"),
+  url-of("guide/index.html", base-path: "/docs/", origin: "https://example.test"),
   "https://example.test/docs/guide/",
 )
 #document("index.html")[URLs]"#,
@@ -974,8 +974,8 @@ path = "icons/brand"
     fn output_url_refuses_origin_paths() {
         for origin in ["https://example.test/docs/", "https://example.test/."] {
             let source = format!(
-                "#import \"@tola/address:0.0.0\": output-to-url\n\
-                 #let url = output-to-url(\"index.html\", origin: {origin:?})\n\
+                "#import \"@tola/address:0.0.0\": url-of\n\
+                 #let url = url-of(\"index.html\", origin: {origin:?})\n\
                  #document(\"index.html\")[Body]"
             );
             let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
@@ -1014,12 +1014,12 @@ path = "icons/brand"
     #[test]
     fn address_conversion_reads_no_site_or_source() {
         let (_directory, compilation) = compiled_from_default_config(
-            r#"#import "@tola/address:0.0.0": route, route-to-output, output-to-route, output-to-url, decode-url-path
+            r#"#import "@tola/address:0.0.0": join-route, output-of, route-of, url-of, decode-url-path
 #let converted = (
-  route(("guide",)),
-  route-to-output("/guide/"),
-  output-to-route("guide/index.html"),
-  output-to-url("guide/index.html", base-path: "/"),
+  join-route(("guide",)),
+  output-of("/guide/"),
+  route-of("guide/index.html"),
+  url-of("guide/index.html", base-path: "/"),
   decode-url-path("/caf%C3%A9/"),
 )
 #document("index.html")[#converted.len()]"#,
@@ -1755,9 +1755,9 @@ path = "icons/brand"
     fn all_sources_lists_every_source_in_order() {
         let sources = source_records(&["about.typ", "about/index.typ", "index.typ"]);
         let source = r#"
-#import "@tola/address:0.0.0": route
+#import "@tola/address:0.0.0": join-route
 #import "@tola/source:0.0.0": all-sources
-#assert.eq(all-sources().map(source => route(source.at("route-segments"))), ("/about/", "/about/", "/"))
+#assert.eq(all-sources().map(source => join-route(source.at("route-segments"))), ("/about/", "/about/", "/"))
 #let eager = all-sources().map(source => source.id).join(", ")
 #document("index.html")[#eager / #context all-sources().last().id]
 "#;
@@ -1959,12 +1959,12 @@ path = "icons/brand"
         fs::write(
             directory.path().join("content/document.typ"),
             r#"
-#import "@tola/address:0.0.0": route
+#import "@tola/address:0.0.0": join-route
 #import "@tola/document:0.0.0": current-document
 #import "@tola/source:0.0.0": current-source
 #let source = current-source()
 #assert.eq(source.path, "document.typ")
-#assert.eq(route(source.at("route-segments")), "/document/")
+#assert.eq(join-route(source.at("route-segments")), "/document/")
 #import "@tola/source:0.0.0": tola-meta
 #tola-meta((filename: source.filename))
 #context {
@@ -2369,7 +2369,7 @@ path = "icons/brand"
                 let main = self.directory.path().join("site.typ");
                 std::fs::write(
                     &main,
-                    format!("#import \"@tola/address:0.0.0\": asset-url\n{body}"),
+                    format!("#import \"@tola/address:0.0.0\": url-of-asset\n{body}"),
                 )
                 .unwrap();
                 let files = tola_typst::FileResolver::new().with_provider(IconFiles::default());
@@ -2401,10 +2401,10 @@ path = "icons/brand"
                 })
             }
 
-            /// The value `asset-url(declared)` produced in a real Bundle compilation.
+            /// The value `url-of-asset(declared)` produced in a real Bundle compilation.
             fn resolve(&self, declared: &str) -> Result<String, String> {
                 let compilation = self.compile(&format!(
-                    "#document(\"index.html\")[#metadata(asset-url(\"{declared}\")) <resolved>]"
+                    "#document(\"index.html\")[#metadata(url-of-asset(\"{declared}\")) <resolved>]"
                 ))?;
                 let path = typst::syntax::VirtualPath::new("index.html").unwrap();
                 let value = compilation
@@ -2415,7 +2415,7 @@ path = "icons/brand"
                     .expect("the document declares the resolved URL");
                 Ok(value
                     .cast::<typst::foundations::Str>()
-                    .expect("asset-url returns a string")
+                    .expect("url-of-asset returns a string")
                     .to_string())
             }
         }
@@ -2562,7 +2562,7 @@ path = "icons/brand"
     /// The `@tola/document` queries inside a real compilation.
     mod references {
         use super::*;
-        use typst::foundations::{Content, Value};
+        use typst::foundations::{Content, Label, Value};
         use typst::introspection::Location;
 
         struct QuerySite {
@@ -3345,25 +3345,63 @@ path = "icons/brand"
             );
         }
 
+        /// A show rule decides which link reaches the output, and that link is what is reported.
         #[test]
-        fn ref_reports_the_label_it_names() {
+        fn show_rules_decide_which_reference_is_reported() {
             let site = QuerySite::new("/");
             let compiled = site.compile(
                 r#"
 #import "@tola/document:0.0.0": references
 #document("from.html")[
-  #show ref: reference => [
-    #link("/to/?via=ref#one")[First]
-    #link("/to/?via=ref#two")[Second]
-  ]
-  #html.main[@original] <page>
+  #show link.where(dest: "/original/"): _ => link("/generated/")[Generated]
+  #html.main[#link("/original/")[Original]] <page>
   #context [#metadata(references(from-within: <page>)) <outgoing>]
 ]
 #document("original.html")[
   = Original <original>
   #context [#metadata(references(to: auto)) <incoming>]
 ]
-#document("to/index.html")[To]
+#document("generated/index.html")[
+  Generated
+  #context [#metadata(references(to: auto)) <incoming>]
+]
+"#,
+                true,
+            );
+            let outgoing = records(&compiled, "from.html", "outgoing");
+            assert_eq!(outgoing.len(), 1, "{outgoing:?}");
+            assert_eq!(
+                outgoing[0].get("destination").unwrap(),
+                &"/generated/".into_value()
+            );
+            assert_eq!(
+                target(&outgoing[0]).get("output").unwrap(),
+                &"generated/index.html".into_value()
+            );
+            assert!(records(&compiled, "original.html", "incoming").is_empty());
+            assert_eq!(
+                records(&compiled, "generated/index.html", "incoming").len(),
+                1
+            );
+        }
+
+        /// A link written inside another link's body belongs to the outer one.
+        #[test]
+        fn nested_links_belong_to_the_outermost_reference() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#set heading(numbering: "1.")
+#document("from.html")[
+  #html.main[#link("/original/")[Original @generated #link("/generated/")[Inner]]] <page>
+  #context [#metadata(references(from-within: <page>)) <outgoing>]
+]
+#document("original/index.html")[= Original <original>]
+#document("generated/index.html")[
+  = Generated <generated>
+  #context [#metadata(references(to: auto, from-within: <page>)) <incoming>]
+]
 "#,
                 true,
             );
@@ -3371,31 +3409,29 @@ path = "icons/brand"
             assert_eq!(outgoing.len(), 1, "{outgoing:?}");
             assert_eq!(
                 target(&outgoing[0]).get("output").unwrap(),
-                &"original.html".into_value(),
-                "{outgoing:?}"
+                &"original/index.html".into_value()
             );
-            assert_eq!(
-                outgoing[0].get("resolution").unwrap(),
-                &"found".into_value(),
-                "{outgoing:?}"
-            );
-            assert_eq!(records(&compiled, "original.html", "incoming").len(), 1);
+            assert!(records(&compiled, "generated/index.html", "incoming").is_empty());
         }
 
+        /// A reference a show rule replaces is reported as what replaced it.
         #[test]
-        fn nested_relations_belong_to_outermost_reference() {
-            for body in [
-                r#"
+        fn show_rewritten_references_report_the_replacement() {
+            for (body, reported) in [
+                (
+                    r#"
   #show ref.where(target: <original>): _ => ref(<generated>)
   #html.main[@original] <page>
 "#,
-                r#"
+                    1,
+                ),
+                (
+                    r#"
   #show link.where(dest: "/original/"): _ => [@generated #link("/generated/")[Generated]]
   #html.main[#link("/original/")[Original]] <page>
 "#,
-                r#"
-  #html.main[#link("/original/")[Original @generated #link("/generated/")[Inner]]] <page>
-"#,
+                    2,
+                ),
             ] {
                 let site = QuerySite::new("/");
                 let compiled = site.compile(
@@ -3405,9 +3441,14 @@ path = "icons/brand"
 #set heading(numbering: "1.")
 #document("from.html")[
 {body}
-  #context [#metadata(references(from-within: <page>)) <outgoing>]
+  #context [
+    #metadata(references(from-within: <page>)) <outgoing>
+  ]
 ]
-#document("original/index.html")[= Original <original>]
+#document("original/index.html")[
+  = Original <original>
+  #context [#metadata(references(to: auto)) <incoming>]
+]
 #document("generated/index.html")[
   = Generated <generated>
   #context [#metadata(references(to: auto, from-within: <page>)) <incoming>]
@@ -3417,17 +3458,25 @@ path = "icons/brand"
                     true,
                 );
                 let outgoing = records(&compiled, "from.html", "outgoing");
-                assert_eq!(outgoing.len(), 1, "{outgoing:?}");
+                assert_eq!(outgoing.len(), reported, "{outgoing:?}");
+                for reference in &outgoing {
+                    assert_eq!(
+                        target(reference).get("output").unwrap(),
+                        &"generated/index.html".into_value(),
+                        "{outgoing:?}"
+                    );
+                }
                 assert_eq!(
-                    target(&outgoing[0]).get("output").unwrap(),
-                    &"original/index.html".into_value(),
+                    records(&compiled, "generated/index.html", "incoming").len(),
+                    reported
                 );
-                assert!(records(&compiled, "generated/index.html", "incoming").is_empty());
+                assert!(records(&compiled, "original/index.html", "incoming").is_empty());
             }
         }
 
+        /// Links a show rule produces are reported in the region that holds them.
         #[test]
-        fn source_scopes_keep_global_reference_owners() {
+        fn show_generated_links_join_their_own_region() {
             let site = QuerySite::new("/");
             let compiled = site.compile(
                 r#"
@@ -3447,17 +3496,20 @@ path = "icons/brand"
 "#,
                 true,
             );
-            assert!(records(&compiled, "from.html", "region").is_empty());
-            let outgoing = records(&compiled, "from.html", "document");
-            assert_eq!(outgoing.len(), 1);
-            assert_eq!(
-                target(&outgoing[0]).get("output").unwrap(),
-                &"original.html".into_value()
-            );
+            let region = records(&compiled, "from.html", "region");
+            assert_eq!(region.len(), 2, "{region:?}");
+            for reference in &region {
+                assert_eq!(
+                    target(reference).get("output").unwrap(),
+                    &"generated/index.html".into_value()
+                );
+            }
+            assert_eq!(records(&compiled, "from.html", "document").len(), 2);
         }
 
+        /// Occurrences stay in the region that holds them, wherever a derived query reads them.
         #[test]
-        fn mixed_rendering_preserves_region_ownership() {
+        fn derived_occurrences_keep_their_regions() {
             let site = QuerySite::new("/");
             site.compile(
                 r#"
@@ -3468,8 +3520,8 @@ path = "icons/brand"
   #html.main[#link("/original/")[Original]] <page>
   #context {
     let found = references(from-within: <page>)
-    assert.eq(found.len(), 1)
-    assert.eq(found.first().target.output, "original/index.html")
+    assert.eq(found.len(), 2)
+    for reference in found [ assert.eq(reference.target.output, "generated/index.html") ]
   }
 ]
 #document("inner.html")[
@@ -3477,14 +3529,14 @@ path = "icons/brand"
     #html.main[#link("/generated/")[First] #link("/generated/")[Second]] <decorative>
   ]
   @original
-  #context assert.eq(references(from-within: <decorative>), ())
+  #context assert.eq(references(from-within: <decorative>).len(), 2)
 ]
 #document("original/index.html")[= Original <original>]
 #document("generated/index.html")[
   = Generated <generated>
   #context {
-    let generated = query(<generated>).first()
-    assert.eq(references(to: generated.location(), from-within: <page>), ())
+    let heading = query(<generated>).first().location()
+    assert.eq(references(to: heading, from-within: <page>).len(), 1)
   }
 ]
 #document("empty.html")[
@@ -3496,10 +3548,12 @@ path = "icons/brand"
             );
         }
 
+        /// A chain of show rules reports the reference that finally reached the output.
         #[test]
-        fn reference_chains_keep_global_ownership() {
-            for body in [
-                r#"
+        fn show_chains_report_the_last_reference() {
+            for (body, in_page, in_decorative, output) in [
+                (
+                    r#"
   #show ref.where(target: <original>): _ => ref(<middle>)
   #show ref.where(target: <middle>): _ => ref(<generated>)
   #show ref.where(target: <generated>): _ => [
@@ -3507,13 +3561,22 @@ path = "icons/brand"
   ]
   #html.main[@original] <page>
 "#,
-                r#"
+                    2,
+                    2,
+                    "generated/index.html",
+                ),
+                (
+                    r#"
   #html.main[
     #link("/original/")[Original #link("/middle/")[Middle
       #html.main[#link("/generated/")[Generated]] <decorative>
     ]]
   ] <page>
 "#,
+                    1,
+                    0,
+                    "original/index.html",
+                ),
             ] {
                 let site = QuerySite::new("/");
                 site.compile(
@@ -3525,9 +3588,9 @@ path = "icons/brand"
 {body}
   #context {{
     let found = references(from-within: <page>)
-    assert.eq(found.len(), 1)
-    assert.eq(found.first().target.output, "original/index.html")
-    assert.eq(references(from-within: <decorative>), ())
+    assert.eq(found.len(), {in_page})
+    assert.eq(found.first().target.output, "{output}")
+    assert.eq(references(from-within: <decorative>).len(), {in_decorative})
   }}
 ]
 #document("original/index.html")[= Original <original>]
@@ -3538,6 +3601,119 @@ path = "icons/brand"
                     true,
                 );
             }
+        }
+
+        /// A link a show rule turns into plain text never reaches the output, so it is not reported.
+        #[test]
+        fn removed_links_are_not_reported() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#document("from.html")[
+  #show link: it => it.body
+  #html.main[#link("/generated/")[Generated]] <page>
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("generated/index.html")[Generated]
+"#,
+                true,
+            );
+            assert!(records(&compiled, "from.html", "outgoing").is_empty());
+        }
+
+        /// A raw anchor belongs to the final HTML checks, not to this query.
+        #[test]
+        fn raw_html_anchors_are_not_native_references() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#document("from.html")[
+  #show link: it => html.a(href: "/generated/")[Raw]
+  #html.main[#link("/generated/")[Generated]] <page>
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("generated/index.html")[Generated]
+"#,
+                true,
+            );
+            assert!(records(&compiled, "from.html", "outgoing").is_empty());
+        }
+
+        /// A link its show rule writes twice reached the output twice, and is reported twice.
+        #[test]
+        fn duplicated_links_report_each_occurrence() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#document("from.html")[
+  #show link: it => [#it #it]
+  #html.main[#link("/generated/")[Generated]] <page>
+  #context [#metadata(references(from-within: <page>)) <outgoing>]
+]
+#document("generated/index.html")[Generated]
+"#,
+                true,
+            );
+            let outgoing = records(&compiled, "from.html", "outgoing");
+            assert_eq!(outgoing.len(), 2, "{outgoing:?}");
+            for reference in &outgoing {
+                assert_eq!(
+                    target(reference).get("output").unwrap(),
+                    &"generated/index.html".into_value()
+                );
+            }
+        }
+
+        /// Paged links count once their marker reached a page; measuring alone leaves none.
+        #[test]
+        fn paged_links_report_retained_markers() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#document("report.pdf")[
+  #link("/generated/")[Shown]
+  #hide[#link("/generated/")[Hidden]]
+  #context measure[#link("/generated/")[Measured]]
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("generated/index.html")[Generated]
+"#,
+                true,
+            );
+            let outgoing = records(&compiled, "report.pdf", "outgoing");
+            assert_eq!(outgoing.len(), 2, "{outgoing:?}");
+            for reference in &outgoing {
+                assert_eq!(
+                    target(reference).get("output").unwrap(),
+                    &"generated/index.html".into_value()
+                );
+            }
+        }
+
+        /// A compilation that never installed the channel says so instead of reporting nothing.
+        #[test]
+        fn missing_channel_fails_the_compilation() {
+            let site = QuerySite::new("/");
+            let world = site.world(
+                r#"
+#import "@tola/document:0.0.0": references
+#document("index.html")[#context [#metadata(references()) <outgoing>]]
+"#,
+                true,
+            );
+            let errors = typst::compile::<tola_typst::typst_bundle::Bundle>(&world)
+                .output
+                .expect_err("a compilation without the channel reports an error");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.message.contains("records no references")),
+                "{errors:?}"
+            );
         }
 
         #[test]
@@ -3748,6 +3924,280 @@ path = "icons/brand"
                     }
                 );
             }
+        }
+
+        /// What the query reports is decided by the program, never by the state of the cache.
+        #[test]
+        fn cleared_cache_keeps_records_identical() {
+            let source = r#"
+#import "@tola/document:0.0.0": references
+#show link.where(dest: "/original/"): _ => link("/generated/")[Generated]
+#document("from.html")[
+  #html.main[#link("/original/")[Original] #link("/generated/")[Direct]] <page>
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("generated/index.html")[Generated]
+"#;
+            let site = QuerySite::new("/");
+            let semantics = |compilation: &tola_typst::BundleCompilation| {
+                records(compilation, "from.html", "outgoing")
+                    .into_iter()
+                    .map(|reference| {
+                        (
+                            target(&reference).get("output").unwrap().clone(),
+                            reference.get("destination").unwrap().clone(),
+                            reference.get("resolution").unwrap().clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let cold = site.compile(source, true);
+            let warm = site.compile(source, true);
+            typst::comemo::evict(0);
+            let cleared = site.compile(source, true);
+
+            assert_eq!(semantics(&cold).len(), 2);
+            assert_eq!(semantics(&cold), semantics(&warm));
+            assert_eq!(semantics(&cold), semantics(&cleared));
+        }
+
+        /// A page that renders what references it settles without a non-convergence warning.
+        #[test]
+        fn reference_queries_converge_without_warning() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#document("index.html")[
+  #show link.where(dest: "/linked/"): _ => link("/other/")[Rewritten]
+  #html.main[#link("/linked/")[Linked]] <body>
+  #context {
+    let written = references(from: auto, from-within: <body>)
+    assert.eq(written.len(), 1)
+    assert.eq(written.first().target.output, "other/index.html")
+  }
+]
+#document("other/index.html")[
+  Other
+  #context {
+    let incoming = references(to: auto, from-within: <body>)
+    assert.eq(incoming.len(), 1)
+  }
+]
+"#,
+                true,
+            );
+            let messages = compiled
+                .diagnostics()
+                .raw()
+                .iter()
+                .map(|diagnostic| diagnostic.source().message.to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                !messages
+                    .iter()
+                    .any(|message| message.contains("did not converge")),
+                "{messages:?}"
+            );
+        }
+
+        /// A ref reports its own element and the label it names, in either output format.
+        #[test]
+        fn refs_keep_their_label_in_every_format() {
+            for path in ["ref.html", "ref.pdf"] {
+                let site = QuerySite::new("/");
+                let compiled = site.compile(
+                    &format!(
+                        r#"
+#import "@tola/document:0.0.0": references
+#set heading(numbering: "1.")
+#document("{path}")[
+  = Target <reftarget>
+  See @reftarget
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+"#,
+                    ),
+                    true,
+                );
+                let outgoing = records(&compiled, path, "outgoing");
+                assert_eq!(outgoing.len(), 1, "{path}: {outgoing:?}");
+                assert_eq!(
+                    outgoing[0]
+                        .get("destination")
+                        .unwrap()
+                        .clone()
+                        .cast::<Label>()
+                        .unwrap(),
+                    Label::new(typst::utils::PicoStr::intern("reftarget")).unwrap(),
+                    "{path}"
+                );
+                let element = outgoing[0]
+                    .get("element")
+                    .unwrap()
+                    .clone()
+                    .cast::<Content>()
+                    .unwrap();
+                assert_eq!(element.func().name(), "ref", "{path}");
+                assert_eq!(
+                    target(&outgoing[0]).get("fragment").unwrap(),
+                    &"reftarget".into_value(),
+                    "{path}"
+                );
+            }
+        }
+
+        /// A footnote inside a link stays out of the list, in either output format.
+        #[test]
+        fn footnotes_inside_links_stay_out() {
+            for path in ["doc.html", "doc.pdf"] {
+                let site = QuerySite::new("/");
+                let compiled = site.compile(
+                    &format!(
+                        r#"
+#import "@tola/document:0.0.0": references
+#document("{path}")[
+  #link("/target/")[Linked text#footnote[Note]]
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("target/index.html")[Target]
+"#,
+                    ),
+                    true,
+                );
+                let outgoing = records(&compiled, path, "outgoing");
+                assert_eq!(outgoing.len(), 1, "{path}: {outgoing:?}");
+                assert_eq!(
+                    target(&outgoing[0]).get("output").unwrap(),
+                    &"target/index.html".into_value(),
+                    "{path}"
+                );
+            }
+        }
+
+        /// A link a show rule writes for a ref is reported as that link, not as the ref.
+        #[test]
+        fn show_written_links_stay_links() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#set heading(numbering: "1.")
+#document("doc.html")[
+  #show ref: it => context [
+    #html.span[#link(query(it.target).first().location())[X]] <region>
+  ]
+  = Target <reftarget>
+  See @reftarget
+  #context [
+    #metadata(references(from-within: <region>)) <region-records>
+  ]
+]
+"#,
+                true,
+            );
+            let region = records(&compiled, "doc.html", "region-records");
+            assert_eq!(region.len(), 1, "{region:?}");
+            let element = region[0]
+                .get("element")
+                .unwrap()
+                .clone()
+                .cast::<Content>()
+                .unwrap();
+            assert_eq!(element.func().name(), "link");
+
+            // The same program in paged output: the show rule replaces the ref, so the only
+            // reference the page uses is the link it wrote.
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#set heading(numbering: "1.")
+#document("doc.pdf")[
+  #show ref: it => context [
+    #link(query(it.target).first().location())[X]
+  ]
+  = Target <reftarget>
+  See @reftarget
+  #context [#metadata(references(from: auto)) <written>]
+]
+"#,
+                true,
+            );
+            let written = records(&compiled, "doc.pdf", "written");
+            assert_eq!(written.len(), 1, "{written:?}");
+            let element = written[0]
+                .get("element")
+                .unwrap()
+                .clone()
+                .cast::<Content>()
+                .unwrap();
+            assert_eq!(element.func().name(), "link", "{written:?}");
+        }
+
+        /// A paged link split by a page break keeps the element that owns it.
+        #[test]
+        fn paged_links_survive_page_breaks() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#show link: it => [Prefix #pagebreak()#it]
+#document("split.pdf")[
+  #link("/target/")[Split link]
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("target/index.html")[Target]
+"#,
+                true,
+            );
+            let outgoing = records(&compiled, "split.pdf", "outgoing");
+            assert_eq!(outgoing.len(), 1, "{outgoing:?}");
+            assert_eq!(
+                target(&outgoing[0]).get("output").unwrap(),
+                &"target/index.html".into_value()
+            );
+        }
+
+        /// Refs one source line writes in a loop keep their own targets.
+        #[test]
+        fn loop_written_refs_keep_their_own_targets() {
+            let site = QuerySite::new("/");
+            let compiled = site.compile(
+                r#"
+#import "@tola/document:0.0.0": references
+#set heading(numbering: "1.")
+#document("source.html")[
+  #html.main[
+    #for index in range(3) [#ref(label("target-" + str(index)))]
+  ] <body>
+  #context [#metadata(references(from: auto)) <outgoing>]
+]
+#document("t0/index.html")[= Zero <target-0>]
+#document("t1/index.html")[= One <target-1>]
+#document("t2/index.html")[= Two <target-2>]
+"#,
+                true,
+            );
+            let outgoing = records(&compiled, "source.html", "outgoing");
+            assert_eq!(outgoing.len(), 3, "{outgoing:?}");
+            for reference in &outgoing {
+                assert_eq!(
+                    reference.get("resolution").unwrap(),
+                    &"found".into_value(),
+                    "{outgoing:?}"
+                );
+            }
+            let mut targets = outgoing
+                .iter()
+                .map(|reference| target(reference).get("output").unwrap().clone())
+                .collect::<Vec<_>>();
+            targets.sort_by_key(|value| format!("{value:?}"));
+            assert_eq!(
+                targets,
+                ["t0/index.html", "t1/index.html", "t2/index.html"].map(|path| path.into_value()),
+                "{outgoing:?}"
+            );
         }
 
         #[test]

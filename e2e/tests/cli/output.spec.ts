@@ -1,6 +1,7 @@
 import { expect } from '@playwright/test'
 import { readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { ServerResponse } from 'node:http'
+import { type AddressInfo, createServer } from 'node:net'
 import { join } from 'node:path'
 import { startGate } from '../../support/gate.ts'
 import { hookToml, writeHookConfiguration } from '../../support/hooks.ts'
@@ -18,12 +19,28 @@ import { test } from '../../support/server.ts'
 import { writeMinimalSite } from '../../support/site.ts'
 import { screenText, shellQuote, sizedTerminalArgs } from '../../support/terminal.ts'
 
+/** A listening socket holding `port` so a development startup has to fall back from it. */
+async function holdPort(port: number): Promise<{ port: number; release: () => Promise<void> }> {
+  const server = createServer()
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(port, () => resolve())
+  })
+  return {
+    port: (server.address() as AddressInfo).port,
+    release: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve())
+      }),
+  }
+}
+
 function openDevelopmentTerminal(
   binary: string,
   root: string,
-  { checkModes = false } = {},
+  { checkModes = false, interfaceAddress = '127.0.0.1', port = 0 } = {},
 ) {
-  const args = ['dev', '--interface', '127.0.0.1', '--port', '0', '--color', 'never']
+  const args = ['dev', '--interface', interfaceAddress, '--port', String(port), '--color', 'never']
   const invocation = [binary, ...args].map(shellQuote).join(' ')
   const command = checkModes
     ? `tola_modes=$(stty -g); ${invocation}; tola_exit=$?; ` +
@@ -92,6 +109,29 @@ test('development history returns to the successful build', async ({ binary, dir
     expect(shown()).not.toContain('error[config.toml]')
   } finally {
     await terminal.running.terminate()
+  }
+})
+
+test('startup warnings share one round', async ({ binary, directory: root }) => {
+  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
+  await writeMinimalSite(root, {
+    program: '#document("index.html")[Home]\n#document("404.html")[Missing]\n',
+  })
+  const web = await holdPort(0)
+  const terminal = openDevelopmentTerminal(binary, root, {
+    interfaceAddress: '0.0.0.0',
+    port: web.port,
+  })
+  try {
+    await expect.poll(() => screenText(terminal.stdout())).toContain('Watching for changes')
+    terminal.running.child.stdin.write('\x1b[D')
+    await expect.poll(() => screenText(terminal.stdout())).toContain('round 1/1')
+    const view = screenText(terminal.stdout())
+    expect(view).toContain('warning[server.port_in_use]')
+    expect(view).toContain('warning[server.network_exposed]')
+  } finally {
+    await terminal.running.terminate()
+    await web.release()
   }
 })
 

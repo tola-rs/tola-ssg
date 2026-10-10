@@ -18,7 +18,7 @@ pub(crate) struct AssetOutput {
     /// Meaning and response media type declared from the logical source.
     declaration: crate::output::semantics::OutputDeclaration,
     /// Identity of the bytes published at `output`, when this site asked for
-    /// cache busting and a build rendered them. `asset-url()` appends it to the
+    /// cache busting and a build rendered them. `url-of-asset()` appends it to the
     /// browser URL as `?h=<identity>`; it never enters a published path.
     identity: Option<Arc<str>>,
 }
@@ -81,7 +81,7 @@ pub(crate) fn output_for_configured_file(
 
 /// The characters a published tree member's path may not contain.
 ///
-/// A member's path is also the tail of the site-root URL `asset-url()` resolves, and that lookup
+/// A member's path is also the tail of the site-root URL `url-of-asset()` resolves, and that lookup
 /// reads URL syntax: it decodes percent escapes exactly once and refuses `?` and `#` before
 /// decoding. A member whose name contains one of these could only be named by a URL spelling its
 /// name does not have, so Tola refuses the member rather than guess which reading it meant.

@@ -237,12 +237,6 @@ fn world_diagnostic(error: &tola_typst::WorldBuildError, root: &Path) -> Option<
             Severity::Error,
             error.to_string(),
         ),
-        WorldBuildError::SnapshotBoundaryMismatch => Diagnostic::new(
-            crate::codes::typst::WORLD,
-            Severity::Error,
-            "Tola could not finish the build because its sources changed",
-        )
-        .with_help("Run the build again"),
         WorldBuildError::Font(error) => font_diagnostic(error, root)?,
     })
 }

@@ -2,16 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::writes::FileWrites;
 use tola_build::config::SiteConfigSchema;
 use tola_build::config::section::build::hooks::{
     BeforeBuildHookConfig, CommandOutput, HooksConfig, OutputCommandConfig,
 };
 use tola_build::config::section::{
-    AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlPrefix, AssetsConfig,
-    BuildSectionConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig, VendorConfig,
+    AssetTreeDeclaration, AssetUrlPrefix, AssetsConfig, BuildSectionConfig, IconsConfig,
+    SiteSectionConfig, TypstSectionConfig, VendorConfig,
 };
-
-use crate::writes::FileWrites;
 
 use super::features::{Effects, Hook, HookStage};
 
@@ -19,9 +18,6 @@ pub(super) const CONFIG_PATH: &str = "tola.toml";
 
 /// The configuration the scaffold's effects require: default site settings, the browser-delivered
 /// asset subtree mapped, and vendoring pointed at `vendor`.
-///
-/// A Tailwind build's generated stylesheet publishes through an exact `files` entry, which owns
-/// its URL instead of the tree's path.
 pub(super) fn schema(effects: &Effects) -> SiteConfigSchema {
     // Only the browser-delivered subtree is mapped: compiler fonts and processing inputs
     // elsewhere under `static` stay unpublished unless another producer selects them.
@@ -31,16 +27,7 @@ pub(super) fn schema(effects: &Effects) -> SiteConfigSchema {
             AssetUrlPrefix::parse("/assets").expect("the scaffold asset prefix is valid"),
         )],
         cache_busting: effects.cache_busting,
-        files: effects
-            .asset_files
-            .iter()
-            .map(|(source, url)| {
-                AssetFileDeclaration::new(
-                    *source,
-                    AssetUrl::parse(url).expect("the scaffold stylesheet URL is valid"),
-                )
-            })
-            .collect(),
+        ..AssetsConfig::default()
     };
     let build = BuildSectionConfig {
         hooks: HooksConfig {
@@ -234,22 +221,39 @@ mod tests {
                     "{name} must omit {omitted}:\n{config}"
                 );
             }
-            for pointed in ["[site]", "[build]", "[assets]", "[vendor]"] {
-                let pointer = format!("# tola help \"{pointed}\"");
-                assert!(
-                    config.contains(&pointer),
-                    "{name} must point at {pointer}:\n{config}"
-                );
-            }
-            assert!(
-                config.contains("# tola help \"[build.hooks]\""),
-                "{name} must point at the hook reference:\n{config}"
-            );
             assert_eq!(
                 config.contains("[[build.hooks.before-build]]"),
                 name == "rich",
                 "{name} hook presence:\n{config}"
             );
+        }
+    }
+
+    #[test]
+    fn starter_help_targets_resolve() {
+        use crate::help::pages::{CrossRefs, page_of, request};
+        use crate::i18n::HelpLanguage;
+
+        let effects = features::Effects::combine(&features::features("minimal"));
+        let config = config_file(&schema(&effects));
+        let commands = config
+            .lines()
+            .filter_map(|line| line.strip_prefix("# tola help "))
+            .collect::<Vec<_>>();
+        assert!(!commands.is_empty());
+        for command in commands {
+            // The scaffold writes a shell line, so each argument carries the quoting a shell strips.
+            let arguments = command
+                .split_whitespace()
+                .map(|argument| argument.trim_matches('"').to_owned())
+                .collect::<Vec<_>>();
+            let target = request(&arguments).unwrap();
+            page_of(
+                target.page().unwrap(),
+                HelpLanguage::English,
+                CrossRefs::Emit,
+            )
+            .unwrap();
         }
     }
 
@@ -262,21 +266,13 @@ mod tests {
 
         let hook = &schema.build.hooks.before_build[0];
         assert_eq!(hook.name, "tailwind");
-        assert_eq!(hook.command, ["just", "css"]);
+        assert_eq!(hook.command, ["deno", "task", "css"]);
         assert_eq!(
             hook.generates,
             [PathBuf::from("static/web-assets/tailwind-output/site.css")]
         );
         assert!(schema.assets.cache_busting);
-        assert_eq!(schema.assets.files.len(), 1);
-        assert_eq!(
-            schema.assets.files[0].source(),
-            Path::new("static/web-assets/tailwind-output/site.css")
-        );
-        assert_eq!(
-            schema.assets.files[0].url().as_str(),
-            "/assets/css/site.css"
-        );
+        assert!(schema.assets.files.is_empty());
     }
 
     #[test]

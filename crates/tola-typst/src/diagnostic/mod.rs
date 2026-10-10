@@ -20,12 +20,6 @@ pub use message::{
 };
 pub use native::{DiagnosticOrigin, NativeDiagnostic, ProducerDiagnosticOrigin, producer_warning};
 pub use panic::{ExplainedPanic, explained_panic};
-#[cfg(feature = "legacy-serialization")]
-#[allow(deprecated)]
-pub use resolved::{
-    ResolvedDiagnostic, ResolvedHint, ResolvedLocationFailure, ResolvedSeverity,
-    ResolvedSourceLine, ResolvedSpan, ResolvedTrace, ResolvedTraceKind, ResolvedTruncation,
-};
 pub use resolved::{
     ResolvedPackageFailure, ResolvedPackageFailureReason, ResolvedPackageSearch, ResolvedSource,
 };

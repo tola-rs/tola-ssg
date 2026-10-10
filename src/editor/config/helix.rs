@@ -285,9 +285,19 @@ mod tests {
     fn conflicting_settings_report_both_values() {
         let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"elsewhere\"\n";
         let error = merge(Some(source), &editor_directory(".")).unwrap_err();
-        let message = format!("{error:#}");
-        assert!(message.contains("elsewhere"), "{message}");
-        assert!(message.contains(".tola/builtin-packages"), "{message}");
+        let diagnostics = tola_build::diagnostic::attached(&error).unwrap();
+        assert!(
+            diagnostics[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("elsewhere"))
+        );
+        assert!(
+            diagnostics[0]
+                .help
+                .iter()
+                .any(|help| help.message.contains(".tola/builtin-packages"))
+        );
     }
 
     #[test]

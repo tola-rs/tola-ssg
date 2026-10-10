@@ -115,6 +115,19 @@ impl OutputSink {
         self.print(&mut presentation, bytes)
     }
 
+    /// Console tracing cannot wait for a view holding this lock. The tracing file layer
+    /// records the event independently, including while the console belongs to a view.
+    pub(crate) fn write_trace(&self, bytes: &[u8]) -> io::Result<()> {
+        let Some(mut presentation) = self.inner.lock.try_lock() else {
+            return Ok(());
+        };
+        if let Some(screen) = &mut presentation.development {
+            screen.prepare()?;
+        }
+        self.finish_hook_line(&mut presentation)?;
+        self.print(&mut presentation, bytes)
+    }
+
     fn print(&self, presentation: &mut Presentation, bytes: &[u8]) -> io::Result<()> {
         match &mut presentation.development {
             Some(screen) => {

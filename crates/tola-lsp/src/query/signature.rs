@@ -78,7 +78,7 @@ mod tests {
                 None,
             ),
             (
-                "#import \"@tola/address:0.0.0\": route-to-output as path\n    #path(|\"/hello/\")\n",
+                "#import \"@tola/address:0.0.0\": output-of as path\n    #path(|\"/hello/\")\n",
                 "path(",
                 &["str"],
                 Some("route"),

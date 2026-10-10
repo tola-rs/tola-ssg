@@ -133,6 +133,7 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ steps.minimum-rust.outputs.rust-version }}
+          cache-key: check-minimum-rust
       - name: Compile all workspace targets and features on minimum Rust
         run: cargo check --locked --workspace --all-targets --all-features
 

@@ -567,7 +567,7 @@ struct PreparedProducerInputs {
 
 struct CompiledRootBundle {
     site_program: crate::compiler::SiteProgramCache,
-    dependencies: crate::compiler::PublishedDependencies,
+    dependencies: crate::compiler::CompilationDependencies,
     source_analysis: crate::compiler::analysis::SourceAnalysisCache,
 }
 
@@ -606,7 +606,10 @@ fn compile_root_bundle(
                 content,
                 &sources,
             )
-            && dependencies.virtual_reads_match(typst_host, &producers.cancellation)?
+            && dependencies.virtual_reads_match(
+                |evidence| typst_host.virtual_read_matches(evidence),
+                &producers.cancellation,
+            )?
         {
             warnings.extend_distinct(source_analysis.diagnostics());
             warnings.extend_distinct(&cached_site_program.diagnostics);
@@ -706,7 +709,7 @@ fn compile_root_bundle(
     let reused_dependencies = previous_dependencies.map(|dependencies| {
         crate::compiler::ReusedDependencyReaders::new(dependencies, &reused_dependency_readers)
     });
-    let dependencies = crate::compiler::PublishedDependencies::new(
+    let dependencies = crate::compiler::CompilationDependencies::new(
         config.get_root(),
         content_sources,
         std::iter::once(config.build.entry.clone()),
@@ -865,10 +868,10 @@ mod tests {
         fs::write(
             root.join("site.typ"),
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output, slugify
+#import "@tola/address:0.0.0": join-route, output-of, slugify
 #for source in all-sources() {
-  let route = route(source.route-segments.map(segment => slugify(segment)))
-  document(route-to-output(route), format: "html")[#include source.file]
+  let route = join-route(source.route-segments.map(segment => slugify(segment)))
+  document(output-of(route), format: "html")[#include source.file]
 }
 "#,
         )
@@ -1024,7 +1027,7 @@ mod tests {
         let entry = root.join("site.typ");
         fs::write(
             &entry,
-            "#import \"@tola/address:0.0.0\": asset-url\n#document(\"index.html\")[#asset-url(\"/app.js\")]",
+            "#import \"@tola/address:0.0.0\": url-of-asset\n#document(\"index.html\")[#url-of-asset(\"/app.js\")]",
         )
         .unwrap();
         let mut config = site_config(root);
@@ -1454,12 +1457,12 @@ mod tests {
     /// slugs as `toukyou` under `ja`, not the Chinese `dong-jing`.
     #[test]
     fn slugify_reads_site_language() {
-        let program = r#"#import "@tola/address:0.0.0": route, route-to-output, slugify
+        let program = r#"#import "@tola/address:0.0.0": join-route, output-of, slugify
 #import "@tola/site:0.0.0": site
 #import "@tola/source:0.0.0": all-sources
 
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments.map(segment => slugify(segment, mode: "ascii", language: site.language.lang)))))[#source.id]
+  document(output-of(join-route(source.route-segments.map(segment => slugify(segment, mode: "ascii", language: site.language.lang)))))[#source.id]
 }"#;
         let cases = [
             (
@@ -1880,12 +1883,12 @@ mod tests {
         fs::write(
             &entry,
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 
 #let published = all-sources()
 
 #for source in published {
-  document(route-to-output(route(source.route-segments)))[#include source.file]
+  document(output-of(join-route(source.route-segments)))[#include source.file]
 }
 "#,
         )
@@ -1970,10 +1973,10 @@ mod tests {
             &entry,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/document:0.0.0": current-document
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments)))[#include source.file]
+  document(output-of(join-route(source.route-segments)))[#include source.file]
 }
 
 #document("tags/rust/index.html", context {
@@ -2056,10 +2059,10 @@ mod tests {
         fs::write(
             &entry,
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments)))[#include source.file]
+  document(output-of(join-route(source.route-segments)))[#include source.file]
 }
 #asset("generated.txt", "generated asset")
 "#,
@@ -2112,9 +2115,9 @@ mod tests {
         fs::write(
             &entry,
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources().filter(source => not source.meta.draft) {
-  document(route-to-output(route(source.route-segments)))[#include source.file]
+  document(output-of(join-route(source.route-segments)))[#include source.file]
 }"#,
         )
         .unwrap();

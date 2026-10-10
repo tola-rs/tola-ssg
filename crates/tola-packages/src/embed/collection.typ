@@ -1,21 +1,27 @@
-// @tola/collection:0.0.0 - pick, group, index, and navigate arrays of your own values
+// @tola/collection:0.0.0 - query, group, filter, and walk arrays of your own values
 //
-// Members are your own values: dictionaries, strings, or anything else you can put in an array.
-// Each operation takes the accessor functions you supply, so field names, order, and hierarchy
-// conventions are yours to choose. `key` identifies a member, `keys` gives the memberships a
-// member carries, and `parent` derives a member's container key.
+// Four kinds of operations on one array of members — the values you supply:
 //
-// `key` and `keys` receive a member; `parent` receives a key, including keys that have no member
-// in the array. A hierarchy walk can revisit shared ancestors, so `parent` must return the same
-// container key for a given key, and must reach `none` after finitely many steps.
+// - Index and group: `index-by`, `group-by`, `group-by-keys`
+// - Filter and copy fields: `select-members`, `pick`
+// - Order and neighbors: `adjacent`, `window`
+// - Hierarchy: `children`, `descendants`, `ancestors`, `lineage`, `siblings`
+//
+// `key`, `keys`, and `parent` are functions you supply: `key` receives a member and returns its
+// key; `keys` receives a member and returns the memberships it carries; `parent` receives a member
+// key and returns its container key. A result of `none` means that key is not in `members`; an empty
+// array means the key is there, but nothing was selected. Results keep `members` order, and groups
+// appear in the order their keys first appear. `index-by`, `adjacent`, `window`, and the hierarchy
+// functions require unique member keys; a duplicate is an error. `group-by`, `group-by-keys`, and
+// `select-members` do not require that.
 
-/// Return the entries of `fields` named by the string keys in `keys`, in the order you list them.
+/// Return a new dictionary with the entries of `fields` named by `keys`, in the order you list them.
 ///
-/// Every key in `keys` must be a string. Only keys that exist in `fields` are copied, and a key
-/// listed twice counts once. Values are copied unchanged, `none` included. A dot in a key is an
+/// Constraints: every key in `keys` must be a string; only keys present in `fields` are copied; a
+/// key listed twice counts once; values are copied unchanged, `none` included; a dot in a key is an
 /// ordinary character, so `"a.b"` names one key.
 ///
-/// Example - copy selected fields:
+/// Example - copy selected fields, including a dotted key:
 ///
 /// ```typst
 /// #import "@tola/collection:0.0.0": pick
@@ -39,22 +45,27 @@
   selected
 }
 
-/// Return a dictionary that maps one string key to one member, in input order.
+/// Index the members by one key each: the result maps each key to its member.
 ///
-/// A duplicate key is an error.
+/// Constraints: `key` is called once per member and must return a string — an array or `none` is an
+/// error; two members sharing a key is an error.
 ///
-/// Example - index members by one key each:
+/// Example - index members by path:
 ///
 /// ```typst
 /// #import "@tola/collection:0.0.0": index-by
-/// #let pages = ((path: "index.html", title: "Home"), (path: "404.html", title: "Not Found"))
-/// #let by-path = index-by(pages, key: page => page.path)
-/// #assert.eq(by-path.at("404.html"), pages.at(1))
+/// #let members = (
+///   (path: "index.html", title: "Home"),
+///   (path: "404.html", title: "Not Found"),
+/// )
+/// #let by-path = index-by(members, key: member => member.path)
+/// #assert.eq(by-path.at("404.html"), members.at(1))
+/// #assert.eq(by-path.at("index.html"), members.at(0))
 /// ```
 ///
 /// Related: group-by
 /// - members (array): the members to index.
-/// - key (function): called once per member; must return a string, never an array or `none`.
+/// - key (function): receives one member; returns its string key.
 /// -> dictionary
 #let index-by(members, key: value => value) = {
   import "keys.typ": duplicate-key-message
@@ -72,10 +83,11 @@
   by-key
 }
 
-/// Group the members by one string key each.
+/// Group the members by one key each: every member lands in exactly one group.
+/// For members with several memberships, use `group-by-keys`.
 ///
-/// Group order follows each key's first appearance, and members keep input order. For members
-/// with several memberships, use `group-by-keys`.
+/// Constraints: `key` is called once per member and must return a string. Groups appear in the order
+/// their keys first appear, and members keep input order.
 ///
 /// Example - group members by one key each:
 ///
@@ -89,7 +101,7 @@
 ///
 /// Related: group-by-keys
 /// - members (array): the members to group.
-/// - key (function): called once per member; must return a string.
+/// - key (function): receives one member; returns its string key.
 /// -> dictionary
 #let group-by(members, key: value => value) = {
   assert(type(members) == array, message: "group-by expects an array")
@@ -103,32 +115,33 @@
   groups
 }
 
-/// Group members by the string keys each member carries.
-/// Group order follows each key's first appearance, and members keep input order. A member with an
-/// empty `keys` array joins no group, and a repeated key joins once.
+/// Group the members by the keys each carries: one member can join several groups.
+/// For exactly one membership per member, use `group-by`.
 ///
-/// Example - group members by their tag lists:
+/// Constraints: `keys` is called once per member and returns that member's memberships; within one
+/// member a repeated membership counts once; a member with an empty membership list joins no
+/// group. Groups appear in the order their keys first appear, and members keep input order.
 ///
-/// ```typst
-/// #import "@tola/collection:0.0.0": group-by-keys
-/// #let notes = ((title: "Build", tags: ("web", "typst")), (title: "Read", tags: ("typst",)))
-/// #let by-tag = group-by-keys(notes, keys: note => note.tags)
-/// #assert.eq(by-tag.at("typst"), notes)
-/// ```
-///
-/// Example - count a repeated key once and skip an empty key list:
+/// Example - each member introduces memberships of its own:
 ///
 /// ```typst
 /// #import "@tola/collection:0.0.0": group-by-keys
-/// #let notes = ((title: "A", tags: ()), (title: "B", tags: ("web", "web")), (title: "C", tags: ("web",)))
-/// #let by-tag = group-by-keys(notes, keys: note => note.tags)
-/// #assert.eq(by-tag.keys(), ("web",))
-/// #assert.eq(by-tag.at("web").map(note => note.title), ("B", "C"))
+/// #let notes = (
+///   (id: "A", tags: ("web", "typst")),
+///   (id: "B", tags: ("cli",)),
+///   (id: "C", tags: ("design", "typst")),
+///   (id: "D", tags: ()),
+/// )
+/// #let groups = group-by-keys(notes, keys: note => note.tags)
+/// #assert.eq(groups.keys(), ("web", "typst", "cli", "design"))
+/// #assert.eq(groups.at("web").map(note => note.id), ("A",))
+/// #assert.eq(groups.at("typst").map(note => note.id), ("A", "C"))
+/// #assert.eq(groups.at("cli").map(note => note.id), ("B",))
 /// ```
 ///
 /// Related: group-by
 /// - members (array): the members to group.
-/// - keys (function): called once per member; returns the member's string keys.
+/// - keys (function): receives one member; returns its membership keys.
 /// -> dictionary
 #let group-by-keys(members, keys: value => value) = {
   import "keys.typ": memberships-of
@@ -145,28 +158,33 @@
   groups
 }
 
-/// Keep the members whose `keys` array contains any one of the `wanted` values.
-/// With `match: "all"`, keep only the members that have every wanted value.
+/// Filter the members by their memberships, one hit (`"any"`) or full hits (`"all"`).
 ///
-/// Both arrays hold ordinary values: `(none,)` counts as one membership, `()` as none. Input
-/// order is kept. When `wanted` is empty, `"any"` selects no members and `"all"` selects every
-/// member.
+/// Constraints: `keys` returns one member's memberships; memberships are ordinary values, so
+/// `(none,)` is one membership and `()` is none. With an empty `wanted`, `"any"` selects nothing and
+/// `"all"` selects every member.
 ///
-/// Example - filter members by their memberships:
+/// Example - any or all memberships:
 ///
 /// ```typst
 /// #import "@tola/collection:0.0.0": select-members
-/// #let notes = ((title: "A", tags: ("web", "typst")), (title: "B", tags: ("web",)), (title: "C", tags: ()))
-/// #let tagged = select-members(notes, ("web",), keys: note => note.tags)
-/// #assert.eq(tagged.map(note => note.title), ("A", "B"))
-/// #assert.eq(select-members(notes, ("web", "typst"), keys: note => note.tags, match: "all").map(note => note.title), ("A",))
+/// #let notes = (
+///   (id: "A", tags: ("web", "typst")),
+///   (id: "B", tags: ("cli", "web")),
+///   (id: "C", tags: ()),
+/// )
+/// #assert.eq(select-members(notes, ("web",), keys: note => note.tags).map(note => note.id), ("A", "B"))
+/// #assert.eq(
+///   select-members(notes, ("web", "typst"), keys: note => note.tags, match: "all").map(note => note.id),
+///   ("A",),
+/// )
 /// ```
 ///
-/// Example - select with an empty `wanted` array:
+/// Example - an empty `wanted`:
 ///
 /// ```typst
 /// #import "@tola/collection:0.0.0": select-members
-/// #let notes = ((title: "A", tags: ("web",)), (title: "B", tags: ("typst",)))
+/// #let notes = ((id: "A", tags: ("web",)), (id: "B", tags: ("typst",)))
 /// #assert.eq(select-members(notes, (), keys: note => note.tags), ())
 /// #assert.eq(select-members(notes, (), keys: note => note.tags, match: "all"), notes)
 /// ```
@@ -174,9 +192,8 @@
 /// Related: group-by-keys
 /// - members (array): the members to filter.
 /// - wanted (array): the memberships a member must have.
-/// - keys (function): returns the memberships one member has.
-/// - match ("any" | "all"): whether one wanted membership is enough, or all of them are
-///   required.
+/// - keys (function): receives one member; returns its memberships.
+/// - match ("any" | "all"): whether one wanted membership is enough, or all of them are required.
 /// -> array
 #let select-members(members, wanted, keys: value => value, match: "any") = {
   import "keys.typ": memberships-of
@@ -194,13 +211,12 @@
   })
 }
 
-/// Return the neighbors of the member keyed `at`, as a dictionary.
+/// Return the neighbors of the member keyed `at`, as `{ before, after }`.
 ///
-/// If no member has that key, the result is `none`.
-///
-/// A `before` or `after` key appears only when that neighbor exists, and a neighbor may itself
-/// be `none`. Member keys must be unique, even when `at` is absent. Keys may be any comparable
-/// value, including `none`; `index-by` is stricter and requires strings.
+/// Constraints: if no member has that key, the result is `none`; a `before` or `after` key appears
+/// only when that neighbor exists, and a neighbor may itself be `none`; member keys must be unique,
+/// even when `at` is absent; keys may be any comparable value, including `none`, while `index-by`
+/// requires strings.
 ///
 /// Example - find a member's neighbors:
 ///
@@ -226,7 +242,7 @@
 /// Example - link to the previous and next page of a section:
 ///
 /// ```typst site
-/// #import "@tola/address:0.0.0": route, route-to-output
+/// #import "@tola/address:0.0.0": join-route, output-of
 /// #import "@tola/collection:0.0.0": adjacent
 /// #import "@tola/source:0.0.0": all-sources
 ///
@@ -236,7 +252,7 @@
 ///     .filter(source => source.path.starts-with("guide/"))
 ///     .sorted(key: source => (source.meta.order, source.id))
 ///     .map(source => (
-///       output: route-to-output(route(source.route-segments)),
+///       output: output-of(join-route(source.route-segments)),
 ///       title: source.meta.title,
 ///     ))
 /// )
@@ -249,7 +265,7 @@
 /// Related: window, index-by
 /// - members (array): the members to search.
 /// - at (any): the key whose neighbors are returned.
-/// - key (function): returns one member's key.
+/// - key (function): receives one member; returns its key.
 /// -> none | dictionary
 #let adjacent(members, at, key: value => value) = {
   import "keys.typ": position-of
@@ -262,10 +278,12 @@
   neighbors
 }
 
-/// Return up to `before` preceding and up to `after` following members, excluding the anchor.
+/// Return up to `before` preceding and `after` following members around the anchor, excluding it.
+///
 /// The result keeps input order. If no member has the key `at`, the result is `none`.
 ///
-/// Member keys must be unique, even when `at` is absent.
+/// Constraints: member keys must be unique, even when `at` is absent; `before` and `after` must be
+/// nonnegative integers.
 ///
 /// Example - collect a window around a member:
 ///
@@ -290,7 +308,7 @@
 /// Related: adjacent
 /// - members (array): the members to search.
 /// - at (any): the key the window is centered on.
-/// - key (function): returns one member's key.
+/// - key (function): receives one member; returns its key.
 /// - before (int): how many preceding members to include; `0` includes none. Must be a
 ///   nonnegative integer.
 /// - after (int): how many following members to include; `0` includes none. Must be a
@@ -314,11 +332,11 @@
   leading + trailing
 }
 
-/// Return the direct children of a container key, in input order; `of` must not be `none`.
+/// Return the direct children of the container key `of`.
 ///
-/// The container may be absent from `members`. `parent` returns a member key's container key, or
-/// `none` at the root. Member keys must be unique and non-`none`. Only direct edges are examined,
-/// and a self-edge is an error.
+/// Constraints: the container may be absent from `members`; member keys must be unique and
+/// non-`none`; `parent` receives a member key (not the member) and returns its container key, or
+/// `none` at the root; only direct edges are examined, and a self-edge is an error.
 ///
 /// Example - list a container's direct children:
 ///
@@ -336,7 +354,8 @@
 /// #import "@tola/collection:0.0.0": children
 /// #let pages = ((id: "intro"), (id: "api"))
 /// #let parents = (intro: "guide", api: "guide")
-/// #assert.eq(children(pages, "guide", key => parents.at(key), key: page => page.id).map(page => page.id), ("intro", "api"))
+/// #let ids = children(pages, "guide", key => parents.at(key), key: page => page.id)
+/// #assert.eq(ids.map(page => page.id), ("intro", "api"))
 /// ```
 ///
 /// Related: descendants
@@ -344,7 +363,7 @@
 /// - of (any): the container key whose direct children are returned.
 /// - parent (function): receives a member key rather than the member; returns its container key,
 ///   or `none` at the root.
-/// - key (function): called once per member; returns the member's key.
+/// - key (function): receives one member; returns its key.
 /// -> array
 #let children(members, of, parent, key: value => value) = {
   import "keys.typ": hierarchy-keys, parent-key
@@ -360,15 +379,13 @@
   children
 }
 
-/// Return the descendants of a container key, in input order, excluding the container.
-/// `of` must not be `none`, and the container may be absent from `members`.
+/// Return every descendant of the container key `of`, excluding the container.
 ///
-/// The result keeps input order. Every member's full parent chain is checked for cycles, including
-/// beyond a matching container; chains continue through keys with no member in `members`. Member
-/// keys must be unique and non-`none`, and `parent` returns `none` at the root.
-///
-/// Every member's chain is checked even when the container is absent. When parent lookups are
-/// expensive, reuse a precomputed key-to-parent dictionary.
+/// Constraints: `of` must not be `none`; the container may be absent from `members`; member keys
+/// must be unique and non-`none`, and `parent` returns `none` at the root. Every member's full
+/// parent chain is checked for cycles, including beyond a matching container, and chains continue
+/// through keys that have no member in `members`. When parent lookups are expensive, reuse a
+/// precomputed key-to-parent dictionary.
 ///
 /// Example - list every descendant of a container:
 ///
@@ -393,7 +410,7 @@
 /// - members (array): the members to search.
 /// - of (any): the container key whose descendants are returned.
 /// - parent (function): returns a member key's container key, or `none` at the root.
-/// - key (function): returns one member's key.
+/// - key (function): receives one member; returns its key.
 /// -> array
 #let descendants(members, of, parent, key: value => value) = {
   import "keys.typ": hierarchy-keys, parent-chain
@@ -411,10 +428,10 @@
 
 /// Return the ancestors of the member keyed `at`, from the root down to its parent.
 ///
-/// Only ancestors present in `members` are included; the member itself is excluded. Member keys
-/// must be unique, and neither they nor `at` may be `none`; an anchor absent from `members`
-/// returns `none`. The walk ends when `parent` returns `none`; chains continue through keys with
-/// no member in `members`, and a repeated key in the traversed chain is an error.
+/// Constraints: only ancestors present in `members` are included, and the member itself is
+/// excluded; member keys must be unique, and neither they nor `at` may be `none`; an anchor absent
+/// from `members` returns `none`. The walk ends when `parent` returns `none`; chains continue
+/// through keys that have no member in `members`, and a repeated key on the walk is an error.
 ///
 /// Example - walk a member's ancestor chain:
 ///
@@ -430,7 +447,7 @@
 /// - members (array): the members to search.
 /// - at (any): the key of the member whose ancestors are returned.
 /// - parent (function): returns a member key's container key, or `none` at the root.
-/// - key (function): returns one member's key.
+/// - key (function): receives one member; returns its key.
 /// -> none | array
 #let ancestors(members, at, parent, key: value => value) = {
   import "keys.typ": hierarchy-keys, ancestor-members
@@ -441,14 +458,14 @@
   ancestor-members(members, member-keys, at, parent, "ancestors")
 }
 
-/// Return the ancestors of the member keyed `at`, from the root down to the member itself.
+/// Return the ancestors of the member keyed `at`, with `at` itself last — a breadcrumb trail.
 ///
-/// Only ancestors present in `members` are included, with the member itself last. Member keys must
-/// be unique, and neither they nor `at` may be `none`; an anchor absent from `members` returns
-/// `none`. The walk ends when `parent` returns `none`; chains continue through keys with no member
-/// in `members`, and a repeated key in the traversed chain is an error.
+/// Constraints: only ancestors present in `members` are included; member keys must be unique, and
+/// none of them, nor `at`, may be `none`; when `at` is not in `members` the result is `none`. The
+/// walk ends when `parent` returns `none`; it continues through keys that have no member in
+/// `members`, and a repeated key on the walk is an error.
 ///
-/// Example - follow a lineage through a key that is not a member:
+/// Example - a lineage through a key that is not a member:
 ///
 /// ```typst
 /// #import "@tola/collection:0.0.0": lineage
@@ -458,11 +475,19 @@
 /// #assert.eq(trail.map(page => page.title), ("Root", "Leaf"))
 /// ```
 ///
+/// Example - an anchor that is not a member:
+///
+/// ```typst
+/// #import "@tola/collection:0.0.0": lineage
+/// #let pages = ((id: "root", title: "Root"),)
+/// #assert.eq(lineage(pages, "missing", key => none, key: page => page.id), none)
+/// ```
+///
 /// Related: ancestors
 /// - members (array): the members to search.
 /// - at (any): the key of the member whose lineage is returned.
 /// - parent (function): returns a member key's container key, or `none` at the root.
-/// - key (function): returns one member's key.
+/// - key (function): receives one member; returns its key.
 /// -> none | array
 #let lineage(members, at, parent, key: value => value) = {
   import "keys.typ": hierarchy-keys, ancestor-members
@@ -476,12 +501,12 @@
   lineage
 }
 
-/// Return the members that share the anchor's parent, in input order, excluding the anchor.
+/// Return the other members sharing the parent of the member keyed `at`.
 ///
-/// Member keys must be unique, and neither they nor `at` may be `none`; an anchor absent from
-/// `members` returns `none`. A member whose `parent` returns `none` is a root; roots have no
-/// siblings, even though all of them share `parent: none`. Only direct parent edges are examined,
-/// and a self-edge is an error.
+/// Constraints: member keys must be unique, and neither they nor `at` may be `none`; an anchor
+/// absent from `members` returns `none`. A member whose `parent` returns `none` is a root, and roots
+/// have no siblings even though they all share `parent: none`; only direct parent edges are
+/// examined, and a self-edge is an error.
 ///
 /// Example - list the members sharing a parent:
 ///
@@ -507,7 +532,7 @@
 /// - members (array): the members to search.
 /// - at (any): the key of the member whose siblings are returned.
 /// - parent (function): returns a member key's container key, or `none` at the root.
-/// - key (function): returns one member's key.
+/// - key (function): receives one member; returns its key.
 /// -> none | array
 #let siblings(members, at, parent, key: value => value) = {
   import "keys.typ": hierarchy-keys, parent-key

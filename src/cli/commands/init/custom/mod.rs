@@ -89,18 +89,39 @@ impl View {
     fn visible_rows(&self, rows: &[Row]) -> Vec<usize> {
         let mut kept = Vec::new();
         let mut title = None;
+        let mut files = Vec::new();
+        let mut files_header = None;
         let query = self.query().to_ascii_lowercase();
         for (index, row) in rows.iter().enumerate() {
-            if !rows::is_item(*row) {
-                title = Some(index);
-                continue;
-            }
-            if rows::name(*row).is_some_and(|name| name.contains(&query)) {
-                if let Some(title) = title.take() {
-                    kept.push(title);
+            match row {
+                Row::Files => {
+                    files_header = Some(index);
+                    continue;
                 }
-                kept.push(index);
+                Row::File(name) => {
+                    if name.contains(&query) {
+                        files.push(index);
+                    }
+                    continue;
+                }
+                Row::Group(_) | Row::Atom(_) => {}
             }
+            if let Some(name) = rows::name(*row) {
+                if name.contains(&query) {
+                    if let Some(title) = title.take() {
+                        kept.push(title);
+                    }
+                    kept.push(index);
+                }
+            } else {
+                title = Some(index);
+            }
+        }
+        if !files.is_empty() {
+            if let Some(header) = files_header {
+                kept.push(header);
+            }
+            kept.extend(files);
         }
         kept
     }
@@ -160,33 +181,10 @@ impl View {
         Step::Continue
     }
 
-    /// Files follow their feature writers; an ambiguous writer remains a feature choice.
+    /// The atoms toggle; the file rows only show what the selection writes.
     fn toggle(&mut self, rows: &[Row]) {
-        match self.current(rows) {
-            Some(Row::Atom(feature)) => {
-                toggle_feature(&mut self.selected, feature, &mut self.footnote)
-            }
-            Some(Row::File(file)) => {
-                let writers = features::writers(file, &self.selected);
-                if !writers.is_empty() {
-                    self.footnote = Some(format!("written by {}", writers.join(", ")));
-                } else {
-                    match features::file_writers(file).as_slice() {
-                        [] => {}
-                        [only] => toggle_feature(&mut self.selected, *only, &mut self.footnote),
-                        many => {
-                            self.footnote = Some(format!(
-                                "check {} to write it",
-                                many.iter()
-                                    .map(|feature| features::feature_name(*feature))
-                                    .collect::<Vec<_>>()
-                                    .join(" or ")
-                            ));
-                        }
-                    }
-                }
-            }
-            _ => {}
+        if let Some(Row::Atom(feature)) = self.current(rows) {
+            toggle_feature(&mut self.selected, feature, &mut self.footnote);
         }
     }
 
@@ -643,40 +641,6 @@ mod tests {
     }
 
     #[test]
-    fn file_row_checks_its_only_writer() {
-        for (file, feature) in [
-            ("static/web-assets/css/site.css", Feature::StarterStylesheet),
-            ("deno.json", Feature::DenoToolchain),
-        ] {
-            let mut view = view(&[]);
-            focus(&mut view, Row::File(file));
-            view.key(&key(KeyCode::Char(' ')));
-            assert_eq!(view.selection(), set(&[feature]));
-        }
-    }
-
-    #[test]
-    fn file_row_names_writer_choices() {
-        let mut view = view(&[]);
-        focus(&mut view, Row::File("justfile"));
-        view.key(&key(KeyCode::Char(' ')));
-        assert_eq!(view.selection(), set(&[]));
-        let note = footnote(&view).expect("ambiguous writers are explained");
-        for writer in features::file_writers("justfile") {
-            assert!(note.contains(features::feature_name(writer)));
-        }
-    }
-
-    #[test]
-    fn displaced_file_writer_refuses_selection() {
-        let mut view = view(&[]);
-        view.selected = canon(&features::features("rich"));
-        focus(&mut view, Row::File("static/web-assets/css/site.css"));
-        view.key(&key(KeyCode::Char(' ')));
-        assert_eq!(view.selection(), canon(&features::features("rich")));
-    }
-
-    #[test]
     fn preset_keys_replace_the_selection() {
         let mut view = view(&[]);
         view.key(&key(KeyCode::Char('1')));
@@ -744,6 +708,19 @@ mod tests {
     }
 
     #[test]
+    fn file_rows_stay_visible() {
+        let view = rich_view(Row::Atom(Feature::Feed));
+        let rows = view.rows();
+        let visible: Vec<Row> = view
+            .visible_rows(rows)
+            .into_iter()
+            .map(|index| rows[index])
+            .collect();
+        assert!(visible.contains(&Row::Files));
+        assert!(visible.iter().any(|row| matches!(row, Row::File(_))));
+    }
+
+    #[test]
     fn filter_matches_case_insensitively() {
         let mut view = rich_view(Row::Atom(Feature::TailwindCss));
         view.key(&key(KeyCode::Char('/')));
@@ -769,15 +746,17 @@ mod tests {
     fn enter_accepts_the_filter_line() {
         let mut view = rich_view(Row::Atom(Feature::TailwindCss));
         view.key(&key(KeyCode::Char('/')));
-        view.key(&key(KeyCode::Char('j')));
+        view.key(&key(KeyCode::Char('f')));
         assert_eq!(view.key(&key(KeyCode::Enter)), Step::Continue);
-        assert_eq!(view.query, "j");
+        assert_eq!(view.query, "f");
         assert!(view.filter.is_none());
-        assert_eq!(cursor_row(&view), Some(Row::File("justfile")));
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Feed)));
         view.key(&key(KeyCode::Down));
-        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Pagefind)));
+        view.key(&key(KeyCode::Down));
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Justfile)));
         view.key(&key(KeyCode::Up));
-        assert_eq!(cursor_row(&view), Some(Row::File("justfile")));
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Pagefind)));
     }
 
     #[test]
@@ -796,7 +775,7 @@ mod tests {
             .map(|row| row.iter().map(|cell| cell.symbol().to_owned()).collect())
             .collect();
         assert!(
-            lines.iter().any(|line| line.contains("tailwind-sources")),
+            lines.iter().any(|line| line.contains("justfile")),
             "the last item is off screen: {lines:?}"
         );
         assert!(
@@ -871,21 +850,21 @@ mod tests {
     fn filter_cancel_restores_focus() {
         let mut view = rich_view(Row::Atom(Feature::TailwindCss));
         view.key(&key(KeyCode::Char('/')));
-        view.paste("DENO");
+        view.paste("f");
         view.key(&key(KeyCode::Enter));
-        focus(&mut view, Row::File("deno.json"));
+        focus(&mut view, Row::Atom(Feature::Justfile));
 
         view.key(&key(KeyCode::Char('/')));
-        assert_eq!(view.query(), "DENO");
-        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+        assert_eq!(view.query(), "f");
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Justfile)));
         view.key(&key(KeyCode::Left));
-        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Justfile)));
         view.paste("no-matching-feature");
         assert_eq!(cursor_row(&view), None);
         view.key(&key(KeyCode::Esc));
 
-        assert_eq!(view.query(), "DENO");
-        assert_eq!(cursor_row(&view), Some(Row::File("deno.json")));
+        assert_eq!(view.query(), "f");
+        assert_eq!(cursor_row(&view), Some(Row::Atom(Feature::Justfile)));
     }
 
     #[test]

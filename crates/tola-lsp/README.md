@@ -118,8 +118,10 @@ A site that does not compile does not silence the file being edited: the check r
 the site's own imports, packages, and fonts come from, a source the site could not compile compiles
 on its own in that world, and the answers say what that file alone establishes. A check that
 resolved no world at all answers a hover that says why. What needs the whole site — its labels, its
-pages — stays empty. A workspace without `tola.toml` is served as the documents it holds, each open
-document checked on its own.
+pages — stays empty. A workspace without `tola.toml` at its root is served as the documents it
+holds, each open document checked on its own. Automatic configuration lookup stays within that
+root; use `--config` to select a site outside it. CLI build commands still discover parent
+configurations.
 
 A file change whose paths are all inside generated state — `.tola`, the build lock, the publication
 and vendor workspaces, the configured output tree — leaves the current revision and every request in

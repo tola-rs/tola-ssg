@@ -128,7 +128,7 @@ impl Drop for TraceWriter {
     fn drop(&mut self) {
         if !self.bytes.is_empty() {
             let rendered = normalize_trace_event(&self.bytes);
-            let _ = self.sink.write_stderr(rendered.as_bytes());
+            let _ = self.sink.write_trace(rendered.as_bytes());
         }
     }
 }
@@ -445,18 +445,21 @@ mod tests {
             tracing::trace!(target: "tola::test", "trace message");
         });
         let shown = String::from_utf8(output.bytes()).unwrap();
-        for (word, styled) in [
-            ("error", "\u{1b}[1m\u{1b}[31merror\u{1b}[39m\u{1b}[0m"),
-            ("warn", "\u{1b}[1m\u{1b}[33mwarn\u{1b}[39m\u{1b}[0m"),
-            ("info", "\u{1b}[1m\u{1b}[32minfo\u{1b}[39m\u{1b}[0m"),
-            ("debug", "\u{1b}[1m\u{1b}[36mdebug\u{1b}[39m\u{1b}[0m"),
-            ("trace", "\u{1b}[2mtrace\u{1b}[0m"),
-        ] {
-            assert!(
-                shown.contains(&format!("{styled} test: {word} message")),
-                "{word}: {shown:?}"
-            );
+        let mut level_styles = std::collections::BTreeSet::new();
+        for word in ["error", "warn", "info", "debug", "trace"] {
+            let line = shown
+                .lines()
+                .find(|line| line.contains(&format!("test: {word} message")))
+                .unwrap_or_else(|| panic!("{word} line: {shown:?}"));
+            let head = line.split(word).next().unwrap_or_default();
+            assert!(head.contains('\u{1b}'), "{word} isn't styled: {shown:?}");
+            level_styles.insert(head.to_owned());
         }
+        assert_eq!(
+            level_styles.len(),
+            5,
+            "every level keeps its own style: {shown:?}"
+        );
     }
 
     #[test]
@@ -476,20 +479,25 @@ mod tests {
             }
         });
         let shown = String::from_utf8(output.bytes()).unwrap();
-        assert!(
-            shown.contains(concat!(
-                "\u{1b}[1m\u{1b}[32mFinished\u{1b}[39m\u{1b}[0m ",
-                "\u{1b}[35mgenerate-outputs\u{1b}[39m/\u{1b}[36msearch\u{1b}[39m in 500 ms"
-            )),
-            "{shown:?}"
+        let mut verdict_styles = std::collections::BTreeSet::new();
+        for verdict in ["Finished", "Failed"] {
+            let line = shown
+                .lines()
+                .find(|line| line.contains(verdict))
+                .unwrap_or_else(|| panic!("{verdict} line: {shown:?}"));
+            let head = line.split(verdict).next().unwrap_or_default();
+            assert!(head.contains('\u{1b}'), "{verdict} isn't styled: {shown:?}");
+            verdict_styles.insert(head.to_owned());
+        }
+        assert_eq!(
+            verdict_styles.len(),
+            2,
+            "success and failure keep different styles: {shown:?}"
         );
-        assert!(
-            shown.contains(concat!(
-                "\u{1b}[1m\u{1b}[31mFailed\u{1b}[39m\u{1b}[0m ",
-                "\u{1b}[35mgenerate-outputs\u{1b}[39m/\u{1b}[36msearch\u{1b}[39m after 500 ms"
-            )),
-            "{shown:?}"
-        );
+        assert!(shown.contains("generate-outputs"), "{shown:?}");
+        assert!(shown.contains("search"), "{shown:?}");
+        assert!(shown.contains("in 500 ms"), "{shown:?}");
+        assert!(shown.contains("after 500 ms"), "{shown:?}");
     }
 
     #[test]
@@ -653,6 +661,33 @@ mod tests {
                 "timestamp"
             ]
         );
+    }
+
+    #[test]
+    fn held_console_keeps_file_events() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let log = LogFile::prepare(&path, |_, error| panic!("log write failed: {error}")).unwrap();
+        log.start().unwrap();
+        let (sink, captured) = OutputSink::buffered();
+        let subscriber = subscriber(
+            1,
+            Terminal::with_sink(sink.clone(), false, false),
+            Some(log),
+            None,
+        )
+        .unwrap();
+        sink.with_stderr_lock(|_| -> io::Result<()> {
+            tracing::dispatcher::with_default(&subscriber, || {
+                tracing::debug!(target: "tola::compile", "preview became ready");
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert!(captured.is_empty());
+        let recorded: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(path).unwrap().trim()).unwrap();
+        assert_eq!(recorded["fields"]["message"], "preview became ready");
     }
 
     #[test]

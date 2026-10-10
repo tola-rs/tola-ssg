@@ -183,7 +183,7 @@ impl AssetUrls {
             .all(|(declared, browser)| next.urls.get(declared).is_none_or(|next| next == browser))
     }
 
-    /// The `asset-url()` view of this site's published declarations.
+    /// The `url-of-asset()` view of this site's published declarations.
     pub(crate) fn to_typst_dict(&self) -> Dict {
         self.urls
             .iter()

@@ -9,10 +9,10 @@
 /// `tola help "[icons]"` documents each source type, and `tola inspect icons` lists the configured
 /// namespaces and, in one you name, its icon names.
 ///
-/// An icon is colored by its own SVG. Artwork drawn with `currentColor` follows the `color` of the
-/// page around it, so a theme or a CSS class recolors it; artwork with fixed fills and strokes keeps
-/// its own colors. A collection can already be drawn that way: every `lucide` icon is painted with
-/// `currentColor`, so it takes on the page's text color as it is.
+/// An icon's color comes from its own SVG content. Artwork drawn with `currentColor` follows the
+/// `color` of the page around it, so a theme or a CSS class recolors it; artwork with fixed fills
+/// and strokes keeps its own colors. Prefer icons drawn that way: every `lucide` icon is painted
+/// with `currentColor`, so it takes on the page's text color as it is.
 ///
 /// Example - render a configured icon in an HTML document:
 ///

@@ -27,6 +27,7 @@ type RunningSite = {
 
 type SiteOptions = {
   contentRoot?: string
+  /** A path under the content root to write; `null` leaves the content root empty. */
   initialContent?: { relativePath: string; source: string } | null
   packageDataRoot?: string
   packageCacheRoot?: string
@@ -185,6 +186,8 @@ async function startSite(
     if (contentRoot !== 'content') await configureContentRoot(siteRoot, contentRoot)
     if (initialContent) {
       await writeContentFile(siteRoot, contentRoot, initialContent.relativePath, initialContent.source)
+    } else {
+      await emptyContentRoot(siteRoot, contentRoot)
     }
     if (options.beforeStart) await options.beforeStart(siteRoot)
 
@@ -299,6 +302,13 @@ async function writeContentFile(
   const contentPath = resolveSiteRelative(join(siteRoot, contentRoot), relativePath, 'content path')
   await mkdir(dirname(contentPath), { recursive: true })
   await writeFile(contentPath, source)
+}
+
+/** Empties the content root: the scaffold ships a first source, and no initial content means none. */
+async function emptyContentRoot(siteRoot: string, contentRoot: string): Promise<void> {
+  const directory = resolveSiteRelative(siteRoot, contentRoot, 'content root')
+  await rm(directory, { recursive: true, force: true })
+  await mkdir(directory, { recursive: true })
 }
 
 async function configureContentRoot(siteRoot: string, contentRoot: string): Promise<void> {

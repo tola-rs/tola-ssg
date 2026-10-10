@@ -127,9 +127,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "jso
 url = "2.5.8"
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"
+unicode-linebreak = "0.1.5"
 hyper = { version = "1.11.0", features = ["http1", "server"] }
 hyper-util = { version = "0.1.20", features = ["server", "http1", "tokio"] }
-http-body-util = "0.1.5"
 bytes = "1.12.1"
 ctrlc = "3.5.2"
 
@@ -139,6 +139,7 @@ tokio-tungstenite = "0.30.0"
 tokio-stream = "0.1.19"
 futures-util = "0.3"
 
+base64 = "0.22.1"
 blake3 = "1.8.7"
 hex = "0.4.3"
 getrandom = "0.4.3"
@@ -155,6 +156,7 @@ tokio = { version = "1.53.1", features = [
 tokio-util = { version = "0.7.18", features = ["io-util", "rt"] }
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
+anstyle-parse = "1.0.0"
 
 [features]
 default = []
@@ -164,9 +166,7 @@ rustix = { version = "1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1.11"
-windows-sys = { version = "0.61.2", features = [
-    "Win32_Storage_FileSystem",
-] }
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 # `typst-kit`'s downloader reaches `native-tls`, and a musl target has no OpenSSL to link: the
 # release archive builds the vendored one, which the runner's `musl-tools`, perl, and make
@@ -178,9 +178,6 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 rss = { version = "2.1.0", default-features = false, features = [
     "builders",
     "validation",
-] }
-atom_syndication = { version = "0.12.10", default-features = false, features = [
-    "builders",
 ] }
 oxc = { version = "0.147.0", default-features = false, features = [
     "minifier",

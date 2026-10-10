@@ -130,6 +130,7 @@ pub(crate) struct RouteIndexRead {
 /// the resolved configuration's own root, or the workspace root when no check has resolved one.
 pub(crate) struct SelectionRead {
     pub(crate) revision: u64,
+    pub(crate) serial: u64,
     pub(crate) root: PathBuf,
     pub(crate) view: crate::sources::SourceView,
     pub(crate) cancellation: BuildCancellation,

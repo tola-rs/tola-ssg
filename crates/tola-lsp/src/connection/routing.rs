@@ -67,6 +67,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             ClientRequest::Initialize(parameters) => self.initialize(id, *parameters),
             ClientRequest::Shutdown => {
                 self.checking.cancel();
+                self.cancel_selection();
                 self.cancel_requests(
                     ErrorCode::RequestCanceled,
                     "language server is shutting down",
@@ -224,6 +225,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         };
         if let Some(request) = self.requests.remove(&id) {
             request.canceller.cancel();
+            if let Some(waiting) = request.waiting
+                && self.waiting_code_actions(waiting.revision).is_empty()
+            {
+                self.cancel_selection();
+            }
             self.reply(error_response(id, CANCELLED_ERROR))?;
         }
         Ok(())

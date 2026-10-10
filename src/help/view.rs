@@ -10,9 +10,10 @@ use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
 
 use super::jump::Jump;
-use super::layout::{DocumentPosition, LinkSpan, PageLayout};
+use super::layout::{DocumentPosition, LinkSpan, PageLayout, slice_columns};
 use super::model::{Anchor, HelpDocument, LinkTarget, PageId};
 use super::navigation::{History, Visit};
+use crate::i18n::HelpLanguage;
 use crate::terminal::style::Palette;
 use crate::terminal::ui::filter::{Reply, TextLine};
 use crate::terminal::ui::pager::Pager;
@@ -47,6 +48,12 @@ pub(crate) struct View<'a> {
     hovered: Option<usize>,
     palette: Palette,
     load: &'a dyn Fn(&PageId) -> Result<HelpDocument>,
+    language: HelpLanguage,
+    clipboard: Option<&'a dyn Clipboard>,
+    selection: Option<Selection>,
+    /// The press a release still decides: a click opens what it landed on, a drag copies.
+    pressed: Option<(u16, u16)>,
+    dragging: bool,
 }
 
 enum Mode {
@@ -59,6 +66,53 @@ struct Search {
     line: TextLine,
     origin: DocumentPosition,
     focus: Option<DocumentPosition>,
+}
+
+/// Where a copied selection goes.
+pub(crate) trait Clipboard {
+    /// Copies `text`; answers whether a clipboard the reader can trust took it. A terminal's
+    /// own escape is written either way.
+    fn copy(&self, text: &str) -> bool;
+}
+
+/// The content cells one mouse drag selected, in page lines and display columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Selection {
+    from_line: usize,
+    from_column: usize,
+    to_line: usize,
+    to_column: usize,
+}
+
+impl Selection {
+    fn at(cell: (usize, usize)) -> Self {
+        Self {
+            from_line: cell.0,
+            from_column: cell.1,
+            to_line: cell.0,
+            to_column: cell.1,
+        }
+    }
+
+    fn extend(&mut self, cell: (usize, usize)) {
+        self.to_line = cell.0;
+        self.to_column = cell.1;
+    }
+
+    /// The selection's ends, from the earliest cell to the latest.
+    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if (self.from_line, self.from_column) <= (self.to_line, self.to_column) {
+            (
+                (self.from_line, self.from_column),
+                (self.to_line, self.to_column),
+            )
+        } else {
+            (
+                (self.to_line, self.to_column),
+                (self.from_line, self.from_column),
+            )
+        }
+    }
 }
 
 impl<'a> View<'a> {
@@ -81,12 +135,36 @@ impl<'a> View<'a> {
             hovered: None,
             palette,
             load,
+            language: HelpLanguage::English,
+            clipboard: None,
+            selection: None,
+            pressed: None,
+            dragging: false,
         }
     }
 
+    /// Whether this reader holds the pointer: the wheel scrolls it, a click opens what it is
+    /// on, and a drag selects the text under it. A released pointer leaves all of that to the
+    /// terminal, and `--no-mouse` starts it released.
     pub(crate) fn set_mouse(&mut self, mouse: bool) {
         self.mouse = mouse;
         self.hovered = None;
+    }
+
+    pub(crate) fn set_clipboard(&mut self, clipboard: &'a dyn Clipboard) {
+        self.clipboard = Some(clipboard);
+    }
+
+    pub(crate) fn set_language(&mut self, language: HelpLanguage) {
+        self.language = language;
+    }
+
+    pub(crate) fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    pub(crate) fn navigate(&mut self, target: &LinkTarget) {
+        self.follow(target);
     }
 
     fn position(&self) -> DocumentPosition {
@@ -130,6 +208,11 @@ impl<'a> View<'a> {
         let changed = content != self.content || reflow;
         let position = self.position();
         let focus = self.focus();
+        let visible_hit = self
+            .page
+            .pager
+            .current_hit()
+            .filter(|hit| self.page.pager.visible().contains(hit));
         if reflow {
             self.page = PageLayout::new(&self.document, usize::from(content.width), palette);
         }
@@ -138,6 +221,8 @@ impl<'a> View<'a> {
         self.page.pager.resize(usize::from(content.height));
         if reflow {
             self.restore_position(position, focus);
+        } else if changed && let Some(hit) = visible_hit {
+            self.page.pager.move_to(hit);
         }
         if changed {
             self.hovered = None;
@@ -170,7 +255,7 @@ impl<'a> View<'a> {
         scroll(&mut self.page.pager);
     }
 
-    fn follow(&mut self, target: &LinkTarget) {
+    fn follow(&mut self, target: &LinkTarget) -> Step {
         self.hovered = None;
         self.mode = Mode::Reading;
         match target {
@@ -178,6 +263,7 @@ impl<'a> View<'a> {
             LinkTarget::Page(id) => self.open(id, None),
             LinkTarget::PageAnchor(id, anchor) => self.open(id, Some(anchor)),
         }
+        Step::Continue
     }
 
     fn open(&mut self, id: &PageId, anchor: Option<&Anchor>) {
@@ -188,7 +274,7 @@ impl<'a> View<'a> {
                 Ok(document) => Rc::new(document),
                 Err(error) => {
                     tracing::debug!(?error, "could not open help page");
-                    self.notice = Some(format!("could not open `{}`", page_label(id)));
+                    self.notice = Some(format!("could not open `{}`", super::pages::label(id)));
                     return;
                 }
             }
@@ -206,7 +292,7 @@ impl<'a> View<'a> {
             })
         };
         // A jump inside the current page moves within it; history keeps pages.
-        if *id == self.document.id {
+        if document.id == self.document.id {
             self.page.pager.set_top(destination_line(&self.page));
             return;
         }
@@ -224,7 +310,7 @@ impl<'a> View<'a> {
         self.notice = Some(format!(
             "`{}` is not on `{}`",
             anchor.as_str(),
-            page_label(id)
+            super::pages::label(id)
         ));
     }
 
@@ -291,10 +377,97 @@ impl<'a> View<'a> {
         }
     }
 
+    /// The content cell one screen position names, kept inside the content and the page.
+    fn cell_at(&self, column: u16, row: u16) -> (usize, usize) {
+        let line = self.page.pager.top() + usize::from(row.saturating_sub(self.content.y));
+        let line = line.min(self.page.pager.line_count().saturating_sub(1));
+        let column = usize::from(column.saturating_sub(self.content.x));
+        (
+            line,
+            column.min(usize::from(self.content.width.saturating_sub(1))),
+        )
+    }
+
+    /// The content cell one screen position names, kept inside the content's rows.
+    fn clamped_cell(&self, column: u16, row: u16) -> (usize, usize) {
+        let row = row.clamp(self.content.y, self.content.bottom().saturating_sub(1));
+        self.cell_at(column, row)
+    }
+
+    /// Copies the selected cells and tells the reader what was taken.
+    fn copy_selection(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let text = self.selected_text(selection);
+        if text.is_empty() {
+            self.notice = Some("nothing selected".to_owned());
+            return;
+        }
+        let lines = text.lines().count();
+        let taken = self
+            .clipboard
+            .is_some_and(|clipboard| clipboard.copy(&text));
+        self.notice = Some(match (taken, lines) {
+            (false, _) => format!("could not copy {lines} lines"),
+            (true, 1) => "copied 1 line".to_owned(),
+            (true, lines) => format!("copied {lines} lines"),
+        });
+    }
+
+    /// The text the selected cells show, one source line at a time.
+    fn selected_text(&self, selection: Selection) -> String {
+        let ((from_line, from_column), (to_line, to_column)) = selection.ordered();
+        let mut text = String::new();
+        for line in from_line..=to_line {
+            let Some(source) = self.page.pager.text(line) else {
+                continue;
+            };
+            let from = if line == from_line { from_column } else { 0 };
+            let to = if line == to_line {
+                to_column
+            } else {
+                usize::MAX
+            };
+            text.push_str(&slice_columns(&source, from, to));
+            if line != to_line {
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    /// Marks the selected cells, so the reader sees what a release copies.
+    fn draw_selection(&self, frame: &mut Frame) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let ((from_line, from_column), (to_line, to_column)) = selection.ordered();
+        let top = self.page.pager.top();
+        for line in self.page.pager.visible() {
+            if !(from_line..=to_line).contains(&line) {
+                continue;
+            }
+            let y = self.content.y + (line - top) as u16;
+            let from = if line == from_line { from_column } else { 0 };
+            let to = if line == to_line {
+                to_column
+            } else {
+                usize::from(self.content.width)
+            };
+            for column in from..to {
+                let x = self.content.x + u16::try_from(column).unwrap_or(u16::MAX);
+                if x < self.content.right() {
+                    frame.buffer_mut()[(x, y)].set_style(self.palette.selection_style());
+                }
+            }
+        }
+    }
+
     fn status(&self) -> String {
         let mut status = format!(
             "{} - {}/{} lines",
-            page_label(&self.document.id),
+            super::pages::label(&self.document.id),
             (self.page.pager.top() + 1).min(self.page.pager.line_count()),
             self.page.pager.line_count()
         );
@@ -332,12 +505,15 @@ impl<'a> View<'a> {
 
 impl Surface for View<'_> {
     fn draw(&mut self, frame: &mut Frame, palette: Palette) {
-        let (content, footer) = split_footer(frame.area(), matches!(self.mode, Mode::Search(_)));
+        let area = frame.area();
+        let (content, mut footer) = split_footer(area, &self.mode);
         self.resize(content, palette);
-        self.page.pager.draw(frame, content, palette);
+        footer.y = self.content.bottom();
+        self.page.pager.draw(frame, self.content, palette);
+        self.draw_selection(frame);
         self.draw_hover(frame);
         if let Mode::Jump(jump) = &mut self.mode
-            && !jump.draw(frame, content, self.page.pager.top(), palette)
+            && !jump.draw(frame, self.content, self.page.pager.top(), palette)
         {
             self.mode = Mode::Reading;
             self.notice = Some("no links on screen".to_owned());
@@ -404,7 +580,6 @@ impl Surface for View<'_> {
         self.notice = None;
         match action {
             Action::Quit => return Step::Done,
-            Action::Open if matches!(self.mode, Mode::Search(_)) => self.finish_search(true),
             Action::Dismiss => match self.mode {
                 Mode::Search(_) => self.finish_search(false),
                 Mode::Jump(_) => self.mode = Mode::Reading,
@@ -466,7 +641,7 @@ impl Surface for View<'_> {
                     && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
                     && let Some(target) = jump.key(character)
                 {
-                    self.follow(&target);
+                    return self.follow(&target);
                 }
                 Step::Continue
             }
@@ -492,8 +667,11 @@ impl Surface for View<'_> {
         Step::Continue
     }
 
+    /// Answers one pointer event: a drag selects the text under it and copies it when the
+    /// pointer is released, a press that does not move opens what it landed on, and a text
+    /// prompt leaves the pointer to the terminal.
     fn pointer(&mut self, event: MouseEvent) -> Step {
-        if !self.mouse || !matches!(self.mode, Mode::Reading) {
+        if !self.mouse || matches!(self.mode, Mode::Search(_)) {
             return Step::Continue;
         }
         match event.kind {
@@ -501,12 +679,31 @@ impl Surface for View<'_> {
                 self.hovered = self.link_at(event.column, event.row).map(|link| link.id);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(target) = self
-                    .link_at(event.column, event.row)
-                    .map(|link| link.target.clone())
+                if self.content.contains((event.column, event.row).into()) {
+                    self.selection = Some(Selection::at(self.cell_at(event.column, event.row)));
+                    self.pressed = Some((event.column, event.row));
+                    self.dragging = false;
+                    self.hovered = None;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.selection.is_some() {
+                    let cell = self.clamped_cell(event.column, event.row);
+                    self.dragging = true;
+                    if let Some(selection) = &mut self.selection {
+                        selection.extend(cell);
+                    }
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let pressed = self.pressed.take();
+                if std::mem::take(&mut self.dragging) {
+                    self.copy_selection();
+                } else if let Some((column, row)) = pressed
+                    && let Some(target) = self.link_at(column, row).map(|link| link.target.clone())
                 {
                     self.notice = None;
-                    self.follow(&target);
+                    return self.follow(&target);
                 }
             }
             _ => {}
@@ -523,7 +720,10 @@ impl Surface for View<'_> {
     }
 
     fn title(&self) -> Option<String> {
-        Some(format!("tola help - {}", page_label(&self.document.id)))
+        Some(format!(
+            "tola help - {}",
+            super::pages::label(&self.document.id)
+        ))
     }
 
     fn wants_mouse(&self) -> bool {
@@ -531,11 +731,10 @@ impl Surface for View<'_> {
     }
 
     fn live(&self) -> Vec<Action> {
-        if matches!(self.mode, Mode::Search(_)) {
-            return vec![Action::Open, Action::Dismiss];
-        }
-        if !matches!(self.mode, Mode::Reading) {
-            return vec![Action::Dismiss];
+        match &self.mode {
+            Mode::Search(_) => return vec![Action::Open, Action::Dismiss],
+            Mode::Jump(_) => return vec![Action::Dismiss],
+            Mode::Reading => {}
         }
         let mut live = ACCEPTED.to_vec();
         live.retain(|action| self.scroll_changes(*action));
@@ -565,6 +764,10 @@ impl Surface for View<'_> {
         live
     }
 
+    fn idle(&mut self) -> bool {
+        false
+    }
+
     fn caption(&self) -> Option<String> {
         match &self.mode {
             Mode::Jump(jump) => Some(jump.caption()),
@@ -573,15 +776,10 @@ impl Surface for View<'_> {
     }
 }
 
-fn page_label(id: &PageId) -> String {
-    id.selector().unwrap_or_else(|| "tola help".to_owned())
-}
-
-fn split_footer(area: Rect, search_is_open: bool) -> (Rect, Rect) {
-    let height = if search_is_open {
-        area.height.min(2)
-    } else {
-        area.height.saturating_sub(1).min(2)
+fn split_footer(area: Rect, mode: &Mode) -> (Rect, Rect) {
+    let height = match mode {
+        Mode::Search(_) => area.height.min(2),
+        _ => area.height.saturating_sub(1).min(2),
     };
     (
         Rect {
@@ -598,8 +796,11 @@ fn split_footer(area: Rect, search_is_open: bool) -> (Rect, Rect) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
     use ratatui::{Terminal, TerminalOptions, Viewport};
 
     use super::*;
@@ -618,7 +819,7 @@ mod tests {
 
     fn linked() -> HelpDocument {
         document(
-            "# Index\n\nRead [the whole manual](tola://package/@tola/schema).\n\n## Details\n\nMore text.\n\n## Tail\n\nEnd.\n",
+            "# Index\n\nRead [the whole manual](tola-help://packages/schema).\n\n## Details\n\nMore text.\n\n## Tail\n\nEnd.\n",
         )
     }
 
@@ -631,7 +832,7 @@ mod tests {
 
     fn destination() -> LinkTarget {
         LinkTarget::Page(PageId::Package {
-            name: "@tola/schema".to_owned(),
+            name: "schema".to_owned(),
         })
     }
 
@@ -715,7 +916,7 @@ mod tests {
     fn reflow_relabels_current_targets() {
         let mut view = reader(
             document(
-                "# A title that wraps across several lines\n\nfirst [go](tola://package/@tola/schema)\n\nmore content\n",
+                "# A title that wraps across several lines\n\nfirst [go](tola-help://packages/schema)\n\nmore content\n",
             ),
             &load,
         );
@@ -882,7 +1083,7 @@ mod tests {
         for id in [
             PageId::Overview,
             PageId::Package {
-                name: "@tola/schema".to_owned(),
+                name: "schema".to_owned(),
             },
         ] {
             view.follow(&LinkTarget::PageAnchor(id, anchor("absent")));
@@ -1086,7 +1287,7 @@ mod tests {
     fn wrapped_hover_uses_content_coordinates() {
         let mut view = reader(
             document(
-                "[one two three four five six](tola://package/@tola/schema) [other](https://example.com)\n",
+                "[one two three four five six](tola-help://packages/schema) [other](https://example.com)\n",
             ),
             &load,
         );
@@ -1128,6 +1329,7 @@ mod tests {
             Palette::new(true).link_style().add_modifier
         );
         view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, y));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, y));
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
@@ -1153,26 +1355,113 @@ mod tests {
     fn mouse_respects_input_mode() {
         let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
-        let link = &view.page.links[0];
-        let click = mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            link.column as u16,
-            link.line as u16,
-        );
-        view.pointer(click);
+        let (column, line) = {
+            let link = &view.page.links[0];
+            (link.column as u16, link.line as u16)
+        };
+        let click = |kind| mouse(kind, column, line);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(view.document.id, PageId::Overview);
         view.set_mouse(true);
         press(&mut view, KeyCode::Char('/'));
-        view.pointer(click);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
         assert!(matches!(view.mode, Mode::Search(_)));
         assert_eq!(view.document.id, PageId::Overview);
         press(&mut view, KeyCode::Esc);
-        view.pointer(click);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
+    /// The clipboard a test reader copies into.
+    #[derive(Default)]
+    struct FakeClipboard {
+        copied: RefCell<Vec<String>>,
+    }
+
+    impl Clipboard for FakeClipboard {
+        fn copy(&self, text: &str) -> bool {
+            self.copied.borrow_mut().push(text.to_owned());
+            true
+        }
+    }
+
     #[test]
-    fn external_jump_shows_destination() {
+    fn dragging_copies_the_selected_text() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        let clipboard = FakeClipboard::default();
+        view.set_clipboard(&clipboard);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
+        view.pointer(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 4));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), 7, 4));
+
+        assert_eq!(
+            clipboard.copied.borrow().as_slice(),
+            ["Read the whole manual.\n\nDetails"],
+            "the drag copies the text the selected cells show"
+        );
+        assert_eq!(view.notice(), Some("copied 3 lines"));
+    }
+
+    #[test]
+    fn press_without_drag_copies_nothing() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        let clipboard = FakeClipboard::default();
+        view.set_clipboard(&clipboard);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        let link = view.page.links[0].clone();
+        let (column, line) = (link.column as u16, link.line as u16);
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
+
+        assert!(
+            clipboard.copied.borrow().is_empty(),
+            "a click copies nothing"
+        );
+        assert_eq!(
+            view.document.id,
+            PageId::Package {
+                name: "schema".to_owned()
+            },
+            "it opened the link instead"
+        );
+    }
+
+    #[test]
+    fn dragged_cells_are_marked() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
+        view.pointer(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 4));
+        let shown = frame(&mut view, Rect::new(0, 0, 60, 12));
+
+        // The mark is added to what the cell already shows, as a terminal's own selection is.
+        let reversed = Modifier::REVERSED;
+        assert!(
+            shown[(3, 2)].modifier.contains(reversed),
+            "the first line is marked"
+        );
+        assert!(
+            shown[(3, 4)].modifier.contains(reversed),
+            "the line reached is marked"
+        );
+        assert!(
+            !shown[(20, 4)].modifier.contains(reversed),
+            "the last line stops at the pointer"
+        );
+    }
+
+    #[test]
+    fn external_link_shows_address() {
         let mut view = reader(
             document("[read manual](https://example.com/manual)\n"),
             &load,
@@ -1182,7 +1471,7 @@ mod tests {
         press(&mut view, KeyCode::Tab);
         frame(&mut view, area);
         press(&mut view, KeyCode::Char('a'));
-        assert_eq!(view.notice.as_deref(), Some("https://example.com/manual"));
+        assert_eq!(view.notice(), Some("https://example.com/manual"));
         assert!(!view.history.has_back());
     }
 
@@ -1241,5 +1530,60 @@ mod tests {
         );
         frame(&mut view, Rect::new(0, 0, 40, 2));
         assert!(!view.live().contains(&Action::Label));
+    }
+
+    #[test]
+    fn accepted_search_keeps_its_hit_visible() {
+        let markdown = format!(
+            "# Backlinks\n\n{}\nsite/backlinks.typ\n\n{}",
+            "Before the file.\n\n".repeat(12),
+            "After the file.\n\n".repeat(12)
+        );
+        let document = HelpDocument::parse(HelpPage::new(PageId::Overview, markdown));
+        let mut view = reader(document, &load);
+        let area = Rect::new(0, 0, 80, 10);
+        frame(&mut view, area);
+        press(&mut view, KeyCode::Char('/'));
+        frame(&mut view, area);
+        view.paste("site/backlinks.typ");
+        frame(&mut view, area);
+        let hit = view.page.pager.current_hit().unwrap();
+        assert!(view.page.pager.visible().contains(&hit));
+        press(&mut view, KeyCode::Enter);
+        frame(&mut view, area);
+        assert_eq!(view.page.pager.current_hit(), Some(hit));
+        assert!(view.page.pager.visible().contains(&hit));
+        assert_eq!(view.query, "site/backlinks.typ");
+    }
+
+    #[test]
+    fn jump_overlay_keeps_the_pointer_working() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+        press(&mut view, KeyCode::Tab);
+        assert!(matches!(view.mode, Mode::Jump(_)), "Tab opens the overlay");
+
+        let link = view.page.links[0].clone();
+        let (column, line) = (link.column as u16, link.line as u16);
+        view.pointer(mouse(MouseEventKind::Moved, column, line));
+        assert_eq!(
+            view.hovered,
+            Some(link.id),
+            "hover marks the link under the pointer"
+        );
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
+        assert!(
+            matches!(view.mode, Mode::Reading),
+            "a click leaves the overlay"
+        );
+        assert_eq!(
+            view.document.id,
+            PageId::Package {
+                name: "schema".to_owned()
+            },
+            "the click followed the link"
+        );
     }
 }

@@ -1,5 +1,6 @@
 //! Terminal presentation and interactive input.
 
+pub(crate) mod clipboard;
 pub(crate) mod code;
 pub(crate) mod color;
 pub(crate) mod development;
@@ -18,6 +19,7 @@ mod source;
 pub(crate) mod style;
 pub(crate) mod text;
 pub(crate) mod ui;
+pub(crate) mod wrap;
 
 use clap::ColorChoice;
 

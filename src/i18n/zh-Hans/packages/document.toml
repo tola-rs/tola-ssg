@@ -4,7 +4,7 @@
 overview = '''
 你在构建的这篇文档、它的标题，以及你写下的引用
 
-这个包回答三个问题。`current-document()` 说明一次调用属于哪篇文档，`headings()` 列出该文档的标题，`references()` 列出 Bundle 写下的链接与引用。读取文档需要文档上下文：请在 `document(…)` 正文里的 `context` 中调用。渲染进同一篇文档的多个源共享同一份身份，单个源自身的身份则属于 `@tola/source`。
+这个包回答三个问题。`current-document()` 说明一次调用属于哪篇文档，`headings()` 列出该文档的标题，`references()` 列出 Bundle 写下、并真正输出的链接与引用。读取文档需要文档上下文：请在 `document(…)` 正文里的 `context` 中调用。渲染进同一篇文档的多个源共享同一份身份，单个源自身的身份则属于 `@tola/source`。
 '''
 
 [exports.current-document]
@@ -25,9 +25,9 @@ Example - 识别所在的文档：
 
 summary = [
   '''
-你在 Bundle 中写下的链接与引用，按 Bundle 顺序。
+你在 Bundle 中写下、并真正作为链接输出的引用，按 Bundle 顺序。
 
-请在 `context` 中调用。每篇文档提供最外层的原生 `link` 和 `ref`，再对这些引用应用所有传入的过滤条件。指向相同目标的不同引用仍各占一条记录。
+请在 `context` 中调用。一条引用是否计入由 show rule 之后的结果决定：被 show rule 换成纯文本或直接写出的 HTML 的链接不计入，由 show rule 产生并真正输出的链接取代它计入。每篇文档提供最外层的这类 `link` 和 `ref`，再对这些引用应用所有传入的过滤条件。指向相同目标的不同引用仍各占一条记录。
 
 | 参数 | 选取 |
 | --- | --- |
@@ -42,13 +42,13 @@ summary = [
 
 两个区域过滤条件都只选严格后代，不含区域自身。标题的 label 选中标题元素，不代表它后面的章节正文；要选正文，请给包含它的元素（例如 `html.section`）加 label。每条返回的引用必须满足所有传入的条件。
 
-每条记录描述一条引用。`ref` 报告它指名的 label，`link` 报告它拼写的目标。show rule 不改变这层关系。原生引用的目标必须唯一。写明自身 scheme 与 host 的目标是 `external`，写的是 `site.origin` 也一样。未限制目标时，也会返回 external 和 unresolved 引用。
+每条记录描述一条已输出的引用，因此 show rule 决定报告什么：`ref` 报告它指名的 label，`link` 报告它此时拼写的目标；show rule 写出的链接（包括顶替某个 `ref` 写出的那个）按该链接报告，而不是按那个 `ref`。原生引用的目标必须唯一。写明自身 scheme 与 host 的目标是 `external`，写的是 `site.origin` 也一样。未限制目标时，也会返回 external 和 unresolved 引用。
 
 | 字段 | 含义 |
 | --- | --- |
-| `element` | 原始的原生 `link` 或 `ref` 元素 |
+| `element` | 到达输出的原生 `link` 或 `ref` 元素（show rule 之后） |
 | `document` | 来源文档的 `output`、`route` 与 `location` |
-| `destination` | 原始的原生目标值 |
+| `destination` | 该元素此时携带的目标（show rule 之后） |
 | `resolution` | `found`、`external` 或 `unresolved` |
 | `reason` | 没能解析的原因，以字典给出；解析成功时为 `none` |
 | `target` | 已知 output 或地址时的目标字典，否则为 `none` |

@@ -2,10 +2,10 @@
 //
 // This package answers three questions about a page you are building. `current-document()` says
 // which document a call belongs to, `headings()` lists that document's headings, and
-// `references()` lists the links and refs your Bundle wrote. Reading a document needs
-// document context, so call these inside `context`, in a `document(…)` body. Sources rendered
-// into one document share that identity, while the identity of a single source lives in
-// `@tola/source`.
+// `references()` lists the links and refs your Bundle wrote that reached their pages. Reading a
+// document needs document context, so call these inside `context`, in a `document(…)` body.
+// Sources rendered into one document share that identity, while the identity of a single source
+// lives in `@tola/source`.
 
 /// The document whose output contains this call: its `output`, `route`, and `location`.
 ///
@@ -43,9 +43,11 @@
 /// Related: references, headings, @tola/source
 #import "@tola/host:0.0.0": current-document
 
-/// The links and refs you wrote in the Bundle, in Bundle order.
+/// The references the Bundle wrote that reached the output as links, in Bundle order.
 ///
-/// Call it inside `context`. Each document contributes its outermost native `link` and `ref`
+/// Call it inside `context`. Whether a reference counts is decided after show rules: a link whose
+/// show rules replace it with plain text or with raw HTML does not count, while a link a show rule
+/// produced counts in its place. Each document contributes its outermost such `link` and `ref`
 /// occurrences, then every supplied filter applies to those occurrences. Distinct occurrences
 /// remain distinct even when they point at the same target.
 ///
@@ -70,16 +72,18 @@
 /// selects the heading element, not the chapter text following it; label a containing element
 /// such as `html.section` to select that text. Every supplied condition must match.
 ///
-/// Each record describes one reference. A `ref` reports the label it names, and a `link` reports
-/// the destination it spells. Show rules do not change that relation. Native destinations name
-/// one target. A destination naming its own scheme and host is `external`, `site.origin`
-/// included. External and unresolved references remain available without target filters.
+/// Each record describes one reference as it reached the output, so show rules decide what is
+/// reported: a `ref` reports the label it names, and a `link` the destination it spells at that
+/// point. A link a show rule writes, including one written in place of a `ref`, is reported as that
+/// link, not as the ref. Native destinations name one target. A destination naming its own scheme
+/// and host is `external`, `site.origin` included. External and unresolved references remain
+/// available without target filters.
 ///
 /// | Field | Meaning |
 /// | --- | --- |
-/// | `element` | The original native `link` or `ref` element |
+/// | `element` | The native `link` or `ref` element that reached the output, after show rules |
 /// | `document` | The originating document's `output`, `route`, and `location` |
-/// | `destination` | The original native destination value |
+/// | `destination` | The destination that element carried, after show rules |
 /// | `resolution` | `found`, `external`, or `unresolved` |
 /// | `reason` | Why nothing resolved, as a dictionary; `none` when something did |
 /// | `target` | The target dictionary, when its output or address is known; otherwise `none` |
@@ -109,21 +113,18 @@
 ///
 /// Example - list the pages that link to the page you are rendering:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": output-to-url, route, route-to-output
+/// ```typst
+/// #import "@tola/address:0.0.0": url-of
 /// #import "@tola/document:0.0.0": references
-/// #import "@tola/source:0.0.0": all-sources
 ///
-/// #let guide = all-sources().at(1)
-/// #let install = all-sources().at(2)
-/// #let guide-output = route-to-output(route(guide.route-segments))
-/// #let install-output = route-to-output(route(install.route-segments))
+/// #let guide-output = "guide/index.html"
+/// #let install-output = "guide/install/index.html"
 ///
-/// #document(guide-output, title: guide.meta.title)[
-///   #html.main[#link(output-to-url(install-output))[Install]] <body>
+/// #document(guide-output, title: [Guide])[
+///   #html.main[#link(url-of(install-output))[Install]] <body>
 /// ]
 ///
-/// #document(install-output, title: install.meta.title)[
+/// #document(install-output, title: [Install])[
 ///   #html.main[Install] <body>
 ///   #context {
 ///     let incoming = references(to: auto, from-within: <body>)
@@ -138,17 +139,15 @@
 ///
 /// Example - point at one heading rather than its whole document:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": output-to-url, route, route-to-output
+/// ```typst
+/// #import "@tola/address:0.0.0": url-of
 /// #import "@tola/document:0.0.0": references
-/// #import "@tola/source:0.0.0": all-sources
 ///
-/// #let page = all-sources().at(2)
-/// #let output = route-to-output(route(page.route-segments))
+/// #let output = "guide/install/index.html"
 ///
-/// #document(output, title: page.meta.title)[
+/// #document(output, title: [Install])[
 ///   #link(<intro>)[Jump to the introduction]
-///   #link(output-to-url(output))[Whole page]
+///   #link(url-of(output))[Whole page]
 ///   = Introduction <intro>
 ///   #context {
 ///     let intro = query(<intro>).first().location()
@@ -160,15 +159,10 @@
 ///
 /// Example - read only the references one document writes:
 ///
-/// ```typst site
-/// #import "@tola/address:0.0.0": route, route-to-output
+/// ```typst
 /// #import "@tola/document:0.0.0": references
-/// #import "@tola/source:0.0.0": all-sources
 ///
-/// #let guide = all-sources().at(1)
-/// #let output = route-to-output(route(guide.route-segments))
-///
-/// #document(output, title: guide.meta.title)[
+/// #document("guide/index.html", title: [Guide])[
 ///   #html.main[#link("https://typst.app/")[Typst]] <body>
 ///   #context {
 ///     let written = references(from: auto, from-within: <body>)

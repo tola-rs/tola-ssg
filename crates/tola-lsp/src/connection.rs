@@ -56,6 +56,12 @@ struct PendingCheck {
     sources: SourceInputs,
 }
 
+struct SelectionBuild {
+    revision: u64,
+    serial: u64,
+    canceller: BuildCanceller,
+}
+
 pub(super) struct Connection<W, D> {
     writer: W,
     record_diagnostics: D,
@@ -71,9 +77,8 @@ pub(super) struct Connection<W, D> {
     queries: VecDeque<SourceJob>,
     analyses: VecDeque<AnalysisRequest>,
     check: Option<PendingCheck>,
-    /// The revision whose selection index the compiler lane is building for a correction, if any:
-    /// one build answers every correction that revision waits for.
-    selection_build: Option<u64>,
+    /// One build serves the revision's waiting corrections independently of check cancellation.
+    selection_build: Option<SelectionBuild>,
     /// When the pending check may run: a typing change sets it after the settle delay, every other
     /// change sets it now.
     check_due: Option<Instant>,
@@ -225,8 +230,20 @@ impl<W, D> Connection<W, D> {
     pub(super) fn cancel(&self) {
         self.shutdown.cancel();
         self.checking.cancel();
+        if let Some(build) = &self.selection_build {
+            build.canceller.cancel();
+        }
         for request in self.requests.values() {
             request.canceller.cancel();
+        }
+    }
+
+    fn cancel_selection(&mut self) {
+        if let Some(build) = self.selection_build.take() {
+            build.canceller.cancel();
+            self.queries.retain(
+                |job| !matches!(job, SourceJob::Selection(job) if job.serial == build.serial),
+            );
         }
     }
 

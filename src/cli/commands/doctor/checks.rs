@@ -202,7 +202,7 @@ fn command_exists(command: &str, root: &Path) -> bool {
 
 /// A vendored copy is portable only while it holds real files.
 fn vendor_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
-    let Some(vendor) = config.vendor.path.as_ref() else {
+    let Some(vendor) = config.vendor().path.as_ref() else {
         return Vec::new();
     };
     let root = config.get_root();

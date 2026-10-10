@@ -1,6 +1,6 @@
 //! Positional parameter hints and the current source's checked routes.
 //!
-//! Tola's own functions are positional — `route-to-output(route)`, `route(segments)` — and a
+//! Tola's own functions are positional — `output-of(route)`, `join-route(segments)` — and a
 //! site author cannot look their parameters up anywhere else, so a hint has each name to the
 //! call site. A call into Typst's own library keeps its signature to itself: `align(center)`,
 //! `document(path)`, and `asset(path)` are documented where the author can read them, and naming a
@@ -357,10 +357,10 @@ mod tests {
 
         // Delaying the call keeps the site valid while testing a contextual parameter hint.
         let hints = site.inlay_hints(
-            "#import \"@tola/address:0.0.0\": route\n#let build(segments) = route(|segments)\n",
+            "#import \"@tola/address:0.0.0\": join-route\n#let build(segments) = join-route(|segments)\n",
         );
         assert_eq!(hint_labels(&hints), ["segments:"], "{hints:?}");
-        assert_eq!(hints[0].position, Position::new(1, 29));
+        assert_eq!(hints[0].position, Position::new(1, 34));
     }
 
     /// A call names each positional argument it fills, in the parameter's own order, and a

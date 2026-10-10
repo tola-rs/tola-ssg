@@ -301,7 +301,7 @@ fn warn_shadowed_asset_url(
             "`{named}` is also a published asset URL; this reads `{resolved}`, while the site \
              publishes that URL from `{published_from}`"
         ),
-    ).with_hint("Write the file the declaration publishes from, or use the URL where a URL is expected (`asset-url(\"…\")`)");
+    ).with_hint("Write the file the declaration publishes from, or use the URL where a URL is expected (`url-of-asset(\"…\")`)");
     engine.sink.warn(warning);
     Ok(())
 }

@@ -10,6 +10,7 @@ mod zed;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 use super::site::EditorDirectory;
 use crate::writes::FileWrites;
@@ -63,18 +64,13 @@ impl Editor {
     /// What a client needs to know beside where its settings go, when it needs anything.
     pub(super) const fn settings_note(self) -> Option<&'static str> {
         match self {
-            Self::Zed => Some(
-                "Zed starts a language server only where an extension declares one, so install the \
-                 Typst extension; this replaces the server that extension publishes with Tola.",
-            ),
-            Self::Emacs => Some(
-                "Emacs derives the language id `typst` from `typst-ts-mode`, which the \
-                 `typst-ts-mode` package opens for `.typ` files; lsp-mode maps it the same way.",
-            ),
-            Self::Sublime => Some(
-                "Install the Typst syntax package: its base scope `text.typst` is the selector, \
-                 and it is the language id `typst` LSP sends.",
-            ),
+            Self::Zed => {
+                Some("Install the Typst extension. These settings use Tola for this site.")
+            }
+            Self::Emacs => {
+                Some("Install `typst-ts-mode`, then use the Eglot or lsp-mode configuration below.")
+            }
+            Self::Sublime => Some("Install the LSP and Typst syntax packages."),
             Self::Vscode | Self::Helix | Self::Neovim => None,
         }
     }
@@ -219,6 +215,20 @@ pub(super) fn prepare_settings(
         })?;
     let publish = editor
         .required_settings(source, directory)
+        .map_err(|error| {
+            if tola_build::diagnostic::attached(&error).is_some() {
+                return error;
+            }
+            let diagnostic = Diagnostic::new(
+                crate::codes::editor::CONFIGURATION,
+                Severity::Error,
+                format!("could not merge settings in `{relative_path}`"),
+            )
+            .with_help(
+                "Fix the settings syntax and duplicate keys, then rerun `tola editor setup`",
+            );
+            DiagnosticError::attach(error, vec![diagnostic]).into()
+        })
         .context(ConfigurationIssue::Merge)
         .with_context(|| format!("Tola could not update `{relative_path}`"))?;
     Ok(PreparedSettings::File {
@@ -228,14 +238,23 @@ pub(super) fn prepare_settings(
 }
 
 fn setting_conflict(editor: &str, key: &str, current: String, required: String) -> anyhow::Error {
-    let diff = format!(
-        "--- current\n+++ required\n- {key} = {}\n+ {key} = {}\n\nNo files were changed. Set this key to the required value, then rerun `tola editor setup` with the same editors.",
-        current.trim(),
-        required.trim(),
-    );
-    anyhow::Error::msg(diff).context(format!(
-        "{editor} setting `{key}` conflicts with Tola's required value"
-    ))
+    let message = format!("{editor} setting `{key}` conflicts with this site");
+    DiagnosticError::new(
+        message.clone(),
+        vec![
+            Diagnostic::new(
+                crate::codes::editor::CONFIGURATION,
+                Severity::Error,
+                message,
+            )
+            .with_note(format!("current value: `{}`", current.trim()))
+            .with_help(format!(
+                "Set `{key}` to `{}`, then rerun `tola editor setup`",
+                required.trim()
+            )),
+        ],
+    )
+    .into()
 }
 
 fn unique(editors: &[Editor]) -> impl Iterator<Item = Editor> + '_ {

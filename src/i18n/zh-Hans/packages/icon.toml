@@ -3,7 +3,7 @@
 
 overview = '''配置好的图标：内联 SVG、SVG 字节或已发布的 URL。
 
-图标染成什么颜色由它自己的 SVG 决定。用 `currentColor` 画的图标跟随所在页面的 `color`，主题或 CSS 类就能改变它的颜色；fills 与 strokes 写死颜色的图标保持自己的颜色。首选本来就画成这样的图标，`lucide` 集合的每一个图标都是。'''
+图标颜色由其 SVG 本身内容决定。用 `currentColor` 画的图标跟随所在页面的 `color`，主题或 CSS 类就能改变它的颜色；fills 与 strokes 写死颜色的图标保持自己的颜色。首选那些跟随主题色的图标（比如 `lucide`）。'''
 
 [exports.icon]
 
@@ -15,7 +15,7 @@ summary = [
 
 图标 id 取自站点在 `tola.toml` 的 `icons.collections` 下声明的 collection：`tola help "[icons]"` 说明每种来源类型，`tola inspect icons` 列出已配置的 namespace，指定其中一个还会列出它底下的图标名。
 
-图标染成什么颜色由它自己的 SVG 决定。用 `currentColor` 画的图标跟随所在页面的 `color`，主题或 CSS 类就能改变它的颜色；fills 与 strokes 写死颜色的图标保持自己的颜色。collection 本来就可以画成前者：`lucide` 集合的每个图标都用 `currentColor` 画，拿来就直接跟着页面的文字颜色走。
+图标颜色由其 SVG 本身内容决定：用 `currentColor` 画的跟随所在页面的 `color`，主题或 CSS 类就能改变它；fills 与 strokes 写死颜色的保持自己的颜色。首选那些跟随主题色的图标：`lucide` 集合的每个图标都用 `currentColor` 画，拿来就直接跟着页面的文字颜色走。
 
 Example - 在 HTML 文档里渲染一个配置好的图标：
 ''',

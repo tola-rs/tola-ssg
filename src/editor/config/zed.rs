@@ -20,14 +20,7 @@ pub(super) fn snippet(directory: &EditorDirectory) -> String {
             },
         },
     });
-    let mut text = String::from(
-        "// Zed starts a language server only where an extension declares one. Install the Typst\n\
-         // extension, then keep this in the site's `.zed/settings.json`: it answers the extension's\n\
-         // `Typst` language with Tola instead of the server the extension publishes.\n",
-    );
-    text.push_str(
-        &serde_json::to_string_pretty(&settings).expect("editor settings are serializable"),
-    );
+    let text = serde_json::to_string_pretty(&settings).expect("editor settings are serializable");
     crate::writes::with_final_newline(text)
 }
 

@@ -433,18 +433,18 @@ mod tests {
         std::fs::write(&entry, "#document(\"saved.html\")[Saved entry]").unwrap();
         let configuration = site_configuration(root, "[build]\nentry = \"content/site.typ\"\n");
         let mut compiler = compiler(&configuration);
-        let program = r#"#import "@tola/address:0.0.0": route
+        let program = r#"#import "@tola/address:0.0.0": join-route
 #import "@tola/source:0.0.0": all-sources
 #let sources = all-sources()
 #assert.eq(sources.map(source => source.id), ("document.typ",))
-#assert.eq(route(sources.first().route-segments), "/document/")
+#assert.eq(join-route(sources.first().route-segments), "/document/")
 #document("document/index.html")[#include sources.first().file]"#;
         let document: Arc<str> = Arc::from(
-            "#import \"@tola/address:0.0.0\": route\n\
+            "#import \"@tola/address:0.0.0\": join-route\n\
              #import \"@tola/source:0.0.0\": current-source\n\
              #let input = current-source()\n\
              #assert.eq(input.id, \"document.typ\")\n\
-             #assert.eq(route(input.route-segments), \"/document/\")\n\
+             #assert.eq(join-route(input.route-segments), \"/document/\")\n\
              Unsaved document.",
         );
         for (revision, text) in [

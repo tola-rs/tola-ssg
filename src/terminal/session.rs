@@ -346,9 +346,6 @@ impl<'a> Session<'a> {
 
     /// Draws frames until the surface ends the view or the caller cancels.
     fn show(&mut self, surface: &mut impl Surface) -> Result<()> {
-        if surface.wants_mouse() {
-            self.set_mouse_capture(true)?;
-        }
         let (columns, rows) = self.terminal.size()?;
         let writer = SinkWriter::new(self.sink.clone());
         let mut screen = Screen::new(CrosstermBackend::new(writer), columns, rows)?;
@@ -598,6 +595,18 @@ mod tests {
                 .push_back(Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))));
             self
         }
+
+        /// The next poll finds no event, so the frame loop draws before it waits again.
+        fn poll_empty(mut self) -> Self {
+            self.polls.push_back(Ok(false));
+            self
+        }
+
+        /// The next poll finds an event waiting.
+        fn poll_waiting(mut self) -> Self {
+            self.polls.push_back(Ok(true));
+            self
+        }
     }
 
     impl Terminal for FakeTerminal {
@@ -761,7 +770,12 @@ mod tests {
             title: Some("tola help - [site]".to_owned()),
             next: Some("tola help - [typst]".to_owned()),
         };
-        let mut terminal = FakeTerminal::new().press(quit_key()).press(quit_key());
+        // Each key lands in its own input batch: the frame between them reads the new title.
+        let mut terminal = FakeTerminal::new()
+            .press(quit_key())
+            .poll_waiting()
+            .poll_empty()
+            .press(quit_key());
         let result = run(
             &mut terminal,
             &sink,

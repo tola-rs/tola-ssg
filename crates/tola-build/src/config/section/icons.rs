@@ -217,12 +217,12 @@ preset = \"lucide\"                  # newest release Tola indexes
 ```
 
 A preset names a collection Tola already indexes, such as `lucide`, `mdi`, `tabler`, or
-`simple-icons`, so `preset = \"lucide\"` is all you write: Tola supplies the download address and the
-digest of the bytes it serves. Adding `version = \"1.2.136\"` beside the preset holds that release
-still, so a build on another day fetches the same icons.
+`simple-icons`, so you only write `preset = \"lucide\"`: Tola fills in the default download address
+and that file's `sha256`, which verifies the bytes it downloads. Add `version = \"1.2.136\"` beside
+the preset to pin the version.
 
-Write `url` with the `sha256` of its bytes instead when the collection is one Tola does not index,
-or a release it does not pin:
+Write `url` yourself, with the `sha256` of its bytes, when no preset covers the collection or
+version you want:
 
 ```toml
 [icons.collections.brand-remote]
@@ -243,6 +243,18 @@ Draw a configured icon in a page, and publish one as a file of its own:
   #icon(\"lucide:rocket\")
   #html.img(src: icon-url(\"brand:mark\"), alt: \"Brand mark\")
 ]
+```
+
+Export your own icons as self-contained SVG: convert text to paths, bring external symbols into
+this file, and keep references within it. Give the root a `viewBox` with positive width and height,
+or positive `width` and `height` in absolute units. Any explicit dimensions must use absolute
+units, even with a `viewBox`; percentages and `em` are refused. For example, `icons/brand/mark.svg`
+can contain:
+
+```svg
+<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">
+  <path fill=\"currentColor\" d=\"M12 2 22 22H2Z\"/>
+</svg>
 ```
 
 An icon keeps the colors its own SVG draws. Artwork painted with `currentColor` follows the `color`

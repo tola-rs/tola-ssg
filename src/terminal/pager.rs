@@ -21,13 +21,13 @@ impl PagerCommand {
     ///
     /// `None` when stdout is not a terminal or `TERM` is unset or `dumb`; a `less` that cannot
     /// drive the terminal stops at its own warning instead of showing the documentation.
-    pub(crate) fn for_process() -> Option<Self> {
+    pub(crate) fn for_process() -> anyhow::Result<Option<Self>> {
         if !io::stdout().is_terminal() {
-            return None;
+            return Ok(None);
         }
         let term = std::env::var_os("TERM");
         if term.is_none() || term.as_deref() == Some(OsStr::new("dumb")) {
-            return None;
+            return Ok(None);
         }
         let less = which::which("less").ok();
         resolve(
@@ -82,24 +82,31 @@ impl StartedPager {
 /// Decide the pager from the two variables, with the `less` on `PATH` as the fallback.
 ///
 /// The first present variable decides: an empty or whitespace-only value, or a program whose
-/// file stem is `cat`, disables paging instead of falling through to the next source. A value
-/// splits on whitespace with no shell quoting, the way `systemd` and `man` read theirs.
+/// file stem is `cat`, disables paging instead of falling through to the next source.
+/// Quotes group command arguments without enabling shell expansion.
 fn resolve(
     tola_pager: Option<&OsStr>,
     pager: Option<&OsStr>,
     less: Option<&Path>,
-) -> Option<PagerCommand> {
+) -> anyhow::Result<Option<PagerCommand>> {
     let (program, arguments): (OsString, Vec<OsString>) = match tola_pager.or(pager) {
         Some(configured) => {
-            let configured = configured.to_string_lossy();
-            let mut fields = configured.split_whitespace();
-            let program = fields.next()?;
-            if Path::new(program).file_stem() == Some(OsStr::new("cat")) {
-                return None;
+            let Some(command) =
+                crate::command_line::CommandLine::parse(configured).map_err(|error| {
+                    anyhow::anyhow!("invalid pager command: {error}; check TOLA_PAGER or PAGER")
+                })?
+            else {
+                return Ok(None);
+            };
+            if Path::new(&command.program).file_stem() == Some(OsStr::new("cat")) {
+                return Ok(None);
             }
-            (program.into(), fields.map(OsString::from).collect())
+            (command.program, command.arguments)
         }
-        None => (less?.as_os_str().to_os_string(), Vec::new()),
+        None => match less {
+            Some(less) => (less.as_os_str().to_os_string(), Vec::new()),
+            None => return Ok(None),
+        },
     };
     let arguments =
         if arguments.is_empty() && Path::new(&program).file_stem() == Some(OsStr::new("less")) {
@@ -107,7 +114,7 @@ fn resolve(
         } else {
             arguments
         };
-    Some(PagerCommand { program, arguments })
+    Ok(Some(PagerCommand { program, arguments }))
 }
 
 #[cfg(test)]
@@ -129,7 +136,8 @@ mod tests {
                 Some(OsStr::new("more")),
                 Some(OsStr::new("less -S")),
                 Some(Path::new("/usr/bin/less")),
-            ),
+            )
+            .unwrap(),
             resolved("more", &[])
         );
     }
@@ -140,18 +148,22 @@ mod tests {
         for value in ["", "  ", "cat", "/bin/cat", "cat -u"] {
             let configured = Some(OsStr::new(value));
             assert_eq!(
-                resolve(configured, None, less),
+                resolve(configured, None, less).unwrap(),
                 None,
                 "TOLA_PAGER={value:?}"
             );
-            assert_eq!(resolve(None, configured, less), None, "PAGER={value:?}");
+            assert_eq!(
+                resolve(None, configured, less).unwrap(),
+                None,
+                "PAGER={value:?}"
+            );
         }
     }
 
     #[test]
     fn bare_less_receives_documentation_arguments() {
         assert_eq!(
-            resolve(Some(OsStr::new("less")), None, None),
+            resolve(Some(OsStr::new("less")), None, None).unwrap(),
             resolved("less", LESS_ARGUMENTS)
         );
     }
@@ -159,7 +171,7 @@ mod tests {
     #[test]
     fn written_less_arguments_are_kept() {
         assert_eq!(
-            resolve(Some(OsStr::new("less -S")), None, None),
+            resolve(Some(OsStr::new("less -S")), None, None).unwrap(),
             resolved("less", &["-S"])
         );
     }
@@ -167,14 +179,19 @@ mod tests {
     #[test]
     fn unset_variables_use_path_less() {
         assert_eq!(
-            resolve(None, None, Some(Path::new("/usr/bin/less"))),
+            resolve(None, None, Some(Path::new("/usr/bin/less"))).unwrap(),
             resolved("/usr/bin/less", LESS_ARGUMENTS)
         );
     }
 
     #[test]
     fn missing_pager_leaves_stdout_unpaged() {
-        assert_eq!(resolve(None, None, None), None);
+        assert_eq!(resolve(None, None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn malformed_preference_stops_pager_selection() {
+        assert!(resolve(Some(OsStr::new("'pager")), Some(OsStr::new("less")), None).is_err());
     }
 
     #[cfg(unix)]

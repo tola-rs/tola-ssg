@@ -76,9 +76,9 @@ pub(super) fn name(row: Row) -> Option<&'static str> {
     }
 }
 
-/// Whether the cursor may land on this row: the atoms and the files, not the titles.
+/// Whether the cursor may land on this row: the atoms, not the titles or the files.
 pub(super) fn is_item(row: Row) -> bool {
-    name(row).is_some()
+    matches!(row, Row::Atom(_))
 }
 
 /// The column every item's hint starts at: after the leading field, the mark, and the longest name
@@ -270,10 +270,11 @@ mod tests {
             (Row::Atom(Feature::StarterStylesheet), false),
             (Row::Atom(Feature::TailwindCss), true),
             (Row::Atom(Feature::DenoToolchain), true),
+            (Row::Atom(Feature::Justfile), false),
             (Row::File("static/web-assets/css/site.css"), false),
             (Row::File("static/tailwind-sources/site.css"), true),
             (Row::File("deno.json"), true),
-            (Row::File("justfile"), true),
+            (Row::File("justfile"), false),
         ] {
             assert_eq!(mark_text(row, &selected).contains('■'), checked, "{row:?}");
         }
@@ -281,6 +282,17 @@ mod tests {
             hint(&selected, Feature::StarterStylesheet),
             Some(Hint::Replaced(Feature::TailwindCss))
         ));
+
+        let selected = selection::complete(&FeatureSet::new([
+            Feature::Justfile,
+            Feature::DenoToolchain,
+        ]));
+        for (row, checked) in [
+            (Row::Atom(Feature::Justfile), true),
+            (Row::File("justfile"), true),
+        ] {
+            assert_eq!(mark_text(row, &selected).contains('■'), checked, "{row:?}");
+        }
     }
 
     #[test]

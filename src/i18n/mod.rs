@@ -1,9 +1,9 @@
 //! The language `tola help` writes its pages in, and the packaged translations of those pages.
 //!
 //! The documentation's own spelling is English: a bundled package's overview and export
-//! documentation come from its Typst sources, and the index prose is written in `help.rs`. A
+//! documentation come from its Typst sources, and the index prose is written in the help page builders. A
 //! translation overrides one unit of that spelling; a unit without one reads English, so a
-//! partially translated page stays readable. Page sections and labels are never translated.
+//! partially translated page stays readable. Configuration and package identifiers stay unchanged.
 //! Nothing outside `tola help` follows this language: commands, their help, and diagnostics stay
 //! English.
 
@@ -81,31 +81,31 @@ fn resolve_from_environment(lookup: impl Fn(&str) -> Option<String>) -> Option<H
 /// stay English in both languages, because they are what the reader types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HelpText {
-    SiteFields,
-    PackageOverview,
-    SelectedExports,
-    DefaultValues,
+    HelpUsage,
 }
 
 impl HelpText {
     /// The asset key this phrase is translated under.
     fn key(self) -> &'static str {
         match self {
-            Self::SiteFields => "site-fields",
-            Self::PackageOverview => "package-overview",
-            Self::SelectedExports => "selected-exports",
-            Self::DefaultValues => "default-values",
+            Self::HelpUsage => "help-usage",
         }
     }
 
     /// The phrase itself, which is what a page without a translation reads.
     fn english(self) -> &'static str {
         match self {
-            Self::SiteFields => "Configuration fields and defaults",
-            Self::PackageOverview => "Package overview and exports",
-            Self::SelectedExports => "Selected exports",
-            Self::DefaultValues => {
-                "Default values; use `tola config` to inspect your site's settings."
+            Self::HelpUsage => {
+                "To read a command's own help, use `tola <command> --help`.\n\n\
+                 `tola help` reads Tola's bundled offline documentation: `tola.toml` settings \
+                 (`tola help \"[build]\"`) and the bundled `@tola/xxx` packages (`tola help \
+                 \"@tola/address\" slugify`). It also supports `-i`/`--interactive` for \
+                 interactive browsing: there you can jump by clicking with the mouse, or press Tab \
+                 for quick keyboard navigation. `--lang` switches the language (English and Chinese \
+                 today).\n\n\
+                 Tola also offers `tola skill` for agents to read: with `tola help` and `tola \
+                 skill`, an agent can learn Tola and Typst quickly, help you organize a site, and \
+                 explain Tola's concepts."
             }
         }
     }
@@ -437,27 +437,16 @@ mod tests {
     }
 
     #[test]
+    // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
+    #[allow(clippy::single_element_loop)]
     fn phrases_have_translations() {
-        for phrase in [
-            HelpText::SiteFields,
-            HelpText::PackageOverview,
-            HelpText::SelectedExports,
-            HelpText::DefaultValues,
-        ] {
-            // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
+        for phrase in [HelpText::HelpUsage] {
             match phrase {
-                HelpText::SiteFields
-                | HelpText::PackageOverview
-                | HelpText::SelectedExports
-                | HelpText::DefaultValues => {}
+                HelpText::HelpUsage => {}
             }
             let translated = text(HelpLanguage::SimplifiedChinese, phrase);
             assert_ne!(translated, phrase.english(), "{:?}", phrase.key());
         }
-        assert_eq!(
-            text(HelpLanguage::English, HelpText::SiteFields),
-            "Configuration fields and defaults"
-        );
     }
 
     /// Every bundled package carries a translation, every translated unit names a real export or

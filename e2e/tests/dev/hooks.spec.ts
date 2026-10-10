@@ -11,6 +11,7 @@ import {
   writeUnreadContentFile,
 } from '../../support/hooks.ts'
 import { readSessionRecords } from '../../support/log.ts'
+import { COMMAND_TIMEOUT_MS } from '../../support/process.ts'
 import { currentRevision, waitForOpenSocket } from '../../support/reload.ts'
 import { test } from '../../support/server.ts'
 import { RENDER_EVERY_SOURCE, writeSiteProgram } from '../../support/site.ts'
@@ -266,7 +267,11 @@ test('generated index preserves active search', async ({ page, sites }) => {
 })
 
 test('generated images publish latest sources', async ({ page, sites, directory }) => {
+  test.setTimeout(COMMAND_TIMEOUT_MS.build * 2)
   const sourceCount = 300
+  // One image-hook run reads 300 sources and rewrites up to 300 images, and the site then
+  // rebuilds: every wait on that work covers a build, not Playwright's 5s poll default.
+  const rebuildWait = { timeout: COMMAND_TIMEOUT_MS.build }
   const names = [
     'cover',
     ...Array.from({ length: sourceCount - 1 }, (_, index) => `image-${String(index).padStart(3, '0')}`),
@@ -495,16 +500,16 @@ test('generated images publish latest sources', async ({ page, sites, directory 
     })
     const reusesBeforeEdit = journalRecords(await readHookJournal(journal), 'reuse').length
     await site.writeContent('index.typ', 'Updated image page.\n')
-    await expect(page.locator('body')).toContainText('Updated image page.')
+    await expect(page.locator('body')).toContainText('Updated image page.', rebuildWait)
     // The edit reruns the hook, which reuses every cached conversion and reconverts none.
-    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length)
+    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length, rebuildWait)
       .toBe(reusesBeforeEdit + names.length)
     expect(journalRecords(await readHookJournal(journal), 'convert')).toEqual(firstConversions)
 
     const source = join(site.root, 'static/image-sources/cover.jpg')
     const reusesBeforeBlue = journalRecords(await readHookJournal(journal), 'reuse').length
     await writeFile(source, Buffer.from(blue.jpeg, 'base64'))
-    await expect.poll(pixel).toEqual({ width: 16, height: 16, pixel: blue.pixel })
+    await expect.poll(pixel, rebuildWait).toEqual({ width: 16, height: 16, pixel: blue.pixel })
     await expect(cover).toHaveAttribute('src', /tola-representation=[a-f0-9]{64}/)
     await expectOutput(blue)
     const blueJournal = await readHookJournal(journal)
@@ -512,7 +517,7 @@ test('generated images publish latest sources', async ({ page, sites, directory 
     expect(blueConversions).toEqual([...firstConversions, 'cover.jpg blue'])
     expect(journalRecords(blueJournal, 'reuse').length).toBe(reusesBeforeBlue + names.length - 1)
     await unlink(join(site.root, 'static/web-assets/images/image-000.webp'))
-    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'convert'))
+    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'convert'), rebuildWait)
       .toEqual([...blueConversions, 'image-000.jpg red'])
     await expectOutput(red, 'image-000')
     const coverChanges = () =>
@@ -536,7 +541,7 @@ test('generated images publish latest sources', async ({ page, sites, directory 
     await writeFile(source, Buffer.from(red.jpeg, 'base64'))
     holdConversions = false
     for (const response of held) response.end('continue')
-    await expect.poll(pixel).toEqual({ width: 16, height: 16, pixel: red.pixel })
+    await expect.poll(pixel, rebuildWait).toEqual({ width: 16, height: 16, pixel: red.pixel })
     const latestRevision = await currentRevision(page)
     await expect.poll(() => imageRevisions.length).toBeGreaterThan(beforePressure)
     expect(overflowedImageRevisions).toBe(false)
@@ -572,11 +577,11 @@ test('generated images publish latest sources', async ({ page, sites, directory 
     // Restoring the bytes the failed run refused proves the failure left the persisted cache
     // readable: the cover is reused from it instead of converted again.
     await writeFile(source, Buffer.from(red.jpeg, 'base64'))
-    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length)
+    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length, rebuildWait)
       .toBeGreaterThanOrEqual(reusesAfterFailure + names.length)
     expect(journalRecords(await readHookJournal(journal), 'convert')).toEqual(failedConversions)
     await writeFile(source, Buffer.from(blue.jpeg, 'base64'))
-    await expect.poll(pixel).toEqual({ width: 16, height: 16, pixel: blue.pixel })
+    await expect.poll(pixel, rebuildWait).toEqual({ width: 16, height: 16, pixel: blue.pixel })
     await expectOutput(blue)
     await expect(searchInput).toHaveValue('preserved')
     await expect(searchInput).toBeFocused()
@@ -620,7 +625,7 @@ test('generated images publish latest sources', async ({ page, sites, directory 
     await site.restart()
     await expectOutput(blue)
     // The restart runs the hook again: every conversion is reused from the same cache directory.
-    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length)
+    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length, rebuildWait)
       .toBe(completedReuses + names.length)
     expect(journalRecords(await readHookJournal(journal), 'convert')).toEqual(completedConversions)
     expect(journalRecords(await readHookJournal(journal), 'cache')).toEqual([cacheDir])
@@ -632,13 +637,13 @@ test('generated images publish latest sources', async ({ page, sites, directory 
     const reusesBeforeClear = journalRecords(await readHookJournal(journal), 'reuse').length
     await rm(cacheDir, { recursive: true, force: true })
     await site.writeContent('index.typ', 'Cleared image cache page.\n')
-    await expect(page.locator('body')).toContainText('Cleared image cache page.')
+    await expect(page.locator('body')).toContainText('Cleared image cache page.', rebuildWait)
     const regenerated = names.map((name) => `${name}.jpg ${name === 'cover' ? 'blue' : 'yellow'}`)
-    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'convert'))
+    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'convert'), rebuildWait)
       .toEqual([...conversionsBeforeClear, ...regenerated])
     await site.writeContent('index.typ', 'Quiet image cache page.\n')
-    await expect(page.locator('body')).toContainText('Quiet image cache page.')
-    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length)
+    await expect(page.locator('body')).toContainText('Quiet image cache page.', rebuildWait)
+    await expect.poll(async () => journalRecords(await readHookJournal(journal), 'reuse').length, rebuildWait)
       .toBe(reusesBeforeClear + names.length)
     expect(journalRecords(await readHookJournal(journal), 'convert'))
       .toEqual([...conversionsBeforeClear, ...regenerated])

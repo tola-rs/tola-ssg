@@ -29,6 +29,10 @@ const SITE_DIRECTORIES: &[&str] = &[
     "site",
 ];
 
+/// The starter page every scaffold publishes at the site root.
+const STARTER_PAGE_PATH: &str = "content/index.typ";
+const STARTER_PAGE_SOURCE: &str = include_str!("templates/index-page.typ");
+
 /// Every file and directory `tola init` creates at `root`.
 pub(super) fn file_writes(
     root: &Path,
@@ -54,6 +58,7 @@ pub(super) fn file_writes(
     )?;
     writes.create_file(program::SELECTION_PATH, program::SELECTION_SOURCE)?;
     writes.create_file(program::SEO_PATH, program::seo_source(&effects.seo))?;
+    writes.create_file(STARTER_PAGE_PATH, STARTER_PAGE_SOURCE)?;
     for (path, contents) in &effects.files {
         let contents = if *path == "static/tailwind-sources/site.css" {
             contents.replacen(
@@ -251,6 +256,25 @@ mod tests {
     }
 
     #[test]
+    fn starter_page_publishes_at_the_site_root() {
+        let directory = tempfile::tempdir().unwrap();
+        scaffold(directory.path());
+        let build = build_generated_site(directory.path());
+        let html = std::str::from_utf8(built_output(&build, "index.html")).unwrap();
+
+        assert!(html.contains("<title>Welcome</title>"), "{html}");
+        assert!(
+            html.contains("content=\"A starter page for a site built with Tola\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h1>Welcome</h1>"),
+            "the declared title is the page's first heading: {html}"
+        );
+        assert!(html.contains("href=\"#start-here\""), "{html}");
+    }
+
+    #[test]
     fn configured_language_reaches_html() {
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
@@ -367,7 +391,7 @@ Draft body."#,
                 .into_iter()
                 .map(|page| page.output.as_str())
                 .collect::<Vec<_>>(),
-            ["404.html"]
+            ["index.html", "404.html"]
         );
 
         std::fs::write(

@@ -7,7 +7,8 @@
 //! advances nothing.
 
 use crate::compiler::{
-    CompilationReuse, PublishedDependencies, RebuildDecision, SiteProgramCache, TypstHost, analysis,
+    CompilationDependencies, CompilationReuse, RebuildDecision, SiteProgramCache, TypstHost,
+    analysis,
 };
 use crate::mode::BuildMode;
 
@@ -26,7 +27,7 @@ pub struct BuildSession {
 
 pub(crate) struct RetainedProducerCaches {
     pub(crate) host: TypstHost,
-    pub(crate) dependencies: PublishedDependencies,
+    pub(crate) dependencies: CompilationDependencies,
     pub(crate) source_analysis: analysis::SourceAnalysisCache,
     pub(crate) site_program: SiteProgramCache,
     pub(crate) configured_assets: crate::asset::ConfiguredAssetInventory,
@@ -1963,10 +1964,10 @@ mod tests {
         .unwrap();
         fs::write(
             root.join("site.typ"),
-            r#"#import "@tola/address:0.0.0": route, route-to-output
+            r#"#import "@tola/address:0.0.0": join-route, output-of
 #import "@tola/source:0.0.0": all-sources
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments)), [#source.meta.title])
+  document(output-of(join-route(source.route-segments)), [#source.meta.title])
 }"#,
         )
         .unwrap();
@@ -2042,9 +2043,9 @@ mod tests {
         fs::write(
             root.join("site.typ"),
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments)))[#include source.file]
+  document(output-of(join-route(source.route-segments)))[#include source.file]
 }"#,
         )
         .unwrap();
@@ -2124,9 +2125,9 @@ mod tests {
         fs::write(
             root.join("site.typ"),
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments)))[#include source.file]
+  document(output-of(join-route(source.route-segments)))[#include source.file]
 }"#,
         )
         .unwrap();

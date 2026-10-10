@@ -28,7 +28,7 @@ summary = [
 
 结果包含派生结果发布的 `url`、它的 `width` 与 `height`，以及源图自身的 `original-width` 与 `original-height`。无论你是否用上返回的 URL 与尺寸，这次调用都会请求派生结果：构建会发布收敛求值中请求过的每个派生结果，编辑器检查只报告诊断信息。这次调用只发布派生结果；源图保留其资产声明为它发布的内容。`resize-image` 拒绝动画图片与 SVG 源图。URL 包含 `site.base-path`，可直接用于 `html.img(src: resized.url, ...)`。把整数像素尺寸直接传给 `html.img` 的 `width` 与 `height`。
 
-构建会把这次求值请求过的派生结果并入站点的输出图：每个都落在 `_tola/images/` 下，名字由源图字节与处理参数共同决定，等价的请求共用同一个输出。链接它通常直接用返回的 `url`；手上只有输出路径时，用 `output-to-url` 换成浏览器 URL。`tola inspect outputs` 列出每个已发布的输出，以及它的 `producer` 与 `media-type`。
+构建会把这次求值请求过的派生结果并入站点的输出图：每个都落在 `_tola/images/` 下，名字由源图字节与处理参数共同决定，等价的请求共用同一个输出。链接它通常直接用返回的 `url`；手上只有输出路径时，用 `url-of` 换成浏览器 URL。`tola inspect outputs` 列出每个已发布的输出，以及它的 `producer` 与 `media-type`。
 
 Example - 缩放到精确的宽高：
 ''',

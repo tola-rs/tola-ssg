@@ -8,6 +8,13 @@ use std::path::Path;
 
 use cap_std::fs::Dir;
 
+/// This system's clipboard command, when the desktop provides one.
+///
+/// Windows relies on the terminal's own OSC 52 escape alone.
+pub(crate) fn clipboard_command() -> Option<&'static str> {
+    None
+}
+
 /// Open one log path for reading.
 pub(crate) fn open_log_for_read(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).open(path)

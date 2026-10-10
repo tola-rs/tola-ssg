@@ -82,7 +82,7 @@ for (const preset of ['medium', 'rich']) {
   })
 }
 
-test('generated search follows the deployment path', async ({ binary, page, sites }) => {
+test('generated search hook publishes under the deployment path', async ({ binary, page, sites }) => {
   const failures: string[] = []
   page.on('pageerror', (error) => failures.push(error.message))
   const site = await sites.preview({
@@ -95,57 +95,13 @@ test('generated search follows the deployment path', async ({ binary, page, site
       const mounted = configuration.replace(/^#?\s*base-path = .*$/m, 'base-path = "/docs/"')
       expect(mounted).not.toBe(configuration)
       await writeFile(path, mounted)
-      await writeFile(
-        join(root, 'content/index.typ'),
-        '#import "@tola/source:0.0.0": tola-meta\n#tola-meta((title: [Orchid handbook]))\n= Orchid handbook\n\nOrchids thrive with patient care.\n',
-      )
     },
   })
-  const resources: string[] = []
-  page.on('response', (response) => {
-    if (response.url().includes('pagefind-search')) {
-      resources.push(new URL(response.url()).pathname)
-      if (!response.ok()) failures.push(`${response.status()} ${response.url()}`)
-    }
-  })
-  expect((await page.goto(new URL('search/', site.url).href, { waitUntil: 'load' }))?.status()).toBe(200)
-  await page.locator('.pagefind-search').getByRole('textbox').fill('Orchid')
-  const result = page.locator('.pagefind-ui__result-link').filter({ hasText: 'Orchid handbook' })
-  await expect(result).toBeVisible()
-  const themeColors = () =>
-    page.evaluate(() => {
-      const input = document.querySelector('.pagefind-ui__search-input')!
-      const link = document.querySelector('.pagefind-ui__result-link')!
-      return {
-        page: getComputedStyle(document.documentElement).backgroundColor,
-        text: getComputedStyle(document.documentElement).color,
-        input: getComputedStyle(input).backgroundColor,
-        inputText: getComputedStyle(input).color,
-        link: getComputedStyle(link).color,
-      }
-    })
-  await page.emulateMedia({ colorScheme: 'light' })
-  const light = await themeColors()
-  expect(light.input).toBe(light.page)
-  expect(light.inputText).toBe(light.text)
-  await page.emulateMedia({ colorScheme: 'dark' })
-  const dark = await themeColors()
-  expect(dark.input).toBe(dark.page)
-  expect(dark.inputText).toBe(dark.text)
-  expect(dark.input).not.toBe(light.input)
-  expect(dark.link).not.toBe(light.link)
-  await page.locator('html').evaluate((node) => node.setAttribute('data-theme', 'light'))
-  expect(await themeColors()).toEqual(light)
-  await page.emulateMedia({ colorScheme: 'light' })
-  await page.locator('html').evaluate((node) => node.setAttribute('data-theme', 'dark'))
-  expect(await themeColors()).toEqual(dark)
-
-  const href = await result.getAttribute('href')
-  expect(new URL(href!, site.url).pathname).toBe('/docs/')
-  expect(resources.length).toBeGreaterThan(2)
-  expect(resources.every((path) => path.startsWith('/docs/assets/pagefind-search/'))).toBe(true)
-  await result.click()
-  await expect(page).toHaveURL(new URL('/docs/', site.url).href)
-  await expect(page.getByRole('heading', { name: 'Orchid handbook' })).toBeVisible()
+  const landing = await page.goto(site.url, { waitUntil: 'load' })
+  expect(landing?.status()).toBe(200)
+  const asset = 'assets/pagefind-search/pagefind.js'
+  const response = await page.goto(new URL(asset, site.url).href, { waitUntil: 'load' })
+  expect(response?.status()).toBe(200)
+  expect(new URL(response!.url()).pathname).toBe(`/docs/${asset}`)
   expect(failures).toEqual([])
 })

@@ -5,12 +5,6 @@ use typst::introspection::{Location, MetadataElem};
 use typst::syntax::Span;
 use typst::utils::PicoStr;
 
-#[cfg(feature = "legacy-serialization")]
-#[allow(deprecated)]
-use crate::codegen::value_to_json;
-#[cfg(feature = "legacy-serialization")]
-use serde_json::Value as JsonValue;
-
 /// One labeled Typst metadata element from eager evaluation or a compiled Bundle.
 ///
 /// Retains the native value, source span, and optional compiled location.
@@ -111,27 +105,6 @@ pub(crate) fn all_values(declarations: Vec<MetadataDeclaration>) -> Vec<Value> {
     declarations
         .into_iter()
         .map(MetadataDeclaration::into_value)
-        .collect()
-}
-
-/// Serialize one optional metadata value at an explicit JSON boundary.
-#[cfg(feature = "legacy-serialization")]
-#[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-#[allow(deprecated)]
-pub(crate) fn json_first(value: Option<Value>) -> serde_json::Result<Option<JsonValue>> {
-    value.map(|value| value_to_json(&value)).transpose()
-}
-
-/// Serialize every metadata value at an explicit JSON boundary.
-#[cfg(feature = "legacy-serialization")]
-#[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-#[allow(deprecated)]
-pub(crate) fn json_all(
-    values: impl IntoIterator<Item = Value>,
-) -> serde_json::Result<Vec<JsonValue>> {
-    values
-        .into_iter()
-        .map(|value| value_to_json(&value))
         .collect()
 }
 

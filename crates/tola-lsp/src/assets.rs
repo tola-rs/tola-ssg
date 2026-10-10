@@ -4,7 +4,7 @@
 //! and it resolves from the site root: `asset("downloads/file.pdf", bytes)` publishes
 //! `public/downloads/file.pdf`. So it answers where the output lands, not where a file is served.
 //!
-//! The second question belongs to `asset-url(declared-url)`: its argument names one of the URLs an
+//! The second question belongs to `url-of-asset(declared-url)`: its argument names one of the URLs an
 //! `assets` declaration publishes. The inventory of those URLs is the generator's (`AssetUrls`,
 //! the same view a check resolves against), while the domain an argument has is declared by
 //! the crate that owns the binding (`tola_packages::ARGUMENT_DOMAINS`).
@@ -70,7 +70,7 @@ pub(super) enum Written<'a> {
     Unpublished,
 }
 
-/// Resolve one written site-root URL the way `asset-url` resolves it.
+/// Resolve one written site-root URL the way `url-of-asset` resolves it.
 ///
 /// The declaration's own spelling is the key, so the decode happens once here exactly as the
 /// lookup decodes it: `/caf%C3%A9.svg` and `/café.svg` name the one declaration. Everything else
@@ -286,7 +286,7 @@ mod tests {
     fn url_completion_replaces_written_url() {
         let (_directory, config) = site_with_declared_assets();
         let urls = published_urls(&config);
-        let source = Source::detached("#asset-url(\"/brand/\")".to_owned());
+        let source = Source::detached("#url-of-asset(\"/brand/\")".to_owned());
         let written = source.text().find("/brand/").expect("the written url");
         let written = written..written + "/brand/".len();
         let cursor = written.end;
@@ -365,7 +365,7 @@ mod tests {
     fn written_definition_keeps_the_client_spelling() {
         let (directory, config) = site_with_declared_assets();
         let urls = published_urls(&config);
-        let source = Source::detached("#asset-url(\"/brand/logo.svg\")");
+        let source = Source::detached("#url-of-asset(\"/brand/logo.svg\")");
         let url = "/brand/logo.svg";
         let at = source.text().find(url).expect("the written URL");
         let spelled = directory.path().join("spelled");
@@ -386,9 +386,9 @@ mod tests {
         );
     }
 
-    /// The value a site imports as `asset-url` is the native the domain table names.
+    /// The value a site imports as `url-of-asset` is the native the domain table names.
     ///
-    /// The binding spells the function `asset-url`; the value itself is named `tola-asset-url`, and
+    /// The binding spells the function `url-of-asset`; the value itself is named `tola-url-of-asset`, and
     /// that identity is what the table keys on.
     #[test]
     fn asset_url_parameter_has_url_domain() {
@@ -410,11 +410,11 @@ mod tests {
         let Value::Module(host) = inputs.get(HOST_MODULE).unwrap().clone() else {
             panic!("the host channel is a module")
         };
-        let Value::Func(asset_url) = host.scope().get("asset-url").unwrap().read() else {
-            panic!("asset-url is a function")
+        let Value::Func(asset_url) = host.scope().get("url-of-asset").unwrap().read() else {
+            panic!("url-of-asset is a function")
         };
 
-        assert_eq!(asset_url.name(), Some("tola-asset-url"));
+        assert_eq!(asset_url.name(), Some("tola-url-of-asset"));
         assert_eq!(
             domain_of(asset_url, "declared-url"),
             Some(ArgumentDomain::SiteAssetUrl)
@@ -426,7 +426,7 @@ mod tests {
     fn completion_names_relative_asset_sources() {
         let (_directory, config) = site_with_declared_assets();
         let urls = published_urls(&config);
-        let source = Source::detached("#asset-url(\"/\")");
+        let source = Source::detached("#url-of-asset(\"/\")");
         let start = source.text().find('/').unwrap();
         let lsp_types::CompletionResponse::List(list) = url_completions(
             &urls,

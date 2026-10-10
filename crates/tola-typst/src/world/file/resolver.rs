@@ -9,10 +9,10 @@ use rustc_hash::FxHashMap;
 use typst::diag::{FileError, FileResult};
 use typst::syntax::FileId;
 
-use super::candidate::CandidatePackageSnapshot;
 use super::evidence::{DiskReadPath, FileRead, ReadAttempt, ReadEvidence, ReadLocator, ReadOrigin};
 use super::provider::{EmptyFiles, FileProvider, FileTarget};
 use super::read::{EMPTY_ID, STDIN_ID, decode_utf8, non_persistent_label, read_disk};
+use super::snapshot::PackageSnapshot;
 use crate::world::package::{PackageCheck, PackageFetchPolicy, PackageLocations, PackageStore};
 
 /// Resolves Typst file IDs against provided bytes, mapped files, packages, and disk.
@@ -168,11 +168,11 @@ impl FileResolver {
         self.read_attempt_inner(id, root, None)
     }
 
-    pub(crate) fn read_attempt_with_candidate(
+    pub(crate) fn read_attempt_with_snapshot(
         &self,
         id: FileId,
         root: &Path,
-        packages: &CandidatePackageSnapshot,
+        packages: &PackageSnapshot,
     ) -> ReadAttempt<Arc<[u8]>> {
         self.read_attempt_inner(id, root, Some(packages))
     }
@@ -181,7 +181,7 @@ impl FileResolver {
         &self,
         id: FileId,
         root: &Path,
-        packages: Option<&CandidatePackageSnapshot>,
+        packages: Option<&PackageSnapshot>,
     ) -> ReadAttempt<Arc<[u8]>> {
         if id == *EMPTY_ID {
             return successful_provider_read(
@@ -310,7 +310,7 @@ impl FileResolver {
         &self,
         root: &Path,
         id: FileId,
-        package_snapshot: Option<&CandidatePackageSnapshot>,
+        package_snapshot: Option<&PackageSnapshot>,
     ) -> Result<(PathBuf, Vec<PackageCheck>), (FileError, Vec<PackageCheck>)> {
         let (root, package_checks) = match id.root() {
             typst::syntax::VirtualRoot::Project => (root.to_path_buf(), Vec::new()),

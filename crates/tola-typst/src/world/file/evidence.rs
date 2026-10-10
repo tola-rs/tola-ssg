@@ -288,21 +288,6 @@ impl<T> ReadAttempt<T> {
     }
 }
 
-impl<T> ReadAttempt<Loaded<T>> {
-    /// Take a value this world already holds, with the read that produced it.
-    ///
-    /// A retained value observed no input beyond its own read.
-    pub(crate) fn from_loaded(loaded: Loaded<T>) -> Self {
-        let read = loaded.read.clone();
-        Self {
-            result: Ok(loaded),
-            reads: Some(read),
-            disk_reads: Vec::new(),
-            package_checks: Vec::new(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::hash_length_prefixed;

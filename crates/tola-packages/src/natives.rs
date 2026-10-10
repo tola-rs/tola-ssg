@@ -183,7 +183,7 @@ pub(super) fn tola_slug(
 }
 
 #[func]
-pub(super) fn tola_route(span: Span, segments: Array) -> SourceResult<Str> {
+pub(super) fn tola_join_route(span: Span, segments: Array) -> SourceResult<Str> {
     let segments = route_segments_from_array(&segments).at(span)?;
     let mut route = String::from("/");
     for (position, segment) in segments.iter().enumerate() {
@@ -225,7 +225,7 @@ fn route_segments_from_array(segments: &Array) -> Result<Vec<String>, String> {
 }
 
 #[func]
-pub(super) fn tola_route_to_output(route: Spanned<Str>) -> SourceResult<Str> {
+pub(super) fn tola_output_of(route: Spanned<Str>) -> SourceResult<Str> {
     let route = tola_address::UrlPath::from_decoded(route.v.as_str())
         .map_err(|error| error.to_string())
         .at(route.span)?;
@@ -233,7 +233,7 @@ pub(super) fn tola_route_to_output(route: Spanned<Str>) -> SourceResult<Str> {
 }
 
 #[func]
-pub(super) fn tola_output_to_route(output: Spanned<Str>) -> SourceResult<Str> {
+pub(super) fn tola_route_of(output: Spanned<Str>) -> SourceResult<Str> {
     let output = tola_address::OutputPath::parse(output.v.as_str())
         .map_err(|error| error.to_string())
         .at(output.span)?;
@@ -241,7 +241,7 @@ pub(super) fn tola_output_to_route(output: Spanned<Str>) -> SourceResult<Str> {
 }
 
 #[func]
-pub(super) fn tola_output_to_url(
+pub(super) fn tola_url_of(
     span: Span,
     output: Spanned<Str>,
     #[named]

@@ -11,14 +11,14 @@ use typst::utils::LazyHash;
 use super::core::TypstWorld;
 use super::snapshot::SourceSnapshot;
 use super::strategy::{FileCacheMode, FontMode, LibraryMode};
-use crate::world::file::{CandidateFileSnapshot, FileResolver, SharedFileCache};
+use crate::world::file::{FileResolver, FileSnapshot, SharedFileCache};
 use crate::world::font::{FontLoadError, FontStore};
 
 /// Invalid configuration for a Typst world.
 #[derive(Debug, Error)]
 pub enum WorldBuildError {
     /// The main source cannot be represented relative to the compilation root.
-    #[error("the main source is outside the site root")]
+    #[error("the main source is outside the compilation root")]
     MainOutsideRoot {
         /// Normalized main source path.
         main: PathBuf,
@@ -46,10 +46,6 @@ pub enum WorldBuildError {
     /// A physical source violates the caller's source boundary.
     #[error("{0}")]
     Source(#[source] typst::diag::FileError),
-
-    /// A candidate snapshot was captured under different source restrictions.
-    #[error("the sources belong to a different source boundary")]
-    SnapshotBoundaryMismatch,
 
     /// A configured font resource could not be prepared.
     #[error("{0}")]
@@ -98,43 +94,48 @@ impl WorldBuilder {
 
     /// Use an explicit file resolver for this world.
     pub fn with_files(mut self, files: Arc<FileResolver>) -> Self {
+        if let Some(FileCacheMode::Frozen { parsed, .. }) = &self.cache {
+            self.cache = Some(FileCacheMode::shared(Arc::clone(parsed)));
+        }
         self.files = files;
         self
     }
 
-    /// Use task-local cache (no sharing between compilations).
+    /// Keep first-observed files until the world is reset.
     pub fn with_local_cache(mut self) -> Self {
         self.cache = Some(FileCacheMode::local());
         self
     }
 
-    /// Use shared cache with lock-based synchronization.
+    /// Reuse parsed files while observing fresh inputs for each compilation.
     ///
-    /// Suits hot reload and incremental updates, where files change frequently.
+    /// Direct world reads revalidate on access. Reads within one compilation
+    /// share their first observation, including failures.
     pub fn with_shared_cache(mut self, cache: Arc<SharedFileCache>) -> Self {
         self.cache = Some(FileCacheMode::shared(cache));
         self
     }
 
-    /// Use pre-built immutable snapshot for lock-free parallel access.
-    ///
-    /// Suits batch compilation of pre-scanned sources.
+    /// Keep the listed sources frozen and observe other files for each compilation.
     pub fn with_snapshot(mut self, snapshot: Arc<SourceSnapshot>) -> Self {
         self.cache = Some(FileCacheMode::snapshot(snapshot));
         self
     }
 
-    /// Use one candidate-scoped view of explicit and first-observed files.
-    pub fn with_candidate_snapshot(
+    /// Use one frozen file view, including its resolver.
+    ///
+    /// This replaces any resolver selected by `with_files`. A later `with_files`
+    /// selects fresh reads through that resolver instead.
+    pub fn with_file_snapshot(
         mut self,
-        files: Arc<CandidateFileSnapshot>,
+        files: Arc<FileSnapshot>,
         parsed: Arc<SharedFileCache>,
     ) -> Self {
-        self.cache = Some(FileCacheMode::candidate(files, parsed));
+        self.files = Arc::clone(files.resolver());
+        self.cache = Some(FileCacheMode::frozen(files, parsed));
         self
     }
 
-    /// Use an already resolved file access policy.
     /// Disable font loading.
     ///
     /// Suits scans and queries, which do not lay out content.
@@ -346,6 +347,49 @@ mod tests {
             String::from_utf8(crate::compile_world(&world).unwrap().html().unwrap()).unwrap();
         assert!(second.contains("Second"), "{second}");
         assert!(!second.contains("First"), "{second}");
+    }
+
+    #[test]
+    fn file_selection_owns_resolver() {
+        use crate::{
+            FileMap, FileResolver, FileSnapshot, SharedFileCache, SourceSnapshot, file_id,
+        };
+        use typst::World;
+
+        let (directory, main) = source_directory("");
+        let resolver = |text: &'static [u8]| {
+            let mut files = FileMap::new();
+            files.insert(file_id("value.txt"), text);
+            Arc::new(FileResolver::new().with_provider(files))
+        };
+        let sources = Arc::new(
+            SourceSnapshot::build(&[], directory.path())
+                .unwrap()
+                .into_snapshot_and_accessed()
+                .0,
+        );
+        let snapshot = Arc::new(FileSnapshot::new(sources, resolver(b"snapshot")));
+        let world = WorldBuilder::new(&main, directory.path())
+            .with_files(resolver(b"resolver"))
+            .with_file_snapshot(Arc::clone(&snapshot), Arc::new(SharedFileCache::new()))
+            .no_fonts()
+            .build(&BundleCancellation::default())
+            .unwrap();
+        assert_eq!(
+            world.file(file_id("value.txt")).unwrap().as_slice(),
+            b"snapshot"
+        );
+
+        let world = WorldBuilder::new(&main, directory.path())
+            .with_file_snapshot(snapshot, Arc::new(SharedFileCache::new()))
+            .with_files(resolver(b"resolver"))
+            .no_fonts()
+            .build(&BundleCancellation::default())
+            .unwrap();
+        assert_eq!(
+            world.file(file_id("value.txt")).unwrap().as_slice(),
+            b"resolver"
+        );
     }
 
     #[test]

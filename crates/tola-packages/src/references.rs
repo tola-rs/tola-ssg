@@ -1,8 +1,11 @@
-//! Native Bundle relations, selected after each document's outermost references are fixed.
+//! Native reference occurrences, resolved after they reached Typst's output rules.
 //!
-//! Native locations identify elements; URL targets identify outputs and suffixes. Neither
-//! resolution nor selection proves that the final HTML exports an anchor or another producer's
-//! resource. All graph and selector reads remain tracked by Typst introspection.
+//! `tola_typst::reference_occurrence` records the links and refs that actually reached an output;
+//! this module resolves them against the Bundle's outputs and applies the query's filters. Native
+//! locations identify elements; URL targets identify outputs and suffixes. A native target reports
+//! the exporter's own anchor rather than a spelling this module invents, and a URL target reports
+//! the fragment as written — whether an output answers it is the build's question, not the query's.
+//! All graph and selector reads remain tracked by Typst introspection.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -22,6 +25,8 @@ use tola_address::{
     OutputPath, ResolvedBrowserReference, SiteReference, SiteUrlMount, UrlPath,
     asset_url_from_output, resolve_browser_reference, route_for_output,
 };
+
+use tola_typst::reference_occurrence::{ReferenceOccurrence, observed_references};
 
 pub(super) fn references_func() -> Func {
     Func::from(tola_references::data())
@@ -116,6 +121,7 @@ struct ReferenceQueryOutcome {
 enum ReferenceQueryFailure {
     OutsideDocument,
     SourceOutsideDocument,
+    MissingChannel,
 }
 
 impl ReferenceQueryFailure {
@@ -128,6 +134,10 @@ impl ReferenceQueryFailure {
             Self::SourceOutsideDocument => error!(
                 span, "`from` selects content outside a published document";
                 hint: "select a document or content written inside one, not an asset"
+            ),
+            Self::MissingChannel => error!(
+                span, "this compilation records no references";
+                hint: "build the site with `tola` so `references` can read what its links and refs target"
             ),
         }
     }
@@ -169,36 +179,57 @@ impl ReferenceQueryIntrospection {
         let output_index = native_output_index(introspector);
         let sources = source_documents(&self.query.from, introspector, &output_index)?;
         let targets = selected_targets(&self.query.to, introspector)?;
+        let mut references = document_occurrences(introspector, &output_index)?;
+        order_references(&mut references, introspector);
         let mut records = Array::new();
-        for document in native_references(introspector, &output_index, &self.mount) {
+        let mut owner = None;
+        for reference in &references {
+            // Retained owners are disjoint, so the last one alone decides whether this
+            // occurrence is nested inside a reference already reported.
+            if owner.is_some_and(|owner: Location| {
+                region_matches(
+                    reference.occurrence.location,
+                    Some(&Selector::Location(owner)),
+                    introspector,
+                )
+            }) {
+                continue;
+            }
+            owner = Some(reference.occurrence.location);
+            let native = output_index
+                .paths
+                .get(&reference.output)
+                .expect("an observed occurrence names a published output");
             if sources
                 .as_ref()
-                .is_some_and(|sources| !sources.contains(&document.location))
+                .is_some_and(|sources| !sources.contains(&reference.document))
+                || !region_matches(
+                    reference.occurrence.location,
+                    self.query.from_within.as_ref(),
+                    introspector,
+                )
             {
                 continue;
             }
-            for reference in &document.references {
-                let location = reference
-                    .element
-                    .location()
-                    .expect("queried references have locations");
-                if !region_matches(location, self.query.from_within.as_ref(), introspector)
-                    || targets
-                        .as_ref()
-                        .is_some_and(|targets| !targets.matches(&reference.resolution))
-                    || self.query.to_within.as_ref().is_some_and(|region| {
-                        reference
-                            .resolution
-                            .native_location()
-                            .is_none_or(|location| {
-                                !region_matches(location, Some(region), introspector)
-                            })
+            let resolution = resolve_target(
+                &reference.occurrence.destination,
+                native,
+                introspector,
+                &output_index,
+                &self.mount,
+            );
+            if targets
+                .as_ref()
+                .is_some_and(|targets| !targets.matches(&resolution))
+                || self.query.to_within.as_ref().is_some_and(|region| {
+                    resolution.native_location().is_none_or(|location| {
+                        !region_matches(location, Some(region), introspector)
                     })
-                {
-                    continue;
-                }
-                records.push(reference.fields(&document));
+                })
+            {
+                continue;
             }
+            records.push(reference.fields(native, &resolution));
         }
         Ok(records)
     }
@@ -310,122 +341,169 @@ fn descendants(selector: Selector, ancestor: Selector) -> Selector {
     }
 }
 
-struct NativeReference {
-    element: Content,
-    destination: LinkTarget,
-    resolution: ReferenceResolution,
+/// The link each ref lowers to, keyed by that link's location.
+///
+/// A ref does not reach an HTML output as itself: it lowers to a link inside the ref's own range.
+/// Realization hands a built-in rule's output the input element's span, so that link carries the
+/// ref's own span, while any `link(…)` call — including one a show rule writes in a ref's place —
+/// carries the span of its call site and stays a link. Looking a lowering up per ref keeps the work
+/// linear in the Bundle's references, and refs written by one expression stay apart because each is
+/// searched inside its own range. A link this map does not name is a link the site wrote.
+#[comemo::memoize]
+fn ref_lowerings(
+    introspector: Tracked<dyn Introspector + '_>,
+) -> Arc<HashMap<Location, ReferenceOccurrence>> {
+    let mut lowerings = HashMap::new();
+    for content in introspector.query(&Selector::Elem(RefElem::ELEM, None)) {
+        let Some(reference) = content.to_packed::<RefElem>() else {
+            continue;
+        };
+        let Some(location) = content.location() else {
+            continue;
+        };
+        let lowered = introspector.query(&descendants(
+            Selector::Elem(LinkElem::ELEM, None),
+            Selector::Location(location),
+        ));
+        let Some(link) = lowered
+            .iter()
+            .find(|link| link.span() == content.span())
+            .and_then(Content::location)
+        else {
+            continue;
+        };
+        lowerings.insert(
+            link,
+            ReferenceOccurrence {
+                element: content.clone(),
+                destination: LinkTarget::Label(reference.target),
+                location,
+            },
+        );
+    }
+    Arc::new(lowerings)
 }
 
-impl NativeReference {
-    fn fields(&self, document: &DocumentReferences) -> Value {
-        let mut fields = self.resolution.fields();
-        fields.insert("element".into(), self.element.clone().into_value());
+/// One observed occurrence with the document it belongs to.
+struct DocumentOccurrence {
+    occurrence: ReferenceOccurrence,
+    /// The document element containing the occurrence.
+    document: Location,
+    /// The output that document publishes.
+    output: OutputPath,
+}
+
+impl DocumentOccurrence {
+    fn fields(&self, document: &NativeOutput, resolution: &ReferenceResolution) -> Value {
+        let mut fields = resolution.fields();
+        fields.insert(
+            "element".into(),
+            self.occurrence.element.clone().into_value(),
+        );
         let mut source = Dict::new();
-        source.insert("output".into(), document.output.as_str().into_value());
+        source.insert("output".into(), self.output.as_str().into_value());
         source.insert("route".into(), document.route.as_str().into_value());
-        source.insert("location".into(), document.location.into_value());
+        source.insert("location".into(), self.document.into_value());
         fields.insert("document".into(), source.into_value());
-        fields.insert("destination".into(), self.destination.clone().into_value());
+        fields.insert(
+            "destination".into(),
+            self.occurrence.destination.clone().into_value(),
+        );
         fields.into_value()
     }
 }
 
-struct DocumentReferences {
-    output: OutputPath,
-    route: UrlPath,
-    location: Location,
-    references: Vec<NativeReference>,
-}
-
-fn native_references(
+/// Every occurrence this compilation observed, with the document it belongs to.
+///
+/// A compilation that carries no occurrence channel cannot report references; saying so beats an
+/// empty list that reads as "this site writes no references".
+fn document_occurrences(
     introspector: Tracked<dyn Introspector + '_>,
     output_index: &NativeOutputIndex,
-    mount: &SiteUrlMount,
-) -> Vec<Arc<DocumentReferences>> {
-    let selector = Selector::Or(
-        [LinkElem::ELEM.select(), RefElem::ELEM.select()]
-            .into_iter()
-            .collect(),
-    );
-    let mut positions = HashMap::new();
-    let mut documents = Vec::<(Location, Vec<Content>)>::new();
-    // Bundle documents have disjoint content ranges, so first occurrence order is document order.
-    for content in introspector.query(&selector) {
-        let location = content
-            .location()
-            .expect("queried references have locations");
-        let Some(document) = introspector.document(location) else {
+) -> Result<Vec<DocumentOccurrence>, ReferenceQueryFailure> {
+    let Some(occurrences) = observed_references(introspector) else {
+        return Err(ReferenceQueryFailure::MissingChannel);
+    };
+    let lowerings = ref_lowerings(introspector);
+    let mut references = Vec::new();
+    for occurrence in occurrences {
+        let occurrence = lowerings
+            .get(&occurrence.location)
+            .cloned()
+            .unwrap_or(occurrence);
+        let (Some(document), Some(output)) = (
+            introspector.document(occurrence.location),
+            introspector
+                .path(occurrence.location)
+                .and_then(|path| logical_output(path.get_with_slash())),
+        ) else {
             continue;
         };
-        let position = *positions.entry(document).or_insert_with(|| {
-            documents.push((document, Vec::new()));
-            documents.len() - 1
-        });
-        documents[position].1.push(content);
-    }
-    documents
-        .into_iter()
-        .filter_map(|(location, occurrences)| {
-            let output = logical_output(introspector.path(location)?.get_with_slash())?;
-            let native = output_index.paths.get(&output)?;
-            Some(document_references(
-                introspector,
-                &output,
-                native,
-                &occurrences,
-                output_index,
-                mount,
-            ))
-        })
-        .collect()
-}
-
-#[comemo::memoize]
-fn document_references(
-    introspector: Tracked<dyn Introspector + '_>,
-    output: &OutputPath,
-    native: &NativeOutput,
-    occurrences: &[Content],
-    output_index: &NativeOutputIndex,
-    mount: &SiteUrlMount,
-) -> Arc<DocumentReferences> {
-    let mut owner = None;
-    let mut references = Vec::new();
-    for content in occurrences {
-        let location = content
-            .location()
-            .expect("queried references have locations");
-        // Parent-first queries make retained owners disjoint. Singleton descendant queries avoid
-        // searching nested candidate ranges whose end positions are not ordered.
-        if owner.is_some_and(|owner| {
-            region_matches(location, Some(&Selector::Location(owner)), introspector)
-        }) {
+        if !output_index.paths.contains_key(&output) {
             continue;
         }
-        owner = Some(location);
-        let destination = if let Some(link) = content.to_packed::<LinkElem>() {
-            link.dest.clone()
-        } else {
-            LinkTarget::Label(
-                content
-                    .to_packed::<RefElem>()
-                    .expect("selected references are links or refs")
-                    .target,
-            )
-        };
-        let resolution = resolve_target(&destination, native, introspector, output_index, mount);
-        references.push(NativeReference {
-            element: content.clone(),
-            destination,
-            resolution,
+        references.push(DocumentOccurrence {
+            occurrence,
+            document,
+            output,
         });
     }
-    Arc::new(DocumentReferences {
-        output: output.clone(),
-        route: native.route.clone(),
-        location: native.location,
-        references,
-    })
+    Ok(references)
+}
+
+/// Orders occurrences the way a Bundle writes them: by document, then by realization order.
+///
+/// The channel hands occurrences over in the order they were recorded — parallel document
+/// compilations merge in document order, and a nested realization finishes inside its parent —
+/// but a cached compilation replays its records wherever the cache is consulted, so arrival order
+/// is not the order to report. The sort is stable, so occurrences of one element keep the order
+/// they were recorded in.
+fn order_references(
+    references: &mut [DocumentOccurrence],
+    introspector: Tracked<dyn Introspector + '_>,
+) {
+    let documents = discovery_order(
+        introspector,
+        &Selector::Or(
+            [DocumentElem::ELEM.select(), AssetElem::ELEM.select()]
+                .into_iter()
+                .collect(),
+        ),
+    );
+    let elements = discovery_order(
+        introspector,
+        &Selector::Or(
+            [LinkElem::ELEM.select(), RefElem::ELEM.select()]
+                .into_iter()
+                .collect(),
+        ),
+    );
+    references.sort_by_key(|reference| {
+        let document = documents
+            .get(&reference.document)
+            .expect("an observed occurrence belongs to a queried document");
+        let element = elements
+            .get(&reference.occurrence.location)
+            .expect("an observed occurrence is a link or ref this compilation queried");
+        (*document, *element)
+    });
+}
+
+/// The discovery order of every located element a selector matches.
+///
+/// Bundle introspection orders elements the way realization discovered them, which is the order
+/// the site writes: documents in Bundle order, and inside one document the parents before the
+/// children they contain.
+fn discovery_order(
+    introspector: Tracked<dyn Introspector + '_>,
+    selector: &Selector,
+) -> HashMap<Location, usize> {
+    introspector
+        .query(selector)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, content)| Some((content.location()?, index)))
+        .collect()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -762,6 +840,8 @@ fn resolve_target(
     }
 }
 
+/// A URL names an output and its suffix, not a native element, so `to` selections match it by
+/// output.
 fn url_target(reference: &SiteReference, output_index: &NativeOutputIndex) -> ReferenceResolution {
     let output = OutputPath::from_route(&reference.route);
     let query = reference.query.clone();

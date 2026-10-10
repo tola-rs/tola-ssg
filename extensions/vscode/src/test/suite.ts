@@ -4,9 +4,11 @@ import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { runGrammarChecks } from './grammar.ts'
 import { runPreviewChecks } from './preview.ts'
+import { runEnterChecks } from './enter.ts'
 import { Assets } from '../assets.ts'
 import { selectSite } from '../selection.ts'
 import { SiteTasks } from '../tasks.ts'
+import { Sites } from '../sites.ts'
 import {
   blockRequest,
   blockServerStart,
@@ -14,10 +16,8 @@ import {
   definitionTargets,
   disable,
   type EditorSite,
-  type HeldRequest,
   openMarked,
   openPublishedPage,
-  outputLog,
   recordOutputChannels,
   recordServiceMessages,
   recordSiteSurfaces,
@@ -53,28 +53,6 @@ async function increaseHeadingAction(
   )
   assert.ok(action?.command, 'The heading offers no increase action')
   return { document, position, command: action.command }
-}
-
-/** Hold one site's next Enter and hand the case its editor, so the case owns the disturbance. */
-async function withHeldEnter(
-  site: EditorSite,
-  disruption: (
-    document: vscode.TextDocument,
-    entering: PromiseLike<unknown>,
-    held: HeldRequest,
-  ) => Promise<void>,
-): Promise<void> {
-  const held = await blockRequest(site, 'tola/onEnter')
-  try {
-    const { document, position } = await openMarked(site.source, '- Original|\n')
-    const editor = await vscode.window.showTextDocument(document)
-    editor.selection = new vscode.Selection(position, position)
-    const entering = vscode.commands.executeCommand('tola.onEnter')
-    await held.reached
-    await disruption(document, entering, held)
-  } finally {
-    await held.close()
-  }
 }
 
 /** Open one site's package import and return the definition the editor answers with. */
@@ -223,67 +201,75 @@ export async function run(): Promise<void> {
       ),
   )
 
-  await check("Deliberate stop leaves Tola's notice", () =>
+  await check('Stopped services offer restart', () =>
     withSite(async (site) => {
-      await symbols(site.source)
-      await vscode.commands.executeCommand('tola.restart')
-      await symbols(site.source)
-      assert.doesNotMatch(outputLog(), /Server process exited/)
-      await waitForOutput('Tola stopped. Run Tola: Restart Language Services to start it again.')
-    }, { content: '' }))
-
-  await check("Unexpected service exit leaves Tola's error", () =>
-    withSite(async (site) => {
+      const recorded = waitForOutput('Started Tola language service for')
       const service = await recordServiceMessages(site)
-      await symbols(site.source)
+      // The recorded service is the current one once its own client finished initializing.
+      await recorded
+      assert.equal((await symbols(site.source)).length, 1)
       const pid = await service.servicePid('lsp')
       assert.ok(pid, 'The recorded service never reported its own process')
       process.kill(pid, 'SIGKILL')
-      await waitForOutput('exited (signal SIGKILL)')
-      assert.match(
-        outputLog(),
-        /The language service for selected site \[one\] exited \(signal SIGKILL\)\./,
-      )
-      // The recorded service is left dead on purpose: the case's own cleanup removes the folder.
-    }, { content: '' }))
+      // The button asks for a restart; the client answers once its service is up again.
+      const restarted = waitForOutput('Started Tola language service for')
+      await workbenchText({ button: 'Restart' })
+      await restarted
+      assert.equal((await symbols(site.source)).length, 1)
+    }, { content: '= Restored heading\n' }))
 
-  await check("Enter edits follow each context's syntax", () =>
-    withSite(async (site) => {
-      const edits: [string, string][] = [
-        ['- one|\n', '- one\n- \n'],
-        ['+ one|\n', '+ one\n+ \n'],
-        ['/// Doc|\n', '/// Doc\n/// \n'],
-      ]
-      for (const [marked, expected] of edits) {
-        const { document, position } = await openMarked(site.source, marked)
-        const editor = await vscode.window.showTextDocument(document)
-        editor.selection = new vscode.Selection(position, position)
-        await vscode.commands.executeCommand('tola.onEnter')
-        assert.equal(document.getText(), expected, `Enter at ${JSON.stringify(marked)}`)
+  await check('Restart cancels pending initialization', async () => {
+    if (process.platform === 'win32') return
+    await withSite(async (site) => {
+      const blocked = await blockServerStart(site)
+      try {
+        await vscode.window.showTextDocument(site.source)
+        await workbenchText({ status: 'service starting', capture: true })
+        await vscode.workspace.getConfiguration('tola', site.source)
+          .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+        await vscode.commands.executeCommand('tola.restart')
+        assert.equal((await symbols(site.source)).length, 1)
+      } finally {
+        await blocked.dispose()
       }
-    }, { content: '' }))
+    }, { content: '= Restored heading\n' })
+  })
 
-  await check('Delayed Enter preserves switched editors', () =>
-    withSite(async (site) => {
-      await withHeldEnter(site, async (document, entering, held) => {
-        const unrelated = await vscode.workspace.openTextDocument(site.plain)
-        await vscode.window.showTextDocument(unrelated)
-        held.release()
-        await entering
-        assert.equal(document.getText(), '- Original\n')
-        assert.equal(unrelated.getText(), 'Unrelated saved source.\n')
+  await check('Closing cancels pending initialization', async () => {
+    if (process.platform === 'win32') return
+    await withSite(async (site) => {
+      const blocked = await blockServerStart(site)
+      const output = vscode.window.createOutputChannel('Tola shutdown check')
+      let started!: () => void
+      const reached = new Promise<void>((resolve) => started = resolve)
+      const channel = new Proxy(output, {
+        get(target, property) {
+          const value = Reflect.get(target, property)
+          if (property === 'appendLine') {
+            return (message: string) => {
+              target.appendLine(message)
+              if (message.startsWith('Starting language services')) started()
+            }
+          }
+          return typeof value === 'function' ? value.bind(target) : value
+        },
       })
-    }))
-
-  await check('Delayed Enter preserves changed buffers', () =>
-    withSite(async (site) => {
-      await withHeldEnter(site, async (document, entering, held) => {
-        await replace(document, 'Replaced while Enter was pending.\n')
-        held.release()
-        await entering
-        assert.equal(document.getText(), 'Replaced while Enter was pending.\n')
-      })
-    }))
+      const connections = new Sites(channel, () => Promise.resolve(), () => {})
+      try {
+        const refreshing = connections.refresh()
+        await reached
+        await connections.close()
+        await refreshing
+      } finally {
+        await connections.close()
+        output.dispose()
+        await vscode.workspace.getConfiguration('tola', site.source)
+          .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+        await vscode.commands.executeCommand('tola.restart')
+        await blocked.dispose()
+      }
+    })
+  })
 
   await check('Delayed transfers discard switched editors', () =>
     withSites(2, async ([first, second]) => {
@@ -558,6 +544,59 @@ export async function run(): Promise<void> {
       const message = await workbenchText({ contains: `Tola built ${site.name}.`, dismiss: true })
       assert.ok(message.includes(site.name), message)
     }))
+
+  await check('Build survives stopped language services', () =>
+    withSite(async (site) => {
+      const service = await recordServiceMessages(site)
+      await symbols(site.source)
+      const pid = await service.servicePid('lsp')
+      assert.ok(pid)
+      process.kill(pid, 'SIGKILL')
+      await workbenchText({ button: 'Show Output' })
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors')
+      await vscode.commands.executeCommand('tola.build')
+      assert.ok((await fs.stat(path.join(site.root, 'public/preview/index.html'))).isFile())
+    }))
+
+  await check('Custom missing configuration stays selected', () =>
+    withSite(async (site) => {
+      const missing = vscode.Uri.file(path.join(site.root, 'missing.toml'))
+      await vscode.workspace.getConfiguration('tola', site.source)
+        .update('configPath', 'missing.toml', vscode.ConfigurationTarget.WorkspaceFolder)
+      await vscode.commands.executeCommand('tola.restart')
+      assert.equal(surfaces.siteSelected(), true)
+      const [task] = await vscode.tasks.fetchTasks({ type: 'tola' })
+      assert.ok(task?.execution instanceof vscode.ProcessExecution)
+      assert.equal(task.execution.args[2], missing.fsPath)
+      await vscode.workspace.openTextDocument(site.source)
+      await waitForDiagnostics(missing, (messages) =>
+        messages.some((message) => message.severity === vscode.DiagnosticSeverity.Error))
+      await fs.writeFile(missing.fsPath, '[site]\ntitle = "Restored site"\n')
+      await waitForDiagnostics(missing, (messages) =>
+        messages.length === 0)
+    }))
+
+  await check('Create Site writes current CLI scaffold', () =>
+    withSite(async (workspace) => {
+      const directory = vscode.Uri.file(path.join(workspace.root, 'created'))
+      await fs.mkdir(directory.fsPath)
+      const open = vscode.window.showOpenDialog
+      vscode.window.showOpenDialog = (() => Promise.resolve([directory])) as typeof open
+      try {
+        const creating = vscode.commands.executeCommand('tola.initSite')
+        await workbenchText({ button: 'Create Site' })
+        await creating
+        const configuration = await fs.readFile(path.join(directory.fsPath, 'tola.toml'), 'utf8')
+        assert.match(configuration, /\[site\]/)
+        assert.ok((await fs.stat(path.join(directory.fsPath, 'site.typ'))).isFile())
+        const settings = JSON.parse(
+          await fs.readFile(path.join(directory.fsPath, '.vscode/settings.json'), 'utf8'),
+        )
+        assert.ok(settings['tola.configPath'])
+      } finally {
+        vscode.window.showOpenDialog = open
+      }
+    }, { documents: true }))
 
   await check('Failed build names the site', () =>
     withSite(async (site) => {
@@ -847,6 +886,7 @@ export async function run(): Promise<void> {
     })
   })
 
+  await runEnterChecks()
   await runPreviewChecks()
   console.log('Tola VS Code extension checks passed.')
 }

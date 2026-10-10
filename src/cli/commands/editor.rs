@@ -10,7 +10,6 @@ use crate::cli::{ConfigFileArgs, EditorCommand, TypstPackageArgs};
 use crate::config::LoadedConfig;
 use crate::editor::{Editor, EditorDirectory, EditorPackageInputs};
 use tola_build::InputScope;
-use tola_build::diagnostic::{Diagnostic, Severity};
 
 pub(in crate::cli) fn run(
     command: EditorCommand,
@@ -76,14 +75,8 @@ pub(in crate::cli) fn run(
                     editor, &settings,
                 ))?;
             }
-            output.summary("Updated editor package support")?;
-            if editors.contains(&Editor::Vscode) {
-                output.status(crate::editor::VSCODE_EXTENSION_NOTICE)?;
-            }
-            output.status(format!(
-                "{}; rerun setup when local package directories change",
-                crate::editor::RESTART_CLIENTS_NOTICE
-            ))?;
+            output.summary("Editor setup complete")?;
+            output.status(crate::editor::startup_instructions(&editors))?;
             Ok(())
         }
         EditorCommand::Packages { config, packages } => {
@@ -132,13 +125,6 @@ fn load_editor_context(
         output.apply_diagnostic_limits(loaded.diagnostics());
     }
     let directory = editor_directory(config, packages, scope, loaded.as_ref())?;
-    if loaded.is_none() {
-        output.diagnostic(&Diagnostic::new(
-            crate::codes::editor::NO_SITE,
-            Severity::Warning,
-            "this directory is not a Tola site",
-        ))?;
-    }
     Ok((loaded, directory))
 }
 

@@ -21,6 +21,7 @@ use crate::world::file::{DiskReadPath, FileRead};
 
 use typst::syntax::FileId;
 
+use crate::reference_occurrence::ObservedOutput;
 use crate::session::{AccessedDeps, CompileSession, failure_evidence};
 
 /// Result of a successful compilation.
@@ -103,7 +104,7 @@ impl CompileResult {
         &self.accessed.package_checks
     }
 
-    /// Get actual disk paths used for read attempts during compilation.
+    /// Physical read paths retained by the compilation.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.accessed.disk_reads
     }
@@ -152,20 +153,19 @@ fn with_session(
     world: &TypstWorld,
     session: CompileSession<'_>,
 ) -> Result<CompileResult, CompileFailure> {
-    let typst::diag::Warned { output, warnings } = typst::compile(&session);
+    let typst::diag::Warned { output, warnings } =
+        typst::compile::<ObservedOutput<typst_html::HtmlDocument>>(&session);
     if let Some(error) = world.font_failure() {
         return Err(CompileFailure::new(error.into(), session.finish()));
     }
 
     let document = match output {
-        Ok(document) => document,
+        Ok(observed) => HtmlDocument::new(observed.into_inner()),
         Err(errors) => {
             let error = session.compilation_error(errors.into_iter().chain(warnings));
             return Err(CompileFailure::new(error, session.finish()));
         }
     };
-
-    let document = HtmlDocument::new(document);
 
     let (accessed, diagnostics, _) = session.finish_with_diagnostics(warnings);
 

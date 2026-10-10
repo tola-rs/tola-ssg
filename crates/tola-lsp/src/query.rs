@@ -592,15 +592,15 @@ mod tests {
     use tola_typst::typst::syntax::Source;
     pub(crate) const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/site:0.0.0": site
-#import "@tola/address:0.0.0": decode-url-path, route, route-to-output, slugify
+#import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify
 #for source in all-sources() {
   let declared = if source.meta == none { none } else { source.meta.at("permalink", default: none) }
   let route = if declared == none {
-    route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
+    join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
   } else {
     decode-url-path(declared)
   }
-  document(route-to-output(route))[#include source.file]
+  document(output-of(route))[#include source.file]
 }
 "#;
     pub(crate) const TWO_DOCUMENT_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
@@ -705,7 +705,7 @@ mod tests {
             }
         }
 
-        /// A session whose site declares a published asset URL, so an `asset-url` argument has one
+        /// A session whose site declares a published asset URL, so a `url-of-asset` argument has one
         /// to answer with.
         pub(crate) fn with_published_assets() -> Self {
             let mut session = Self::with_program(ENTRY_PROGRAM);
@@ -1011,7 +1011,7 @@ mod tests {
         format!(
             r#"#import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/site:0.0.0": site
-#import "@tola/address:0.0.0": route, route-to-output, slugify
+#import "@tola/address:0.0.0": join-route, output-of, slugify
 #import "@tola/schema:0.0.0": describe, optional, schema
 #let page-schema = schema((
 {schema}
@@ -1019,7 +1019,7 @@ mod tests {
 #let declared = parse-sources(all-sources(), page-schema)
 #let kept = declared.filter(source => not source.meta.draft)
 #for source in kept {{
-  document(route-to-output(route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))))[#include source.file]
+  document(output-of(join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))))[#include source.file]
 }}
 "#
         )
@@ -1064,7 +1064,7 @@ mod tests {
     /// the record literal an answer derives its fields from.
     pub(crate) fn mapped_pages() -> String {
         format!(
-            r#"#import "@tola/address:0.0.0": route, route-to-output, slugify
+            r#"#import "@tola/address:0.0.0": join-route, output-of, slugify
 #import "@tola/schema:0.0.0": describe, optional, schema
 #import "@tola/source:0.0.0": parse-sources
 
@@ -1081,7 +1081,7 @@ mod tests {
   let published = declared.filter(record => not record.meta.draft)
   published.map(record => (
     source: record,
-    output: route-to-output(route(record.route-segments.map(segment => slugify(segment, language: "en")))),
+    output: output-of(join-route(record.route-segments.map(segment => slugify(segment, language: "en")))),
     title: entry-title(record, "en"),
   ))
 }}

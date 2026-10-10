@@ -214,7 +214,7 @@ impl UnresolvedReferenceReason {
             } => Some(format!("Point the link at `{suggestion}`")),
             Self::TargetMissing { suggestion: None } => Some(match category {
                 ReferenceCategory::Resource => {
-                    "Declare it in `assets.files` or `assets.trees` in `tola.toml`, or take its URL from `asset-url()`".into()
+                    "Declare it in `assets.files` or `assets.trees` in `tola.toml`, or take its URL from `url-of-asset()`".into()
                 }
                 _ => {
                     "Point the link at a page that exists, or create the page that publishes it"
@@ -570,7 +570,6 @@ fn unchecked_base(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn resolve_reference(
     snapshot: &SiteIndex,
     page: &HtmlPage,

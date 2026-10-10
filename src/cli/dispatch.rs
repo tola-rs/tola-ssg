@@ -118,15 +118,9 @@ pub(crate) fn dispatch(
             commands::lsp::run(config, packages, scope, cancellation, output)
         }
         Commands::Skill(args) => commands::skill::run(args.output.as_deref(), output, cancellation),
-        Commands::Help {
-            targets,
-            interactive,
-            no_mouse,
-        } => commands::help::run(
-            &targets,
+        Commands::Help(args) => commands::help::run(
+            &args,
             crate::i18n::HelpLanguage::resolve(cli.lang),
-            interactive,
-            !no_mouse,
             output,
             cancellation,
         ),

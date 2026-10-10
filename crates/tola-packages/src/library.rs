@@ -133,14 +133,17 @@ pub(crate) fn native_scope() -> Scope {
         Func::from(super::natives::tola_source::data()),
     );
     host.define("slugify", Func::from(super::natives::tola_slug::data()));
-    host.define("route", Func::from(super::natives::tola_route::data()));
     host.define(
-        "route-to-output",
-        Func::from(super::natives::tola_route_to_output::data()),
+        "join-route",
+        Func::from(super::natives::tola_join_route::data()),
     );
     host.define(
-        "output-to-route",
-        Func::from(super::natives::tola_output_to_route::data()),
+        "output-of",
+        Func::from(super::natives::tola_output_of::data()),
+    );
+    host.define(
+        "route-of",
+        Func::from(super::natives::tola_route_of::data()),
     );
     host.define(
         "decode-url-path",
@@ -150,13 +153,10 @@ pub(crate) fn native_scope() -> Scope {
         "plain-text",
         Func::from(super::text::tola_plain_text::data()),
     );
+    host.define("url-of", Func::from(super::natives::tola_url_of::data()));
     host.define(
-        "output-to-url",
-        Func::from(super::natives::tola_output_to_url::data()),
-    );
-    host.define(
-        "asset-url",
-        Func::from(super::assets::tola_asset_url::data()),
+        "url-of-asset",
+        Func::from(super::assets::tola_url_of_asset::data()),
     );
     host.define(
         "render-code",

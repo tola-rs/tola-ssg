@@ -44,7 +44,7 @@ pub(in crate::cli) fn run(
         },
         "package_path": config.package_locations().data().map(|location| location.root()),
         "package_cache_path": config.package_locations().cache().map(|location| location.root()),
-        "vendored_package_path": config.vendor.typst_packages(),
+        "vendored_package_path": config.vendor().typst_packages(),
         "icon_cache_directory": tola_build::BuildResources::icon_cache_directory(config.get_root()),
         "system_fonts": config.system_fonts_allowed(&resources),
         "server": {

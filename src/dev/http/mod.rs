@@ -12,6 +12,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use hyper::{Request, body::Incoming};
 use tola_address::RESERVED_ROOT;
+use tola_build::diagnostic::{Diagnostic, Severity};
 
 use crate::dev::site::CurrentSite;
 
@@ -24,11 +25,13 @@ const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_IDLE_CONNECTION_LIFETIME: Duration = Duration::from_secs(60);
 
 /// Bind a nonblocking listener, trying consecutive ports when needed.
+///
+/// The warning naming a taken requested port comes back for the caller to report with the
+/// startup's other diagnostics.
 pub(super) fn bind_with_port_fallback(
     interface: std::net::IpAddr,
     base_port: u16,
-    output: &crate::cli::output::CommandOutput,
-) -> Result<(TcpListener, SocketAddr)> {
+) -> Result<(TcpListener, SocketAddr, Option<Diagnostic>)> {
     for offset in 0..MAX_PORT_RETRIES {
         let port = base_port.saturating_add(offset);
         let address = SocketAddr::new(interface, port);
@@ -39,25 +42,23 @@ pub(super) fn bind_with_port_fallback(
         });
         match bound {
             Ok((listener, address)) => {
-                if offset > 0 {
-                    output.diagnostic(
-                        &tola_build::diagnostic::Diagnostic::new(
-                            crate::codes::server::PORT_IN_USE,
-                            tola_build::diagnostic::Severity::Warning,
-                            format!("port `{base_port}` is already in use"),
-                        )
-                        .with_note(format!("serving http://{address} instead"))
-                        .with_help(format!("Use `--port {}` to keep this port", address.port())),
-                    )?;
-                }
-                return Ok((listener, address));
+                let fallback = (offset > 0).then(|| {
+                    Diagnostic::new(
+                        crate::codes::server::PORT_IN_USE,
+                        Severity::Warning,
+                        format!("port `{base_port}` is already in use"),
+                    )
+                    .with_note(format!("serving http://{address} instead"))
+                    .with_help(format!("Use `--port {}` to keep this port", address.port()))
+                });
+                return Ok((listener, address, fallback));
             }
             Err(_) if offset + 1 < MAX_PORT_RETRIES => {}
             Err(_) => {
                 let message = format!("Tola could not start the development server on {interface}");
-                let diagnostic = tola_build::diagnostic::Diagnostic::new(
+                let diagnostic = Diagnostic::new(
                     crate::codes::command::FAILED,
-                    tola_build::diagnostic::Severity::Error,
+                    Severity::Error,
                     message.clone(),
                 )
                 .with_help("Choose another address or port with `--interface`/`--port`");
@@ -385,5 +386,21 @@ mod tests {
             .unwrap();
         assert_eq!(closed, 0, "the server closed the idle connection");
         serving.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn taken_base_port_reports_port_in_use() {
+        let interface = "127.0.0.1".parse().unwrap();
+        let held = TcpListener::bind((interface, 0)).unwrap();
+        let taken = held.local_addr().unwrap().port();
+
+        let (_listener, address, fallback) = bind_with_port_fallback(interface, taken).unwrap();
+        let fallback = fallback.expect("a taken base port reports the fallback");
+        assert_eq!(fallback.code, crate::codes::server::PORT_IN_USE);
+        assert!(fallback.message.contains(&taken.to_string()));
+        assert_ne!(address.port(), taken);
+
+        let (_listener, _address, fallback) = bind_with_port_fallback(interface, 0).unwrap();
+        assert!(fallback.is_none(), "a free base port reports nothing");
     }
 }

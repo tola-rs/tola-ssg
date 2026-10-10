@@ -22,13 +22,14 @@ summary = [
   '''
 把 raw 元素渲染成代码，保留 Typst 自己的高亮。
 
-用 show rule 应用：`#show raw: render-code`。在代码里构造的 `raw(...)` 值没有行可渲染，把代码写在文档里。HTML 导出之外，原样返回该元素。
+用 show rule 应用：`#show raw: render-code`。Typst 先准备元素的行与高亮，再把它交给 show rule。把代码围栏或 `#raw(...)` 放进文档；直接调用 `render-code(raw(...))` 会跳过准备阶段，因此报错。HTML 导出之外，原样返回该元素。
 
 每个块长什么样，由 `raw.theme` 在 Typst 高亮之前决定：`auto` 用 Typst 默认主题，路径或主题字节用该主题，`none` 关闭高亮。主题写在代码块处，用 `#set raw(theme: …)` 或 `#show raw.where(…)` 规则。
 
-Example - 用 show rule 渲染文档中的代码块：
+把 `code-stylesheet()` 加载到文档 head 中，让浏览器应用渲染后的 token 样式。用 `raw.theme` 设置主要外观，用 `dark-theme` 设置深色外观。
+
+Example - 在完整页面中用浅色与深色主题渲染代码：
 ''',
-  'Example - 为站点深色状态传入一个主题值：',
   '',
 ]
 
@@ -46,11 +47,10 @@ summary = [
   '''
 代码样式表挂载到的浏览器 URL。
 
-样式表给 `render-code` 渲染出的代码上色。需要给 head 条目加自己的属性时用这个 URL；`code-stylesheet` 返回现成的条目。
+样式表给 `render-code` 渲染出的代码上色。需要给 head 条目加自己的属性时用这个 URL；`code-stylesheet` 返回现成的条目。每次构建都会在 `_tola/` 下发布共享样式表，这个 URL 已经包含 `site.base-path`。
 
-Example - 检查样式表 URL 是否为根相对路径：
+Example - 给 head 条目加上自己的属性：
 ''',
-  'Example - 给 head 条目加上自己的属性：',
   '',
 ]
 
@@ -64,6 +64,5 @@ summary = [
 
 Example - 在文档 head 中加载样式表：
 ''',
-  'Example - 检查条目指向的样式表 URL：',
   '',
 ]

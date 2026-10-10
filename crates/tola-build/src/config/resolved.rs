@@ -39,7 +39,7 @@ pub struct ResolvedSiteConfig {
 
     pub(crate) icons: crate::config::section::IconsConfig,
 
-    pub vendor: crate::config::section::VendorConfig,
+    pub(crate) vendor: crate::config::section::VendorConfig,
 
     // Refresh and candidate configs retain the declared workspace, not a path derived from their selection.
     pub(crate) vendor_workspace: Option<PathBuf>,
@@ -129,6 +129,11 @@ impl ResolvedSiteConfig {
 
     pub fn icons(&self) -> &crate::config::section::IconsConfig {
         &self.icons
+    }
+
+    /// Vendor settings whose directory has been resolved against the site root.
+    pub fn vendor(&self) -> &crate::config::section::VendorConfig {
+        &self.vendor
     }
 
     /// Site root directory.

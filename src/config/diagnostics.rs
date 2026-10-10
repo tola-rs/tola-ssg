@@ -11,8 +11,7 @@
 use serde::{Deserialize, Serialize};
 use tola_config::Config;
 
-/// Limits how many diagnostics the terminal shows per batch; build results and editor
-/// diagnostics stay complete.
+/// Caps how many diagnostics the terminal shows.
 #[derive(Debug, Clone, Serialize, Deserialize, Config)]
 #[serde(default)]
 #[config(section = "diagnostics")]
@@ -47,13 +46,14 @@ max_errors = 3
 max_warnings = 3
 ```
 
-Set a limit to `0` to hide that severity from the terminal; logs and editor reports stay complete.
-A batch that exceeds a limit ends by naming how many diagnostics it hid:
+Set a limit to `0` to hide that severity from the terminal — that is terminal output only: the
+`--log-file` record and the diagnostics your editor gets over LSP stay complete. Paths in the
+terminal render relative to where you run the command; the editor lists diagnostics at the open file
+and its lines. A batch that exceeds a limit ends by naming how many diagnostics it hid:
 
 ```
 3 errors not shown; increase `diagnostics.max_errors` to show more
 ```
 
-These limits never change whether a build succeeds. `[build.references]` decides how a broken
-reference is reported, `error` among its levels.";
+`[diagnostics]` does not change the outcome of the build itself.";
 }

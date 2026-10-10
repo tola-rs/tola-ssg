@@ -8,6 +8,7 @@
 use crate::diagnostic::package_imports::PackageImporters;
 use crate::diagnostic::{CompileError, Diagnostics};
 use crate::introspection::{MetadataDeclaration, label_selector, metadata_declaration};
+use crate::reference_occurrence::ObservedOutput;
 use crate::session::{AccessedDeps, CompileSession, failure_evidence};
 use crate::world::TypstWorld;
 use crate::world::file::{DiskReadPath, FileRead};
@@ -94,7 +95,7 @@ pub fn compile_bundle_world(
         ));
     }
     let session = CompileSession::start(world);
-    let compiled = typst::compile::<Bundle>(&session);
+    let compiled = typst::compile::<ObservedOutput<Bundle>>(&session);
     let warnings = compiled.warnings;
 
     if cancellation.is_cancelled() {
@@ -108,7 +109,7 @@ pub fn compile_bundle_world(
         return Err(BundleCompileFailure::new(session.finish(), error.into()));
     }
     let bundle = match compiled.output {
-        Ok(bundle) => bundle,
+        Ok(observed) => observed.into_inner(),
         Err(errors) => {
             let error = session.compilation_error(errors.into_iter().chain(warnings));
             let accessed = session.finish();
@@ -234,7 +235,7 @@ impl BundleCompilation {
         self.importers.importing(package)
     }
 
-    /// Actual disk paths used for read attempts during compilation.
+    /// Physical read paths retained by the compilation.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.accessed.disk_reads
     }
@@ -283,6 +284,43 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let world = world_for(&dir, "main.typ", source);
         compile_bundle_world(&world, &BundleCancellation::default()).unwrap()
+    }
+
+    #[test]
+    fn repeated_compilation_keeps_package_evidence() {
+        let dir = TempDir::new().unwrap();
+        let packages = dir.path().join("packages");
+        let package = packages.join("local/demo/1.0.0");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("typst.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n",
+        )
+        .unwrap();
+        fs::write(package.join("lib.typ"), "#let text = \"payload\"").unwrap();
+        let locations = crate::PackageLocations::from_absolute_roots(Some(packages), None).unwrap();
+        let files = Arc::new(FileResolver::from_package_locations(
+            locations,
+            crate::PackageFetchPolicy::LocalOnly,
+        ));
+        let world = world_with_files(
+            &dir,
+            "site.typ",
+            "#import \"@local/demo:1.0.0\": text\n#asset(\"text.txt\", text)",
+            files,
+        );
+        let first = compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+        let second = compile_bundle_world(&world, &BundleCancellation::default()).unwrap();
+        assert!(!first.package_checks().is_empty());
+        assert_eq!(second.package_checks(), first.package_checks());
+        assert_eq!(second.file_reads(), first.file_reads());
+        let first = first
+            .export_default(&BundleCancellation::default(), None)
+            .unwrap();
+        let second = second
+            .export_default(&BundleCancellation::default(), None)
+            .unwrap();
+        assert_eq!(first.entries()[0].bytes(), second.entries()[0].bytes());
     }
 
     fn world_builder(dir: &TempDir, entry: &str, source: &str) -> crate::world::WorldBuilder {
@@ -1009,6 +1047,8 @@ mod tests {
     }
     mod semantic_bundle {
         use std::fs;
+        use std::sync::Arc;
+        use typst::LibraryExt as _;
 
         use crate::{
             BundleCancellation, BundleEntryKind, BundleOptions, TypstWorld, compile_bundle_world,
@@ -1215,6 +1255,52 @@ mod tests {
                     .collect::<Vec<_>>(),
                 official.warnings.iter().collect::<Vec<_>>(),
             );
+        }
+
+        /// Replacing the link rule to observe occurrences changes nothing a site can see.
+        #[test]
+        fn observing_links_keeps_the_export_unchanged() {
+            let source = r#"
+        #set heading(numbering: "1.")
+        #show link.where(dest: "/from/"): _ => link("/to/")[Rewritten]
+        #document("index.html")[
+          #link("/from/")[Link] @target #link(<target>)[Ref]
+          #html.frame[#link(<target>)[Framed]]
+        ]
+        #document("to/index.html")[
+          = Target <target>
+        ]
+        "#;
+            let directory = TempDir::new().unwrap();
+            let main = directory.path().join("site.typ");
+            fs::write(&main, source).unwrap();
+            let observed = super::world_for(&directory, "site.typ", source);
+            let plain = TypstWorld::builder(&main, directory.path())
+                .with_shared_library(Arc::new(typst::utils::LazyHash::new(
+                    typst::Library::builder()
+                        .with_features(typst::Features::from_iter([
+                            typst::Feature::Html,
+                            typst::Feature::Bundle,
+                        ]))
+                        .build(),
+                )))
+                .with_local_cache()
+                .no_fonts()
+                .build(&BundleCancellation::default())
+                .expect("valid test world");
+
+            let options = BundleOptions::default();
+            let observed = official_export(&observed, &options).unwrap();
+            let plain = official_export(&plain, &options).unwrap();
+            assert_eq!(observed.warnings, plain.warnings);
+            assert_eq!(observed.entries.len(), plain.entries.len());
+            for ((path, kind, bytes), (plain_path, plain_kind, plain_bytes)) in
+                observed.entries.iter().zip(&plain.entries)
+            {
+                assert_eq!(path, plain_path);
+                assert_eq!(kind, plain_kind);
+                assert_eq!(bytes.as_slice(), plain_bytes.as_slice(), "{path:?}");
+            }
         }
 
         #[test]

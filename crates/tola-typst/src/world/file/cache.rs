@@ -10,7 +10,6 @@ use typst::diag::{FileError, FileResult};
 use typst::foundations::Bytes;
 use typst::syntax::{FileId, Source};
 
-use super::FileResolver;
 use super::evidence::{Loaded, ReadAttempt};
 use super::read::decode_utf8;
 
@@ -72,35 +71,11 @@ impl SharedFileCache {
         });
     }
 
-    /// Read and cache source text using an explicit file resolver.
-    ///
-    /// The read happens before the per-file lock, never under it.
-    pub(crate) fn source_with_files(
-        &self,
-        id: FileId,
-        root: &Path,
-        files: &FileResolver,
-    ) -> ReadAttempt<Loaded<Source>> {
-        let observation = files.read_attempt(id, root);
-        self.source_from_observation(id, root, observation)
-    }
-
-    /// Read and cache raw bytes using an explicit file resolver.
-    pub(crate) fn file_with_files(
-        &self,
-        id: FileId,
-        root: &Path,
-        files: &FileResolver,
-    ) -> ReadAttempt<Loaded<Bytes>> {
-        let observation = files.read_attempt(id, root);
-        self.file_from_observation(id, root, observation)
-    }
-
     pub(crate) fn source_from_observation(
         &self,
         id: FileId,
         root: &Path,
-        observation: ReadAttempt<Arc<[u8]>>,
+        observation: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
         self.with_slot(root, id, |slot| slot.source_from_observation(observation))
     }
@@ -109,7 +84,7 @@ impl SharedFileCache {
         &self,
         id: FileId,
         root: &Path,
-        observation: ReadAttempt<Arc<[u8]>>,
+        observation: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
         self.with_slot(root, id, |slot| slot.file_from_observation(observation))
     }
@@ -126,10 +101,9 @@ impl SharedFileCache {
         use_slot(&mut value)
     }
 
-    /// How many file slots this cache's map currently owns, across every root it has seen.
+    /// Number of file slots owned by the cache, across all compilation roots.
     ///
-    /// A slot a reader has already cloned stays counted here after an eviction that dropped it from
-    /// the map, so this reports the cache's own reachable entries, not every live `Source`.
+    /// Sources returned to callers can outlive evicted slots.
     pub fn retained_slots(&self) -> usize {
         self.roots.read().values().map(FxHashMap::len).sum()
     }
@@ -198,8 +172,8 @@ impl<T: Clone> SlotCell<T> {
 
     fn get_or_init(
         &mut self,
-        load: impl FnOnce() -> ReadAttempt<Arc<[u8]>>,
-        process: impl FnOnce(Arc<[u8]>, Option<T>) -> FileResult<T>,
+        load: impl FnOnce() -> ReadAttempt<Bytes>,
+        process: impl FnOnce(Bytes, Option<T>) -> FileResult<T>,
     ) -> ReadAttempt<Loaded<T>> {
         let attempt = load();
         let fingerprint = match &attempt.result {
@@ -248,7 +222,7 @@ impl FileSlot {
 
     fn source_from_observation(
         &mut self,
-        observation: ReadAttempt<Arc<[u8]>>,
+        observation: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
         self.source.get_or_init(
             || observation,
@@ -267,23 +241,33 @@ impl FileSlot {
 
     fn file_from_observation(
         &mut self,
-        observation: ReadAttempt<Arc<[u8]>>,
+        observation: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
-        self.file
-            .get_or_init(|| observation, |data, _| Ok(Bytes::new(data)))
+        self.file.get_or_init(|| observation, |bytes, _| Ok(bytes))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::file::FileResolver;
     use crate::world::file::{FileRead, ReadEvidence, ReadLocator, ReadOrigin};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    fn loaded_bytes(bytes: &[u8]) -> ReadAttempt<Arc<[u8]>> {
-        let value: Arc<[u8]> = Arc::from(bytes);
+    fn byte_read(files: &FileResolver, id: FileId, root: &Path) -> ReadAttempt<Bytes> {
+        let read = files.read_attempt(id, root);
+        ReadAttempt {
+            result: read.result.map(Bytes::new),
+            reads: read.reads,
+            disk_reads: read.disk_reads,
+            package_checks: read.package_checks,
+        }
+    }
+
+    fn loaded_bytes(bytes: &[u8]) -> ReadAttempt<Bytes> {
+        let value = Bytes::new(bytes.to_vec());
         let evidence = ReadEvidence::new(ReadLocator::Root(PathBuf::from("test.typ")), &value);
         let read = FileRead::new(evidence, ReadOrigin::Provider);
         ReadAttempt {
@@ -317,7 +301,7 @@ mod tests {
         assert_eq!(repeated.value, "hello");
         assert_eq!(repeated.read, first.read);
 
-        let mut failed: SlotCell<Arc<[u8]>> = SlotCell::new();
+        let mut failed: SlotCell<Bytes> = SlotCell::new();
         let error = FileError::NotFound(PathBuf::from("missing.typ"));
         let first = failed
             .get_or_init(
@@ -349,11 +333,11 @@ mod tests {
         let files = FileResolver::new();
 
         let first_source = cache
-            .source_with_files(id, first.path(), &files)
+            .source_from_observation(id, first.path(), byte_read(&files, id, first.path()))
             .result
             .unwrap();
         let second_source = cache
-            .source_with_files(id, second.path(), &files)
+            .source_from_observation(id, second.path(), byte_read(&files, id, second.path()))
             .result
             .unwrap();
 

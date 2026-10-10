@@ -437,8 +437,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "legacy-serialization")]
-    #[allow(deprecated)]
     #[test]
     fn ranges_survive_excerpt_truncation() {
         let text = format!("{}🦊alpha\r\nβ🦊z", " ".repeat(5000));
@@ -492,17 +490,6 @@ mod tests {
         assert_eq!(
             resolved.location.truncation.omitted_bytes,
             5000 + "🦊alphaβ🦊z".len() - "alpha".len()
-        );
-        let serialized = serde_json::to_string(&resolved.to_resolved()).unwrap();
-        let decoded: crate::ResolvedDiagnostic = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(decoded.source.unwrap().range, Some(expected));
-        assert_eq!(
-            decoded.hints[0].source.as_ref().unwrap().range,
-            Some(expected)
-        );
-        assert_eq!(
-            decoded.trace[0].source.as_ref().unwrap().range.unwrap().end,
-            expected.end
         );
     }
 

@@ -24,7 +24,7 @@ pub(crate) struct EvaluatedSiteProgram {
         Vec<tola_typst::FileRead>,
         Vec<tola_typst::PackageCheck>,
     )>,
-    candidate_files: Arc<tola_typst::CandidateFileSnapshot>,
+    candidate_files: Arc<tola_typst::FileSnapshot>,
     package_bindings: crate::package::SiteBindings,
 }
 
@@ -399,9 +399,9 @@ Second
         let compiled = compile_sources(
             &directory,
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route-to-output
+#import "@tola/address:0.0.0": output-of
 #for source in all-sources().filter(source => not source.meta.at("draft", default: false)) {
-  document(route-to-output(source.meta.permalink), format: "html")[#include source.file]
+  document(output-of(source.meta.permalink), format: "html")[#include source.file]
 }"#,
             &[
                 (
@@ -437,9 +437,9 @@ Second
             r#"#document("index.html", format: "html")[Home]"#,
             &[(
                 "a..typ",
-                r#"#import "@tola/address:0.0.0": route
+                r#"#import "@tola/address:0.0.0": join-route
 #import "@tola/source:0.0.0": current-source
-#let route = route(current-source().route-segments)
+#let route = join-route(current-source().route-segments)
 #import "@tola/source:0.0.0": tola-meta
 #tola-meta((permalink: route))"#,
             )],
@@ -486,9 +486,9 @@ Second
         let error = compile_sources(
             &directory,
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources() {
-  document(route-to-output(route(source.route-segments)), format: "html")[#include source.file]
+  document(output-of(join-route(source.route-segments)), format: "html")[#include source.file]
 }"#,
             &sources,
             "",
@@ -505,10 +505,10 @@ Second
         let compiled = compile_sources(
             &directory,
             r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": route, route-to-output
+#import "@tola/address:0.0.0": join-route, output-of
 #for source in all-sources() {
-  assert.eq(route(source.route-segments), if source.id == "index.typ" { "/" } else { "/about/" })
-  document(route-to-output(source.meta.permalink), format: "html")[
+  assert.eq(join-route(source.route-segments), if source.id == "index.typ" { "/" } else { "/about/" })
+  document(output-of(source.meta.permalink), format: "html")[
     #source.id
     #include source.file
   ]

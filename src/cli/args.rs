@@ -232,7 +232,7 @@ pub enum Commands {
         packages: TypstPackageArgs,
     },
 
-    /// Print or export the Tola and Typst authoring skill.
+    /// Print or export the Tola site authoring skill.
     Skill(SkillArgs),
 
     /// Show resolved site paths and selected settings as JSON.
@@ -251,22 +251,24 @@ pub enum Commands {
     /// Generate a roff manual page.
     Manpage(ManpageArgs),
 
-    /// Show the command overview, configuration tables, or bundled package documentation.
-    Help {
-        /// Quoted TOML table header, or `@tola/package` and exports.
-        #[arg(value_name = "TARGET", num_args = 0..)]
-        targets: Vec<String>,
+    /// Read configuration and package documentation.
+    Help(HelpArgs),
+}
 
-        /// Read the page as an interactive view with cross-references, search, and scrolling.
-        #[arg(long)]
-        interactive: bool,
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct HelpArgs {
+    /// `"[TABLE]"`, `"@tola/NAME" [EXPORT...]`, or a `tola-help://` address.
+    #[arg(value_name = "TARGET", num_args = 0..)]
+    pub targets: Vec<String>,
 
-        /// Do not capture the pointer: the wheel and clicks do nothing, and the terminal keeps
-        /// its own text selection. Without this the view follows links on click and scrolls on
-        /// the wheel, which turns the terminal's own selection off while it runs.
-        #[arg(long)]
-        no_mouse: bool,
-    },
+    /// Browse documentation and source files in the terminal.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// Leave mouse selection to the terminal; use the keyboard to navigate. The reader's `c`
+    /// key hands the pointer over and back.
+    #[arg(long)]
+    pub no_mouse: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -337,7 +339,7 @@ pub struct InitArgs {
     pub features: Vec<String>,
 
     /// Choose the site directory, features, and editors in a terminal.
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     pub interactive: bool,
 
     /// Write editor settings (Neovim prints instructions); repeat or separate with commas.
@@ -437,7 +439,7 @@ pub struct InspectProjectionArgs {
     pub build: BuildOverrideArgs,
 
     /// Browse the rows in a terminal table with filtering, row detail, and export.
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     pub interactive: bool,
 }
 
@@ -448,7 +450,7 @@ pub struct IconInspectArgs {
     pub namespace: Option<String>,
 
     /// Browse the rows in a terminal table with filtering, row detail, and export.
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     pub interactive: bool,
 }
 
@@ -479,7 +481,7 @@ pub struct SourceInspectArgs {
     pub output: Option<PathBuf>,
 
     /// Browse the rows in a terminal table with filtering, row detail, and export.
-    #[arg(long)]
+    #[arg(short = 'i', long)]
     pub interactive: bool,
 }
 
@@ -592,7 +594,7 @@ impl Commands {
             Self::Config { .. } => "config",
             Self::Completions(_) => "completions",
             Self::Manpage(_) => "manpage",
-            Self::Help { .. } => "help",
+            Self::Help(_) => "help",
         }
     }
 
@@ -1013,7 +1015,7 @@ mod tests {
         assert!(
             rendered.contains(
                 "[possible values: starter-stylesheet, canonical, feed, sitemap, open-graph, \
-                 twitter-card, pagefind, deno-toolchain, tailwind-css]"
+                 twitter-card, pagefind, deno-toolchain, tailwind-css, justfile]"
             ),
             "{rendered}"
         );

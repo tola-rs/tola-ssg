@@ -4,17 +4,17 @@ import { pathToFileURL } from 'node:url'
 
 /** Every content source renders, so an unsaved edit to any of them reaches the compiler. */
 export const RENDER_EVERY_SOURCE = `#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": decode-url-path, route, route-to-output, slugify
+#import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify
 #for source in all-sources() {
   let declared = if source.meta == none { none } else {
     source.meta.at("permalink", default: none)
   }
   let route = if declared == none {
-    route(source.route-segments.map(segment => slugify(segment)))
+    join-route(source.route-segments.map(segment => slugify(segment)))
   } else {
     decode-url-path(declared)
   }
-  document(route-to-output(route), format: "html")[#include source.file]
+  document(output-of(route), format: "html")[#include source.file]
 }
 `
 

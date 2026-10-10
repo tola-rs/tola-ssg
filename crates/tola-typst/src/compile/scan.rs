@@ -21,9 +21,6 @@
 //! ));
 //! ```
 
-#[cfg(feature = "legacy-serialization")]
-use serde_json::Value as JsonValue;
-
 use typst::World;
 use typst::comemo::Track;
 use typst::diag::SourceDiagnostic;
@@ -42,9 +39,6 @@ use crate::introspection::{
     MetadataCardinalityError, MetadataDeclaration, label_selector, metadata_declaration,
     unique_metadata_value,
 };
-#[cfg(feature = "legacy-serialization")]
-#[allow(deprecated)]
-use crate::introspection::{json_all, json_first};
 use crate::world::TypstWorld;
 use crate::world::file::{DiskReadPath, FileRead};
 
@@ -235,24 +229,6 @@ impl ScanResult {
         declarations
     }
 
-    /// Serialize one metadata value at an explicit JSON boundary.
-    #[cfg(feature = "legacy-serialization")]
-    #[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-    #[allow(deprecated)]
-    #[inline]
-    pub fn metadata_json_first(&self, label: &str) -> serde_json::Result<Option<JsonValue>> {
-        json_first(self.metadata_first(label))
-    }
-
-    /// Serialize all metadata values at an explicit JSON boundary.
-    #[cfg(feature = "legacy-serialization")]
-    #[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-    #[allow(deprecated)]
-    #[inline]
-    pub fn metadata_json_all(&self, label: &str) -> serde_json::Result<Vec<JsonValue>> {
-        json_all(self.metadata_all(label))
-    }
-
     /// Get the raw eager module content tree.
     pub fn content(&self) -> &Content {
         &self.content
@@ -273,7 +249,7 @@ impl ScanResult {
         &self.accessed.package_checks
     }
 
-    /// Get actual disk paths used for read attempts during scanning.
+    /// Physical read paths retained by the scan.
     pub fn disk_reads(&self) -> &[DiskReadPath] {
         &self.accessed.disk_reads
     }

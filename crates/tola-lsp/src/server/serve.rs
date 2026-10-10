@@ -517,7 +517,7 @@ mod tests {
     fn narrowing_actions_follow_observed_sources() {
         const PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/site:0.0.0": site
-#import "@tola/address:0.0.0": route, route-to-output, slugify
+#import "@tola/address:0.0.0": join-route, output-of, slugify
 #import "@tola/schema:0.0.0": describe, optional, schema
 #let page-schema = schema((
   draft: describe(optional(bool, default: false), "keeps the page out of the published site"),
@@ -525,7 +525,7 @@ mod tests {
 #let declared = parse-sources(all-sources(), page-schema)
 #let kept = declared.filter(source => not source.meta.draft)
 #for source in kept {
-  document(route-to-output(route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))))[#include source.file]
+  document(output-of(join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))))[#include source.file]
 }
 "#;
         let site = SiteDirectory::new();

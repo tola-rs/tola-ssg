@@ -5,15 +5,14 @@ use std::sync::Arc;
 use typst::Library;
 use typst::utils::LazyHash;
 
-use super::file::LocalFileCache;
 use super::snapshot::SourceSnapshot;
-use crate::world::file::{CandidateFileSnapshot, SharedFileCache};
+use crate::world::file::{FileResolver, FileSnapshot, SharedFileCache};
 use crate::world::font::FontStore;
 use crate::world::library::create_library_with_inputs;
 
 pub(crate) enum FileCacheMode {
     /// Task-local cache, no sharing between tasks.
-    Local(LocalFileCache),
+    Local,
     /// Shared cache owned by the caller.
     Shared(Arc<SharedFileCache>),
     /// Pre-built source snapshot plus a shared fallback cache.
@@ -23,16 +22,16 @@ pub(crate) enum FileCacheMode {
         /// Shared cache used for files that are not covered by the snapshot.
         fallback: Arc<SharedFileCache>,
     },
-    /// One candidate-scoped view of explicit and first-observed files.
-    Candidate {
-        files: Arc<CandidateFileSnapshot>,
+    /// An externally owned frozen file view.
+    Frozen {
+        files: Arc<FileSnapshot>,
         parsed: Arc<SharedFileCache>,
     },
 }
 
 impl FileCacheMode {
     pub(crate) fn local() -> Self {
-        Self::Local(LocalFileCache::new())
+        Self::Local
     }
 
     pub(crate) fn shared(cache: Arc<SharedFileCache>) -> Self {
@@ -46,12 +45,18 @@ impl FileCacheMode {
         }
     }
 
-    pub(crate) fn candidate(
-        files: Arc<CandidateFileSnapshot>,
-        parsed: Arc<SharedFileCache>,
-    ) -> Self {
-        Self::Candidate { files, parsed }
+    pub(crate) fn frozen(files: Arc<FileSnapshot>, parsed: Arc<SharedFileCache>) -> Self {
+        Self::Frozen { files, parsed }
     }
+}
+
+pub(crate) enum FileAccess {
+    Local(Arc<FileSnapshot>),
+    Live {
+        files: Arc<FileResolver>,
+        sources: Option<Arc<SourceSnapshot>>,
+    },
+    Frozen(Arc<FileSnapshot>),
 }
 
 #[derive(Clone)]

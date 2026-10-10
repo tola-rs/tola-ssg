@@ -7,6 +7,9 @@
 //! inside `html.frame()`, but is not evaluated during eager scans. A caller-supplied
 //! `sys.inputs.at("format")` is available during scans but does not change inside
 //! frames. Use `target()` when a show rule must distinguish frame rendering.
+//!
+//! Both constructors install the reference-occurrence observer; [`crate::reference_occurrence`]
+//! records why a compilation observes at all.
 
 use std::sync::LazyLock;
 
@@ -14,11 +17,14 @@ use typst::foundations::Dict;
 use typst::utils::LazyHash;
 use typst::{Feature, Features, Library, LibraryExt};
 
+use crate::reference_occurrence;
+
 /// Lazily initialized standard library with HTML and Bundle support, without inputs.
 pub static GLOBAL_LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| {
-    let library = Library::builder()
+    let mut library = Library::builder()
         .with_features(Features::from_iter([Feature::Html, Feature::Bundle]))
         .build();
+    reference_occurrence::install(&mut library);
     LazyHash::new(library)
 });
 
@@ -57,11 +63,12 @@ pub static GLOBAL_LIBRARY: LazyLock<LazyHash<Library>> = LazyLock::new(|| {
 /// by #author
 /// ```
 pub fn create_library_with_inputs(inputs: Dict) -> LazyHash<Library> {
-    Library::builder()
+    let mut library = Library::builder()
         .with_inputs(inputs)
         .with_features(Features::from_iter([Feature::Html, Feature::Bundle]))
-        .build()
-        .into()
+        .build();
+    reference_occurrence::install(&mut library);
+    library.into()
 }
 
 #[cfg(test)]

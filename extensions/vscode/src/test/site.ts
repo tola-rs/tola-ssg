@@ -39,26 +39,19 @@ export function recordOutputChannels(): void {
     })) as typeof vscode.window.createOutputChannel
 }
 
-/** Every line the extension has written to an output channel, in the order it wrote them. */
-export function outputLog(): string {
-  return channelLog.join('\n')
-}
-
-/** Wait for a line the extension writes to hold `text`, so a case reads what the author reads. */
+/** Wait for the extension's next output line holding `text`, armed when the call is made. */
 export async function waitForOutput(text: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const seen = (line: string) => {
+    const arrival = channelLines.event((line) => {
       if (!line.includes(text)) return
       clearTimeout(deadline)
       arrival.dispose()
       resolve()
-    }
-    const arrival = channelLines.event(seen)
+    })
     const deadline = setTimeout(() => {
       arrival.dispose()
       reject(new Error(`The output channel never held ${text}`))
     }, 15_000)
-    seen(outputLog())
   })
 }
 
@@ -350,6 +343,8 @@ export type BlockedStart = {
   release(): Promise<void>
   /** Release the service and remove what held it. */
   close(): Promise<void>
+  /** Remove the gate after cancellation has ended the blocked service. */
+  dispose(): Promise<void>
 }
 
 /**
@@ -384,12 +379,14 @@ export async function blockServerStart(site: EditorSite): Promise<BlockedStart> 
   await reached
   let released: Promise<void> | undefined
   const release = () => released ??= fs.open(gate, 'w').then((handle) => handle.close())
+  const dispose = () => fs.rm(directory, { recursive: true, force: true })
   return {
     release,
     close: async () => {
       await release()
-      await fs.rm(directory, { recursive: true, force: true })
+      await dispose()
     },
+    dispose,
   }
 }
 

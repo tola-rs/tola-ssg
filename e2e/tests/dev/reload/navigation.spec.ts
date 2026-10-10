@@ -638,10 +638,10 @@ test('mounted stylesheet updates in place', async ({ page, sites }) => {
     beforeStart: async (root) => {
       await writeFile(
         join(root, 'site.typ'),
-        `#import "@tola/address:0.0.0": asset-url
+        `#import "@tola/address:0.0.0": url-of-asset
 #document("index.html", format: "html")[
   #html.html(lang: "en")[
-    #html.head[#html.link(rel: "stylesheet", href: asset-url("/theme.css"))]
+    #html.head[#html.link(rel: "stylesheet", href: url-of-asset("/theme.css"))]
     #html.body[#html.elem("p", attrs: (id: "text"))[First]]
   ]
 ]

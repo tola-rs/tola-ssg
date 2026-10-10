@@ -71,6 +71,7 @@ export async function selectSite(
   folder: vscode.WorkspaceFolder,
   config: vscode.Uri,
 ): Promise<Selection | undefined> {
+  let exists = true
   try {
     const stat = await vscode.workspace.fs.stat(config)
     if (!(stat.type & vscode.FileType.File)) {
@@ -79,14 +80,21 @@ export async function selectSite(
       )
     }
   } catch (error) {
-    if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') return undefined
-    throw error
+    if (!(error instanceof vscode.FileSystemError && error.code === 'FileNotFound')) throw error
+    const configured = vscode.workspace.getConfiguration('tola', folder.uri).get<string>(
+      'configPath',
+      'tola.toml',
+    )
+    if (configured === 'tola.toml') return undefined
+    exists = false
   }
-  const [workspaceRoot, configurationRoot, configurationFile] = await Promise.all([
-    realpath(folder.uri.fsPath),
-    realpath(path.dirname(config.fsPath)),
-    realpath(config.fsPath),
-  ])
+  const [workspaceRoot, configurationRoot, configurationFile] = exists
+    ? await Promise.all([
+      realpath(folder.uri.fsPath),
+      realpath(path.dirname(config.fsPath)),
+      realpath(config.fsPath),
+    ])
+    : [folder.uri.fsPath, path.dirname(config.fsPath), config.fsPath]
   // The site root is the configuration's directory; everything the server mirrors lives under it,
   // plus whatever package directories the settings name.
   const sourceRoot = containsFile(workspaceRoot, configurationRoot)

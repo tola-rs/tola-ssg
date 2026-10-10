@@ -47,7 +47,7 @@ pub(in crate::cli) fn run(
         .as_deref()
         .unwrap_or_else(|| Path::new("tola.toml"));
     ensure!(
-        config.vendor.path.is_some(),
+        config.vendor().path.is_some(),
         "this site does not declare a `[vendor] path`; add `path = \"vendor\"` to `{}`",
         config_name.display()
     );
@@ -676,7 +676,7 @@ impl VendorReplacement {
             )
         })?;
         let declared = config
-            .vendor
+            .vendor()
             .path
             .as_deref()
             .context("vendor path is missing")?;
@@ -691,7 +691,7 @@ impl VendorReplacement {
         );
         let root = site.join(relative);
         let workspace = config
-            .vendor
+            .vendor()
             .workspace_path()
             .context("vendor path must name a directory below the site root")?;
         let workspace = site.join(

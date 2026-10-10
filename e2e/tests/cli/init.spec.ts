@@ -27,7 +27,7 @@ test('init writes one scaffold everywhere', async ({ binary, directory: temporar
 
     expectExited(completed)
     expect(completed.stdout).toBe('')
-    expect(await readdir(join(root, 'content'))).toEqual([])
+    expect(await readdir(join(root, 'content'))).toEqual(['index.typ'])
     scaffolds.push({
       configuration: await readFile(join(root, 'tola.toml'), 'utf8'),
       program: await readFile(join(root, 'site.typ'), 'utf8'),
@@ -73,8 +73,8 @@ test('internal log records the scaffold', async ({ binary, directory: temporary 
   expect(contentStep).toBeGreaterThan(directoryStep)
   expect(developmentStep).toBeGreaterThan(contentStep)
   expect(completed.stderr).toContain('tola help "[site]"')
-  expect(completed.stderr).toContain('tola help "@tola/address" slugify output-to-url')
-  expect(await readdir(join(root, 'content'))).toEqual([])
+  expect(completed.stderr).toContain('tola help "@tola/address" slugify url-of')
+  expect(await readdir(join(root, 'content'))).toEqual(['index.typ'])
   expect(await readFile(join(root, 'tola.toml'), 'utf8')).toContain('[build]')
   const records = await readLogRecords(log)
   expect(records[0]!.fields).toMatchObject({ kind: 'command_started', command: 'init' })
@@ -302,20 +302,16 @@ test('interactive init writes the selected preset', async ({ binary, directory: 
   })
 })
 
-test('interactive file selection uses its available writers', async ({ binary, directory: root }) => {
+test('interactive justfile feature decides the derived file', async ({ binary, directory: root }) => {
   test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await withInteractiveInit(binary, root, ['--preset', 'minimal'], async (init) => {
+  await withInteractiveInit(binary, root, ['--preset', 'rich'], async (init) => {
     await expect.poll(() => screenText(init.output.stdout())).toContain('preset  [1] rich')
     await filterInit(init, 'justfile')
+    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] justfile')
     init.running.child.stdin.write(' ')
-    await expect.poll(() => screenText(init.output.stdout())).toContain(
-      'check pagefind or deno-toolchain or tailwind-css',
-    )
-    await filterInit(init, 'static/web-assets/css/site.css', 'justfile')
-    init.running.child.stdin.write(' ')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] static/web-assets/css/site.css')
+    await expect.poll(() => screenText(init.output.stdout())).toContain('[ ] justfile')
     await confirmInteractiveInit(init)
-    expect(await readdir(join(init.site, 'static/web-assets/css'))).toEqual(['site.css'])
+    expect(await readdir(join(init.site, 'static/tailwind-sources'))).toEqual(['site.css'])
     expect(await readdir(init.site)).not.toContain('justfile')
   })
 })
@@ -329,6 +325,9 @@ test('interactive feature selection completes the toolchain', async ({ binary, d
     await expect.poll(() => screenText(init.output.stdout())).toContain('[■] tailwind-css')
     await filterInit(init, 'deno-toolchain', 'tailwind-css')
     await expect.poll(() => screenText(init.output.stdout())).toContain('[■] deno-toolchain')
+    await filterInit(init, 'justfile', 'deno-toolchain')
+    init.running.child.stdin.write(' ')
+    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] justfile')
     await confirmInteractiveInit(init)
     const configuration = JSON.parse(await readFile(join(init.site, 'deno.json'), 'utf8'))
     expect(configuration.tasks.css).toContain('tailwindcss')

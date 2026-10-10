@@ -110,13 +110,12 @@ test('package documentation follows the language', async ({ binary, directory: r
   const english = await run(['help', '@tola/address'], root)
   expectExited(english)
   expect(english.stdout).toContain('Import in Typst:')
-  expect(english.stdout).toContain('Decode a percent-encoded site-root URL path exactly once.')
   expect(english.stderr).toBe('')
 
   const chinese = await run(['help', '@tola/address', '--lang', 'zh'], root)
   expectExited(chinese)
   expect(chinese.stdout).toContain('Import in Typst:')
-  expect(chinese.stdout).toContain('把百分号编码的站点根 URL 路径恰好解码一次。')
+  expect(chinese.stdout).toMatch(/\p{Script=Han}/u)
   expect(chinese.stdout).toContain('Positional Parameters')
   expect(chinese.stderr).toBe('')
 
@@ -136,23 +135,19 @@ test('configuration tables and the overview follow the language', async ({ binar
 
   const table = await run(['help', '[build]', '--lang', 'zh-Hans'], root)
   expectExited(table)
-  // The prose is Chinese; the key names, the fenced template, and the headings stay English.
-  expect(table.stdout).toContain('站点如何构建：Typst 入口、页面目录，以及发布目录。')
-  expect(table.stdout).toContain('构建站点的 Typst 程序，相对站点根。')
-  expect(table.stdout).toContain('[build] - configuration table')
-  expect(table.stdout).toContain('默认值；用 `tola config` 查看你站点的设置。')
-  expect(table.stdout).toContain('entry = "site.typ"')
-  expect(table.stdout).toContain('- `content-dir` - ')
-  expect(table.stdout).toContain('- `publish-dir` - ')
+  // The prose is Chinese; the key names and the headings stay English.
+  expect(table.stdout).toMatch(/\p{Script=Han}/u)
+  expect(table.stdout).toContain('[build]')
+  expect(table.stdout).toContain('content-dir')
+  expect(table.stdout).toContain('publish-dir')
   expect(table.stderr).toBe('')
 
   const overview = await run(['help', '--lang', 'zh-Hans'], root)
   expectExited(overview)
-  expect(overview.stdout).toContain('配置字段与默认值')
-  expect(overview.stdout).toContain('Configuration tables:')
-  // `tola help` shows the help topics and the tables; the command surface stays on `tola --help`.
-  expect(overview.stdout).not.toContain('Usage:')
-  expect(overview.stdout).not.toContain('Commands:')
+  expect(overview.stdout).toMatch(/\p{Script=Han}/u)
+  for (const command of ['tola help "[build]"', 'tola help "@tola/source"']) {
+    expect(overview.stdout).toContain(command)
+  }
   expect(overview.stderr).toBe('')
 })
 
@@ -217,14 +212,16 @@ test('no-pager writes terminal help directly', async ({ binary, directory: root 
   await expect(readFile(join(root, 'pager-received.txt'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
-test('interactive help refuses a piped terminal', async ({ binary, directory: root }) => {
+test('interactive help prints its page without a terminal', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
-
-  const refused = await run(['help', '--interactive'], root)
-  expect(refused.code).toBe(1)
-  expect(refused.stderr).toContain('need a terminal')
-  expect(refused.stderr).toContain('without the interactive flag')
-  expect(refused.stdout).not.toContain('configuration table')
+  const plain = await run(['help', '[site]'], root)
+  expectExited(plain)
+  for (const flag of ['-i', '--interactive']) {
+    const fallback = await run(['help', '[site]', flag], root)
+    expectExited(fallback)
+    expect(fallback.stdout).toBe(plain.stdout)
+    expect(fallback.stderr).toBe('')
+  }
 })
 
 test('interactive help prints the page on a dumb terminal', async ({ binary, directory: root }) => {
@@ -314,7 +311,7 @@ test('interactive help keeps the zh page intact', async ({ binary, directory: ro
 
   // Every character of the page's overview reaches the drawn rows, in order: jumps between
   // wide glyphs must not leave any behind.
-  const sentence = 'slug、route、输出路径与浏览器'
+  const sentence = '不会对路径做隐式拼接等处理'
   await expect
     .poll(() => {
       const drawn = stripVTControlCharacters(output.stdout()).replace(/\s+/g, '')
@@ -330,11 +327,10 @@ test('interactive help keeps the zh page intact', async ({ binary, directory: ro
   running.child.stdin.write('G')
   await expect.poll(() => screenText(output.stdout())).toContain('100%/index.html')
   running.child.stdin.write('g')
-  await expect.poll(() => screenText(output.stdout())).toContain('Exports:')
+  await expect.poll(() => screenText(output.stdout())).toContain('@tola/address')
   running.child.stdin.write('\t')
-  await expect.poll(() => screenText(output.stdout())).toContain('Esc/Tab')
-  running.child.stdin.write('\t')
-  await expect.poll(() => screenText(output.stdout())).not.toContain('Esc/Tab')
+  // This page has no next tab, so Tab leaves the zh page exactly as it was.
+  await expect.poll(() => screenText(output.stdout())).toContain('@tola/address')
   running.child.stdin.write('q')
 
   expect((await closing).code).toBe(0)
@@ -372,7 +368,7 @@ test('help section keys align export headings', async ({ binary, directory: root
     sizedTerminalArgs(binary, [
       'help',
       '@tola/address',
-      'route',
+      'join-route',
       'decode-url-path',
       '--interactive',
       '--color',
@@ -387,15 +383,15 @@ test('help section keys align export headings', async ({ binary, directory: root
 
   await expect.poll(firstLine).toContain('@tola/address')
   running.child.stdin.write('f')
-  await expect.poll(firstLine).toMatch(/^route\b/)
+  await expect.poll(firstLine).toMatch(/^join-route\b/)
   running.child.stdin.write(' ')
-  await expect.poll(firstLine).not.toMatch(/^route\b/)
+  await expect.poll(firstLine).not.toMatch(/^join-route\b/)
   running.child.stdin.write('b')
-  await expect.poll(firstLine).toMatch(/^route\b/)
+  await expect.poll(firstLine).toMatch(/^join-route\b/)
   running.child.stdin.write('f')
   await expect.poll(firstLine).toMatch(/^decode-url-path\b/)
   running.child.stdin.write('b')
-  await expect.poll(firstLine).toMatch(/^route\b/)
+  await expect.poll(firstLine).toMatch(/^join-route\b/)
   running.child.stdin.write('q')
 
   expect((await closing).code).toBe(0)

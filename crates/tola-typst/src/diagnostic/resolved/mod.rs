@@ -1,4 +1,4 @@
-//! Resolved diagnostics: what a live diagnostic has, and the retired DTOs.
+//! Resolved diagnostics: source locations and package failures a live diagnostic carries.
 //!
 //! [`ResolvedSource`], [`ResolvedPackageFailure`], and their parts are read by live
 //! diagnostics and by [`resolve_source`](super::source::resolve_source).
@@ -8,16 +8,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::diagnostic::message::SourceRange;
-
-#[cfg(feature = "legacy-serialization")]
-#[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-mod serialized;
-#[cfg(feature = "legacy-serialization")]
-#[allow(deprecated)]
-pub use serialized::{
-    ResolvedDiagnostic, ResolvedHint, ResolvedLocationFailure, ResolvedSeverity,
-    ResolvedSourceLine, ResolvedSpan, ResolvedTrace, ResolvedTraceKind, ResolvedTruncation,
-};
 
 /// A source location attached to a diagnostic or trace entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

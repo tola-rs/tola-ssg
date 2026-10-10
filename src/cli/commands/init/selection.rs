@@ -69,7 +69,8 @@ pub(super) fn unfilled_slots(feature: Feature, set: &FeatureSet) -> Vec<SlotId> 
         | Feature::Sitemap
         | Feature::OpenGraph
         | Feature::TwitterCard
-        | Feature::DenoToolchain => &[],
+        | Feature::DenoToolchain
+        | Feature::Justfile => &[],
     };
     required
         .iter()

@@ -73,6 +73,7 @@ pub(crate) fn run_preview(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_server(
     config: Arc<ResolvedSiteConfig>,
     server: ServerConfig,
@@ -109,11 +110,9 @@ fn run_server(
         .enable_all()
         .build()
         .context("Tola could not start its development runtime; restart `tola dev`")?;
-    let (listener, address) =
-        super::http::bind_with_port_fallback(server.interface, server.port, &output)?;
-    if let Some(diagnostic) = network_exposure_diagnostic(server.interface) {
-        output.diagnostic(&diagnostic)?;
-    }
+    let (listener, address, port_fallback) =
+        super::http::bind_with_port_fallback(server.interface, server.port)?;
+    let network_exposure = network_exposure_diagnostic(server.interface);
     let serving = runtime.block_on(async {
         // Register HTTP first so failure cannot strand rebuild or hook workers.
         let listener = tokio::net::TcpListener::from_std(listener)?;
@@ -122,21 +121,21 @@ fn run_server(
         let reload = if watching {
             let reload = ReloadTransport::start(server.interface, DEFAULT_WS_PORT, sites.clone())
                 .context("Tola could not start the browser reload listener")?;
-            let port = reload.endpoint().port();
-            if port != DEFAULT_WS_PORT {
-                output.diagnostic(
-                    &tola_build::diagnostic::Diagnostic::new(
-                        crate::codes::reload::PORT_IN_USE,
-                        tola_build::diagnostic::Severity::Warning,
-                        format!("port `{DEFAULT_WS_PORT}` is already in use"),
-                    )
-                    .with_note(format!("serving browser reload on port `{port}` instead")),
-                )?;
-            }
             Some(reload)
         } else {
             None
         };
+        let reload_fallback = reload
+            .as_ref()
+            .and_then(|reload| reload_port_fallback_diagnostic(reload.endpoint().port()));
+        // One batch, so the view keeps the startup's diagnostics in one round.
+        let startup_diagnostics: Vec<_> = [port_fallback, network_exposure, reload_fallback]
+            .into_iter()
+            .flatten()
+            .collect();
+        if !startup_diagnostics.is_empty() {
+            output.diagnostics(&startup_diagnostics)?;
+        }
         let browser_diagnostics = reload.as_ref().map(ReloadTransport::diagnostics_sender);
         let hooks = match &purpose {
             ServerPurpose::Development(_) => Some(HookQueue::start(
@@ -384,6 +383,18 @@ fn network_exposure_diagnostic(
     })
 }
 
+/// The warning for a reload listener that took a port other than the preferred one.
+fn reload_port_fallback_diagnostic(port: u16) -> Option<tola_build::diagnostic::Diagnostic> {
+    (port != DEFAULT_WS_PORT).then(|| {
+        tola_build::diagnostic::Diagnostic::new(
+            crate::codes::reload::PORT_IN_USE,
+            tola_build::diagnostic::Severity::Warning,
+            format!("port `{DEFAULT_WS_PORT}` is already in use"),
+        )
+        .with_note(format!("serving browser reload on port `{port}` instead"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +482,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{interface} must warn"));
             assert_eq!(diagnostic.code, crate::codes::server::NETWORK_EXPOSED);
         }
+    }
+
+    #[test]
+    fn reload_fallback_reports_port_in_use() {
+        assert!(reload_port_fallback_diagnostic(DEFAULT_WS_PORT).is_none());
+        let port = DEFAULT_WS_PORT + 1;
+        let fallback = reload_port_fallback_diagnostic(port)
+            .expect("a fallback reload port reports the warning");
+        assert_eq!(fallback.code, crate::codes::reload::PORT_IN_USE);
+        assert!(
+            fallback
+                .notes
+                .iter()
+                .any(|note| note.contains(&port.to_string())),
+            "the note names the port the listener took"
+        );
     }
 }

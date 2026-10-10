@@ -211,7 +211,6 @@ pub(crate) const DEFAULT: Table = Table {
     ],
 };
 
-/// Sections and screenfuls are separate movements in the help reader.
 pub(crate) const HELP: Table = Table {
     bindings: &[
         Binding {

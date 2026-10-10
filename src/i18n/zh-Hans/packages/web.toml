@@ -87,7 +87,7 @@ kind = "页面的 Open Graph 类型，例如 `website` 或 `article`。"
 
 url = "页面的绝对 URL。"
 
-images = "要声明的图片。每张图片的条目保持在一起，并按你给出的顺序排列；`alt` 描述图片，其余键都可选。"
+images = "非空的图片字典数组。每项必填绝对 HTTP(S) `url` 与非空白的 `alt`。可选字段为 `secure-url`（绝对 HTTPS URL）、`media-type`（例如 `image/png` 的字符串）、`width` 与 `height`（正的整数像素数）。可选字段接受 `none`；空白文本不写入条目。每张图片的条目保持在一起，图片按你给出的顺序排列。"
 
 description = "页面的描述；设置后才写入。"
 
@@ -150,21 +150,44 @@ attrs = "传给包装元素的、取字符串值的 HTML 属性，例如 `class`
 
 summary = [
   '''
-通过 metadata 声明一个 feed 输出。把返回的内容放进根程序：声明只在根程序里生效。站点需要 `site.origin`，因为 feed 的每个地址都是绝对地址。
+通过 metadata 声明一个 feed 输出。把返回的内容放进根程序：声明只在根程序里生效。站点需要 `site.origin`，因为 feed 的每个地址都是绝对地址；feed 标题从 `title` 或 `site.title` 取得，并且不能只含空白。
 
 每个条目都需要 `target` 和 `published`，还可以设置 `id`、`title`、`updated`、`summary`、`content` 和 `authors`。`target` 是输出路径、`(output:, fragment:)` 字典、label 或 location；条目会链接到对应文档，并带上 target 所指的 fragment。`id` 为 `auto` 或省略时取解析后的目标 URL，`title` 为 `auto` 或省略时取目标文档自己的标题。
 
+`summary` 是摘要，`content` 是条目正文，通常用于全文。两者独立：只设置 `summary` 就发布摘要，指定 `target` 不会把目标文档的正文复制进 feed。各格式分别写入这两个字段：
+
+| 格式 | Summary | Content |
+| --- | --- | --- |
+| RSS | `<description>` | `<content:encoded>`，供读取全文的阅读器使用 |
+| Atom | `<summary>` | `<content>`：纯字符串为 `text`，片段或文档选择为 `html` |
+| JSON Feed | `summary`，转为纯文本 | 字符串为 `content_text`，片段或文档选择为 `content_html` |
+
+省略正文或传 `none` 时，RSS 与 Atom 不写 content 元素；JSON Feed 写入空的 `content_text`。
+
 每种格式各自填写修改日期。Atom 的 `updated` 默认取 `published`。RSS 不写修改日期。JSON Feed 只在条目设置了 `updated` 时才写 `date_modified`。
 
-`content` 和 `summary` 接受字符串（纯文本），或只含文本、换行、强调、加粗、删除线和 URL 链接的 markup；其他元素一律报错。`content` 还接受 `(document:, id:)` 字典：选定文档中的某个元素，省略 `id` 时取整篇正文。`summary` 不接受文档选择。
+字符串是纯文本：`"<strong>Note</strong>"` 会保留为字面文本。Typst content 支持文本、换行、强调、加粗、删除线与 URL 链接。Tola 遍历这些原始元素，生成便于 feed 阅读器使用的 HTML 片段，不运行文档 show rule 或排版。例如，`content: [*Note*]` 变成 `<strong>Note</strong>`，而 `content: [= Heading]` 会报错。带样式、contextual 或已经处理过的 content 也会被拒绝。标题、表格、图片、数学与渲染后的代码应使用文档选择。链接接受相对路径与 fragment，以及绝对 HTTP(S)、`mailto`、`tel` URL。相对链接按条目的 target URL 解析。
+
+`content: (document: output, id: "post-body")` 选择最终 HTML 中带这个 id 的元素及其后代。省略 `id` 或传 `none` 时选择整个 body；`summary` 不接受文档选择。给 article 显式设置 HTML id，就能排除导航与页脚。这个 id 必须在选定 HTML 文档中恰好出现一次：空 id、找不到或重复的 id，以及非 HTML 文档，都会让构建失败。别的 output 里的 id 不会匹配。
+
+选择会在该子树外保留祖先容器，但不带上祖先的其他子元素，并包含 head 里的样式与样式表链接。HTML 文档容器会变成 `div`。URL 属性按原文档的 URL 与第一个 `<base href>` 解析成绝对地址；CSS 内的 URL 不改写，也不复现整页的 CSS cascade。
+
+三个 id 的用途不同：feed 的 `id` 标识 Atom feed，条目的 `id` 向订阅者标识这一条内容，`content.id` 则选择 HTML 元素。页面移动时保持显式的条目 id 不变。条目 id 必须非空白，并且在 feed 内唯一。Atom 要求标识符为绝对 URI，并且 feed 本身要有作者；非空 feed 也可以改为给每个条目设置作者。
 
 文档内的 label 或 location 需要一个导出的 anchor，所以在站点某处链接到它（`#link(<label>)`、`@label` 或 `#outline()`）：导出只会给有链接指向的元素分配 `id`。缺少这个 anchor 时，构建会直接失败，绝不会改为链接整篇文档。整篇文档的 label 或 location 不需要正文 anchor。`fragment` 按原样保留，并且必须指向目标文档导出的 anchor。
 
 Typst 的 datetime 一律按 UTC 解释，RFC 3339 字符串保留自己的时区。
 
-Example - 声明一个 RSS feed：
+Example - 发布只有摘要、没有全文正文的 RSS：
 ''',
-  'Example - 为已发现的源发布一个条目：',
+  'Example - 发布摘要与 article 的完整 HTML，排除导航：',
+  '''
+starter 的 `site/seo.typ` 把源 metadata `feed-summary` 映射到条目的 `summary`，把 `feed-content` 映射到 `content`。省略 `feed-content` 或传 `none` 时，这个 recipe 会选择页面的整个 body。因此，只设置 `feed-summary` 仍会发布全文 RSS。需要只有摘要的 feed 时，把这个 recipe 改为传入 `content: none`。
+
+Example - 给 starter 页面单独编写一个便于 feed 阅读器使用的正文：
+
+在启用了 `feed` feature 的站点里，把以下声明放在 `content/note.typ` 开头，后面接页面的普通正文。设置 `site.origin` 与 `site.title`，让 starter 输出 feed。下面的 `feed-content` 只使用支持的文本片段元素。
+''',
   '',
 ]
 
@@ -194,7 +217,7 @@ summary = [
 
 每个 target 都指向整篇文档。解析到元素的 target（文档内的 label 或 location，或写有 `fragment` 的字典）会直接报错，同一个 target 出现两次也会报错。列出的 URL 都是绝对 URL，因此站点需要 `site.origin`。Typst 的 datetime 一律按 UTC 解释，RFC 3339 字符串保留自己的时区。
 
-Example - 列出已发现源发布的文档：
+Example - 选择整篇文档，并为其中一篇注明日期：
 ''',
   '',
 ]

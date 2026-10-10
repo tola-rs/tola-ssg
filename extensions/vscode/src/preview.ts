@@ -19,6 +19,11 @@ export interface PreviewSite {
   readonly siteRoutes: () => Promise<SiteRoute[]>
 }
 
+export interface PreviewStatus {
+  readonly selection: Selection
+  readonly state: 'starting' | 'ready' | 'stopped'
+}
+
 export class Preview {
   private readonly servers = new Map<string, PreviewServer>()
   private readonly children = new Set<PreviewServer>()
@@ -30,6 +35,7 @@ export class Preview {
     private readonly output: vscode.OutputChannel,
     private readonly siteFor: (uri?: vscode.Uri, siteKey?: string) => PreviewSite | undefined,
     private readonly report: (error: unknown) => void,
+    private readonly statusFor: (uri?: vscode.Uri) => PreviewStatus | undefined,
   ) {}
 
   register(): vscode.Disposable {
@@ -64,12 +70,31 @@ export class Preview {
     if (this.closing) return
     const request = ++this.statusRequest
     const document = vscode.window.activeTextEditor?.document
-    const site = document && this.siteFor(document.uri)
-    const server = site && this.servers.get(this.key(site.selection))
-    if (!document || !site) {
+    const status = document && this.statusFor(document.uri)
+    if (!document || !status) {
       this.status.hide()
       return
     }
+    const state = status.state
+    if (state !== 'ready') {
+      this.status.text = state === 'starting'
+        ? '$(sync~spin) Tola · service starting'
+        : '$(warning) Tola · service stopped'
+      this.status.tooltip = state === 'starting'
+        ? `Tola is starting the language service for ${status.selection.folder.name}.`
+        : `Restart the language service for ${status.selection.folder.name}.`
+      this.status.command = state === 'stopped'
+        ? { title: 'Tola: Restart Language Services', command: 'tola.restart' }
+        : undefined
+      this.status.show()
+      return
+    }
+    const site = this.siteFor(document.uri)
+    if (!site) {
+      this.status.hide()
+      return
+    }
+    const server = this.servers.get(this.key(site.selection))
     if (!server?.running) {
       this.showStartAction(document.uri, site)
       return
@@ -284,8 +309,6 @@ export class Preview {
     const selected = site.selection
     return vscode.workspace.textDocuments.filter((document) => {
       if (!document.isDirty || document.uri.scheme !== 'file') return false
-      const folder = vscode.workspace.getWorkspaceFolder(document.uri)
-      if (folder && folder.uri.toString() !== selected.folder.uri.toString()) return false
       return document.uri.fsPath === selected.config.fsPath ||
         document.uri.fsPath === selected.configurationFile ||
         selected.inputRoots.some((root) => containsFile(root, document.uri.fsPath))

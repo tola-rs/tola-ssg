@@ -71,12 +71,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                             self.publish(checked, checked_revision)?;
                             // The check built this revision's index itself, so a correction waiting
                             // for one reads it now instead of paying for a second walk.
-                            if self.selection_build == Some(checked_revision) {
-                                self.selection_build = None;
+                            if self
+                                .selection_build
+                                .as_ref()
+                                .is_some_and(|build| build.revision == checked_revision)
+                            {
+                                self.cancel_selection();
                             }
-                            self.queries.retain(|job| {
-                                !matches!(job, SourceJob::Selection(job) if job.revision == checked_revision)
-                            });
                             self.complete_waiting_code_actions(checked_revision)?;
                             self.refresh_diagnostics()?;
                         }
@@ -145,12 +146,18 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             }
             SourceCompilation::Selected {
                 revision,
+                serial,
                 root,
                 selected,
             } => {
-                if self.selection_build == Some(revision) {
-                    self.selection_build = None;
+                if !self
+                    .selection_build
+                    .as_ref()
+                    .is_some_and(|build| build.serial == serial)
+                {
+                    return Ok(());
                 }
+                self.cancel_selection();
                 match selected {
                     // A build a source change cancelled describes a revision the author has left:
                     // its waiting requests were superseded with it, and no later one may read its

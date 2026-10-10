@@ -7,9 +7,6 @@ use crate::introspection::{
     MetadataCardinalityError, MetadataDeclaration, all_values, first_value, label_selector,
     metadata_declaration, unique_metadata_value,
 };
-#[cfg(feature = "legacy-serialization")]
-#[allow(deprecated)]
-use crate::introspection::{json_all, json_first};
 
 /// A compiled HTML document.
 ///
@@ -70,25 +67,6 @@ impl HtmlDocument {
             .iter()
             .filter_map(metadata_declaration)
             .collect()
-    }
-
-    /// Serialize the first matching value at an explicit JSON boundary.
-    #[cfg(feature = "legacy-serialization")]
-    #[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-    #[allow(deprecated)]
-    pub fn metadata_json_first(
-        &self,
-        label: &str,
-    ) -> serde_json::Result<Option<serde_json::Value>> {
-        json_first(self.metadata_first(label))
-    }
-
-    /// Serialize every matching value at an explicit JSON boundary.
-    #[cfg(feature = "legacy-serialization")]
-    #[deprecated(note = "native Typst values pass through the pipeline; scheduled for deletion")]
-    #[allow(deprecated)]
-    pub fn metadata_json_all(&self, label: &str) -> serde_json::Result<Vec<serde_json::Value>> {
-        json_all(self.metadata_all(label))
     }
 
     /// Unwrap the native Typst HTML document.
