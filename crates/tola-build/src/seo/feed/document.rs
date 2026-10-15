@@ -12,7 +12,9 @@ use typst::foundations::Dict;
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::config::ResolvedSiteConfig;
 use crate::seo::RenderError;
-use crate::seo::declaration::{SeoDeclaration, field_path, resolve_target};
+use crate::seo::declaration::{
+    ResolvedDocumentTarget, SeoDeclaration, SeoDeclarationError, field_path, resolve_target,
+};
 use tola_address::OutputPath;
 
 /// One rendering pass shares an exported selection across entries and feed formats.
@@ -60,52 +62,23 @@ impl<'a> DocumentContents<'a> {
             self.compilation,
             cancellation,
         )?;
-        let selection = match declaration.optional_string(fields, "id", field)? {
-            None => HtmlFragmentSelection::Body,
-            Some(id) => {
-                if id.is_empty() {
-                    return Err(declaration
-                        .invalid(
-                            &field_path(field, "id"),
-                            "HTML element id must not be empty",
-                        )
-                        .into());
-                }
-                HtmlFragmentSelection::Id(id)
-            }
-        };
+        let selection = html_selection(declaration, fields, field)?;
         let key = (target.output.clone(), selection);
         if let Some(html) = self.selections.get(&key) {
             return Ok(Arc::clone(html));
         }
+        let base = self.document_base(&target, cancellation)?;
         let path =
             typst::syntax::VirtualPath::new(target.output.as_str()).expect("validated output path");
         let document = self
             .compilation
             .document(&path)
             .expect("resolved Bundle target exists");
-        let base = if let Some(base) = self.bases.get(&target.output) {
-            base.clone()
-        } else {
-            let mut canonical = target.url;
-            canonical.set_fragment(None);
-            canonical.set_query(None);
-            let base = document
-                .html_inventory(&cancellation.bundle_cancellation())?
-                .and_then(|inventory| inventory.base_href().map(|base| base.value().to_owned()))
-                .and_then(|base| canonical.join(&base).ok())
-                .filter(|base| {
-                    !base.cannot_be_a_base() && !matches!(base.scheme(), "data" | "javascript")
-                })
-                .unwrap_or(canonical);
-            self.bases.insert(target.output.clone(), base.clone());
-            base
-        };
-        let policy = cancellation.bundle_cancellation();
+        let bundle_cancellation = cancellation.bundle_cancellation();
         let fragment = document.html_fragment_with_links(
             &key.1,
             &HtmlFragmentOptions { preserve_ancestors: true, ..Default::default() },
-            &policy,
+            &bundle_cancellation,
             &mut |destination, reference_use| {
                 cancellation.ensure_active().map_err(|_| HtmlFragmentError::Cancelled)?;
                 match base.join(destination) {
@@ -128,33 +101,8 @@ impl<'a> DocumentContents<'a> {
                     }
                 }
             },
-        ).map_err(|error| {
-            if error.is_cancelled() {
-                RenderError::Cancelled(BuildCancelled)
-            } else if error.raw_diagnostics().is_some() {
-                RenderError::HtmlExport(error)
-            } else {
-                let reason = match &error {
-                    HtmlFragmentError::MissingId { .. } => {
-                        "no HTML element in the target document has this `content` id".to_owned()
-                    }
-                    HtmlFragmentError::RepeatedId { .. } => {
-                        "multiple elements in the target document share this `content` id".to_owned()
-                    }
-                    HtmlFragmentError::MissingBody | HtmlFragmentError::RepeatedBody => {
-                        "the target document does not have exactly one HTML body".to_owned()
-                    }
-                    HtmlFragmentError::NotHtmlDocument { .. } => {
-                        "the feed content target is not an HTML document".to_owned()
-                    }
-                    HtmlFragmentError::InvalidReference { message } => message.clone(),
-                    HtmlFragmentError::Cancelled | HtmlFragmentError::Export { .. } => {
-                        "the feed content could not be selected".to_owned()
-                    }
-                };
-                declaration.invalid(field, reason).into()
-            }
-        })?;
+        )
+        .map_err(|error| fragment_error(declaration, field, error))?;
         cancellation.ensure_active()?;
         let capacity = fragment.styles.iter().map(String::len).sum::<usize>() + fragment.html.len();
         let mut html = String::with_capacity(capacity);
@@ -166,4 +114,86 @@ impl<'a> DocumentContents<'a> {
         self.selections.insert(key, Arc::clone(&html));
         Ok(html)
     }
+}
+
+impl DocumentContents<'_> {
+    fn document_base(
+        &mut self,
+        target: &ResolvedDocumentTarget,
+        cancellation: &BuildCancellation,
+    ) -> Result<url::Url, RenderError> {
+        if let Some(base) = self.bases.get(&target.output) {
+            return Ok(base.clone());
+        }
+        let mut canonical = target.url.clone();
+        canonical.set_fragment(None);
+        canonical.set_query(None);
+        let path =
+            typst::syntax::VirtualPath::new(target.output.as_str()).expect("validated output path");
+        let document = self
+            .compilation
+            .document(&path)
+            .expect("resolved Bundle target exists");
+        let base = document
+            .html_inventory(&cancellation.bundle_cancellation())?
+            .and_then(|inventory| inventory.base_href().map(|base| base.value().to_owned()))
+            .and_then(|base| canonical.join(&base).ok())
+            .filter(|base| {
+                !base.cannot_be_a_base() && !matches!(base.scheme(), "data" | "javascript")
+            })
+            .unwrap_or(canonical);
+        self.bases.insert(target.output.clone(), base.clone());
+        Ok(base)
+    }
+}
+
+fn html_selection(
+    declaration: &SeoDeclaration,
+    fields: &Dict,
+    field: &str,
+) -> Result<HtmlFragmentSelection, SeoDeclarationError> {
+    Ok(match declaration.optional_string(fields, "id", field)? {
+        None => HtmlFragmentSelection::Body,
+        Some(id) => {
+            if id.is_empty() {
+                return Err(declaration.invalid(
+                    &field_path(field, "id"),
+                    "HTML element id must not be empty",
+                ));
+            }
+            HtmlFragmentSelection::Id(id)
+        }
+    })
+}
+
+fn fragment_error(
+    declaration: &SeoDeclaration,
+    field: &str,
+    error: HtmlFragmentError,
+) -> RenderError {
+    if error.is_cancelled() {
+        return RenderError::Cancelled(BuildCancelled);
+    }
+    if error.raw_diagnostics().is_some() {
+        return RenderError::HtmlExport(error);
+    }
+    let reason = match &error {
+        HtmlFragmentError::MissingId { .. } => {
+            "no HTML element in the target document has this `content` id".to_owned()
+        }
+        HtmlFragmentError::RepeatedId { .. } => {
+            "multiple elements in the target document share this `content` id".to_owned()
+        }
+        HtmlFragmentError::MissingBody | HtmlFragmentError::RepeatedBody => {
+            "the target document does not have exactly one HTML body".to_owned()
+        }
+        HtmlFragmentError::NotHtmlDocument { .. } => {
+            "the feed content target is not an HTML document".to_owned()
+        }
+        HtmlFragmentError::InvalidReference { message } => message.clone(),
+        HtmlFragmentError::Cancelled | HtmlFragmentError::Export { .. } => {
+            "the feed content could not be selected".to_owned()
+        }
+    };
+    declaration.invalid(field, reason).into()
 }

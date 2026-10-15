@@ -2,6 +2,7 @@ set working-directory := '..'
 set positional-arguments
 
 binary := if os() == 'windows' { 'tola.exe' } else { 'tola' }
+# Set TOLA_E2E_PROFILE=release for a release build; dev is the default.
 profile := env('TOLA_E2E_PROFILE', 'dev')
 binary-directory := if profile == 'dev' { 'debug' } else { profile }
 
@@ -16,8 +17,7 @@ setup *args:
 typecheck:
     deno task typecheck
 
-# Build the workspace binary and run the suite against it; arguments after the recipe name reach
-# Playwright, such as a spec path or --grep. Set TOLA_E2E_PROFILE=release for a release build.
+# Build the binary and run the Playwright suite, passing trailing arguments through to it.
 [default]
 [working-directory('e2e')]
 run *args: typecheck

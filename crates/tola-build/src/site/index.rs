@@ -1,16 +1,21 @@
 //! Complete site indexing and cross-output document validation.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use tola_address::{OutputPath, asset_directory_index_alias, asset_url_from_output};
+use tola_typst::HtmlDocumentInventory;
+
 use super::{AddressRegistrationError, AddressSpace, HtmlPage, SiteAssetRoute};
-use tola_address::asset_url_from_output;
+use crate::compiler::documents::RealizedPage;
+use crate::output::graph::{OutputGraph, OutputKind};
 
 /// Realized documents, resource routes, and final HTML inventories of one site.
 #[derive(Debug, Default)]
 pub struct SiteIndex {
     address: AddressSpace,
-    html_inventories: std::collections::BTreeMap<
-        tola_address::OutputPath,
-        std::sync::Arc<tola_typst::HtmlDocumentInventory>,
-    >,
+    html_inventories: BTreeMap<OutputPath, Arc<HtmlDocumentInventory>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -20,31 +25,17 @@ pub(crate) enum SiteIndexError {
     #[error(
         "the root Bundle declares `{output}` as an HTML page, but this build generated no output for it; run the build again"
     )]
-    DocumentOutputMissing { output: tola_address::OutputPath },
+    DocumentOutputMissing { output: OutputPath },
     #[error(
         "the root Bundle declares `{output}` as an HTML page, but this build generated it as {}; run the build again",
         kind.display_name()
     )]
     DocumentOutputKind {
-        output: tola_address::OutputPath,
-        kind: crate::output::graph::OutputKind,
+        output: OutputPath,
+        kind: OutputKind,
     },
     #[error("`{output}` is an HTML page, but no Bundle document declares it; run the build again")]
-    HtmlDocumentMissing { output: tola_address::OutputPath },
-    #[error("`{output}` is an HTML page, but Tola read no HTML for it; run the build again")]
-    HtmlInventoryMissing { output: tola_address::OutputPath },
-    #[error(
-        "Tola read HTML for `{output}`, but this build generated no output for it; run the build again"
-    )]
-    InventoryOutputMissing { output: tola_address::OutputPath },
-    #[error(
-        "Tola read HTML for `{output}`, but this build generated it as `{}`; run the build again",
-        kind.as_str()
-    )]
-    InventoryOutputKind {
-        output: tola_address::OutputPath,
-        kind: crate::output::graph::OutputKind,
-    },
+    HtmlDocumentMissing { output: OutputPath },
 }
 
 impl SiteIndex {
@@ -52,14 +43,7 @@ impl SiteIndex {
         &self.address
     }
 
-    pub fn html_pages(
-        &self,
-    ) -> impl Iterator<
-        Item = (
-            &HtmlPage,
-            &std::sync::Arc<tola_typst::HtmlDocumentInventory>,
-        ),
-    > {
+    pub fn html_pages(&self) -> impl Iterator<Item = (&HtmlPage, &Arc<HtmlDocumentInventory>)> {
         self.html_inventories.iter().map(|(output, inventory)| {
             let document = self
                 .address
@@ -70,23 +54,17 @@ impl SiteIndex {
     }
 
     pub(crate) fn from_output_graph(
-        graph: &crate::output::graph::OutputGraph,
-        documents: impl IntoIterator<Item = HtmlPage>,
-        html_inventories: std::collections::BTreeMap<
-            tola_address::OutputPath,
-            std::sync::Arc<tola_typst::HtmlDocumentInventory>,
-        >,
+        graph: &OutputGraph,
+        documents: impl IntoIterator<Item = RealizedPage>,
     ) -> Result<Self, SiteIndexError> {
-        use crate::output::graph::OutputKind;
-
         let outputs = graph
             .outputs()
             .iter()
             .map(|output| (output.path().clone(), output))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let mut documents_by_output = std::collections::BTreeMap::new();
+            .collect::<BTreeMap<_, _>>();
+        let mut documents_by_output = BTreeMap::new();
         for document in documents {
-            let output = document.output.clone();
+            let output = document.page.output.clone();
             if documents_by_output
                 .insert(output.clone(), document)
                 .is_some()
@@ -110,11 +88,6 @@ impl SiteIndex {
                     kind: candidate.kind(),
                 });
             }
-            if !html_inventories.contains_key(output) {
-                return Err(SiteIndexError::HtmlInventoryMissing {
-                    output: output.clone(),
-                });
-            }
         }
         for output in graph.outputs() {
             if output.kind() == OutputKind::HtmlDocument
@@ -125,31 +98,18 @@ impl SiteIndex {
                 });
             }
         }
-        for output in html_inventories.keys() {
-            let candidate =
-                outputs
-                    .get(output)
-                    .ok_or_else(|| SiteIndexError::InventoryOutputMissing {
-                        output: output.clone(),
-                    })?;
-            if candidate.kind() != OutputKind::HtmlDocument {
-                return Err(SiteIndexError::InventoryOutputKind {
-                    output: output.clone(),
-                    kind: candidate.kind(),
-                });
-            }
-        }
-
         let mut address = AddressSpace::default();
+        let mut html_inventories = BTreeMap::new();
         for (output, document) in documents_by_output {
-            let inventory = &html_inventories[&output];
             address.register_page(
-                document,
-                inventory
+                document.page,
+                document
+                    .inventory
                     .fragments()
                     .iter()
                     .map(|fragment| fragment.value().to_owned()),
             )?;
+            html_inventories.insert(output, document.inventory);
         }
         let mut directory_indexes = Vec::new();
         for output in graph
@@ -158,14 +118,11 @@ impl SiteIndex {
             .filter(|output| output.kind() != OutputKind::HtmlDocument)
         {
             let url = asset_url_from_output(output.path());
-            if let Some(alias) = tola_address::asset_directory_index_alias(output.path()) {
+            if let Some(alias) = asset_directory_index_alias(output.path()) {
                 directory_indexes.push((alias, url.clone()));
             }
             address.register_asset_route(SiteAssetRoute {
-                source: output
-                    .owner()
-                    .configured_source()
-                    .map(std::path::PathBuf::from),
+                source: output.owner().configured_source().map(PathBuf::from),
                 url,
                 declaration: output.declaration().clone(),
             })?;
@@ -180,7 +137,6 @@ impl SiteIndex {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -222,28 +178,14 @@ mod tests {
 
     fn bundle_outputs(
         entries: impl IntoIterator<Item = tola_typst::BundleEntry>,
-        document_outputs: &BTreeSet<tola_address::OutputPath>,
     ) -> crate::output::graph::OutputGraphBuilder {
         let mut outputs = crate::output::graph::OutputGraphBuilder::new();
-        crate::compiler::outputs::insert_bundle(
-            &mut outputs,
-            entries,
-            "site-program",
-            document_outputs,
-        )
-        .unwrap();
+        crate::compiler::outputs::insert_bundle(&mut outputs, entries).unwrap();
         outputs
     }
 
     #[test]
     fn asset_routes_keep_configured_source() {
-        let document_outputs = [
-            tola_address::OutputPath::parse("paper.pdf").unwrap(),
-            tola_address::OutputPath::parse("preview.png").unwrap(),
-            tola_address::OutputPath::parse("diagram.svg").unwrap(),
-        ]
-        .into_iter()
-        .collect();
         let entries = [
             ("paper.pdf", tola_typst::BundleEntryKind::PdfDocument),
             ("preview.png", tola_typst::BundleEntryKind::PngDocument),
@@ -257,7 +199,7 @@ mod tests {
                 path.as_bytes().to_vec(),
             )
         });
-        let mut outputs = bundle_outputs(entries, &document_outputs);
+        let mut outputs = bundle_outputs(entries);
         outputs
             .insert_configured_asset(
                 "static/logo.svg",
@@ -269,8 +211,7 @@ mod tests {
             )
             .unwrap();
         let graph = outputs.finish();
-        let snapshot =
-            SiteIndex::from_output_graph(&graph, std::iter::empty(), BTreeMap::new()).unwrap();
+        let snapshot = SiteIndex::from_output_graph(&graph, []).unwrap();
 
         for (url, source, media_type) in [
             (
@@ -315,20 +256,15 @@ mod tests {
     #[test]
     fn html_output_needs_document_identity() {
         let output = tola_address::OutputPath::parse("index.html").unwrap();
-        let document_outputs = [output.clone()].into_iter().collect();
         let entry = tola_typst::BundleEntry::new(
             typst::syntax::VirtualPath::new("index.html").unwrap(),
             tola_typst::BundleEntryKind::HtmlDocument,
             b"page".to_vec(),
         );
-        let graph = bundle_outputs([entry], &document_outputs).finish();
+        let graph = bundle_outputs([entry]).finish();
 
         assert!(matches!(
-            SiteIndex::from_output_graph(
-                &graph,
-                std::iter::empty(),
-                BTreeMap::new()
-            ),
+            SiteIndex::from_output_graph(&graph, []),
             Err(SiteIndexError::HtmlDocumentMissing { output: missing })
                 if missing == output
         ));
@@ -337,13 +273,12 @@ mod tests {
     #[test]
     fn asset_claimed_document_url_rejected() {
         let output = tola_address::OutputPath::parse("page.html").unwrap();
-        let document_outputs = [output.clone()].into_iter().collect();
         let entry = tola_typst::BundleEntry::new(
             typst::syntax::VirtualPath::new("page.html").unwrap(),
             tola_typst::BundleEntryKind::HtmlDocument,
             b"page".to_vec(),
         );
-        let mut outputs = bundle_outputs([entry], &document_outputs);
+        let mut outputs = bundle_outputs([entry]);
         outputs
             .insert_configured_asset(
                 "static/shared.bin",
@@ -355,69 +290,21 @@ mod tests {
             )
             .unwrap();
         let graph = outputs.finish();
-        let document = HtmlPage {
-            permalink: UrlPath::parse("/shared.bin").unwrap(),
-            output: output.clone(),
-            properties: typst::model::DocumentInfo::default(),
-            sources: Vec::new(),
+        let document = RealizedPage {
+            page: HtmlPage {
+                permalink: UrlPath::parse("/shared.bin").unwrap(),
+                output,
+                properties: typst::model::DocumentInfo::default(),
+                sources: Vec::new(),
+            },
+            inventory: html_inventory(),
         };
-        let inventories = [(output, html_inventory())].into_iter().collect();
 
         assert!(matches!(
-            SiteIndex::from_output_graph(&graph, [document], inventories),
+            SiteIndex::from_output_graph(&graph, [document]),
             Err(SiteIndexError::Registration(
                 AddressRegistrationError::UrlAlreadyRegistered { url }
             )) if url == UrlPath::parse("/shared.bin").unwrap()
-        ));
-    }
-
-    #[test]
-    fn cross_document_output_alias_is_rejected() {
-        let first_output = tola_address::OutputPath::parse("shared/index.html").unwrap();
-        let second_output = tola_address::OutputPath::parse("second/index.html").unwrap();
-        let document_outputs = [first_output.clone(), second_output.clone()]
-            .into_iter()
-            .collect();
-        let entries = [
-            tola_typst::BundleEntry::new(
-                typst::syntax::VirtualPath::new(first_output.as_str()).unwrap(),
-                tola_typst::BundleEntryKind::HtmlDocument,
-                b"first".to_vec(),
-            ),
-            tola_typst::BundleEntry::new(
-                typst::syntax::VirtualPath::new(second_output.as_str()).unwrap(),
-                tola_typst::BundleEntryKind::HtmlDocument,
-                b"second".to_vec(),
-            ),
-        ];
-        let graph = bundle_outputs(entries, &document_outputs).finish();
-        let documents = [
-            HtmlPage {
-                permalink: UrlPath::parse("/first/").unwrap(),
-                output: first_output.clone(),
-                properties: typst::model::DocumentInfo::default(),
-                sources: Vec::new(),
-            },
-            HtmlPage {
-                permalink: UrlPath::parse("/shared/index.html").unwrap(),
-                output: second_output.clone(),
-                properties: typst::model::DocumentInfo::default(),
-                sources: Vec::new(),
-            },
-        ];
-        let inventory = html_inventory();
-        let inventories = [
-            (first_output, std::sync::Arc::clone(&inventory)),
-            (second_output, inventory),
-        ]
-        .into_iter()
-        .collect();
-
-        assert!(matches!(
-            SiteIndex::from_output_graph(&graph, documents, inventories),
-            Err(SiteIndexError::Registration(
-                AddressRegistrationError::UrlAlreadyRegistered { url }
-            )) if url == UrlPath::parse("/shared/index.html").unwrap()
         ));
     }
 }

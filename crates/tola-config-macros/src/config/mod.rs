@@ -29,20 +29,22 @@ fn is_toml_bare_key(key: &str) -> bool {
 
 /// Generate Config field paths, template methods, and status validation.
 pub fn derive(input: &DeriveInput) -> TokenStream {
+    match expand(input) {
+        Ok(tokens) => tokens,
+        Err(error) => error.into_compile_error(),
+    }
+}
+
+fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let fields_struct_name = syn::Ident::new(&format!("{}Fields", name), name.span());
 
-    let struct_attrs = match ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct) {
-        Ok(attrs) => attrs,
-        Err(error) => return error.into_compile_error(),
-    };
+    let struct_attrs = ConfigAttrs::parse(&input.attrs, ConfigAttrScope::Struct)?;
     let section = match struct_attrs.section {
         Some(section) => section,
         None => {
             let section = infer_section(&name.to_string());
-            if let Err(error) = attr::validate_section_path(&section, name.span()) {
-                return error.into_compile_error();
-            }
+            attr::validate_section_path(&section, name.span())?;
             section
         }
     };
@@ -58,24 +60,20 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
             _ => {
-                return quote! { compile_error!("Config only works on structs with named fields"); };
+                return Ok(
+                    quote! { compile_error!("Config only works on structs with named fields"); },
+                );
             }
         },
-        _ => return quote! { compile_error!("Config only works on structs"); },
+        _ => return Ok(quote! { compile_error!("Config only works on structs"); }),
     };
 
-    if let Err(error) = reject_serde_rename_all(&input.attrs) {
-        return error.into_compile_error();
-    }
+    reject_serde_rename_all(&input.attrs)?;
 
-    let config_fields: Vec<ConfigField> = match fields
+    let config_fields: Vec<ConfigField> = fields
         .iter()
-        .filter_map(|field| ConfigField::from_field(field).transpose())
-        .collect()
-    {
-        Ok(fields) => fields,
-        Err(error) => return error.into_compile_error(),
-    };
+        .map(ConfigField::from_field)
+        .collect::<syn::Result<_>>()?;
 
     let fields_for_path = config_fields.iter().filter(|f| !f.skip).collect::<Vec<_>>();
 
@@ -118,17 +116,16 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
             boolean.then(|| quote! { (#runtime_crate::FieldPath::new(#path), &["true", "false"]) })
         });
 
-    let template_code = match generate_template_code(&config_fields, &runtime_crate) {
-        Ok(code) => code,
-        Err(error) => return error.into_compile_error(),
-    };
+    let template_code = generate_template_code(&config_fields, &runtime_crate)?;
 
     let visible_fields = config_fields
         .iter()
         .filter(|field| !field.skip && field.status != FieldStatus::Hidden);
+    // A section whose visible fields are all nested sections leaves the header to them; a section
+    // with no visible field at all still writes its own.
     let template_has_header = struct_attrs.collection == Some(CollectionShape::ArrayTable)
-        || visible_fields.clone().any(|field| !field.sub)
-        || !visible_fields.clone().any(|field| field.sub);
+        || visible_fields.clone().next().is_none()
+        || visible_fields.clone().any(|field| !field.sub);
 
     let section_header_code = template_has_header.then(|| {
         let header = generate_section_header_code(
@@ -185,7 +182,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
             }
         });
 
-    quote! {
+    Ok(quote! {
         /// Generated field path accessors.
         #[allow(non_camel_case_types)]
         pub struct #fields_struct_name {
@@ -252,7 +249,7 @@ pub fn derive(input: &DeriveInput) -> TokenStream {
                 #(#nested_calls)*
             }
         }
-    }
+    })
 }
 
 /// The documentation one declared key carries.

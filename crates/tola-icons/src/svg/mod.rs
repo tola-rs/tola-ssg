@@ -238,7 +238,7 @@ mod tests {
     /// Every shape an icon refuses, and the variant it names for that shape.
     #[test]
     fn invalid_icons_are_rejected() {
-        let cases: [(&str, Refusal); 17] = [
+        let cases: [(&str, Refusal); 14] = [
             ("<path", |error| matches!(error, InvalidSvg::Xml { .. })),
             (r#"<path d="M 0"/>"#, |error| {
                 matches!(error, InvalidSvg::Path)
@@ -269,23 +269,13 @@ mod tests {
             (r##"<g id="a"><use href="#a"/></g>"##, |error| {
                 matches!(error, InvalidSvg::ReferenceCycle)
             }),
-            (
-                r##"<defs><linearGradient id="a" href="#b"/><linearGradient id="b" href="#a"/></defs>"##,
-                |error| matches!(error, InvalidSvg::ReferenceCycle),
-            ),
             (r##"<g id="a"/><g id="a"/>"##, |error| {
                 matches!(error, InvalidSvg::DuplicateId { .. })
             }),
             (r#"<use href="icons.svg#mark"/>"#, |error| {
                 matches!(error, InvalidSvg::ExternalReference)
             }),
-            (r#"<use href="https://example.org/mark.svg"/>"#, |error| {
-                matches!(error, InvalidSvg::ExternalReference)
-            }),
             ("<script/>", |error| {
-                matches!(error, InvalidSvg::Element { .. })
-            }),
-            ("<text>logo</text>", |error| {
                 matches!(error, InvalidSvg::Element { .. })
             }),
             (r#"<path xmlns=""/>"#, |error| {

@@ -52,7 +52,7 @@ mod tests {
     use crate::ImageFormat;
     use crate::NO_CANCELLATION;
     use crate::OutputFormat;
-    use crate::codec::test_support::*;
+    use crate::codec::tests::test_support::*;
     use crate::codec::{inspect, render};
     use image::ExtendedColorType;
 

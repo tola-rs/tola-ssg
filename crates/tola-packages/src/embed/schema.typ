@@ -40,5 +40,5 @@
   any, array-of, at-least, at-most, check, convert, date, defaults, describe, dictionary-of,
   email, enum-of, err, format-issues, http-url, https-url, inspect, ip, ipv4, ipv6, issue, lazy, literal,
   map, matches, max-length, min-length, non-empty, nullable, ok, one-or-many, optional, parse, partial,
-  refine, schema, timestamp, trim, try-parse, tuple, union, url-path, variant,
+  partial-date, refine, schema, timestamp, trim, try-parse, tuple, union, url-path, variant,
 )

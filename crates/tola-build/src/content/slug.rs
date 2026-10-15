@@ -1,20 +1,11 @@
 //! Route segments derived from content file layout.
-//!
-//! File-layout segments retain their hierarchy, and the resulting decoded
-//! site-root path passes the shared portable address validation.
 
 use std::borrow::Cow;
 use std::path::Path;
 
 use super::{ContentId, ContentSourceLayout};
 
-/// The path a source's route is derived from, with its layout applied and the
-/// extension removed.
-///
-/// This is the only place that knows the layout rule: a directory index is named
-/// after its directory, and a single file after its own path without its
-/// extension. Components normalize away empty and `.` parts, so no segment can be
-/// empty here.
+/// The path a source's route is derived from, with its layout applied and the extension removed.
 fn route_path(id: &ContentId, layout: ContentSourceLayout) -> Cow<'_, Path> {
     match layout {
         ContentSourceLayout::DirectoryIndex => {
@@ -25,10 +16,6 @@ fn route_path(id: &ContentId, layout: ContentSourceLayout) -> Cow<'_, Path> {
 }
 
 /// The original identity segments of a source's route, in order.
-///
-/// A site program that wants a different route structure starts here rather than
-/// re-deriving the layout, which depends on the accepted extension and the index
-/// filename.
 pub(crate) fn route_segments(id: &ContentId, layout: ContentSourceLayout) -> Vec<String> {
     route_path(id, layout)
         .components()
@@ -53,7 +40,7 @@ mod tests {
     }
 
     #[test]
-    fn route_segments_follow_the_source_layout() {
+    fn segments_follow_layout() {
         let cases: [(&str, Vec<&str>); 6] = [
             ("index.typ", vec![]),
             ("about.typ", vec!["about"]),

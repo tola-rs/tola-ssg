@@ -9,7 +9,7 @@ use crate::rows::for_each_row;
 use crate::{HOLD_IN_MEMORY, pixel_bytes, rgba_buffer};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum AlphaRepresentation {
+pub(crate) enum AlphaRepresentation {
     Opaque,
     Straight,
 }
@@ -18,7 +18,7 @@ pub(super) enum AlphaRepresentation {
 ///
 /// A crop of untransformed pixels stays a window over the decoded buffer. A mirrored or
 /// transposed axis is materialized once.
-pub(super) enum SourcePlane<'a> {
+pub(crate) enum SourcePlane<'a> {
     Window {
         pixels: &'a [u8],
         /// Distance between rows, in pixels.

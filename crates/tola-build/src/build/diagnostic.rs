@@ -2,14 +2,14 @@
 
 use std::path::Path;
 
-use crate::diagnostic::{Diagnostic, DiagnosticError};
+use tola_diagnostic::{Diagnostic, DiagnosticError};
 
 /// Warning emitted when the completed output graph contains no HTML pages.
 pub fn no_pages_diagnostic(config: &crate::config::ResolvedSiteConfig) -> Diagnostic {
     let entry = crate::filesystem::display_path(&config.build.entry, config.get_root());
     Diagnostic::new(
-        crate::codes::site::NO_PAGES,
-        crate::diagnostic::Severity::Warning,
+        tola_diagnostic::codes::site::NO_PAGES,
+        tola_diagnostic::Severity::Warning,
         "no HTML pages were produced",
     )
     .with_help(format!(
@@ -23,8 +23,8 @@ pub(super) fn not_found_missing_diagnostic(
 ) -> Diagnostic {
     let entry = crate::filesystem::display_path(&config.build.entry, config.get_root());
     Diagnostic::new(
-        crate::codes::site::NOT_FOUND_MISSING,
-        crate::diagnostic::Severity::Warning,
+        tola_diagnostic::codes::site::NOT_FOUND_MISSING,
+        tola_diagnostic::Severity::Warning,
         "no `404.html` page was produced",
     )
     .with_help(format!(
@@ -32,34 +32,32 @@ pub(super) fn not_found_missing_diagnostic(
     ))
 }
 
-/// Refuse a build that would read a vendor replacement this process never finished.
+/// Refuse a build that would read vendored inputs a stopped `tola vendor` left half replaced.
 ///
-/// `tola vendor` journals its replacement before the first tree moves and marks it committed
-/// after the last. A process that dies in between leaves the vendored trees mixed or short while
-/// the operating system releases the site lock, so the next build would silently consume the
-/// partial set. Recovery belongs to `tola vendor`, which owns the backup trees.
+/// A present swap workspace means the last replacement never finished, so the vendored trees may
+/// be mixed; `tola vendor` completes it.
 pub(super) fn refuse_incomplete_vendor(
     config: &crate::config::ResolvedSiteConfig,
 ) -> anyhow::Result<()> {
-    let Some(workspace) = config.vendor.workspace_path() else {
-        return Ok(());
-    };
-    if workspace.join("committed").exists() || !workspace.join("replacing").exists() {
+    // A vendor candidate is the tree `tola vendor` is preparing now, not an installed one a
+    // stopped run left under recovery.
+    if config.vendor_candidate.is_some() {
         return Ok(());
     }
-    let vendor = config
-        .vendor
-        .path
-        .as_ref()
-        .map(|path| crate::filesystem::display_path(path, config.get_root()))
-        .unwrap_or_default();
+    let Some(vendor_path) = config.vendor.path.as_ref() else {
+        return Ok(());
+    };
+    if !crate::filesystem::TreeSwap::beside(config.get_root(), vendor_path)?.is_claimed()? {
+        return Ok(());
+    }
+    let vendor = crate::filesystem::display_path(vendor_path, config.get_root());
     let diagnostic = Diagnostic::new(
-        crate::codes::vendor::INCOMPLETE,
-        crate::diagnostic::Severity::Error,
+        tola_diagnostic::codes::vendor::INCOMPLETE,
+        tola_diagnostic::Severity::Error,
         "a previous `tola vendor` stopped before it finished",
     )
     .with_note(vendor)
-    .with_help("Run `tola vendor` to finish or undo that replacement");
+    .with_help("Run `tola vendor` to complete the replacement");
     Err(anyhow::Error::new(DiagnosticError::attach(
         anyhow::anyhow!("the vendored inputs are incomplete"),
         vec![diagnostic],
@@ -67,42 +65,38 @@ pub(super) fn refuse_incomplete_vendor(
 }
 
 pub(super) fn with_site(error: anyhow::Error, root: &Path) -> anyhow::Error {
-    if crate::cancellation::is_cancelled(&error) || crate::diagnostic::attached(&error).is_some() {
-        return error;
-    }
-    attach(error, root, crate::codes::build::SITE)
+    with_report(error, root, tola_diagnostic::codes::build::SITE)
 }
 
 pub(super) fn with_write(error: anyhow::Error, root: &Path) -> anyhow::Error {
-    if crate::cancellation::is_cancelled(&error) || crate::diagnostic::attached(&error).is_some() {
-        return error;
-    }
-    attach(error, root, crate::codes::publish::SITE)
+    with_report(error, root, tola_diagnostic::codes::publish::SITE)
 }
 
-fn attach(
+fn with_report(
     error: anyhow::Error,
     root: &Path,
-    fallback_code: crate::diagnostic::DiagnosticCode,
+    fallback_code: tola_diagnostic::DiagnosticCode,
 ) -> anyhow::Error {
-    let diagnostics = classify(&error, root)
-        .unwrap_or_else(|| vec![crate::diagnostic::fallback(fallback_code, &error)]);
-    anyhow::Error::new(DiagnosticError::attach(error, diagnostics))
+    crate::compiler::diagnostic::attach_reports(error, |error| reports(error, root, fallback_code))
 }
 
 pub fn for_error(error: &anyhow::Error, root: &Path) -> Vec<Diagnostic> {
     if crate::cancellation::is_cancelled(error) {
         return Vec::new();
     }
-    if let Some(diagnostics) = crate::diagnostic::attached(error) {
+    reports(error, root, tola_diagnostic::codes::build::SITE)
+}
+
+/// The reports one boundary hands a reader: attached by a producer, or classified here.
+fn reports(
+    error: &anyhow::Error,
+    root: &Path,
+    fallback_code: tola_diagnostic::DiagnosticCode,
+) -> Vec<Diagnostic> {
+    if let Some(diagnostics) = tola_diagnostic::attached(error) {
         return diagnostics.to_vec();
     }
-    classify(error, root).unwrap_or_else(|| {
-        vec![crate::diagnostic::fallback(
-            crate::codes::build::SITE,
-            error,
-        )]
-    })
+    classify(error, root).unwrap_or_else(|| vec![tola_diagnostic::fallback(fallback_code, error)])
 }
 
 fn classify(error: &anyhow::Error, root: &Path) -> Option<Vec<Diagnostic>> {
@@ -122,7 +116,7 @@ mod tests {
         let error = anyhow::Error::new(tola_typst::CompileError::Cancelled);
         let error = with_site(error, Path::new("/site"));
         assert!(crate::cancellation::is_cancelled(&error));
-        assert!(crate::diagnostic::attached(&error).is_none());
+        assert!(tola_diagnostic::attached(&error).is_none());
         assert!(for_error(&error, Path::new("/site")).is_empty());
     }
 
@@ -136,7 +130,7 @@ mod tests {
         let diagnostics = for_error(&diagnosed, Path::new("/site"));
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::typst::FONT);
+        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::typst::FONT);
         assert!(diagnostics[0].message.contains("fonts/Arial.ttf"));
         assert!(!diagnostics[0].message.contains("/site"));
         assert!(!diagnostics[0].help.is_empty());
@@ -169,6 +163,30 @@ mod tests {
         );
     }
 
+    /// A build reads no vendored input while a stopped replacement waits for `tola vendor`.
+    #[test]
+    fn unfinished_vendor_replacement_refuses_the_build() {
+        let site = tempfile::TempDir::new().unwrap();
+        let config = crate::config::tests::load_test_config(
+            site.path(),
+            crate::config::tests::VENDORED_SITE_SOURCE,
+        );
+        assert!(refuse_incomplete_vendor(&config).is_ok());
+
+        let vendor = config.vendor.path.as_ref().expect("a declared vendor path");
+        crate::filesystem::TreeSwap::beside(config.get_root(), vendor)
+            .unwrap()
+            .claim()
+            .unwrap();
+
+        let error = refuse_incomplete_vendor(&config).unwrap_err();
+        let diagnostics = tola_diagnostic::attached(&error).expect("the refusal is a diagnostic");
+        assert_eq!(
+            diagnostics[0].code,
+            tola_diagnostic::codes::vendor::INCOMPLETE
+        );
+    }
+
     #[test]
     fn build_error_renders_outer_context_once() {
         let error = anyhow::anyhow!("disk read failed")
@@ -176,7 +194,7 @@ mod tests {
             .context("compile the root Bundle");
 
         let error = with_site(error, Path::new("/site"));
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
+        let diagnostics = tola_diagnostic::attached(&error).unwrap();
 
         assert_eq!(diagnostics[0].message, "compile the root Bundle");
         // Only the outermost message reaches the reader; inner contexts stay in the chain.

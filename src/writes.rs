@@ -1,11 +1,16 @@
 //! Checked creation and replacement of site files beneath one root.
 
 use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use cap_std::fs::Dir;
+use tola_build::cancellation::BuildCancellation;
+
+use crate::terminal::display_path;
 
 #[derive(Debug)]
 enum ExpectedContents {
@@ -23,7 +28,7 @@ impl std::fmt::Display for ExistingFile {
         write!(
             formatter,
             "file `{}` already exists",
-            crate::terminal::display_path(&self.path)
+            display_path(&self.path)
         )
     }
 }
@@ -54,10 +59,7 @@ impl FileWrites {
     pub(crate) fn new(root: &Path) -> Result<Self> {
         let root = tola_build::filesystem::normalize_existing_prefix(root);
         if !root.is_absolute() {
-            bail!(
-                "write root `{}` must be absolute",
-                crate::terminal::display_path(&root)
-            );
+            bail!("write root `{}` must be absolute", display_path(&root));
         }
         Ok(Self {
             root,
@@ -145,7 +147,7 @@ impl FileWrites {
                     return Err(error).with_context(|| {
                         format!(
                             "cannot use `{}` as a directory; move the existing path aside or check its permissions",
-                            crate::terminal::display_path(directory)
+                            display_path(directory)
                         )
                     });
                 }
@@ -157,10 +159,7 @@ impl FileWrites {
         Ok(())
     }
 
-    pub(crate) fn apply(
-        &self,
-        cancellation: &tola_build::cancellation::BuildCancellation,
-    ) -> Result<()> {
+    pub(crate) fn apply(&self, cancellation: &BuildCancellation) -> Result<()> {
         cancellation.ensure_active()?;
         self.check()?;
         let mut created_directories = Vec::new();
@@ -191,7 +190,7 @@ impl FileWrites {
                     .with_context(|| {
                         format!(
                             "cannot write `{}`; review the file and its directory, then retry",
-                            crate::terminal::display_path(&file.path)
+                            display_path(&file.path)
                         )
                     })?;
                 written.push((file, parent.to_path_buf(), backup));
@@ -208,7 +207,7 @@ impl FileWrites {
                 if let Err(_rollback) = rolled_back {
                     error = error.context(format!(
                         "cannot restore `{}` after a failed write; review the site files, then retry",
-                        crate::terminal::display_path(&file.path)
+                        display_path(&file.path)
                     ));
                 }
             }
@@ -226,7 +225,7 @@ impl FileWrites {
                 backup.remove().with_context(|| {
                     format!(
                         "cannot remove committed backup `{}`",
-                        crate::terminal::display_path(&backup.directory.path.join(&backup.name))
+                        display_path(&backup.directory.path.join(&backup.name))
                     )
                 })?;
             }
@@ -243,7 +242,7 @@ impl FileWrites {
             .into()),
             ExpectedContents::Exact(expected) if actual.as_ref() != expected.as_ref() => bail!(
                 "file `{}` changed before it could be written; review the current contents and retry",
-                crate::terminal::display_path(&file.path)
+                display_path(&file.path)
             ),
             _ => Ok(()),
         }
@@ -256,10 +255,7 @@ impl FileWrites {
         expected: ExpectedContents,
     ) -> Result<()> {
         if self.files.iter().any(|file| file.path == path) {
-            bail!(
-                "file `{}` was added more than once",
-                crate::terminal::display_path(&path)
-            );
+            bail!("file `{}` was added more than once", display_path(&path));
         }
         self.files.push(FileWrite {
             path,
@@ -274,16 +270,14 @@ impl FileWrites {
             || relative.components().any(|component| {
                 matches!(
                     component,
-                    std::path::Component::ParentDir
-                        | std::path::Component::RootDir
-                        | std::path::Component::Prefix(_)
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
                 )
             })
         {
             bail!(
                 "write path `{}` must be relative to `{}` and must not contain `..`",
-                crate::terminal::display_path(relative),
-                crate::terminal::display_path(&self.root)
+                display_path(relative),
+                display_path(&self.root)
             );
         }
         Ok(self.root.join(relative))
@@ -293,14 +287,10 @@ impl FileWrites {
         &self,
         path: &Path,
         created: &mut Vec<PathBuf>,
-        cancellation: &tola_build::cancellation::BuildCancellation,
+        cancellation: &BuildCancellation,
     ) -> Result<()> {
-        Directory::open(path, true, created, cancellation).with_context(|| {
-            format!(
-                "cannot create safe directory `{}`",
-                crate::terminal::display_path(path)
-            )
-        })?;
+        Directory::open(path, true, created, cancellation)
+            .with_context(|| format!("cannot create safe directory `{}`", display_path(path)))?;
         Ok(())
     }
 }
@@ -326,12 +316,9 @@ fn read_target(path: &Path) -> Result<Option<Vec<u8>>> {
     match result {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error).with_context(|| {
-            format!(
-                "cannot safely read `{}`",
-                crate::terminal::display_path(path)
-            )
-        }),
+        Err(error) => {
+            Err(error).with_context(|| format!("cannot safely read `{}`", display_path(path)))
+        }
     }
 }
 
@@ -340,7 +327,7 @@ fn read_target(path: &Path) -> Result<Option<Vec<u8>>> {
 #[derive(Clone, Debug)]
 struct Directory {
     path: PathBuf,
-    _pinned_directories: std::sync::Arc<Vec<Dir>>,
+    _pinned_directories: Arc<Vec<Dir>>,
 }
 
 impl Directory {
@@ -352,7 +339,7 @@ impl Directory {
         path: &Path,
         create: bool,
         created: &mut Vec<PathBuf>,
-        cancellation: &tola_build::cancellation::BuildCancellation,
+        cancellation: &BuildCancellation,
     ) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(io::Error::other("directory must be absolute"));
@@ -362,20 +349,20 @@ impl Directory {
         for component in path.components() {
             cancellation.ensure_active().map_err(io::Error::other)?;
             let name = match component {
-                std::path::Component::Prefix(_) => {
+                Component::Prefix(_) => {
                     current.push(component);
                     continue;
                 }
-                std::path::Component::RootDir => {
+                Component::RootDir => {
                     current.push(component);
                     handles.push(crate::sys::open_filesystem_root(&current)?);
                     continue;
                 }
-                std::path::Component::CurDir => continue,
-                std::path::Component::ParentDir => {
+                Component::CurDir => continue,
+                Component::ParentDir => {
                     return Err(io::Error::other("directory must not contain `..`"));
                 }
-                std::path::Component::Normal(name) => name,
+                Component::Normal(name) => name,
             };
             current.push(name);
             let parent = handles.last().expect("absolute path starts at a root");
@@ -399,7 +386,7 @@ impl Directory {
         }
         Ok(Self {
             path: path.to_owned(),
-            _pinned_directories: std::sync::Arc::new(handles),
+            _pinned_directories: Arc::new(handles),
         })
     }
 
@@ -409,7 +396,7 @@ impl Directory {
             .expect("directory has a handle")
     }
 
-    fn read(&self, name: &std::ffi::OsStr) -> io::Result<Vec<u8>> {
+    fn read(&self, name: &OsStr) -> io::Result<Vec<u8>> {
         let mut file = crate::sys::open_file_for_read(self.dir(), name)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("write target is not a regular file"));
@@ -419,23 +406,25 @@ impl Directory {
         Ok(bytes)
     }
 
-    fn rename(&self, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
+    fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
         self.dir().rename(from, self.dir(), to)
     }
 
-    fn publish(&self, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
+    fn publish(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
         crate::sys::rename_without_replacing(self.dir(), &self.path, from, to)
     }
 
-    fn restore(&self, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> Result<()> {
+    fn restore(&self, from: &OsStr, to: &OsStr) -> Result<()> {
         // Keep the captured version until recovery is confirmed. Unlike a hard
         // link, a staged copy also supports Windows FAT/exFAT site roots.
         let staged = self.stage(&self.read(from)?, "tmp")?;
+        self.dir()
+            .set_permissions(&staged.name, self.dir().metadata(from)?.permissions())?;
         self.publish(&staged.name, to)?;
         Ok(())
     }
 
-    fn remove(&self, name: &std::ffi::OsStr, directory: bool) -> io::Result<()> {
+    fn remove(&self, name: &OsStr, directory: bool) -> io::Result<()> {
         if directory {
             self.dir().remove_dir(name)
         } else {
@@ -448,7 +437,7 @@ impl Directory {
         getrandom::fill(&mut random).map_err(|_| {
             anyhow::anyhow!("Tola could not replace the file; run the command again")
         })?;
-        let name = std::ffi::OsString::from(format!(".tola-{}.{suffix}", hex::encode(random)));
+        let name = OsString::from(format!(".tola-{}.{suffix}", hex::encode(random)));
         let mut file = crate::sys::create_new_file(self.dir(), &name)?;
         let staged = StoredFile {
             directory: self.clone(),
@@ -459,7 +448,7 @@ impl Directory {
         Ok(staged)
     }
 
-    fn capture(&self, name: &std::ffi::OsStr) -> Result<StoredFile> {
+    fn capture(&self, name: &OsStr) -> Result<StoredFile> {
         let mut saved = self.stage(&[], "backup")?;
         self.rename(name, &saved.name)?;
         // From this point Drop must never erase the displaced version on errors.
@@ -469,10 +458,10 @@ impl Directory {
 
     fn replace(
         &self,
-        name: &std::ffi::OsStr,
+        name: &OsStr,
         expected: Option<&[u8]>,
         contents: &[u8],
-        cancellation: &tola_build::cancellation::BuildCancellation,
+        cancellation: &BuildCancellation,
     ) -> Result<Option<StoredFile>> {
         let staged = self.stage(contents, "tmp")?;
         cancellation.ensure_active()?;
@@ -488,6 +477,10 @@ impl Directory {
             if self.read(&saved.name)? != expected {
                 bail!("file changed before replacement");
             }
+            self.dir().set_permissions(
+                &staged.name,
+                self.dir().metadata(&saved.name)?.permissions(),
+            )?;
             cancellation.ensure_active()?;
             self.publish(&staged.name, name)?;
             Ok(())
@@ -497,7 +490,7 @@ impl Directory {
             return Err(error).with_context(|| {
                 format!(
                     "displaced version retained at `{}`; {}",
-                    crate::terminal::display_path(&self.path.join(&saved.name)),
+                    display_path(&self.path.join(&saved.name)),
                     if restored.is_ok() {
                         "original path restored"
                     } else {
@@ -511,7 +504,7 @@ impl Directory {
 
     fn rollback(
         &self,
-        name: &std::ffi::OsStr,
+        name: &OsStr,
         written: &[u8],
         mut previous: Option<StoredFile>,
     ) -> Result<()> {
@@ -521,7 +514,7 @@ impl Directory {
                 |saved| {
                     format!(
                         "earlier version retained at `{}`",
-                        crate::terminal::display_path(&self.path.join(&saved.name))
+                        display_path(&self.path.join(&saved.name))
                     )
                 },
             )
@@ -530,10 +523,10 @@ impl Directory {
             let _ = self.restore(&current.name, name);
             bail!(
                 "concurrent version retained at `{}`; earlier version: {}",
-                crate::terminal::display_path(&self.path.join(&current.name)),
+                display_path(&self.path.join(&current.name)),
                 previous.as_ref().map_or_else(
                     || "file was originally absent".to_owned(),
-                    |saved| crate::terminal::display_path(&self.path.join(&saved.name))
+                    |saved| display_path(&self.path.join(&saved.name))
                 )
             );
         }
@@ -541,7 +534,7 @@ impl Directory {
             self.restore(&previous.name, name).with_context(|| {
                 format!(
                     "earlier version retained at `{}`",
-                    crate::terminal::display_path(&self.path.join(&previous.name))
+                    display_path(&self.path.join(&previous.name))
                 )
             })?;
             previous.remove()?;
@@ -553,7 +546,7 @@ impl Directory {
 
 struct StoredFile {
     directory: Directory,
-    name: std::ffi::OsString,
+    name: OsString,
     retained: bool,
 }
 
@@ -631,7 +624,7 @@ mod tests {
         fs::write(path.join("settings"), b"editor save").unwrap();
         assert!(
             directory
-                .publish(&staged.name, std::ffi::OsStr::new("settings"))
+                .publish(&staged.name, OsStr::new("settings"))
                 .is_err()
         );
         assert_eq!(fs::read(path.join("settings")).unwrap(), b"editor save");
@@ -723,12 +716,7 @@ mod tests {
         fs::rename(&path, root.join("original")).unwrap();
         std::os::unix::fs::symlink(outside.path(), &path).unwrap();
         directory
-            .replace(
-                std::ffi::OsStr::new("page.typ"),
-                None,
-                b"inside",
-                &Default::default(),
-            )
+            .replace(OsStr::new("page.typ"), None, b"inside", &Default::default())
             .unwrap();
         assert_eq!(fs::read(root.join("original/page.typ")).unwrap(), b"inside");
         assert!(!outside.path().join("page.typ").exists());
@@ -747,7 +735,7 @@ mod tests {
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("settings"), b"unrelated").unwrap();
 
-        let name = std::ffi::OsStr::new("settings");
+        let name = OsStr::new("settings");
         let previous = directory
             .replace(name, Some(b"original"), b"ours", &Default::default())
             .unwrap();
@@ -762,7 +750,7 @@ mod tests {
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
                 .collect::<Vec<_>>(),
-            vec![std::ffi::OsString::from("settings")]
+            vec![OsString::from("settings")]
         );
     }
 
@@ -777,12 +765,7 @@ mod tests {
 
         assert!(fs::rename(root.join("parent"), root.join("moved")).is_err());
         directory
-            .replace(
-                std::ffi::OsStr::new("settings"),
-                None,
-                b"ours",
-                &Default::default(),
-            )
+            .replace(OsStr::new("settings"), None, b"ours", &Default::default())
             .unwrap();
         drop(directory);
         fs::rename(root.join("parent"), root.join("moved")).unwrap();
@@ -799,7 +782,7 @@ mod tests {
         assert!(
             directory
                 .replace(
-                    std::ffi::OsStr::new("settings"),
+                    OsStr::new("settings"),
                     Some(b"expected"),
                     b"ours",
                     &Default::default()
@@ -827,7 +810,7 @@ mod tests {
         fs::write(path.join("settings"), b"original").unwrap();
         let previous = directory
             .replace(
-                std::ffi::OsStr::new("settings"),
+                OsStr::new("settings"),
                 Some(b"original"),
                 b"ours",
                 &Default::default(),
@@ -836,7 +819,7 @@ mod tests {
         fs::write(path.join("settings"), b"editor save").unwrap();
         assert!(
             directory
-                .rollback(std::ffi::OsStr::new("settings"), b"ours", previous)
+                .rollback(OsStr::new("settings"), b"ours", previous)
                 .is_err()
         );
         assert_eq!(fs::read(path.join("settings")).unwrap(), b"editor save");
@@ -871,11 +854,7 @@ mod tests {
         writes.create_file("first", "one").unwrap();
         writes.create_file("second", "two").unwrap();
 
-        assert!(
-            writes
-                .apply(&tola_build::cancellation::BuildCancellation::default())
-                .is_err()
-        );
+        assert!(writes.apply(&BuildCancellation::default()).is_err());
         assert!(!root.join("first").exists());
     }
 
@@ -891,17 +870,13 @@ mod tests {
             .unwrap();
         writes.create_file("generated/child", "unwritten").unwrap();
 
-        assert!(
-            writes
-                .apply(&tola_build::cancellation::BuildCancellation::new())
-                .is_err()
-        );
+        assert!(writes.apply(&BuildCancellation::new()).is_err());
         assert_eq!(fs::read(root.join("settings.toml")).unwrap(), b"original");
         assert!(!root.join("generated").exists());
     }
 
     #[test]
-    fn nested_targets_apply_in_one_pass() {
+    fn nested_targets_apply_once() {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("site");
         let mut writes = FileWrites::new(&root).unwrap();
@@ -910,12 +885,40 @@ mod tests {
             .create_file("content/posts/index.typ", "hello")
             .unwrap();
 
-        writes
-            .apply(&tola_build::cancellation::BuildCancellation::default())
-            .unwrap();
+        writes.apply(&BuildCancellation::default()).unwrap();
         assert_eq!(
             fs::read_to_string(root.join("content/posts/index.typ")).unwrap(),
             "hello"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_keeps_file_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        for mode in [0o600, 0o755] {
+            for fail in [false, true] {
+                let temporary = tempfile::tempdir().unwrap();
+                let root = temporary.path();
+                let path = root.join("script.nu");
+                fs::write(&path, "original").unwrap();
+                fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+                let mut writes = FileWrites::new(root).unwrap();
+                writes.replace_file("script.nu", "updated").unwrap();
+                if fail {
+                    writes.create_file("parent", "not a directory").unwrap();
+                    writes.create_file("parent/child", "unwritten").unwrap();
+                }
+                assert_eq!(writes.apply(&Default::default()).is_err(), fail);
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    if fail { "original" } else { "updated" }
+                );
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+        }
     }
 }

@@ -9,6 +9,7 @@ repository = "https://github.com/tola-rs/tola-ssg"
 
 [dependencies]
 anyhow = "1.0.104"
+gix = { version = "=0.90.0", default-features = false, features = ["blocking-http-transport-reqwest-rust-tls", "worktree-mutation", "sha1"] }
 bytes = "1.12.1"
 comemo = "0.5.1"
 ignore = "0.4.23"
@@ -28,6 +29,7 @@ rss = { version = "2.1.0", default-features = false, features = ["builders", "va
 atom_syndication = { version = "0.12.10", default-features = false, features = ["builders"] }
 tola-address.workspace = true
 tola-config.workspace = true
+tola-diagnostic.workspace = true
 tola-icons.workspace = true
 tola-minify.workspace = true
 tola-typst = { workspace = true, features = ["embed-fonts", "network"] }
@@ -48,7 +50,6 @@ hex = "0.4.3"
 tempfile = "3.27.0"
 tola-image.workspace = true
 tola-packages.workspace = true
-schemars = { version = "1.2.2", optional = true }
 
 [dev-dependencies]
 image = { version = "=0.25.9", default-features = false, features = ["png"] }
@@ -62,4 +63,4 @@ winapi-util = "0.1.11"
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [features]
-json-schema = ["dep:schemars"]
+json-schema = ["tola-diagnostic/json-schema"]

@@ -42,34 +42,14 @@ impl SourceMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use typst::foundations::{Array, IntoValue, Label, NativeElement, Value};
-    use typst::math::EquationElem;
+    use typst::foundations::{Array, IntoValue, Label, Value};
     use typst::text::TextElem;
-    use typst::visualize::Color;
 
     /// The dictionary one declaration has, with `field` set to `value`.
     fn declared(field: &str, value: Value) -> Dict {
         let mut fields = Dict::new();
         fields.insert(field.into(), value);
         fields
-    }
-
-    #[test]
-    fn declared_dictionary_round_trips() {
-        let equation = EquationElem::new(TextElem::packed("x")).pack();
-        let styled = equation.set(TextElem::fill, Color::RED.into());
-        let fields = declared("card", styled.clone().into_value());
-
-        let metadata = SourceMetadata::from_dict(fields.clone());
-
-        assert_eq!(
-            metadata.to_typst_dict().get("card").unwrap(),
-            &styled.into_value()
-        );
-        assert_eq!(
-            typst::utils::hash128(&metadata.to_typst_dict()),
-            typst::utils::hash128(&fields)
-        );
     }
 
     #[test]

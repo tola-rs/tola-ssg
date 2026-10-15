@@ -116,11 +116,6 @@ impl Plane {
         local
     }
 
-    #[cfg(test)]
-    pub(crate) fn stride(&self) -> usize {
-        self.stride
-    }
-
     pub(crate) fn frame_stride(&self) -> usize {
         self.frame_stride
     }

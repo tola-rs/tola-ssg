@@ -94,7 +94,7 @@ fn open(source: &Source, leaf: &LinkedNode<'_>, offset: usize) -> Option<Vec<Edi
         }
         // One level deeper than the line the construct opened on, which is the depth the author
         // indented that construct's body to — whether or not the caret is the first thing in it.
-        let width = line_indent(source, range.start) + INDENT;
+        let width = indent_at(text, range.start).len() + INDENT;
         return Some(vec![insert(
             offset,
             format!("\n{}", " ".repeat(width)),
@@ -121,11 +121,6 @@ fn opened(kind: SyntaxKind) -> bool {
     )
 }
 
-/// The spaces that open the line `at` sits on.
-fn line_indent(source: &Source, at: usize) -> usize {
-    indent_at(source.text(), at).len()
-}
-
 /// The edit that replaces nothing at `offset` and inserts `text`, leaving the insertion at `insertion`.
 fn insert(at: usize, text: String, insertion: Option<usize>) -> Edit {
     Edit {
@@ -137,17 +132,13 @@ fn insert(at: usize, text: String, insertion: Option<usize>) -> Edit {
 
 /// The nearest ancestor of `leaf` that is a `kind`.
 fn ancestor<'a>(leaf: &LinkedNode<'a>, kind: SyntaxKind) -> Option<LinkedNode<'a>> {
-    let mut node = leaf.clone();
-    loop {
-        if node.kind() == kind {
-            return Some(node);
-        }
-        node = node.parent()?.clone();
-    }
+    ancestors(leaf).find(|node| node.kind() == kind).cloned()
 }
 
 /// `leaf` and each node that contains it, innermost first.
-fn ancestors<'a>(leaf: &'a LinkedNode<'a>) -> impl Iterator<Item = &'a LinkedNode<'a>> {
+fn ancestors<'a, 'leaf>(
+    leaf: &'leaf LinkedNode<'a>,
+) -> impl Iterator<Item = &'leaf LinkedNode<'a>> {
     std::iter::successors(Some(leaf), |node| node.parent())
 }
 

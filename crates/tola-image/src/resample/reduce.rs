@@ -39,6 +39,13 @@ pub(super) struct ReducedBlock {
 }
 
 impl ReducedBlock {
+    pub(super) fn dimensions(self, width: u32, height: u32) -> (u32, u32) {
+        (
+            width.div_ceil(self.horizontal),
+            height.div_ceil(self.vertical),
+        )
+    }
+
     /// The block one resize averages by, or `None` when neither axis is worth a box stage.
     pub(super) fn of(input: (u32, u32), output: (u32, u32)) -> Option<Self> {
         let mut block = Self {
@@ -105,8 +112,7 @@ pub(super) fn box_averaged(
     cancellation: &dyn Cancellation,
 ) -> Result<SourcePlane<'static>> {
     let (horizontal, vertical) = (block.horizontal, block.vertical);
-    let width = plane.width().div_ceil(horizontal);
-    let height = plane.height().div_ceil(vertical);
+    let (width, height) = block.dimensions(plane.width(), plane.height());
     let mut pixels = rgba_buffer(width, height)?;
     let level = Level::new();
     // One divisor per output column, so the row loop divides once per output pixel and never
@@ -179,8 +185,7 @@ pub(super) fn covered_box_averaged(
     cancellation: &dyn Cancellation,
 ) -> Result<CoveredPlane<'static>> {
     let (horizontal, vertical) = (block.horizontal, block.vertical);
-    let width = plane.width().div_ceil(horizontal);
-    let height = plane.height().div_ceil(vertical);
+    let (width, height) = block.dimensions(plane.width(), plane.height());
     let samples = pixel_bytes(width, height, 8)? / 8;
     let mut pixels = Vec::new();
     pixels.try_reserve_exact(samples).context(HOLD_IN_MEMORY)?;
@@ -242,7 +247,7 @@ pub(super) fn covered_box_averaged(
 mod tests {
     use super::*;
     use crate::NO_CANCELLATION;
-    use crate::resample::test_support::plane;
+    use crate::resample::tests::test_support::plane;
 
     #[test]
     fn box_reduction_observes_cancellation_within_rows() {

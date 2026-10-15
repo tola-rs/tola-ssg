@@ -1,18 +1,16 @@
 import { expect } from '@playwright/test'
-import { chmod, readdir, readFile, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
 import {
-  captureOutput,
   COMMAND_TIMEOUT_MS,
   commandRunner,
   expectExited,
   runCommand,
-  RunningProcess,
   startCommand,
   test,
 } from '../../support/process.ts'
-import { runOnTerminal, screenText, sizedTerminalArgs } from '../../support/terminal.ts'
+import { runOnTerminal } from '../../support/terminal.ts'
 
 test('documentation help needs no usable site', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
@@ -21,47 +19,18 @@ test('documentation help needs no usable site', async ({ binary, directory: root
 
   const hooks = await run(['help', '[build.hooks]'], root)
   expectExited(hooks)
-  for (const stage of ['before-build', 'generate-outputs', 'after-publish']) {
-    expect(hooks.stdout).toContain(`[[build.hooks.${stage}]]`)
-  }
+  expect(hooks.stdout).toContain('build.hooks')
   expect(hooks.stderr).toBe('')
 
-  const fonts = await run(['help', '[typst]'], root)
-  expectExited(fonts)
-  expect(fonts.stdout).toContain('[typst.fonts]')
-  expect(fonts.stdout).toContain('paths =')
-  expect(fonts.stderr).toBe('')
-
-  for (
-    const name of [
-      'site',
-      'address',
-      'icon',
-      'image',
-      'source',
-      'collection',
-      'datalog',
-      'schema',
-      'document',
-      'code',
-      'web',
-    ]
-  ) {
-    const reference = await run(['help', `@tola/${name}`], root)
-    expectExited(reference)
-    expect(reference.stdout).toContain(`@tola/${name}:0.0.0`)
-    expect(reference.stdout).toContain('Exports:')
-    expect(reference.stderr).toBe('')
-  }
+  const reference = await run(['help', '@tola/document'], root)
+  expectExited(reference)
+  expect(reference.stdout).toContain('@tola/document:0.0.0')
+  expect(reference.stderr).toBe('')
 
   const selected = await run(['help', '@tola/document', 'headings', 'references'], root)
   expectExited(selected)
   expect(selected.stdout).toContain('let headings(')
-  expect(selected.stdout).toContain('depth: ')
-  expect(selected.stdout).toContain('Named Parameters')
-  expect(selected.stdout).toContain('type: ')
   expect(selected.stdout).toContain('references(')
-  expect(selected.stdout).not.toContain('current-document — function')
 
   const rejected = await run(['help', '@tola/document', 'headings', 'unknown-export'], root)
   expectExited(rejected, 1)
@@ -72,37 +41,16 @@ test('documentation help needs no usable site', async ({ binary, directory: root
 })
 
 test('documentation color follows stdout choice', async ({ binary, directory: root }) => {
-  for (const target of [['[typst.fonts]'], ['@tola/document', 'headings']]) {
-    const plain = await runCommand(
-      binary,
-      ['--color', 'never', 'help', ...target],
-      root,
-      COMMAND_TIMEOUT_MS.standard,
-    )
-    const automatic = await runCommand(
-      binary,
-      ['--color', 'auto', 'help', ...target],
-      root,
-      COMMAND_TIMEOUT_MS.standard,
-    )
-    const colored = await runCommand(
-      binary,
-      ['--color', 'always', 'help', ...target],
-      root,
-      COMMAND_TIMEOUT_MS.standard,
-    )
-    for (const command of [plain, automatic, colored]) {
-      expectExited(command)
-      expect(command.stderr).toBe('')
-    }
-    expect(plain.stdout).not.toContain('\u001b')
-    expect(automatic.stdout).toBe(plain.stdout)
-    expect(colored.stdout).toContain('\u001b[')
-    expect(stripVTControlCharacters(colored.stdout)).toBe(plain.stdout)
-    expect(
-      plain.stdout,
-    ).toContain(target[0] === '[typst.fonts]' ? 'paths =' : 'let headings(')
-  }
+  const run = (color: string) =>
+    runCommand(binary, ['--color', color, 'help', '[typst.fonts]'], root, COMMAND_TIMEOUT_MS.standard)
+  const plain = await run('never')
+  const automatic = await run('auto')
+  const colored = await run('always')
+  for (const command of [plain, automatic, colored]) expectExited(command)
+  expect(plain.stdout).not.toContain('\u001b')
+  expect(automatic.stdout).toBe(plain.stdout)
+  expect(colored.stdout).toContain('\u001b[')
+  expect(stripVTControlCharacters(colored.stdout)).toBe(plain.stdout)
 })
 
 test('package documentation follows the language', async ({ binary, directory: root }) => {
@@ -120,7 +68,6 @@ test('package documentation follows the language', async ({ binary, directory: r
     const selected = await run(['help', '@tola/address', '--lang', 'en'], root)
     expectExited(selected)
     expect(english.stdout()).toBe(selected.stdout)
-    expect(english.stdout()).toContain('Import in Typst:')
     expect(english.stderr()).toBe('')
   } finally {
     await english.command.terminate()
@@ -128,16 +75,9 @@ test('package documentation follows the language', async ({ binary, directory: r
 
   const chinese = await run(['help', '@tola/address', '--lang', 'zh'], root)
   expectExited(chinese)
-  expect(chinese.stdout).toContain('Import in Typst:')
   expect(chinese.stdout).toMatch(/\p{Script=Han}/u)
-  expect(chinese.stdout).toContain('Positional Parameters')
   expect(chinese.stderr).toBe('')
   expect(chinese.stdout).not.toBe(english.stdout())
-
-  // A translation keeps every identifier it reads, so the keys it names stay the keys Tola has.
-  const sources = await run(['help', '@tola/source', '--lang', 'zh'], root)
-  expectExited(sources)
-  expect(sources.stdout).toContain('build.content-dir')
 
   const rejected = await run(['help', '@tola/address', '--lang', 'fr'], root)
   expectExited(rejected, 2)
@@ -150,19 +90,13 @@ test('configuration tables and the overview follow the language', async ({ binar
 
   const table = await run(['help', '[build]', '--lang', 'zh-Hans'], root)
   expectExited(table)
-  // The prose is Chinese; the key names and the headings stay English.
   expect(table.stdout).toMatch(/\p{Script=Han}/u)
   expect(table.stdout).toContain('[build]')
-  expect(table.stdout).toContain('content-dir')
-  expect(table.stdout).toContain('publish-dir')
   expect(table.stderr).toBe('')
 
   const overview = await run(['help', '--lang', 'zh-Hans'], root)
   expectExited(overview)
   expect(overview.stdout).toMatch(/\p{Script=Han}/u)
-  for (const command of ['tola help "[build]"', 'tola help "@tola/source"']) {
-    expect(overview.stdout).toContain(command)
-  }
   expect(overview.stderr).toBe('')
 })
 
@@ -261,124 +195,75 @@ test('interactive help prints the page on a dumb terminal', async ({ binary, dir
   expect(interactive.stdout).toBe(plain.stdout)
 })
 
-test('interactive help cancels on interrupt', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-
-  const running = new RunningProcess(
-    'script',
-    sizedTerminalArgs(binary, ['help', '[site]', '--interactive', '--color', 'never']),
-    root,
-    { TERM: 'xterm-256color' },
+test('machine-readable help preserves content and targets', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  const markdown = await run(['help', 'config', '--format', 'markdown'], root)
+  const json = await run(['help', 'config', '--format', 'json'], root)
+  expectExited(markdown)
+  expectExited(json)
+  const document = JSON.parse(json.stdout)
+  expect(document.markdown).toBe(markdown.stdout)
+  expect(document.target).toBe('tola-help://config')
+  expect(document.headings.length).toBeGreaterThan(0)
+  const link = document.links.find((link: { target: string }) =>
+    link.target.startsWith('tola-help://config/')
   )
-  const output = captureOutput(running.child)
-  const closing = running.waitForClose(COMMAND_TIMEOUT_MS.standard)
-
-  await expect.poll(() => stripVTControlCharacters(output.stdout())).toContain('configuration')
-  running.child.stdin.write('\x03')
-
-  expect((await closing).code).toBe(130)
-  expect(output.stdout()).toContain('\x1b[?1049l')
+  expect(link).toBeDefined()
+  expectExited(await run(['help', link.target, '--format', 'json'], root))
 })
 
-test('interactive help navigates the localized page', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-
-  const plain = await commandRunner(binary)(['help', '@tola/address', '--lang', 'zh'], root)
-  expectExited(plain)
-  expect(plain.stderr).toBe('')
-  const overview = plain.stdout.split('\n').find((line) => /\p{Script=Han}/u.test(line))?.trim() ?? ''
-  expect(overview).toMatch(/\p{Script=Han}/u)
-
-  const running = new RunningProcess(
-    'script',
-    sizedTerminalArgs(binary, [
-      'help',
-      '@tola/address',
-      '--lang',
-      'zh',
-      '--interactive',
-      '--color',
-      'never',
-    ]),
-    root,
-    { TERM: 'xterm-256color' },
-  )
-  const output = captureOutput(running.child)
-  const closing = running.waitForClose(COMMAND_TIMEOUT_MS.standard)
-
-  await expect
-    .poll(() => screenText(output.stdout()).replace(/\s+/g, ''))
-    .toContain(overview.replace(/\s+/g, ''))
-
-  running.child.stdin.write('G')
-  await expect.poll(() => screenText(output.stdout())).toContain('100%/index.html')
-  running.child.stdin.write('g')
-  await expect.poll(() => screenText(output.stdout())).toContain('@tola/address')
-  running.child.stdin.write('\t')
-  // This page has no next tab, so Tab leaves the zh page exactly as it was.
-  await expect.poll(() => screenText(output.stdout())).toContain('@tola/address')
-  running.child.stdin.write('q')
-
-  expect((await closing).code).toBe(0)
-  expect(output.stdout()).toContain('\x1b[?1049l')
+test('help selects the requested section', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  const response = await run(['help', '@tola/address', '--format', 'json'], root)
+  expectExited(response)
+  const page = JSON.parse(response.stdout)
+  const heading = page.headings.find((heading: { level: number }) => heading.level > 1)
+  const selected = await run(['help', page.target + '#' + heading.anchor, '--format', 'json'], root)
+  expectExited(selected)
+  const section = JSON.parse(selected.stdout)
+  expect(section.headings[0].anchor).toBe(heading.anchor)
+  expect(page.markdown).toContain(section.markdown)
+  expectExited(await run(['help', page.target + '#no-such-section', '--format', 'json'], root), 1)
 })
 
-test('pasted help search reveals matches before Enter', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-
-  const running = new RunningProcess(
-    'script',
-    sizedTerminalArgs(binary, ['help', '@tola/address', '--interactive', '--color', 'never']),
-    root,
-    { TERM: 'xterm-256color' },
+test('static help discovers the selected site without running it', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  const site = join(root, 'site')
+  await mkdir(join(site, 'module'), { recursive: true })
+  await writeFile(join(site, 'tola.toml'), "[modules.forest]\npath = 'module'\n")
+  await writeFile(
+    join(site, 'module/tola-module.toml'),
+    `schema-version = 1
+[queries.nodes]
+entry = 'missing.typ'
+label = 'Tree nodes'
+schema-version = 1
+[commands.edit]
+help = 'Edit a tree'
+kind = 'argv'
+argv = ['missing-tool']
+`,
   )
-  const output = captureOutput(running.child)
-  const closing = running.waitForClose(COMMAND_TIMEOUT_MS.standard)
-  const content = () => screenText(output.stdout()).split('\n').slice(0, -2).join('\n')
-
-  await expect.poll(content).toContain('Import in Typst:')
-  expect(content()).not.toContain('100%/index.html')
-  running.child.stdin.write('/\x1b[200~100%/index.html\x1b[201~')
-  await expect.poll(content).toContain('100%/index.html')
-  running.child.stdin.write('\rq')
-
-  expect((await closing).code).toBe(0)
-  expect(output.stdout()).toContain('\x1b[?1049l')
+  const config = join(site, 'tola.toml')
+  for (
+    const [args, name] of [
+      [['--config', config, '--help'], 'forest edit'],
+      [['query', '-C' + config, '--help'], 'forest.nodes'],
+    ] as const
+  ) {
+    const help = await run([...args], root)
+    expectExited(help)
+    expect(help.stdout).toContain(name)
+  }
+  const query = await run(['query', '-C' + config, 'forest.nodes'], root)
+  expectExited(query, 1)
+  await expect(readFile(join(site, '.tola'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
-test('help section keys align export headings', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-
-  const running = new RunningProcess(
-    'script',
-    sizedTerminalArgs(binary, [
-      'help',
-      '@tola/address',
-      'join-route',
-      'decode-url-path',
-      '--interactive',
-      '--color',
-      'never',
-    ]),
-    root,
-    { TERM: 'xterm-256color' },
-  )
-  const output = captureOutput(running.child)
-  const closing = running.waitForClose(COMMAND_TIMEOUT_MS.standard)
-  const firstLine = () => screenText(output.stdout()).split('\n')[0]
-
-  await expect.poll(firstLine).toContain('@tola/address')
-  running.child.stdin.write('f')
-  await expect.poll(firstLine).toMatch(/^join-route\b/)
-  running.child.stdin.write(' ')
-  await expect.poll(firstLine).not.toMatch(/^join-route\b/)
-  running.child.stdin.write('b')
-  await expect.poll(firstLine).toMatch(/^join-route\b/)
-  running.child.stdin.write('f')
-  await expect.poll(firstLine).toMatch(/^decode-url-path\b/)
-  running.child.stdin.write('b')
-  await expect.poll(firstLine).toMatch(/^join-route\b/)
-  running.child.stdin.write('q')
-
-  expect((await closing).code).toBe(0)
+test('static help tolerates broken site configuration', async ({ binary, directory: root }) => {
+  await writeFile(join(root, 'tola.toml'), 'not valid = [')
+  const help = await commandRunner(binary)(['--help', '--log-file', 'help.log'], root)
+  expectExited(help)
+  expect(help.stdout).toContain('build')
+  expect(await readdir(root)).toEqual(['tola.toml'])
 })

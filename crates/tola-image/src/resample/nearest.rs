@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 
+use crate::RESIZE_TOO_LARGE;
 use crate::cancellation::Cancellation;
 use crate::rgba_buffer;
 use crate::rows::for_each_row;
@@ -23,7 +24,7 @@ pub(super) fn nearest_pixels(
     let mut columns = Vec::new();
     columns
         .try_reserve_exact(output_width as usize)
-        .context("the image is too large to resize; use a smaller image")?;
+        .context(RESIZE_TOO_LARGE)?;
     for x in 0..output_width {
         columns.push(sampled_center(x, plane.width(), output_width) as usize);
     }
@@ -50,7 +51,7 @@ mod tests {
     use super::*;
     use crate::NO_CANCELLATION;
     use crate::resample::plane::AlphaRepresentation;
-    use crate::resample::test_support::plane;
+    use crate::resample::tests::test_support::plane;
 
     #[test]
     fn nearest_reads_the_nearest_sample() {

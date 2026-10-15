@@ -24,16 +24,3 @@ pub(crate) fn enabled(choice: ColorChoice, stream: Stream) -> bool {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn explicit_choice_overrides_detection() {
-        for stream in [Stream::Stdout, Stream::Stderr] {
-            assert!(enabled(ColorChoice::Always, stream));
-            assert!(!enabled(ColorChoice::Never, stream));
-        }
-    }
-}

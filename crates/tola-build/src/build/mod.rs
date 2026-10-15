@@ -5,23 +5,23 @@ mod diagnostic;
 mod input;
 mod lock;
 mod pipeline;
+mod report;
 mod revision;
 mod session;
 
 pub use crate::hooks::HookExecution;
 pub use crate::mode::BuildMode;
-pub use crate::observation::{InputKind, InputObservation, InputScope, ObservedInputPath};
+pub use crate::observation::{InputKind, InputObservation, InputPathScope, ObservedInputPath};
 pub use diagnostic::{for_error as error_diagnostics, no_pages_diagnostic};
 pub(crate) use input::{AcceptedFileChanges, BuildAttemptInputs};
 pub use input::{BuildFailure, InputFreshness, configured_input_observation};
-pub use lock::{SiteBuildGuard, SiteBuildLock};
+pub use lock::{SiteBuildGuard, SiteBuildLock, SiteBuildLockError};
 pub use pipeline::build_site;
+pub use report::BuildReport;
 pub use revision::{
     CheckedRevision, RevisionCheck, SiteBuild, UncheckedRevision, WriteOutcome, write_site,
 };
 /// Whether a build attempt checks the site's internal references.
-///
-/// Whether a build attempt checks page references.
 ///
 /// Vendor verification skips it: references depend on outputs its build does not produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,8 +46,8 @@ pub(crate) mod tests {
 
     use super::pipeline::{BuildAttemptProducers, build_site_inner};
     use super::{
-        BuildMode, BuildSession, CheckedRevision, SiteBuild, UncheckedRevision, build_site,
-        write_site,
+        BuildMode, BuildRequest, BuildSession, CheckedRevision, SiteBuild, UncheckedRevision,
+        build_site, write_site,
     };
 
     pub(super) use crate::compiler::tests::compiler_host;
@@ -72,7 +72,6 @@ pub(crate) mod tests {
     /// The file names a hook environment record is read back from, below the site root.
     const RECORDED_CACHE_DIRECTORY: &str = "hook-cache-directory.txt";
     const RECORDED_BUILD_MODE: &str = "hook-build-mode.txt";
-    const RECORDED_TEMPORARY_DIRECTORY: &str = "hook-temporary-directory.txt";
 
     /// Assert the environment Tola supplies to one hook command child process.
     ///
@@ -98,7 +97,8 @@ pub(crate) mod tests {
         );
         let root = std::env::current_dir().unwrap();
         let temporary = std::fs::canonicalize(temporary).unwrap();
-        let expected_parent = std::fs::canonicalize(root.join(".tola/hook-tmp")).unwrap();
+        let expected_parent =
+            std::fs::canonicalize(crate::filesystem::layout::hook_scratch(&root)).unwrap();
         assert!(temporary.starts_with(expected_parent));
         let cache = std::env::var_os("TOLA_HOOK_CACHE_DIR")
             .expect("a hook child receives a cache directory");
@@ -128,14 +128,8 @@ pub(crate) mod tests {
         let cache = std::env::var_os("TOLA_HOOK_CACHE_DIR")
             .expect("a hook child receives a cache directory");
         let mode = std::env::var_os("TOLA_BUILD_MODE").expect("a hook child receives a build mode");
-        let temporary = std::env::var_os("TMPDIR").expect("a hook child receives TMPDIR");
         std::fs::write(RECORDED_CACHE_DIRECTORY, cache.to_string_lossy().as_bytes()).unwrap();
         std::fs::write(RECORDED_BUILD_MODE, mode.to_string_lossy().as_bytes()).unwrap();
-        std::fs::write(
-            RECORDED_TEMPORARY_DIRECTORY,
-            temporary.to_string_lossy().as_bytes(),
-        )
-        .unwrap();
         let log = std::path::Path::new(&cache).join("invocations.txt");
         let runs = std::fs::read_to_string(&log).unwrap_or_default();
         std::fs::write(log, format!("{runs}run\n")).unwrap();
@@ -195,27 +189,24 @@ pub(crate) mod tests {
         mode: BuildMode,
         producers: &mut BuildAttemptProducers,
     ) -> Result<SiteBuild> {
-        build_site_inner(
-            config,
+        let request = BuildRequest {
             mode,
-            crate::hooks::HookExecution::Run,
-            super::ReferenceChecks::Full,
-            producers,
-            |producers, _| {
-                if host.matches(config, &producers.resources)
-                    && host.font_inventory_is_fresh(&producers.cancellation)?
-                {
-                    Ok(host.clone())
-                } else {
-                    crate::compiler::TypstHost::for_config_with_resources(
-                        config,
-                        &producers.resources,
-                        &producers.cancellation,
-                    )
-                    .map_err(anyhow::Error::new)
-                }
-            },
-        )
+            ..Default::default()
+        };
+        build_site_inner(config, &request, producers, |producers, _| {
+            if host.matches(config, &producers.resources)
+                && host.font_inventory_is_fresh(&producers.cancellation)?
+            {
+                Ok(host.clone())
+            } else {
+                crate::compiler::TypstHost::for_config_with_resources(
+                    config,
+                    &producers.resources,
+                    &producers.cancellation,
+                )
+                .map_err(anyhow::Error::new)
+            }
+        })
     }
 
     /// Load a resolved config for the conventional `site.typ`/`content` layout

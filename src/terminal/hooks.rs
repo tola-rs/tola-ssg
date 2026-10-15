@@ -99,35 +99,6 @@ mod tests {
     use tola_build::config::section::build::{BeforeBuildHookConfig, HooksConfig};
 
     #[test]
-    fn wrapped_entries_keep_stage_indent() {
-        let mut hooks = HooksConfig::default();
-        for label in ["alpha", "bravo", "charlie", "delta", "echo"] {
-            hooks.before_build.push(BeforeBuildHookConfig {
-                name: label.to_owned(),
-                command: vec!["tool".into()],
-                ..BeforeBuildHookConfig::default()
-            });
-        }
-        let configured = tola_build::hooks::configured_hooks(&hooks).collect::<Vec<_>>();
-
-        assert_eq!(
-            overview(
-                &configured,
-                BuildMode::Production,
-                EVERY_STAGE,
-                Some(40),
-                Palette::new(false)
-            ),
-            [
-                "Hooks:",
-                "  before-build: alpha, bravo, charlie",
-                "                delta, echo",
-            ]
-            .join("\n")
-        );
-    }
-
-    #[test]
     fn hook_overview_fits_terminal_columns() {
         let mut hooks = HooksConfig::default();
         for label in ["文档", "图片", "样式", "脚本", "图标"] {

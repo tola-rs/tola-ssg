@@ -3,6 +3,16 @@
 
 overview = "本站的配置值，解析自 `tola.toml`"
 
+[exports.project-path]
+summary = ['''
+构造以站点根目录为根的原生路径，在主题包中调用也相同。
+
+用于读取主题已知位置的用户数据或生成输入。这里只创建路径，不读取或生成文件；实际读取仍遵守本次调用的输入边界。
+''', '']
+
+[exports.project-path.parameters]
+path = "相对于站点根目录的路径。"
+
 [exports.site]
 
 summary = [

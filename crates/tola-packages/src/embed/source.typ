@@ -26,7 +26,8 @@
 ///   metadata reads other sources settles over several rounds, so its value can differ from one
 ///   round to the next. The root program receives the settled values.
 ///
-/// `tola inspect sources` reads the metadata each source declares, without building the site.
+/// `tola inspect sources` lists discovered file paths without evaluating metadata.
+/// Use a model query to return the metadata your site needs as JSON.
 ///
 /// The segments only suggest a route. Slug and join them with `@tola/address`, and let the
 /// document's own output decide which route reaches it.
@@ -125,7 +126,7 @@
 /// declaration resolved for it. A source that declares no metadata carries `meta: none`, which
 /// this function alone reads as an empty dictionary. Resolved metadata is always a dictionary.
 /// The input order and identity fields stay unchanged. Parsing does not write back to
-/// `all-sources()` or the declarations that `tola inspect sources` reads.
+/// `all-sources()` or the original metadata declarations.
 ///
 /// Example - validate, select, and publish sources in the root program:
 ///

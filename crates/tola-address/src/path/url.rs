@@ -9,7 +9,9 @@ use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_enco
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::portable::{MAX_PORTABLE_SEGMENT_BYTES, PortablePathError, validate_portable_segment};
+use super::portable::{
+    MAX_PORTABLE_SEGMENT_BYTES, PortablePathError, is_control_character, validate_portable_segment,
+};
 use crate::link::split_destination;
 
 const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
@@ -121,7 +123,7 @@ impl UrlPath {
         if path.contains('\0') {
             return Err(UrlPathError::Nul);
         }
-        if path.chars().any(is_c0_or_c1_control) {
+        if path.chars().any(is_control_character) {
             return Err(UrlPathError::Control);
         }
         if path.starts_with("//") {
@@ -274,10 +276,6 @@ fn validate_encoded_path(raw: &str) -> Result<(), UrlPathError> {
     Ok(())
 }
 
-fn is_c0_or_c1_control(character: char) -> bool {
-    matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f)
-}
-
 fn map_portable_path_error(error: PortablePathError) -> UrlPathError {
     match error {
         PortablePathError::FilesystemPrefix => UrlPathError::FilesystemPrefix,
@@ -395,7 +393,7 @@ impl<'de> Deserialize<'de> for UrlPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::url_path;
+    use crate::tests::test_support::url_path;
 
     #[test]
     fn trailing_slash_is_preserved() {

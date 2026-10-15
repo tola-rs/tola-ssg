@@ -9,18 +9,15 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
+use crate::terminal::{display_path, display_path_as_given, display_path_within};
 use crate::writes::FileWrites;
 
-use tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
+use tola_build::filesystem::layout;
 
 pub(crate) use site::EditorDirectory;
 
 pub(crate) use config::{Editor, manual_editors, names, settings};
 
-/// Whether this editor's settings are files Tola writes, rather than settings it prints.
-pub(crate) fn writes_settings(editor: Editor) -> bool {
-    editor.settings_file().is_some()
-}
 pub(crate) use packages::{
     EditorPackageInputs, GeneratedDirectory, HeldFile, generated_directory,
     generated_package_files, initial_package_inputs, obsolete_package_paths,
@@ -84,10 +81,7 @@ pub(crate) fn client_list(directory: &EditorDirectory) -> String {
             "  {:<14}{}",
             editor.name(),
             match editor.settings_file() {
-                Some(relative) => format!(
-                    "writes {}",
-                    crate::terminal::display_path_as_given(relative)
-                ),
+                Some(relative) => format!("writes {}", display_path_as_given(relative)),
                 None => format!(
                     "copy settings manually to {}",
                     editor.settings_destination()
@@ -125,10 +119,7 @@ pub(crate) struct EditorSetup {
 
 pub(crate) fn settings_report(setup: &EditorSetup, editors: &[Editor]) -> String {
     let mut text = String::new();
-    for (index, editor) in editors.iter().enumerate() {
-        if editors[..index].contains(editor) {
-            continue;
-        }
+    for editor in config::unique(editors) {
         let Some(relative) = editor.settings_file() else {
             continue;
         };
@@ -141,7 +132,7 @@ pub(crate) fn settings_report(setup: &EditorSetup, editors: &[Editor]) -> String
             text,
             "{}: `{}` {action}",
             editor.name(),
-            crate::terminal::display_path_as_given(relative),
+            display_path_as_given(relative),
         );
     }
     text
@@ -195,7 +186,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
     let mut generated_files = Vec::new();
     for path in writes.file_paths() {
         let relative = writes.relative_path(path);
-        if relative.starts_with(PACKAGE_MIRROR_DIRECTORY) {
+        if relative.starts_with(layout::builtin_packages_relative()) {
             generated_files.push(relative);
         } else {
             settings_files.push(relative);
@@ -204,7 +195,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
 
     let mut text = format!(
         "Editor setup for {} (dry run; nothing applied)\n",
-        crate::terminal::display_path(root)
+        display_path(root)
     );
 
     text.push_str("\nEditor settings files:\n");
@@ -212,11 +203,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
         text.push_str("  (none)\n");
     }
     for relative in settings_files {
-        let _ = writeln!(
-            text,
-            "  {}",
-            crate::terminal::display_path_as_given(relative)
-        );
+        let _ = writeln!(text, "  {}", display_path_as_given(relative));
         let contents = writes
             .file_contents(relative)
             .expect("a staged file has staged contents");
@@ -228,11 +215,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
         text.push_str("  (none)\n");
     }
     for relative in generated_files {
-        let _ = writeln!(
-            text,
-            "  {}",
-            crate::terminal::display_path_as_given(relative)
-        );
+        let _ = writeln!(text, "  {}", display_path_as_given(relative));
     }
 
     text.push_str("\nEditor package view:\n");
@@ -240,15 +223,15 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
         let _ = writeln!(
             text,
             "  directory {}",
-            crate::terminal::display_path_within(&directory, root)
+            display_path_within(&directory, root)
         );
     }
     for (link, target) in setup.package_inputs.view_links() {
         let _ = writeln!(
             text,
             "  link {} -> {}",
-            crate::terminal::display_path_within(&link, root),
-            crate::terminal::display_path_within(target, root)
+            display_path_within(&link, root),
+            display_path_within(target, root)
         );
     }
 
@@ -257,11 +240,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
         text.push_str("  (none)\n");
     }
     for path in obsolete {
-        let _ = writeln!(
-            text,
-            "  {}",
-            crate::terminal::display_path_within(path, root)
-        );
+        let _ = writeln!(text, "  {}", display_path_within(path, root));
     }
 
     text.push_str("\nManual configuration:\n");
@@ -273,19 +252,4 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
     }
 
     text
-}
-
-/// Collect the editor files for an init preview without inspecting their destinations.
-pub(crate) fn add_initial_files(
-    writes: &mut FileWrites,
-    editors: &[Editor],
-    packages: &tola_typst::PackageLocations,
-) -> Result<()> {
-    packages::add_initial_files(writes)?;
-    let directory = EditorDirectory::initial(writes.root(), packages)?;
-    config::add_initial_files(writes, &directory, editors)
-}
-
-pub(crate) fn check_initial_files(root: &std::path::Path) -> Result<()> {
-    packages::ensure_generated_package_paths_are_safe(root)
 }

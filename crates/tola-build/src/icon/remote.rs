@@ -14,14 +14,13 @@ use crate::resources::{BuildResources, HttpDownloadError};
 use super::IconError;
 use super::input::MAX_COLLECTION_BYTES;
 
-/// One remote collection request: which collection, where its copies may come from, and the
-/// request context every read in this build shares.
+/// One remote collection request and the context every read in this build shares.
 pub(super) struct RemoteCollection<'a> {
     pub namespace: &'a str,
-    pub urls: &'a [String],
+    pub urls: Vec<String>,
     pub sha256: Sha256Digest,
-    pub vendored: Option<&'a Path>,
-    pub cache_root: &'a Path,
+    pub vendored: Option<std::path::PathBuf>,
+    pub cache_root: std::path::PathBuf,
     pub cancellation: &'a BuildCancellation,
     pub resources: &'a BuildResources,
     pub boundary: &'a tola_typst::SourceBoundary,
@@ -29,24 +28,20 @@ pub(super) struct RemoteCollection<'a> {
 
 pub(super) fn load_collection(
     request: RemoteCollection<'_>,
-) -> anyhow::Result<(
-    tola_icons::IconCollection,
-    Option<super::input::IconFileRead>,
-)> {
+) -> anyhow::Result<(tola_icons::IconCollection, CollectionBytes)> {
     let verified = collection_bytes(&request)?;
     let namespace = request.namespace;
     let collection =
-        super::parse_collection(namespace, verified.read_from.as_deref(), &verified.bytes)
-            .map_err(anyhow::Error::from)?;
+        super::parse_collection(namespace, verified.read_from.as_deref(), &verified.bytes)?;
     store_downloaded(namespace, &verified);
-    Ok((collection, verified.source))
+    Ok((collection, verified))
 }
 
 /// The bytes of one remote collection, and where they came from.
 pub(super) struct CollectionBytes {
     pub(super) bytes: Vec<u8>,
     pub(super) read_from: Option<std::path::PathBuf>,
-    source: Option<super::input::IconFileRead>,
+    pub(super) source: Option<super::input::IconFileRead>,
     /// The cache entry a freshly downloaded collection belongs in once it has parsed.
     pending_cache: Option<std::path::PathBuf>,
 }
@@ -62,29 +57,22 @@ pub(super) fn store_downloaded(namespace: &str, verified: &CollectionBytes) {
     }
 }
 
-/// The bytes one remote collection resolves to, checked against the digest it must have.
-///
-/// The site's vendored copy is read first, then the collection cache, then the collection itself,
-/// trying each mirror in turn when one cannot deliver. Every source answers with the same bytes,
-/// because the digest decides which bytes count, so reusing one is never a second semantic path.
+/// The bytes one remote collection resolves to, checked against its digest.
 pub(super) fn collection_bytes(request: &RemoteCollection<'_>) -> anyhow::Result<CollectionBytes> {
-    let RemoteCollection {
-        namespace,
-        urls,
-        sha256,
-        vendored,
-        cache_root,
-        cancellation,
-        resources,
-        boundary,
-    } = *request;
+    let namespace = request.namespace;
+    let urls = &request.urls;
+    let sha256 = request.sha256;
+    let vendored = request.vendored.as_deref();
+    let cache_root = &request.cache_root;
+    let cancellation = request.cancellation;
+    let resources = request.resources;
+    let boundary = request.boundary;
     cancellation.ensure_active()?;
     let primary = urls
         .first()
         .map(String::as_str)
         .expect("configuration names at least one address");
-    // A copy the site has is authoritative: the site asks for exactly these bytes, so a
-    // missing one falls back to the cache and the network, and a wrong one fails the build.
+    // A site's own copy is authoritative: missing falls back, wrong fails the build.
     if let Some(vendored) = vendored {
         boundary.check(vendored)?;
         let bytes =
@@ -217,10 +205,7 @@ fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether a failed download says the address could not deliver, rather than the build cannot ask.
-///
-/// Only a transport or status failure is worth handing to the next mirror: a denied network, an
-/// oversized collection, and a cancelled build answer the same way at every address.
+/// Whether a failed download says the address could not deliver.
 fn refused(error: &anyhow::Error) -> bool {
     matches!(
         error.downcast_ref::<IconError>(),
@@ -301,10 +286,10 @@ mod tests {
     ) -> anyhow::Result<tola_icons::IconCollection> {
         load_collection(RemoteCollection {
             namespace: "ui",
-            urls: &["http://127.0.0.1:1/icons.json".to_owned()],
+            urls: vec!["http://127.0.0.1:1/icons.json".to_owned()],
             sha256,
-            vendored,
-            cache_root,
+            vendored: vendored.map(Path::to_path_buf),
+            cache_root: cache_root.to_path_buf(),
             cancellation: &BuildCancellation::new(),
             resources: &BuildResources::new().with_network_access(NetworkAccess::Denied),
             boundary: &tola_typst::SourceBoundary::default(),
@@ -327,10 +312,10 @@ mod tests {
     ) -> anyhow::Result<tola_icons::IconCollection> {
         load_collection(RemoteCollection {
             namespace: "ui",
-            urls,
+            urls: urls.to_vec(),
             sha256,
             vendored: None,
-            cache_root,
+            cache_root: cache_root.to_path_buf(),
             cancellation: &BuildCancellation::new(),
             resources: &BuildResources::new(),
             boundary: &tola_typst::SourceBoundary::default(),
@@ -339,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_icons_do_not_satisfy_pure() {
+    fn cached_icons_fail_pure() {
         let directory = tempfile::tempdir().unwrap();
         let sha256 = digest(COLLECTION);
         let config = crate::config::tests::load_test_config(
@@ -458,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn refused_download_tries_the_next_mirror() {
+    fn refused_download_tries_mirror() {
         let directory = tempfile::tempdir().unwrap();
         let (refused, refused_server) = serve_status(503);
         let (served, served_server) = serve_collection(COLLECTION);
@@ -470,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn every_mirror_refusing_names_all_of_them() {
+    fn all_mirrors_refusing_are_named() {
         let directory = tempfile::tempdir().unwrap();
         let (first, first_server) = serve_status(503);
         let (second, second_server) = serve_status(404);
@@ -512,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_vendored_copy_fails_the_build() {
+    fn stale_vendored_copy_fails() {
         let directory = tempfile::tempdir().unwrap();
         let vendored = directory.path().join("vendor/icons/ui.json");
         std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
@@ -570,9 +555,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let sha256 = digest(COLLECTION);
-        let cache = root.join(".tola/cache/icons/sha256");
-        std::fs::create_dir_all(&cache).unwrap();
-        std::fs::write(cache.join(format!("{sha256}.json")), b"corrupt").unwrap();
+        let cache = BuildResources::icon_cache_directory(root);
+        write_cache(&cache.join(format!("{sha256}.json")), b"corrupt").unwrap();
         std::fs::write(root.join("local.json"), COLLECTION).unwrap();
         let (url, server) = serve_collection(COLLECTION);
         let source = format!(

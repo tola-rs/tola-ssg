@@ -1,9 +1,4 @@
-//! Configured asset declarations: the inventory they resolve to, the bytes their
-//! render publishes, and the output identity and browser URLs those bytes hold.
-//!
-//! Declarations alone select the configured asset outputs. A derivative a helper
-//! derives from a declared source — a resized image, for example — is a separate
-//! output; the declared original stays published.
+//! Configured asset declarations and the inventory, bytes, and URLs they resolve to.
 
 mod inventory;
 pub(crate) mod minify;

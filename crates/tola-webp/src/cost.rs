@@ -42,8 +42,6 @@ impl CostWriter {
     }
 
     pub(crate) fn write_bool(&mut self, probability: u8, value: bool) {
-        let zero = u32::from(probability);
-        let branch = if value { 256 - zero } else { zero };
-        self.bits += u64::from(BOOL_COST[branch as usize]);
+        self.bits += u64::from(bool_cost(probability, value));
     }
 }

@@ -19,11 +19,7 @@ pub(crate) struct IconOutputs {
 }
 
 impl IconOutputs {
-    /// Collect the icon requests one compilation observed.
-    ///
-    /// A document publishes an icon by calling `icon-url`, and only those requests are collected,
-    /// so a site serves the icons its pages name. Identical bytes requested under different
-    /// namespaces occupy one output.
+    /// The icons one compilation published, with the bytes each serves.
     pub(crate) fn prepare<'a>(
         evidence: impl IntoIterator<Item = &'a ReadEvidence>,
         collections: &tola_icons::IconCollections,
@@ -168,6 +164,7 @@ mod tests {
             .err()
             .expect("an invalid icon prevents compilation");
         error
+            .error()
             .chain()
             .find_map(|cause| cause.downcast_ref::<tola_typst::CompileError>())
             .and_then(tola_typst::CompileError::diagnostics)

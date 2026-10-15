@@ -31,24 +31,76 @@ pub(in crate::cli) struct SiteRequest<'a> {
     pub cancellation: &'a Cancellation,
 }
 
-/// Build one complete production candidate while holding the cross-process site build lock.
-///
-/// The returned guard keeps the lock: a publishing caller writes through it, and a
-/// read-only caller checks freshness and releases it.
-pub(in crate::cli) fn build_candidate(
-    config: std::sync::Arc<tola_build::config::ResolvedSiteConfig>,
-    cancellation: &Cancellation,
-    hook_execution: tola_build::build::HookExecution,
-    resources: tola_build::BuildResources,
-    output: &CommandOutput,
-) -> anyhow::Result<tola_build::build::SiteBuildGuard> {
-    let mut session = tola_build::BuildSession::with_resources(resources);
-    let mut request =
-        tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production);
-    request.cancellation = cancellation.token();
-    request.hook_execution = hook_execution;
-    tola_build::build::SiteBuildGuard::build(&mut session, config, request, || {
-        let _ = output.waiting_for_build();
-    })
-    .map_err(|failure| failure.into_error())
+impl<'a> SiteRequest<'a> {
+    pub(super) fn new(
+        config_file: crate::cli::ConfigFileArgs,
+        packages: crate::cli::TypstPackageArgs,
+        scope: tola_build::InputScope,
+        build: crate::cli::BuildOverrideArgs,
+        fonts: crate::cli::CompilerFontArgs,
+        output: &'a CommandOutput,
+        cancellation: &'a Cancellation,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            config_file,
+            packages,
+            scope,
+            build,
+            resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+            output,
+            cancellation,
+        })
+    }
+
+    pub(super) fn load_config(
+        &self,
+        overrides: &crate::config::ConfigOverrides,
+    ) -> anyhow::Result<crate::config::LoadedConfig> {
+        crate::cli::config::load_site(
+            &self.config_file,
+            &self.packages,
+            self.scope,
+            overrides,
+            self.output,
+            self.cancellation,
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use crate::cli::ConfigFileArgs;
+    use crate::cli::output::CommandOutput;
+
+    pub(crate) fn site(sources: &[(&str, &str)]) -> (tempfile::TempDir, ConfigFileArgs) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("content")).unwrap();
+        std::fs::write(root.join("site.typ"), "= Home\n").unwrap();
+        std::fs::write(
+            root.join("tola.toml"),
+            "[site]\norigin = \"https://example.com\"\n",
+        )
+        .unwrap();
+        for (path, contents) in sources {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        let config = ConfigFileArgs {
+            path: Some(root.join("tola.toml")),
+        };
+        (directory, config)
+    }
+
+    pub(crate) fn buffered_output() -> CommandOutput {
+        CommandOutput::new(
+            crate::terminal::Terminal::with_sink(
+                crate::terminal::OutputSink::buffered().0,
+                false,
+                false,
+            ),
+            None,
+        )
+    }
 }

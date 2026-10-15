@@ -11,9 +11,10 @@
 //! publishes every request its read evidence carries, while an editor source check evaluates the
 //! same call without running an image producer.
 
-// `#[func]` clears attributes on the function it rewrites, so `too_many_arguments` has to be
-// allowed on the module.
-#![allow(clippy::too_many_arguments)]
+#![expect(
+    clippy::too_many_arguments,
+    reason = "`#[func]` clears attributes on the function it rewrites"
+)]
 
 use std::num::NonZeroU32;
 
@@ -23,7 +24,7 @@ use typst::diag::{At, SourceResult, bail};
 use typst::ecow::EcoString;
 use typst::engine::Engine;
 use typst::foundations::{
-    Array, Content, Dict, IntoValue, NativeElement, PathOrStr, Str, Value, func,
+    Array, Content, Dict, IntoValue, NativeElement, PathOrStr, Repr, Str, Value, func,
 };
 use typst::loading::{DataSource, Load, LoadSource};
 use typst::syntax::{FileId, RootedPath, Span, SpanKind, Spanned, VirtualPath, VirtualRoot};
@@ -295,7 +296,8 @@ fn pixel_widths(widths: &Array, span: Span) -> SourceResult<Vec<NonZeroU32>> {
         let Ok(width) = width.clone().cast::<NonZeroU32>() else {
             bail!(
                 span,
-                "`widths` must be positive pixel counts, not `{width:?}`"
+                "`widths` must hold positive pixel counts, not `{}`",
+                width.repr()
             );
         };
         ordered.push(width);
@@ -320,9 +322,9 @@ fn requested_widths(
             Ok(vec![width])
         }
         Value::Array(array) => pixel_widths(array, span),
-        value => bail!(
+        _ => bail!(
             span,
-            "`widths` must be `auto` or positive pixel counts, not `{value:?}`"
+            "`widths` must be `auto` or a list of positive pixel counts"
         ),
     }
 }
@@ -484,17 +486,7 @@ pub(super) fn image_srcset(
 /// The attributes `img` writes itself; `attrs` cannot name them.
 const IMG_OWNED_ATTRIBUTES: [&str; 6] = ["src", "srcset", "sizes", "width", "height", "alt"];
 
-/// Place one image at several widths as a responsive `<img>` element.
-///
-/// `path` behaves as in `resize-image`. The element carries the widest derivative's `src`, its
-/// pixel `width` and `height`, and `alt`, written even when empty. `srcset` and `sizes` are
-/// written only when more than one width was requested. `loading` and `decoding` default to
-/// `lazy` and `async`, and `attrs` may override them.
-///
-/// Attributes are written raw rather than through the typed HTML image element: its `sizes` model
-/// cannot express viewport units or the unconditional final entry a CSS source-size list needs.
-///
-/// The element is HTML: call it from an HTML document. A paged document uses `image` instead.
+/// A responsive `<img>` written raw: the typed `sizes` model cannot express viewport units.
 #[func]
 pub(super) fn img(
     engine: &mut Engine,

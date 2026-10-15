@@ -42,7 +42,6 @@ pub fn colours(source: &Source) -> Vec<Colour> {
 /// of digits, and whole components out of 255 with a ratio for alpha.
 pub fn spellings(components: [f32; 4]) -> Vec<String> {
     let [red, green, blue, alpha] = components;
-    let whole = |component: f32| (component.clamp(0.0, 1.0) * 255.0).round() as u8;
     let components = format!("{}, {}, {}", whole(red), whole(green), whole(blue));
     // Alpha is the fourth component of the same call, never a second one.
     let ratio = if alpha < 1.0 {
@@ -59,7 +58,6 @@ pub fn spellings(components: [f32; 4]) -> Vec<String> {
 /// The hexadecimal notation of one colour, with alpha when it is not opaque.
 pub fn hex(components: [f32; 4]) -> String {
     let [red, green, blue, alpha] = components;
-    let whole = |component: f32| (component.clamp(0.0, 1.0) * 255.0).round() as u8;
     if alpha < 1.0 {
         format!(
             "#{:02x}{:02x}{:02x}{:02x}",
@@ -71,6 +69,11 @@ pub fn hex(components: [f32; 4]) -> String {
     } else {
         format!("#{:02x}{:02x}{:02x}", whole(red), whole(green), whole(blue))
     }
+}
+
+/// One colour component as the 0–255 whole number both spellings write.
+fn whole(component: f32) -> u8 {
+    (component.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// The colour one call writes, with the bytes of the spelling that names it.

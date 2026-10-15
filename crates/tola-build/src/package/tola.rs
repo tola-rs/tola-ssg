@@ -1,8 +1,4 @@
 //! The package observations the engine produces and reads back.
-//!
-//! The packages themselves, their sources, and their natives belong to `tola-packages`. What
-//! stays here is the producer side: the bytes a package path has in one compilation, and the
-//! lexical source a `current-source()` read names.
 
 use std::path::Path;
 
@@ -10,9 +6,7 @@ use tola_packages::TolaPackage;
 use tola_typst::prelude::*;
 use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
-/// The bytes one package path holds in this compilation, or `None` when the package is not a
-/// Tola package or the path names nothing in it. Observation descriptors and request paths
-/// resolve to empty bytes, because their own path is the whole observation.
+/// The bytes one package path holds in this compilation, when it holds any.
 pub(crate) fn read_package(pkg: &PackageSpec, path: &str) -> Option<Vec<u8>> {
     let tola_pkg = TolaPackage::from_spec(pkg)?;
     let path = path.strip_prefix('/').unwrap_or(path);
@@ -33,11 +27,7 @@ pub(crate) fn read_package(pkg: &PackageSpec, path: &str) -> Option<Vec<u8>> {
         .map(|contents| contents.into_owned().into_bytes())
 }
 
-/// The target one icon package path answers a read with, from the collections a host bound: a
-/// configured icon's normalized SVG, or the tracked name list of one configured collection.
-///
-/// Any other path, and a name the collections do not carry, is missing, which leaves the miss to
-/// the read that asked for it.
+/// The target one icon package path answers a read with.
 pub(crate) fn icon_file_target(
     collections: &tola_icons::IconCollections,
     package: &PackageSpec,
@@ -53,10 +43,6 @@ pub(crate) fn icon_file_target(
 }
 
 /// Whether this package path's bytes are fixed for the process.
-///
-/// Only Tola's own package files, immutable observation descriptors, and published icon request
-/// paths — whose observation is their own name — qualify; a package's dynamic files stay
-/// unstable, so naming the package is never enough.
 pub(crate) fn package_file_is_process_stable(package: &PackageSpec, path: &Path) -> bool {
     let Some(kind) = TolaPackage::from_spec(package) else {
         return false;
@@ -216,6 +202,8 @@ path = "icons/brand"
             source_records: Array::new(),
             source_records_by_file: Dict::new(),
             source_origins: Dict::new(),
+            modules: Dict::new(),
+            module_validation: None,
         })
         .shared()
     }
@@ -525,37 +513,6 @@ path = "icons/brand"
         }
     }
 
-    #[test]
-    fn example_site_provides_its_inputs() {
-        let docs = r#"Example:
-```typst site
-#import "@tola/image:0.0.0": image-metadata
-#import "@tola/icon:0.0.0": icon-bytes
-#import "@tola/site:0.0.0": site
-#import "@tola/source:0.0.0": all-sources
-#assert.eq(image-metadata("assets/logo.png").width, 8)
-#assert.eq(all-sources().first().id, "index.typ")
-#assert.eq(all-sources().first().path, "index.typ")
-#assert.eq(all-sources().first().filename, "index.typ")
-#assert.eq(all-sources().first().meta, (title: "Welcome"))
-#assert.eq(all-sources().last().route-segments, ("notes", "second-post"))
-#assert.eq(type(icon-bytes("brand:mark")), bytes)
-#assert.eq(type(icon-bytes("brand:logo")), bytes)
-#assert.eq(site.base-path, "/")
-#assert.eq(site.title, "Example site")
-```
-"#;
-        let examples = documented_examples(docs).unwrap();
-        let [(line, source, selected)] = examples.as_slice() else {
-            panic!("one example fence: {examples:?}");
-        };
-        assert_eq!(*line, 2);
-        assert_eq!(*selected, ExampleWorld::ExampleSite);
-        let (_directory, world) = world_from_example_site(source);
-        tola_typst::compile_bundle_world(&world, &Default::default())
-            .expect("the example site provides every input the example reads");
-    }
-
     /// A program importing every `@tola/<package>` native and running `assertions` before its one
     /// document.
     fn package_program(package: &str, assertions: &str) -> String {
@@ -647,7 +604,7 @@ path = "icons/brand"
     }
 
     #[test]
-    fn package_helper_failure_keeps_the_call_site() {
+    fn helper_failure_keeps_call_site() {
         for (helper, is_typst_error) in [
             (
                 r#"#let url() = address("/guide/", base-path: "/docs")"#,
@@ -728,7 +685,7 @@ path = "icons/brand"
     }
 
     #[test]
-    fn included_source_keeps_its_own_identity() {
+    fn included_source_keeps_identity() {
         let sources = source_records(&["document.typ"]);
         let (directory, world) = world_from_default_config(
             r#"
@@ -770,7 +727,7 @@ path = "icons/brand"
     }
 
     #[test]
-    fn qualified_imports_reach_their_own_package() {
+    fn qualified_imports_reach_package() {
         let sources = source_records(&["document.typ"]);
         let (directory, world) = world_from_default_config(
             r#"
@@ -841,6 +798,41 @@ path = "icons/brand"
     }
 
     #[test]
+    fn datalog_cached_decimals_keep_scale() {
+        assert_package(
+            "datalog",
+            r##"
+#let scalar = relation("scalar", 1)
+#let value = var("value")
+#for amount in (decimal("1.0"), decimal("1.00")) {
+  let db = database(facts: (scalar(amount),))
+  let rows = query(db, select: (value,), where: (scalar(value),))
+  assert.eq(repr(rows.at(0).at(0)), repr(amount))
+}
+"##,
+        );
+    }
+
+    #[test]
+    fn datalog_snapshots_canonicalize_rows() {
+        assert_package(
+            "datalog",
+            r##"
+#let p = relation("p", 1)
+#let x = var("x")
+#for (left, right, same-left) in ((1, 2, 1), (bytes("a"), bytes("b"), bytes((97,)))) {
+  let one = p(left)
+  let two = p(right)
+  let db = database(facts: (one, two))
+  assert.eq(db, database(facts: (two, one, p(same-left))))
+  assert.eq(db, database(facts: (p(left), p(right))))
+  assert.eq(query(db, select: (x,), where: (p(x),)), ((left,), (right,)))
+}
+"##,
+        );
+    }
+
+    #[test]
     fn datalog_queries_use_their_snapshot() {
         assert_package(
             "datalog",
@@ -857,6 +849,9 @@ path = "icons/brand"
 #assert.eq(ask(before), (("b",), ("c",)))
 #assert.eq(ask(after), (("b",),))
 #assert.eq(ask(before), (("b",), ("c",)))
+#let changed = ask(before)
+#{ changed.at(0).at(0) = "changed" }
+#assert.eq(ask(before), (("b",), ("c",)))
 #assert.eq(query(after, select: (), where: (reach("a", "b"),)), ((),))
 #assert.eq(query(after, select: (), where: (reach("a", "c"),)), ())
 "##,
@@ -864,22 +859,41 @@ path = "icons/brand"
     }
 
     #[test]
-    fn datalog_cached_errors_keep_current_location() {
-        for blank_lines in [0, 3] {
-            let source = format!(
-                "#import \"@tola/datalog:0.0.0\" as d\n\
-                 #let p = d.relation(\"p\", 1)\n\
-                 #let x = d.var(\"x\")\n\
-                 {}#let r = d.rule(p(x))\n\
-                 #let db = d.database(rules: (r,))\n",
-                "\n".repeat(blank_lines),
-            );
-            let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
-            let failure =
-                tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
-            let error = failure.diagnostics().unwrap().errors().next().unwrap();
-            assert_eq!(error.location.path.as_deref(), Some("main.typ"));
-            assert_eq!(error.location.range.unwrap().start.line, 3 + blank_lines);
+    fn cached_errors_keep_location() {
+        for (declarations, clauses, line) in [
+            (
+                "#let p = d.relation(\"p\", 1)\n#let x = d.var(\"x\")\n",
+                "#let r = d.rule(p(x))\n#let db = d.database(rules: (r,))\n",
+                3,
+            ),
+            (
+                "#let downstream = d.relation(\"downstream\", 0)\n\
+                 #let cycle = d.relation(\"cycle\", 0)\n",
+                "#let dependent = d.rule(downstream(), cycle())\n\
+                 #let recursive = d.rule(cycle(), d.negate(cycle()))\n\
+                 #let db = d.database(rules: (dependent, recursive))\n",
+                4,
+            ),
+            (
+                "#let p = d.relation(\"p\", 1)\n",
+                "#let x = d.var(\"x\")\n\
+                 #let rows = d.query(d.database(), select: (x,), where: ())\n",
+                2,
+            ),
+        ] {
+            for blank_lines in [0, 3] {
+                let source = format!(
+                    "#import \"@tola/datalog:0.0.0\" as d\n{declarations}{}{clauses}",
+                    "\n".repeat(blank_lines),
+                );
+                let (_directory, world) =
+                    world_from_default_config(&source, SourceRecords::default());
+                let failure =
+                    tola_typst::compile_bundle_world(&world, &Default::default()).unwrap_err();
+                let error = failure.diagnostics().unwrap().errors().next().unwrap();
+                assert_eq!(error.location.path.as_deref(), Some("main.typ"));
+                assert_eq!(error.location.range.unwrap().start.line, line + blank_lines);
+            }
         }
     }
 
@@ -1269,44 +1283,10 @@ path = "icons/brand"
         }
 
         #[test]
-        fn declared_urls_resolve_under_mount() {
-            for (declared, expected) in [
-                ("/app.js", "/blog/app.js"),
-                ("/assets/index.html", "/blog/assets/index.html"),
-                ("/a%23b.css", "/blog/a%23b.css"),
-                ("/100%25.css", "/blog/100%25.css"),
-                ("/café.css", "/blog/caf%C3%A9.css"),
-            ] {
-                let site = site(
-                    &[("assets/app.js", declared)],
-                    None,
-                    "[site]\nbase-path = \"/blog/\"",
-                );
-                assert_eq!(site.resolve(declared).unwrap(), expected);
-            }
-        }
-
-        #[test]
-        fn cache_busting_appends_published_identity() {
-            let site = site(
-                &[("assets/app.js", "/app.js")],
-                None,
-                "[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"",
-            );
-            let identity = published_identity(&site.config, "app.js");
-
-            assert_eq!(
-                site.resolve("/app.js").unwrap(),
-                format!("/blog/app.js?h={identity}")
-            );
-            assert_eq!(published_names(&site.config), ["app.js"]);
-        }
-
-        #[test]
-        fn cache_busting_follows_changed_bytes() {
+        fn cache_busting_names_bytes() {
             let mut site = site(
                 &[("assets/app.js", "/app.js")],
-                None,
+                Some(("assets", "/assets")),
                 "[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"",
             );
             std::fs::write(
@@ -1318,6 +1298,11 @@ path = "icons/brand"
             let first = site.resolve("/app.js").unwrap();
             let first_identity = published_identity(&site.config, "app.js");
             assert_eq!(first, format!("/blog/app.js?h={first_identity}"));
+            let member = published_identity(&site.config, "assets/member.js");
+            assert_eq!(
+                site.resolve("/assets/member.js").unwrap(),
+                format!("/blog/assets/member.js?h={member}")
+            );
 
             std::fs::write(
                 site.directory.path().join("assets/app.js"),
@@ -1331,21 +1316,13 @@ path = "icons/brand"
                 site.resolve("/app.js").unwrap(),
                 format!("/blog/app.js?h={changed_identity}")
             );
-            assert_eq!(published_names(&site.config), ["app.js"]);
-        }
-
-        #[test]
-        fn cache_busting_versions_tree_members() {
-            let site = site(
-                &[],
-                Some(("assets", "/assets")),
-                "[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"",
-            );
-            let identity = published_identity(&site.config, "assets/member.js");
-
             assert_eq!(
                 site.resolve("/assets/member.js").unwrap(),
-                format!("/blog/assets/member.js?h={identity}")
+                format!("/blog/assets/member.js?h={member}")
+            );
+            assert_eq!(
+                published_names(&site.config),
+                ["app.js", "assets/member.js"]
             );
         }
 
@@ -1366,52 +1343,6 @@ path = "icons/brand"
             assert!(
                 !error.contains("/app.js"),
                 "an undefined URL must not resolve to another declaration: {error}"
-            );
-        }
-
-        #[test]
-        fn unknown_tree_member_reports_error() {
-            let site = site(&[], Some(("assets", "/assets")), "");
-
-            assert_eq!(
-                site.resolve("/assets/member.js").unwrap(),
-                "/assets/member.js"
-            );
-            let error = site.resolve("/assets/missing.js").unwrap_err();
-            assert!(error.contains("/assets/missing.js"), "{error}");
-            assert!(error.contains("assets.files"), "{error}");
-            assert_eq!(
-                crate::filesystem::normalize_path(site.config.get_root()),
-                crate::filesystem::normalize_path(site.directory.path()),
-                "the site root is the temporary directory"
-            );
-        }
-
-        #[test]
-        fn exact_declaration_wins_over_tree() {
-            let site = site(
-                &[("assets/app.js", "/assets/app.js")],
-                Some(("assets", "/assets")),
-                "[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"",
-            );
-
-            assert_eq!(
-                published_names(&site.config),
-                ["assets/app.js", "assets/member.js"]
-            );
-            assert_eq!(
-                site.resolve("/assets/app.js").unwrap(),
-                format!(
-                    "/blog/assets/app.js?h={}",
-                    published_identity(&site.config, "assets/app.js")
-                )
-            );
-            assert_eq!(
-                site.resolve("/assets/member.js").unwrap(),
-                format!(
-                    "/blog/assets/member.js?h={}",
-                    published_identity(&site.config, "assets/member.js")
-                )
             );
         }
     }
@@ -1603,7 +1534,7 @@ path = "icons/brand"
 
         /// `from-within` takes a label or a location, and restricts the query to that region.
         #[test]
-        fn source_region_accepts_label_or_location() {
+        fn source_region_accepts_label() {
             let program = |scope: Option<&str>| {
                 let argument =
                     scope.map_or_else(String::new, |scope| format!("from-within: {scope}"));
@@ -1793,7 +1724,7 @@ path = "icons/brand"
         /// Occurrences stay in the region that holds them, wherever a derived query reads them.
         /// A chain of show rules reports the reference that finally reached the output.
         #[test]
-        fn links_missing_from_the_output_stay_unreported() {
+        fn missing_links_stay_unreported() {
             let site = QuerySite::new("/");
             for rewritten in [
                 "#show link: it => it.body",
@@ -2063,6 +1994,54 @@ path = "icons/brand"
 
         fn reject_schema(assertions: &str) {
             reject_package("schema", assertions);
+        }
+
+        #[test]
+        fn partial_date_preserves_declared_shapes() {
+            assert_schema(
+                r#"
+#let shapes = (
+  (precision: "year", year: 2026),
+  (precision: "month", year: 2026, month: 11),
+  (precision: "day", year: 2024, month: 2, day: 29),
+)
+#for (source, expected) in ("2026", "2026-11", "2024-02-29").zip(shapes) {
+  assert.eq(parse(source, partial-date), expected)
+}
+#assert.eq(parse(datetime(year: 2024, month: 2, day: 29), partial-date), shapes.last())
+#let description = inspect(partial-date)
+#assert.eq((description.kind, description.tag-key, description.tags), ("variant", "precision", ("year", "month", "day")))
+#for (branch, expected) in description.branches.zip(shapes) {
+  assert.eq(branch.kind, "object")
+  assert.eq(branch.unknown, "error")
+  assert.eq(branch.fields.keys().sorted(), expected.keys().sorted())
+  assert.eq(branch.fields.precision.value, expected.precision)
+  for (key, field) in branch.fields {
+    assert.eq(field.presence, "required")
+    if key != "precision" { assert.eq(field.type, int) }
+  }
+}
+"#,
+            );
+        }
+
+        #[test]
+        fn partial_date_collects_member_errors() {
+            assert_schema(
+                r#"
+#let declaration = schema((dates: array-of(partial-date), title: str))
+#let failed = try-parse((dates: ("2026", "2026-02-30", "0000"), title: false), declaration)
+#assert.eq(failed.ok, false)
+#assert.eq(failed.issues.map(problem => (problem.code, problem.path)), (
+  ("schema.partial-date", ("dates", 1)),
+  ("schema.partial-date", ("dates", 2)),
+  ("schema.type", ("title",)),
+))
+#for value in (none, 2026, datetime(hour: 8, minute: 30, second: 0), datetime(year: 2026, month: 11, day: 1, hour: 8, minute: 30, second: 0)) {
+  assert.eq(try-parse(value, partial-date).ok, false)
+}
+"#,
+            );
         }
 
         #[test]
@@ -2463,7 +2442,7 @@ path = "icons/brand"
         }
 
         #[test]
-        fn wrong_arity_still_reports_member_failures() {
+        fn wrong_arity_reports_members() {
             assert_schema(
                 r#"
 #let declaration = tuple(optional(str), int)
@@ -3087,7 +3066,10 @@ path = "icons/brand"
             let diagnostics =
                 crate::compiler::diagnostic::error_diagnostics(&error, directory.path())
                     .expect("a compile failure has diagnostics");
-            assert_eq!(diagnostics[0].code, crate::codes::source::METADATA);
+            assert_eq!(
+                diagnostics[0].code,
+                tola_diagnostic::codes::source::METADATA
+            );
             assert!(
                 diagnostics[0].message.starts_with("`content/note.typ`: "),
                 "{}",

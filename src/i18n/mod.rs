@@ -68,13 +68,14 @@ impl HelpText {
                 "For command options, use `tola <command> --help`.\n\n\
                  `tola help` provides Tola's bundled offline documentation: `tola.toml` settings \
                  (`tola help \"[build]\"`) and the bundled `@tola/xxx` packages (`tola help \
-                 \"@tola/address\" slugify`). Add `-i` or `--interactive` to browse: click links \
-                 with the mouse, or press Tab to choose a jump target. Documentation is in English \
+                 \"@tola/address\" slugify`). Add `-i` or `--interactive` to browse: filter the \
+                 section and link list, press Enter to open a choice, or select Back to return. \
+                 Esc finishes browsing. Documentation is in English \
                  by default; use \
                  `--lang zh` for Simplified Chinese.\n\n\
-                 `tola skill` provides a site-writing guide for agents. An agent can use this \
-                 guide with `tola help` to learn Tola and Typst, help you organize a site, and \
-                 explain their concepts."
+                 `tola skill` introduces the task-focused authoring guide. Use `tola skill math` \
+                 or `tola skill headings levels` to read only what the task needs. `--list` shows \
+                 the heading tree; `--all` includes the selected topic’s subsections."
             }
         }
     }
@@ -189,18 +190,6 @@ impl SectionTranslations {
     pub(crate) fn field(&self, path: &str) -> Option<&str> {
         self.fields.get(path).map(String::as_str)
     }
-
-    /// Every section the catalog translates, for the guard that holds it against the schema.
-    #[allow(dead_code)] // The renderer walks the schema; only the guard reads the catalog's keys.
-    pub(crate) fn section_names(&self) -> impl Iterator<Item = &str> {
-        self.sections.keys().map(String::as_str)
-    }
-
-    /// Every field path the catalog translates, for the guard that holds it against the schema.
-    #[allow(dead_code)] // The renderer walks the schema; only the guard reads the catalog's keys.
-    pub(crate) fn field_paths(&self) -> impl Iterator<Item = &str> {
-        self.fields.keys().map(String::as_str)
-    }
 }
 
 /// The configuration tables `language` translates, when that language carries them.
@@ -303,6 +292,7 @@ static TEXT: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
 static PACKAGES: LazyLock<BTreeMap<&'static str, PackageTranslations>> = LazyLock::new(|| {
     [
         ("site", include_str!("zh-Hans/packages/site.toml")),
+        ("module", include_str!("zh-Hans/packages/module.toml")),
         ("address", include_str!("zh-Hans/packages/address.toml")),
         ("icon", include_str!("zh-Hans/packages/icon.toml")),
         ("image", include_str!("zh-Hans/packages/image.toml")),
@@ -317,6 +307,11 @@ static PACKAGES: LazyLock<BTreeMap<&'static str, PackageTranslations>> = LazyLoc
         ("code", include_str!("zh-Hans/packages/code.toml")),
         ("web", include_str!("zh-Hans/packages/web.toml")),
         ("hash", include_str!("zh-Hans/packages/hash.toml")),
+        ("uuid", include_str!("zh-Hans/packages/uuid.toml")),
+        (
+            "diagnostic",
+            include_str!("zh-Hans/packages/diagnostic.toml"),
+        ),
     ]
     .into_iter()
     .map(|(name, asset)| (name, PackageTranslations::parse(asset)))
@@ -348,6 +343,22 @@ static SECTIONS: LazyLock<SectionTranslations> = LazyLock::new(|| {
     }
 });
 
+/// Catalog keys the translation guard reads; the renderer walks the schema instead.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::SectionTranslations;
+
+    impl SectionTranslations {
+        pub(crate) fn section_names(&self) -> impl Iterator<Item = &str> {
+            self.sections.keys().map(String::as_str)
+        }
+
+        pub(crate) fn field_paths(&self) -> impl Iterator<Item = &str> {
+            self.fields.keys().map(String::as_str)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,7 +366,10 @@ mod tests {
 
     #[test]
     // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
-    #[allow(clippy::single_element_loop)]
+    #[expect(
+        clippy::single_element_loop,
+        reason = "exhaustive on purpose: a new phrase stops this test compiling until it is listed"
+    )]
     fn phrases_have_translations() {
         for phrase in [HelpText::HelpUsage] {
             match phrase {

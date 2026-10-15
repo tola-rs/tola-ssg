@@ -1,6 +1,6 @@
 //! Bundled declaration documentation, without evaluating package or site code.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use tola_typst_syntax::docs::Documentation;
 use typst::foundations::Repr;
 use typst::syntax::{LinkedNode, Source, ast};
@@ -12,6 +12,17 @@ mod related;
 mod resolution;
 
 use resolution::{Declaration, Declarations, DeclaredDocumentation, source_function};
+
+/// Why bundled export documentation could not be produced.
+#[derive(Debug, thiserror::Error)]
+pub enum ExportDocumentationError {
+    /// The requested name is not an export of the package.
+    #[error("`{name}` is not an export of {package}")]
+    NotAnExport { name: String, package: String },
+    /// The bundled source could not be resolved; the message is the resolver's.
+    #[error(transparent)]
+    Resolution(#[from] anyhow::Error),
+}
 
 pub use declaration::{
     ExportDeclaration, ExportDocumentation, Parameter, ParameterKind, Signature, cast_spelling,
@@ -50,10 +61,16 @@ impl BuiltinPackage {
 
     /// Describe selected exports in request order, using only bundled source and static natives.
     /// All names are checked before any declaration is returned.
-    pub fn export_documentation(&self, names: &[String]) -> Result<Vec<ExportDocumentation>> {
+    pub fn export_documentation(
+        &self,
+        names: &[String],
+    ) -> std::result::Result<Vec<ExportDocumentation>, ExportDocumentationError> {
         for name in names {
             if !self.exports().any(|export| export == name) {
-                bail!("`{name}` is not an export of {}", self.spec());
+                return Err(ExportDocumentationError::NotAnExport {
+                    name: name.clone(),
+                    package: self.spec().to_string(),
+                });
             }
         }
         let sources = self
@@ -107,7 +124,8 @@ impl BuiltinPackage {
                     declaration,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()
+            .map_err(ExportDocumentationError::from)
     }
 }
 

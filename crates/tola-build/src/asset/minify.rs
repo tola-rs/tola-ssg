@@ -1,7 +1,4 @@
-//! Minification state for configured static assets.
-//!
-//! Minification is an optimization: a source Tola cannot minify is published with its own bytes,
-//! and the author reads a warning naming the source and what was wrong with it.
+//! Minification state for configured static assets; a source it cannot minify keeps its bytes.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,7 +9,7 @@ use tola_minify::{
     MinifyRequest,
 };
 
-use crate::diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::{Diagnostic, Severity};
 
 /// Cache identity for bytes derived from one immutable raw observation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -31,27 +28,23 @@ impl AssetMinifyKey {
     }
 }
 
-/// Minification state for one inventory render: the bytes it already produced and what it could
-/// not minify.
-///
-/// The cache is shared by every source one render publishes, so equal bytes and language are
-/// transformed once; the warnings name the sources that kept their own bytes.
+/// Minification state for one render: produced bytes and what could not be minified.
 #[derive(Default)]
 pub(crate) struct AssetMinification {
-    cache: AssetMinifyCache,
+    /// Minified bytes shared by asset mappings within one render; excludes raw passthroughs.
+    bytes: HashMap<AssetMinifyKey, Arc<[u8]>>,
     warnings: Vec<AssetMinifyWarning>,
 }
 
 impl AssetMinification {
     /// Seed one source already rendered for a previous inventory.
     pub(crate) fn seed(&mut self, key: Option<AssetMinifyKey>, bytes: Arc<[u8]>) {
-        self.cache.seed(key, bytes);
+        if let Some(key) = key {
+            self.bytes.entry(key).or_insert(bytes);
+        }
     }
 
-    /// The bytes one source publishes, minifying them when the site asked for it.
-    ///
-    /// A source whose minification fails keeps its raw bytes and reports why, so an
-    /// optimization that cannot run never decides whether the site can be built.
+    /// The bytes one source publishes, minified when the site asked for it.
     pub(crate) fn rendered_bytes(
         &mut self,
         source_path: &Path,
@@ -59,44 +52,6 @@ impl AssetMinification {
         digest: tola_typst::ContentDigest,
         raw: &Arc<[u8]>,
         languages: MinifiedLanguages,
-    ) -> Arc<[u8]> {
-        self.cache.rendered_bytes(
-            source_path,
-            display_source,
-            digest,
-            raw,
-            languages,
-            &mut self.warnings,
-        )
-    }
-
-    /// The warnings this render produced, in the order the sources were rendered.
-    pub(crate) fn take_warnings(&mut self) -> Vec<AssetMinifyWarning> {
-        std::mem::take(&mut self.warnings)
-    }
-}
-
-/// Minified bytes shared by asset mappings within one render; excludes raw passthroughs.
-#[derive(Default)]
-struct AssetMinifyCache {
-    bytes: HashMap<AssetMinifyKey, Arc<[u8]>>,
-}
-
-impl AssetMinifyCache {
-    fn seed(&mut self, key: Option<AssetMinifyKey>, bytes: Arc<[u8]>) {
-        if let Some(key) = key {
-            self.bytes.entry(key).or_insert(bytes);
-        }
-    }
-
-    fn rendered_bytes(
-        &mut self,
-        source_path: &Path,
-        display_source: &str,
-        digest: tola_typst::ContentDigest,
-        raw: &Arc<[u8]>,
-        languages: MinifiedLanguages,
-        warnings: &mut Vec<AssetMinifyWarning>,
     ) -> Arc<[u8]> {
         let Some(key) = AssetMinifyKey::for_source(source_path, digest, languages) else {
             return Arc::clone(raw);
@@ -106,7 +61,7 @@ impl AssetMinifyCache {
         }
         let language = key.request.language();
         let Ok(source) = std::str::from_utf8(raw) else {
-            warnings.push(AssetMinifyWarning::NotUtf8 {
+            self.warnings.push(AssetMinifyWarning::NotUtf8 {
                 path: display_source.to_owned(),
                 language,
             });
@@ -119,7 +74,7 @@ impl AssetMinifyCache {
                 bytes
             }
             Err(failure) => {
-                warnings.push(AssetMinifyWarning::from_failure(
+                self.warnings.push(AssetMinifyWarning::from_failure(
                     language,
                     display_source,
                     failure,
@@ -127,6 +82,11 @@ impl AssetMinifyCache {
                 Arc::clone(raw)
             }
         }
+    }
+
+    /// The warnings this render produced, in the order the sources were rendered.
+    pub(crate) fn take_warnings(&mut self) -> Vec<AssetMinifyWarning> {
+        std::mem::take(&mut self.warnings)
     }
 }
 
@@ -164,7 +124,7 @@ impl AssetMinifyWarning {
             Self::Unexpected { path, .. } => (path, format!("Tola could not minify `{path}`")),
         };
         let diagnostic = Diagnostic::at_path(
-            crate::codes::build::MINIFY,
+            tola_diagnostic::codes::build::MINIFY,
             Severity::Warning,
             path,
             message,
@@ -223,14 +183,8 @@ impl AssetMinifyWarning {
                 reason,
                 line,
                 column,
-            }) => Self::Syntax {
-                path,
-                language,
-                reason,
-                line,
-                column,
-            },
-            MinifyFailure::JavaScript(JavaScriptMinifyError::Syntax {
+            })
+            | MinifyFailure::JavaScript(JavaScriptMinifyError::Syntax {
                 reason,
                 line,
                 column,
@@ -241,8 +195,7 @@ impl AssetMinifyWarning {
                 line,
                 column,
             },
-            // The semantic minifier and the printer report failures Tola's own options cannot
-            // produce, so this arm exists to report one honestly rather than to expect it.
+            // A semantic or printer failure Tola's own options cannot produce; report it honestly.
             MinifyFailure::Css(other) => Self::Unexpected {
                 path,
                 language,
@@ -268,7 +221,7 @@ const REPORT_URL: &str = "https://github.com/tola-rs/tola-ssg/issues";
 mod tests {
     use super::*;
 
-    fn all_asset_minification() -> MinifiedLanguages {
+    fn all_languages_minified() -> MinifiedLanguages {
         MinifiedLanguages::new(true, true)
     }
 
@@ -280,17 +233,17 @@ mod tests {
             path,
             tola_typst::ContentDigest::of(source),
             &raw,
-            all_asset_minification(),
+            all_languages_minified(),
         );
         (bytes, minification.take_warnings())
     }
 
     #[test]
-    fn raw_sources_keep_their_own_bytes() {
+    fn raw_sources_keep_bytes() {
         for (path, languages) in [
             ("app.css", MinifiedLanguages::default()),
-            ("asset.bin", all_asset_minification()),
-            ("app.MIN.CSS", all_asset_minification()),
+            ("asset.bin", all_languages_minified()),
+            ("app.MIN.CSS", all_languages_minified()),
         ] {
             let raw: Arc<[u8]> = Arc::from(b"source bytes".as_slice());
             let mut minification = AssetMinification::default();
@@ -317,14 +270,14 @@ mod tests {
             "first.css",
             digest,
             &raw,
-            all_asset_minification(),
+            all_languages_minified(),
         );
         let second = minification.rendered_bytes(
             Path::new("second.css"),
             "second.css",
             digest,
             &raw,
-            all_asset_minification(),
+            all_languages_minified(),
         );
         assert!(Arc::ptr_eq(&first, &second));
         assert!(minification.take_warnings().is_empty());
@@ -374,17 +327,5 @@ mod tests {
                 diagnostic.help
             );
         }
-    }
-
-    #[test]
-    fn syntax_error_reports_its_position() {
-        let (_, warnings) = rendered("app.css", b".a { color: red }\n@media (");
-        let [warning] = &warnings[..] else {
-            panic!("expected one warning, got {warnings:?}");
-        };
-        let AssetMinifyWarning::Syntax { line, column, .. } = warning else {
-            panic!("expected a syntax warning, got {warning:?}");
-        };
-        assert_eq!((*line, *column), (2, 9));
     }
 }

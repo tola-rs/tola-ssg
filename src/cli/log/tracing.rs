@@ -353,6 +353,34 @@ fn short_target(target: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn round_diagnostics() -> Vec<tola_diagnostic::Diagnostic> {
+        vec![
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::typst::COMPILE,
+                tola_diagnostic::Severity::Warning,
+                "first warning",
+            ),
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::config::INVALID,
+                tola_diagnostic::Severity::Warning,
+                "second warning",
+            ),
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::hook::COMMAND,
+                tola_diagnostic::Severity::Error,
+                "command `search` failed\nStderr:\nmissing index\nStdout:\npartial result",
+            ),
+        ]
+    }
+
+    fn log_records(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
     use crate::cli::log::record_bytes;
     use crate::cli::log::tests::normalized_record;
 
@@ -389,6 +417,30 @@ mod tests {
             crate::cli::output::CommandOutput::new(terminal, Some(log)),
             subscriber,
         )
+    }
+
+    /// The console capture and session log of one quiet run that emits status, hook, diagnostic,
+    /// and machine-output lines.
+    fn quiet_run() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        crate::terminal::sink::tests::testing::BufferedOutput,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.jsonl");
+        let (sink, console) = OutputSink::buffered();
+        let (messages, subscriber) = quiet_session(sink, &path, 1);
+        tracing::dispatcher::with_default(&subscriber, || {
+            messages.status("Building site").unwrap();
+            tracing::info!(target: "tola::hook_status", stage = "generate-outputs", hook = "search", "Running hook");
+            tracing::info!(target: "tola::hook_status", stage = "generate-outputs", hook = "search", duration_seconds = 0.5, success = false, "Hook finished");
+            tracing::info!(target: "tola::hook_output", hook = "search", stream = "stdout", output = "script output");
+            messages.diagnostics(&round_diagnostics()).unwrap();
+            messages
+                .write_stdout_line("{\"machine_output\":true}")
+                .unwrap();
+        });
+        (directory, path, console)
     }
 
     /// The log file one command writes while `emit` runs through tracing's file layer.
@@ -593,11 +645,7 @@ mod tests {
         let shown = String::from_utf8(output.bytes()).unwrap();
         assert!(!shown.contains("script stdout"));
         assert!(!shown.contains("script stderr"));
-        let source = std::fs::read_to_string(path).unwrap();
-        let records = source
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .collect::<Vec<_>>();
+        let records = log_records(&path);
         assert!(records.iter().any(|record| {
             record["target"] == "tola::hook_output" && record["fields"]["output"] == "script stdout"
         }));
@@ -677,11 +725,7 @@ mod tests {
             tracing::trace!(target: "tola::compile", "trace remains opt-in");
         });
         assert!(output.is_empty());
-        let source = std::fs::read_to_string(path).unwrap();
-        let records = source
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .collect::<Vec<_>>();
+        let records = log_records(&path);
         assert_eq!(records.len(), 2);
         assert_eq!(records[1]["level"], "DEBUG");
         assert_eq!(records[1]["fields"]["reused"], true);
@@ -709,27 +753,19 @@ mod tests {
     }
 
     #[test]
-    fn held_console_keeps_file_events() {
+    fn verbose_events_reach_console_and_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         let log = LogFile::prepare(&path, |_, error| panic!("log write failed: {error}")).unwrap();
         log.start().unwrap();
         let (sink, captured) = OutputSink::buffered();
-        let subscriber = subscriber(
-            1,
-            Terminal::with_sink(sink.clone(), false, false),
-            Some(log),
-            None,
-        )
-        .unwrap();
-        sink.with_stderr_lock(|_| -> io::Result<()> {
-            tracing::dispatcher::with_default(&subscriber, || {
-                tracing::debug!(target: "tola::compile", "preview became ready");
-            });
-            Ok(())
-        })
-        .unwrap();
-        assert!(captured.is_empty());
+        let subscriber =
+            subscriber(1, Terminal::with_sink(sink, false, false), Some(log), None).unwrap();
+        tracing::dispatcher::with_default(&subscriber, || {
+            tracing::debug!(target: "tola::compile", "preview became ready");
+        });
+        let shown = String::from_utf8(captured.bytes()).unwrap();
+        assert!(shown.contains("preview became ready"), "{shown:?}");
         let recorded: serde_json::Value =
             serde_json::from_str(std::fs::read_to_string(path).unwrap().trim()).unwrap();
         assert_eq!(recorded["fields"]["message"], "preview became ready");
@@ -737,37 +773,9 @@ mod tests {
 
     #[test]
     fn quiet_console_keeps_limited_diagnostics() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let (sink, output) = OutputSink::buffered();
-        let (messages, subscriber) = quiet_session(sink, &path, 1);
+        let (_directory, _log, console) = quiet_run();
 
-        tracing::dispatcher::with_default(&subscriber, || {
-            messages.status("Building site").unwrap();
-            tracing::info!(target: "tola::hook_status", stage = "generate-outputs", hook = "search", "Running hook");
-            tracing::info!(target: "tola::hook_status", stage = "generate-outputs", hook = "search", duration_seconds = 0.5, success = false, "Hook finished");
-            tracing::info!(target: "tola::hook_output", hook = "search", stream = "stdout", output = "script output");
-            messages
-                .diagnostics(&[
-                    tola_build::diagnostic::Diagnostic::new(
-                        tola_build::codes::typst::COMPILE,
-                        tola_build::diagnostic::Severity::Warning,
-                        "first warning",
-                    ),
-                    tola_build::diagnostic::Diagnostic::new(
-                        tola_build::codes::config::INVALID,
-                        tola_build::diagnostic::Severity::Warning,
-                        "second warning",
-                    ),
-                    tola_build::diagnostic::Diagnostic::new(
-                        tola_build::codes::hook::COMMAND,
-                        tola_build::diagnostic::Severity::Error,
-                        "command `search` failed\nStderr:\nmissing index\nStdout:\npartial result",
-                    ),
-                ])
-                .unwrap();
-        });
-        let shown = String::from_utf8(output.bytes()).unwrap();
+        let shown = String::from_utf8(console.bytes()).unwrap();
         assert!(!shown.contains("Building site"));
         assert!(!shown.contains("script output"));
         assert!(!shown.contains("Running generate-outputs/"));
@@ -781,43 +789,9 @@ mod tests {
 
     #[test]
     fn session_log_keeps_every_record() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("session.jsonl");
-        let (sink, _) = OutputSink::buffered();
-        let (messages, subscriber) = quiet_session(sink, &path, 1);
-
-        tracing::dispatcher::with_default(&subscriber, || {
-            messages.status("Building site").unwrap();
-            tracing::info!(target: "tola::hook_status", stage = "generate-outputs", hook = "search", duration_seconds = 0.5, success = false, "Hook finished");
-            tracing::info!(target: "tola::hook_output", hook = "search", stream = "stdout", output = "script output");
-            messages
-                .diagnostics(&[
-                    tola_build::diagnostic::Diagnostic::new(
-                        tola_build::codes::typst::COMPILE,
-                        tola_build::diagnostic::Severity::Warning,
-                        "first warning",
-                    ),
-                    tola_build::diagnostic::Diagnostic::new(
-                        tola_build::codes::config::INVALID,
-                        tola_build::diagnostic::Severity::Warning,
-                        "second warning",
-                    ),
-                    tola_build::diagnostic::Diagnostic::new(
-                        tola_build::codes::hook::COMMAND,
-                        tola_build::diagnostic::Severity::Error,
-                        "command `search` failed\nStderr:\nmissing index\nStdout:\npartial result",
-                    ),
-                ])
-                .unwrap();
-            messages
-                .write_stdout_line("{\"machine_output\":true}")
-                .unwrap();
-        });
-        let source = std::fs::read_to_string(path).unwrap();
-        let records = source
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .collect::<Vec<_>>();
+        let (_directory, log, _console) = quiet_run();
+        let source = std::fs::read_to_string(&log).unwrap();
+        let records = log_records(&log);
         assert_eq!(
             records
                 .iter()
@@ -829,11 +803,11 @@ mod tests {
             records
                 .iter()
                 .any(|record| record["fields"]["diagnostic"]["code"]
-                    == serde_json::json!(tola_build::codes::config::INVALID))
+                    == serde_json::json!(tola_diagnostic::codes::config::INVALID))
         );
         assert!(records.iter().any(|record| {
             record["fields"]["diagnostic"]["code"]
-                == serde_json::json!(tola_build::codes::hook::COMMAND)
+                == serde_json::json!(tola_diagnostic::codes::hook::COMMAND)
                 && record["fields"]["diagnostic"]["message"]
                     .as_str()
                     .is_some_and(|message| {

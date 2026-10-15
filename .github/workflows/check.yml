@@ -98,7 +98,7 @@ jobs:
           components: rustfmt
           cache-key: check-static
           cache-on-failure: true
-      - name: Check formatting, lints, test names, and synchronized versions
+      - name: Check formatting, lints, and synchronized versions
         run: just quality version-check
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:

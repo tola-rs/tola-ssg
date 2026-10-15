@@ -98,7 +98,7 @@ for (const mode of ['--pure', '--offline']) {
       ...proxyEnvironment(proxy.url),
       TYPST_PACKAGE_PATH: join(root, 'packages'),
       TYPST_PACKAGE_CACHE_PATH: join(root, 'cache'),
-    }, mode)
+    }, ['lsp', mode])
     try {
       await connection.initialize()
       const uri = contentDocument(root, 'packages.typ').uri
@@ -131,7 +131,7 @@ test('source requests answer while the site check hangs', async ({ binary, direc
     ...proxyEnvironment(proxy.url),
     TYPST_PACKAGE_PATH: join(root, 'packages'),
     TYPST_PACKAGE_CACHE_PATH: join(root, 'cache'),
-  }, null)
+  }, ['lsp'])
   try {
     await connection.initialize()
     connection.open(uri, source)
@@ -519,7 +519,7 @@ test('a pull for a document the check has not reached is refused', async ({ bina
     ...proxyEnvironment(proxy.url),
     TYPST_PACKAGE_PATH: join(root, 'packages'),
     TYPST_PACKAGE_CACHE_PATH: join(root, 'cache'),
-  }, null)
+  }, ['lsp'])
   try {
     await connection.initialize({
       textDocument: { diagnostic: {} },

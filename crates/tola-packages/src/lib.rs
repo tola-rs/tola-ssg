@@ -10,6 +10,10 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
+
+use typst::foundations::Str;
+
 mod assets;
 mod builtin;
 mod code_render;
@@ -24,13 +28,16 @@ mod image_request;
 mod images;
 mod issue;
 pub mod library;
+mod modules;
 mod natives;
 mod protocol;
 mod references;
-mod schema_issue;
+mod report;
+pub mod schema_issue;
 mod source_issues;
 mod source_meta;
 mod text;
+mod uuid;
 
 pub use assets::{
     ARGUMENT_DOMAINS, ArgumentDomain, ArgumentDomainDeclaration, CODE_STYLESHEET_FILE,
@@ -46,22 +53,47 @@ pub use code_themes::{
 };
 pub use diagnostic::{DECLARATION_PROTOCOL_ORIGIN, SOURCE_ISSUE_ORIGIN};
 pub use docs::{
-    DocumentationSegment, ExportDeclaration, ExportDocumentation, Parameter, ParameterKind,
-    RelatedTarget, Signature, cast_spelling, documentation_segments, type_spelling,
+    DocumentationSegment, ExportDeclaration, ExportDocumentation, ExportDocumentationError,
+    Parameter, ParameterKind, RelatedTarget, Signature, cast_spelling, documentation_segments,
+    type_spelling,
 };
 pub use icons::{
     PublishedIcon, collection_of_icon_file, icon_collection_names_bytes, icon_file_bytes,
     is_icon_file, published_icon_path, published_icon_request,
 };
-pub use image_request::{ImageRequest, observation_bytes, owns_observation};
+pub use image_request::{
+    DescriptorError, ImageRequest, PackageSpecMessage, observation_bytes, owns_observation,
+};
 pub use images::AssetUrlShadowed;
 pub use library::{ALL_SOURCES, CURRENT_SOURCE, TOLA_META};
 pub use protocol::{
     ASSET_URLS_MEMBER, CAPABILITY_OBSERVATION_PATH, HOST_MODULE, ICON_OBSERVATION_DIRECTORY,
     ICON_REQUEST_OBSERVATION_DIRECTORY, IMAGE_REQUEST_OBSERVATION_DIRECTORY,
-    IMAGE_REQUEST_OBSERVATION_EXTENSION, SOURCE_OBSERVATION_DIRECTORY,
-    SOURCE_RECORDS_BY_FILE_MEMBER, SOURCE_RECORDS_MEMBER,
+    IMAGE_REQUEST_OBSERVATION_EXTENSION, MODULE_VALIDATION_MEMBER, MODULES_MEMBER,
+    SOURCE_OBSERVATION_DIRECTORY, SOURCE_RECORDS_BY_FILE_MEMBER, SOURCE_RECORDS_MEMBER,
 };
+pub use report::{REPORT_ORIGIN, ReportCaller, ReportOrigin, ReportSeverity};
 pub use source_meta::{
     CaptureError, CaptureHeader, Declaration, DeclaredMeta, SourceCapture, decode_capture,
 };
+
+/// The key an author attribute is written under; `class` and `style` keep the element's spelling.
+pub(crate) fn attribute_key(name: &Str) -> &str {
+    if name.as_str().eq_ignore_ascii_case("class") {
+        "class"
+    } else if name.as_str().eq_ignore_ascii_case("style") {
+        "style"
+    } else {
+        name.as_str()
+    }
+}
+
+/// Join one author value onto what the element already sets: `class` is a list, `style` a block.
+pub(crate) fn merge_attribute(attributes: &mut BTreeMap<String, String>, name: &str, value: &str) {
+    let merged = match (name, attributes.get(name)) {
+        ("class", Some(current)) => format!("{current} {value}"),
+        ("style", Some(current)) => format!("{};{value}", current.trim_end_matches(';')),
+        _ => value.to_owned(),
+    };
+    attributes.insert(name.to_owned(), merged);
+}

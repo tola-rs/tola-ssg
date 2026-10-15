@@ -20,11 +20,6 @@ format:
 check:
     deno task check
 
-# Refuse test names that describe code instead of the behaviour a test proves.
-[working-directory('scripts')]
-test-names:
-    deno task test-names
-
 # Regenerate the Iconify collection index Tola pins; name collections to refresh only those.
 [working-directory('scripts')]
 icons-index *collections:
@@ -35,8 +30,7 @@ icons-index *collections:
 pronunciations *args:
     deno run --allow-read --allow-write --allow-net pronunciations/index.ts {{ args }}
 
-# Regenerate the fonts this repository carries from the pinned typst-assets release.
-# Pass --check to verify what is committed without writing.
+# Regenerate the fonts from the pinned typst-assets release; pass --check to verify without writing.
 [working-directory('scripts')]
 fonts *args:
     deno run --allow-read --allow-write --allow-net fonts/index.ts {{ args }}

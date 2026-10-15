@@ -1,10 +1,12 @@
 //! Human-facing progress, status, and output-count wording.
 
+use std::time::Duration;
+
 use tola_build::output::summary::{ChangedOutputGroups, OutputCounts};
 
 use super::Palette;
 
-pub(crate) fn format_duration(duration: std::time::Duration) -> String {
+pub(crate) fn format_duration(duration: Duration) -> String {
     if duration.as_secs() > 0 {
         format!("{:.2} s", duration.as_secs_f64())
     } else {
@@ -118,7 +120,7 @@ pub(crate) fn describe_changes(changes: ChangedOutputGroups) -> String {
 
 /// One sentence for a command that worked on the site: the verb, the elapsed time, and an
 /// optional detail clause.
-pub(crate) fn site_summary(verb: &str, elapsed: std::time::Duration, detail: &str) -> String {
+pub(crate) fn site_summary(verb: &str, elapsed: Duration, detail: &str) -> String {
     let duration = format_duration(elapsed);
     if detail.is_empty() {
         format!("{verb} site in {duration}")
@@ -183,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn status_lines_cannot_escape_their_block() {
+    fn status_lines_stay_in_block() {
         assert_eq!(status("first\nsecond\n"), "first\n  second");
         assert_eq!(text("\nblock\n"), "block");
         assert_eq!(

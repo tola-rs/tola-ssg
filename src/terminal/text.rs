@@ -1,8 +1,5 @@
 //! Display external text without granting it terminal control.
 
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
-
 use super::ansi;
 use super::ansi::push_visible;
 
@@ -60,43 +57,6 @@ pub(crate) fn visible_in_place(source: &str) -> String {
     output
 }
 
-pub(crate) struct DisplayWindow<'a> {
-    pub(crate) text: &'a str,
-    pub(crate) start_column: usize,
-}
-
-/// Keep a display position visible without splitting an extended grapheme.
-pub(crate) fn window(source: &str, columns: usize, focus: usize) -> DisplayWindow<'_> {
-    let total = source.width();
-    let desired = focus
-        .saturating_sub(columns / 3)
-        .min(total.saturating_sub(columns));
-    let mut start_byte = 0;
-    let mut start_column = 0;
-    for (byte, grapheme) in source.grapheme_indices(true) {
-        let next = start_column + grapheme.width();
-        if desired == 0 || next > desired {
-            break;
-        }
-        start_byte = byte + grapheme.len();
-        start_column = next;
-    }
-    let mut end_byte = start_byte;
-    let mut end_column = start_column;
-    for (byte, grapheme) in source[start_byte..].grapheme_indices(true) {
-        let next = end_column + grapheme.width();
-        if next > start_column + columns {
-            break;
-        }
-        end_byte = start_byte + byte + grapheme.len();
-        end_column = next;
-    }
-    DisplayWindow {
-        text: &source[start_byte..end_byte],
-        start_column,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,27 +106,5 @@ mod tests {
                 .chars()
                 .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
         );
-    }
-
-    #[test]
-    fn window_clamps_focus_past_text_end() {
-        let end = window("abcdef", 3, 6);
-        assert_eq!(end.text, "def");
-        assert_eq!(end.start_column, 3);
-        let past = window("abcdef", 3, 99);
-        assert_eq!(past.text, "def");
-        assert_eq!(past.start_column, 3);
-        let empty = window("", 80, 5);
-        assert_eq!(empty.text, "");
-        assert_eq!(empty.start_column, 0);
-    }
-
-    #[test]
-    fn window_keeps_wide_grapheme_whole() {
-        // The focus falls inside the wide grapheme, so the window starts at the grapheme rather
-        // than at the column that would split it.
-        let focused = window("a界x", 2, 2);
-        assert_eq!(focused.text, "界");
-        assert_eq!(focused.start_column, 1);
     }
 }

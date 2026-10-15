@@ -88,10 +88,7 @@ pub struct Signature {
 }
 
 impl Signature {
-    /// The signature Typst's own metadata declares for one function. A closure's parameters carry
-    /// no type here: only a documented annotation or a checked observation names one. An element
-    /// function returns the element it builds, which Tinymist spells as that element's own name,
-    /// so a binding that aliases one still answers the element.
+    /// The signature Typst's own metadata declares; an element function returns its element.
     pub fn of(name: &str, func: &Func) -> Self {
         let returns = match func.to_element() {
             Some(element) => Some(element.name().to_owned()),
@@ -313,7 +310,7 @@ fn parameter_of(param: ParamInfo) -> Parameter {
     }
 }
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use typst::foundations::Value;
     fn signature(export: &ExportDocumentation) -> &Signature {
@@ -323,7 +320,7 @@ pub(crate) mod tests {
         signature
     }
 
-    pub(crate) fn parameter<'a>(signature: &'a Signature, name: &str) -> &'a Parameter {
+    fn parameter<'a>(signature: &'a Signature, name: &str) -> &'a Parameter {
         signature
             .parameters
             .iter()
@@ -378,7 +375,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn signature_code_omits_returns_matching_the_name() {
+    fn signature_omits_return_matching_name() {
         let signature = Signature {
             name: "sample".to_owned(),
             parameters: vec![],

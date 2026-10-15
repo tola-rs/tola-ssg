@@ -9,8 +9,7 @@ setup:
 typecheck:
     deno task typecheck
 
-# Exercise the integration host against the debug workspace binary.
-# Linux needs Xvfb; the launcher downloads VS Code unless VSCODE_EXECUTABLE_PATH is set.
+# Exercise the integration host; Linux needs Xvfb, and VSCODE_EXECUTABLE_PATH skips the download.
 [working-directory('extensions/vscode')]
 test:
     cargo build --locked -p tola

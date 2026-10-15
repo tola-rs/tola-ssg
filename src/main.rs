@@ -11,6 +11,7 @@ mod command_line;
 mod config;
 mod dev;
 mod editor;
+mod edits;
 mod embed;
 mod help;
 mod i18n;

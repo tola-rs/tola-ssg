@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use codespan_reporting::files::{Error as FilesError, Files};
-use tola_build::diagnostic::{Location, SourceLine, SourcePosition, SourceRange};
+use tola_diagnostic::{Location, SourceLine, SourcePosition, SourceRange};
 
 use crate::terminal::source::SourceFiles;
 use crate::terminal::text;
@@ -348,65 +348,46 @@ impl<'a> Files<'a> for RenderedFiles<'a> {
     }
 
     fn line_number(&'a self, id: &'a str, line: usize) -> Result<usize, FilesError> {
-        let text = self.texts.get(id).ok_or(FilesError::FileMissing)?;
-        text.rows
-            .get(line)
-            .map(|row| row.line)
-            .ok_or(FilesError::LineTooLarge {
-                given: line,
-                max: text.rows.len(),
-            })
+        Ok(self.source_row(id, line)?.0.line)
     }
 
     // Typst CLI columns count Unicode scalars from zero.
     fn column_number(&'a self, id: &'a str, line: usize, byte: usize) -> Result<usize, FilesError> {
-        let text = self.texts.get(id).ok_or(FilesError::FileMissing)?;
-        let row = text.rows.get(line).ok_or(FilesError::LineTooLarge {
-            given: line,
-            max: text.rows.len(),
-        })?;
+        let (row, text) = self.source_row(id, line)?;
         Ok(row.start_column
-            + text.text[row.bytes.start..byte.min(row.bytes.end)]
+            + text[row.bytes.start..byte.min(row.bytes.end)]
                 .chars()
                 .count())
     }
 
     fn line_range(&'a self, id: &'a str, line: usize) -> Result<Range<usize>, FilesError> {
+        Ok(self.source_row(id, line)?.0.bytes.clone())
+    }
+}
+
+impl RenderedFiles<'_> {
+    /// The row `line` of file `id`, with the source text it slices.
+    fn source_row<'s>(
+        &'s self,
+        id: &str,
+        line: usize,
+    ) -> Result<(&'s SourceRow, &'s str), FilesError> {
         let text = self.texts.get(id).ok_or(FilesError::FileMissing)?;
-        text.rows
-            .get(line)
-            .map(|row| row.bytes.clone())
-            .ok_or(FilesError::LineTooLarge {
-                given: line,
-                max: text.rows.len(),
-            })
+        let row = text.rows.get(line).ok_or(FilesError::LineTooLarge {
+            given: line,
+            max: text.rows.len(),
+        })?;
+        Ok((row, text.text.as_ref()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::render;
+    use super::super::tests::snippet;
     use super::*;
-    use tola_build::codes::typst::COMPILE;
-    use tola_build::diagnostic::{Diagnostic, Help, Severity, SourceLine, SourcePosition};
-
-    /// One location whose line the renderer can show without reading a file.
-    fn snippet(line: usize, text: &str) -> Location {
-        Location {
-            path: "site.typ".to_owned(),
-            line: Some(line),
-            column: Some(1),
-            range: None,
-            source_lines: vec![SourceLine {
-                line,
-                start_column: 0,
-                start_character: 0,
-                ends_line: true,
-                text: text.to_owned(),
-                highlight: Some((0, 1)),
-            }],
-        }
-    }
+    use tola_diagnostic::codes::typst::COMPILE;
+    use tola_diagnostic::{Diagnostic, Help, Severity, SourceLine, SourcePosition};
 
     /// A location's window is the source its producer read, so an edited file on disk does not
     /// decide what a running session shows.
@@ -438,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn range_past_window_labels_first_line() {
+    fn range_past_window_labels() {
         let mut location = snippet(3, "let wide = \"text");
         location.range = Some(SourceRange {
             start: SourcePosition {
@@ -458,10 +439,7 @@ mod tests {
 
         assert!(rendered.contains("let wide = \"text"), "{rendered}");
         assert!(rendered.contains('^'), "{rendered}");
-        assert!(
-            rendered.contains("source excerpts are shortened"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("the excerpt is shortened"), "{rendered}");
     }
 
     #[test]
@@ -488,10 +466,7 @@ mod tests {
         );
         assert!(rendered.contains("site.typ:1:39"), "{rendered}");
         assert!(!rendered.contains('^'), "{rendered}");
-        assert!(
-            !rendered.contains("source excerpts are shortened"),
-            "{rendered}"
-        );
+        assert!(!rendered.contains("the excerpt is shortened"), "{rendered}");
     }
     #[test]
     fn disjoint_windows_keep_endpoints() {
@@ -536,10 +511,7 @@ mod tests {
             assert!(files.source("site.typ").unwrap().len() <= 9);
             let rendered = render(&diagnostic, None, false);
             assert!(rendered.contains("site.typ:2000000:5001"), "{rendered}");
-            assert!(
-                rendered.contains("source excerpts are shortened"),
-                "{rendered}"
-            );
+            assert!(rendered.contains("the excerpt is shortened"), "{rendered}");
         }
     }
 
@@ -631,10 +603,7 @@ mod tests {
                 assert!(files.compact_span(primary).unwrap().ends_with('…'));
             }
             let rendered = render(&diagnostic, None, false);
-            assert!(
-                rendered.contains("source excerpts are shortened"),
-                "{rendered}"
-            );
+            assert!(rendered.contains("the excerpt is shortened"), "{rendered}");
         }
     }
 }

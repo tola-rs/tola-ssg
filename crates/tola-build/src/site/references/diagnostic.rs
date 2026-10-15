@@ -4,10 +4,10 @@ use tola_address::OutputPath;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::config::{ReferenceLevel, ResolvedSiteConfig};
-use crate::diagnostic::{Diagnostic, DiagnosticCause, Severity};
 use crate::site::references::{
     Reference, ReferenceCategory, ReferenceResolution, References, UnresolvedReferenceReason,
 };
+use tola_diagnostic::{Diagnostic, DiagnosticCause, Severity};
 
 // Resolution groups may be reused, but policy is always projected from this
 // build's configuration so cached failures cannot retain an obsolete severity.
@@ -21,18 +21,18 @@ pub(crate) fn diagnostics(
     for reference in index.references() {
         cancellation.ensure_active()?;
         if let Some(diagnostic) = reference_diagnostic(config, reference) {
-            let identity = crate::diagnostic::ReferenceIdentity::of(&diagnostic);
+            let identity = tola_diagnostic::ReferenceIdentity::of(&diagnostic);
             diagnostics.push((identity, diagnostic, reference.page().as_str().to_owned()));
         }
     }
     for (page, base) in index.unchecked_bases() {
         cancellation.ensure_active()?;
         let diagnostic = base_href_diagnostic(page, base);
-        let identity = crate::diagnostic::ReferenceIdentity::of(&diagnostic);
+        let identity = tola_diagnostic::ReferenceIdentity::of(&diagnostic);
         diagnostics.push((identity, diagnostic, page.as_str().to_owned()));
     }
     cancellation.ensure_active()?;
-    Ok(crate::diagnostic::collapse_repeated(diagnostics))
+    Ok(tola_diagnostic::collapse_repeated(diagnostics))
 }
 
 /// The page whose document base names another origin, reported rather than silently unchecked.
@@ -49,19 +49,19 @@ fn base_href_diagnostic(
     );
     match &base.origin {
         Some(origin) => Diagnostic::at_location(
-            crate::codes::reference::BASE_HREF_EXTERNAL_ORIGIN,
+            tola_diagnostic::codes::reference::BASE_HREF_EXTERNAL_ORIGIN,
             Severity::Warning,
             origin.clone(),
             message,
         ),
         None => Diagnostic::at_path(
-            crate::codes::reference::BASE_HREF_EXTERNAL_ORIGIN,
+            tola_diagnostic::codes::reference::BASE_HREF_EXTERNAL_ORIGIN,
             Severity::Warning,
             page.as_str(),
             message,
         ),
     }
-    .with_help("remove the `<base href>` or write it as a relative address (`/`, `/docs/`)")
+    .with_help("Remove the `<base href>` or write it as a relative address (`/`, `/docs/`)")
 }
 fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> Option<Diagnostic> {
     let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
@@ -69,21 +69,21 @@ fn reference_diagnostic(config: &ResolvedSiteConfig, reference: &Reference) -> O
     };
     let (default_code, level) = match reference.category() {
         ReferenceCategory::Navigation => (
-            crate::codes::reference::NAVIGATION_MISSING,
+            tola_diagnostic::codes::reference::NAVIGATION_MISSING,
             config.build.references.navigation,
         ),
         ReferenceCategory::Resource => (
-            crate::codes::reference::RESOURCE_MISSING,
+            tola_diagnostic::codes::reference::RESOURCE_MISSING,
             config.build.references.resources,
         ),
         ReferenceCategory::Fragment => (
-            crate::codes::reference::FRAGMENT_MISSING,
+            tola_diagnostic::codes::reference::FRAGMENT_MISSING,
             config.build.references.fragments,
         ),
         ReferenceCategory::External => return None,
     };
     let code = if reason.is_media_type_mismatch() {
-        crate::codes::reference::RESOURCE_MEDIA_MISMATCH
+        tola_diagnostic::codes::reference::RESOURCE_MEDIA_MISMATCH
     } else {
         default_code
     };
@@ -157,7 +157,7 @@ fn fragment_replacements(destination: &str, available: &[String]) -> Vec<String>
     let before = &destination[..=fragment];
     available
         .iter()
-        .take(crate::diagnostic::LISTED_NAMES)
+        .take(tola_diagnostic::LISTED_NAMES)
         .map(|id| tola_address::browser_location(id))
         .filter(|id| !id.contains(['?', '#', '"', '\\']) && !id.chars().any(char::is_control))
         .map(|id| format!("{before}{id}"))
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_directory_page_offers_its_published_address() {
+    fn missing_directory_page_published_address() {
         let reference = unresolved(
             "/post",
             ReferenceCategory::Navigation,
@@ -210,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_fragment_offers_each_id_the_target_has() {
+    fn missing_each_id_target_has() {
         let reference = unresolved(
             "/post/#missing",
             ReferenceCategory::Fragment,
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_target_with_no_address_offers_nothing() {
+    fn missing_target_no_address_nothing() {
         let reference = unresolved(
             "/nowhere.html",
             ReferenceCategory::Navigation,

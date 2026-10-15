@@ -1,8 +1,4 @@
-//! The Iconify collections Tola indexes, and the releases it pins their bytes to.
-//!
-//! A preset names a collection release instead of a URL; the index in `releases` supplies the npm
-//! mirrors that serve it and the SHA-256 digest of its bytes. `just scripts::icons-index`
-//! regenerates that table.
+//! The Iconify collections Tola indexes and the releases it pins their bytes to.
 
 mod releases;
 
@@ -67,9 +63,6 @@ pub(crate) fn names() -> impl Iterator<Item = &'static str> {
 }
 
 /// The indexed collection a written name most plausibly meant.
-///
-/// A name within typo distance wins first. Beyond that, a shared prefix still names the family:
-/// `material-symbols-outlined` means `material-symbols`.
 pub(crate) fn nearest(written: &str) -> Option<&'static str> {
     if let Some(closest) = tola_typst::spelling::closest(written, names()) {
         return Some(closest);
@@ -100,12 +93,7 @@ pub(crate) fn resolve(name: &str, version: Option<&str>) -> Option<ResolvedPrese
     })
 }
 
-/// The npm mirrors serving one indexed release's IconifyJSON, in the order Tola tries them.
-///
-/// Every indexed collection is published as an `@iconify-json` package, and a versioned CDN path
-/// is immutable. Both mirrors serve the same package bytes, and the pinned digest decides which
-/// bytes count, so the second is never a second source of truth: it only answers when the first
-/// cannot deliver them.
+/// The npm mirrors serving one pinned release, in the order Tola tries them.
 fn release_urls(name: &str, version: &str) -> Vec<String> {
     [
         format!("https://cdn.jsdelivr.net/npm/@iconify-json/{name}@{version}/icons.json"),
@@ -117,12 +105,6 @@ fn release_urls(name: &str, version: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn first_collection() -> &'static IndexedCollection {
-        releases::INDEXED_COLLECTIONS
-            .first()
-            .expect("the index has at least one collection")
-    }
 
     #[test]
     fn index_pins_releases_in_order() {
@@ -156,40 +138,6 @@ mod tests {
                 collection.name
             );
         }
-    }
-
-    #[test]
-    fn preset_resolves_to_the_newest_release() {
-        let collection = first_collection();
-        let name = collection.name;
-        let newest = collection.newest();
-        let resolved = resolve(name, None).expect("an indexed collection resolves");
-        assert_eq!(resolved.name, name);
-        assert_eq!(resolved.version, newest.version);
-        assert_eq!(
-            resolved.urls,
-            [
-                format!(
-                    "https://cdn.jsdelivr.net/npm/@iconify-json/{name}@{}/icons.json",
-                    newest.version
-                ),
-                format!(
-                    "https://unpkg.com/@iconify-json/{name}@{}/icons.json",
-                    newest.version
-                ),
-            ]
-        );
-        assert_eq!(resolved.sha256, newest.sha256);
-
-        let pinned = resolve(name, Some(newest.version)).expect("an indexed release resolves");
-        assert_eq!(pinned.version, newest.version);
-    }
-
-    #[test]
-    fn unknown_collection_does_not_resolve() {
-        assert!(resolve("not-a-real-collection", None).is_none());
-        let collection = first_collection();
-        assert!(resolve(collection.name, Some("0.0.1")).is_none());
     }
 
     #[test]

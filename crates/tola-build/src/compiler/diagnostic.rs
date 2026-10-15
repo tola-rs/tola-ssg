@@ -1,50 +1,52 @@
 //! Formatting and collection of Typst diagnostics.
 
 use std::path::Path;
-use tola_typst::{DiagnosticFilter, Diagnostics};
+use tola_typst::{DiagnosticFilter, DiagnosticOrigin, Diagnostics};
 
-use crate::diagnostic::{Diagnostic, DiagnosticCause, Severity};
 use crate::filesystem::root_relative;
+use tola_diagnostic::{Diagnostic, DiagnosticCause, Severity};
 
-/// Convert Typst compiler failures into shared diagnostics.
-///
-/// Presentation, display limits, and terminal policy belong to consumers.
+/// Compiler failures as shared diagnostics; presentation belongs to consumers.
 pub(crate) fn error_diagnostics(
     error: &anyhow::Error,
     root: &Path,
-) -> Option<Vec<crate::diagnostic::Diagnostic>> {
+) -> Option<Vec<tola_diagnostic::Diagnostic>> {
     if let Some(compile) = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<tola_typst::CompileError>())
     {
         return compile_failure_diagnostics(compile, root);
     }
-    // Font resources are prepared before a compilation, so their failure can reach a boundary with
-    // no `CompileError` wrapped around it.
+    // Font failures reach a boundary with no `CompileError` wrapped around them.
     let font = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<tola_typst::FontLoadError>())?;
     font_failure(font, root).map(|diagnostic| vec![diagnostic])
 }
 
-/// Classify one Typst compiler failure into diagnostics the site author reads.
-///
-/// Returns `None` for cancellation, which callers report as cancellation instead of failure.
+fn without_export_warnings(diagnostics: &Diagnostics) -> Diagnostics {
+    diagnostics.filter_out(&DiagnosticFilter::typst_export_warning_filters())
+}
+
+/// One Typst failure as author diagnostics; `None` means cancellation.
 pub(super) fn compile_failure_diagnostics(
     compile: &tola_typst::CompileError,
     root: &Path,
-) -> Option<Vec<crate::diagnostic::Diagnostic>> {
+) -> Option<Vec<tola_diagnostic::Diagnostic>> {
     if let Some(diagnostics) = compile.diagnostics() {
-        let diagnostics = diagnostics
-            .filter_out(&DiagnosticFilter::typst_export_warning_filters())
+        let diagnostics = without_export_warnings(diagnostics)
             .iter()
             .map(|diagnostic| {
-                resolved_diagnostic(diagnostic.clone(), root, crate::codes::typst::COMPILE)
+                resolved_diagnostic(
+                    diagnostic.clone(),
+                    root,
+                    tola_diagnostic::codes::typst::COMPILE,
+                )
             })
             .collect::<Vec<_>>();
         return Some(ensure_error_diagnostic(
             diagnostics,
-            crate::codes::typst::COMPILE,
+            tola_diagnostic::codes::typst::COMPILE,
             "Tola could not compile the site",
         ));
     }
@@ -58,15 +60,22 @@ pub(super) fn compile_failure_diagnostics(
                     .any(|filter| filter.matches(source_diagnostic))
             })
             .map(|source_diagnostic| {
+                if let Some(report) =
+                    tola_packages::ReportOrigin::from_origin(source_diagnostic.origin())
+                {
+                    let reported = source_diagnostic.source();
+                    return report_diagnostic(
+                        &report,
+                        reported.message.to_string(),
+                        reported.hints.iter().map(|hint| help(hint.v.to_string())),
+                    );
+                }
                 let source_diagnostic = source_diagnostic.source();
                 let mut message = source_diagnostic.message.to_string();
                 relativize_message(&mut message, root);
-                let mut diagnostic = crate::diagnostic::Diagnostic::new(
-                    crate::codes::typst::BUNDLE_EXPORT,
-                    match source_diagnostic.severity {
-                        typst::diag::Severity::Error => crate::diagnostic::Severity::Error,
-                        typst::diag::Severity::Warning => crate::diagnostic::Severity::Warning,
-                    },
+                let mut diagnostic = tola_diagnostic::Diagnostic::new(
+                    tola_diagnostic::codes::typst::BUNDLE_EXPORT,
+                    typst_severity(source_diagnostic.severity),
                     message,
                 );
                 for hint in &source_diagnostic.hints {
@@ -79,18 +88,18 @@ pub(super) fn compile_failure_diagnostics(
             .collect::<Vec<_>>();
         return Some(ensure_error_diagnostic(
             diagnostics,
-            crate::codes::typst::BUNDLE_EXPORT,
+            tola_diagnostic::codes::typst::BUNDLE_EXPORT,
             "Tola could not export the Bundle",
         ));
     }
     let diagnostic = match compile {
         tola_typst::CompileError::HtmlExport { message } => Diagnostic::new(
-            crate::codes::typst::HTML_EXPORT,
+            tola_diagnostic::codes::typst::HTML_EXPORT,
             Severity::Error,
             relativized_text(message, root),
         ),
         tola_typst::CompileError::Input { message } => Diagnostic::new(
-            crate::codes::typst::INPUT,
+            tola_diagnostic::codes::typst::INPUT,
             Severity::Error,
             relativized_text(message, root),
         ),
@@ -111,10 +120,7 @@ fn relativized_text(text: &str, root: &Path) -> String {
     text
 }
 
-/// One source load failure in the site author's words, or `None` for cancellation.
-///
-/// `CompileError::from` already folds a cancelled load into `CompileError::Cancelled`, so
-/// a cancelled load answers `None` here and the caller reports cancellation instead.
+/// One source load failure as author diagnostics; `None` means cancellation.
 fn source_load_diagnostic(
     error: &tola_typst::world::SourceLoadError,
     root: &Path,
@@ -125,32 +131,29 @@ fn source_load_diagnostic(
         SourceLoadError::File { path, error } => match site_relative(path, root) {
             Some(relative) => {
                 let diagnostic = Diagnostic::new(
-                    crate::codes::typst::SNAPSHOT,
+                    tola_diagnostic::codes::typst::SNAPSHOT,
                     Severity::Error,
                     format!("Tola could not read `{relative}`"),
                 )
                 .with_path(relative)
                 .with_help("Check that the file exists and is readable, then run the build again");
-                match file_failure_reason(error) {
-                    Some(reason) => diagnostic.with_note(reason),
-                    None => diagnostic,
-                }
+                with_file_failure_reason(diagnostic, error)
             }
             None => Diagnostic::new(
-                crate::codes::typst::SNAPSHOT,
+                tola_diagnostic::codes::typst::SNAPSHOT,
                 Severity::Error,
                 "Tola could not read a source this build needs",
             )
             .with_help("Check that each content source exists inside the site root"),
         },
         SourceLoadError::OutsideRoot { .. } => Diagnostic::new(
-            crate::codes::typst::SNAPSHOT,
+            tola_diagnostic::codes::typst::SNAPSHOT,
             Severity::Error,
             "a source this build reads is outside the site root",
         )
         .with_help("Keep the content root and the Bundle entry inside the site root"),
         SourceLoadError::RootMismatch { .. } => Diagnostic::new(
-            crate::codes::typst::SNAPSHOT,
+            tola_diagnostic::codes::typst::SNAPSHOT,
             Severity::Error,
             "Tola could not reuse the sources it read before the site root changed",
         )
@@ -158,18 +161,14 @@ fn source_load_diagnostic(
     })
 }
 
-/// One font-resource failure in the site author's words, or `None` for cancellation.
-///
-/// `CompileError::from` already folds a cancelled font load into `CompileError::Cancelled`, so a
-/// cancelled load answers `None` here and the caller reports cancellation instead. An application
-/// that prepares fonts itself reports its failures through this same projection.
+/// One font failure as author diagnostics; `None` means cancellation.
 pub fn font_failure(error: &tola_typst::FontLoadError, root: &Path) -> Option<Diagnostic> {
     use tola_typst::FontLoadError;
     Some(match error {
         FontLoadError::Cancelled => return None,
         FontLoadError::NotDirectory { path } => match site_relative(path, root) {
             Some(relative) => Diagnostic::new(
-                crate::codes::typst::FONT,
+                tola_diagnostic::codes::typst::FONT,
                 Severity::Error,
                 format!("`{relative}` is not a directory"),
             )
@@ -178,7 +177,7 @@ pub fn font_failure(error: &tola_typst::FontLoadError, root: &Path) -> Option<Di
                 "`typst.fonts.paths` entries name directories; point this entry at the directory that holds the font file",
             ),
             None => Diagnostic::new(
-                crate::codes::typst::FONT,
+                tola_diagnostic::codes::typst::FONT,
                 Severity::Error,
                 "a `typst.fonts.paths` entry is not a directory",
             )
@@ -187,19 +186,16 @@ pub fn font_failure(error: &tola_typst::FontLoadError, root: &Path) -> Option<Di
         FontLoadError::File { path, error } => match site_relative(path, root) {
             Some(relative) => {
                 let diagnostic = Diagnostic::new(
-                    crate::codes::typst::FONT,
+                    tola_diagnostic::codes::typst::FONT,
                     Severity::Error,
                     format!("Tola could not read the font file `{relative}`"),
                 )
                 .with_path(relative)
                 .with_help("Check the font file, or remove it from `typst.fonts.paths`");
-                match file_failure_reason(error) {
-                    Some(reason) => diagnostic.with_note(reason),
-                    None => diagnostic,
-                }
+                with_file_failure_reason(diagnostic, error)
             }
             None => Diagnostic::new(
-                crate::codes::typst::FONT,
+                tola_diagnostic::codes::typst::FONT,
                 Severity::Error,
                 "Tola could not read a font file this site configures",
             )
@@ -207,14 +203,14 @@ pub fn font_failure(error: &tola_typst::FontLoadError, root: &Path) -> Option<Di
         },
         FontLoadError::Changed { path } => match site_relative(path, root) {
             Some(relative) => Diagnostic::new(
-                crate::codes::typst::FONT,
+                tola_diagnostic::codes::typst::FONT,
                 Severity::Error,
                 format!("the font file `{relative}` changed while Tola was loading fonts"),
             )
             .with_path(relative)
             .with_help("Run the build again without changing font files"),
             None => Diagnostic::new(
-                crate::codes::typst::FONT,
+                tola_diagnostic::codes::typst::FONT,
                 Severity::Error,
                 "a font file changed while Tola was loading fonts",
             )
@@ -229,37 +225,37 @@ fn world_diagnostic(error: &tola_typst::WorldBuildError, root: &Path) -> Option<
     Some(match error {
         WorldBuildError::Cancelled => return None,
         WorldBuildError::MainOutsideRoot { .. } => Diagnostic::new(
-            crate::codes::typst::WORLD,
+            tola_diagnostic::codes::typst::WORLD,
             Severity::Error,
             "the Bundle entry is outside the site root",
         )
         .with_help("Set `build.entry` to a file inside the site root"),
         WorldBuildError::MissingFileCache => Diagnostic::new(
-            crate::codes::typst::WORLD,
+            tola_diagnostic::codes::typst::WORLD,
             Severity::Error,
             "the site sources could not be loaded for this build",
         )
         .with_help("Restart `tola dev` and run the build again"),
         WorldBuildError::MissingFonts => Diagnostic::new(
-            crate::codes::typst::WORLD,
+            tola_diagnostic::codes::typst::WORLD,
             Severity::Error,
             "the configured font files could not be loaded for this build",
         )
         .with_help("Restart `tola dev` and run the build again"),
         WorldBuildError::RootMismatch { .. } => Diagnostic::new(
-            crate::codes::typst::WORLD,
+            tola_diagnostic::codes::typst::WORLD,
             Severity::Error,
             "the site root changed while Tola was reading sources",
         )
         .with_help("Restart `tola dev` to read the sources again"),
         WorldBuildError::FixedTimeWithoutDate => Diagnostic::new(
-            crate::codes::typst::WORLD,
+            tola_diagnostic::codes::typst::WORLD,
             Severity::Error,
             "the build date has no calendar day",
         )
         .with_help("Give the build a date that includes its year, month, and day"),
         WorldBuildError::Source(error) => Diagnostic::new(
-            crate::codes::typst::WORLD,
+            tola_diagnostic::codes::typst::WORLD,
             Severity::Error,
             error.to_string(),
         ),
@@ -267,10 +263,7 @@ fn world_diagnostic(error: &tola_typst::WorldBuildError, root: &Path) -> Option<
     })
 }
 
-/// The site-author reason behind one Typst file failure, when a plain one exists.
-///
-/// Details Typst keeps for its own diagnostics — conflicting editor versions, unmapped paths —
-/// stay out of the rendered reason.
+/// The author-facing reason for one file failure, or `None` when Typst keeps it internal.
 pub(crate) fn file_failure_reason(error: &typst::diag::FileError) -> Option<String> {
     use typst::diag::{FileError, PackageError};
     Some(match error {
@@ -297,17 +290,24 @@ pub(crate) fn file_failure_reason(error: &typst::diag::FileError) -> Option<Stri
 pub(super) fn with_diagnostics(
     error: anyhow::Error,
     root: &Path,
-    fallback_code: crate::diagnostic::DiagnosticCode,
+    fallback_code: tola_diagnostic::DiagnosticCode,
 ) -> anyhow::Error {
-    if crate::cancellation::is_cancelled(&error) || crate::diagnostic::attached(&error).is_some() {
+    attach_reports(error, |error| {
+        error_diagnostics(error, root)
+            .unwrap_or_else(|| vec![tola_diagnostic::fallback(fallback_code, error)])
+    })
+}
+
+/// Attach `reports` for `error`, unless it is cancelled or already carries diagnostics.
+pub(crate) fn attach_reports(
+    error: anyhow::Error,
+    reports: impl FnOnce(&anyhow::Error) -> Vec<Diagnostic>,
+) -> anyhow::Error {
+    if crate::cancellation::is_cancelled(&error) || tola_diagnostic::attached(&error).is_some() {
         return error;
     }
-    let diagnostics = error_diagnostics(&error, root)
-        .unwrap_or_else(|| vec![crate::diagnostic::fallback(fallback_code, &error)]);
-    anyhow::Error::new(crate::diagnostic::DiagnosticError::attach(
-        error,
-        diagnostics,
-    ))
+    let diagnostics = reports(&error);
+    anyhow::Error::new(tola_diagnostic::DiagnosticError::attach(error, diagnostics))
 }
 
 pub(super) fn with_export_diagnostics(
@@ -317,26 +317,35 @@ pub(super) fn with_export_diagnostics(
     root: &Path,
 ) -> anyhow::Error {
     let Some(raw) = error.raw_diagnostics() else {
-        return with_diagnostics(error.into(), root, crate::codes::typst::SITE_PROGRAM);
+        return with_diagnostics(
+            error.into(),
+            root,
+            tola_diagnostic::codes::typst::SITE_PROGRAM,
+        );
     };
     let mut diagnostics = Diagnostics::resolve(world, raw);
     diagnostics.attach_imported_by(|package| compilation.files_importing(package).to_vec());
-    let diagnostics = diagnostics
-        .filter_out(&DiagnosticFilter::typst_export_warning_filters())
+    let diagnostics = without_export_warnings(&diagnostics)
         .into_iter()
-        .map(|diagnostic| resolved_diagnostic(diagnostic, root, crate::codes::typst::BUNDLE_EXPORT))
+        .map(|diagnostic| {
+            resolved_diagnostic(
+                diagnostic,
+                root,
+                tola_diagnostic::codes::typst::BUNDLE_EXPORT,
+            )
+        })
         .collect();
     let diagnostics = ensure_error_diagnostic(
         diagnostics,
-        crate::codes::typst::BUNDLE_EXPORT,
+        tola_diagnostic::codes::typst::BUNDLE_EXPORT,
         "Tola could not export the Bundle",
     );
-    crate::diagnostic::DiagnosticError::attach(error.into(), diagnostics).into()
+    tola_diagnostic::DiagnosticError::attach(error.into(), diagnostics).into()
 }
 
 fn ensure_error_diagnostic(
     mut diagnostics: Vec<Diagnostic>,
-    code: crate::diagnostic::DiagnosticCode,
+    code: tola_diagnostic::DiagnosticCode,
     message: &'static str,
 ) -> Vec<Diagnostic> {
     if diagnostics
@@ -357,51 +366,42 @@ fn ensure_error_diagnostic(
 }
 
 /// The site-root-relative spelling of `path`, when it lies inside the site root.
-///
-/// A path outside the root is not rendered, so callers state the failure without one.
 pub(crate) fn site_relative(path: &Path, root: &Path) -> Option<String> {
     let relative = root_relative(path, root);
     (!relative.as_os_str().is_empty() && relative != path)
         .then(|| crate::filesystem::display_path(path, root))
 }
 
-/// Typst's wording when the world provides no clock.
-///
-/// Typst's diagnostics carry no error kind, so this wording is the only signal that
-/// `datetime.today()` failed. A wording change drops the guidance instead of mislabeling it.
+/// Typst's wording when the world provides no clock; a wording change drops the guidance.
 const MISSING_CLOCK: &str = "unable to get the current date";
 
 pub(super) fn resolved_diagnostic(
     mut diagnostic: tola_typst::Diagnostic,
     root: &Path,
-    code: crate::diagnostic::DiagnosticCode,
-) -> crate::diagnostic::Diagnostic {
-    // A source metadata issue belongs to the source whose fields failed, not to the Typst call
-    // that reached it. Its producer names that ownership so the site diagnostic can say so.
-    let source_metadata = matches!(
-        &diagnostic.origin,
-        tola_typst::diagnostic::DiagnosticOrigin::Producer(origin)
-            if origin.name() == tola_packages::SOURCE_ISSUE_ORIGIN
-    );
-    let declaration_protocol = matches!(
-        &diagnostic.origin,
-        tola_typst::diagnostic::DiagnosticOrigin::Producer(origin)
-            if origin.name() == tola_packages::DECLARATION_PROTOCOL_ORIGIN
-    );
-    let code = if source_metadata {
-        crate::codes::source::METADATA
-    } else if declaration_protocol {
-        crate::codes::source::DECLARATION_PROTOCOL
-    } else if tola_packages::AssetUrlShadowed::from_origin(&diagnostic.origin).is_some() {
-        crate::codes::reference::ASSET_URL_SHADOWED
-    } else {
-        code
+    code: tola_diagnostic::DiagnosticCode,
+) -> tola_diagnostic::Diagnostic {
+    if let Some(report) = tola_packages::ReportOrigin::from_origin(&diagnostic.origin) {
+        return resolved_report(diagnostic, root, report);
+    }
+    // Source metadata issues belong to the source; its producer names that ownership.
+    let code = match &diagnostic.origin {
+        DiagnosticOrigin::Producer(origin)
+            if origin.name() == tola_packages::SOURCE_ISSUE_ORIGIN =>
+        {
+            tola_diagnostic::codes::source::METADATA
+        }
+        DiagnosticOrigin::Producer(origin)
+            if origin.name() == tola_packages::DECLARATION_PROTOCOL_ORIGIN =>
+        {
+            tola_diagnostic::codes::source::DECLARATION_PROTOCOL
+        }
+        origin if tola_packages::AssetUrlShadowed::from_origin(origin).is_some() => {
+            tola_diagnostic::codes::reference::ASSET_URL_SHADOWED
+        }
+        _ => code,
     };
     relativize_diagnostic(&mut diagnostic, root);
-    let severity = match diagnostic.severity {
-        tola_typst::DiagnosticSeverity::Error => crate::diagnostic::Severity::Error,
-        tola_typst::DiagnosticSeverity::Warning => crate::diagnostic::Severity::Warning,
-    };
+    let severity = typst_severity(diagnostic.severity);
     let mut notes = Vec::new();
     if let Some(note) = imported_by_note(&diagnostic.imported_by) {
         notes.push(note);
@@ -411,27 +411,25 @@ pub(super) fn resolved_diagnostic(
         let guidance = package_failure_guidance(failure, root);
         diagnostic.message = guidance.message;
         notes.extend(guidance.note);
-        help.extend(guidance.help);
+        help.push(guidance.help);
     }
     if diagnostic.message == MISSING_CLOCK {
         diagnostic.message =
             "`datetime.today()` is not available because Tola does not read the current date when building".into();
-        help.push(crate::diagnostic::Help {
+        help.push(tola_diagnostic::Help {
             message: "Replace `datetime.today()` with an explicit date, such as \
                       `datetime(year: 2026, month: 10, day: 17)`"
                 .into(),
             location: None,
         });
     }
-    let location = diagnostic
-        .location
-        .path
-        .as_ref()
-        .map(|_| diagnostic_location(&diagnostic.location));
+    let location = reported_location(&diagnostic.location);
     let cause = unknown_variable_cause(&diagnostic.message, location.as_ref());
-    crate::diagnostic::Diagnostic {
+    tola_diagnostic::Diagnostic {
         severity,
         code,
+        producer: None,
+        source: None,
         message: diagnostic.message,
         location,
         imported_by: diagnostic.imported_by,
@@ -440,19 +438,115 @@ pub(super) fn resolved_diagnostic(
             .into_iter()
             .chain(diagnostic.hints.into_iter().map(help_from_hint))
             .collect(),
+        related: Vec::new(),
         trace: diagnostic.traces.into_iter().map(trace_frame).collect(),
         cause,
     }
 }
 
-/// The name the highlighted source text leaves unbound, or `None` when no highlight names one.
-///
-/// Typst's diagnostics hold no error kind, so the compiler's own wording is the only signal that
-/// the fault is an unbound name; the name is read from the highlight rather than from the sentence.
-/// A wording change drops the cause instead of producing a wrong one.
+fn typst_severity(severity: tola_typst::DiagnosticSeverity) -> Severity {
+    match severity {
+        tola_typst::DiagnosticSeverity::Error => Severity::Error,
+        tola_typst::DiagnosticSeverity::Warning => Severity::Warning,
+    }
+}
+
+fn report_severity(severity: tola_packages::ReportSeverity) -> Severity {
+    match severity {
+        tola_packages::ReportSeverity::Error => Severity::Error,
+        tola_packages::ReportSeverity::Warning => Severity::Warning,
+        tola_packages::ReportSeverity::Info => Severity::Info,
+        tola_packages::ReportSeverity::Hint => Severity::Hint,
+    }
+}
+
+fn report_producer(report: &tola_packages::ReportOrigin) -> tola_diagnostic::DiagnosticProducer {
+    tola_diagnostic::DiagnosticProducer {
+        name: match &report.caller {
+            tola_packages::ReportCaller::Project => Some("project".into()),
+            tola_packages::ReportCaller::Package(package) => Some(package.to_string()),
+            tola_packages::ReportCaller::Unknown => None,
+        },
+        code: report.code.clone(),
+    }
+}
+
+/// One package report: its first `hint_count` hints are help, the rest its reason.
+fn report_diagnostic(
+    report: &tola_packages::ReportOrigin,
+    message: String,
+    hints: impl IntoIterator<Item = tola_diagnostic::Help>,
+) -> Diagnostic {
+    let mut diagnostic = Diagnostic::new(
+        tola_diagnostic::codes::report::ISSUE,
+        report_severity(report.severity),
+        message,
+    );
+    diagnostic.producer = Some(report_producer(report));
+    for (index, help) in hints.into_iter().enumerate() {
+        if index < report.hint_count {
+            diagnostic.help.push(help);
+        } else {
+            diagnostic
+                .related
+                .push(tola_diagnostic::RelatedInformation {
+                    message: help.message,
+                    location: help.location,
+                    source: None,
+                });
+        }
+    }
+    diagnostic
+}
+
+fn resolved_report(
+    mut diagnostic: tola_typst::Diagnostic,
+    root: &Path,
+    report: tola_packages::ReportOrigin,
+) -> Diagnostic {
+    relativize_diagnostic(&mut diagnostic, root);
+    let mut result = report_diagnostic(
+        &report,
+        diagnostic.message,
+        diagnostic.hints.into_iter().map(help_from_hint),
+    );
+    result.location = reported_location(&diagnostic.location);
+    result.imported_by = diagnostic.imported_by;
+    result.trace = diagnostic.traces.into_iter().map(trace_frame).collect();
+    result
+}
+
+/// Retained compiler reports in the site diagnostic model, coalesced per producer.
+fn resolved_reports(
+    config: &crate::config::ResolvedSiteConfig,
+    diagnostics: &Diagnostics,
+) -> Vec<tola_diagnostic::Diagnostic> {
+    let mut resolved = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            resolved_diagnostic(
+                diagnostic.clone(),
+                config.get_root(),
+                tola_diagnostic::codes::typst::COMPILE,
+            )
+        })
+        .collect();
+    tola_diagnostic::coalesce_reports(&mut resolved);
+    resolved
+}
+
+/// Restore report levels before a successful compiler phase can expose its result.
+pub(crate) fn ensure_native_reports_succeed(
+    config: &crate::config::ResolvedSiteConfig,
+    diagnostics: &Diagnostics,
+) -> anyhow::Result<()> {
+    tola_diagnostic::ensure_reports_succeed(&resolved_reports(config, diagnostics))
+}
+
+/// The unbound name a Typst "unknown variable" wording leaves, read from the highlight.
 fn unknown_variable_cause(
     message: &str,
-    location: Option<&crate::diagnostic::Location>,
+    location: Option<&tola_diagnostic::Location>,
 ) -> Option<DiagnosticCause> {
     const UNKNOWN_VARIABLE: &str = "unknown variable";
     if !message.starts_with(UNKNOWN_VARIABLE) {
@@ -489,12 +583,10 @@ fn unknown_variable_cause(
 struct PackageFailureGuidance {
     message: String,
     note: Option<String>,
-    help: Option<crate::diagnostic::Help>,
+    help: tola_diagnostic::Help,
 }
 
-/// The package directory a site declares is the place the author can commit, so it
-/// leads; a package kept elsewhere is reached with `--package-path`. Directories
-/// outside the site root stay unnamed.
+/// The declared package directory leads; `--package-path` reaches one kept elsewhere.
 fn package_failure_guidance(
     failure: &tola_typst::ResolvedPackageFailure,
     root: &Path,
@@ -519,27 +611,27 @@ fn package_failure_guidance(
                     site_relative(&search.candidate, root)
                         .map(|candidate| format!("`{candidate}` does not exist"))
                 }),
-                help: Some(help(match directory {
+                help: help(match directory {
                     Some(directory) => format!("Put the package in `{directory}/`"),
                     None => "Run `tola vendor` to add the package to the site".to_owned(),
-                })),
+                }),
             },
         },
         ResolvedPackageFailureReason::Unavailable => PackageFailureGuidance {
             message: format!("Tola could not install the package `{package}`"),
             note: None,
-            help: Some(help(match directory {
+            help: help(match directory {
                 Some(directory) => {
                     format!("Add it to `{directory}/` so the site includes the package itself")
                 }
-                None => "Make the package cache writable".to_owned(),
-            })),
+                None => "Make `.tola` writable".to_owned(),
+            }),
         },
     }
 }
 
-fn help(message: impl Into<String>) -> crate::diagnostic::Help {
-    crate::diagnostic::Help {
+fn help(message: impl Into<String>) -> tola_diagnostic::Help {
+    tola_diagnostic::Help {
         message: message.into(),
         location: None,
     }
@@ -560,27 +652,25 @@ fn owned_namespace_guidance(package: &str) -> Option<PackageFailureGuidance> {
         Some(provided) => PackageFailureGuidance {
             message: format!("Tola provides `{}`, not `{package}`", provided.spec()),
             note: None,
-            help: Some(help(format!("Import `{}`", provided.spec()))),
+            help: help(format!("Import `{}`", provided.spec())),
         },
         None => PackageFailureGuidance {
             message: format!("`{package}` is not a Tola package"),
             note: None,
-            help: Some(help(
-                "Check the package name; run `tola skill` to see the packages Tola provides",
-            )),
+            help: help("Check the package name"),
         },
     })
 }
 
-fn source_line(source: tola_typst::SourceLine) -> crate::diagnostic::SourceLine {
+fn source_line(source: tola_typst::SourceLine) -> tola_diagnostic::SourceLine {
     let highlight = source
         .highlight
         .and_then(|range| char_range_to_byte_range(&source.text, range));
-    crate::diagnostic::SourceLine {
+    tola_diagnostic::SourceLine {
         start_column: source.start_column,
         start_character: source.start_character,
         ends_line: source.ends_line,
-        ..crate::diagnostic::SourceLine::new(source.line_num, source.text, highlight)
+        ..tola_diagnostic::SourceLine::new(source.line_num, source.text, highlight)
     }
 }
 
@@ -597,17 +687,24 @@ fn char_range_to_byte_range(text: &str, (start, end): (usize, usize)) -> Option<
     Some((byte_offset(start)?, byte_offset(end)?))
 }
 
-fn diagnostic_location(source: &tola_typst::SourceLocation) -> crate::diagnostic::Location {
-    crate::diagnostic::Location {
+fn with_file_failure_reason(diagnostic: Diagnostic, error: &typst::diag::FileError) -> Diagnostic {
+    match file_failure_reason(error) {
+        Some(reason) => diagnostic.with_note(reason),
+        None => diagnostic,
+    }
+}
+
+fn diagnostic_location(source: &tola_typst::SourceLocation) -> tola_diagnostic::Location {
+    tola_diagnostic::Location {
         path: source.path.clone().unwrap_or_default(),
         line: source.line,
         column: source.column,
-        range: source.range.map(|range| crate::diagnostic::SourceRange {
-            start: crate::diagnostic::SourcePosition {
+        range: source.range.map(|range| tola_diagnostic::SourceRange {
+            start: tola_diagnostic::SourcePosition {
                 line: range.start.line,
                 character: range.start.character,
             },
-            end: crate::diagnostic::SourcePosition {
+            end: tola_diagnostic::SourcePosition {
                 line: range.end.line,
                 character: range.end.character,
             },
@@ -625,30 +722,29 @@ fn diagnostic_location(source: &tola_typst::SourceLocation) -> crate::diagnostic
 pub(crate) fn source_location(
     world: &tola_typst::TypstWorld,
     span: typst::syntax::Span,
-) -> Option<crate::diagnostic::Location> {
+) -> Option<tola_diagnostic::Location> {
     tola_typst::diagnostic::resolve_source_location(world, span)
         .map(|source| diagnostic_location(&source))
 }
 
-fn help_from_hint(hint: tola_typst::Hint) -> crate::diagnostic::Help {
-    crate::diagnostic::Help {
+fn reported_location(location: &tola_typst::SourceLocation) -> Option<tola_diagnostic::Location> {
+    location
+        .path
+        .as_ref()
+        .map(|_| diagnostic_location(location))
+}
+
+fn help_from_hint(hint: tola_typst::Hint) -> tola_diagnostic::Help {
+    tola_diagnostic::Help {
         message: hint.message,
-        location: hint
-            .location
-            .path
-            .as_ref()
-            .map(|_| diagnostic_location(&hint.location)),
+        location: reported_location(&hint.location),
     }
 }
 
-fn trace_frame(trace: tola_typst::Trace) -> crate::diagnostic::TraceFrame {
-    crate::diagnostic::TraceFrame {
+fn trace_frame(trace: tola_typst::Trace) -> tola_diagnostic::TraceFrame {
+    tola_diagnostic::TraceFrame {
         message: trace.message,
-        location: trace
-            .location
-            .path
-            .as_ref()
-            .map(|_| diagnostic_location(&trace.location)),
+        location: reported_location(&trace.location),
     }
 }
 
@@ -657,7 +753,7 @@ fn imported_by_note(files: &[String]) -> Option<String> {
     (!files.is_empty()).then(|| {
         format!(
             "package references in {}",
-            crate::diagnostic::bounded_listing(files, ("file", "files"))
+            tola_diagnostic::bounded_listing(files, ("file", "files"))
         )
     })
 }
@@ -681,10 +777,7 @@ fn relativize_diagnostic(diagnostic: &mut tola_typst::Diagnostic, root: &Path) {
     relativize(&mut diagnostic.location, root);
 }
 
-/// Rewrite every site-root prefix inside `text` into its site-relative spelling.
-///
-/// Typst names the files it searched with host-absolute paths; the author reads paths relative to
-/// their site, with `/` separators.
+/// Rewrite every site-root prefix inside `text`; Typst names files absolutely.
 fn relativize_message(text: &mut String, root: &Path) {
     let root = root.to_string_lossy();
     let root = root.trim_end_matches(['/', '\\']);
@@ -714,10 +807,7 @@ fn replace_root_prefix(text: &str, root: &str) -> String {
     rewritten
 }
 
-/// The path a matched site root introduces, when the match really names that root.
-///
-/// A root that continues or extends a longer component — a sibling directory, or the site root
-/// named without a path after it — belongs to the surrounding sentence, not to the site.
+/// The path a matched site root introduces, when the match names the root itself.
 fn site_relative_after_root<'a>(before: &str, after: &'a str) -> Option<&'a str> {
     let continues_component = before.chars().next_back().is_some_and(|previous| {
         previous.is_alphanumeric() || matches!(previous, '/' | '\\' | '_' | '-' | '.')
@@ -747,19 +837,10 @@ fn relative_path_run(path: &str) -> &str {
 pub(crate) fn warning_diagnostics(
     config: &crate::config::ResolvedSiteConfig,
     warnings: &mut Diagnostics,
-) -> Vec<crate::diagnostic::Diagnostic> {
-    let warnings =
-        std::mem::take(warnings).filter_out(&DiagnosticFilter::typst_export_warning_filters());
-    warnings
-        .iter()
-        .map(|warning| {
-            resolved_diagnostic(
-                warning.clone(),
-                config.get_root(),
-                crate::codes::typst::COMPILE,
-            )
-        })
-        .collect()
+) -> Vec<tola_diagnostic::Diagnostic> {
+    let retained = std::mem::take(warnings);
+    let warnings = without_export_warnings(&retained);
+    resolved_reports(config, &warnings)
 }
 
 #[cfg(test)]
@@ -827,10 +908,18 @@ mod tests {
         ]));
 
         for (label, error, code) in [
-            ("world", &outside, crate::codes::typst::WORLD),
-            ("source load", &source_load, crate::codes::typst::SNAPSHOT),
-            ("font", &font, crate::codes::typst::FONT),
-            ("export", &export, crate::codes::typst::BUNDLE_EXPORT),
+            ("world", &outside, tola_diagnostic::codes::typst::WORLD),
+            (
+                "source load",
+                &source_load,
+                tola_diagnostic::codes::typst::SNAPSHOT,
+            ),
+            ("font", &font, tola_diagnostic::codes::typst::FONT),
+            (
+                "export",
+                &export,
+                tola_diagnostic::codes::typst::BUNDLE_EXPORT,
+            ),
         ] {
             let diagnostics = error_diagnostics(error, site)
                 .unwrap_or_else(|| panic!("{label} produced no diagnostic"));
@@ -875,7 +964,7 @@ mod tests {
 
     /// A package failure names the site directory the author can act on, never the host cache.
     #[test]
-    fn package_failure_names_the_site_directory() {
+    fn package_failure_names_directory() {
         use tola_typst::{
             ResolvedPackageFailure, ResolvedPackageFailureReason, ResolvedPackageSearch,
         };
@@ -926,7 +1015,7 @@ mod tests {
             let guidance = package_failure_guidance(&failure, root);
 
             assert!(guidance.message.contains(package), "{package} {reason:?}");
-            let help = guidance.help.expect("the author learns what to do");
+            let help = &guidance.help;
             assert!(!help.message.contains("author"), "{}", help.message);
             assert!(!help.message.contains("/home/"), "{}", help.message);
             assert_eq!(
@@ -966,11 +1055,8 @@ mod tests {
         ] {
             let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
             assert_eq!(diagnostics.len(), 2);
-            assert_eq!(diagnostics[0].severity, crate::diagnostic::Severity::Error);
-            assert_eq!(
-                diagnostics[1].severity,
-                crate::diagnostic::Severity::Warning
-            );
+            assert_eq!(diagnostics[0].severity, tola_diagnostic::Severity::Error);
+            assert_eq!(diagnostics[1].severity, tola_diagnostic::Severity::Warning);
         }
     }
 
@@ -994,7 +1080,7 @@ mod tests {
     /// A highlight's character offsets become byte offsets, and a path keeps its site-relative
     /// shape at every depth of one diagnostic.
     #[test]
-    fn converted_diagnostics_keep_their_sites() {
+    fn converted_paths_stay_relative() {
         let line = source_line(tola_typst::SourceLine {
             line_num: 1,
             start_column: 0,
@@ -1028,10 +1114,13 @@ mod tests {
                 },
             )
         };
-        let diagnostic =
-            resolved_diagnostic(resolved, Path::new("/site"), crate::codes::typst::COMPILE);
+        let diagnostic = resolved_diagnostic(
+            resolved,
+            Path::new("/site"),
+            tola_diagnostic::codes::typst::COMPILE,
+        );
 
-        assert_eq!(diagnostic.code, crate::codes::typst::COMPILE);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::typst::COMPILE);
         assert_eq!(diagnostic.location.unwrap().path, "content/index.typ");
         assert_eq!(
             diagnostic.help[0].location.as_ref().unwrap().path,
@@ -1046,7 +1135,7 @@ mod tests {
     /// An unbound name is read from the highlight, so the cause survives a wording change and
     /// appears only when a highlight actually names one.
     #[test]
-    fn unknown_variable_cause_follows_the_highlight() {
+    fn unknown_variable_follows_highlight() {
         let highlighted = tola_typst::Diagnostic {
             origin: tola_typst::DiagnosticOrigin::Typst,
             severity: tola_typst::DiagnosticSeverity::Error,
@@ -1072,11 +1161,11 @@ mod tests {
         let resolved = resolved_diagnostic(
             highlighted,
             Path::new("/site"),
-            crate::codes::typst::COMPILE,
+            tola_diagnostic::codes::typst::COMPILE,
         );
         assert_eq!(
             resolved.cause,
-            Some(crate::diagnostic::DiagnosticCause::UnknownVariable {
+            Some(tola_diagnostic::DiagnosticCause::UnknownVariable {
                 name: "absent-name".to_owned(),
             })
         );
@@ -1091,8 +1180,11 @@ mod tests {
             ..without_highlight.clone()
         };
         for diagnostic in [without_highlight, panic] {
-            let resolved =
-                resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
+            let resolved = resolved_diagnostic(
+                diagnostic,
+                Path::new("/site"),
+                tola_diagnostic::codes::typst::COMPILE,
+            );
             assert_eq!(resolved.cause, None, "{resolved:?}");
         }
     }
@@ -1112,8 +1204,11 @@ mod tests {
             package_failure: None,
         };
 
-        let resolved =
-            resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
+        let resolved = resolved_diagnostic(
+            diagnostic,
+            Path::new("/site"),
+            tola_diagnostic::codes::typst::COMPILE,
+        );
 
         assert!(resolved.message.contains("datetime.today()"));
         assert!(
@@ -1123,16 +1218,5 @@ mod tests {
                 .any(|help| help.message.contains("datetime(year:")),
             "{resolved:#?}"
         );
-    }
-
-    /// The export-feature warning is filtered out of what the author reads.
-    #[test]
-    fn bundle_feature_warning_is_hidden() {
-        let warning = warning_at("bundle export is experimental", location(None));
-
-        let filtered = Diagnostics::from_vec(vec![warning])
-            .filter_out(&DiagnosticFilter::typst_export_warning_filters());
-
-        assert!(filtered.is_empty());
     }
 }

@@ -39,3 +39,14 @@
 /// ```
 /// Related: @tola/web
 #import "@tola/host:0.0.0": site
+
+/// A native path rooted in the site, including when called from a theme package.
+///
+/// Use this for project data or generated inputs whose location the theme knows.
+/// It creates a path without reading the file; normal input boundaries still apply.
+///
+/// ```typst site
+/// #import "@tola/site:0.0.0": project-path
+/// #let data = project-path("generated/catalog.json")
+/// ```
+#import "@tola/host:0.0.0": project-path

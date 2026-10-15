@@ -10,11 +10,11 @@ for (const flag of ['--pure', '--ignore-system-fonts']) {
     await writeMinimalSite(root)
     await writeFile(join(root, 'tola.toml'), '[typst.fonts]\nsystem = true\n')
 
-    const result = await run(['fonts', flag], root)
+    const result = await run(['inspect', 'fonts', flag], root)
     expectExited(result)
-    const lines = result.stdout.trim().split('\n')
-    expect(lines.length).toBeGreaterThan(0)
-    expect(lines.every((line) => line.includes('embedded'))).toBe(true)
+    const records = JSON.parse(result.stdout) as { file: string | null }[]
+    expect(records.length).toBeGreaterThan(0)
+    expect(records.every((record) => record.file === null)).toBe(true)
   })
 }
 
@@ -22,7 +22,7 @@ test('a pure listing refuses host font directories', async ({ binary, directory:
   const run = commandRunner(binary)
   await writeMinimalSite(root)
 
-  const result = await run(['fonts', '--pure', '--font-path', root], root)
+  const result = await run(['inspect', 'fonts', '--pure', '--font-path', root], root)
   expectExited(result, 1)
   expect(result.stderr).toContain('--font-path')
 })
@@ -31,7 +31,7 @@ test('font records carry the face and its file', async ({ binary, directory: roo
   const run = commandRunner(binary)
   await writeMinimalSite(root)
 
-  const result = await run(['fonts', '--json', '--pure'], root)
+  const result = await run(['inspect', 'fonts', '--pure'], root)
   expectExited(result)
   const records = JSON.parse(result.stdout) as Record<string, unknown>[]
   expect(records.length).toBeGreaterThan(0)
@@ -50,7 +50,7 @@ test('font records carry the face and its file', async ({ binary, directory: roo
 test('a workspace without a configuration still lists fonts', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
 
-  const result = await run(['fonts'], root)
+  const result = await run(['inspect', 'fonts'], root)
   expectExited(result)
-  expect(result.stdout.trim().length).toBeGreaterThan(0)
+  expect(JSON.parse(result.stdout).length).toBeGreaterThan(0)
 })

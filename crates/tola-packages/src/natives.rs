@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use typst::World;
 use typst::comemo::Tracked;
-use typst::diag::{At, SourceResult, bail};
+use typst::diag::{At, SourceDiagnostic, SourceResult, bail};
 use typst::ecow::eco_vec;
 use typst::engine::Engine;
 use typst::foundations::{Array, Context, Dict, IntoValue, Str, Value, func};
@@ -13,6 +13,31 @@ use typst::syntax::{FileId, RootedPath, Span, Spanned, VirtualPath, VirtualRoot}
 
 use crate::TolaPackage;
 use crate::protocol::{CAPABILITY_OBSERVATION_PATH, SOURCE_OBSERVATION_DIRECTORY};
+
+/// One argument failure `@tola/address` reports at the author's call to `function`.
+fn address_error(
+    span: Span,
+    function: &str,
+    message: impl std::fmt::Display,
+) -> typst::ecow::EcoVec<SourceDiagnostic> {
+    eco_vec![crate::diagnostic::package_error(
+        span,
+        TolaPackage::Address,
+        format!("`{function}`: {message}"),
+    )]
+}
+
+#[func]
+pub(super) fn project_path(
+    span: Span,
+    /// A path relative to the site's root directory.
+    path: Str,
+) -> SourceResult<RootedPath> {
+    let path = VirtualPath::new(path.as_str())
+        .map_err(|error| error.to_string())
+        .at(span)?;
+    Ok(RootedPath::new(VirtualRoot::Project, path))
+}
 
 static SOURCES_CAPABILITY_FILE_ID: LazyLock<FileId> = LazyLock::new(|| {
     FileId::new(RootedPath::new(
@@ -228,11 +253,11 @@ fn route_segments_from_array(segments: &Array) -> Result<Vec<String>, String> {
 #[func]
 pub(super) fn tola_output_of(route: Spanned<Str>) -> SourceResult<Str> {
     let route = tola_address::UrlPath::from_decoded(route.v.as_str()).map_err(|error| {
-        eco_vec![crate::diagnostic::package_error(
+        address_error(
             route.span,
-            TolaPackage::Address,
-            format!("`output-of`: `route` is invalid: {error}"),
-        )]
+            "output-of",
+            format!("`route` is invalid: {error}"),
+        )
     })?;
     Ok(tola_address::OutputPath::from_route(&route).as_str().into())
 }
@@ -257,11 +282,11 @@ pub(super) fn tola_output_url(
     origin: Option<Str>,
 ) -> SourceResult<Str> {
     let output = tola_address::OutputPath::parse(output.v.as_str()).map_err(|error| {
-        eco_vec![crate::diagnostic::package_error(
+        address_error(
             output.span,
-            TolaPackage::Address,
-            format!("`output-url`: `output` is invalid: {error}"),
-        )]
+            "output-url",
+            format!("`output` is invalid: {error}"),
+        )
     })?;
     let mount =
         tola_address::SiteUrlMount::from_base_path(base_path.as_str()).map_err(|error| {
@@ -275,30 +300,20 @@ pub(super) fn tola_output_url(
                     "must stay outside `_tola`, the namespace Tola reserves".to_owned()
                 }
             };
-            eco_vec![crate::diagnostic::package_error(
-                span,
-                TolaPackage::Address,
-                format!("`output-url`: `base-path` {reason}"),
-            )]
+            address_error(span, "output-url", format!("`base-path` {reason}"))
         })?;
     let origin = origin
         .as_ref()
         .map(|origin| {
             let origin = tola_address::SiteOrigin::parse(origin.as_str())
-                .map_err(|error| format!("`output-url`: `origin` {error}"))?;
+                .map_err(|error| format!("`origin` {error}"))?;
             if origin.base_path().is_some() {
-                return Err("`output-url`: `origin` must name only an http/https origin; pass the deployment path with `base-path`".to_owned());
+                return Err("`origin` must name only an http/https origin; pass the deployment path with `base-path`".to_owned());
             }
             Ok(origin)
         })
         .transpose()
-        .map_err(|message| {
-            eco_vec![crate::diagnostic::package_error(
-                span,
-                TolaPackage::Address,
-                message,
-            )]
-        })?;
+        .map_err(|message| address_error(span, "output-url", message))?;
     let route = tola_address::route_for_output(&output);
     Ok(tola_address::browser_url(&route, &mount, origin.as_ref()).into())
 }
@@ -322,6 +337,33 @@ pub(super) fn tola_parse_url_path(url_path: Str) -> Dict {
 #[func]
 pub(super) fn tola_parse_date(value: Value) -> Dict {
     schema_conversion(crate::date::parse_date(&value), "schema.date")
+}
+
+#[func]
+pub(super) fn tola_parse_partial_date(value: Value) -> Dict {
+    use crate::date::PartialDate;
+
+    schema_conversion(
+        crate::date::parse_partial_date(&value).map(|date| {
+            let mut fields = Dict::new();
+            let (precision, year) = match date {
+                PartialDate::Year(year) => ("year", year),
+                PartialDate::Month { year, month } => {
+                    fields.insert("month".into(), month.into_value());
+                    ("month", year)
+                }
+                PartialDate::Day { year, month, day } => {
+                    fields.insert("month".into(), month.into_value());
+                    fields.insert("day".into(), day.into_value());
+                    ("day", year)
+                }
+            };
+            fields.insert("precision".into(), precision.into_value());
+            fields.insert("year".into(), year.into_value());
+            fields
+        }),
+        "schema.partial-date",
+    )
 }
 
 #[func]

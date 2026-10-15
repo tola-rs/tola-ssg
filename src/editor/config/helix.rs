@@ -30,38 +30,23 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
         Value::Array(arguments),
     )?;
     let tola = ensure_table(&mut document, &["language-server", "tola-lsp", "config"])?;
-    // Relative to the site root, so the settings survive a move to another machine.
     tola.insert(
         "packageSourceDirectory",
-        toml_edit::value(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY),
+        toml_edit::value(super::package_source_directory()),
     );
     merge_language_servers(&mut document)?;
     Ok(crate::writes::with_final_newline(document.to_string()))
 }
 
 fn merge_language_servers(document: &mut DocumentMut) -> Result<()> {
-    let servers = language_servers(document, "typst")?;
-    if servers
-        .iter()
-        .filter(|value| server_name(value).as_deref() == Some("tola-lsp"))
-        .count()
-        > 1
-    {
-        anyhow::bail!(
-            "`.helix/languages.toml` registers `tola-lsp` for Typst more than once; keep one entry, then rerun `tola editor setup`"
-        );
-    }
     // Tola answers the site's own sources and the ordinary Typst beside them, so it claims every
     // feature it serves, for every release: Helix merges supporting servers from 25.07 on and asks
     // the first one before that.
-    let mut tola = InlineTable::new();
-    tola.insert("name", Value::from("tola-lsp"));
-    let mut features = Array::new();
     // Every feature Helix can ask for that Tola advertises for Typst, in Helix's own spelling.
     // Folding, selection ranges, code lenses, and semantic tokens have no Helix feature: Helix
     // reads those from its syntax tree, and asking a language server for them is not on offer.
     // Colors are the exception: Helix asks for `documentColor`, and Tola answers it.
-    for feature in [
+    let typst = tola_service(&[
         "code-action",
         "completion",
         "diagnostics",
@@ -76,69 +61,72 @@ fn merge_language_servers(document: &mut DocumentMut) -> Result<()> {
         "rename-symbol",
         "signature-help",
         "workspace-symbols",
-    ] {
-        features.push(feature);
+    ]);
+    register_tola_service(document, "typst", "Typst", typst, ServiceOrder::First)?;
+    // The site's configuration answers Tola's own keys: which keys exist, what each one means, and
+    // which values it accepts. A TOML server the author also runs keeps every other file, because
+    // these answers are the schema's and no other server has it.
+    let toml = tola_service(&["completion", "diagnostics", "hover"]);
+    register_tola_service(document, "toml", "`toml`", toml, ServiceOrder::Last)?;
+    Ok(())
+}
+
+fn tola_service(features: &[&str]) -> Value {
+    let mut service = InlineTable::new();
+    service.insert("name", Value::from("tola-lsp"));
+    let mut claimed = Array::new();
+    for feature in features {
+        claimed.push(*feature);
     }
-    tola.insert("only-features", Value::Array(features));
-    let expected = Value::InlineTable(tola);
+    service.insert("only-features", Value::Array(claimed));
+    Value::InlineTable(service)
+}
+
+enum ServiceOrder {
+    First,
+    Last,
+}
+
+fn register_tola_service(
+    document: &mut DocumentMut,
+    language: &str,
+    display: &str,
+    service: Value,
+    order: ServiceOrder,
+) -> Result<()> {
+    let servers = language_servers(document, language)?;
+    if servers
+        .iter()
+        .filter(|value| server_name(value).as_deref() == Some("tola-lsp"))
+        .count()
+        > 1
+    {
+        anyhow::bail!(
+            "`.helix/languages.toml` registers `tola-lsp` for {display} more than once; keep one entry, then rerun `tola editor setup`"
+        );
+    }
+    let required = match order {
+        ServiceOrder::First => format!("[{service}, ...]"),
+        ServiceOrder::Last => service.to_string(),
+    };
     let existing = servers
         .iter()
         .position(|server| server_name(server).as_deref() == Some("tola-lsp"));
     match existing {
         Some(index) => {
-            if !same_value(servers.get(index).expect("located Tola service"), &expected) {
+            if !same_value(servers.get(index).expect("located Tola service"), &service) {
                 return Err(super::setting_conflict(
                     "Helix",
-                    "language.typst.language-servers",
+                    &format!("language.{language}.language-servers"),
                     servers.to_string(),
-                    format!("[{expected}, ...]"),
+                    required,
                 ));
             }
         }
-        None => servers.insert(0, expected),
-    }
-    // The site's configuration answers Tola's own keys: which keys exist, what each one means, and
-    // which values it accepts. A TOML server the author also runs keeps every other file, because
-    // these answers are the schema's and no other server has it.
-    let servers = language_servers(document, "toml")?;
-    let expected_toml = Value::InlineTable({
-        let mut entry = InlineTable::new();
-        entry.insert("name", Value::from("tola-lsp"));
-        let mut features = Array::new();
-        for feature in ["completion", "diagnostics", "hover"] {
-            features.push(feature);
-        }
-        entry.insert("only-features", Value::Array(features));
-        entry
-    });
-    if servers
-        .iter()
-        .filter(|server| server_name(server).as_deref() == Some("tola-lsp"))
-        .count()
-        > 1
-    {
-        anyhow::bail!(
-            "`.helix/languages.toml` registers `tola-lsp` for `toml` more than once; keep one entry, then rerun `tola editor setup`"
-        );
-    }
-    let toml_index = servers
-        .iter()
-        .position(|server| server_name(server).as_deref() == Some("tola-lsp"));
-    match toml_index {
-        Some(index) => {
-            if !same_value(
-                servers.get(index).expect("located Tola service"),
-                &expected_toml,
-            ) {
-                return Err(super::setting_conflict(
-                    "Helix",
-                    "language.toml.language-servers",
-                    servers.to_string(),
-                    expected_toml.to_string(),
-                ));
-            }
-        }
-        None => servers.push(expected_toml),
+        None => match order {
+            ServiceOrder::First => servers.insert(0, service),
+            ServiceOrder::Last => servers.push(service),
+        },
     }
     Ok(())
 }
@@ -304,12 +292,13 @@ mod tests {
 
     #[test]
     fn foreign_mirror_path_is_rewritten() {
-        let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"/other/host/.tola/builtin-packages\"\n";
+        let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"/other/host/packages\"\n";
         let merged = merge(Some(source), &editor_directory(".")).unwrap();
         let value: toml::Value = toml::from_str(&merged).unwrap();
+        let packages = super::super::package_source_directory();
         assert_eq!(
             value["language-server"]["tola-lsp"]["config"]["packageSourceDirectory"].as_str(),
-            Some(".tola/builtin-packages")
+            Some(packages.as_str())
         );
         assert!(!merged.contains("/other/host"), "{merged}");
     }

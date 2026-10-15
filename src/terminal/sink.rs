@@ -2,13 +2,14 @@
 
 use std::io::{self, Write};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use super::Palette;
 use super::ansi::{self, Painter};
 use super::development::{DevScreen, HookRun, Round, stream_index};
-use super::session::{Claim, Holder, ProcessTerminal, Terminal as _};
+use super::session::{Claim, ProcessTerminal};
 
-const OUTPUT_LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+const OUTPUT_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 pub(crate) struct OutputSink {
@@ -54,12 +55,11 @@ impl HookText {
 #[error("standard output was closed before writing finished")]
 pub(crate) struct StdoutClosed;
 
+/// Where one sink writes its bytes.
+type Destination = Arc<dyn Fn(&[u8]) -> io::Result<()> + Send + Sync>;
+
 #[derive(Clone)]
-enum StreamTarget {
-    Stderr,
-    Stdout,
-    Buffered(BufferedOutput),
-}
+struct StreamTarget(Destination);
 
 /// Frame writes hold only their destination, so a renderer cannot retain its owning sink.
 #[derive(Clone)]
@@ -76,29 +76,9 @@ impl Write for StreamWriter {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct BufferedOutput(Arc<std::sync::Mutex<Vec<u8>>>);
-
-#[allow(dead_code)]
-impl BufferedOutput {
-    pub(crate) fn bytes(&self) -> Vec<u8> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty()
-    }
-}
-
 impl OutputSink {
     pub(crate) fn process() -> Self {
-        Self::new(StreamTarget::Stderr, StreamTarget::Stdout)
+        Self::new(StreamTarget::stderr(), StreamTarget::stdout())
     }
 
     fn new(stderr: StreamTarget, stdout: StreamTarget) -> Self {
@@ -110,13 +90,6 @@ impl OutputSink {
                 cancellation: OnceLock::new(),
             }),
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn buffered() -> (Self, BufferedOutput) {
-        let output = BufferedOutput::default();
-        let target = StreamTarget::Buffered(output.clone());
-        (Self::new(target.clone(), target), output)
     }
 
     pub(crate) fn set_cancellation(
@@ -160,12 +133,12 @@ impl OutputSink {
         palette: Palette,
         log: Option<String>,
     ) -> io::Result<bool> {
-        let terminal = ProcessTerminal::new(self);
+        let terminal = ProcessTerminal;
         if !terminal.is_interactive() || !terminal.can_draw() {
             return Ok(false);
         }
         let (columns, rows) = terminal.size()?;
-        let claim = Claim::take(Holder::View).map_err(io::Error::other)?;
+        let claim = Claim::take().map_err(io::Error::other)?;
         let mut presentation = self.lock()?;
         self.finish_hook_line(&mut presentation)?;
         presentation.development = Some(DevScreen::open(
@@ -203,52 +176,46 @@ impl OutputSink {
         Ok(false)
     }
 
-    pub(crate) fn round(&self, round: Round) -> io::Result<()> {
+    /// Write `text` to the development screen, or to stderr when no screen is open.
+    fn present<T: AsRef<[u8]>>(
+        &self,
+        text: T,
+        write: impl FnOnce(&mut DevScreen, T),
+    ) -> io::Result<()> {
         let mut presentation = self.lock()?;
         self.finish_hook_line(&mut presentation)?;
-        match &mut presentation.development {
-            Some(screen) => {
-                screen.round(round);
-                Ok(())
-            }
-            None => self.inner.stderr.write(round.transcript.as_bytes()),
-        }
+        let Some(screen) = &mut presentation.development else {
+            return self.inner.stderr.write(text.as_ref());
+        };
+        write(screen, text);
+        Ok(())
+    }
+
+    pub(crate) fn round(&self, round: Round) -> io::Result<()> {
+        let Round {
+            diagnostics,
+            transcript,
+            observed_at,
+        } = round;
+        self.present(transcript, |screen, transcript| {
+            screen.round(Round {
+                diagnostics,
+                transcript,
+                observed_at,
+            })
+        })
     }
 
     pub(crate) fn activity(&self, text: &str) -> io::Result<()> {
-        let mut presentation = self.lock()?;
-        self.finish_hook_line(&mut presentation)?;
-        match &mut presentation.development {
-            Some(screen) => {
-                screen.activity(text);
-                Ok(())
-            }
-            None => self.inner.stderr.write(text.as_bytes()),
-        }
+        self.present(text, |screen, text| screen.activity(text))
     }
 
     pub(crate) fn hooks(&self, text: &str) -> io::Result<()> {
-        let mut presentation = self.lock()?;
-        self.finish_hook_line(&mut presentation)?;
-        match &mut presentation.development {
-            Some(screen) => {
-                screen.hooks(text);
-                Ok(())
-            }
-            None => self.inner.stderr.write(text.as_bytes()),
-        }
+        self.present(text, |screen, text| screen.hooks(text))
     }
 
     pub(crate) fn serving(&self, text: &str) -> io::Result<()> {
-        let mut presentation = self.lock()?;
-        self.finish_hook_line(&mut presentation)?;
-        match &mut presentation.development {
-            Some(screen) => {
-                screen.serving(text);
-                Ok(())
-            }
-            None => self.inner.stderr.write(text.as_bytes()),
-        }
+        self.present(text, |screen, text| screen.serving(text))
     }
 
     pub(crate) fn hook_started(&self, run: HookRun, stage: &str) -> io::Result<bool> {
@@ -374,22 +341,6 @@ impl OutputSink {
         self.inner.stdout.write(b"\n").map_err(stdout_error)
     }
 
-    pub(crate) fn with_stderr_lock<R, E>(
-        &self,
-        operation: impl FnOnce(&Self) -> Result<R, E>,
-    ) -> Result<R, E>
-    where
-        E: From<io::Error>,
-    {
-        let mut presentation = self.lock()?;
-        self.finish_hook_line(&mut presentation)?;
-        operation(self)
-    }
-
-    pub(crate) fn write_stderr_locked(&self, bytes: &[u8]) -> io::Result<()> {
-        self.inner.stderr.write(bytes)
-    }
-
     fn lock(&self) -> io::Result<parking_lot::MutexGuard<'_, Presentation>> {
         let cancellation = self.inner.cancellation.get().cloned().unwrap_or_default();
         loop {
@@ -423,23 +374,20 @@ impl OutputSink {
 }
 
 impl StreamTarget {
+    fn stderr() -> Self {
+        Self(Arc::new(crate::sys::write_process_stderr))
+    }
+
+    fn stdout() -> Self {
+        Self(Arc::new(|bytes: &[u8]| {
+            let mut stdout = io::stdout();
+            stdout.write_all(bytes)?;
+            stdout.flush()
+        }))
+    }
+
     fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        match self {
-            Self::Stderr => crate::sys::write_process_stderr(bytes),
-            Self::Stdout => {
-                let mut stdout = io::stdout();
-                stdout.write_all(bytes)?;
-                stdout.flush()
-            }
-            Self::Buffered(output) => {
-                output
-                    .0
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .extend_from_slice(bytes);
-                Ok(())
-            }
-        }
+        (self.0)(bytes)
     }
 }
 
@@ -452,7 +400,49 @@ fn stdout_error(error: io::Error) -> anyhow::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    pub(crate) mod testing {
+        use std::io;
+        use std::sync::{Arc, Mutex, PoisonError};
+
+        use crate::terminal::sink::{OutputSink, StreamTarget};
+
+        #[derive(Clone, Default)]
+        pub(crate) struct BufferedOutput(Arc<Mutex<Vec<u8>>>);
+
+        impl BufferedOutput {
+            pub(crate) fn bytes(&self) -> Vec<u8> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone()
+            }
+
+            pub(crate) fn is_empty(&self) -> bool {
+                self.0
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .is_empty()
+            }
+        }
+
+        impl OutputSink {
+            pub(crate) fn buffered() -> (Self, BufferedOutput) {
+                let captured = BufferedOutput::default();
+                let collected = captured.clone();
+                let target = StreamTarget(Arc::new(move |bytes: &[u8]| -> io::Result<()> {
+                    collected
+                        .0
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .extend_from_slice(bytes);
+                    Ok(())
+                }));
+                (Self::new(target.clone(), target), captured)
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -484,11 +474,7 @@ mod tests {
                     .unwrap();
             });
         canceller.cancel();
-        assert!(
-            completion
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap()
-        );
+        assert!(completion.recv_timeout(Duration::from_secs(2)).unwrap());
         drop(guard);
         worker.join().unwrap();
         assert!(captured.is_empty());

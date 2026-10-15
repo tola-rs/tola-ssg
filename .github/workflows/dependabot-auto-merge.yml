@@ -1,0 +1,64 @@
+name: Dependabot auto-merge
+
+# Triggered by Check rather than by the pull request so the job keeps a write token:
+# a run started by `pull_request` on a Dependabot branch is read-only. A rebase
+# cancels the previous run, and a cancelled run reports `cancelled` here, so only a
+# complete green run ever reaches the merge step.
+on:
+  workflow_run:
+    workflows: [Check]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  # Two completions for one pull request must not race for the merge button.
+  group: dependabot-auto-merge-${{ github.event.workflow_run.pull_requests[0].number }}
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge a green grouped bump
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Only the `*-minor-patch` group names in dependabot.yml carry that suffix, so a
+      # major or a security bump falls through to the manual queue and stays green.
+      - name: Squash the pull request once its own commit is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PR:-}" ]; then
+            echo "no pull request on this run; nothing to merge"
+            exit 0
+          fi
+
+          fields=$(gh pr view "$PR" --repo "$REPO" --json author,title,isDraft,headRefOid,state \
+            --jq '[.author.login, .title, (.isDraft | tostring), .headRefOid, .state] | @tsv')
+          IFS=$'\t' read -r author title draft head state <<<"$fields"
+          if [ "$author" != "dependabot[bot]" ] || [ "$draft" = "true" ] || [ "$state" != "OPEN" ]; then
+            echo "not an open Dependabot pull request; nothing to merge"
+            exit 0
+          fi
+          case "$title" in
+            *-minor-patch\ group*) ;;
+            *) echo "not a grouped minor/patch bump: $title"; exit 0 ;;
+          esac
+
+          # The run that triggered us may predate a push, so re-read the head commit.
+          green=$(gh api "repos/$REPO/actions/runs?head_sha=$head&event=pull_request" \
+            --jq '[.workflow_runs[] | select(.name == "Check" and .conclusion == "success")] | length')
+          if [ "$green" -eq 0 ]; then
+            echo "no successful Check run for $head; leaving the pull request alone"
+            exit 0
+          fi
+
+          gh pr merge "$PR" --repo "$REPO" --squash --delete-branch --match-head-commit "$head"

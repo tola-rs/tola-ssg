@@ -19,7 +19,5 @@
   "[javascriptreact]": { "editor.defaultFormatter": "denoland.vscode-deno" },
   "[json]": { "editor.defaultFormatter": "denoland.vscode-deno" },
   "[jsonc]": { "editor.defaultFormatter": "denoland.vscode-deno" },
-  "[markdown]": { "editor.defaultFormatter": "denoland.vscode-deno" },
-  "tola.packagePath": "/Users/kawayww/Library/Application Support/typst/packages",
-  "tola.packageCachePath": "/Users/kawayww/Library/Caches/typst/packages"
+  "[markdown]": { "editor.defaultFormatter": "denoland.vscode-deno" }
 }

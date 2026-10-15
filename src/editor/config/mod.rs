@@ -10,7 +10,7 @@ mod zed;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 use super::site::EditorDirectory;
 use crate::writes::FileWrites;
@@ -139,19 +139,6 @@ pub(super) fn setup(
     Ok(manual_settings)
 }
 
-pub(super) fn add_initial_files(
-    writes: &mut FileWrites,
-    directory: &EditorDirectory,
-    editors: &[Editor],
-) -> Result<()> {
-    for editor in unique(editors) {
-        if let Some(relative) = editor.settings_file() {
-            writes.create_file(relative, editor.required_settings(None, directory)?)?;
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub(super) enum ConfigurationIssue {
     #[error("editor configuration is not a regular file")]
@@ -216,7 +203,7 @@ pub(super) fn prepare_settings(
     let publish = editor
         .required_settings(source, directory)
         .map_err(|error| {
-            if tola_build::diagnostic::attached(&error).is_some() {
+            if tola_diagnostic::attached(&error).is_some() {
                 return error;
             }
             let diagnostic = Diagnostic::new(
@@ -257,7 +244,19 @@ fn setting_conflict(editor: &str, key: &str, current: String, required: String) 
     .into()
 }
 
-fn unique(editors: &[Editor]) -> impl Iterator<Item = Editor> + '_ {
+pub(super) fn settings_text(settings: &serde_json::Value) -> String {
+    let text = serde_json::to_string_pretty(settings).expect("editor settings are serializable");
+    crate::writes::with_final_newline(text)
+}
+
+/// The package mirror as an editor's settings name it.
+pub(super) fn package_source_directory() -> String {
+    crate::terminal::display_path_as_given(
+        &tola_build::filesystem::layout::builtin_packages_relative(),
+    )
+}
+
+pub(super) fn unique(editors: &[Editor]) -> impl Iterator<Item = Editor> + '_ {
     editors
         .iter()
         .copied()

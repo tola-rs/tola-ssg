@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_sgr_leaves_following_text_plain() {
+    fn unsupported_sgr_leaves_text_plain() {
         for source in [
             "\x1b[3;5;7;8;9mplain",
             "\x1b[58;2;9;8;7mplain",

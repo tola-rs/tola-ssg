@@ -7,9 +7,8 @@ use super::EditorDirectory;
 /// Typst syntax package, which the package turns into the language id `typst`, and the
 /// configuration document of the site is not a Typst buffer, so one client answers Typst alone.
 pub(super) fn snippet(directory: &EditorDirectory) -> String {
-    let command = directory.server_command();
-    let mut executable = vec![command.command.to_owned()];
-    executable.extend(command.arguments);
+    let executable = directory.server_command().argv();
+    let packages = super::package_source_directory();
     let settings = serde_json::json!({
         "settings": {
             "LSP": {
@@ -17,12 +16,14 @@ pub(super) fn snippet(directory: &EditorDirectory) -> String {
                     "enabled": true,
                     "command": executable,
                     "selector": "text.typst",
+                    "initialization_options": {
+                        "packageSourceDirectory": packages,
+                    },
                 },
             },
         },
     });
-    let text = serde_json::to_string_pretty(&settings).expect("editor settings are serializable");
-    crate::writes::with_final_newline(text)
+    super::settings_text(&settings)
 }
 
 #[cfg(test)]
@@ -31,10 +32,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_starts_for_the_typst_syntax() {
+    fn client_configures_package_navigation() {
         let settings = parsed_settings(&snippet(&editor_directory(".")));
         let client = &settings["settings"]["LSP"]["tola-lsp"];
         assert_eq!(client["selector"], "text.typst");
         assert_eq!(client["command"], serde_json::json!(["tola", "lsp"]));
+        assert_eq!(
+            client["initialization_options"]["packageSourceDirectory"],
+            super::super::package_source_directory()
+        );
     }
 }

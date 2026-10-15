@@ -24,10 +24,7 @@ pub(super) fn parse_style(
     element: &str,
     source: &str,
 ) -> Result<BTreeMap<String, StyleDeclaration>, InvalidSvg> {
-    let invalid = || InvalidSvg::Value {
-        element: element.to_owned(),
-        attribute: "style".to_owned(),
-    };
+    let invalid = || invalid_value(element, "style");
     let mut input = ParserInput::new(source);
     let mut parser = Parser::new(&mut input);
     let mut declarations: BTreeMap<String, StyleDeclaration> = BTreeMap::new();
@@ -162,6 +159,54 @@ fn is_valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= MAX_SVG_ID_BYTES && !id.chars().any(char::is_whitespace)
 }
 
+/// The keywords every presentation property accepts whatever its own values are.
+const CSS_WIDE_KEYWORDS: &[&str] = &["inherit", "initial", "unset"];
+
+/// Attributes whose value is one keyword from a fixed set.
+///
+/// A list more than one attribute accepts is a const; a list only one attribute accepts is written
+/// in its row. An attribute whose keywords depend on its element stays in the match below, beside
+/// its guard.
+const KEYWORD_VALUES: &[(&str, &[&str])] = &[
+    ("fill-rule", RULE_KEYWORDS),
+    ("clip-rule", RULE_KEYWORDS),
+    ("stroke-linecap", &["butt", "round", "square", "inherit"]),
+    ("stroke-linejoin", STROKE_JOIN_KEYWORDS),
+    ("gradientUnits", OBJECT_UNITS),
+    ("patternUnits", OBJECT_UNITS),
+    ("patternContentUnits", OBJECT_UNITS),
+    ("clipPathUnits", OBJECT_UNITS),
+    ("maskUnits", OBJECT_UNITS),
+    ("maskContentUnits", OBJECT_UNITS),
+    ("filterUnits", OBJECT_UNITS),
+    ("primitiveUnits", OBJECT_UNITS),
+    ("spreadMethod", &["pad", "reflect", "repeat"]),
+    ("mask-type", &["luminance", "alpha"]),
+    ("display", &["none", "inline", "block", "inherit"]),
+    ("visibility", VISIBILITY_KEYWORDS),
+    ("overflow", OVERFLOW_KEYWORDS),
+    ("vector-effect", &["none", "non-scaling-stroke"]),
+    ("color-interpolation", COLOR_KEYWORDS),
+    ("color-interpolation-filters", COLOR_KEYWORDS),
+    ("shape-rendering", RENDERING_KEYWORDS),
+    ("isolation", &["auto", "isolate"]),
+];
+
+/// The keywords the two rules accept, and the units keywords every units attribute accepts.
+const RULE_KEYWORDS: &[&str] = &["nonzero", "evenodd", "inherit"];
+const OBJECT_UNITS: &[&str] = &["userSpaceOnUse", "objectBoundingBox"];
+const STROKE_JOIN_KEYWORDS: &[&str] = &["miter", "miter-clip", "round", "bevel", "arcs", "inherit"];
+const VISIBILITY_KEYWORDS: &[&str] = &["visible", "hidden", "collapse", "inherit"];
+const OVERFLOW_KEYWORDS: &[&str] = &["visible", "hidden", "scroll", "auto", "inherit"];
+const COLOR_KEYWORDS: &[&str] = &["auto", "srgb", "linearrgb", "inherit"];
+const RENDERING_KEYWORDS: &[&str] = &["auto", "optimizespeed", "crispedges", "geometricprecision"];
+
+fn keyword_values(attribute: &str) -> Option<&'static [&'static str]> {
+    KEYWORD_VALUES
+        .iter()
+        .find_map(|(name, keywords)| (*name == attribute).then_some(*keywords))
+}
+
 pub(super) fn validate_attribute(
     element: &str,
     attribute: &str,
@@ -176,24 +221,12 @@ pub(super) fn validate_attribute(
     {
         return Ok(());
     }
-    if matches!(
-        attribute,
-        "opacity"
-            | "fill-opacity"
-            | "stroke-opacity"
-            | "stop-opacity"
-            | "flood-opacity"
-            | "stroke-width"
-            | "visibility"
-            | "display"
-            | "mask-type"
-            | "paint-order"
-            | "shape-rendering"
-            | "isolation"
-            | "mix-blend-mode"
-    ) && matches!(value.trim(), "inherit" | "initial" | "unset")
-    {
+    // A presentation property accepts the CSS-wide keywords whatever its own values are.
+    if is_presentation_property(attribute) && CSS_WIDE_KEYWORDS.contains(&value.trim()) {
         return Ok(());
+    }
+    if let Some(keywords) = keyword_values(attribute) {
+        return validate_keyword(value, keywords).map_err(|_| invalid());
     }
     match attribute {
         "id" => is_valid_id(value).then_some(()).ok_or_else(invalid),
@@ -282,52 +315,7 @@ pub(super) fn validate_attribute(
                 .then_some(())
                 .ok_or_else(invalid)
         }
-        "fill-rule" | "clip-rule" => {
-            validate_keyword(value, &["nonzero", "evenodd", "inherit"]).map_err(|_| invalid())
-        }
-        "stroke-linecap" => {
-            validate_keyword(value, &["butt", "round", "square", "inherit"]).map_err(|_| invalid())
-        }
-        "stroke-linejoin" => validate_keyword(
-            value,
-            &["miter", "miter-clip", "round", "bevel", "arcs", "inherit"],
-        )
-        .map_err(|_| invalid()),
-        "gradientUnits"
-        | "patternUnits"
-        | "patternContentUnits"
-        | "clipPathUnits"
-        | "maskUnits"
-        | "maskContentUnits"
-        | "filterUnits"
-        | "primitiveUnits" => {
-            validate_keyword(value, &["userSpaceOnUse", "objectBoundingBox"]).map_err(|_| invalid())
-        }
-        "spreadMethod" => {
-            validate_keyword(value, &["pad", "reflect", "repeat"]).map_err(|_| invalid())
-        }
-        "mask-type" => validate_keyword(value, &["luminance", "alpha"]).map_err(|_| invalid()),
-        "display" => {
-            validate_keyword(value, &["none", "inline", "block", "inherit"]).map_err(|_| invalid())
-        }
-        "visibility" => validate_keyword(value, &["visible", "hidden", "collapse", "inherit"])
-            .map_err(|_| invalid()),
-        "overflow" => validate_keyword(value, &["visible", "hidden", "scroll", "auto", "inherit"])
-            .map_err(|_| invalid()),
-        "vector-effect" => {
-            validate_keyword(value, &["none", "non-scaling-stroke"]).map_err(|_| invalid())
-        }
-        "color-interpolation" | "color-interpolation-filters" => {
-            validate_keyword(value, &["auto", "srgb", "linearrgb", "inherit"])
-                .map_err(|_| invalid())
-        }
         "paint-order" => validate_paint_order(value).map_err(|_| invalid()),
-        "shape-rendering" => validate_keyword(
-            value,
-            &["auto", "optimizespeed", "crispedges", "geometricprecision"],
-        )
-        .map_err(|_| invalid()),
-        "isolation" => validate_keyword(value, &["auto", "isolate"]).map_err(|_| invalid()),
         "mix-blend-mode" => {
             if value == "plus-lighter" {
                 return Ok(());
@@ -774,6 +762,20 @@ mod tests {
             for keyword in ["inherit", "initial", "unset"] {
                 assert!(SvgIcon::parse(svg(keyword)).is_ok(), "{property}:{keyword}");
             }
+        }
+    }
+
+    #[test]
+    fn presentation_attributes_accept_inherit() {
+        for attribute in [
+            "stroke-linejoin",
+            "overflow",
+            "color-interpolation",
+            "color-interpolation-filters",
+            "visibility",
+        ] {
+            let svg = format!(r#"<svg viewBox="0 0 24 24"><path {attribute}="inherit"/></svg>"#);
+            assert!(SvgIcon::parse(svg).is_ok(), "{attribute}");
         }
     }
 }

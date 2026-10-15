@@ -8,14 +8,7 @@ use typst::foundations::{Dict, IntoValue};
 
 use crate::config::ResolvedSiteConfig;
 
-/// The browser URL of one published asset.
-///
-/// The address is the site-root URL of the file with the deployment mount
-/// applied. A site that asked `[assets] cache-busting` for identified URLs
-/// names the identity of the published bytes in a query, so changed bytes are
-/// a changed address while the published name stays what the declaration says.
-/// A caller that rendered no bytes passes no identity and gets the plain
-/// address.
+/// The site-root URL of one published asset with the deployment mount and identity applied.
 pub(super) fn browser_url(
     mount: &tola_address::SiteUrlMount,
     url: &tola_address::UrlPath,
@@ -30,29 +23,10 @@ pub(super) fn browser_url(
 }
 
 /// Every URL the site publishes, keyed by the site-root URL its author writes.
-///
-/// A declaration is stable; the address a browser fetches may not be, because
-/// `[assets] cache-busting` appends the identity of the published bytes to
-/// the URL. Only a build knows those bytes, so a build derives the dictionary
-/// from an inventory that has already rendered them, while a read-only check
-/// derives it from the declarations and the tree's members alone and so never
-/// has an identity.
-///
-/// A key absent from this dictionary names something the site does not publish.
-/// Nothing here discovers files, and nothing invents a URL: every value comes
-/// from one declaration's own output path.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetUrls {
-    /// Site-root URL -> mounted browser URL. A `assets.files` declaration
-    /// contributes its `url`; a `assets.trees` declaration contributes its
-    /// `url-prefix` joined with the path of every member it publishes, such as
-    /// `/assets/images/logo.svg`. A member a `files` declaration owns is the
-    /// declaration's, not the tree's. A build appends `?h=<identity>` to the
-    /// value of a file it identified; the key never has one.
-    urls: BTreeMap<String, String>,
-    /// Where each key's file is declared, when the view was built from the site's declarations
-    /// rather than from a build inventory.
-    origins: BTreeMap<String, AssetOrigin>,
+    /// Site-root URL -> mounted browser URL; a build appends `?h=<identity>` when busting.
+    urls: BTreeMap<String, (String, AssetOrigin)>,
 }
 
 /// The declaration that publishes one asset URL.
@@ -64,8 +38,7 @@ pub enum AssetOrigin {
     TreeMember { source: PathBuf, member: PathBuf },
 }
 
-/// One published asset URL: what its author writes, where a browser fetches it, and the declaration
-/// that publishes it.
+/// One published asset URL and the declaration that publishes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedAsset<'a> {
     pub declared: &'a str,
@@ -74,23 +47,21 @@ pub struct PublishedAsset<'a> {
 }
 
 impl AssetUrls {
-    /// Resolve every declaration to the address of the file it names.
-    ///
-    /// Read-only checks use this: they must not render or minify configured
-    /// assets, so every declaration resolves to the mounted address of the name
-    /// the configuration gives it, and a site with cache busting enabled
-    /// resolves to the same address without an identity, because a check knows
-    /// no bytes. Tree members are enumerated from their source directory, by the
-    /// same rules and the same exclusions a build applies, without reading,
-    /// rendering, or minifying them.
+    /// Resolve every declaration to its mounted address, without rendering or minifying.
     pub fn for_check(
         config: &ResolvedSiteConfig,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
+        super::inventory::validate_asset_output_ownership_for_check(config)?;
         let mount = config.url_mount();
         let mut published = Vec::new();
+        let mut outputs = Vec::new();
         for declaration in &config.assets.files {
             let url = declaration.url().url_path();
+            outputs.push(super::output::output_for_configured_file(
+                declaration.source(),
+                declaration.url().output_path(),
+            ));
             published.push((
                 declaration.url().as_str().to_owned(),
                 browser_url(mount, url, None),
@@ -111,6 +82,7 @@ impl AssetUrls {
                     config.get_root(),
                 )?;
                 let url = tola_address::asset_url_from_output(&output.output);
+                outputs.push(output);
                 let browser = browser_url(mount, &url, None);
                 published.push((
                     url.as_str().to_owned(),
@@ -122,72 +94,66 @@ impl AssetUrls {
                 ));
             }
         }
+        super::inventory::validate_asset_output_set(
+            outputs.iter(),
+            config.get_root(),
+            cancellation,
+        )?;
         Ok(Self::from_published(published))
     }
 
-    /// The published view one caller walked: every declared URL, the address it resolves to, and
-    /// the declaration that publishes it.
+    /// The published view one caller walked: URL, address, and publishing declaration.
     pub(super) fn from_published(
         published: impl IntoIterator<Item = (String, String, AssetOrigin)>,
     ) -> Self {
-        let mut urls = BTreeMap::new();
-        let mut origins = BTreeMap::new();
-        for (declared, address, origin) in published {
-            urls.insert(declared.clone(), address);
-            origins.insert(declared, origin);
+        Self {
+            urls: published
+                .into_iter()
+                .map(|(declared, address, origin)| (declared, (address, origin)))
+                .collect(),
         }
-        Self { urls, origins }
     }
 
     /// The address a browser fetches for one declared asset URL, when this site publishes it.
     pub fn address(&self, declared: &str) -> Option<&str> {
-        self.urls.get(declared).map(String::as_str)
+        self.urls.get(declared).map(|(address, _)| address.as_str())
     }
 
-    /// The declaration that publishes one declared asset URL, when this view knows it.
+    /// The declaration that publishes one declared asset URL, when this site publishes it.
     pub fn origin(&self, declared: &str) -> Option<&AssetOrigin> {
-        self.origins.get(declared)
+        self.urls.get(declared).map(|(_, origin)| origin)
     }
 
-    /// The declarations that publish exactly one file, keyed by the declared URL.
-    ///
-    /// A tree member and an asset without an origin are absent: neither names one file, so a caller
-    /// comparing a resolved file against a declaration has nothing to compare for them.
+    /// Declarations in declared-URL order.
     pub(crate) fn origins(&self) -> impl Iterator<Item = (&str, &AssetOrigin)> {
-        self.origins
-            .iter()
-            .map(|(declared, origin)| (declared.as_str(), origin))
-    }
-
-    /// Every published asset URL with its address, and its declaration when the view knows one.
-    pub fn published(&self) -> impl Iterator<Item = PublishedAsset<'_>> {
-        self.urls.iter().map(|(declared, address)| PublishedAsset {
-            declared,
-            address,
-            origin: self.origins.get(declared),
-        })
-    }
-
-    /// Whether every declaration this dictionary resolves still resolves the same way.
-    ///
-    /// A compilation that read a URL read it from the dictionary it was bound to,
-    /// so it is reusable only while the next dictionary answers every declaration
-    /// this one names with the same address. A declaration the next dictionary
-    /// adds or drops is not an address a compilation read, so it neither refreshes
-    /// nor invalidates one. An address follows the published bytes only when the
-    /// site asked for cache busting, so without it a declaration is a function of
-    /// the configuration and this holds until that declaration changes.
-    pub(crate) fn values_match(&self, next: &Self) -> bool {
         self.urls
             .iter()
-            .all(|(declared, browser)| next.urls.get(declared).is_none_or(|next| next == browser))
+            .map(|(declared, (_, origin))| (declared.as_str(), origin))
+    }
+
+    /// Every published asset URL with its address and publishing declaration.
+    pub fn published(&self) -> impl Iterator<Item = PublishedAsset<'_>> {
+        self.urls
+            .iter()
+            .map(|(declared, (address, origin))| PublishedAsset {
+                declared,
+                address,
+                origin: Some(origin),
+            })
+    }
+
+    /// Whether every declaration this dictionary resolved still resolves the same way.
+    pub(crate) fn values_match(&self, next: &Self) -> bool {
+        self.urls.iter().all(|(declared, (browser, _))| {
+            next.address(declared).is_none_or(|next| next == browser)
+        })
     }
 
     /// The `asset-url()` view of this site's published declarations.
     pub(crate) fn to_typst_dict(&self) -> Dict {
         self.urls
             .iter()
-            .map(|(declared, browser)| (declared.clone().into(), browser.clone().into_value()))
+            .map(|(declared, (browser, _))| (declared.clone().into(), browser.clone().into_value()))
             .collect()
     }
 }
@@ -227,33 +193,6 @@ mod tests {
         );
         assert_eq!(published_url(&urls, "/undeclared.js"), None);
 
-        // A tree member an exact declaration owns belongs to the declaration, and a
-        // check appends no identity to any value an editor resolves.
-        let directory = tempfile::TempDir::new().unwrap();
-        let assets = directory.path().join("assets");
-        std::fs::create_dir_all(assets.join("images")).unwrap();
-        std::fs::write(assets.join("images/logo.svg"), b"<svg></svg>").unwrap();
-        std::fs::write(assets.join("app.js"), "const answer = 40 + 2;").unwrap();
-        let mut tree_config = crate::config::tests::load_test_config(
-            directory.path(),
-            "[site]\nbase-path = \"/blog/\"",
-        );
-        tree_config.assets.cache_busting = true;
-        tree_config.assets.files = vec![file_declaration(assets.join("app.js"), "/app.js")];
-        tree_config.assets.trees = vec![crate::config::section::AssetTreeDeclaration::new(
-            &assets,
-            crate::config::section::AssetUrlPrefix::parse("/assets").unwrap(),
-        )];
-        let tree_urls = AssetUrls::for_check(&tree_config, &Default::default()).unwrap();
-        assert_eq!(published_url(&tree_urls, "/assets/app.js"), None);
-        assert_eq!(
-            published_url(&tree_urls, "/assets/images/logo.svg").as_deref(),
-            Some("/blog/assets/images/logo.svg")
-        );
-        for value in tree_urls.urls.values() {
-            assert!(!value.contains('?'), "{value}");
-        }
-
         // The key is the decoded URL the declaration was written with, while the
         // value is the browser URL: it has the deployment mount and is percent
         // encoded, so a non-ASCII path is spelled the way a browser fetches it.
@@ -272,6 +211,33 @@ mod tests {
                     .as_str(),
                 browser
             );
+        }
+    }
+
+    /// A check knows no bytes, so cache busting adds no identity.
+    #[test]
+    fn checks_resolve_no_identity() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let assets = directory.path().join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.join("app.css"), "body { color: red; }").unwrap();
+        let mut config = crate::config::tests::load_test_config(
+            directory.path(),
+            "[assets]\ncache-busting = true",
+        );
+        config.assets.trees = vec![crate::config::section::AssetTreeDeclaration::new(
+            &assets,
+            crate::config::section::AssetUrlPrefix::parse("/assets").unwrap(),
+        )];
+
+        let urls = AssetUrls::for_check(&config, &Default::default()).unwrap();
+
+        assert_eq!(
+            published_url(&urls, "/assets/app.css").as_deref(),
+            Some("/assets/app.css")
+        );
+        for asset in urls.published() {
+            assert!(!asset.address.contains('?'), "{}", asset.address);
         }
     }
 

@@ -13,10 +13,7 @@ use super::EditorDirectory;
 
 pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result<String> {
     let Some(source) = source else {
-        let mut settings = serde_json::to_string_pretty(&expected(directory))
-            .expect("editor settings are serializable");
-        settings.push('\n');
-        return Ok(settings);
+        return Ok(super::settings_text(&expected(directory)));
     };
     let actual = jsonc_value(source)
         .context("`.vscode/settings.json` is not valid JSONC; fix the syntax, then rerun `tola editor setup`")?;

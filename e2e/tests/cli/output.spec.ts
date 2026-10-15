@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import type { ServerResponse } from 'node:http'
 import { type AddressInfo, createServer } from 'node:net'
 import { join } from 'node:path'
@@ -125,10 +125,12 @@ test('startup warnings share one round', async ({ binary, directory: root }) => 
   try {
     await expect.poll(() => screenText(terminal.stdout())).toContain('Watching for changes')
     terminal.running.child.stdin.write('\x1b[D')
-    await expect.poll(() => screenText(terminal.stdout())).toContain('round 1/1')
-    const view = screenText(terminal.stdout())
-    expect(view).toContain('warning[server.port_in_use]')
-    expect(view).toContain('warning[server.network_exposed]')
+    await expect.poll(() => {
+      const view = screenText(terminal.stdout())
+      return ['warning[server.port_in_use]', 'warning[server.network_exposed]'].every((warning) =>
+        view.includes(warning)
+      )
+    }).toBe(true)
   } finally {
     await terminal.running.terminate()
     await web.release()
@@ -188,7 +190,7 @@ test('quiet preview retains warnings', async ({ binary, directory: root }) => {
     '--port',
     '0',
     '--log-file',
-    '.tola/logs/session.jsonl',
+    '.tola/state/logs/session.jsonl',
     '--color',
     'never',
   ], root)
@@ -289,23 +291,24 @@ test('build lock contention preserves output', async ({ binary, directory: root 
   if (teardownError !== undefined) throw teardownError
 })
 
-test('build restores output before compilation', async ({ binary, directory: root }) => {
+test('an interrupted publication is completed before compilation', async ({ binary, directory: root }) => {
   const run = commandRunner(binary)
   await writeMinimalSite(root, { program: '#document("index.html")[Last successful publication.]' })
   expectExited(await run(['build'], root, COMMAND_TIMEOUT_MS.build))
-  const published = await readFile(join(root, 'public/index.html'), 'utf8')
-  const previous = join(root, '.public-publish/previous')
-  await rename(join(root, 'public'), previous)
-  await rm(join(root, '.tola'), { recursive: true, force: true })
+
+  const workspace = join(root, '.public-swap')
+  const recovered = 'The verified candidate.'
+  await mkdir(join(workspace, 'staged/0'), { recursive: true })
+  await mkdir(join(workspace, 'previous'), { recursive: true })
+  await writeFile(join(workspace, 'staged/0/index.html'), recovered)
+  await rename(join(root, 'public'), join(workspace, 'previous/0'))
+  await writeFile(join(workspace, 'owner'), 'tola-swap\ntarget=public\n')
+  await writeFile(join(workspace, 'commit'), 'public\n')
   await writeFile(join(root, 'site.typ'), '#panic("Compilation must fail")')
 
-  expect((await run(['check'], root, COMMAND_TIMEOUT_MS.build)).code).not.toBe(0)
-  await expect(readFile(join(root, 'public/index.html'))).rejects.toMatchObject({ code: 'ENOENT' })
-  expect(await readFile(join(previous, 'index.html'), 'utf8')).toBe(published)
-
   expect((await run(['build'], root, COMMAND_TIMEOUT_MS.build)).code).not.toBe(0)
-  expect(await readFile(join(root, 'public/index.html'), 'utf8')).toBe(published)
-  await expect(readFile(join(previous, 'index.html'))).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(await readFile(join(root, 'public/index.html'), 'utf8')).toBe(recovered)
+  await expect(readFile(join(workspace, 'owner'))).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 test('consumer can check the same site', async ({ binary, directory: root }) => {
@@ -461,36 +464,50 @@ test('neither check nor preview publishes', async ({ binary, directory, page, re
   await expect(readFile(afterPublish)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
-test('skill export keeps an edited skill', async ({ binary, directory }) => {
+test('skill files match selected stdout', async ({ binary, directory }) => {
   const run = commandRunner(binary)
   await writeFile(join(directory, 'tola.toml'), 'not valid TOML')
-  const printed = await run(['skill'], directory, COMMAND_TIMEOUT_MS.short)
-  expectExited(printed)
-
-  const skills = join(directory, 'skills')
-  const exported = await run(['skill', '--output', skills], directory, COMMAND_TIMEOUT_MS.short)
-  expectExited(exported)
-  expect(exported.stdout).toBe('')
-  const entry = join(skills, 'tola/SKILL.md')
-  expect(await readFile(entry, 'utf8')).toBe(printed.stdout)
-
-  await writeFile(entry, 'Site-specific authoring guidance.\n')
-  const conflict = await run(['skill', '--output', skills], directory, COMMAND_TIMEOUT_MS.short)
-  expect(conflict.code).not.toBe(0)
-  expect(await readFile(entry, 'utf8')).toBe('Site-specific authoring guidance.\n')
+  const selections = [[], ['math'], ['math', 'numbering'], ['--list'], ['--all']]
+  for (const [index, selection] of selections.entries()) {
+    const printed = await run(['skill', ...selection], directory, COMMAND_TIMEOUT_MS.short)
+    expectExited(printed)
+    const file = index === 0 ? 'guide.md' : join('guides', 'guide-' + index + '.md')
+    const exported = await run(['skill', ...selection, '-o', file], directory, COMMAND_TIMEOUT_MS.short)
+    expectExited(exported)
+    expect(exported.stdout).toBe('')
+    expect(await readFile(join(directory, file), 'utf8')).toBe(printed.stdout)
+  }
 })
 
-test('log collision stops skill export', async ({ binary, directory }) => {
+test('skill output preserves existing files', async ({ binary, directory }) => {
   const run = commandRunner(binary)
-  const skills = join(directory, 'skills')
-  const entry = join(skills, 'tola/SKILL.md')
+  const file = join(directory, 'guide.md')
+  await writeFile(file, 'Site-specific authoring guidance.\n')
+  const conflict = await run(['skill', '--all', '-o', file], directory, COMMAND_TIMEOUT_MS.short)
+  expect(conflict.code).not.toBe(0)
+  expect(await readFile(file, 'utf8')).toBe('Site-specific authoring guidance.\n')
+})
+
+test('failed skill selection writes nothing', async ({ binary, directory }) => {
+  const run = commandRunner(binary)
+  const file = join(directory, 'missing.md')
+  const missing = await run(['skill', 'math', 'missing', '-o', file], directory, COMMAND_TIMEOUT_MS.short)
+  expect(missing.code).not.toBe(0)
+  expect(missing.stdout).toBe('')
+  expect(missing.stderr).toContain('tola skill --list')
+  await expect(readFile(file)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+test('log collision stops skill output', async ({ binary, directory }) => {
+  const run = commandRunner(binary)
+  const file = join(directory, 'guide.md')
   const conflict = await run(
-    ['skill', '--output', skills, '--log-file', entry],
+    ['skill', '--output', file, '--log-file', file],
     directory,
     COMMAND_TIMEOUT_MS.short,
   )
   expect(conflict.code).not.toBe(0)
-  await expect(readFile(entry)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(readFile(file)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
 test('version flag prints both releases', async ({ binary, directory }) => {

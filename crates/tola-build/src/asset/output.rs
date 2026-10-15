@@ -1,26 +1,23 @@
-//! Mapping one configured asset source to the output path it publishes, with the
-//! identity of the bytes a build rendered for it.
+//! Map one configured asset source to the output path it publishes.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::section::AssetUrlPrefix;
-use anyhow::{Result, anyhow};
-use tola_address::OutputPath;
+use crate::config::section::{AssetUrlError, AssetUrlPrefix};
+use anyhow::Result;
+use tola_address::{OutputPath, OutputPathError};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AssetOutput {
-    /// The logical source coordinate this output is published from; the inventory
-    /// retains the physical read evidence separately.
+    /// The logical source coordinate this output is published from.
     pub(crate) logical_source: PathBuf,
     /// Validated path relative to the output root.
     pub(crate) output: tola_address::OutputPath,
     /// Meaning and response media type declared from the logical source.
     declaration: crate::output::semantics::OutputDeclaration,
-    /// Identity of the bytes published at `output`, when this site asked for
-    /// cache busting and a build rendered them. `asset-url()` appends it to the
-    /// browser URL as `?h=<identity>`; it never enters a published path.
-    identity: Option<Arc<str>>,
+    /// Identity of the bytes published at `output`, when cache busting asked for one.
+    pub(crate) identity: Option<Arc<str>>,
 }
 
 impl AssetOutput {
@@ -33,7 +30,7 @@ impl AssetOutput {
         self.identity.as_deref()
     }
 
-    /// The same output, published from bytes this build rendered.
+    /// The same output, published under a cache-busting identity.
     pub(crate) fn with_identity(mut self, identity: Option<Arc<str>>) -> Self {
         self.identity = identity;
         self
@@ -47,16 +44,28 @@ pub(crate) fn output_for_configured_tree_member(
     url_prefix: &AssetUrlPrefix,
     display_root: &Path,
 ) -> Result<AssetOutput> {
+    configured_tree_member(logical_source, relative, url_prefix, display_root)
+        .map_err(anyhow::Error::from)
+}
+
+fn configured_tree_member(
+    logical_source: &Path,
+    relative: &Path,
+    url_prefix: &AssetUrlPrefix,
+    display_root: &Path,
+) -> Result<AssetOutput, AssetOutputError> {
     let member = filesystem_output_path(relative, logical_source, display_root)?;
+    let output =
+        url_prefix
+            .output_for(&member)
+            .map_err(|cause| AssetOutputError::ReservedPath {
+                member: crate::filesystem::display_path(logical_source, display_root),
+                prefix: url_prefix.to_string(),
+                cause,
+            })?;
     Ok(AssetOutput {
         logical_source: logical_source.to_path_buf(),
-        output: url_prefix.output_for(&member).map_err(|_| {
-            anyhow!(
-                "`assets.trees` cannot publish `{}` under `{}` because the output lands in Tola's reserved `_tola` path; rename the member or its `url-prefix`",
-                crate::filesystem::display_path(logical_source, display_root),
-                url_prefix
-            )
-        })?,
+        output,
         declaration: crate::output::semantics::OutputDeclaration::from_filesystem_source(
             logical_source,
         ),
@@ -79,73 +88,115 @@ pub(crate) fn output_for_configured_file(
     }
 }
 
-/// The characters a published tree member's path may not contain.
-///
-/// A member's path is also the tail of the site-root URL `asset-url()` resolves, and that lookup
-/// reads URL syntax: it decodes percent escapes exactly once and refuses `?` and `#` before
-/// decoding. A member whose name contains one of these could only be named by a URL spelling its
-/// name does not have, so Tola refuses the member rather than guess which reading it meant.
-pub(super) const DECLARED_URL_SYNTAX: [char; 3] = ['?', '#', '%'];
+/// Characters a published member path may not contain; `asset-url()` reads URL syntax.
+const DECLARED_URL_SYNTAX: [char; 3] = ['?', '#', '%'];
 
-fn filesystem_output_path(path: &Path, source: &Path, display_root: &Path) -> Result<OutputPath> {
-    let member = crate::filesystem::display_path(source, display_root);
+#[derive(Clone, Copy, Debug)]
+pub(super) enum MemberPathViolation {
+    NotAPlainName,
+    NotUtf8,
+    UrlSyntax,
+}
+
+/// Why one configured asset cannot be published at the path its declaration names.
+#[derive(Debug)]
+pub(super) enum AssetOutputError {
+    /// The member path breaks one of the naming rules.
+    MemberPath {
+        member: String,
+        violation: MemberPathViolation,
+    },
+    /// The published name is not portable across filesystems.
+    PortableName {
+        member: String,
+        cause: OutputPathError,
+    },
+    /// The prefix puts the member inside Tola's reserved path.
+    ReservedPath {
+        member: String,
+        prefix: String,
+        cause: AssetUrlError,
+    },
+}
+
+impl fmt::Display for AssetOutputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MemberPath { member, violation } => match violation {
+                MemberPathViolation::NotAPlainName => write!(
+                    formatter,
+                    "asset `{member}` cannot be published: its path must contain only file and \
+                     directory names; rename the file or directory"
+                ),
+                MemberPathViolation::NotUtf8 => write!(
+                    formatter,
+                    "asset `{member}` cannot be published because its name is not valid UTF-8; \
+                     rename the file or directory"
+                ),
+                MemberPathViolation::UrlSyntax => write!(
+                    formatter,
+                    "asset `{member}` cannot be published because its path contains `?`, `#`, \
+                     or `%`; rename the file or directory"
+                ),
+            },
+            Self::PortableName { member, .. } => write!(
+                formatter,
+                "asset `{member}` cannot be published because its name is not portable across \
+                 filesystems; rename it"
+            ),
+            Self::ReservedPath { member, prefix, .. } => write!(
+                formatter,
+                "`assets.trees` cannot publish `{member}` under `{prefix}` because the output \
+                 lands in Tola's reserved `_tola` path; rename the member or its `url-prefix`"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AssetOutputError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::MemberPath { .. } => None,
+            Self::PortableName { cause, .. } => Some(cause),
+            Self::ReservedPath { cause, .. } => Some(cause),
+        }
+    }
+}
+
+/// Where one published member path splits, or the rule it breaks.
+pub(super) fn member_path_segments(relative: &Path) -> Result<Vec<&str>, MemberPathViolation> {
     let mut segments = Vec::new();
-    for component in path.components() {
+    for component in relative.components() {
         let std::path::Component::Normal(segment) = component else {
-            return Err(anyhow!(
-                "asset `{member}` must have a path containing only file and directory names; rename it"
-            ));
+            return Err(MemberPathViolation::NotAPlainName);
         };
-        let segment = segment.to_str().ok_or_else(|| {
-            anyhow!("asset `{member}` cannot be published because its name is not valid UTF-8; rename it")
-        })?;
+        let segment = segment.to_str().ok_or(MemberPathViolation::NotUtf8)?;
         if segment.contains(DECLARED_URL_SYNTAX) {
-            return Err(anyhow!(
-                "asset `{member}` cannot be published because its path contains `?`, `#`, or `%`; rename it"
-            ));
+            return Err(MemberPathViolation::UrlSyntax);
         }
         segments.push(segment);
     }
+    Ok(segments)
+}
+
+fn filesystem_output_path(
+    path: &Path,
+    source: &Path,
+    display_root: &Path,
+) -> Result<OutputPath, AssetOutputError> {
+    let member = crate::filesystem::display_path(source, display_root);
+    let segments =
+        member_path_segments(path).map_err(|violation| AssetOutputError::MemberPath {
+            member: member.clone(),
+            violation,
+        })?;
     OutputPath::parse(&segments.join("/"))
-        .map_err(|_| anyhow!("asset `{member}` cannot be published because its name is not portable across filesystems; rename it"))
+        .map_err(|cause| AssetOutputError::PortableName { member, cause })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    #[test]
-    fn tree_output_ignores_the_deployment_mount() {
-        let dir = TempDir::new().unwrap();
-        let images = dir.path().join("assets/images");
-        fs::create_dir_all(&images).unwrap();
-        let source = images.join("logo.png");
-        fs::write(&source, "image").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(
-            dir.path(),
-            "[site]\norigin = \"https://example.test\"\nbase-path = \"/docs/blog/\"",
-        );
-        config.build.publish_dir = dir.path().join("public");
-        let output = output_for_configured_tree_member(
-            &source,
-            Path::new("logo.png"),
-            &AssetUrlPrefix::parse("/images").unwrap(),
-            dir.path(),
-        )
-        .unwrap();
-
-        assert_eq!(output.logical_source, source);
-        assert_eq!(output.output.as_str(), "images/logo.png");
-        let url = tola_address::asset_url_from_output(&output.output);
-        assert_eq!(url, "/images/logo.png");
-        assert_eq!(
-            config.url_mount().browser_path(&url),
-            "/docs/blog/images/logo.png"
-        );
-    }
 
     #[test]
     fn tree_prefix_composes_member_paths() {
@@ -182,31 +233,18 @@ mod tests {
     }
 
     #[test]
-    fn file_output_uses_the_declared_name() {
-        let dir = TempDir::new().unwrap();
-        let source = dir.path().join("assets/favicon.ico");
-        fs::create_dir_all(source.parent().unwrap()).unwrap();
-        fs::write(&source, "icon").unwrap();
+    fn file_output_uses_declared_name() {
+        let source = Path::new("assets/favicon.ico");
+        let declared = crate::config::section::AssetUrl::parse("/favicon.ico").unwrap();
 
-        let mut config = crate::config::tests::load_test_config(
-            dir.path(),
-            "[site]\norigin = \"https://example.test\"\nbase-path = \"/docs/blog/\"",
-        );
-        config.build.publish_dir = dir.path().join("public");
-        let url = crate::config::section::AssetUrl::parse("/favicon.ico").unwrap();
-        let output = output_for_configured_file(&source, url.output_path());
+        let output = output_for_configured_file(source, declared.output_path());
 
+        assert_eq!(output.logical_source.as_path(), source);
         assert_eq!(output.output.as_str(), "favicon.ico");
-        let url = tola_address::asset_url_from_output(&output.output);
-        assert_eq!(url, "/favicon.ico");
-        assert_eq!(
-            config.url_mount().browser_path(&url),
-            "/docs/blog/favicon.ico"
-        );
     }
 
     #[test]
-    fn file_media_type_follows_the_source() {
+    fn media_type_follows_source() {
         let source = Path::new("assets/app.css");
         let output_path = tola_address::OutputPath::parse("styles/app").unwrap();
 

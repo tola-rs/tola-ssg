@@ -3,10 +3,8 @@
 use super::EditorDirectory;
 
 pub(super) fn snippet(directory: &EditorDirectory) -> String {
-    let command = directory.server_command();
-    let mut executable = vec![command.command.to_owned()];
-    executable.extend(command.arguments);
-    let command = lua_json(&serde_json::json!(executable));
+    let argv = directory.server_command().argv();
+    let command = lua_json(&serde_json::json!(argv));
     let root = lua_json(&serde_json::json!(directory.root()));
     // A configuration answers Tola's own keys in its file; a directory without one is answered
     // through the Typst documents it holds.

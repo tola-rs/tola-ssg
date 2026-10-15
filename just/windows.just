@@ -6,7 +6,6 @@ help:
     @just --list windows
 
 # Check application dependencies and isolated no-default library APIs on Windows.
-# MSVC is the published Windows target; GNU keeps the cross-compilation target checking.
 check target:
     cargo check --locked --target {{ quote(target) }} -p tola-build --all-targets
     cargo check --locked --target {{ quote(target) }} -p tola-subprocess --all-targets

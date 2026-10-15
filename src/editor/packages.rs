@@ -1,5 +1,6 @@
 //! Generated editor packages and their view of configured local packages.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -7,18 +8,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::terminal::{display_path_as_given, display_path_within};
 use crate::writes::FileWrites;
-use std::borrow::Cow;
 
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
+use tola_build::filesystem::{FilesystemSourceIdentity, layout};
+use tola_typst::{PackageLocations, SourceBoundary};
 
 pub(crate) fn generated_package_files() -> Vec<(PathBuf, Cow<'static, str>)> {
     let mut files = Vec::new();
     for package in tola_packages::resolvable_packages() {
         let spec = package.spec();
-        let root = Path::new(PACKAGE_MIRROR_DIRECTORY)
+        let root = layout::builtin_packages_relative()
             .join(spec.namespace.as_str())
             .join(spec.name.as_str())
             .join(spec.version.to_string());
@@ -31,14 +33,6 @@ pub(crate) fn generated_package_files() -> Vec<(PathBuf, Cow<'static, str>)> {
     files
 }
 
-pub(super) fn add_initial_files(writes: &mut FileWrites) -> Result<()> {
-    writes.add_directory(PACKAGE_VIEW_DIRECTORY)?;
-    for (path, source) in generated_package_files() {
-        writes.create_file(path, source.into_owned())?;
-    }
-    Ok(())
-}
-
 pub(super) fn add_editor_package_replacements(writes: &mut FileWrites) -> Result<()> {
     for (path, source) in generated_package_files() {
         writes.replace_file(path, source.into_owned())?;
@@ -46,7 +40,7 @@ pub(super) fn add_editor_package_replacements(writes: &mut FileWrites) -> Result
     Ok(())
 }
 
-pub(crate) fn obsolete_package_paths(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+pub(crate) fn obsolete_package_paths(root: &Path) -> Result<Vec<PathBuf>> {
     let found =
         collect_obsolete_package_paths(root, &generated_package_files(), &Default::default())?;
     match found.refused.into_iter().next() {
@@ -63,10 +57,7 @@ pub(crate) fn obsolete_package_paths(root: &Path) -> Result<Vec<std::path::PathB
 /// wording stay in the cause chain the debug log records.
 fn mirror_failure(operation: &str, path: &Path, source: io::Error) -> anyhow::Error {
     anyhow::Error::new(source)
-        .context(format!(
-            "at `{}`",
-            crate::terminal::display_path_as_given(path)
-        ))
+        .context(format!("at `{}`", display_path_as_given(path)))
         .context(format!(
             "Tola could not {operation}: check its permissions, then run `tola editor packages`"
         ))
@@ -109,18 +100,18 @@ fn collect_obsolete_package_paths(
     cancellation: &BuildCancellation,
 ) -> Result<ObsoletePaths> {
     cancellation.ensure_active()?;
-    let mut package_root = root.join(PACKAGE_MIRROR_DIRECTORY);
+    let mut package_root = layout::builtin_packages(root);
     package_root.push("tola");
     let expected_files = generated
         .iter()
         .map(|(path, _)| path.as_path())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let expected_versions = generated
         .iter()
         .filter_map(|(path, _)| path.parent())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let mut found = ObsoletePaths::default();
-    let names = match std::fs::read_dir(&package_root) {
+    let names = match fs::read_dir(&package_root) {
         Ok(names) => names,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(found),
         Err(source) => {
@@ -128,21 +119,10 @@ fn collect_obsolete_package_paths(
             return Ok(found);
         }
     };
-    for name in names {
+    for entry in names {
         cancellation.ensure_active()?;
-        let name = match name {
-            Ok(name) => name.path(),
-            Err(source) => {
-                found.refuse(root, &package_root, source);
-                continue;
-            }
-        };
-        let metadata = match std::fs::symlink_metadata(&name) {
-            Ok(metadata) => metadata,
-            Err(source) => {
-                found.refuse(root, &name, source);
-                continue;
-            }
+        let Some((name, metadata)) = inspected(&mut found, root, &package_root, entry) else {
+            continue;
         };
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             if !claimed(below(root, &name), &expected_files) {
@@ -150,7 +130,7 @@ fn collect_obsolete_package_paths(
             }
             continue;
         }
-        let versions = match std::fs::read_dir(&name) {
+        let versions = match fs::read_dir(&name) {
             Ok(versions) => versions,
             Err(source) => {
                 found.refuse(root, &name, source);
@@ -158,21 +138,10 @@ fn collect_obsolete_package_paths(
             }
         };
         let mut retained = false;
-        for version in versions {
+        for entry in versions {
             cancellation.ensure_active()?;
-            let version = match version {
-                Ok(version) => version.path(),
-                Err(source) => {
-                    found.refuse(root, &name, source);
-                    continue;
-                }
-            };
-            let metadata = match std::fs::symlink_metadata(&version) {
-                Ok(metadata) => metadata,
-                Err(source) => {
-                    found.refuse(root, &version, source);
-                    continue;
-                }
+            let Some((version, metadata)) = inspected(&mut found, root, &name, entry) else {
+                continue;
             };
             if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
                 if !claimed(below(root, &version), &expected_files) {
@@ -215,28 +184,17 @@ fn collect_obsolete_children(
     found: &mut ObsoletePaths,
 ) -> Result<bool> {
     let mut retained = false;
-    let children = match std::fs::read_dir(directory) {
+    let children = match fs::read_dir(directory) {
         Ok(children) => children,
         Err(source) => {
             found.refuse(root, directory, source);
             return Ok(retained);
         }
     };
-    for child in children {
+    for entry in children {
         cancellation.ensure_active()?;
-        let child = match child {
-            Ok(child) => child.path(),
-            Err(source) => {
-                found.refuse(root, directory, source);
-                continue;
-            }
-        };
-        let metadata = match std::fs::symlink_metadata(&child) {
-            Ok(metadata) => metadata,
-            Err(source) => {
-                found.refuse(root, &child, source);
-                continue;
-            }
+        let Some((child, metadata)) = inspected(found, root, directory, entry) else {
+            continue;
         };
         // A path Tola writes is refused rather than removed when it is not the plain file or
         // directory the generated set expects, so it is never a path another version left behind.
@@ -280,6 +238,33 @@ fn claimed(relative: &Path, expected_files: &BTreeSet<&Path>) -> bool {
 fn below<'a>(root: &Path, path: &'a Path) -> &'a Path {
     path.strip_prefix(root)
         .expect("a package path is below the site root")
+}
+
+/// One entry of a walked directory, with the metadata that says what it is.
+///
+/// An entry the walk cannot read refuses the directory holding it; a path whose metadata the
+/// walk cannot read refuses that path. `None` records that refusal, so a command that removes
+/// paths stops at it rather than walking past.
+fn inspected(
+    found: &mut ObsoletePaths,
+    root: &Path,
+    directory: &Path,
+    entry: io::Result<fs::DirEntry>,
+) -> Option<(PathBuf, fs::Metadata)> {
+    let path = match entry {
+        Ok(entry) => entry.path(),
+        Err(source) => {
+            found.refuse(root, directory, source);
+            return None;
+        }
+    };
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => Some((path, metadata)),
+        Err(source) => {
+            found.refuse(root, &path, source);
+            None
+        }
+    }
 }
 
 /// Why Tola will not write one path it generates.
@@ -328,7 +313,7 @@ impl RefusedPath {
 
     /// The refused path as the site author reads it.
     pub(crate) fn displayed(&self) -> String {
-        crate::terminal::display_path_as_given(&self.relative)
+        display_path_as_given(&self.relative)
     }
 
     /// What is wrong with the path, without the path itself.
@@ -368,7 +353,7 @@ fn refused_path(root: &Path, relative: &Path, last: &'static str) -> Option<Refu
     let component_count = relative.components().count();
     for (index, component) in relative.components().enumerate() {
         path.push(component);
-        let metadata = match std::fs::symlink_metadata(&path) {
+        let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
             Err(source) => {
@@ -409,10 +394,10 @@ pub(crate) enum GeneratedDirectory {
 }
 
 pub(crate) fn generated_directory(root: &Path) -> GeneratedDirectory {
-    let relative = Path::new(PACKAGE_MIRROR_DIRECTORY);
-    match refused_path(root, relative, "directory") {
+    let relative = layout::builtin_packages_relative();
+    match refused_path(root, &relative, "directory") {
         Some(refused) => GeneratedDirectory::Refused(refused),
-        None if root.join(relative).is_dir() => GeneratedDirectory::Usable,
+        None if root.join(&relative).is_dir() => GeneratedDirectory::Usable,
         None => GeneratedDirectory::Missing,
     }
 }
@@ -449,7 +434,7 @@ pub(crate) fn read_package_directory(root: &Path) -> PackageDirectory {
         .map(|(relative, source)| {
             let held = match refused_path(root, &relative, "file") {
                 Some(refused) => HeldFile::Refused(refused),
-                None => match std::fs::read(root.join(&relative)) {
+                None => match fs::read(root.join(&relative)) {
                     Ok(bytes) if bytes == source.as_bytes() => HeldFile::Current,
                     Ok(_) => HeldFile::Differing,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => HeldFile::Missing,
@@ -494,26 +479,24 @@ pub(crate) fn remove_obsolete_package_paths(root: &Path) -> Result<usize> {
     Ok(obsolete.len())
 }
 
-/// The Tola-owned package directory editors read builtin packages from, not an LSP transport.
-pub(super) const PACKAGE_VIEW_DIRECTORY: &str = ".tola/editor-packages";
-
 /// Links are read inputs: setup never modifies their local-package targets, and
 /// Tola's own service uses the embedded package provider rather than this directory.
 pub(crate) struct EditorPackageInputs {
-    root: PathBuf,
+    site_root: PathBuf,
+    view: PathBuf,
     directories: BTreeSet<PathBuf>,
     links: BTreeMap<PathBuf, PathBuf>,
 }
 
 pub(crate) fn initial_package_inputs(
     root: &Path,
-    packages: &tola_typst::PackageLocations,
+    packages: &PackageLocations,
     cancellation: &BuildCancellation,
 ) -> Result<EditorPackageInputs> {
     package_inputs(
         root,
         packages,
-        &tola_typst::SourceBoundary::new(root, false)
+        &SourceBoundary::new(root, false)
             .excluding(root.join(tola_build::filesystem::INTERNAL_DIR)),
         cancellation,
     )
@@ -533,13 +516,14 @@ pub(crate) fn prepare_package_inputs(
 
 fn package_inputs(
     root: &Path,
-    packages: &tola_typst::PackageLocations,
-    boundary: &tola_typst::SourceBoundary,
+    packages: &PackageLocations,
+    boundary: &SourceBoundary,
     cancellation: &BuildCancellation,
 ) -> Result<EditorPackageInputs> {
     cancellation.ensure_active()?;
     let mut inputs = EditorPackageInputs {
-        root: root.join(PACKAGE_VIEW_DIRECTORY),
+        site_root: root.to_path_buf(),
+        view: layout::editor_packages(root),
         directories: BTreeSet::from([PathBuf::new()]),
         links: BTreeMap::new(),
     };
@@ -553,7 +537,7 @@ fn package_inputs(
         let version = package.join(spec.version.to_string());
         inputs.links.insert(
             version.clone(),
-            root.join(PACKAGE_MIRROR_DIRECTORY).join(version),
+            layout::builtin_packages(root).join(version),
         );
     }
     // Package roots in search order. The first root that provides an identity keeps it,
@@ -568,18 +552,14 @@ fn package_inputs(
         .into_iter();
     for (local, option) in declared.chain(user) {
         let local = local.root();
-        let local_identity = tola_build::filesystem::FilesystemSourceIdentity::from_path(local);
-        let view_identity =
-            tola_build::filesystem::FilesystemSourceIdentity::from_path(&inputs.root);
+        let local_identity = FilesystemSourceIdentity::from_path(local);
+        let view_identity = FilesystemSourceIdentity::from_path(&inputs.view);
         if local_identity.intersects(&view_identity) {
-            let root = inputs
-                .root
-                .parent()
-                .expect("editor package root has a parent");
-            let local = local.strip_prefix(root).unwrap_or(local);
+            let local = local.strip_prefix(&inputs.site_root).unwrap_or(local);
             bail!(
-                "the package directory `{}` overlaps Tola's editor package directory `{PACKAGE_VIEW_DIRECTORY}`; point {option} at a directory outside it",
-                crate::terminal::display_path_as_given(local),
+                "the package directory `{}` overlaps Tola's editor package directory `{}`; point {option} at a directory outside it",
+                display_path_as_given(local),
+                display_path_within(&inputs.view, &inputs.site_root),
             );
         }
         for namespace in child_directories(local, option, boundary, cancellation)? {
@@ -612,13 +592,16 @@ fn package_inputs(
 impl EditorPackageInputs {
     fn check(&self) -> Result<()> {
         // Never traverse a site-owned symlink while planning or installing inputs.
-        let internal = self
-            .root
-            .parent()
-            .expect("editor package root has a parent");
+        let internal = self.site_root.join(tola_build::filesystem::INTERNAL_DIR);
         for (label, path) in [
-            (".tola", internal),
-            (PACKAGE_VIEW_DIRECTORY, self.root.as_path()),
+            (
+                display_path_within(&internal, &self.site_root),
+                internal.as_path(),
+            ),
+            (
+                display_path_within(&self.view, &self.site_root),
+                self.view.as_path(),
+            ),
         ] {
             match fs::symlink_metadata(path) {
                 Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
@@ -627,7 +610,7 @@ impl EditorPackageInputs {
                     );
                 }
                 Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(anyhow::Error::new(error).context(format!(
                         "Tola could not read `{label}`; check its permissions, then run `tola editor packages`"
@@ -643,9 +626,9 @@ impl EditorPackageInputs {
         self.directories.iter().map(|relative| {
             // `join("")` keeps a trailing separator; the view root is spelled without one.
             if relative.as_os_str().is_empty() {
-                self.root.clone()
+                self.view.clone()
             } else {
-                self.root.join(relative)
+                self.view.join(relative)
             }
         })
     }
@@ -654,7 +637,7 @@ impl EditorPackageInputs {
     pub(crate) fn view_links(&self) -> impl Iterator<Item = (PathBuf, &Path)> {
         self.links
             .iter()
-            .map(|(relative, target)| (self.root.join(relative), target.as_path()))
+            .map(|(relative, target)| (self.view.join(relative), target.as_path()))
     }
 
     pub(crate) fn apply(
@@ -664,7 +647,8 @@ impl EditorPackageInputs {
         cancellation.ensure_active()?;
         self.check()?;
         synchronize_directory(
-            &self.root,
+            &self.site_root,
+            &self.view,
             Path::new(""),
             &self.directories,
             &self.links,
@@ -676,14 +660,14 @@ impl EditorPackageInputs {
 fn child_directories(
     root: &Path,
     option: &str,
-    boundary: &tola_typst::SourceBoundary,
+    boundary: &SourceBoundary,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<PathBuf>> {
     cancellation.ensure_active()?;
     boundary.check(root)?;
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(package_directory_failure(option, error)),
     };
     let mut directories = Vec::new();
@@ -731,16 +715,17 @@ fn link_matches(path: &Path, metadata: &fs::Metadata, target: &Path) -> Result<b
     Ok(existing == target)
 }
 
-/// Make the mirror below `root` hold exactly the planned directories and links.
+/// Make one directory of the installed view hold exactly the planned directories and links.
 fn synchronize_directory(
-    root: &Path,
+    site_root: &Path,
+    view: &Path,
     relative: &Path,
     directories: &BTreeSet<PathBuf>,
     links: &BTreeMap<PathBuf, PathBuf>,
     cancellation: &tola_build::cancellation::BuildCancellation,
 ) -> Result<()> {
     cancellation.ensure_active()?;
-    let directory = root.join(relative);
+    let directory = view.join(relative);
     match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => {
@@ -749,11 +734,10 @@ fn synchronize_directory(
                 mirror_failure("create the editor package directory", &directory, error)
             })?;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(&directory).map_err(|error| {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(&directory)
+            .map_err(|error| {
                 mirror_failure("create the editor package directory", &directory, error)
-            })?
-        }
+            })?,
         Err(error) => {
             return Err(mirror_failure(
                 "read the editor package directory",
@@ -777,14 +761,14 @@ fn synchronize_directory(
     for name in children {
         cancellation.ensure_active()?;
         let child = relative.join(name);
-        let path = root.join(&child);
+        let path = view.join(&child);
         if let Some(target) = links.get(&child) {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if link_matches(&path, &metadata, target)? => {
                     continue;
                 }
                 Ok(_) => remove_owned_path(&path)?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(mirror_failure(
                         "read the editor package directory",
@@ -795,11 +779,12 @@ fn synchronize_directory(
             }
             crate::sys::link_directory(target, &path).with_context(|| {
                 format!(
-                    "Tola could not link a local package into `{PACKAGE_VIEW_DIRECTORY}`; check that the directory is writable, then run `tola editor packages`"
+                    "Tola could not link a local package into `{}`; check that the directory is writable, then run `tola editor packages`",
+                    display_path_within(view, site_root)
                 )
             })?;
         } else {
-            synchronize_directory(root, &child, directories, links, cancellation)?;
+            synchronize_directory(site_root, view, &child, directories, links, cancellation)?;
         }
     }
     Ok(())
@@ -865,9 +850,7 @@ mod tests {
     #[test]
     fn obsolete_package_versions_are_removed() {
         let directory = tempfile::tempdir().unwrap();
-        let obsolete = directory
-            .path()
-            .join(".tola/builtin-packages/tola/source/9.9.9");
+        let obsolete = layout::builtin_packages(directory.path()).join("tola/source/9.9.9");
         std::fs::create_dir_all(&obsolete).unwrap();
         std::fs::write(obsolete.join("lib.typ"), "old").unwrap();
         let unrelated = directory.path().join("keep.txt");
@@ -885,9 +868,7 @@ mod tests {
         let external = tempfile::tempdir().unwrap();
         let target_file = external.path().join("lib.typ");
         fs::write(&target_file, "external package").unwrap();
-        let obsolete = directory
-            .path()
-            .join(".tola/builtin-packages/tola/source/9.9.9");
+        let obsolete = layout::builtin_packages(directory.path()).join("tola/source/9.9.9");
         fs::create_dir_all(obsolete.parent().unwrap()).unwrap();
         link_directory(external.path(), &obsolete).unwrap();
 
@@ -910,9 +891,7 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let loaded = loaded_config(&path, tola_typst::PackageLocations::default());
         let config = loaded.config();
-        let package = config
-            .get_root()
-            .join(".tola/builtin-packages/tola/source/0.0.0");
+        let package = layout::builtin_packages(config.get_root()).join("tola/source/0.0.0");
         std::fs::create_dir_all(package.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(external.path(), &package).unwrap();
         let directory = crate::editor::EditorDirectory::from_config(config).unwrap();
@@ -928,9 +907,7 @@ mod tests {
     #[test]
     fn extra_package_files_are_obsolete() {
         let directory = tempfile::tempdir().unwrap();
-        let version = directory
-            .path()
-            .join(".tola/builtin-packages/tola/source/0.0.0");
+        let version = layout::builtin_packages(directory.path()).join("tola/source/0.0.0");
         std::fs::create_dir_all(&version).unwrap();
         std::fs::write(version.join("lib.typ"), "current").unwrap();
         std::fs::write(version.join("typst.toml"), "current").unwrap();
@@ -946,22 +923,18 @@ mod tests {
     /// A generated directory below a version stays: only paths the generated files do not name
     /// are removed.
     #[test]
-    fn nested_generated_files_are_not_obsolete() {
+    fn nested_generated_files_are_current() {
         let directory = tempfile::tempdir().unwrap();
-        let version = directory
-            .path()
-            .join(".tola/builtin-packages/tola/code/0.0.0");
+        let version = layout::builtin_packages(directory.path()).join("tola/code/0.0.0");
         let theme = version.join("code-themes/zenburn.tmTheme");
         std::fs::create_dir_all(theme.parent().unwrap()).unwrap();
         std::fs::write(version.join("lib.typ"), "code").unwrap();
         std::fs::write(&theme, "theme").unwrap();
+        let mirror = layout::builtin_packages_relative().join("tola/code/0.0.0");
         let generated = vec![
+            (mirror.join("lib.typ"), Cow::Borrowed("code")),
             (
-                PathBuf::from(".tola/builtin-packages/tola/code/0.0.0/lib.typ"),
-                Cow::Borrowed("code"),
-            ),
-            (
-                PathBuf::from(".tola/builtin-packages/tola/code/0.0.0/code-themes/zenburn.tmTheme"),
+                mirror.join("code-themes/zenburn.tmTheme"),
                 Cow::Borrowed("theme"),
             ),
         ];
@@ -982,7 +955,7 @@ mod tests {
 
         for package in tola_packages::resolvable_packages() {
             let spec = package.spec();
-            let root = Path::new(PACKAGE_MIRROR_DIRECTORY)
+            let root = layout::builtin_packages_relative()
                 .join(spec.namespace.as_str())
                 .join(spec.name.as_str())
                 .join(spec.version.to_string());
@@ -1018,25 +991,25 @@ mod tests {
         let loaded = loaded_config(&path, packages);
         let config = loaded.config();
         let inputs = prepare_package_inputs(config, &Default::default()).unwrap();
-        assert!(!directory.path().join(".tola").exists());
+        assert!(!layout::editor_packages(directory.path()).exists());
         let mut writes = FileWrites::new(config.get_root()).unwrap();
         add_editor_package_replacements(&mut writes).unwrap();
         writes.apply(&Default::default()).unwrap();
         inputs.apply(&Default::default()).unwrap();
 
         assert_eq!(
-            fs::read_to_string(inputs.root.join("local/example/0.1.0/lib.typ")).unwrap(),
+            fs::read_to_string(inputs.view.join("local/example/0.1.0/lib.typ")).unwrap(),
             "local/example/0.1.0"
         );
         assert_eq!(
-            fs::read_to_string(inputs.root.join("tola/site/4.0.0/lib.typ")).unwrap(),
+            fs::read_to_string(inputs.view.join("tola/site/4.0.0/lib.typ")).unwrap(),
             "tola/site/4.0.0"
         );
         assert_eq!(
-            fs::read_to_string(inputs.root.join("tola/custom/0.1.0/lib.typ")).unwrap(),
+            fs::read_to_string(inputs.view.join("tola/custom/0.1.0/lib.typ")).unwrap(),
             "tola/custom/0.1.0"
         );
-        let mirrored = fs::read_to_string(inputs.root.join("tola/site/0.0.0/lib.typ")).unwrap();
+        let mirrored = fs::read_to_string(inputs.view.join("tola/site/0.0.0/lib.typ")).unwrap();
         assert_ne!(
             mirrored, "tola/site/0.0.0",
             "the local copy must not answer for a builtin version"
@@ -1054,13 +1027,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            fs::read_to_string(inputs.root.join("local/example/0.1.0/lib.typ")).unwrap(),
+            fs::read_to_string(inputs.view.join("local/example/0.1.0/lib.typ")).unwrap(),
             "edited on disk"
         );
         fs::remove_dir_all(local.path().join("local")).unwrap();
         let refreshed = prepare_package_inputs(config, &Default::default()).unwrap();
         refreshed.apply(&Default::default()).unwrap();
-        assert!(fs::symlink_metadata(inputs.root.join("local")).is_err());
+        assert!(fs::symlink_metadata(inputs.view.join("local")).is_err());
         assert!(local.path().join("tola/site/0.0.0/lib.typ").is_file());
     }
 
@@ -1071,12 +1044,9 @@ mod tests {
         let external = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("tola.toml");
         fs::write(&config_path, "").unwrap();
-        fs::create_dir(directory.path().join(".tola")).unwrap();
-        link_directory(
-            external.path(),
-            &directory.path().join(PACKAGE_VIEW_DIRECTORY),
-        )
-        .unwrap();
+        let view = layout::editor_packages(directory.path());
+        fs::create_dir_all(view.parent().unwrap()).unwrap();
+        link_directory(external.path(), &view).unwrap();
         let config = loaded_config(&config_path, tola_typst::PackageLocations::default());
         let error = prepare_package_inputs(config.config(), &Default::default())
             .err()

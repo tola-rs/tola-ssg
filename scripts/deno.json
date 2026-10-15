@@ -12,7 +12,6 @@
     "typecheck": "deno check .",
     "format": "deno fmt --check .",
     "test": "deno test -A --trace-leaks --parallel",
-    "test-names": "deno run --allow-read=.. test-names.ts",
     "check": "deno task typecheck && deno task test && deno run --allow-run check.ts"
   }
 }

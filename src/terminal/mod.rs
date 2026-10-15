@@ -1,4 +1,4 @@
-//! Terminal presentation and interactive input.
+//! Terminal presentation: status text, diagnostics, documentation, and the development view.
 
 mod ansi;
 pub(crate) mod clipboard;
@@ -8,14 +8,12 @@ pub(crate) mod development;
 mod diagnostic;
 pub(crate) mod documentation;
 mod hooks;
-mod input;
 mod limits;
 mod pager;
 mod path;
 mod progress;
-mod prompt;
 pub(crate) mod session;
-mod sink;
+pub(crate) mod sink;
 mod source;
 pub(crate) mod style;
 pub(crate) mod text;
@@ -36,19 +34,26 @@ pub(crate) use progress::{
 pub(crate) use source::SourceFiles;
 pub(crate) use style::Palette;
 
-pub(crate) use prompt::InputCancelled;
-use prompt::PromptReader;
-#[cfg(test)]
-pub(crate) use sink::BufferedOutput;
+pub(crate) use session::InputCancelled;
 pub(crate) use sink::{OutputSink, StdoutClosed};
-use std::io;
+use std::io::{self, IsTerminal};
+use std::sync::{Arc, RwLock};
+use tola_diagnostic::Diagnostic;
 
 const INDENT_UNIT: &str = "  ";
 
 /// Best-effort restoration for an application panic hook.
 pub(crate) fn restore() {
-    prompt::restore();
     session::restore();
+}
+
+/// A cancelled child cannot run its own alternate-screen and cursor cleanup.
+pub(crate) fn restore_external_screen() {
+    if io::stderr().is_terminal() {
+        let _ = session::leave_commands(&mut io::stderr());
+    } else if io::stdout().is_terminal() {
+        let _ = session::leave_commands(&mut io::stdout());
+    }
 }
 
 pub(crate) fn append_indent(output: &mut String, level: usize) {
@@ -57,14 +62,19 @@ pub(crate) fn append_indent(output: &mut String, level: usize) {
     }
 }
 
+/// The terminal's column count, when it reports a positive width.
+fn terminal_columns() -> Option<usize> {
+    let (columns, _) = crossterm::terminal::size().ok()?;
+    (columns > 0).then_some(usize::from(columns))
+}
+
 /// Shared command output for one process invocation.
 ///
 /// Clones share a synchronized sink, so output blocks never interleave.
 #[derive(Clone)]
 pub struct Terminal {
     sink: OutputSink,
-    prompt: PromptReader,
-    sources: std::sync::Arc<std::sync::RwLock<Option<std::sync::Arc<source::SourceFiles>>>>,
+    sources: Arc<RwLock<Option<Arc<source::SourceFiles>>>>,
     palette: Palette,
     stdout_use_color: bool,
     pager: Option<PagerCommand>,
@@ -86,8 +96,7 @@ impl Terminal {
 
     pub(crate) fn with_sink(sink: OutputSink, use_color: bool, quiet: bool) -> Self {
         Self {
-            prompt: PromptReader::new(sink.clone()),
-            sources: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            sources: Arc::new(RwLock::new(None)),
             palette: Palette::new(use_color),
             stdout_use_color: use_color,
             pager: None,
@@ -115,12 +124,7 @@ impl Terminal {
     }
 
     pub(crate) fn stdout_columns(&self) -> Option<usize> {
-        use std::io::IsTerminal;
-        if !io::stdout().is_terminal() {
-            return None;
-        }
-        let (columns, _) = crossterm::terminal::size().ok()?;
-        (columns > 0).then_some(usize::from(columns))
+        io::stdout().is_terminal().then(terminal_columns).flatten()
     }
 
     /// Install the source texts diagnostics render snippets from.
@@ -129,7 +133,7 @@ impl Terminal {
     /// rendering diagnostics without snippets.
     pub fn set_source_files(&self, sources: source::SourceFiles) {
         if let Ok(mut slot) = self.sources.write() {
-            *slot = Some(std::sync::Arc::new(sources));
+            *slot = Some(Arc::new(sources));
         }
     }
 
@@ -139,12 +143,7 @@ impl Terminal {
 
     /// Column count of the terminal this command writes to, when it has one.
     pub(crate) fn columns(&self) -> Option<usize> {
-        use std::io::IsTerminal;
-        if !io::stderr().is_terminal() {
-            return None;
-        }
-        let (columns, _) = crossterm::terminal::size().ok()?;
-        (columns > 0).then_some(usize::from(columns))
+        io::stderr().is_terminal().then(terminal_columns).flatten()
     }
 
     /// Write command progress unless quiet mode is enabled.
@@ -183,31 +182,12 @@ impl Terminal {
         self.write_nonempty(progress::text(text.as_ref()))
     }
 
-    /// Write a complete block whose styling the caller already applied.
-    ///
-    /// Escaping exists for text Tola does not control; a block that has its own
-    /// styling has already escaped the text inside it, so escaping again would print
-    /// the escape codes instead of applying them.
-    pub(crate) fn styled_block(&self, block: &str) -> io::Result<()> {
-        if self.quiet {
-            return Ok(());
-        }
-        self.write(block.to_owned())
-    }
-
     pub(crate) fn hooks(&self, text: &str) -> io::Result<()> {
         if self.quiet {
             return Ok(());
         }
         self.sink
             .hooks(&format!("{}\n", text.trim_end_matches('\n')))
-    }
-
-    pub(crate) fn blank_line(&self) -> io::Result<()> {
-        if self.quiet {
-            return Ok(());
-        }
-        self.sink.write_stderr(b"\n")
     }
 
     pub(crate) fn activity(&self, text: &str) -> io::Result<()> {
@@ -233,29 +213,22 @@ impl Terminal {
         self.sink.hook_output(run, stream, chunk, self.palette)
     }
 
-    pub fn diagnostic(&self, diagnostic: &tola_build::diagnostic::Diagnostic) -> io::Result<()> {
+    pub fn diagnostic(&self, diagnostic: &Diagnostic) -> io::Result<()> {
         self.diagnostics(std::slice::from_ref(diagnostic))
     }
 
-    pub fn diagnostics(
-        &self,
-        diagnostics: &[tola_build::diagnostic::Diagnostic],
-    ) -> io::Result<()> {
+    pub fn diagnostics(&self, diagnostics: &[Diagnostic]) -> io::Result<()> {
         let mut transcript = self.render_diagnostics(diagnostics);
         if !transcript.is_empty() {
             transcript.push('\n');
         }
-        self.sink.round(development::Round {
-            diagnostics: diagnostics.to_vec(),
-            transcript,
-            observed_at: chrono::Local::now(),
-        })
+        self.publish_round(diagnostics, transcript)
     }
 
     pub(crate) fn report_round(
         &self,
         completion: development::Completion<'_>,
-        diagnostics: &[tola_build::diagnostic::Diagnostic],
+        diagnostics: &[Diagnostic],
     ) -> io::Result<()> {
         let mut transcript = String::new();
         if let development::Completion::Failed(message) = completion {
@@ -274,6 +247,10 @@ impl Terminal {
             transcript.push_str(&progress::summary(summary, self.palette));
             transcript.push('\n');
         }
+        self.publish_round(diagnostics, transcript)
+    }
+
+    fn publish_round(&self, diagnostics: &[Diagnostic], transcript: String) -> io::Result<()> {
         self.sink.round(development::Round {
             diagnostics: diagnostics.to_vec(),
             transcript,
@@ -281,7 +258,7 @@ impl Terminal {
         })
     }
 
-    fn render_diagnostics(&self, diagnostics: &[tola_build::diagnostic::Diagnostic]) -> String {
+    fn render_diagnostics(&self, diagnostics: &[Diagnostic]) -> String {
         let sources = self.sources.read().ok().and_then(|slot| slot.clone());
         self.diagnostic_limits
             .render(diagnostics, sources.as_deref(), self.palette)
@@ -340,46 +317,7 @@ impl Terminal {
     }
 
     pub(crate) fn is_interactive(&self) -> bool {
-        self.prompt.is_interactive()
-    }
-
-    pub(crate) fn select_many(
-        &self,
-        text: &str,
-        choices: &[&str],
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<Vec<usize>> {
-        self.prompt
-            .select_many(text, choices, self.uses_color(), cancelled)
-    }
-
-    pub(crate) fn select_one(
-        &self,
-        text: &str,
-        choices: &[&str],
-        initial: usize,
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<usize> {
-        self.prompt
-            .select_one(text, choices, initial, self.uses_color(), cancelled)
-    }
-
-    pub(crate) fn read_line(
-        &self,
-        text: &str,
-        default: &str,
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<String> {
-        self.prompt.read_line(text, default, cancelled)
-    }
-
-    pub(crate) fn confirm(
-        &self,
-        text: &str,
-        default: bool,
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<bool> {
-        self.prompt.confirm(text, default, cancelled)
+        session::ProcessTerminal.is_interactive()
     }
 
     pub(crate) fn set_diagnostic_limits(
@@ -408,8 +346,8 @@ impl Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::sink::BufferedOutput;
-    use tola_build::diagnostic::Diagnostic;
+    use crate::terminal::sink::tests::testing::BufferedOutput;
+    use tola_diagnostic::Diagnostic;
 
     fn captured() -> (Terminal, BufferedOutput) {
         let (sink, output) = OutputSink::buffered();
@@ -467,29 +405,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn styled_block_is_not_escaped_twice() {
-        let (terminal, output) = captured_with_color();
-        terminal
-            .styled_block("Hooks:\n  \u{1b}[2mbefore-build\u{1b}[0m\n")
-            .unwrap();
-        terminal
-            .block("Hooks:\n  \u{1b}[2mbefore-build\u{1b}[0m")
-            .unwrap();
-
-        assert_eq!(
-            String::from_utf8(output.bytes()).unwrap(),
-            "Hooks:\n  \u{1b}[2mbefore-build\u{1b}[0m\nHooks:\n  before-build\n"
-        );
-    }
-
     /// The layout always comes from `codespan-reporting`; the buffer choice decides whether its
     /// style bytes survive, so a wrong buffer silently flattens every diagnostic.
     #[test]
     fn diagnostic_escapes_only_with_color() {
         let diagnostic = Diagnostic::new(
-            tola_build::codes::config::EXPERIMENTAL,
-            tola_build::diagnostic::Severity::Warning,
+            tola_diagnostic::codes::config::EXPERIMENTAL,
+            tola_diagnostic::Severity::Warning,
             "experimental configuration is enabled",
         );
 
@@ -517,18 +439,18 @@ mod tests {
         terminal.set_diagnostic_limits(Some(1), Some(0));
         let diagnostics = [
             Diagnostic::new(
-                tola_build::codes::typst::COMPILE,
-                tola_build::diagnostic::Severity::Error,
+                tola_diagnostic::codes::typst::COMPILE,
+                tola_diagnostic::Severity::Error,
                 "first failure",
             ),
             Diagnostic::new(
-                tola_build::codes::config::INVALID,
-                tola_build::diagnostic::Severity::Error,
+                tola_diagnostic::codes::config::INVALID,
+                tola_diagnostic::Severity::Error,
                 "second failure",
             ),
             Diagnostic::new(
-                tola_build::codes::config::WARNING,
-                tola_build::diagnostic::Severity::Warning,
+                tola_diagnostic::codes::config::WARNING,
+                tola_diagnostic::Severity::Warning,
                 "retained warning",
             ),
         ];
@@ -560,12 +482,11 @@ mod tests {
         terminal.status("first").unwrap();
         terminal.status("").unwrap();
         terminal.block("\n").unwrap();
-        terminal.blank_line().unwrap();
         terminal.block("second").unwrap();
 
         assert_eq!(
             String::from_utf8(output.bytes()).unwrap(),
-            "first\n\nsecond\n"
+            "first\nsecond\n"
         );
     }
 
@@ -575,11 +496,10 @@ mod tests {
         terminal.quiet = true;
         terminal.status("Building").unwrap();
         terminal.summary("Built").unwrap();
-        terminal.blank_line().unwrap();
         terminal
             .diagnostic(&Diagnostic::new(
-                tola_build::codes::typst::COMPILE,
-                tola_build::diagnostic::Severity::Error,
+                tola_diagnostic::codes::typst::COMPILE,
+                tola_diagnostic::Severity::Error,
                 "source could not compile",
             ))
             .unwrap();
@@ -594,8 +514,8 @@ mod tests {
         let (sink, output) = OutputSink::buffered();
         let terminal = Terminal::with_sink(sink, false, true);
         let diagnostic = Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Error,
+            tola_diagnostic::codes::typst::COMPILE,
+            tola_diagnostic::Severity::Error,
             "expected expression",
         );
         terminal

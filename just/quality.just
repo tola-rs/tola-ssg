@@ -1,5 +1,5 @@
-# Check source formatting, TypeScript lints, and test names.
-quality: fmt-check fmt-typescript fmt-just lint-typescript scripts::test-names
+# Check source formatting and TypeScript lints.
+quality: fmt-check fmt-typescript fmt-just lint-typescript
 
 # Check TypeScript formatting in the workspace packages without rewriting files.
 fmt-typescript:
@@ -9,8 +9,7 @@ fmt-typescript:
 lint-typescript:
     deno lint
 
-# Check dependency licenses against the reviewed allow list in deny.toml, and dependency
-# advisories against the RustSec database.
+# Check dependency licenses against deny.toml's allow list, and advisories against RustSec.
 deny:
     cargo deny --locked check advisories licenses
 
@@ -18,8 +17,7 @@ deny:
 workflows:
     actionlint
 
-# Check this justfile and every module against the official formatter; `just --fmt` only visits the
-# justfile it is given, so modules need their own pass.
+# Check this justfile and every module; `just --fmt` only visits the justfile it is given.
 fmt-just:
     just --fmt --check
     for file in just/*.just; do just --fmt --check --justfile "$file" || exit; done

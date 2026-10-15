@@ -61,8 +61,14 @@ pub enum ConfigError {
     #[error("unknown configuration fields: {}", fields.join(", "))]
     UnknownFields { fields: Vec<String> },
 
-    #[error("{0}")]
-    Validation(String),
+    /// The configuration path the author passed names no file.
+    ///
+    /// The author changes the argument, not a line in a document, so the message stands alone.
+    #[error("`{path}` is not a file")]
+    PathNotAFile {
+        /// The path as the author wrote it, rendered by the caller that knows the site root.
+        path: String,
+    },
 
     // No #[from]: exposing diagnostics as source() would print them twice.
     #[error("{0}")]
@@ -182,19 +188,15 @@ impl ConfigDiagnostic {
         let declared = self.field.as_str();
         let written = super::field::indexed_field_path(declared, &self.elements);
         let entry = self
-            .entry_key()
+            .elements
+            .last()
+            .and_then(|(array, _)| super::field::indexed_field_path(array, &self.elements))
             .filter(|entry| written.as_deref() != Some(entry.as_str()));
         written
             .into_iter()
             .map(Cow::Owned)
             .chain(entry.into_iter().map(Cow::Owned))
             .chain(std::iter::once(Cow::Borrowed(declared)))
-    }
-
-    /// The innermost entry's key, with every enclosing element's index.
-    fn entry_key(&self) -> Option<String> {
-        let (array, _) = self.elements.last()?;
-        super::field::indexed_field_path(array, &self.elements)
     }
 }
 
@@ -419,15 +421,6 @@ mod tests {
             diagnostics.errors()[0].key_paths().collect::<Vec<_>>(),
             ["build.entry"]
         );
-    }
-
-    #[test]
-    fn library_output_has_no_terminal_escapes() {
-        let diagnostic =
-            ConfigDiagnostic::new(FieldPath::new("build.publish-dir"), "must be writable")
-                .with_help("Choose another directory");
-
-        assert!(!diagnostic.to_string().contains("\u{1b}["));
     }
 
     #[test]

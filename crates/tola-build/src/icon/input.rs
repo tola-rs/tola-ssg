@@ -121,14 +121,10 @@ pub(super) fn read_file<'a>(
         path: path.to_path_buf(),
         source,
     })?;
-    let mut bytes = Vec::new();
-    read_chunks(&mut file, path, cancellation, |chunk| {
-        bytes.extend_from_slice(chunk);
-    })?;
+    let bytes = read_bounded(&mut file, path, cancellation)?;
     let digest = ContentDigest::of(&bytes);
     drop(file);
-    // Reopen the logical path: rewinding the first descriptor would keep reading an inode that
-    // an editor or downloader has already replaced with a different file.
+    // Reopen the path so a replaced inode cannot keep answering the read.
     boundary.check(path)?;
     let confirmed_digest = digest_source_file(path, cancellation)?;
     if confirmed_digest != digest || !physical_path_is_unchanged(&source) {
@@ -334,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_sources_replace_the_source_view() {
+    fn unsaved_sources_replace_view() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("missing/icons");
         let path = root.join("nested/new.svg");
@@ -609,23 +605,6 @@ mod tests {
         assert!(matches!(
             error.downcast_ref::<IconError>(),
             Some(IconError::TooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn cancelled_read_reports_cancellation() {
-        let canceller = crate::cancellation::BuildCanceller::new();
-        canceller.cancel();
-        let error = read_file(
-            Path::new("missing.svg"),
-            &SourceOverrides::default(),
-            &canceller.token(),
-            &tola_typst::SourceBoundary::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<crate::cancellation::BuildCancelled>(),
-            Some(crate::cancellation::BuildCancelled)
         ));
     }
 

@@ -208,6 +208,15 @@ impl<'a> LiveSource<'a> {
         if (self.cancelled)() { None } else { Some(()) }
     }
 
+    /// Polls cancellation once every [`CANCELLATION_POLL_INTERVAL`] visited items.
+    fn poll_every(&self, scanned: &mut usize) -> Option<()> {
+        *scanned += 1;
+        if scanned.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
+            self.poll()?;
+        }
+        Some(())
+    }
+
     fn tick(&mut self) {
         self.visits += 1;
         if self.visits.is_multiple_of(CANCELLATION_POLL_INTERVAL) && (self.cancelled)() {
@@ -241,40 +250,29 @@ impl<'a> LiveSource<'a> {
                 .map(|assignment| assignment.pattern().bindings()),
             _ => None,
         };
-        match node.kind() {
-            SyntaxKind::Closure => {
-                if let Some(closure) = node.cast::<ast::Closure>() {
-                    let body = node.find(closure.body().span());
-                    let child = self.push_region(region, body.as_ref(), node.range().start);
-                    for child_node in node.children() {
-                        let in_body = body
-                            .as_ref()
-                            .is_some_and(|body| body.range() == child_node.range());
-                        self.scan(&child_node, if in_body { child } else { region });
-                        if self.halt {
-                            return;
-                        }
-                    }
+        // A closure or `context` gives its body a region of its own; everything beside that body,
+        // parameters included, belongs to the region that creates it.
+        let body = match node.kind() {
+            SyntaxKind::Closure => node
+                .cast::<ast::Closure>()
+                .map(|closure| node.find(closure.body().span())),
+            SyntaxKind::Contextual => node
+                .cast::<ast::Contextual>()
+                .map(|contextual| node.find(contextual.body().span())),
+            _ => None,
+        };
+        if let Some(body) = body {
+            let child = self.push_region(region, body.as_ref(), node.range().start);
+            for child_node in node.children() {
+                let in_body = body
+                    .as_ref()
+                    .is_some_and(|body| body.range() == child_node.range());
+                self.scan(&child_node, if in_body { child } else { region });
+                if self.halt {
                     return;
                 }
             }
-            SyntaxKind::Contextual => {
-                if let Some(contextual) = node.cast::<ast::Contextual>() {
-                    let body = node.find(contextual.body().span());
-                    let child = self.push_region(region, body.as_ref(), node.range().start);
-                    for child_node in node.children() {
-                        let in_body = body
-                            .as_ref()
-                            .is_some_and(|body| body.range() == child_node.range());
-                        self.scan(&child_node, if in_body { child } else { region });
-                        if self.halt {
-                            return;
-                        }
-                    }
-                    return;
-                }
-            }
-            _ => {}
+            return;
         }
         for child in node.children() {
             self.scan(&child, region);
@@ -350,10 +348,7 @@ impl<'a> LiveSource<'a> {
         let names = self.names;
         let mut seen = 0usize;
         for occurrence in names.occurrences() {
-            seen += 1;
-            if seen.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
-                self.poll()?;
-            }
+            self.poll_every(&mut seen)?;
             if !matches!(occurrence.kind, OccurrenceKind::Name) {
                 continue;
             }
@@ -472,20 +467,22 @@ impl<'a> LiveSource<'a> {
         }
         let range = node.range();
         if let Some(declarations) = self.reads.remove(&(range.start, range.end)) {
-            let actions = &mut self.flows[region].nodes[at].actions;
-            for declaration in declarations {
-                actions.push(Action::Use(declaration));
-            }
+            self.push_uses(region, at, &declarations);
         }
     }
 
     /// Flushes the reads a closure or `context` captures: once, at its creation.
     fn flush_captures(&mut self, region: usize, creation: usize, at: usize) {
         if let Some(declarations) = self.captures.remove(&creation) {
-            let actions = &mut self.flows[region].nodes[at].actions;
-            for declaration in declarations {
-                actions.push(Action::Use(declaration));
-            }
+            self.push_uses(region, at, &declarations);
+        }
+    }
+
+    /// Records one use of each declaration read at one node.
+    fn push_uses(&mut self, region: usize, at: usize, declarations: &[usize]) {
+        let actions = &mut self.flows[region].nodes[at].actions;
+        for &declaration in declarations {
+            actions.push(Action::Use(declaration));
         }
     }
 
@@ -512,6 +509,27 @@ impl<'a> LiveSource<'a> {
         };
         self.creation_nodes[region] = Some(creation_node);
         self.lower_region(region, Some(body));
+    }
+
+    /// Lowers a loop body with this loop as the innermost `break` and `continue` target, so the
+    /// body's tail flows back to the loop's head.
+    fn lower_loop_body(
+        &mut self,
+        region: usize,
+        head: usize,
+        exit: usize,
+        entry: usize,
+        body: Option<LinkedNode<'_>>,
+    ) {
+        self.loops[region].push((exit, head));
+        let saved = self.in_header;
+        self.in_header = false;
+        let lowered = body.and_then(|body| self.walk(&body, region, entry));
+        self.in_header = saved;
+        self.loops[region].pop();
+        if let Some(tail) = lowered {
+            self.edge(region, tail, head);
+        }
     }
 
     fn walk(&mut self, node: &LinkedNode, region: usize, current: usize) -> Option<usize> {
@@ -579,33 +597,9 @@ impl<'a> LiveSource<'a> {
                     self.edge(region, head, body_entry);
                     self.edge(region, head, exit);
                     // A pattern binding happens per iteration, never on the zero-iteration exit.
-                    for name in for_loop.pattern().bindings() {
-                        let Some(range) = self.range_of(name.span()) else {
-                            continue;
-                        };
-                        let Some(declaration) = self.names.declared_at(range.start) else {
-                            continue;
-                        };
-                        let store_range = self.names.declarations()[declaration].range.clone();
-                        self.flows[region].nodes[body_entry]
-                            .actions
-                            .push(Action::Store {
-                                declaration,
-                                range: store_range,
-                                report: false,
-                            });
-                        self.init_nodes[declaration] = Some((region, body_entry));
-                    }
-                    self.loops[region].push((exit, head));
-                    let saved = self.in_header;
-                    self.in_header = false;
+                    self.store_bindings(region, body_entry, for_loop.pattern().bindings(), false);
                     let body = node.find(for_loop.body().span());
-                    let lowered = body.and_then(|body| self.walk(&body, region, body_entry));
-                    self.in_header = saved;
-                    self.loops[region].pop();
-                    if let Some(tail) = lowered {
-                        self.edge(region, tail, head);
-                    }
+                    self.lower_loop_body(region, head, exit, body_entry, body);
                     return Some(exit);
                 }
             }
@@ -629,16 +623,8 @@ impl<'a> LiveSource<'a> {
                         }
                         None => self.edge(region, head, exit),
                     }
-                    self.loops[region].push((exit, head));
-                    let saved = self.in_header;
-                    self.in_header = false;
                     let body = node.find(while_loop.body().span());
-                    let lowered = body.and_then(|body| self.walk(&body, region, body_entry));
-                    self.in_header = saved;
-                    self.loops[region].pop();
-                    if let Some(tail) = lowered {
-                        self.edge(region, tail, head);
-                    }
+                    self.lower_loop_body(region, head, exit, body_entry, body);
                     return Some(exit);
                 }
             }
@@ -706,21 +692,7 @@ impl<'a> LiveSource<'a> {
                         cur = self.walk(&init, region, cur)?;
                     }
                     let report = binding.init().is_some();
-                    for name in binding.kind().bindings() {
-                        let Some(range) = self.range_of(name.span()) else {
-                            continue;
-                        };
-                        let Some(declaration) = self.names.declared_at(range.start) else {
-                            continue;
-                        };
-                        let store_range = self.names.declarations()[declaration].range.clone();
-                        self.flows[region].nodes[cur].actions.push(Action::Store {
-                            declaration,
-                            range: store_range,
-                            report,
-                        });
-                        self.init_nodes[declaration] = Some((region, cur));
-                    }
+                    self.store_bindings(region, cur, binding.kind().bindings(), report);
                     return Some(cur);
                 }
             }
@@ -763,7 +735,8 @@ impl<'a> LiveSource<'a> {
                             // An assignment evaluates its right-hand side before it accesses its
                             // target (typst-eval `apply_assignment`), so a compound read observes
                             // the value that side stored.
-                            let order = if assignment_reads(op).is_some() {
+                            let stores = assignment_reads(op).is_some();
+                            let order = if stores {
                                 [binary.rhs(), binary.lhs()]
                             } else {
                                 [binary.lhs(), binary.rhs()]
@@ -773,9 +746,7 @@ impl<'a> LiveSource<'a> {
                                     cur = self.walk(&side, region, cur)?;
                                 }
                             }
-                            if assignment_reads(op).is_some()
-                                && let Some(ident) = written_ident(binary.lhs())
-                            {
+                            if stores && let Some(ident) = written_ident(binary.lhs()) {
                                 self.store_written(region, cur, ident);
                             }
                             return Some(cur);
@@ -790,6 +761,31 @@ impl<'a> LiveSource<'a> {
             cur = self.walk(&child, region, cur)?;
         }
         Some(cur)
+    }
+
+    /// Records the store each binding of one pattern makes at the node that binds it.
+    fn store_bindings(
+        &mut self,
+        region: usize,
+        node: usize,
+        bindings: Vec<ast::Ident<'_>>,
+        report: bool,
+    ) {
+        for name in bindings {
+            let Some(range) = self.range_of(name.span()) else {
+                continue;
+            };
+            let Some(declaration) = self.names.declared_at(range.start) else {
+                continue;
+            };
+            let store_range = self.names.declarations()[declaration].range.clone();
+            self.flows[region].nodes[node].actions.push(Action::Store {
+                declaration,
+                range: store_range,
+                report,
+            });
+            self.init_nodes[declaration] = Some((region, node));
+        }
     }
 
     /// Emits the store of one assignment target when it stores a binding of this region.
@@ -838,15 +834,24 @@ impl<'a> LiveSource<'a> {
                     None => Some(cur),
                 }
             }
-            ast::Pattern::Normal(expr) => {
-                let cur = self.walk(pattern_node, region, cur)?;
-                if let ast::Expr::Ident(ident) = expr {
-                    self.store_written(region, cur, ident);
-                }
-                Some(cur)
-            }
+            ast::Pattern::Normal(expr) => self.lower_target(region, pattern_node, expr, cur),
             ast::Pattern::Placeholder(_) => Some(cur),
         }
+    }
+
+    /// Lowers one pattern target, emitting the store it makes when it names a binding.
+    fn lower_target(
+        &mut self,
+        region: usize,
+        target: &LinkedNode,
+        expression: ast::Expr<'_>,
+        cur: usize,
+    ) -> Option<usize> {
+        let cur = self.walk(target, region, cur)?;
+        if let ast::Expr::Ident(ident) = expression {
+            self.store_written(region, cur, ident);
+        }
+        Some(cur)
     }
 
     /// Lowers one pattern item after the items before it were assigned.
@@ -872,11 +877,7 @@ impl<'a> LiveSource<'a> {
                 let Some(target) = item_node.find(expr.span()) else {
                     return Some(cur);
                 };
-                let cur = self.walk(&target, region, cur)?;
-                if let ast::Expr::Ident(ident) = expr {
-                    self.store_written(region, cur, ident);
-                }
-                Some(cur)
+                self.lower_target(region, &target, expr, cur)
             }
         }
     }
@@ -924,12 +925,8 @@ impl<'a> LiveSource<'a> {
             declarations.push(declaration);
         }
         let exit = self.flows[0].exit;
-        for declaration in declarations {
-            self.flows[0].nodes[exit]
-                .actions
-                .push(Action::Use(declaration));
-            self.exported.insert(declaration);
-        }
+        self.push_uses(0, exit, &declarations);
+        self.exported.extend(declarations);
     }
 
     fn solve(&mut self) -> Option<Liveness> {
@@ -950,10 +947,7 @@ impl<'a> LiveSource<'a> {
                 reach[flow.entry] = true;
                 let mut stack = vec![flow.entry];
                 while let Some(id) = stack.pop() {
-                    scanned += 1;
-                    if scanned.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
-                        self.poll()?;
-                    }
+                    self.poll_every(&mut scanned)?;
                     for &next in &flow.nodes[id].successors {
                         if !reach[next] {
                             reach[next] = true;
@@ -988,10 +982,7 @@ impl<'a> LiveSource<'a> {
                 if !node_reach[region][id] {
                     continue;
                 }
-                scanned += 1;
-                if scanned.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
-                    self.poll()?;
-                }
+                self.poll_every(&mut scanned)?;
                 for action in &node.actions {
                     if let Action::Use(declaration) = action {
                         used[*declaration] = true;
@@ -1032,17 +1023,8 @@ impl<'a> LiveSource<'a> {
             let mut stepped = 0usize;
             while let Some(id) = worklist.pop() {
                 queued[id] = false;
-                stepped += 1;
-                if stepped.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
-                    self.poll()?;
-                }
-                scratch.fill(0);
-                for &next in &flow.nodes[id].successors {
-                    let successor = &live[next];
-                    for (word, source) in scratch.iter_mut().zip(successor) {
-                        *word |= *source;
-                    }
-                }
+                self.poll_every(&mut stepped)?;
+                live_after(&flow.nodes[id].successors, &live, &mut scratch);
                 for action in flow.nodes[id].actions.iter().rev() {
                     match action {
                         Action::Use(declaration) => set_bit(&mut scratch, *declaration),
@@ -1064,17 +1046,8 @@ impl<'a> LiveSource<'a> {
                 if !reach[id] {
                     continue;
                 }
-                scanned += 1;
-                if scanned.is_multiple_of(CANCELLATION_POLL_INTERVAL) {
-                    self.poll()?;
-                }
-                scratch.fill(0);
-                for &next in &node.successors {
-                    let successor = &live[next];
-                    for (word, source) in scratch.iter_mut().zip(successor) {
-                        *word |= *source;
-                    }
-                }
+                self.poll_every(&mut scanned)?;
+                live_after(&node.successors, &live, &mut scratch);
                 for action in node.actions.iter().rev() {
                     match action {
                         Action::Use(declaration) => set_bit(&mut scratch, *declaration),
@@ -1160,6 +1133,16 @@ fn written_ident<'a>(target: ast::Expr<'a>) -> Option<ast::Ident<'a>> {
         ast::Expr::Ident(ident) => Some(ident),
         ast::Expr::Parenthesized(group) => written_ident(group.expr()),
         _ => None,
+    }
+}
+
+/// The live-after set of one node: every successor's live set, unioned.
+fn live_after(successors: &[usize], live: &[Vec<u64>], out: &mut [u64]) {
+    out.fill(0);
+    for &next in successors {
+        for (word, source) in out.iter_mut().zip(&live[next]) {
+            *word |= *source;
+        }
     }
 }
 

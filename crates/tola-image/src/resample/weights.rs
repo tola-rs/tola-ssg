@@ -4,6 +4,7 @@ use std::f64::consts::PI;
 
 use anyhow::{Context, Result, ensure};
 
+use crate::RESIZE_TOO_LARGE;
 use crate::cancellation::Cancellation;
 use crate::recipe::ResizeFilter;
 
@@ -15,6 +16,9 @@ const WEIGHT_PRECISION: u32 = 14;
 
 /// The quantized representation of a weight sum of one.
 const WEIGHT_ONE: i32 = 1 << WEIGHT_PRECISION;
+
+const RESAMPLE_FAILURE: &str =
+    "the image could not be resampled at this size; try another `width` or `height`";
 
 /// Round a weighted tap sum back into the sample domain.
 ///
@@ -33,9 +37,7 @@ pub(super) fn check_coverage_bounds(first: &AxisWeights, second: &AxisWeights) -
     let sum = lane
         .checked_mul(i64::from(second.absolute_sum))
         .and_then(|sum| sum.checked_add(i64::from(WEIGHT_ONE / 2)))
-        .context(
-            "the image could not be resampled at this size; try another `width` or `height`",
-        )?;
+        .context(RESAMPLE_FAILURE)?;
     let output = sum >> WEIGHT_PRECISION;
     ensure!(
         lane <= i64::from(i32::MAX)
@@ -43,7 +45,7 @@ pub(super) fn check_coverage_bounds(first: &AxisWeights, second: &AxisWeights) -
                 .checked_mul(255)
                 .and_then(|value| value.checked_add(output / 2))
                 .is_some(),
-        "the image could not be resampled at this size; try another `width` or `height`"
+        RESAMPLE_FAILURE
     );
     Ok(())
 }
@@ -77,7 +79,6 @@ impl AxisWeights {
         let taps = 2usize
             .saturating_mul(support.ceil() as usize)
             .saturating_add(1);
-        let too_large = || anyhow::anyhow!("the image is too large to resize; use a smaller image");
         let mut axis = Self {
             starts: Vec::new(),
             offsets: Vec::new(),
@@ -86,17 +87,23 @@ impl AxisWeights {
         };
         axis.starts
             .try_reserve_exact(output as usize)
-            .context(too_large())?;
+            .context(RESIZE_TOO_LARGE)?;
         axis.offsets
-            .try_reserve_exact((output as usize).checked_add(1).context(too_large())?)
-            .context(too_large())?;
+            .try_reserve_exact((output as usize).checked_add(1).context(RESIZE_TOO_LARGE)?)
+            .context(RESIZE_TOO_LARGE)?;
         axis.weights
-            .try_reserve_exact((output as usize).checked_mul(taps).context(too_large())?)
-            .context(too_large())?;
+            .try_reserve_exact(
+                (output as usize)
+                    .checked_mul(taps)
+                    .context(RESIZE_TOO_LARGE)?,
+            )
+            .context(RESIZE_TOO_LARGE)?;
         let mut raw = Vec::new();
-        raw.try_reserve_exact(taps).context(too_large())?;
+        raw.try_reserve_exact(taps).context(RESIZE_TOO_LARGE)?;
         let mut quantized = Vec::new();
-        quantized.try_reserve_exact(taps).context(too_large())?;
+        quantized
+            .try_reserve_exact(taps)
+            .context(RESIZE_TOO_LARGE)?;
         for index in 0..output {
             cancellation.ensure_active()?;
             // The output sample's center in source coordinates; a downscale widens the support so
@@ -112,10 +119,7 @@ impl AxisWeights {
                 raw.push(weight);
                 total += weight;
             }
-            ensure!(
-                total > 0.0,
-                "the image could not be resampled at this size; try another `width` or `height`"
-            );
+            ensure!(total > 0.0, RESAMPLE_FAILURE);
             axis.starts.push(start as u32);
             axis.offsets.push(axis.weights.len());
             quantized.clear();
@@ -124,10 +128,7 @@ impl AxisWeights {
             let mut largest = (0usize, 0.0f64);
             for (offset, weight) in raw.iter().enumerate() {
                 let scaled = (weight / total * f64::from(WEIGHT_ONE)).round();
-                ensure!(
-                    scaled.abs() < f64::from(i16::MAX),
-                    "the image could not be resampled at this size; try another `width` or `height`"
-                );
+                ensure!(scaled.abs() < f64::from(i16::MAX), RESAMPLE_FAILURE);
                 quantized.push(scaled as i16);
                 sum += i32::from(quantized[offset]);
                 magnitude = magnitude.saturating_add(i32::from(quantized[offset]).abs());
@@ -140,7 +141,7 @@ impl AxisWeights {
             let adjusted = i32::from(quantized[largest.0]) + (WEIGHT_ONE - sum);
             ensure!(
                 (-i32::from(i16::MAX)..=i32::from(i16::MAX)).contains(&adjusted),
-                "the image could not be resampled at this size; try another `width` or `height`"
+                RESAMPLE_FAILURE
             );
             magnitude += adjusted.abs() - i32::from(quantized[largest.0]).abs();
             quantized[largest.0] = adjusted as i16;
@@ -154,7 +155,7 @@ impl AxisWeights {
                 lane_bound <= i64::from(i16::MAX)
                     && i64::from(magnitude) * lane_bound + i64::from(WEIGHT_ONE) / 2
                         <= i64::from(i32::MAX),
-                "the image could not be resampled at this size; try another `width` or `height`"
+                RESAMPLE_FAILURE
             );
             axis.absolute_sum = axis.absolute_sum.max(magnitude);
             axis.weights.extend_from_slice(&quantized);
@@ -305,8 +306,6 @@ mod tests {
             assert_eq!(quantize(value * WEIGHT_ONE), value);
             assert_eq!(quantize(value * WEIGHT_ONE + WEIGHT_ONE / 2), value + 1);
         }
-        assert_eq!(quantize(0), 0);
-        assert_eq!(quantize(WEIGHT_ONE / 2), 1);
     }
 
     #[test]

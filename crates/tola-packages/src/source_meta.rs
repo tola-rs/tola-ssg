@@ -8,7 +8,6 @@
 //!
 //! Each event retains the marker's source span separately from the source it declares for.
 
-use std::fmt;
 use std::ops::Range;
 
 use tola_typst::CapturedValues;
@@ -37,17 +36,7 @@ const OWNER: &str = "owner";
 const VALUE: &str = "value";
 const INPUT_IDENTITY: &str = "input_identity";
 
-/// Declare the metadata of the source that calls this.
-///
-/// Ordinary function calls retain the source's declaration ownership, including helpers in
-/// another file. Importing or including a module does not transfer its declarations to the caller.
-///
-/// Only eager evaluation declares. Contextual realization can still produce the returned marker,
-/// but does not change the declarations used to select the site's documents.
-///
-/// The returned marker is an invisible metadata element carrying the same dictionary at this call
-/// site, labelled `tola-meta` so `query(<tola-meta>)` still finds it. Placing the marker any
-/// number of times declares nothing further.
+/// Declare the metadata of the source that calls this; only eager evaluation declares.
 #[func]
 pub(super) fn tola_meta(
     engine: &mut Engine,
@@ -73,10 +62,7 @@ pub struct CaptureHeader {
 }
 
 impl CaptureHeader {
-    /// The header `source` is captured under.
-    ///
-    /// `input_identity` is the host's name for the input this scan is taken under; the decoder
-    /// carries it back unchanged.
+    /// The header `source` is captured under; `input_identity` returns unchanged.
     pub fn new(source: FileId, input_identity: &str) -> Self {
         Self {
             owner: owner_of(source),
@@ -224,29 +210,39 @@ pub fn decode_capture(
 ///
 /// Every variant refuses the whole capture: the caller has no declaration to read, not an absent
 /// one.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
     /// The capture does not start with the header the host wrote: the channel received nothing,
     /// or a write took the first record.
+    #[error(
+        "the scan captured nothing in front of its `{}` header",
+        CAPTURE_PROTOCOL
+    )]
     MissingHeader,
     /// A record's protocol is not the one its place in the capture allows, including another
     /// version of a protocol this decoder reads.
+    #[error("the scan captured a `{found}` record where the protocol allows none")]
     UnknownProtocol {
         /// The protocol the record named.
         found: EcoString,
     },
     /// A capture header follows the records it must precede.
+    #[error("a capture header follows the records it must precede")]
     MisplacedHeader,
     /// A record is not a dictionary, so it carries no protocol fields.
+    #[error("a captured value is not a protocol record")]
     NotADictionary,
     /// A record misses a field the protocol gives it, or carries another type there.
+    #[error("a protocol record misses its `{field}`")]
     Malformed {
         /// The field that is missing or has another type.
         field: &'static str,
     },
     /// A record carried styles, which no protocol record does.
+    #[error("a protocol record carried styles")]
     Styled,
     /// The capture names a source other than the one being decoded.
+    #[error("the capture belongs to `{found}`, not `{expected}`")]
     ForeignOwner {
         /// The source the caller is decoding for.
         expected: EcoString,
@@ -254,50 +250,13 @@ pub enum CaptureError {
         found: EcoString,
     },
     /// A declaration's span cannot be located in its own source.
+    #[error("a declaration has no readable source location")]
     UnlocatedDeclaration,
     /// The channel held as many records as it can, so writes may have been dropped and no
     /// declaration can be read from what remains.
+    #[error("the capture channel is full, so a declaration may have been dropped")]
     Saturated,
 }
-
-impl fmt::Display for CaptureError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingHeader => write!(
-                formatter,
-                "the scan captured nothing in front of its `{CAPTURE_PROTOCOL}` header"
-            ),
-            Self::UnknownProtocol { found } => write!(
-                formatter,
-                "the scan captured a `{found}` record where the protocol allows none"
-            ),
-            Self::MisplacedHeader => {
-                write!(
-                    formatter,
-                    "a capture header follows the records it must precede"
-                )
-            }
-            Self::NotADictionary => write!(formatter, "a captured value is not a protocol record"),
-            Self::Malformed { field } => {
-                write!(formatter, "a protocol record misses its `{field}`")
-            }
-            Self::Styled => write!(formatter, "a protocol record carried styles"),
-            Self::ForeignOwner { expected, found } => write!(
-                formatter,
-                "the capture belongs to `{found}`, not `{expected}`"
-            ),
-            Self::UnlocatedDeclaration => {
-                write!(formatter, "a declaration has no readable source location")
-            }
-            Self::Saturated => write!(
-                formatter,
-                "the capture channel is full, so a declaration may have been dropped"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CaptureError {}
 
 /// One string field every protocol record carries.
 fn string_field<'a>(record: &'a Dict, field: &'static str) -> Result<&'a str, CaptureError> {
@@ -356,7 +315,7 @@ mod tests {
     use typst::Library;
     use typst::engine::Sink;
     use typst::foundations::{Array, Styles};
-    use typst::syntax::VirtualRoot;
+    use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
     use typst::utils::LazyHash;
 
     use super::*;
@@ -417,6 +376,8 @@ mod tests {
     fn host_inputs() -> HostInputs {
         HostInputs {
             site: Dict::new(),
+            modules: Dict::new(),
+            module_validation: None,
             asset_urls: Dict::new(),
             asset_origins: Dict::new(),
             source_records: Array::new(),
@@ -443,7 +404,7 @@ mod tests {
         }
 
         fn owned_namespaces(&self) -> &'static [&'static str] {
-            &[TOLA_NAMESPACE]
+            &[TOLA_NAMESPACE, "tola-modules"]
         }
     }
 
@@ -461,21 +422,138 @@ mod tests {
         Ok(Value::None)
     }
     #[test]
-    fn own_call_records_declaration() {
+    fn natives_use_calling_alias() {
+        let package: tola_typst::PackageSpec = "@tola-modules/notes:0.0.0".parse().unwrap();
+        let package_file = |path: &str| {
+            FileId::new(RootedPath::new(
+                VirtualRoot::Package(package.clone()),
+                VirtualPath::new(path).unwrap(),
+            ))
+        };
+        let mut files = FileMap::new();
+        files.insert(
+            file_id("main.typ"),
+            br#"
+#import "@tola/module:0.0.0": get-module
+#import "@tola-modules/notes:0.0.0": chosen
+#assert.eq(get-module("notes").name, "notes")
+#assert.eq(chosen.name, "notes")
+"#
+            .to_vec(),
+        );
+        files.insert(
+            package_file("/typst.toml"),
+            b"[package]\nname=\"notes\"\nversion=\"0.0.0\"\nentrypoint=\"lib.typ\"\n".to_vec(),
+        );
+        files.insert(
+            package_file("/lib.typ"),
+            br#"
+#import "@tola/module:0.0.0": get-module
+#let chosen = get-module()
+#assert.eq(get-module(auto).name, "notes")
+"#
+            .to_vec(),
+        );
+        let mut record = Dict::new();
+        record.insert("name".into(), Value::Str("notes".into()));
+        let mut inputs = host_inputs();
+        inputs.modules.insert("notes".into(), Value::Dict(record));
+        let world = virtual_site(files, SiteLibrary::new(inputs).shared());
+        let scan = scan_world_observed(&world, []);
+        assert!(scan.result().is_ok(), "{:?}", scan.result().err());
+    }
+
+    #[test]
+    fn lookup_rejects_unknown_alias() {
+        for (expression, expected) in [
+            (
+                "get-module()",
+                "must be called from a configured module package",
+            ),
+            (
+                "get-module(auto)",
+                "must be called from a configured module package",
+            ),
+            (
+                "get-module(\"missing\")",
+                "module `missing` is not configured",
+            ),
+        ] {
+            let text = format!("#import \"@tola/module:0.0.0\": get-module\n#{expression}");
+            let (_, result) = scan(&[("main.typ", &text)], Vec::new());
+            assert!(
+                result.result().is_err(),
+                "{expression} unexpectedly succeeded"
+            );
+            let diagnostics = format!("{:?}", result.result().err());
+            assert!(diagnostics.contains(expected), "{diagnostics}");
+        }
+    }
+
+    #[test]
+    fn uuid_natives_match_rfc_vector() {
+        let text = r#"
+#import "@tola/uuid:0.0.0": namespace, normalize, v5
+#assert.eq(normalize("550E8400E29B41D4A716446655440000"), "550e8400-e29b-41d4-a716-446655440000")
+#assert.eq(normalize("{550E8400-E29B-41D4-A716-446655440000}"), "550e8400-e29b-41d4-a716-446655440000")
+#assert.eq(normalize("urn:uuid:550e8400-e29b-41d4-a716-446655440000"), "550e8400-e29b-41d4-a716-446655440000")
+#assert.eq(v5(namespace.dns, "www.widgets.com"), "21f7f8de-8051-5b89-8680-0195ef798b6a")
+#assert.eq(v5(namespace.dns, "中文 é"), v5(namespace.dns, bytes("中文 é")))
+#assert(v5(namespace.dns, "é") != v5(namespace.dns, "é"))
+#assert.eq(namespace.url, "6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+#assert.eq(namespace.oid, "6ba7b812-9dad-11d1-80b4-00c04fd430c8")
+#assert.eq(namespace.x500, "6ba7b814-9dad-11d1-80b4-00c04fd430c8")
+"#;
+        let (_, result) = scan(&[("main.typ", text)], Vec::new());
+        assert!(result.result().is_ok(), "{:?}", result.result().err());
+    }
+
+    #[test]
+    fn uuid_natives_reject_invalid_values() {
+        for expression in [
+            "normalize(\"invalid\")",
+            "normalize(\" 550e8400-e29b-41d4-a716-446655440000\")",
+            "v5(\"invalid\", \"x\")",
+            "v5(namespace.dns, 1)",
+        ] {
+            let text =
+                format!("#import \"@tola/uuid:0.0.0\": namespace, normalize, v5\n#{expression}");
+            let (_, result) = scan(&[("main.typ", &text)], Vec::new());
+            assert!(
+                result.result().is_err(),
+                "{expression} unexpectedly succeeded"
+            );
+        }
+    }
+
+    #[test]
+    fn own_call_records_one_labelled_declaration() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
         let (world, scan) = scan(&[("main.typ", &text)], Vec::new());
         let capture = decode(&world, &scan).unwrap();
-        let declared = match capture.declaration {
-            Declaration::One(declared) => declared,
-            other => panic!("expected one declaration, decoded {other:?}"),
+        let Declaration::One(declared) = capture.declaration else {
+            panic!("the source declares once");
         };
         assert_eq!(
             declared.metadata.get("title"),
             Ok(&Value::Str("Post".into()))
         );
-        let source = scan.result().unwrap().source();
+        let result = scan.result().expect("the source evaluates");
         assert_eq!(
-            &source.text()[declared.range],
+            &result.source().text()[declared.range],
+            "tola-meta((title: \"Post\"))"
+        );
+
+        let declarations = result.metadata_declarations(DECLARATION_LABEL);
+        assert_eq!(declarations.len(), 1);
+        assert_eq!(declarations[0].value(), &Value::Dict(payload("Post")));
+        let range = result
+            .source()
+            .find(declarations[0].span())
+            .unwrap()
+            .range();
+        assert_eq!(
+            &result.source().text()[range],
             "tola-meta((title: \"Post\"))"
         );
     }
@@ -515,19 +593,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn declaration_marker_keeps_label_and_span() {
-        let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
-        let (_world, scan) = scan(&[("main.typ", &text)], Vec::new());
-        let result = scan.result().expect("the source evaluates");
-        let declarations = result.metadata_declarations(DECLARATION_LABEL);
-        assert_eq!(declarations.len(), 1);
-        assert_eq!(declarations[0].value(), &Value::Dict(payload("Post")));
-
-        let source = result.source();
-        let range = source.find(declarations[0].span()).unwrap().range();
-        assert_eq!(&source.text()[range], "tola-meta((title: \"Post\"))");
-    }
     #[test]
     fn foreign_owner_is_refused() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";

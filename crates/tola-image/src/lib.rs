@@ -16,16 +16,17 @@
 //! varies. Covered box reduction and prepared rows use eight-byte color–alpha products.
 //! Color conversion and encoding may need their own buffers; rows share plane ownership.
 //! Hosts must bound the images and geometries they admit concurrently and the worker count.
-//! Retained convolution scratch is capped at 2 MiB per thread. Source decoding requires each of
-//! its raw and normalization planes to fit the decoder's 512 MiB allotment; codec scratch remains
-//! best-effort, and this budget does not cover resampling, encoding, or other images a host keeps
-//! alive.
+//! Retained convolution scratch is capped at 2 MiB per thread. Source decoding requires the
+//! larger of its raw and in-place normalized planes to fit the decoder's 512 MiB allotment;
+//! codec scratch and allocator growth remain best-effort. This budget does not cover resampling,
+//! encoding, or other images a host keeps alive.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 mod cancellation;
 mod codec;
+mod error;
 mod recipe;
 mod resample;
 mod rows;
@@ -34,9 +35,10 @@ pub use cancellation::{
     Cancellation, ImageCancelled, NO_CANCELLATION, NoCancellation, ensure_active_if_present,
 };
 pub use codec::{DecodedSource, inspect, render};
+pub use error::{ImageError, ImageResult, ReexportProblem, SizeLimit};
 pub use recipe::{
-    Background, CropAnchor, ImageRecipe, OutputFormat, PixelRecipe, ResizeFilter, ResizeOperation,
-    ResizeOptions, SvgRender, VectorGeometry,
+    Background, CropAnchor, ImageRecipe, ImageRequestError, OutputFormat, PixelRecipe,
+    ResizeFilter, ResizeOperation, ResizeOptions, SvgRender, VectorGeometry,
 };
 pub use resample::ResampledPixels;
 
@@ -127,29 +129,41 @@ fn check_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
 pub(crate) const HOLD_IN_MEMORY: &str =
     "the image is too large to hold in memory; use a smaller image";
 
+pub(crate) const RESIZE_TOO_LARGE: &str = "the image is too large to resize; use a smaller image";
+
 /// Byte length of one decoded plane, rejecting sizes that cannot be addressed.
 pub(crate) fn pixel_bytes(
     width: u32,
     height: u32,
     bytes_per_pixel: usize,
 ) -> anyhow::Result<usize> {
-    use anyhow::Context;
-
-    (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
-        .filter(|bytes| *bytes <= isize::MAX as usize)
-        .context(HOLD_IN_MEMORY)
+    let allowed = isize::MAX as u64;
+    let actual = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(bytes_per_pixel as u64);
+    if actual > allowed {
+        return Err(ImageError::TooLarge {
+            limit: SizeLimit::HoldInMemory,
+            allowed,
+            actual,
+        }
+        .into());
+    }
+    Ok(actual as usize)
 }
 
 pub(crate) fn rgba_buffer(width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    zeroed_plane(pixel_bytes(width, height, 4)?)
+}
+
+/// A zeroed buffer of `bytes` bytes.
+pub(crate) fn zeroed_plane(bytes: usize) -> anyhow::Result<Vec<u8>> {
     use anyhow::Context;
 
-    let bytes = pixel_bytes(width, height, 4)?;
-    let mut rgba = Vec::new();
-    rgba.try_reserve_exact(bytes).context(HOLD_IN_MEMORY)?;
-    rgba.resize(bytes, 0);
-    Ok(rgba)
+    let mut plane = Vec::new();
+    plane.try_reserve_exact(bytes).context(HOLD_IN_MEMORY)?;
+    plane.resize(bytes, 0);
+    Ok(plane)
 }
 
 #[cfg(test)]

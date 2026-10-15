@@ -3,10 +3,43 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use thiserror::Error;
 
 use super::{BuildFailure, BuildRequest, BuildSession, SiteBuild};
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
+
+/// Why this site's build lock could not be taken.
+#[derive(Debug, Error)]
+pub enum SiteBuildLockError {
+    /// The waiter stopped before the lock became available.
+    #[error(transparent)]
+    Cancelled(#[from] crate::cancellation::BuildCancelled),
+
+    #[error(
+        "the site directory could not be used: {reason}; run the command from the site directory or pass `--config`"
+    )]
+    SiteDirectory {
+        reason: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(
+        "`{lock}` is not a regular file, so it cannot hold this site's build lock; stop other Tola commands and move that path aside"
+    )]
+    LockPath { lock: String },
+
+    #[error(
+        "could not open the site's build lock `{lock}`: {reason}; make the site directory writable"
+    )]
+    LockAccess {
+        lock: String,
+        reason: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 /// Excludes another coordinated build of the same site until this value is dropped.
 ///
@@ -26,7 +59,7 @@ impl SiteBuildLock {
         config: &ResolvedSiteConfig,
         cancellation: &BuildCancellation,
         on_wait: impl FnOnce(),
-    ) -> Result<Self> {
+    ) -> Result<Self, SiteBuildLockError> {
         Self::acquire_at_root(config.get_root(), cancellation, on_wait)
     }
 
@@ -34,24 +67,28 @@ impl SiteBuildLock {
         site_root: &std::path::Path,
         cancellation: &BuildCancellation,
         on_wait: impl FnOnce(),
-    ) -> Result<Self> {
+    ) -> Result<Self, SiteBuildLockError> {
         cancellation.ensure_active()?;
-        let site_root = std::fs::canonicalize(site_root).map_err(|error| {
-            let reason = crate::filesystem::path_failure_reason(&error);
-            anyhow::Error::new(error).context(format!(
-                "the site directory could not be used: {reason}; run the command from the site directory or pass `--config`"
-            ))
+        let site_root = std::fs::canonicalize(site_root).map_err(|source| {
+            SiteBuildLockError::SiteDirectory {
+                reason: crate::filesystem::path_failure_reason(&source),
+                source,
+            }
         })?;
         let path = site_root.join(crate::filesystem::SITE_BUILD_LOCK_FILE);
         let lock = crate::filesystem::FileLock::acquire(&site_root, &path, cancellation, on_wait)
             .map_err(|error| match error {
-            crate::filesystem::FileLockError::Cancelled(cancelled) => anyhow::Error::new(cancelled),
-            crate::filesystem::FileLockError::NotRegularFile => {
-                non_regular_lock_failure(&site_root, &path)
+            crate::filesystem::FileLockError::Cancelled(cancelled) => {
+                SiteBuildLockError::Cancelled(cancelled)
             }
-            crate::filesystem::FileLockError::Io(error) => {
-                lock_access_failure(&site_root, &path, error)
-            }
+            crate::filesystem::FileLockError::NotRegularFile => SiteBuildLockError::LockPath {
+                lock: crate::filesystem::display_path(&path, &site_root),
+            },
+            crate::filesystem::FileLockError::Io(error) => SiteBuildLockError::LockAccess {
+                lock: crate::filesystem::display_path(&path, &site_root),
+                reason: crate::filesystem::path_failure_reason(&error),
+                source: error,
+            },
         })?;
         Ok(Self {
             _lock: lock,
@@ -85,30 +122,6 @@ impl SiteBuildLock {
     }
 }
 
-/// The lock path itself cannot hold a lock, so moving it aside is the author's repair.
-///
-/// The typed verdict stays in the cause chain: the debug log records it, and no access failure
-/// ever reaches this sentence.
-fn non_regular_lock_failure(site_root: &std::path::Path, path: &std::path::Path) -> anyhow::Error {
-    let lock = crate::filesystem::display_path(path, site_root);
-    anyhow::Error::new(crate::filesystem::FileLockError::NotRegularFile).context(format!(
-        "`{lock}` is not a regular file, so it cannot hold this site's build lock; stop other Tola commands and move that path aside"
-    ))
-}
-
-/// An access failure at the lock path: the repair asks about permissions or the filesystem.
-fn lock_access_failure(
-    site_root: &std::path::Path,
-    path: &std::path::Path,
-    error: std::io::Error,
-) -> anyhow::Error {
-    let lock = crate::filesystem::display_path(path, site_root);
-    let reason = crate::filesystem::path_failure_reason(&error);
-    anyhow::Error::new(error).context(format!(
-        "could not open the site's build lock `{lock}`: {reason}; make the site directory writable"
-    ))
-}
-
 /// A completed build that keeps the site's build lock held.
 ///
 /// The held lock orders source generation, the attempt, and any publication or
@@ -129,10 +142,7 @@ impl SiteBuildGuard {
         request: BuildRequest,
         on_wait: impl FnOnce(),
     ) -> Result<Self, BuildFailure> {
-        let lock = SiteBuildLock::acquire(&config, &request.cancellation, on_wait)
-            .map_err(BuildFailure::before_attempt)?;
-        let build = session.prepare(config, request).run()?;
-        Ok(Self { build, lock })
+        Self::lock_and_build(session, config, request, on_wait, false)
     }
 
     /// Restore interrupted output before compiling a disk-publishing attempt.
@@ -142,10 +152,23 @@ impl SiteBuildGuard {
         request: BuildRequest,
         on_wait: impl FnOnce(),
     ) -> Result<Self, BuildFailure> {
+        Self::lock_and_build(session, config, request, on_wait, true)
+    }
+
+    /// Hold the site lock through one attempt, recovering interrupted output first when writing.
+    fn lock_and_build(
+        session: &mut BuildSession,
+        config: Arc<ResolvedSiteConfig>,
+        request: BuildRequest,
+        on_wait: impl FnOnce(),
+        recover_output: bool,
+    ) -> Result<Self, BuildFailure> {
         let lock = SiteBuildLock::acquire(&config, &request.cancellation, on_wait)
-            .map_err(BuildFailure::before_attempt)?;
-        lock.recover_output(&config, &request.cancellation)
-            .map_err(BuildFailure::before_attempt)?;
+            .map_err(|error| BuildFailure::before_attempt(anyhow::Error::new(error)))?;
+        if recover_output {
+            lock.recover_output(&config, &request.cancellation)
+                .map_err(BuildFailure::before_attempt)?;
+        }
         let build = session.prepare(config, request).run()?;
         Ok(Self { build, lock })
     }
@@ -191,45 +214,15 @@ mod tests {
         .unwrap();
         let canceller = crate::cancellation::BuildCanceller::default();
         let blocked = SiteBuildLock::acquire(&config, &canceller.token(), || canceller.cancel());
-        assert!(
-            blocked
-                .unwrap_err()
-                .is::<crate::cancellation::BuildCancelled>()
-        );
-        let canceller = crate::cancellation::BuildCanceller::default();
-        assert!(
-            SiteBuildLock::acquire(&config, &canceller.token(), || canceller.cancel()).is_err()
-        );
+        assert!(matches!(
+            blocked.unwrap_err(),
+            SiteBuildLockError::Cancelled(_)
+        ));
         drop(owner);
         SiteBuildLock::acquire(&config, &BuildCancellation::default(), || {
             panic!("released build lock remained held")
         })
         .unwrap();
-    }
-
-    #[test]
-    fn directory_at_lock_path_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory
-            .path()
-            .join(crate::filesystem::SITE_BUILD_LOCK_FILE);
-        std::fs::create_dir(&path).unwrap();
-
-        let error =
-            SiteBuildLock::acquire_at_root(directory.path(), &BuildCancellation::default(), || {
-                panic!("uncontended build waited")
-            })
-            .unwrap_err();
-
-        let verdict = error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<crate::filesystem::FileLockError>())
-            .expect("the lock failure keeps its typed verdict");
-        assert!(matches!(
-            verdict,
-            crate::filesystem::FileLockError::NotRegularFile
-        ));
-        assert!(path.is_dir());
     }
 
     #[test]

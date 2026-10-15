@@ -98,11 +98,15 @@ impl DependencyPathIndex {
     }
 }
 
-fn path_aliases(path: &Path) -> impl Iterator<Item = PathBuf> {
+pub(super) fn path_aliases(path: &Path) -> impl Iterator<Item = PathBuf> {
     let lexical = crate::filesystem::lexical_path_identity(path);
     let normalized = crate::filesystem::normalize_path(path);
-    let distinct = lexical != normalized;
-    std::iter::once(lexical).chain(distinct.then_some(normalized))
+    // A deleted descendant's parent still reveals the identity behind an alias.
+    let physical = crate::filesystem::normalize_existing_prefix(path);
+    let mut aliases = vec![lexical, normalized, physical];
+    aliases.sort_unstable();
+    aliases.dedup();
+    aliases.into_iter()
 }
 
 fn absolute_lexical_path(path: &Path) -> PathBuf {
@@ -111,5 +115,37 @@ fn absolute_lexical_path(path: &Path) -> PathBuf {
         lexical
     } else {
         std::path::absolute(lexical).unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn deleted_alias_selects_physical_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        let alias = directory.path().join("alias");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        fs::write(real.join("input.typ"), "content").unwrap();
+        let physical = real.join("input.typ").canonicalize().unwrap();
+        let mut index = DependencyPathIndex::default();
+        index.add_reader_identity(&physical, 0);
+        let readers = BTreeMap::from([(
+            TypstDependencyReader::SiteProgram,
+            DependencyReaderEvidence {
+                reads: Vec::new(),
+                package_checks: Vec::new(),
+            },
+        )]);
+        fs::remove_file(alias.join("input.typ")).unwrap();
+        assert_eq!(
+            index.readers_for(&[alias.join("input.typ")], &readers),
+            vec![TypstDependencyReader::SiteProgram]
+        );
     }
 }

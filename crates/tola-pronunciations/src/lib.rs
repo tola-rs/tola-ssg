@@ -49,13 +49,7 @@ mod unihan;
 /// over the characters it is spelled with. Pronunciations are separated from each other,
 /// and text no table names keeps its own characters.
 pub fn chinese_pronunciations(text: &str) -> Cow<'_, str> {
-    if sources::CHINESE_TABLES.is_empty() || !han::contains_han(text) {
-        return Cow::Borrowed(text);
-    }
-    match table::rewrite(sources::CHINESE_TABLES, text) {
-        Some(rewritten) => Cow::Owned(rewritten),
-        None => Cow::Borrowed(text),
-    }
+    pronunciations(sources::CHINESE_TABLES, text)
 }
 
 /// Rewrite `text` into the pronunciations its words have in Japanese.
@@ -64,10 +58,18 @@ pub fn chinese_pronunciations(text: &str) -> Cow<'_, str> {
 /// `東京` is `とうきょう`, which a rule set reads as Latin.
 /// Text no table names keeps its own characters.
 pub fn japanese_pronunciations(text: &str) -> Cow<'_, str> {
-    if sources::JAPANESE_TABLES.is_empty() || !han::contains_han(text) {
+    pronunciations(sources::JAPANESE_TABLES, text)
+}
+
+/// `text` rewritten by the pronunciations `tables` name, or borrowed when none of them does.
+///
+/// Text with no character a generated key is written with holds no key, so it answers before any
+/// table is parsed.
+fn pronunciations<'a>(tables: &[&table::PronunciationTable], text: &'a str) -> Cow<'a, str> {
+    if tables.is_empty() || !han::contains_han(text) {
         return Cow::Borrowed(text);
     }
-    match table::rewrite(sources::JAPANESE_TABLES, text) {
+    match table::rewrite(tables, text) {
         Some(rewritten) => Cow::Owned(rewritten),
         None => Cow::Borrowed(text),
     }

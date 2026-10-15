@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tola_build::diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::{Diagnostic, Severity};
 
 use super::Palette;
 use super::diagnostic;
@@ -54,26 +54,32 @@ impl DiagnosticLimits {
         let error_limit = self.error_limit.load(Ordering::Relaxed);
         let mut warnings = 0usize;
         let mut errors = 0usize;
-        let mut rendered = [Severity::Error, Severity::Warning]
-            .into_iter()
-            .flat_map(|severity| {
-                diagnostics
-                    .iter()
-                    .filter(move |diagnostic| diagnostic.severity == severity)
-            })
-            .filter(|diagnostic| match diagnostic.severity {
-                Severity::Warning => {
-                    warnings += 1;
-                    warnings <= warning_limit
-                }
-                Severity::Error => {
-                    errors += 1;
-                    errors <= error_limit
-                }
-            })
-            .map(|diagnostic| diagnostic::render(diagnostic, sources, palette.uses_color()))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut rendered = [
+            Severity::Error,
+            Severity::Warning,
+            Severity::Info,
+            Severity::Hint,
+        ]
+        .into_iter()
+        .flat_map(|severity| {
+            diagnostics
+                .iter()
+                .filter(move |diagnostic| diagnostic.severity == severity)
+        })
+        .filter(|diagnostic| match diagnostic.severity {
+            Severity::Warning => {
+                warnings += 1;
+                warnings <= warning_limit
+            }
+            Severity::Error => {
+                errors += 1;
+                errors <= error_limit
+            }
+            Severity::Info | Severity::Hint => true,
+        })
+        .map(|diagnostic| diagnostic::render(diagnostic, sources, palette.uses_color()))
+        .collect::<Vec<_>>()
+        .join("\n");
         for (hidden, severity) in [
             (errors.saturating_sub(error_limit), "error"),
             (warnings.saturating_sub(warning_limit), "warning"),
@@ -98,7 +104,7 @@ impl DiagnosticLimits {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_build::codes::typst::COMPILE;
+    use tola_diagnostic::codes::typst::COMPILE;
 
     #[test]
     fn errors_lead_each_limited_batch() {

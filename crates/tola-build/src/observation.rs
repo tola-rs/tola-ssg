@@ -6,7 +6,7 @@
 
 /// Filesystem membership range observed by a build input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InputScope {
+pub enum InputPathScope {
     Children,
     Exact,
     Recursive,
@@ -17,7 +17,7 @@ pub enum InputScope {
 pub struct ObservedInputPath {
     path: std::path::PathBuf,
     input: InputKind,
-    scope: InputScope,
+    scope: InputPathScope,
     required: bool,
 }
 
@@ -28,7 +28,7 @@ impl ObservedInputPath {
     pub fn input(&self) -> InputKind {
         self.input
     }
-    pub fn scope(&self) -> InputScope {
+    pub fn scope(&self) -> InputPathScope {
         self.scope
     }
     pub fn required(&self) -> bool {
@@ -71,7 +71,7 @@ impl InputObservation {
             .extend(paths.into_iter().map(|path| ObservedInputPath {
                 path,
                 input,
-                scope: InputScope::Exact,
+                scope: InputPathScope::Exact,
                 required,
             }));
     }
@@ -80,7 +80,7 @@ impl InputObservation {
     pub(crate) fn path_pair(
         &mut self,
         input: InputKind,
-        scope: InputScope,
+        scope: InputPathScope,
         required: bool,
         logical_path: &std::path::Path,
         physical_path: &std::path::Path,
@@ -102,8 +102,8 @@ impl InputObservation {
     ) {
         for boundary in evidence.boundaries() {
             let scope = match boundary.kind() {
-                crate::filesystem::FilesystemSourceKind::File => InputScope::Exact,
-                crate::filesystem::FilesystemSourceKind::Tree => InputScope::Recursive,
+                crate::filesystem::FilesystemSourceKind::File => InputPathScope::Exact,
+                crate::filesystem::FilesystemSourceKind::Tree => InputPathScope::Recursive,
             };
             self.path_pair(
                 input,
@@ -120,6 +120,7 @@ impl InputObservation {
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub enum InputKind {
     TypstPhysicalReads,
+    ModuleManifests,
     TypstPackageSelection,
     ContentInventory,
     ConfiguredAssets,
@@ -133,6 +134,7 @@ impl InputKind {
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
             Self::TypstPhysicalReads => "files read by the Bundle",
+            Self::ModuleManifests => "module manifests",
             Self::TypstPackageSelection => "Typst packages",
             Self::ContentInventory => "`build.content-dir` files",
             Self::ConfiguredAssets => "`assets` files",

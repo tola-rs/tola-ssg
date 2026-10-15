@@ -46,7 +46,7 @@ struct DocumentReferences {
 #[derive(Clone)]
 pub(crate) struct UncheckedBase {
     value: String,
-    origin: Option<crate::diagnostic::Location>,
+    origin: Option<tola_diagnostic::Location>,
 }
 
 struct ReferenceIter<'a> {
@@ -228,7 +228,7 @@ impl UnresolvedReferenceReason {
             }),
             Self::FragmentMissing { available, .. } if !available.is_empty() => Some(format!(
                 "Choose an existing id: {}",
-                crate::diagnostic::bounded_listing(available, ("id", "ids"))
+                tola_diagnostic::bounded_listing(available, ("id", "ids"))
             )),
             Self::DocumentNotAllowed { .. } => {
                 Some("Point it at a generated file such as a stylesheet, script, or image".into())
@@ -254,7 +254,7 @@ pub struct Reference {
     html_context: String,
     category: ReferenceCategory,
     resolution: ReferenceResolution,
-    origin: Option<crate::diagnostic::Location>,
+    origin: Option<tola_diagnostic::Location>,
 }
 
 impl Reference {
@@ -271,7 +271,7 @@ impl Reference {
     }
 
     /// Absent when the element came from outside the site, such as a package.
-    pub fn origin(&self) -> Option<&crate::diagnostic::Location> {
+    pub fn origin(&self) -> Option<&tola_diagnostic::Location> {
         self.origin.as_ref()
     }
 
@@ -286,7 +286,7 @@ impl Reference {
 
 impl References {
     pub(crate) fn from_site(
-        snapshot: &SiteIndex,
+        index: &SiteIndex,
         url_mount: &SiteUrlMount,
         world: &tola_typst::TypstWorld,
         cancellation: &BuildCancellation,
@@ -294,10 +294,9 @@ impl References {
     ) -> Result<Self, BuildCancelled> {
         cancellation.ensure_active()?;
         let previous = previous.filter(|previous| &previous.0.url_mount == url_mount);
-        // An unchanged group keeps its predecessors by Arc rather than copying references.
         let mut changed_groups = None;
         let mut page_count = 0;
-        for (page, inventory) in snapshot.html_pages() {
+        for (page, inventory) in index.html_pages() {
             cancellation.ensure_active()?;
             let cached = previous.and_then(|previous| {
                 previous
@@ -306,48 +305,41 @@ impl References {
                     .get(&page.output)
                     .map(|&position| &previous.0.groups[position])
             });
-            let reusable = if let Some(cached) = cached {
-                cached.same_reference_semantics(page, inventory, cancellation)?
+            // A group is reusable only while every read that shaped it still answers the same way.
+            let retained = match cached {
+                Some(cached) => (cached.same_reference_semantics(page, inventory, cancellation)?
                     && cached
                         .dependencies
-                        .unchanged(snapshot.address(), cancellation)?
-            } else {
-                false
+                        .unchanged(index.address(), cancellation)?)
+                .then_some(cached),
+                None => None,
             };
-            let refreshed = if reusable {
-                cached
-                    .expect("reusable groups have prior evidence")
-                    .refresh_origins(inventory, world, cancellation)?
-            } else {
-                None
+            // A retained group whose source positions moved is rebuilt around the same references.
+            let group = match retained {
+                Some(cached) => match cached.refresh_origins(inventory, world, cancellation)? {
+                    Some(refreshed) => Arc::new(refreshed),
+                    None => Arc::clone(cached),
+                },
+                None => Arc::new(DocumentReferences::resolve(
+                    index,
+                    page,
+                    inventory,
+                    url_mount,
+                    world,
+                    cancellation,
+                )?),
             };
-            let unchanged_prefix = reusable
-                && refreshed.is_none()
-                && previous
-                    .and_then(|previous| previous.0.groups.get(page_count))
-                    .zip(cached)
-                    .is_some_and(|(at_position, cached)| Arc::ptr_eq(at_position, cached));
+            // An unchanged group keeps its predecessor by Arc rather than by copying references.
+            let unchanged_prefix = previous
+                .and_then(|previous| previous.0.groups.get(page_count))
+                .is_some_and(|at_position| Arc::ptr_eq(at_position, &group));
             if changed_groups.is_some() || !unchanged_prefix {
                 let groups = changed_groups.get_or_insert_with(|| {
                     previous.map_or_else(Vec::new, |previous| {
                         previous.0.groups[..page_count].to_vec()
                     })
                 });
-                groups.push(if reusable {
-                    refreshed.map_or_else(
-                        || Arc::clone(cached.expect("reusable groups have prior evidence")),
-                        Arc::new,
-                    )
-                } else {
-                    Arc::new(DocumentReferences::resolve(
-                        snapshot,
-                        page,
-                        inventory,
-                        url_mount,
-                        world,
-                        cancellation,
-                    )?)
-                });
+                groups.push(group);
             }
             page_count += 1;
         }
@@ -499,12 +491,12 @@ impl DocumentReferences {
                 .base_href()
                 .and_then(|base| crate::compiler::source_location(world, base.span())),
         });
-        let refreshed = references.is_some()
-            || unchecked_base.as_ref().and_then(|base| base.origin.clone())
-                != self
-                    .unchecked_base
-                    .as_ref()
-                    .and_then(|base| base.origin.clone());
+        let base_moved = unchecked_base.as_ref().map(|base| base.origin.as_ref())
+            != self
+                .unchecked_base
+                .as_ref()
+                .map(|base| base.origin.as_ref());
+        let refreshed = references.is_some() || base_moved;
         Ok(refreshed.then(|| Self {
             output: self.output.clone(),
             permalink: self.permalink.clone(),
@@ -517,7 +509,7 @@ impl DocumentReferences {
     }
 
     fn resolve(
-        snapshot: &SiteIndex,
+        index: &SiteIndex,
         page: &HtmlPage,
         inventory: &Arc<tola_typst::HtmlDocumentInventory>,
         url_mount: &SiteUrlMount,
@@ -530,7 +522,7 @@ impl DocumentReferences {
         for reference in inventory.references() {
             cancellation.ensure_active()?;
             let resolved = resolve_reference(
-                snapshot,
+                index,
                 page,
                 inventory,
                 reference,
@@ -576,7 +568,7 @@ fn unchecked_base(
 }
 
 fn resolve_reference(
-    snapshot: &SiteIndex,
+    index: &SiteIndex,
     page: &HtmlPage,
     inventory: &tola_typst::HtmlDocumentInventory,
     reference: &tola_typst::HtmlReference,
@@ -613,15 +605,15 @@ fn resolve_reference(
             },
         ),
         Ok(tola_address::ResolvedBrowserReference::Site(site)) => {
-            match snapshot.address().resolve_route(
+            match index.address().resolve_route(
                 &site.route,
                 site.fragment.as_deref().unwrap_or_default(),
                 reference_target(reference),
-                Some(&mut *dependencies),
+                &mut *dependencies,
             ) {
                 AddressResolution::Found { url } => {
                     let resolution = resolved_media_type(
-                        snapshot,
+                        index,
                         reference,
                         ReferenceTarget::new(url, site),
                         dependencies,
@@ -641,12 +633,12 @@ fn resolve_reference(
                     default_category,
                     ReferenceResolution::Unresolved {
                         reason: UnresolvedReferenceReason::TargetMissing {
-                            suggestion: snapshot
+                            suggestion: index
                                 .address()
                                 .directory_page_suggestion(
                                     &site.route,
                                     reference_target(reference),
-                                    &mut Some(&mut *dependencies),
+                                    &mut *dependencies,
                                 )
                                 .map(|route| {
                                     SiteReference { route, ..site }.to_browser_url(url_mount, None)
@@ -769,7 +761,7 @@ fn reference_target(reference: &tola_typst::HtmlReference) -> RequiredResourceKi
 }
 
 fn resolved_media_type(
-    snapshot: &SiteIndex,
+    index: &SiteIndex,
     reference: &tola_typst::HtmlReference,
     target: ReferenceTarget,
     dependencies: &mut AddressDependencies,
@@ -777,12 +769,8 @@ fn resolved_media_type(
     let Some(required) = reference_expectation(reference.reference_use()).media_type else {
         return ReferenceResolution::Found { target };
     };
-    let Resource::Asset { route } = snapshot
-        .address()
-        .get_by_url(target.url())
-        .expect("a found URL has a registered resource")
-    else {
-        unreachable!("typed resource references reject document targets before media validation");
+    let Some(Resource::Asset { route }) = index.address().get_by_url(target.url()) else {
+        unreachable!("a media-typed reference resolves to a registered asset");
     };
     let declared = route.declaration().media_type();
     dependencies.observe_media_type(target.url(), declared);
@@ -866,42 +854,14 @@ mod tests {
             .unwrap();
         let cancellation = tola_typst::BundleCancellation::default();
         let compilation = tola_typst::compile_bundle_world(&world, &cancellation).unwrap();
-        let document_outputs = compilation
-            .documents()
-            .map(|document| {
-                crate::compiler::documents::output_path_for_virtual(document.path()).unwrap()
-            })
-            .collect();
-        let mut documents = Vec::new();
-        let mut inventories = std::collections::BTreeMap::new();
-        for document in compilation
-            .documents()
-            .filter(|document| document.kind() == tola_typst::BundleDocumentKind::Html)
-        {
-            let output =
-                crate::compiler::documents::output_path_for_virtual(document.path()).unwrap();
-            let permalink = tola_address::route_for_output(&output);
-            let inventory = document.html_inventory(&cancellation).unwrap().unwrap();
-            documents.push(crate::site::HtmlPage {
-                permalink,
-                output: output.clone(),
-                properties: typst::model::DocumentInfo::default(),
-                sources: document.source_ids(),
-            });
-            inventories.insert(output, inventory);
-        }
+        let documents = crate::compiler::documents::from_compilation(&compilation, &cancellation)?;
         let export = compilation.export_default(&cancellation, None).unwrap();
         let mut graph = crate::output::graph::OutputGraphBuilder::new();
-        crate::compiler::outputs::insert_bundle(
-            &mut graph,
-            export.entries().iter().cloned(),
-            "test",
-            &document_outputs,
-        )
-        .unwrap();
+        crate::compiler::outputs::insert_bundle(&mut graph, export.entries().iter().cloned())
+            .unwrap();
         let graph = graph.finish();
-        let snapshot = SiteIndex::from_output_graph(&graph, documents, inventories)?;
-        Ok((directory, snapshot, graph, world))
+        let site_index = SiteIndex::from_output_graph(&graph, documents)?;
+        Ok((directory, site_index, graph, world))
     }
 
     fn reindex(
@@ -915,17 +875,18 @@ mod tests {
             .filter(|output| output.kind() == crate::output::graph::OutputKind::HtmlDocument)
             .map(|output| output.path())
             .collect::<std::collections::BTreeSet<_>>();
-        let mut documents = Vec::new();
-        let mut inventories = BTreeMap::new();
-        for (page, inventory) in source.html_pages() {
-            if html_outputs.contains(&page.output) {
+        let documents = source
+            .html_pages()
+            .filter(|(page, _)| html_outputs.contains(&page.output))
+            .map(|(page, inventory)| {
                 let mut page = page.clone();
                 update_route(&mut page);
-                inventories.insert(page.output.clone(), Arc::clone(inventory));
-                documents.push(page);
-            }
-        }
-        SiteIndex::from_output_graph(graph, documents, inventories).unwrap()
+                crate::compiler::documents::RealizedPage {
+                    page,
+                    inventory: Arc::clone(inventory),
+                }
+            });
+        SiteIndex::from_output_graph(graph, documents).unwrap()
     }
 
     /// The same site resolved twice: from `previous`, and with no previous graph.
@@ -1023,7 +984,7 @@ mod tests {
 
         // A reloaded policy re-severities the retained failures without re-resolving them.
         use crate::config::ReferenceLevel;
-        use crate::diagnostic::Severity;
+        use tola_diagnostic::Severity;
         let (directory, site, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.a(href: "/missing/")[Missing]
@@ -1063,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn absolute_url_on_the_configured_origin_stays_external() {
+    fn absolute_url_configured_origin_external() {
         let (_directory, site, _graph, world) = candidate(
             r#"#document("index.html")[#html.a(href: "https://example.test/guide/")[Absolute]]
 #document("guide/index.html")[Guide]"#,
@@ -1117,7 +1078,7 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(
             diagnostics[0].code,
-            crate::codes::reference::BASE_HREF_EXTERNAL_ORIGIN
+            tola_diagnostic::codes::reference::BASE_HREF_EXTERNAL_ORIGIN
         );
 
         let (directory, site, _graph, world) = candidate(
@@ -1326,7 +1287,7 @@ mod tests {
     /// its escaped filename publishes, and the fragment a media target carries.
     #[test]
     fn destination_resolves_against_final_dom() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.a(href: "/post/#intro")[Post]
   #html.a(href: "/100%25.html")[Percent-named page]
@@ -1337,7 +1298,7 @@ mod tests {
 #document("c#notes.html")[#html.h1(id: "intro")[Intro]]"#,
         )
         .unwrap();
-        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let references = site_references(&site_index, &SiteUrlMount::root(), &world);
         let page = OutputPath::parse("index.html").unwrap();
 
         assert_eq!(references.references().len(), 3);
@@ -1361,7 +1322,7 @@ mod tests {
         );
 
         // A fragment a media target owns is kept, not folded into the file's address.
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"
 #document("index.html")[
   #link(<pdf-part>)[PDF section]
@@ -1372,7 +1333,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let references = site_references(&site_index, &SiteUrlMount::root(), &world);
         for (reference, path, fragment) in [
             (
                 references.references().next().unwrap(),
@@ -1433,9 +1394,11 @@ mod tests {
 
     #[test]
     fn fragment_failures_follow_target_requirements() {
-        use crate::codes::reference::{FRAGMENT_MISSING, NAVIGATION_MISSING, RESOURCE_MISSING};
         use crate::config::ReferenceLevel;
-        use crate::diagnostic::Severity;
+        use tola_diagnostic::Severity;
+        use tola_diagnostic::codes::reference::{
+            FRAGMENT_MISSING, NAVIGATION_MISSING, RESOURCE_MISSING,
+        };
 
         for (source, category, code, severity) in [
             (
@@ -1473,10 +1436,10 @@ mod tests {
                 Severity::Warning,
             ),
         ] {
-            let (directory, snapshot, _graph, world) = candidate(source).unwrap();
+            let (directory, site_index, _graph, world) = candidate(source).unwrap();
             let mut config = crate::config::tests::load_test_config(directory.path(), "");
             config.build.references.fragments = ReferenceLevel::Warn;
-            let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+            let index = site_references(&site_index, &SiteUrlMount::root(), &world);
             assert_eq!(index.references().next().unwrap().category(), category);
             let diagnostics =
                 diagnostic::diagnostics(&index, &config, &BuildCancellation::new()).unwrap();
@@ -1505,14 +1468,14 @@ mod tests {
             (SiteUrlMount::root(), "/100%25-ready", "/100%25-ready/"),
             (SiteUrlMount::root(), "/a%2541", "/a%2541/"),
         ] {
-            let (_directory, snapshot, _graph, world) = candidate(&format!(
+            let (_directory, site_index, _graph, world) = candidate(&format!(
                 r#"#document("index.html")[#html.a(href: "{href}")[Page]]
 #document("guide/index.html")[#html.h1(id: "intro%20part")[Guide]]
 #document("100%-ready/index.html")[Ready]
 #document("a%41/index.html")[Named]"#
             ))
             .unwrap();
-            let index = site_references(&snapshot, &mount, &world);
+            let index = site_references(&site_index, &mount, &world);
             let reference = index.references().next().unwrap();
             let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
                 panic!("{href} resolved: {reference:?}");
@@ -1534,11 +1497,11 @@ mod tests {
 
     #[test]
     fn missing_resources_name_the_declarations() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html")[#html.img(src: "/assets/missing.png", alt: "missing")]"#,
         )
         .unwrap();
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
         let reference = index.references().next().unwrap();
         assert_eq!(reference.category(), ReferenceCategory::Resource);
         let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
@@ -1559,7 +1522,7 @@ mod tests {
 
     #[test]
     fn each_missing_fragment_is_reported() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.a(href: "/post/#missing")[First]
   #html.a(href: "/post/#missing")[Second]
@@ -1567,7 +1530,7 @@ mod tests {
 #document("post/index.html")[#html.h1(id: "z")[Last] #html.h2(id: "a")[First]]"#,
         )
         .unwrap();
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
         assert_eq!(index.references().len(), 2);
         let mut previous = None;
         for reference in index.references() {
@@ -1601,7 +1564,7 @@ mod tests {
                 Some("intro"),
             ),
         ] {
-            let (_directory, snapshot, _graph, world) = candidate(&format!(
+            let (_directory, site_index, _graph, world) = candidate(&format!(
                 r#"#document("guide/index.html", html.html(
   html.head(html.base(href: "{base}"))
   + html.body(html.a(href: "{href}")[Target])
@@ -1609,7 +1572,7 @@ mod tests {
 #document("docs/target/index.html")[#html.h1(id: "intro")[Intro]]"#,
             ))
             .unwrap();
-            let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+            let index = site_references(&site_index, &SiteUrlMount::root(), &world);
             let ReferenceResolution::Found { target } =
                 index.references().next().unwrap().resolution()
             else {
@@ -1623,7 +1586,7 @@ mod tests {
 
     #[test]
     fn mount_rejects_urls_outside_its_prefix() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.a(href: "/target/")[Outside mount]
   #html.a(href: "/docs/target/")[Mounted]
@@ -1634,7 +1597,7 @@ mod tests {
         .unwrap();
 
         let index = site_references(
-            &snapshot,
+            &site_index,
             &SiteUrlMount::from_base_path("/docs/").unwrap(),
             &world,
         );
@@ -1657,7 +1620,7 @@ mod tests {
 
     #[test]
     fn img_refuses_document_targets() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.object(data: "/embedded/")[]
   #html.img(src: "/embedded/")
@@ -1666,7 +1629,7 @@ mod tests {
         )
         .unwrap();
 
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
 
         assert_eq!(
             index.references().next().unwrap().category(),
@@ -1690,7 +1653,7 @@ mod tests {
 
     #[test]
     fn prefetch_never_becomes_navigation() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html", html.html(html.head(
   html.elem("link", attrs: (rel: "PrEfEtCh prefetch", href: "/docs/next/"))
   + html.link(rel: "prefetch", href: "/docs/download.txt")
@@ -1701,7 +1664,7 @@ mod tests {
         )
         .unwrap();
         let index = site_references(
-            &snapshot,
+            &site_index,
             &SiteUrlMount::from_base_path("/docs/").unwrap(),
             &world,
         );
@@ -1723,7 +1686,7 @@ mod tests {
         ));
 
         // A prefetch relation never relaxes the destination each use already requires.
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html", html.html(html.head(
   html.link(rel: ("stylesheet", "prefetch"), href: "/next/")
   + html.link(rel: ("prefetch", "modulepreload"), href: "/next/")
@@ -1735,7 +1698,7 @@ mod tests {
 #document("next/index.html")[Next]"#,
         )
         .unwrap();
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
         assert_eq!(index.references().len(), 7);
         for reference in index.references() {
             assert_eq!(reference.category(), ReferenceCategory::Resource);
@@ -1753,7 +1716,7 @@ mod tests {
 
     #[test]
     fn typed_uses_report_media_type_mismatches() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html", html.html(
   html.head(
     html.link(rel: "stylesheet", href: "/opaque.bin")
@@ -1767,7 +1730,7 @@ mod tests {
         )
         .unwrap();
 
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
         let failures = index
             .references()
             .map(|reference| match reference.resolution() {
@@ -1807,7 +1770,7 @@ mod tests {
 
     #[test]
     fn external_uses_need_no_declaration() {
-        let (_directory, snapshot, _graph, world) = candidate(
+        let (_directory, site_index, _graph, world) = candidate(
             r#"#document("index.html", html.html(
   html.head(
     html.link(rel: "stylesheet", href: "https://cdn.example/site")
@@ -1817,7 +1780,7 @@ mod tests {
         )
         .unwrap();
 
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let index = site_references(&site_index, &SiteUrlMount::root(), &world);
 
         assert_eq!(index.references().len(), 2);
         assert!(index.references().all(|reference| {

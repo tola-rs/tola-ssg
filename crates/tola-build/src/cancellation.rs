@@ -1,5 +1,10 @@
 //! Cancellation shared by all stages of one build attempt.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
 use tola_typst::BundleCancellation;
 
 #[derive(Clone, Default)]
@@ -17,13 +22,13 @@ impl BuildCanceller {
     }
 
     pub fn cancel(&self) {
-        self.cancellation.bundle.cancel();
+        self.cancellation.cancelled.store(true, Ordering::Relaxed);
     }
 }
 
 #[derive(Clone)]
 pub struct BuildCancellation {
-    bundle: BundleCancellation,
+    cancelled: Arc<AtomicBool>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,12 +38,16 @@ pub struct BuildCancelled;
 impl BuildCancellation {
     pub fn new() -> Self {
         Self {
-            bundle: BundleCancellation::new(),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.bundle.is_cancelled()
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn flag(&self) -> &AtomicBool {
+        &self.cancelled
     }
 
     pub fn ensure_active(&self) -> Result<(), BuildCancelled> {
@@ -52,7 +61,7 @@ impl BuildCancellation {
     /// The Typst-side handle sharing this attempt's cancellation state, for APIs that take
     /// their own cancellation type.
     pub(crate) fn bundle_cancellation(&self) -> BundleCancellation {
-        self.bundle.clone()
+        BundleCancellation::from_flag(self.cancelled.clone())
     }
 }
 
@@ -66,7 +75,7 @@ impl tola_image::Cancellation for BuildCancellation {
 ///
 /// Every stage returns cancellation as a typed cause, so classifying one is a property of the
 /// error rather than of the stage that produced it.
-pub(crate) fn is_cancelled(error: &anyhow::Error) -> bool {
+pub fn is_cancelled(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause.is::<BuildCancelled>()
             || cause.is::<tola_image::ImageCancelled>()
@@ -103,7 +112,7 @@ impl Default for BuildCancellation {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildCancelled, BuildCanceller};
+    use super::{BuildCancelled, BuildCanceller, is_cancelled};
 
     #[test]
     fn attempt_cancellation_stays_scoped() {
@@ -119,5 +128,32 @@ mod tests {
             Err(BuildCancelled)
         ));
         assert!(current_worker.ensure_active().is_ok());
+    }
+
+    #[test]
+    fn cancelled_failure_keeps_attached_diagnostics() {
+        let diagnostics = vec![
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::typst::SOURCE_ANALYSIS,
+                tola_diagnostic::Severity::Error,
+                "the check stopped before the site was analyzed",
+            )
+            .with_note("the previous revision stays published"),
+        ];
+
+        let error = anyhow::Error::new(tola_diagnostic::DiagnosticError::attach(
+            anyhow::Error::new(BuildCancelled),
+            diagnostics,
+        ));
+
+        assert!(is_cancelled(&error));
+        assert_eq!(error.to_string(), "build cancelled");
+        let attached = tola_diagnostic::attached(&error).expect("the diagnostics stay attached");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(
+            attached[0].code,
+            tola_diagnostic::codes::typst::SOURCE_ANALYSIS
+        );
+        assert_eq!(attached[0].notes.len(), 1);
     }
 }

@@ -20,6 +20,19 @@ pub(crate) mod tracing;
 const MAX_BUFFERED_STARTUP_BYTES: usize = 256 * 1024;
 const MAX_LOG_HEADER_BYTES: u64 = 8 * 1024;
 
+/// The context one failed log check reports: the path it names and what to do.
+fn unusable_log(path: &Path) -> String {
+    format!("cannot use log `{}`; choose a new file", display_path(path))
+}
+
+/// The context one failed log write reports: the path it names and what to do.
+fn unwritable_log(path: &Path) -> String {
+    format!(
+        "cannot write log `{}`; choose a writable location for `--log-file`",
+        display_path(path)
+    )
+}
+
 /// How many paths one debug record names before its count stands for the rest.
 ///
 /// A record that listed every path of a large batch would bury the event it describes; the count
@@ -151,24 +164,14 @@ impl LogFile {
         // messages about a log Tola named itself, which should read as the site-relative path.
         let declared_path = path.to_owned();
         let path = tola_build::filesystem::normalize_existing_prefix(path);
-        if path.try_exists().with_context(|| {
-            format!(
-                "cannot use log `{}`; choose a new file",
-                display_path(&path)
-            )
-        })? {
+        if path.try_exists().with_context(|| unusable_log(&path))? {
             let mut file = crate::sys::open_log_for_read(&path).with_context(|| {
                 format!(
                     "cannot read log `{}`; choose a new file",
                     display_path(&path)
                 )
             })?;
-            let metadata = file.metadata().with_context(|| {
-                format!(
-                    "cannot use log `{}`; choose a new file",
-                    display_path(&path)
-                )
-            })?;
+            let metadata = file.metadata().with_context(|| unusable_log(&path))?;
             anyhow::ensure!(
                 metadata.is_file(),
                 "log `{}` is not a file; choose a file path for `--log-file`",
@@ -193,6 +196,13 @@ impl LogFile {
         })
     }
 
+    fn destination(&self) -> std::sync::MutexGuard<'_, LogDestination> {
+        self.inner
+            .destination
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.inner.path
     }
@@ -212,11 +222,7 @@ impl LogFile {
     ///
     /// Reports whether this call changed the state, so the caller warns exactly once.
     pub(crate) fn disable(&self) -> bool {
-        let mut destination = self
-            .inner
-            .destination
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut destination = self.destination();
         if matches!(*destination, LogDestination::Pending(_)) {
             *destination = LogDestination::Unavailable;
             return true;
@@ -232,11 +238,7 @@ impl LogFile {
 
     /// Whether this log writes nothing more: it stopped, or it never opened.
     pub(crate) fn is_stopped(&self) -> bool {
-        let destination = self
-            .inner
-            .destination
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let destination = self.destination();
         match &*destination {
             LogDestination::Pending(_) => false,
             LogDestination::Recording { stopped, .. } => *stopped,
@@ -249,11 +251,7 @@ impl LogFile {
     /// A log that cannot be opened stays unavailable: the caller reports an automatic session log
     /// as a warning, and never announces a log that did not start.
     pub(crate) fn start(&self) -> Result<bool> {
-        let mut destination = self
-            .inner
-            .destination
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut destination = self.destination();
         let LogDestination::Pending(startup) = &mut *destination else {
             return Ok(false);
         };
@@ -282,12 +280,10 @@ impl LogFile {
         let mut options = OpenOptions::new();
         options.read(true).append(true);
         crate::sys::open_log_for_append(&mut options);
-        let exists = self.path().try_exists().with_context(|| {
-            format!(
-                "cannot use log `{}`; choose a new file",
-                display_path(self.path())
-            )
-        })?;
+        let exists = self
+            .path()
+            .try_exists()
+            .with_context(|| unusable_log(self.path()))?;
         if !exists {
             options.create_new(true);
         }
@@ -297,12 +293,7 @@ impl LogFile {
                 display_path(self.path())
             )
         })?;
-        let metadata = file.metadata().with_context(|| {
-            format!(
-                "cannot use log `{}`; choose a new file",
-                display_path(self.path())
-            )
-        })?;
+        let metadata = file.metadata().with_context(|| unusable_log(self.path()))?;
         if !metadata.is_file() {
             bail!(
                 "log `{}` is not a file; choose a file path for `--log-file`",
@@ -318,12 +309,7 @@ impl LogFile {
         let handle = file
             .try_clone()
             .and_then(same_file::Handle::from_file)
-            .with_context(|| {
-                format!(
-                    "cannot use log `{}`; choose a new file",
-                    display_path(self.path())
-                )
-            })?;
+            .with_context(|| unusable_log(self.path()))?;
         require_path_names_file(self.path(), &file, &handle)?;
         for stream in [same_file::Handle::stdout(), same_file::Handle::stderr()]
             .into_iter()
@@ -335,12 +321,8 @@ impl LogFile {
                 display_path(self.path())
             );
         }
-        let unchanged = std::fs::canonicalize(self.path()).with_context(|| {
-            format!(
-                "cannot use log `{}`; choose a new file",
-                display_path(self.path())
-            )
-        })?;
+        let unchanged =
+            std::fs::canonicalize(self.path()).with_context(|| unusable_log(self.path()))?;
         if unchanged != self.path() {
             bail!(
                 "log path `{}` changed before it could be opened; choose a new file",
@@ -349,12 +331,8 @@ impl LogFile {
         }
         validate_contents(self.path(), &mut file)?;
         for record in &startup.records {
-            file.write_all(record).with_context(|| {
-                format!(
-                    "cannot write log `{}`; choose a writable location for `--log-file`",
-                    display_path(self.path())
-                )
-            })?;
+            file.write_all(record)
+                .with_context(|| unwritable_log(self.path()))?;
         }
         if startup.omitted_records != 0 {
             file.write_all(&record_bytes(
@@ -365,12 +343,7 @@ impl LogFile {
                     "message": "early log records exceeded the startup buffer",
                 }),
             ))
-            .with_context(|| {
-                format!(
-                    "cannot write log `{}`; choose a writable location for `--log-file`",
-                    display_path(self.path())
-                )
-            })?;
+            .with_context(|| unwritable_log(self.path()))?;
         }
         Ok(file)
     }
@@ -380,14 +353,7 @@ impl LogFile {
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        matches!(
-            *self
-                .inner
-                .destination
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            LogDestination::Pending(_)
-        )
+        matches!(&*self.destination(), LogDestination::Pending(_))
     }
 
     pub(crate) fn writer(&self) -> LogWriter {
@@ -399,11 +365,7 @@ impl LogFile {
 
     fn write_event(&self, bytes: &[u8]) {
         let failure = {
-            let mut destination = self
-                .inner
-                .destination
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut destination = self.destination();
             match &mut *destination {
                 LogDestination::Pending(startup) => {
                     startup.push(bytes);
@@ -490,7 +452,7 @@ fn require_path_names_file(path: &Path, file: &File, handle: &same_file::Handle)
     // link must be refused, not waited on or followed.
     let named = crate::sys::open_log_for_read(path)
         .and_then(same_file::Handle::from_file)
-        .with_context(|| format!("cannot use log `{}`; choose a new file", display_path(path)))?;
+        .with_context(|| unusable_log(path))?;
     anyhow::ensure!(
         *handle == named,
         "log path `{}` no longer names the opened file; choose a new file",
@@ -500,8 +462,7 @@ fn require_path_names_file(path: &Path, file: &File, handle: &same_file::Handle)
 }
 
 fn require_single_link(path: &Path, file: &File) -> Result<()> {
-    let links = crate::sys::link_count(file)
-        .with_context(|| format!("cannot use log `{}`; choose a new file", display_path(path)))?;
+    let links = crate::sys::link_count(file).with_context(|| unusable_log(path))?;
     anyhow::ensure!(
         links == 1,
         "log `{}` is linked from more than one path; choose a new file",
@@ -512,10 +473,7 @@ fn require_single_link(path: &Path, file: &File) -> Result<()> {
 
 fn validate_contents(path: &Path, file: &mut File) -> Result<()> {
     let shown = display_path(path);
-    let length = file
-        .metadata()
-        .with_context(|| format!("cannot use log `{shown}`; choose a new file"))?
-        .len();
+    let length = file.metadata().with_context(|| unusable_log(path))?.len();
     if length == 0 {
         return Ok(());
     }
@@ -824,7 +782,7 @@ mod tests {
     /// writer on it.
     #[cfg(unix)]
     #[test]
-    fn fifo_replacing_the_log_path_is_refused() {
+    fn fifo_replacing_log_path_refused() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
         std::fs::write(&path, "{}\n").unwrap();

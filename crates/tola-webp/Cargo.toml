@@ -10,6 +10,7 @@ repository = "https://github.com/tola-rs/tola-ssg"
 [dependencies]
 fearless_simd = "=1.0.0"
 image-webp = "=0.2.4"
+thiserror = "2.0.20"
 
 [dev-dependencies]
 fearless_simd = { version = "=1.0.0", features = ["force_support_fallback"] }

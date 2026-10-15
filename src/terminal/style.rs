@@ -1,7 +1,7 @@
 //! The styling roles terminal status text is drawn with.
 
 use owo_colors::OwoColorize;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use tracing::Level;
 
 /// Every role of terminal status text, under one color decision.
@@ -73,11 +73,6 @@ impl Palette {
         self.with_style(stage, |stage| stage.magenta().to_string())
     }
 
-    /// A section header of a report the reader scans.
-    pub(crate) fn heading(self, text: &str) -> String {
-        self.with_style(text, |text| text.bold().to_string())
-    }
-
     /// The outcome word of a finished hook, bold green when it worked and bold red when it failed.
     pub(crate) fn hook_result(self, success: bool, text: &str) -> String {
         if success {
@@ -99,125 +94,10 @@ impl Palette {
         }
     }
 
-    /// The style a heading of `level` draws with, matching the plain renderer's colors.
-    ///
-    /// A heading is an anchor a reader can jump to, so it is underlined like every other
-    /// followable target, through the same color gate.
-    pub(crate) fn heading_style(self, level: u8) -> Style {
-        self.view_style(
-            match level {
-                1 => Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-                2 => Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-                3 => Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-                _ => Style::default().fg(Color::Green),
-            }
-            .add_modifier(Modifier::UNDERLINED),
-        )
-    }
-
-    /// The style of emphasized text.
-    pub(crate) fn emphasis_style(self) -> Style {
-        self.view_style(Style::default().add_modifier(Modifier::BOLD))
-    }
-    /// The style of secondary text: borders, key hints, inactive tabs, and other reading aids.
+    /// The style of secondary text and key hints.
     pub(crate) fn dim_style(self) -> Style {
-        self.view_style(Style::default().add_modifier(Modifier::DIM))
-    }
-
-    /// The style of a name, label, or code span the reader scans for.
-    pub(crate) fn accent_style(self) -> Style {
-        self.view_style(Style::default().fg(Color::Cyan))
-    }
-
-    /// The style of the row, line, or tab the reader has selected.
-    pub(crate) fn selected_style(self) -> Style {
-        self.view_style(Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED))
-    }
-
-    /// The style of the cells one mouse drag selected.
-    pub(crate) fn selection_style(self) -> Style {
-        self.view_style(Style::default().add_modifier(Modifier::REVERSED))
-    }
-
-    /// The style of the search hit the reader is on.
-    pub(crate) fn hit_style(self) -> Style {
-        self.view_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::REVERSED),
-        )
-    }
-
-    /// The style of a code keyword, a boolean, or an operator.
-    pub(crate) fn keyword_style(self) -> Style {
-        self.view_style(Style::default().fg(Color::Magenta))
-    }
-
-    /// The style of a code string.
-    pub(crate) fn string_style(self) -> Style {
-        self.view_style(Style::default().fg(Color::Green))
-    }
-
-    /// The style of a code number.
-    pub(crate) fn number_style(self) -> Style {
-        self.view_style(Style::default().fg(Color::Yellow))
-    }
-
-    /// The style of a code comment.
-    pub(crate) fn comment_style(self) -> Style {
-        self.view_style(Style::default().add_modifier(Modifier::DIM))
-    }
-
-    /// The style of a code literal: a name, a key, or a label.
-    pub(crate) fn literal_style(self) -> Style {
-        self.view_style(Style::default().fg(Color::Cyan))
-    }
-
-    /// The style of a followable target: a cross-reference's label, or a heading's anchor.
-    pub(crate) fn link_style(self) -> Style {
-        self.view_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::UNDERLINED),
-        )
-    }
-
-    /// The style of a followable target the pointer rests on, emphasized so it reads clickable.
-    ///
-    /// The pointer's own highlight, distinct from the static link: bold and underlined in the
-    /// link's color, never reversed, so it cannot be mistaken for the search line or a jumped label.
-    pub(crate) fn link_hover_style(self) -> Style {
-        self.view_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        )
-    }
-
-    /// The style of the status line, and of a search hit the reader is not on.
-    pub(crate) fn notice_style(self) -> Style {
-        self.view_style(Style::default().fg(Color::Yellow))
-    }
-
-    /// The style of a jump-mode label drawn beside the target it names.
-    pub(crate) fn label_style(self) -> Style {
-        self.view_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        )
-    }
-
-    /// `style` when this palette writes escape sequences, and no styling otherwise.
-    fn view_style(self, style: Style) -> Style {
         if self.uses_color {
-            style
+            Style::default().add_modifier(Modifier::DIM)
         } else {
             Style::default()
         }

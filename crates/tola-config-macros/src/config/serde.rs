@@ -5,10 +5,7 @@ use syn::{Attribute, Expr, Lit, Meta, Token, ext::IdentExt, punctuated::Punctuat
 /// Reject `serde(rename_all)`; Config requires explicit `serde(rename = ...)`
 /// so field paths and template keys match deserialization.
 pub(super) fn reject_serde_rename_all(attrs: &[Attribute]) -> syn::Result<()> {
-    for attr in attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
+    for attr in serde_attributes(attrs) {
         for meta in serde_metadata(attr)? {
             if meta.path().is_ident("rename_all") {
                 return Err(syn::Error::new_spanned(
@@ -26,6 +23,10 @@ fn serde_metadata(attr: &Attribute) -> syn::Result<Punctuated<Meta, Token![,]>> 
     attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
 }
 
+fn serde_attributes(attrs: &[Attribute]) -> impl Iterator<Item = &Attribute> {
+    attrs.iter().filter(|attr| attr.path().is_ident("serde"))
+}
+
 /// Resolve both serde directions against the Rust name before selecting a key.
 pub(super) fn parse_serde_field(
     attrs: &[Attribute],
@@ -36,10 +37,7 @@ pub(super) fn parse_serde_field(
     let mut deserialize = None;
     let mut rename_span = ident.span();
 
-    for attr in attrs {
-        if !attr.path().is_ident("serde") {
-            continue;
-        }
+    for attr in serde_attributes(attrs) {
         for meta in serde_metadata(attr)? {
             let path = meta.path();
             let unsupported = path.is_ident("flatten")

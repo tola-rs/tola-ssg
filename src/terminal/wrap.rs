@@ -107,12 +107,12 @@ mod tests {
     }
 
     #[test]
-    fn prose_without_spaces_fills_the_columns() {
+    fn prose_fills_columns_without_spaces() {
         assert_eq!(drawn("ab 中文中文中文", 10), ["ab 中文中", "文中文"]);
     }
 
     #[test]
-    fn word_with_no_break_splits_at_the_fill() {
+    fn unbreakable_word_splits_at_fill() {
         assert_eq!(drawn("abcdefgh ij", 4), ["abcd", "efgh", "ij"]);
     }
 
@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn grapheme_wider_than_the_columns_stands_alone() {
+    fn wide_grapheme_stands_alone() {
         assert_eq!(drawn("界界", 1), ["界", "界"]);
         assert_eq!(drawn("e\u{301}e\u{301}", 1), ["e\u{301}", "e\u{301}"]);
     }

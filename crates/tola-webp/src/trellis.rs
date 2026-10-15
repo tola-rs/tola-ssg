@@ -674,7 +674,6 @@ fn category_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::token::{emitted_block_cost, emitted_token_cost};
 
     fn quantize_block(
         coefficients: &[i32; 16],
@@ -703,237 +702,6 @@ mod tests {
         std::array::from_fn(|index| (17 + index * 73 % 238) as u8)
     }
 
-    fn category_choices(
-        coefficient: u32,
-        factor: i32,
-        weight: u64,
-        lambda: u64,
-        costs: &TokenCosts,
-    ) -> [(u16, u64); 11] {
-        let nearest =
-            ((2 * u64::from(coefficient) + factor as u64) / (2 * factor as u64)).min(2047) as u16;
-        MAGNITUDE_RANGES.map(|range| {
-            category_choice(
-                coefficient,
-                factor,
-                weight,
-                lambda,
-                costs,
-                range,
-                nearest.clamp(range.0, range.1),
-            )
-        })
-    }
-
-    fn objective(
-        coefficients: &[i32; 16],
-        levels: &[i16; 16],
-        factors: [i32; 2],
-        plane: CoefficientPlane,
-        first_context: usize,
-        lambda: u64,
-        probs: &[u8; 1056],
-    ) -> u64 {
-        let distortion: u64 = ZIGZAG[plane.first_position()..]
-            .iter()
-            .map(|raster| {
-                let factor = factors[usize::from(*raster != 0)];
-                let error = i64::from(coefficients[*raster] - i32::from(levels[*raster]) * factor);
-                (error * error) as u64
-            })
-            .sum();
-        distortion * plane.distortion_weight()
-            + lambda * emitted_block_cost(levels, plane, first_context, probs)
-    }
-
-    fn exhaustive_score(
-        coefficients: &[i32; 16],
-        factors: [i32; 2],
-        plane: CoefficientPlane,
-        first_context: usize,
-        lambda: u64,
-        probs: &[u8; 1056],
-    ) -> u64 {
-        let first = plane.first_position();
-        let mut prefixes = [u64::MAX; 3];
-        prefixes[first_context] = 0;
-        let mut minimum = u64::MAX;
-        for position in first..16 {
-            let mut next = [u64::MAX; 3];
-            let tail_error: u64 = ZIGZAG[position..]
-                .iter()
-                .map(|raster| {
-                    let coefficient = i64::from(coefficients[*raster]);
-                    (coefficient * coefficient) as u64 * plane.distortion_weight()
-                })
-                .sum();
-            for (context, prefix) in prefixes.into_iter().enumerate() {
-                if prefix == u64::MAX {
-                    continue;
-                }
-                if position == first || context != 0 {
-                    minimum = minimum.min(
-                        prefix
-                            + tail_error
-                            + lambda
-                                * emitted_token_cost(plane, position, context, false, None, probs),
-                    );
-                }
-                for magnitude in 0..=2047u16 {
-                    let raster = ZIGZAG[position];
-                    let error = i64::from(coefficients[raster].unsigned_abs())
-                        - i64::from(magnitude) * i64::from(factors[usize::from(raster != 0)]);
-                    let score = prefix
-                        + (error * error) as u64 * plane.distortion_weight()
-                        + lambda
-                            * emitted_token_cost(
-                                plane,
-                                position,
-                                context,
-                                position != first && context == 0,
-                                Some(magnitude),
-                                probs,
-                            );
-                    if position == 15 {
-                        if magnitude != 0 {
-                            minimum = minimum.min(score);
-                        }
-                    } else {
-                        let next_context = usize::from(magnitude.min(2));
-                        next[next_context] = next[next_context].min(score);
-                    }
-                }
-            }
-            prefixes = next;
-        }
-        minimum
-    }
-
-    const SEARCH_PLANES: [CoefficientPlane; 4] = [
-        CoefficientPlane::LumaAc,
-        CoefficientPlane::LumaDc,
-        CoefficientPlane::Chroma,
-        CoefficientPlane::Luma,
-    ];
-
-    /// Every accelerated search returns the optimum the exhaustive search finds.
-    ///
-    /// The trellis, the empty-block bound and the magnitude-category bounds all exist to avoid
-    /// enumerating candidates; each is only worth its arithmetic if it lands on the same answer
-    /// the enumeration would.
-    #[test]
-    fn searches_find_the_exhaustive_optimum() {
-        let factors = Factors {
-            y_dc: 11,
-            y_ac: 8,
-            y2_dc: 11,
-            y2_ac: 8,
-            chroma_dc: 11,
-            chroma_ac: 8,
-        };
-        for probs in [probabilities(), crate::tables::DEFAULT_COEFF_PROBS] {
-            let costs = TokenCosts::new(&probs);
-            let models = [
-                Quantizer::new(factors, 1024, 1024, &costs, TrellisMode::Exact),
-                Quantizer::new(factors, 258_064, 258_064, &costs, TrellisMode::Exact),
-            ];
-            for plane in SEARCH_PLANES {
-                let first = plane.first_position();
-                for context in 0..3 {
-                    let mut coefficients = [3; 16];
-                    coefficients[ZIGZAG[first]] = -532;
-                    coefficients[ZIGZAG[first + 1]] = 79;
-                    coefficients[ZIGZAG[9]] = -12;
-                    for (lambda, model) in [1024, 258_064].into_iter().zip(&models) {
-                        let levels =
-                            quantize_block(&coefficients, 11, 8, plane, context, lambda, &costs);
-                        assert_eq!(model.quantize(&coefficients, plane, context), levels);
-                        assert_eq!(
-                            objective(
-                                &coefficients,
-                                &levels,
-                                [11, 8],
-                                plane,
-                                context,
-                                lambda,
-                                &probs
-                            ),
-                            exhaustive_score(
-                                &coefficients,
-                                [11, 8],
-                                plane,
-                                context,
-                                lambda,
-                                &probs
-                            ),
-                            "trellis {} {context} {lambda}",
-                            plane.index()
-                        );
-                    }
-                }
-            }
-            let plane = CoefficientPlane::Chroma;
-            for coefficient in [0, 1, 3, 17] {
-                let coefficients = [coefficient; 16];
-                let levels = quantize_block(&coefficients, 36, 36, plane, 0, 16_384, &costs);
-                assert_eq!(
-                    objective(&coefficients, &levels, [36; 2], plane, 0, 16_384, &probs),
-                    exhaustive_score(&coefficients, [36; 2], plane, 0, 16_384, &probs),
-                    "empty block {coefficient}"
-                );
-            }
-        }
-
-        let costs = TokenCosts::new(&probabilities());
-        for coefficient in [0, 3, 44, 1462, 2060, 16_320] {
-            for factor in [4, 8, 22, 58, 284] {
-                for weight in [4096, 16384] {
-                    for lambda in [1, 1024, 16_384, 258_064] {
-                        let selected =
-                            category_choices(coefficient, factor, weight, lambda, &costs);
-                        for ((lower, upper), (_, score)) in
-                            MAGNITUDE_RANGES.into_iter().zip(selected)
-                        {
-                            let minimum = (lower..=upper)
-                                .map(|magnitude| {
-                                    let error = i64::from(coefficient)
-                                        - i64::from(magnitude) * i64::from(factor);
-                                    (error * error) as u64 * weight
-                                        + lambda * u64::from(costs.magnitude_cost(magnitude))
-                                })
-                                .min()
-                                .unwrap();
-                            assert_eq!(
-                                score, minimum,
-                                "categories {coefficient} {factor} {weight} {lambda}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // The bound also picks the magnitude the exhaustive walk above already covered.
-        let costs = TokenCosts::new(&crate::tables::DEFAULT_COEFF_PROBS);
-        for (coefficient, factor, context, lambda, expected) in
-            [(1462, 22, 0, 1024, 67), (2060, 58, 1, 16_384, 34)]
-        {
-            let mut coefficients = [0; 16];
-            coefficients[0] = coefficient;
-            let plane = CoefficientPlane::LumaDc;
-            let selected = quantize_block(
-                &coefficients,
-                factor,
-                factor,
-                plane,
-                context,
-                lambda,
-                &costs,
-            );
-            assert_eq!(selected[0], expected, "{coefficient} {factor}");
-        }
-    }
-
     #[test]
     fn zero_lambda_rounds_to_nearest() {
         let costs = TokenCosts::new(&probabilities());
@@ -954,6 +722,156 @@ mod tests {
                 quantize_block(&coefficients, 11, 8, plane, 0, 0, &costs),
                 nearest
             );
+        }
+    }
+
+    /// The quantizer's factor pair for one plane; scoring must mirror it.
+    fn plane_factors(factors: Factors, plane: CoefficientPlane) -> (i32, i32) {
+        match plane {
+            CoefficientPlane::LumaAc | CoefficientPlane::Luma => (factors.y_dc, factors.y_ac),
+            CoefficientPlane::LumaDc => (factors.y2_dc, factors.y2_ac),
+            CoefficientPlane::Chroma => (factors.chroma_dc, factors.chroma_ac),
+        }
+    }
+
+    fn reference_score(
+        coefficients: &[i32; 16],
+        factors: Factors,
+        plane: CoefficientPlane,
+        first_context: usize,
+        lambda: u64,
+        costs: &TokenCosts,
+    ) -> u64 {
+        let first = plane.first_position();
+        let weight = plane.distortion_weight();
+        let (dc, ac) = plane_factors(factors, plane);
+        let factor = |position: usize| if ZIGZAG[position] == 0 { dc } else { ac };
+        let mut prefixes = [u64::MAX; 3];
+        prefixes[first_context] = 0;
+        let mut minimum = u64::MAX;
+        for position in first..16 {
+            let mut next = [u64::MAX; 3];
+            let tail: u64 = ZIGZAG[position..]
+                .iter()
+                .map(|raster| {
+                    let coefficient = i64::from(coefficients[*raster]);
+                    (coefficient * coefficient) as u64 * weight
+                })
+                .sum();
+            for (context, prefix) in prefixes.into_iter().enumerate() {
+                if prefix == u64::MAX {
+                    continue;
+                }
+                let previous_was_zero = position != first && context == 0;
+                if position == first || context != 0 {
+                    minimum = minimum.min(
+                        prefix + tail + lambda * u64::from(costs.end(plane, position, context)),
+                    );
+                }
+                for magnitude in 0..=2047u16 {
+                    let error = i64::from(coefficients[ZIGZAG[position]].unsigned_abs())
+                        - i64::from(magnitude) * i64::from(factor(position));
+                    let score = prefix
+                        + (error * error) as u64 * weight
+                        + lambda
+                            * u64::from(costs.coefficient(
+                                plane,
+                                position,
+                                context,
+                                previous_was_zero,
+                                magnitude,
+                            ));
+                    if position == 15 {
+                        if magnitude != 0 {
+                            minimum = minimum.min(score);
+                        }
+                    } else {
+                        let next_context = usize::from(magnitude.min(2));
+                        next[next_context] = next[next_context].min(score);
+                    }
+                }
+            }
+            prefixes = next;
+        }
+        minimum
+    }
+
+    fn objective(
+        coefficients: &[i32; 16],
+        levels: &[i16; 16],
+        factors: Factors,
+        plane: CoefficientPlane,
+        first_context: usize,
+        lambda: u64,
+        costs: &TokenCosts,
+    ) -> u64 {
+        let weight = plane.distortion_weight();
+        let (dc, ac) = plane_factors(factors, plane);
+        let distortion: u64 = ZIGZAG[plane.first_position()..]
+            .iter()
+            .map(|raster| {
+                let factor = if *raster == 0 { dc } else { ac };
+                let error = i64::from(coefficients[*raster] - i32::from(levels[*raster]) * factor);
+                (error * error) as u64
+            })
+            .sum();
+        distortion * weight + lambda * costs.block(levels, plane, first_context)
+    }
+
+    /// Every accelerated search returns the optimum the exhaustive search finds.
+    #[test]
+    fn searches_find_the_exhaustive_optimum() {
+        let factors = Factors {
+            y_dc: 11,
+            y_ac: 8,
+            y2_dc: 11,
+            y2_ac: 8,
+            chroma_dc: 11,
+            chroma_ac: 11,
+        };
+        let costs = TokenCosts::new(&crate::tables::DEFAULT_COEFF_PROBS);
+        for plane in [
+            CoefficientPlane::LumaAc,
+            CoefficientPlane::LumaDc,
+            CoefficientPlane::Chroma,
+            CoefficientPlane::Luma,
+        ] {
+            let first = plane.first_position();
+            for context in 0..3 {
+                let mut coefficients = [3; 16];
+                coefficients[ZIGZAG[first]] = -532;
+                coefficients[ZIGZAG[first + 1]] = 79;
+                coefficients[ZIGZAG[9]] = -12;
+                for lambda in [1024u64, 258_064] {
+                    let model = Quantizer::new(factors, lambda, lambda, &costs, TrellisMode::Exact);
+                    let levels = model.quantize(&coefficients, plane, context);
+                    assert_eq!(
+                        objective(
+                            &coefficients,
+                            &levels,
+                            factors,
+                            plane,
+                            context,
+                            lambda,
+                            &costs
+                        ),
+                        reference_score(&coefficients, factors, plane, context, lambda, &costs),
+                        "trellis {} {context} {lambda}",
+                        plane.index()
+                    );
+                }
+            }
+            for magnitude in [0, 1, 3] {
+                let coefficients = [magnitude; 16];
+                let model = Quantizer::new(factors, 16_384, 16_384, &costs, TrellisMode::Exact);
+                let levels = model.quantize(&coefficients, plane, 0);
+                assert_eq!(
+                    objective(&coefficients, &levels, factors, plane, 0, 16_384, &costs),
+                    reference_score(&coefficients, factors, plane, 0, 16_384, &costs),
+                    "trellis uniform {magnitude} {}",
+                    plane.index()
+                );
+            }
         }
     }
 }

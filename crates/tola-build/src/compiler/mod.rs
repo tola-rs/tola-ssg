@@ -21,15 +21,11 @@ pub(crate) use inputs::BuildInputs;
 #[derive(Clone)]
 pub(crate) struct SiteProgramCache {
     pub(crate) root: std::path::PathBuf,
-    pub(crate) documents: Vec<crate::site::HtmlPage>,
-    pub(crate) html_inventories: std::collections::BTreeMap<
-        tola_address::OutputPath,
-        std::sync::Arc<tola_typst::HtmlDocumentInventory>,
-    >,
+    pub(crate) documents: Vec<documents::RealizedPage>,
     pub(crate) outputs: crate::output::graph::OutputGraph,
     /// Retained so a reused compilation reports the same warnings.
     pub(crate) diagnostics: tola_typst::Diagnostics,
-    pub(crate) payload_diagnostics: Vec<crate::diagnostic::Diagnostic>,
+    pub(crate) payload_diagnostics: Vec<tola_diagnostic::Diagnostic>,
     pub(crate) pretty_html: bool,
     pub(crate) minified_languages: tola_minify::MinifiedLanguages,
     pub(crate) entry: std::path::PathBuf,
@@ -43,6 +39,15 @@ impl SiteProgramCache {
         self.root == crate::filesystem::normalize_path(config.get_root())
             && crate::filesystem::normalize_path(&self.entry)
                 == crate::filesystem::normalize_path(&config.build.entry)
+            && config
+                .entry_file()
+                .or_else(|| {
+                    tola_typst::file_id_from_path(
+                        &tola_typst::normalize_path(&config.build.entry),
+                        &tola_typst::normalize_path(config.get_root()),
+                    )
+                })
+                .is_some_and(|entry| typst::World::main(self.world.as_ref()) == entry)
     }
 
     pub(crate) fn matches_export_config(&self, config: &crate::config::ResolvedSiteConfig) -> bool {
@@ -50,9 +55,6 @@ impl SiteProgramCache {
     }
 
     /// Whether this compilation already has the minification the configuration requests.
-    ///
-    /// Re-exporting cannot undo a rewritten payload, so a changed answer here needs a fresh
-    /// compilation rather than an export of the retained one.
     pub(crate) fn matches_minification(&self, config: &crate::config::ResolvedSiteConfig) -> bool {
         self.minified_languages == minified_languages(config)
     }
@@ -211,6 +213,104 @@ pub(crate) mod tests {
         let mut collections = tola_icons::IconCollections::new();
         collections.mount("brand", collection).unwrap();
         std::sync::Arc::new(collections)
+    }
+
+    #[test]
+    fn cached_driver_switches_native_alias() {
+        use crate::build::{BuildRequest, BuildReuse, BuildTrigger};
+        use crate::config::loading::{BuildOverrides, load_site_config};
+        use crate::{BuildResources, BuildSession, InputScope};
+        use std::{fs, sync::Arc};
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        let module = directory.path().join("module");
+        fs::create_dir_all(root.join("content")).unwrap();
+        fs::create_dir(&module).unwrap();
+        fs::write(
+            module.join("tola-module.toml"),
+            r#"
+schema-version = 1
+name = "shared-driver"
+version = "1.0.0"
+[typst]
+entry = "lib.typ"
+[site]
+entry = "site.typ"
+"#,
+        )
+        .unwrap();
+        fs::write(module.join("lib.typ"), "").unwrap();
+        fs::write(
+            module.join("site.typ"),
+            r#"
+#import "@tola/module:0.0.0": get-module
+#asset("selected.txt", get-module().name)
+#document("index.html", format: "html")[Home]
+"#,
+        )
+        .unwrap();
+        let configure = |alias: &str| {
+            fs::write(
+                root.join("tola.toml"),
+                format!(
+                    r#"
+[modules.first]
+path = "../module"
+[modules.second]
+path = "../module"
+[theme]
+module = "{alias}"
+[typst.fonts]
+system = false
+"#
+                ),
+            )
+            .unwrap();
+            load_site_config(
+                Some(&root.join("tola.toml")),
+                tola_typst::PackageLocations::default(),
+                &BuildOverrides::default(),
+            )
+            .unwrap()
+            .into_config()
+        };
+        let mut session = BuildSession::with_resources(
+            BuildResources::new().with_input_scope(InputScope::Offline),
+        );
+        let first = configure("first");
+        session
+            .build_and_write(&first, BuildRequest::default())
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("public/selected.txt")).unwrap(),
+            "first"
+        );
+        let second = configure("second");
+        let prepared_first =
+            crate::modules::prepared::configure(&first, InputScope::Offline).unwrap();
+        let prepared_second =
+            crate::modules::prepared::configure(&second, InputScope::Offline).unwrap();
+        assert_eq!(prepared_first.build.entry, prepared_second.build.entry);
+        assert_ne!(prepared_first.entry_file(), prepared_second.entry_file());
+        session
+            .build_and_write(
+                &second,
+                BuildRequest {
+                    trigger: BuildTrigger::Paths(Arc::from([])),
+                    reuse: BuildReuse {
+                        content_inventory: true,
+                        typst_compilation: true,
+                        configured_assets: true,
+                    },
+                    ..BuildRequest::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("public/selected.txt")).unwrap(),
+            "second"
+        );
     }
 
     #[test]

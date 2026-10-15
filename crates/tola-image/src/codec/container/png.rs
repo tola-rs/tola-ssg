@@ -1,12 +1,16 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use super::super::{ContainerMetadata, SampleColor};
 use super::be32;
 use crate::cancellation::{Cancellation, ensure_active_if_present};
 use crate::check_dimensions;
+use crate::{ImageError, ImageFormat, ReexportProblem};
 
 /// How a damaged PNG reads to a site author.
 const DAMAGED: &str = "the PNG image is damaged or incomplete; re-export it";
+
+const DAMAGED_COLOR: &str =
+    "the PNG image has damaged color information; re-export it with sRGB colors";
 
 /// These scans find animation and color metadata the codec wrappers hide; compressed
 /// pixels are always decoded and encoded by maintained codec libraries.
@@ -77,24 +81,18 @@ pub(in crate::codec) fn scan_png<'a>(
                 metadata.exif = Some(data);
             }
             b"sRGB" => {
-                ensure!(
-                    !srgb && data.len() == 1 && data[0] <= 3,
-                    "the PNG image has damaged color information; re-export it with sRGB colors"
-                );
+                ensure!(!srgb && data.len() == 1 && data[0] <= 3, DAMAGED_COLOR);
                 srgb = true;
             }
             b"gAMA" => {
                 ensure!(
                     gamma.is_none() && data.len() == 4 && be32(data) > 0,
-                    "the PNG image has damaged color information; re-export it with sRGB colors"
+                    DAMAGED_COLOR
                 );
                 gamma = Some(be32(data));
             }
             b"cHRM" => {
-                ensure!(
-                    !seen_chromaticities && data.len() == 32,
-                    "the PNG image has damaged color information; re-export it with sRGB colors"
-                );
+                ensure!(!seen_chromaticities && data.len() == 32, DAMAGED_COLOR);
                 seen_chromaticities = true;
                 let expected = [31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000];
                 standard_chromaticities = data
@@ -105,10 +103,7 @@ pub(in crate::codec) fn scan_png<'a>(
                     .all(|(value, expected)| be32(value) == expected);
             }
             b"cICP" => {
-                ensure!(
-                    cicp.is_none() && data.len() == 4,
-                    "the PNG image has damaged color information; re-export it with sRGB colors"
-                );
+                ensure!(cicp.is_none() && data.len() == 4, DAMAGED_COLOR);
                 cicp = Some([data[0], data[1], data[2], data[3]]);
             }
             b"mDCV" | b"cLLI" => mastering = true,
@@ -122,7 +117,11 @@ pub(in crate::codec) fn scan_png<'a>(
             }
             b"PLTE" => {}
             chunk if chunk[0].is_ascii_uppercase() => {
-                bail!("the PNG image uses a feature Tola cannot read; re-export it")
+                return Err(ImageError::Reexport {
+                    format: ImageFormat::Png,
+                    problem: ReexportProblem::UnsupportedFeature,
+                }
+                .into());
             }
             _ => {}
         }
@@ -173,7 +172,7 @@ mod tests {
     use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::codec::render;
-    use crate::codec::test_support::*;
+    use crate::codec::tests::test_support::*;
     use image::ExtendedColorType;
 
     /// One 8x8 PNG whose pixels are not compressed — the scan never inflates them — with one

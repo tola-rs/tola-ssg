@@ -234,9 +234,7 @@ mod tests {
         value ^ (value >> 31)
     }
 
-    /// The length model exists so a partition can be priced without writing it. It is only
-    /// correct when the number it predicts is the number of bytes the writer emits, measured
-    /// both mid-stream (where the pending byte is still unpadded) and after finishing.
+    /// The length model must predict the bytes the writer emits.
     #[test]
     fn length_model_matches_written_bytes() {
         assert_eq!(
@@ -302,8 +300,7 @@ mod tests {
         assert_eq!(length.finish(), writer.finish().len());
     }
 
-    /// A bit written when the pending byte is not yet flushed costs the four bytes the encoder
-    /// still holds, so the running length is the emitted bytes plus the pending word.
+    /// A pending-byte write still costs the four bytes the writer holds.
     fn assert_length_tracks(
         writer: &mut BoolWriter,
         length: &mut LengthWriter,

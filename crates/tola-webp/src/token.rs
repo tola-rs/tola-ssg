@@ -410,7 +410,10 @@ impl TokenCosts {
     }
 
     /// Continue from the first pair carrying a magnitude of 64 or more.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the scan continues from the caller's position, running rate, and context"
+    )]
     #[inline(never)]
     fn block_rate_wide(
         &self,
@@ -1028,52 +1031,6 @@ fn magnitude_context(magnitude: u16) -> usize {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn emitted_block_cost(
-    levels: &[i16; 16],
-    plane: CoefficientPlane,
-    first_context: usize,
-    probs: &[u8; 1056],
-) -> u64 {
-    let length = last_nonzero(levels, plane.first_position()).map_or(0, |last| last + 1);
-    let prefix: [i16; 16] = std::array::from_fn(|position| levels[ZIGZAG[position]]);
-    let mut writer = CostWriter::new();
-    write_block(
-        &mut writer,
-        &prefix[..length],
-        plane.index(),
-        plane.first_position(),
-        first_context,
-        probs,
-    );
-    writer.bits()
-}
-
-#[cfg(test)]
-pub(crate) fn emitted_token_cost(
-    plane: CoefficientPlane,
-    position: usize,
-    context: usize,
-    previous_was_zero: bool,
-    magnitude: Option<u16>,
-    probs: &[u8; 1056],
-) -> u64 {
-    let mut writer = CostWriter::new();
-    let token = magnitude.map_or(TOKEN_END, token_for_magnitude);
-    write_token(
-        &mut writer,
-        token,
-        (plane.index(), position, context),
-        previous_was_zero,
-        probs,
-    );
-    if let Some(magnitude) = magnitude.filter(|magnitude| *magnitude != 0) {
-        write_extra_bits(&mut writer, magnitude, token);
-        writer.write_bool(128, false);
-    }
-    writer.bits()
-}
-
 /// A fitted table with its estimated net savings in 1/256 bit.
 pub(crate) struct ProbabilityFit {
     pub(crate) probs: [u8; 1056],
@@ -1119,6 +1076,50 @@ pub(crate) fn fit_probs(counts: &[[u32; 2]; 1056]) -> Option<ProbabilityFit> {
 mod tests {
     use super::*;
     use crate::macroblock::DenseMacroblock;
+
+    fn emitted_block_cost(
+        levels: &[i16; 16],
+        plane: CoefficientPlane,
+        first_context: usize,
+        probs: &[u8; 1056],
+    ) -> u64 {
+        let length = last_nonzero(levels, plane.first_position()).map_or(0, |last| last + 1);
+        let prefix: [i16; 16] = std::array::from_fn(|position| levels[ZIGZAG[position]]);
+        let mut writer = CostWriter::new();
+        write_block(
+            &mut writer,
+            &prefix[..length],
+            plane.index(),
+            plane.first_position(),
+            first_context,
+            probs,
+        );
+        writer.bits()
+    }
+
+    fn emitted_token_cost(
+        plane: CoefficientPlane,
+        position: usize,
+        context: usize,
+        previous_was_zero: bool,
+        magnitude: Option<u16>,
+        probs: &[u8; 1056],
+    ) -> u64 {
+        let mut writer = CostWriter::new();
+        let token = magnitude.map_or(TOKEN_END, token_for_magnitude);
+        write_token(
+            &mut writer,
+            token,
+            (plane.index(), position, context),
+            previous_was_zero,
+            probs,
+        );
+        if let Some(magnitude) = magnitude.filter(|magnitude| *magnitude != 0) {
+            write_extra_bits(&mut writer, magnitude, token);
+            writer.write_bool(128, false);
+        }
+        writer.bits()
+    }
 
     fn coefficient_probability_cases() -> [[u8; 1056]; 2] {
         [DEFAULT_COEFF_PROBS, synthetic_probs()]
@@ -1204,21 +1205,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn scan_covers_every_coefficient() {
-        let mut seen = [false; 16];
-        for position in ZIGZAG {
-            assert!(!seen[position]);
-            seen[position] = true;
-        }
-        assert!(seen.iter().all(|seen| *seen));
-    }
-
-    /// Every rate the model computes equals the bits the writer emits for the same coefficients:
-    /// one token, one cached pair, one block, one macroblock.
-    ///
-    /// The model exists only to make the encoder's searches cheap; the moment its arithmetic
-    /// drifts from the writer's the encoder optimises a different file than it produces.
+    /// The rate model must emit exactly the bits the writer produces.
     #[test]
     fn cost_model_matches_emitted_bits() {
         for probs in coefficient_probability_cases() {
@@ -1458,5 +1445,15 @@ mod tests {
         assert_eq!(fitted.probs[2], 1);
         assert_eq!(fitted.probs[3], DEFAULT_COEFF_PROBS[3]);
         assert!(fitted.savings > 0);
+    }
+
+    #[test]
+    fn scan_covers_every_coefficient() {
+        let mut seen = [false; 16];
+        for position in ZIGZAG {
+            assert!(!seen[position]);
+            seen[position] = true;
+        }
+        assert!(seen.iter().all(|seen| *seen));
     }
 }

@@ -219,14 +219,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quantizer_tables_match_spec() {
-        assert_eq!((DC_QLOOKUP[0], DC_QLOOKUP[127]), (4, 157));
-        assert_eq!((AC_QLOOKUP[0], AC_QLOOKUP[127]), (4, 284));
-        assert_eq!(DC_QLOOKUP.iter().sum::<i32>(), 8168);
-        assert_eq!(AC_QLOOKUP.iter().sum::<i32>(), 12723);
-    }
-
-    #[test]
     fn quality_refines_quantizer_monotonically() {
         assert_eq!(quantizer_index(100), 0);
         assert_eq!(quantizer_index(0), 127);
@@ -239,5 +231,13 @@ mod tests {
             assert!(index <= previous, "q{quality} regressed");
             previous = index;
         }
+    }
+
+    #[test]
+    fn quantizer_tables_match_spec() {
+        assert_eq!((DC_QLOOKUP[0], DC_QLOOKUP[127]), (4, 157));
+        assert_eq!((AC_QLOOKUP[0], AC_QLOOKUP[127]), (4, 284));
+        assert_eq!(DC_QLOOKUP.iter().sum::<i32>(), 8168);
+        assert_eq!(AC_QLOOKUP.iter().sum::<i32>(), 12723);
     }
 }

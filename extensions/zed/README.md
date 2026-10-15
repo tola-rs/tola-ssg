@@ -16,14 +16,20 @@ cargo build --release --target wasm32-wasip2
 `zed: install dev extension` → this directory. Zed fetches the grammar pinned in `extension.toml` at
 install time, so the first install needs network access.
 
-Project `.zed/settings.json`:
+Run `tola editor packages` in the site to prepare the builtin package sources that definitions
+open. Configure this development extension in project `.zed/settings.json` as follows.
+`tola editor setup zed` targets the published Typst extension through its `tinymist`
+server; this development extension instead uses the `tola` server key.
 
 ```json
 {
   "languages": { "Typst": { "formatter": "language_server" } },
   "lsp": {
     "tola": {
-      "initialization_options": { "checkMode": "onType" },
+      "initialization_options": {
+        "checkMode": "onType",
+        "packageSourceDirectory": ".tola/mirrors/builtin-packages"
+      },
       "settings": { "tola": { "checkMode": "onType" } }
     }
   }

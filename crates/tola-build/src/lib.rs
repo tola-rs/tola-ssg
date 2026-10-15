@@ -3,8 +3,8 @@
 //! Command-line handling, filesystem watching, HTTP serving, and editor transport
 //! belong to applications using this crate.
 //!
-//! The optional `json-schema` feature implements `schemars::JsonSchema` for the
-//! records in [`diagnostic`], using their Serde serialization contract.
+//! Diagnostics are [`tola_diagnostic`]'s records; the optional `json-schema` feature forwards to
+//! that crate's schema derivation.
 
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
@@ -16,11 +16,9 @@ mod asset;
 pub mod build;
 pub mod cancellation;
 pub mod check;
-pub mod codes;
 mod compiler;
 pub mod config;
 mod content;
-pub mod diagnostic;
 pub mod filesystem;
 pub mod hooks;
 pub mod html;

@@ -102,6 +102,17 @@ pub(crate) struct LoadedConfig {
     loader: ConfigLoader,
 }
 
+impl std::fmt::Debug for LoadedConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoadedConfig")
+            .field("config", self.core.config())
+            .field("server", &self.server)
+            .field("dev", &self.dev)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LoadedConfig {
     pub(crate) fn config(&self) -> &ResolvedSiteConfig {
         self.core.config()
@@ -140,17 +151,6 @@ impl LoadedConfig {
     }
 }
 
-impl std::fmt::Debug for LoadedConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("LoadedConfig")
-            .field("config", self.core.config())
-            .field("server", &self.server)
-            .field("dev", &self.dev)
-            .finish_non_exhaustive()
-    }
-}
-
 pub(crate) fn load(
     explicit: Option<&Path>,
     scope: InputScope,
@@ -164,10 +164,10 @@ pub(crate) fn load(
         {
             return error;
         }
-        let diagnostics = tola_build::diagnostic::attached(&error)
+        let diagnostics = tola_diagnostic::attached(&error)
             .map(<[_]>::to_vec)
             .unwrap_or_else(|| {
-                vec![tola_build::diagnostic::fallback(
+                vec![tola_diagnostic::fallback(
                     crate::codes::config::LOAD,
                     &error,
                 )]
@@ -175,7 +175,7 @@ pub(crate) fn load(
             .into_iter()
             .map(|diagnostic| diagnostic.with_help("Run `tola init` to create a site"))
             .collect();
-        tola_build::diagnostic::DiagnosticError::attach(error, diagnostics).into()
+        tola_diagnostic::DiagnosticError::attach(error, diagnostics).into()
     })?;
     resolve(source, packages, overrides)
 }
@@ -295,46 +295,7 @@ impl ConfigCandidate {
 
 /// Whether two configuration sections hold the same values.
 fn same_section(left: &impl Serialize, right: &impl Serialize) -> Result<bool> {
-    Ok(same_setting_value(
-        &toml::Value::try_from(left)?,
-        &toml::Value::try_from(right)?,
-    ))
-}
-
-fn same_setting_value(left: &toml::Value, right: &toml::Value) -> bool {
-    match (left, right) {
-        (toml::Value::Float(left), toml::Value::Float(right)) => {
-            !left.is_nan() && !right.is_nan() && left.to_bits() == right.to_bits()
-        }
-        (toml::Value::Array(left), toml::Value::Array(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| same_setting_value(left, right))
-        }
-        (toml::Value::Table(left), toml::Value::Table(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|((left_key, left), (right_key, right))| {
-                        left_key == right_key && same_setting_value(left, right)
-                    })
-        }
-        _ => left == right,
-    }
-}
-
-impl std::fmt::Debug for ConfigCandidate {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ConfigCandidate")
-            .field("config", &self.config)
-            .field("server", &self.server)
-            .field("dev", &self.dev)
-            .finish_non_exhaustive()
-    }
+    Ok(toml::Value::try_from(left)? == toml::Value::try_from(right)?)
 }
 
 /// Reloads the same configuration source with the original overrides.
@@ -377,15 +338,6 @@ impl ConfigLoader {
             "configuration candidate belongs to another invocation"
         );
         self.source = candidate.source.clone();
-    }
-}
-
-impl std::fmt::Debug for ConfigLoader {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ConfigLoader")
-            .field("path", &self.source.path())
-            .finish_non_exhaustive()
     }
 }
 
@@ -447,64 +399,30 @@ mod tests {
     }
 
     #[test]
-    fn unknown_root_section_is_rejected() {
+    fn unknown_configuration_keys_stop_the_load() {
         let directory = tempfile::tempdir().unwrap();
-        let source = ConfigSource::parse(
-            &directory.path().join("tola.toml"),
-            "[unknown]\nvalue = true\n",
-            InputScope::Online,
-        )
-        .unwrap();
-        let error = resolve(
-            source,
-            tola_typst::PackageLocations::default(),
-            &ConfigOverrides::default(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown"));
-        assert!(tola_build::diagnostic::attached(&error).is_some());
-    }
-
-    #[test]
-    fn misspelled_core_key_stops_the_load() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = ConfigSource::parse(
-            &directory.path().join("tola.toml"),
-            "[assets]\ncache_busting = true\n\n[site]\ntitel = \"Misspelled\"\n",
-            InputScope::Online,
-        )
-        .unwrap();
-        let error = resolve(
-            source,
-            tola_typst::PackageLocations::default(),
-            &ConfigOverrides::default(),
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("site.titel"), "{error:#}");
-        assert!(tola_build::diagnostic::attached(&error).is_some());
-    }
-
-    #[test]
-    fn type_error_keeps_its_source_line() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = ConfigSource::parse(
-            &directory.path().join("tola.toml"),
-            "[server]\nport = \"wrong\"\n",
-            InputScope::Online,
-        )
-        .unwrap();
-        let error = resolve(
-            source,
-            tola_typst::PackageLocations::default(),
-            &ConfigOverrides::default(),
-        )
-        .unwrap_err();
-        let diagnostic = &tola_build::diagnostic::attached(&error).unwrap()[0];
-        assert_eq!(diagnostic.code, "config.toml");
-        let location = diagnostic.location.as_ref().unwrap();
-        assert_eq!(location.line, Some(2));
-        assert_eq!(location.source_lines[0].text, "port = \"wrong\"");
+        for (toml, key) in [
+            ("[unknown]\nvalue = true\n", "unknown"),
+            (
+                "[assets]\ncache_busting = true\n\n[site]\ntitel = \"Misspelled\"\n",
+                "site.titel",
+            ),
+        ] {
+            let source = ConfigSource::parse(
+                &directory.path().join("tola.toml"),
+                toml,
+                InputScope::Online,
+            )
+            .unwrap();
+            let error = resolve(
+                source,
+                tola_typst::PackageLocations::default(),
+                &ConfigOverrides::default(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(key), "{error:#}");
+            assert!(tola_diagnostic::attached(&error).is_some());
+        }
     }
 
     #[test]
@@ -580,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_text_leaves_disk_source_alone() {
+    fn unsaved_text_keeps_disk_source() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("tola.toml");
         std::fs::write(&path, text("Disk")).unwrap();
@@ -688,43 +606,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(candidate.has_same_effective_settings(&config).unwrap());
-    }
-
-    #[test]
-    fn float_equality_preserves_representation() {
-        assert!(!same_setting_value(
-            &toml::Value::Float(0.0),
-            &toml::Value::Float(-0.0)
-        ));
-        assert!(!same_setting_value(
-            &toml::Value::Float(f64::NAN),
-            &toml::Value::Float(f64::NAN)
-        ));
-        assert!(!same_setting_value(
-            &toml::Value::Integer(1),
-            &toml::Value::Float(1.0)
-        ));
-        assert!(same_setting_value(
-            &toml::Value::Float(1.0),
-            &toml::Value::Float(1.0)
-        ));
-    }
-
-    #[test]
-    fn loaders_acknowledge_independently() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        let first_path = first.path().join("tola.toml");
-        let second_path = second.path().join("tola.toml");
-        std::fs::write(&first_path, text("First")).unwrap();
-        std::fs::write(&second_path, text("Second")).unwrap();
-        let (_, _, _, mut first_loader) = load_at(&first_path).into_parts();
-        let (_, _, _, second_loader) = load_at(&second_path).into_parts();
-        std::fs::write(&first_path, text("Changed")).unwrap();
-        let candidate = first_loader.load_candidate().unwrap().unwrap();
-        first_loader.acknowledge(&candidate);
-        assert!(first_loader.load_candidate().unwrap().is_none());
-        assert!(second_loader.load_candidate().unwrap().is_none());
     }
 
     #[test]

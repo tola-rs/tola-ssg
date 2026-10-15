@@ -1,21 +1,12 @@
 //! Calendar dates and timestamps shared by metadata schemas and publication formats.
 
-use std::fmt;
-
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Timelike};
 use typst::foundations::{Datetime, Value};
 
 /// A date or timestamp that cannot be interpreted under the supported calendar rules.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
 pub struct DateError(&'static str);
-
-impl fmt::Display for DateError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.0)
-    }
-}
-
-impl std::error::Error for DateError {}
 
 /// Parse a native date or a strict `YYYY-MM-DD` string, with a year from 1 through 9999.
 ///
@@ -37,11 +28,50 @@ pub fn parse_date(value: &Value) -> Result<Datetime, DateError> {
     }
 }
 
-/// A timestamp retaining its local spelling and arbitrarily precise fractional second.
-///
-/// Whole UTC seconds and the normalized fractional digits form an exact ordering key. Fixed
-/// offset conversion for existing feed serializers is the only operation that truncates to
-/// nanoseconds.
+/// The `YYYY-MM-DD` spelling of a calendar date, the only kind of value [`parse_date`] accepts.
+pub fn format_calendar_date(value: &Datetime) -> String {
+    let (year, month, day) = calendar_parts(value);
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+/// The year, month, and day of a value [`parse_date`] accepted; every component is present.
+fn calendar_parts(value: &Datetime) -> (i32, u8, u8) {
+    match value {
+        Datetime::Date(date) => (date.year(), date.month() as u8, date.day()),
+        _ => unreachable!("parse_date accepts only values carrying a calendar date"),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum PartialDate {
+    Year(i32),
+    Month { year: i32, month: u8 },
+    Day { year: i32, month: u8, day: u8 },
+}
+
+pub(super) fn parse_partial_date(value: &Value) -> Result<PartialDate, DateError> {
+    let invalid = DateError("expected a valid calendar date in YYYY, YYYY-MM, or YYYY-MM-DD form");
+    if let Value::Str(text) = value {
+        match text.len() {
+            4 => {
+                let date = calendar_date(&format!("{text}-01-01")).map_err(|_| invalid)?;
+                return Ok(PartialDate::Year(date.year()));
+            }
+            7 => {
+                let date = calendar_date(&format!("{text}-01")).map_err(|_| invalid)?;
+                return Ok(PartialDate::Month {
+                    year: date.year(),
+                    month: date.month() as u8,
+                });
+            }
+            _ => {}
+        }
+    }
+    let (year, month, day) = calendar_parts(&parse_date(value).map_err(|_| invalid)?);
+    Ok(PartialDate::Day { year, month, day })
+}
+
+/// A timestamp with its local spelling and exact fractional second.
 #[derive(Debug)]
 pub struct Timestamp {
     rfc3339: String,
@@ -51,10 +81,6 @@ pub struct Timestamp {
 
 impl Timestamp {
     /// Parse a strict RFC 3339 string or a native datetime with a complete calendar date.
-    ///
-    /// Years are 1 through 9999, `T`/`t` separates the date and time, and the timezone is `Z`/`z`
-    /// or `±hh:mm`. Leap seconds and surrounding whitespace are rejected. Native datetimes use
-    /// UTC; a pure native date uses midnight, while a time without a date is rejected.
     pub fn parse(value: &Value) -> Result<Self, DateError> {
         match value {
             Value::Str(text) => Self::from_text(text.as_str()),
@@ -228,6 +254,72 @@ mod tests {
             assert_eq!(parse_date(&Value::Datetime(expected)).unwrap(), expected);
         }
     }
+
+    #[test]
+    fn partial_dates_keep_declared_components() {
+        for (source, expected) in [
+            ("0001", PartialDate::Year(1)),
+            ("9999", PartialDate::Year(9999)),
+            (
+                "2024-02",
+                PartialDate::Month {
+                    year: 2024,
+                    month: 2,
+                },
+            ),
+            (
+                "2000-02-29",
+                PartialDate::Day {
+                    year: 2000,
+                    month: 2,
+                    day: 29,
+                },
+            ),
+        ] {
+            assert_eq!(parse_partial_date(&text(source)).unwrap(), expected);
+        }
+        let date = Datetime::from_ymd(2024, 2, 29).unwrap();
+        assert_eq!(
+            parse_partial_date(&Value::Datetime(date)).unwrap(),
+            PartialDate::Day {
+                year: 2024,
+                month: 2,
+                day: 29,
+            },
+        );
+    }
+
+    #[test]
+    fn partial_dates_reject_other_shapes() {
+        for source in [
+            "",
+            "0000",
+            "10000",
+            "2026-00",
+            "2026-13",
+            "1900-02-29",
+            "2026-02-30",
+            "2026-04-31",
+            "2026-1",
+            "2026-01-1",
+            "2026 ",
+            " 2026",
+            "2026-11-01\n",
+            "2026-11-01T08:30:00Z",
+            "２０２６",
+            "2026-é",
+        ] {
+            assert!(parse_partial_date(&text(source)).is_err(), "{source}");
+        }
+        for date in [
+            Datetime::from_ymd(0, 1, 1).unwrap(),
+            Datetime::from_hms(8, 30, 0).unwrap(),
+            Datetime::from_ymd_hms(2026, 11, 1, 8, 30, 0).unwrap(),
+        ] {
+            assert!(parse_partial_date(&Value::Datetime(date)).is_err());
+        }
+    }
+
     #[test]
     fn timestamps_keep_local_offsets() {
         let source = "1970-01-01t00:30:00+01:00";

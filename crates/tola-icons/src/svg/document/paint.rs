@@ -421,19 +421,9 @@ impl RenderTraversal<'_> {
         self.visit()?;
         let element = &self.document.elements[index];
         let inherited = parent.for_element(element);
+        // A clipPath's children are the geometry this walk reads; every other resource is skipped.
         if !inherited.displayed
-            || matches!(
-                element.name.as_str(),
-                "defs"
-                    | "linearGradient"
-                    | "radialGradient"
-                    | "stop"
-                    | "mask"
-                    | "filter"
-                    | "pattern"
-                    | "title"
-                    | "desc"
-            )
+            || (element.is_resource_or_description() && element.name != "clipPath")
         {
             return Ok(());
         }
