@@ -10,7 +10,7 @@ use tola_build::diagnostic::{DiagnosticError, Location};
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
-use crate::cli::{ConfigFileArgs, TypstPackageArgs};
+use crate::cli::{CompilerFontArgs, ConfigFileArgs, TypstPackageArgs};
 use tola_build::InputScope;
 
 use tola_lsp::ServedWorkspace;
@@ -18,12 +18,13 @@ use tola_lsp::ServedWorkspace;
 pub(in crate::cli) fn run(
     config: ConfigFileArgs,
     packages: TypstPackageArgs,
+    fonts: CompilerFontArgs,
     scope: InputScope,
     cancellation: &Cancellation,
     output: &CommandOutput,
 ) -> Result<()> {
     cancellation.token().ensure_active()?;
-    let resources = crate::cli::config::build_resources(scope);
+    let resources = crate::cli::config::build_resources_with_fonts(scope, &fonts)?;
     let mut configuration = source_configuration(config, packages, resources.input_scope())?;
     let token = cancellation.token();
     let input = std::io::stdin();

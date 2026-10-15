@@ -40,7 +40,9 @@ pub use crate::world::file::{
     file_id_from_path, hash_length_prefixed, virtual_file_id,
 };
 
-pub use crate::world::font::{FontLoadError, FontOptions, FontStore};
+pub use crate::world::font::{
+    CompilerFont, CompilerFontInput, FontLoadError, FontOptions, FontStore,
+};
 
 pub use crate::world::library::{GLOBAL_LIBRARY, create_library_with_inputs};
 

@@ -5,13 +5,40 @@ use crate::cli::log::destination;
 use anyhow::{Result, ensure};
 use tola_build::InputScope;
 
-use super::{BuildOverrideArgs, ConfigFileArgs, ServerArgs, TypstPackageArgs};
+use super::{BuildOverrideArgs, CompilerFontArgs, ConfigFileArgs, ServerArgs, TypstPackageArgs};
 use crate::cli::output::CommandOutput;
 use crate::config::{ConfigOverrides, ServerOverrides};
 use tola_build::config::loading::BuildOverrides;
 
 pub(super) fn build_resources(scope: InputScope) -> tola_build::BuildResources {
     tola_build::BuildResources::new().with_input_scope(scope)
+}
+
+/// Build resources with this invocation's compiler font inputs applied.
+pub(super) fn build_resources_with_fonts(
+    scope: InputScope,
+    fonts: &CompilerFontArgs,
+) -> Result<tola_build::BuildResources> {
+    let mut resources = build_resources(scope);
+    if fonts.ignore_system {
+        resources = resources.without_system_fonts();
+    }
+    if fonts.ignore_embedded {
+        resources = resources.without_embedded_fonts();
+    }
+    if fonts.paths.is_empty() {
+        return Ok(resources);
+    }
+    ensure!(
+        scope != InputScope::Pure,
+        "`--pure` cannot use `--font-path`"
+    );
+    let directories = fonts
+        .paths
+        .iter()
+        .map(std::path::absolute)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    Ok(resources.with_font_directories(directories))
 }
 
 pub(super) fn build_overrides(build: &BuildOverrideArgs) -> BuildOverrides {
@@ -218,5 +245,21 @@ mod tests {
         ] {
             assert!(package_locations(&packages, InputScope::Pure).is_err());
         }
+    }
+
+    #[test]
+    fn font_flags_narrow_one_invocation() {
+        let fonts = CompilerFontArgs {
+            paths: vec!["fonts".into()],
+            ignore_system: true,
+            ignore_embedded: true,
+        };
+        assert!(build_resources_with_fonts(InputScope::Pure, &fonts).is_err());
+
+        let resources = build_resources_with_fonts(InputScope::Online, &fonts).unwrap();
+        assert!(!resources.include_system_fonts());
+        assert!(!resources.include_embedded_fonts());
+        assert_eq!(resources.font_directories().len(), 1);
+        assert!(resources.font_directories()[0].is_absolute());
     }
 }

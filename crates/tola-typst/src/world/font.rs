@@ -19,7 +19,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 use typst::diag::FileError;
 use typst::foundations::Bytes;
-use typst::text::{Font, FontInfo};
+use typst::text::{Font, FontAxis, FontInfo, FontVariant};
 use typst_kit::fonts::{self, FontSource, FontStore as KitFontStore};
 
 use crate::BundleCancellation;
@@ -159,6 +159,38 @@ impl FontLoadError {
     }
 }
 
+/// One face the compiler fonts offer, with the input it is read from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompilerFont {
+    /// The family name, spelled as the face declares it.
+    pub family: String,
+    /// The style, weight, and stretch a selection matches this face by.
+    pub variant: FontVariant,
+    /// The variation axes the face declares; empty for a static face.
+    pub axes: Vec<FontAxis>,
+    /// The input the face's bytes come from.
+    pub input: CompilerFontInput,
+}
+
+/// The input one compiler font face is read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompilerFontInput {
+    /// A face file below one configured directory.
+    ConfiguredDirectory {
+        /// The configured directory, as the host passed it.
+        directory: PathBuf,
+        /// The file inside it the face is read from.
+        file: PathBuf,
+    },
+    /// A face file system font discovery reported.
+    SystemFile {
+        /// The face file.
+        file: PathBuf,
+    },
+    /// A face this binary carries.
+    Embedded,
+}
+
 /// Shared fonts and the source evidence belonging to one resource generation.
 ///
 /// Configured directories retain complete membership and byte digests, and a used font from one
@@ -247,7 +279,7 @@ impl FontStore {
             &self.options,
             cancellation,
             &fonts.configured.files,
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         ) {
             Ok(current) => current,
             Err(FontLoadError::Cancelled) => return Err(FontLoadError::Cancelled),
@@ -313,6 +345,30 @@ impl FontStore {
             .map(|fonts| fonts.native.book().families().count())
     }
 
+    /// Every face the loaded fonts offer, in the order the compiler indexes them.
+    ///
+    /// A store that has not loaded its fonts offers nothing: discovery has not run.
+    pub fn compiler_fonts(&self) -> Vec<CompilerFont> {
+        let Some(fonts) = self.fonts.get() else {
+            return Vec::new();
+        };
+        let book = fonts.native.book();
+        fonts
+            .inputs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, input)| {
+                let info = book.info(index)?;
+                Some(CompilerFont {
+                    family: info.family.clone(),
+                    variant: info.variant,
+                    axes: info.axes.clone(),
+                    input: input.clone(),
+                })
+            })
+            .collect()
+    }
+
     /// Whether a path has a font format supported by the native font scanner.
     pub fn accepts_path(path: &Path) -> bool {
         path.extension()
@@ -352,6 +408,8 @@ struct LoadedFonts {
     configured: FontInventory,
     files: BTreeMap<PathBuf, Arc<FontFile>>,
     system_paths: BTreeSet<PathBuf>,
+    /// The input that provided each face, in the native store's own index order.
+    inputs: Vec<CompilerFontInput>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -527,8 +585,12 @@ fn load_fonts(
 ) -> Result<LoadedFonts, FontLoadError> {
     let mut native = KitFontStore::new();
     let mut files = BTreeMap::<PathBuf, Arc<FontFile>>::new();
-    let configured =
-        scan_configured_fonts(options, cancellation, &BTreeMap::new(), |path, observed| {
+    let mut inputs = Vec::new();
+    let configured = scan_configured_fonts(
+        options,
+        cancellation,
+        &BTreeMap::new(),
+        |directory, path, observed| {
             let bytes = observed.bytes.as_slice();
             let digest = observed.digest;
             let file = files.entry(path.to_path_buf()).or_insert_with(|| {
@@ -552,10 +614,15 @@ fn load_fonts(
                         },
                         info,
                     ));
+                    inputs.push(CompilerFontInput::ConfiguredDirectory {
+                        directory: directory.to_path_buf(),
+                        file: path.to_path_buf(),
+                    });
                 }
             }
             Ok(())
-        })?;
+        },
+    )?;
     let mut system_paths = BTreeSet::new();
     if options.include_system_fonts {
         cancellation.ensure_active_as()?;
@@ -583,18 +650,24 @@ fn load_fonts(
                 },
                 info,
             ));
+            inputs.push(CompilerFontInput::SystemFile {
+                file: file.path.clone(),
+            });
         }
     }
     #[cfg(feature = "embed-fonts")]
     if options.include_embedded_fonts {
-        cancellation.ensure_active_as()?;
-        native.extend(embedded::fonts());
+        for face in embedded::fonts() {
+            native.push(face);
+            inputs.push(CompilerFontInput::Embedded);
+        }
     }
     Ok(LoadedFonts {
         native,
         configured,
         files,
         system_paths,
+        inputs,
     })
 }
 
@@ -602,11 +675,14 @@ fn load_fonts(
 ///
 /// `known` has the identities a previous scan established; files those still describe are
 /// not read again and `observe` is not called for them.
+///
+/// `observe` receives the configured directory being scanned, the file below it, and that file's
+/// bytes.
 fn scan_configured_fonts(
     options: &FontOptions,
     cancellation: &BundleCancellation,
     known: &BTreeMap<PathBuf, FontFileIdentity>,
-    mut observe: impl FnMut(&Path, &FontFileBytes) -> Result<(), FontLoadError>,
+    mut observe: impl FnMut(&Path, &Path, &FontFileBytes) -> Result<(), FontLoadError>,
 ) -> Result<FontInventory, FontLoadError> {
     let mut roots = Vec::new();
     let mut files = BTreeMap::new();
@@ -633,7 +709,7 @@ fn scan_configured_fonts(
                     }
                     check_font_source(&options.source_boundary, path)?;
                     let observed = read_font_bytes(path, Some(cancellation))?;
-                    observe(path, &observed)?;
+                    observe(&logical, path, &observed)?;
                     files.insert(
                         path.to_path_buf(),
                         FontFileIdentity::of(path, observed.digest)?,
@@ -805,6 +881,9 @@ mod tests {
                     },
                     files: BTreeMap::from([(path.to_path_buf(), Arc::clone(&file))]),
                     system_paths: BTreeSet::from([path.to_path_buf()]),
+                    inputs: vec![CompilerFontInput::SystemFile {
+                        file: path.to_path_buf(),
+                    }],
                 })
                 .is_ok()
         );
@@ -821,6 +900,49 @@ mod tests {
         assert_eq!(store.font_count(), Some(0));
         assert_eq!(store.family_count(), Some(0));
         assert!(store.is_current(&cancellation).unwrap());
+    }
+
+    #[cfg(feature = "embed-fonts")]
+    #[test]
+    fn configured_directory_faces_report_their_directory() {
+        let root = tempfile::TempDir::new().unwrap();
+        let path = root.path().join("font.ttf");
+        let (font, _) = embedded::fonts().next().unwrap();
+        fs::write(&path, font.data().as_slice()).unwrap();
+        let store = FontStore::with_options(isolated_options().with_custom_paths(&[root.path()]));
+        store.load(&BundleCancellation::new()).unwrap();
+
+        let fonts = store.compiler_fonts();
+        assert_eq!(fonts.len(), 1);
+        assert_eq!(fonts[0].family, font.info().family);
+        assert_eq!(fonts[0].variant, font.info().variant);
+        assert!(matches!(
+            &fonts[0].input,
+            CompilerFontInput::ConfiguredDirectory { directory, file }
+                if directory.as_path() == root.path()
+                    && file == &fs::canonicalize(&path).unwrap()
+        ));
+    }
+
+    #[cfg(feature = "embed-fonts")]
+    #[test]
+    fn embedded_faces_report_themselves_embedded() {
+        let unloaded = FontStore::with_options(
+            FontOptions::new()
+                .with_system_fonts(false)
+                .with_embedded_fonts(true),
+        );
+        assert!(unloaded.compiler_fonts().is_empty());
+        unloaded.load(&BundleCancellation::new()).unwrap();
+
+        let fonts = unloaded.compiler_fonts();
+        assert_eq!(fonts.len(), unloaded.font_count().unwrap());
+        assert!(!fonts.is_empty());
+        assert!(
+            fonts
+                .iter()
+                .all(|font| matches!(font.input, CompilerFontInput::Embedded))
+        );
     }
 
     #[test]
