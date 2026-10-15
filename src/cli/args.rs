@@ -152,6 +152,8 @@ pub enum Commands {
         packages: TypstPackageArgs,
         #[command(flatten)]
         build: BuildOverrideArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
     },
 
     /// Build and serve the site, rebuilding when files change.
@@ -162,6 +164,8 @@ pub enum Commands {
         packages: TypstPackageArgs,
         #[command(flatten)]
         build: BuildOverrideArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
         #[command(flatten)]
         development: DevelopmentArgs,
     },
@@ -177,6 +181,8 @@ pub enum Commands {
         #[command(flatten)]
         build: BuildOverrideArgs,
         #[command(flatten)]
+        fonts: CompilerFontArgs,
+        #[command(flatten)]
         server: ServerArgs,
     },
 
@@ -191,6 +197,8 @@ pub enum Commands {
         packages: TypstPackageArgs,
         #[command(flatten)]
         build: BuildOverrideArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
     },
 
     /// Format the site's Typst sources.
@@ -210,6 +218,8 @@ pub enum Commands {
         config: ConfigFileArgs,
         #[command(flatten)]
         packages: TypstPackageArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
         #[command(subcommand)]
         command: InspectCommand,
     },
@@ -222,10 +232,19 @@ pub enum Commands {
         packages: TypstPackageArgs,
         #[command(flatten)]
         vendor: VendorArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
     },
 
     /// Check site configuration, source paths, and local tools.
     Doctor(DoctorArgs),
+
+    /// List the compiler fonts Typst discovered for this site.
+    ///
+    /// Compiler fonts lay out and export Typst content: paged documents, and content a page bakes
+    /// with `html.frame`. Browser fonts are separate: publish them through `[assets]` and load them
+    /// with CSS `@font-face`; a Typst font setting does not install a browser font.
+    Fonts(FontsArgs),
 
     /// Configure or display editor integration.
     Editor {
@@ -241,6 +260,8 @@ pub enum Commands {
         config: ConfigFileArgs,
         #[command(flatten)]
         packages: TypstPackageArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
     },
 
     /// Print or export the Tola site authoring skill.
@@ -509,6 +530,50 @@ pub struct DoctorArgs {
     pub json: bool,
 }
 
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct FontsArgs {
+    #[command(flatten)]
+    pub config: ConfigFileArgs,
+
+    #[command(flatten)]
+    pub packages: TypstPackageArgs,
+
+    #[command(flatten)]
+    pub fonts: CompilerFontArgs,
+
+    /// List every face with its style, weight, stretch, and file instead of one line per family.
+    #[arg(long)]
+    pub variants: bool,
+
+    /// Print the fonts as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// The compiler font inputs one invocation overrides.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct CompilerFontArgs {
+    /// Extra compiler font directories for this invocation, searched before `[typst.fonts] paths`.
+    ///
+    /// Repeat the flag for more than one directory. A relative path resolves against the
+    /// invocation directory. `--pure` refuses these.
+    #[arg(
+        long = "font-path",
+        global = true,
+        value_name = "DIR",
+        value_hint = clap::ValueHint::DirPath
+    )]
+    pub paths: Vec<PathBuf>,
+
+    /// Do not use system fonts, even when `[typst.fonts] system` is on.
+    #[arg(long = "ignore-system-fonts", global = true)]
+    pub ignore_system: bool,
+
+    /// Do not use the fonts Typst carries.
+    #[arg(long = "ignore-embedded-fonts", global = true)]
+    pub ignore_embedded: bool,
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum EditorCommand {
     /// Regenerate editor packages and merge workspace settings.
@@ -600,6 +665,7 @@ impl Commands {
             Self::Inspect { .. } => "inspect",
             Self::Vendor { .. } => "vendor",
             Self::Doctor(_) => "doctor",
+            Self::Fonts(_) => "fonts",
             Self::Editor { .. } => "editor",
             Self::Lsp { .. } => "lsp",
             Self::Skill(_) => "skill",
@@ -626,6 +692,7 @@ impl Commands {
                 command: EditorCommand::Setup { config, .. },
             } => Some(config),
             Self::Doctor(args) => Some(&args.config),
+            Self::Fonts(args) => Some(&args.config),
             _ => None,
         }
     }
@@ -737,7 +804,9 @@ mod tests {
                     "packages",
                 ],
                 |cli| match &cli.command {
-                    Commands::Lsp { config, packages } => format!(
+                    Commands::Lsp {
+                        config, packages, ..
+                    } => format!(
                         "{}/{}",
                         path_text(&config.path),
                         path_text(&packages.package_path)
@@ -864,6 +933,7 @@ mod tests {
                         config,
                         packages,
                         command: InspectCommand::Outputs(args),
+                        ..
                     } => format!(
                         "{}/{}/{}",
                         path_text(&config.path),

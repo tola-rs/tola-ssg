@@ -23,7 +23,7 @@ include = [
 ]
 
 [dependencies]
-ruzstd = { version = "0.9.0", optional = true }
+ruzstd = { version = "0.9.1", optional = true }
 
 [features]
 default = []
@@ -35,4 +35,4 @@ jmdict = ["dep:ruzstd"]
 unihan = ["dep:ruzstd"]
 
 [dev-dependencies]
-ruzstd = "0.9.0"
+ruzstd = "0.9.1"

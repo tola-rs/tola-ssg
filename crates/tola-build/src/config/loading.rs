@@ -306,6 +306,8 @@ fn resolve_schema(
         root,
         warnings,
         positions,
+        declares_font_paths: presence
+            .contains(crate::config::section::FontsConfig::FIELDS.paths.as_str()),
         site: site.into_resolved(),
         build: build_config,
         assets,

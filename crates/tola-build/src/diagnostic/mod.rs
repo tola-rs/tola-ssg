@@ -5,6 +5,7 @@
 mod code;
 mod error;
 
+pub use crate::compiler::diagnostic::font_failure;
 pub use code::DiagnosticCode;
 pub use error::{DiagnosticError, attached, fallback};
 

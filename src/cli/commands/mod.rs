@@ -6,6 +6,7 @@ pub(super) mod dev;
 pub(super) mod doctor;
 pub(super) mod editor;
 pub(super) mod fmt;
+pub(super) mod fonts;
 pub(super) mod help;
 pub(super) mod init;
 pub(super) mod inspect;

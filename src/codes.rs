@@ -55,6 +55,11 @@ pub mod doctor {
         DiagnosticCode::new("doctor.editor_packages_unusable");
     /// The configured entry is not a file.
     pub const ENTRY_MISSING: DiagnosticCode = DiagnosticCode::new("doctor.entry_missing");
+    /// A configured compiler font directory holds no font file.
+    pub const FONT_DIRECTORY_EMPTY: DiagnosticCode =
+        DiagnosticCode::new("doctor.font_directory_empty");
+    /// A configured compiler font directory is not a directory.
+    pub const FONT_PATH_MISSING: DiagnosticCode = DiagnosticCode::new("doctor.font_path_missing");
     /// A hook command is not installed.
     pub const HOOK_COMMAND_MISSING: DiagnosticCode =
         DiagnosticCode::new("doctor.hook_command_missing");

@@ -33,6 +33,7 @@ caf = "caf"
 # Deliberate misspellings in fixtures, and upstream spellings quoted verbatim:
 # correct where they stand, so the checker must not rewrite them.
 adress = "adress"
+alais = "alais"
 alhpa = "alhpa"
 alikes = "alikes"
 asert = "asert"
@@ -55,3 +56,5 @@ titel = "titel"
 ue = "ue"
 ues = "ues"
 underlaying = "underlaying"
+# The OpenType width-axis tag, which the dictionary reads as "width".
+wdth = "wdth"

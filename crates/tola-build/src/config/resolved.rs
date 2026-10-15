@@ -28,6 +28,8 @@ pub struct ResolvedSiteConfig {
 
     /// Where the configuration source writes each key, so a warning can name its line.
     pub(super) positions: std::sync::Arc<crate::config::source::ConfigPositions>,
+    /// Whether the configuration source declares `typst.fonts.paths` itself.
+    pub(crate) declares_font_paths: bool,
 
     pub(crate) site: ResolvedSiteSection,
 
@@ -103,12 +105,31 @@ impl ResolvedSiteConfig {
         &self.typst.fonts
     }
 
+    /// Whether the configuration source declares `typst.fonts.paths` itself.
+    ///
+    /// An absent key falls back to the scaffold's directory, which a site relying on the fonts
+    /// Tola carries need not create.
+    pub fn declares_font_paths(&self) -> bool {
+        self.declares_font_paths
+    }
+
     /// Whether system fonts may join a build under `resources`.
     ///
     /// The site's `[typst.fonts] system` and the invocation's scope each decide it, and either can
     /// refuse what the other allows.
     pub fn system_fonts_allowed(&self, resources: &BuildResources) -> bool {
         self.typst.fonts.system && resources.include_system_fonts()
+    }
+
+    /// Every directory the compiler discovers fonts in, in search order.
+    ///
+    /// This invocation's own directories come first, then the site's configured paths, then the
+    /// vendored copy, whose faces the site keeps so a `--pure` build can use them.
+    pub fn compiler_font_directories(&self, resources: &BuildResources) -> Vec<PathBuf> {
+        let mut directories = resources.font_directories().to_vec();
+        directories.extend(self.typst.fonts.paths.iter().cloned());
+        directories.extend(self.vendor.fonts().filter(|path| path.is_dir()));
+        directories
     }
 
     pub fn icons(&self) -> &crate::config::section::IconsConfig {
@@ -322,5 +343,45 @@ mod tests {
                 .expect("a declared vendor path")
         );
         assert_eq!(exclusions[2].candidate, None);
+    }
+
+    /// Invocation directories come first, and a vendored copy joins the site's own paths.
+    #[test]
+    fn invocation_font_directories_precede_the_site_paths() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        std::fs::write(
+            root.join("tola.toml"),
+            "[typst.fonts]\npaths = [\"fonts\"]\n[vendor]\npath = \"vendor\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("content")).unwrap();
+        let config = load_site_config(
+            Some(&root.join("tola.toml")),
+            tola_typst::PackageLocations::default(),
+            &BuildOverrides::default(),
+        )
+        .unwrap()
+        .into_config();
+        let root = config.get_root().to_path_buf();
+
+        let resources = crate::resources::BuildResources::new();
+        assert_eq!(
+            config.compiler_font_directories(&resources),
+            vec![root.join("fonts")]
+        );
+
+        std::fs::create_dir_all(root.join("vendor/fonts")).unwrap();
+        assert_eq!(
+            config.compiler_font_directories(&resources),
+            vec![root.join("fonts"), root.join("vendor/fonts")]
+        );
+
+        let invocation = std::path::PathBuf::from("/host/fonts");
+        let resources = resources.with_font_directories(vec![invocation.clone()]);
+        assert_eq!(
+            config.compiler_font_directories(&resources),
+            vec![invocation, root.join("fonts"), root.join("vendor/fonts")]
+        );
     }
 }

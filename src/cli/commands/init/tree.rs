@@ -22,10 +22,7 @@ pub(super) fn render(writes: &FileWrites) -> String {
         }
     }
     if has_package_files {
-        tree.insert(
-            Path::new(PACKAGE_MIRROR_DIRECTORY),
-            EntryKind::Directory,
-        );
+        tree.insert(Path::new(PACKAGE_MIRROR_DIRECTORY), EntryKind::Directory);
     }
 
     let name = writes

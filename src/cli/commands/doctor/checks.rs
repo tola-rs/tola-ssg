@@ -101,6 +101,7 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
     diagnostics.extend(environment_diagnostics(config.get_root()));
 
     diagnostics.extend(vendor_diagnostics(&config));
+    diagnostics.extend(font_diagnostics(&config));
     diagnostics
 }
 
@@ -255,8 +256,10 @@ fn sampled(
         diagnostic = diagnostic.with_note(crate::terminal::display_path_within(path, root));
     }
     if let Some(extra) = paths.len().checked_sub(SAMPLED).filter(|count| *count > 0) {
-        diagnostic =
-            diagnostic.with_note(crate::terminal::plural_count(extra, &format!("more {noun}")));
+        diagnostic = diagnostic.with_note(crate::terminal::plural_count(
+            extra,
+            &format!("more {noun}"),
+        ));
     }
     diagnostic
 }
@@ -328,6 +331,72 @@ fn vendor_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Di
         diagnostic = diagnostic.with_note(format!("{extra} more links in the same directory"));
     }
     vec![diagnostic]
+}
+
+/// Compiler font directories a build would find nothing in.
+///
+/// Only the paths the author declared are checked: an absent `typst.fonts.paths` falls back to the
+/// scaffold's directory, which a site relying on the fonts Tola carries need not create. The
+/// extension rule is the compiler's own, so a directory this reports empty provides no face to a
+/// build either. A directory Tola cannot read is left to the compiler, which reports it there.
+fn font_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Diagnostic> {
+    if !config.declares_font_paths() {
+        return Vec::new();
+    }
+    let root = config.get_root();
+    let mut diagnostics = Vec::new();
+    for (index, directory) in config.fonts().paths.iter().enumerate() {
+        if !directory.is_dir() {
+            diagnostics.push(
+                path_diagnostic(
+                    crate::codes::doctor::FONT_PATH_MISSING,
+                    Severity::Error,
+                    root,
+                    directory,
+                    &format!("`typst.fonts.paths[{index}]` is not a directory"),
+                )
+                .with_help("Create it, or correct `typst.fonts.paths`"),
+            );
+            continue;
+        }
+        if !holds_font_file(directory) {
+            diagnostics.push(
+                path_diagnostic(
+                    crate::codes::doctor::FONT_DIRECTORY_EMPTY,
+                    Severity::Warning,
+                    root,
+                    directory,
+                    &format!("`typst.fonts.paths[{index}]` holds no font file"),
+                )
+                .with_help(
+                    "Add a `.ttf`, `.otf`, `.ttc`, or `.otc` file, or correct `typst.fonts.paths`",
+                ),
+            );
+        }
+    }
+    diagnostics
+}
+
+/// Whether any file below `directory` carries an extension the compiler scans fonts by.
+fn holds_font_file(directory: &Path) -> bool {
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            // A directory Tola cannot read is the compiler's to report, not this check's.
+            return true;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = std::fs::metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            } else if tola_typst::FontStore::accepts_path(&entry.path()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Every symbolic link below a directory, in a stable order.
@@ -548,6 +617,76 @@ mod tests {
                 .map(|location| location.path.as_str()),
             Some("vendor")
         );
+    }
+
+    #[test]
+    fn missing_font_directory_is_reported() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
+
+        let reported = diagnose_at(&path);
+        let missing = reported
+            .iter()
+            .find(|diagnostic| diagnostic.code == crate::codes::doctor::FONT_PATH_MISSING)
+            .expect("a configured font directory that does not exist is reported");
+
+        assert_eq!(
+            missing
+                .location
+                .as_ref()
+                .map(|location| location.path.as_str()),
+            Some("fonts")
+        );
+    }
+
+    #[test]
+    fn font_directory_without_font_files_is_reported() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
+        std::fs::create_dir_all(directory.path().join("fonts")).unwrap();
+        std::fs::write(directory.path().join("fonts/notes.txt"), "not a font").unwrap();
+
+        let reported = diagnose_at(&path);
+
+        assert!(
+            reported
+                .iter()
+                .any(|diagnostic| diagnostic.code == crate::codes::doctor::FONT_DIRECTORY_EMPTY)
+        );
+    }
+
+    #[test]
+    fn font_directory_with_fonts_is_not_reported() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
+        std::fs::create_dir_all(directory.path().join("fonts/nested")).unwrap();
+        std::fs::write(directory.path().join("fonts/nested/Face.OTF"), "bytes").unwrap();
+
+        let reported = diagnose_at(&path);
+
+        assert!(!reported.iter().any(|diagnostic| diagnostic.code
+            == crate::codes::doctor::FONT_DIRECTORY_EMPTY
+            || diagnostic.code == crate::codes::doctor::FONT_PATH_MISSING));
+    }
+
+    #[test]
+    fn undeclared_font_paths_are_not_reported() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        std::fs::write(
+            &path,
+            "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n",
+        )
+        .unwrap();
+
+        let reported = diagnose_at(&path);
+
+        assert!(!reported.iter().any(|diagnostic| diagnostic.code
+            == crate::codes::doctor::FONT_PATH_MISSING
+            || diagnostic.code == crate::codes::doctor::FONT_DIRECTORY_EMPTY));
     }
 
     #[cfg(unix)]

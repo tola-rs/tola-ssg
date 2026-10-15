@@ -3,7 +3,7 @@
 pub(crate) mod analysis;
 pub(crate) mod bundle;
 mod dependency;
-mod diagnostic;
+pub(crate) mod diagnostic;
 pub(crate) mod documents;
 mod host;
 mod html;

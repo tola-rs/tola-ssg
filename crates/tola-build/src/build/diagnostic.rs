@@ -127,6 +127,22 @@ mod tests {
     }
 
     #[test]
+    fn font_failure_names_the_configuration_key() {
+        let error = anyhow::Error::new(tola_typst::FontLoadError::NotDirectory {
+            path: std::path::PathBuf::from("/site/fonts/Arial.ttf"),
+        });
+
+        let diagnosed = with_site(error, Path::new("/site"));
+        let diagnostics = for_error(&diagnosed, Path::new("/site"));
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, crate::codes::typst::FONT);
+        assert!(diagnostics[0].message.contains("fonts/Arial.ttf"));
+        assert!(!diagnostics[0].message.contains("/site"));
+        assert!(!diagnostics[0].help.is_empty());
+    }
+
+    #[test]
     fn output_conflict_names_its_path() {
         let path = std::path::PathBuf::from("/site");
         let diagnostics = for_error(

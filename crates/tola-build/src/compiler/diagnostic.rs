@@ -13,10 +13,18 @@ pub(crate) fn error_diagnostics(
     error: &anyhow::Error,
     root: &Path,
 ) -> Option<Vec<crate::diagnostic::Diagnostic>> {
-    let compile = error
+    if let Some(compile) = error
         .chain()
-        .find_map(|cause| cause.downcast_ref::<tola_typst::CompileError>())?;
-    compile_failure_diagnostics(compile, root)
+        .find_map(|cause| cause.downcast_ref::<tola_typst::CompileError>())
+    {
+        return compile_failure_diagnostics(compile, root);
+    }
+    // Font resources are prepared before a compilation, so their failure can reach a boundary with
+    // no `CompileError` wrapped around it.
+    let font = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<tola_typst::FontLoadError>())?;
+    font_failure(font, root).map(|diagnostic| vec![diagnostic])
 }
 
 /// Classify one Typst compiler failure into diagnostics the site author reads.
@@ -87,7 +95,7 @@ pub(super) fn compile_failure_diagnostics(
             relativized_text(message, root),
         ),
         tola_typst::CompileError::Snapshot(error) => snapshot_diagnostic(error, root)?,
-        tola_typst::CompileError::Font(error) => font_diagnostic(error, root)?,
+        tola_typst::CompileError::Font(error) => font_failure(error, root)?,
         tola_typst::CompileError::World(error) => world_diagnostic(error, root)?,
         tola_typst::CompileError::Cancelled => return None,
         tola_typst::CompileError::Compilation { .. }
@@ -152,12 +160,30 @@ fn snapshot_diagnostic(
 
 /// One font-resource failure in the site author's words, or `None` for cancellation.
 ///
-/// `CompileError::from` already folds a cancelled font load into `CompileError::Cancelled`, so
-/// a cancelled load answers `None` here and the caller reports cancellation instead.
-fn font_diagnostic(error: &tola_typst::FontLoadError, root: &Path) -> Option<Diagnostic> {
+/// `CompileError::from` already folds a cancelled font load into `CompileError::Cancelled`, so a
+/// cancelled load answers `None` here and the caller reports cancellation instead. An application
+/// that prepares fonts itself reports its failures through this same projection.
+pub fn font_failure(error: &tola_typst::FontLoadError, root: &Path) -> Option<Diagnostic> {
     use tola_typst::FontLoadError;
     Some(match error {
         FontLoadError::Cancelled => return None,
+        FontLoadError::NotDirectory { path } => match site_relative(path, root) {
+            Some(relative) => Diagnostic::new(
+                crate::codes::typst::FONT,
+                Severity::Error,
+                format!("`{relative}` is not a directory"),
+            )
+            .with_path(relative)
+            .with_help(
+                "`typst.fonts.paths` entries name directories; point this entry at the directory that holds the font file",
+            ),
+            None => Diagnostic::new(
+                crate::codes::typst::FONT,
+                Severity::Error,
+                "a `typst.fonts.paths` entry is not a directory",
+            )
+            .with_help("Point each `typst.fonts.paths` entry at a directory that holds font files"),
+        },
         FontLoadError::File { path, error } => match site_relative(path, root) {
             Some(relative) => {
                 let diagnostic = Diagnostic::new(
@@ -237,7 +263,7 @@ fn world_diagnostic(error: &tola_typst::WorldBuildError, root: &Path) -> Option<
             Severity::Error,
             error.to_string(),
         ),
-        WorldBuildError::Font(error) => font_diagnostic(error, root)?,
+        WorldBuildError::Font(error) => font_failure(error, root)?,
     })
 }
 
@@ -245,7 +271,7 @@ fn world_diagnostic(error: &tola_typst::WorldBuildError, root: &Path) -> Option<
 ///
 /// Details Typst keeps for its own diagnostics — conflicting editor versions, unmapped paths —
 /// stay out of the rendered reason.
-fn file_failure_reason(error: &typst::diag::FileError) -> Option<String> {
+pub(crate) fn file_failure_reason(error: &typst::diag::FileError) -> Option<String> {
     use typst::diag::{FileError, PackageError};
     Some(match error {
         FileError::NotFound(_) => "it does not exist".to_owned(),
@@ -333,7 +359,7 @@ fn ensure_error_diagnostic(
 /// The site-root-relative spelling of `path`, when it lies inside the site root.
 ///
 /// A path outside the root is not rendered, so callers state the failure without one.
-pub(super) fn site_relative(path: &Path, root: &Path) -> Option<String> {
+pub(crate) fn site_relative(path: &Path, root: &Path) -> Option<String> {
     let relative = root_relative(path, root);
     (!relative.as_os_str().is_empty() && relative != path)
         .then(|| crate::filesystem::display_path(path, root))
