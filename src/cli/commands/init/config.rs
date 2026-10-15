@@ -8,8 +8,8 @@ use tola_build::config::section::build::hooks::{
     BeforeBuildHookConfig, CommandOutput, HooksConfig, OutputCommandConfig,
 };
 use tola_build::config::section::{
-    AssetTreeDeclaration, AssetUrlPrefix, AssetsConfig, BuildSectionConfig, IconsConfig,
-    SiteSectionConfig, TypstSectionConfig, VendorConfig,
+    AssetTreeDeclaration, AssetUrlPrefix, AssetsConfig, BuildSectionConfig, FormatterConfig,
+    IconsConfig, SiteSectionConfig, TypstSectionConfig, VendorConfig,
 };
 
 use super::features::{Effects, Hook, HookStage};
@@ -46,6 +46,7 @@ pub(super) fn schema(effects: &Effects) -> SiteConfigSchema {
         vendor: VendorConfig {
             path: Some(PathBuf::from("vendor")),
         },
+        formatter: FormatterConfig::default(),
     }
 }
 

@@ -3,6 +3,7 @@
 
 pub mod assets;
 pub mod build;
+pub mod formatter;
 pub mod icons;
 pub(crate) mod path;
 pub mod site;
@@ -14,6 +15,7 @@ pub use assets::{
     AssetsConfig,
 };
 pub use build::BuildSectionConfig;
+pub use formatter::FormatterConfig;
 pub use icons::{IconCollectionSource, IconsConfig, Sha256Digest};
 pub use site::{SiteAuthor, SiteSectionConfig};
 pub use typst::{FontsConfig, TypstSectionConfig};

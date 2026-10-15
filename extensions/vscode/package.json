@@ -330,18 +330,6 @@
           "scope": "resource",
           "description": "Typst package cache directory, absolute or relative to the workspace folder. Leave empty to use Typst's default cache directory."
         },
-        "tola.formatterPrintWidth": {
-          "type": "number",
-          "default": 120,
-          "scope": "resource",
-          "description": "Maximum line width the formatter aims for."
-        },
-        "tola.formatterProseWrap": {
-          "type": "boolean",
-          "default": false,
-          "scope": "resource",
-          "description": "Rewrap prose paragraphs to the formatter's width."
-        },
         "tola.trace.server": {
           "type": "string",
           "enum": [

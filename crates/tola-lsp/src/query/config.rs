@@ -714,7 +714,15 @@ mod tests {
 
         assert_eq!(
             labels("|"),
-            ["site", "build", "assets", "typst", "icons", "vendor"]
+            [
+                "site",
+                "build",
+                "assets",
+                "typst",
+                "icons",
+                "vendor",
+                "formatter"
+            ]
         );
     }
 

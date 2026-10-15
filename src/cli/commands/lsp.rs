@@ -158,7 +158,7 @@ impl SourceConfiguration {
                 (None, _) => None,
             };
             if let Some(candidate) = candidate {
-                if !candidate.has_same_build_settings(&loaded.configuration)? {
+                if !candidate.has_same_effective_settings(&loaded.configuration)? {
                     loaded.configuration = candidate.config();
                 }
                 output.apply_diagnostic_limits(candidate.diagnostics());

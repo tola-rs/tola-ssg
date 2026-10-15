@@ -32,7 +32,7 @@ use tola_build::diagnostic::Diagnostic;
 use crate::capabilities::ClientFeatures;
 use crate::compiler::{AnalysisRequest, SourceInputs, SourceJob, SourceOverrides};
 use crate::diagnostic::ClientDiagnostics;
-use crate::protocol::{CheckMode, FormatterOptions};
+use crate::protocol::CheckMode;
 use crate::server::HostSections;
 use crate::sources::OpenSources;
 use crate::transport::{InvalidMessage, write_invalid};
@@ -352,8 +352,6 @@ struct Workspace {
     root: PathBuf,
     diagnostics: ClientDiagnostics,
     package_sources: Option<Arc<PathBuf>>,
-    /// How the client's settings shape a formatted source.
-    formatter: FormatterOptions,
     /// When a source change reruns the site's check, which the client states for this site.
     check_mode: CheckMode,
     source_check_status: bool,
@@ -443,7 +441,6 @@ pub(crate) mod tests {
             diagnostics: ClientDiagnostics::new(root.clone()),
             root,
             package_sources: None,
-            formatter: FormatterOptions::default(),
             check_mode: CheckMode::default(),
             source_check_status: false,
             preview_origin: None,

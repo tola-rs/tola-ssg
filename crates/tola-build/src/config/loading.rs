@@ -297,6 +297,7 @@ fn resolve_schema(
         typst,
         icons,
         vendor,
+        formatter,
         ..
     } = schema;
     Ok(ResolvedSiteConfig {
@@ -311,6 +312,7 @@ fn resolve_schema(
         typst,
         icons,
         vendor,
+        formatter,
         vendor_workspace,
         vendor_candidate: None,
     })

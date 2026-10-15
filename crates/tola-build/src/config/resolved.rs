@@ -41,6 +41,8 @@ pub struct ResolvedSiteConfig {
 
     pub(crate) vendor: crate::config::section::VendorConfig,
 
+    pub(crate) formatter: crate::config::section::FormatterConfig,
+
     // Refresh and candidate configs retain the declared workspace, not a path derived from their selection.
     pub(crate) vendor_workspace: Option<PathBuf>,
     // Only with_vendor_root grants a candidate; changing a section cannot broaden that grant.
@@ -116,6 +118,10 @@ impl ResolvedSiteConfig {
     /// Vendor settings whose directory has been resolved against the site root.
     pub fn vendor(&self) -> &crate::config::section::VendorConfig {
         &self.vendor
+    }
+
+    pub fn formatter(&self) -> &crate::config::section::FormatterConfig {
+        &self.formatter
     }
 
     /// Site root directory.

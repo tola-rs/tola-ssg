@@ -8,6 +8,7 @@ mod identity;
 mod lock;
 mod output_boundary;
 mod overrides;
+mod owned;
 mod path;
 mod read;
 mod snapshot;
@@ -106,6 +107,7 @@ pub(crate) use output_boundary::{
     DeclaredOutputBoundaries, DeclaredOutputViolation, OutputBoundary, OutputBoundaryError,
 };
 pub(crate) use overrides::SourceOverrides;
+pub use owned::owned_files;
 pub(crate) use path::{
     SitePathError, canonical_site_root, render_relative, site_relative_absolute,
 };

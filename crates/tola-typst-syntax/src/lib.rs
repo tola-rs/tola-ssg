@@ -16,6 +16,7 @@ pub mod nesting;
 pub mod outline;
 pub mod position;
 pub mod sections;
+pub mod style;
 pub mod syntax;
 pub mod tokens;
 pub mod usage;

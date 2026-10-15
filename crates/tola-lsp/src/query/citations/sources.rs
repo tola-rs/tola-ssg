@@ -323,7 +323,7 @@ pub(super) fn spelled_sources(
             .into_iter()
             .flat_map(|document| document.sources)
             .collect(),
-        None => crate::files::site_files(config),
+        None => crate::files::owned_file_ids(config),
     };
     sources.push(open);
     // Only a source is read as Typst, and a citation is spelled in a source.

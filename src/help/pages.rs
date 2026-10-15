@@ -3,7 +3,8 @@
 use anyhow::Result;
 
 use tola_build::config::section::{
-    AssetsConfig, FontsConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig, VendorConfig,
+    AssetsConfig, FontsConfig, FormatterConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig,
+    VendorConfig,
     build::{
         BuildSectionConfig, HooksConfig, MinifyConfig, ReferencesConfig,
         hooks::{AfterPublishHookConfig, BeforeBuildHookConfig, OutputCommandConfig},
@@ -83,6 +84,10 @@ const TABLES: &[ConfigTable] = &[
     },
     ConfigTable {
         section: VendorConfig::TEMPLATE_SECTION,
+        array: false,
+    },
+    ConfigTable {
+        section: FormatterConfig::TEMPLATE_SECTION,
         array: false,
     },
     ConfigTable {

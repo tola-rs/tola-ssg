@@ -232,7 +232,8 @@ fn explained_panic_diagnostic(
     Some(diagnostic)
 }
 
-const REPORT_URL: &str = "https://github.com/tola-rs/tola-ssg/issues";
+/// Where a failure no author can act on is reported.
+pub(crate) const REPORT_URL: &str = "https://github.com/tola-rs/tola-ssg/issues";
 
 fn internal_error_diagnostic(log_path: Option<&std::path::Path>) -> diagnostic::Diagnostic {
     let help = match log_path {

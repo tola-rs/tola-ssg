@@ -462,6 +462,20 @@ tola build --pure       # build from site-owned inputs
 
 这些标志限制 Tola 读取输入，不限制 hook 命令及其工具链：整个构建要在其他机器上复现，需要自己固定每个 hook 的命令及其工具链读取的文件（清单与锁文件），或者提交它生成的文件。'''
 
+[sections.formatter]
+documentation = "Tola 书写站点自己的 `.typ` 文件所用的样式：`tola fmt` 与语言服务都按这些值格式化。"
+help = '''`tola fmt` 按这里的样式书写站点自己的 `.typ` 文件，语言服务也用它格式化编辑器里正在编辑的那个文件：
+
+```toml
+[formatter]
+indent = 2
+print-width = 120
+prose-wrap = "none"
+```
+
+没有 `tola.toml` 的目录就按上面这份默认配置格式化：在这个目录里运行命令，它用这些默认值格式化该目录下的 `.typ` 文件。
+'''
+
 [sections.server]
 documentation = "`tola dev` 与 `tola preview` 监听的 HTTP 服务器设置。"
 help = '''`tola dev` 与 `tola preview` 绑定这张表的监听器：`tola build` 只写文件，永远不开端口。
@@ -574,6 +588,10 @@ max_warnings = 3
 "icons.collections" = "每个 namespace 说明它的图标从哪来：本地 SVG 目录或 IconifyJSON 文件，或按 Tola 已索引的 preset、或按 URL 与摘要指名的远程 collection。"
 
 "vendor.path" = "`tola vendor` 把这次构建选中的输入冻结到哪个目录，相对站点根。"
+
+"formatter.indent" = "一级嵌套缩进多少个空格。"
+"formatter.print-width" = "格式化结果折行的列宽。格式化器最窄只折到 20 列：更小的值会被提升到 20，而不是被拒绝。"
+"formatter.prose-wrap" = "标记文本中的散文怎么换行：`none` 保留作者自己的换行，`fill` 重新排满每一行，`sentence` 每个句子单独一行。"
 
 "server.interface" = "要绑定的 IP 地址。默认回环地址最安全；`0.0.0.0`、`::` 这类未指定地址会把服务器暴露到网络上。"
 "server.port" = "服务器监听的端口。写 `0` 让操作系统挑一个空闲端口。"

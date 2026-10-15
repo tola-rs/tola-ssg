@@ -262,11 +262,12 @@ impl ConfigCandidate {
         &self.diagnostics
     }
 
-    /// Whether a reloaded configuration leaves every build setting unchanged.
+    /// Whether a reloaded configuration leaves every setting in effect unchanged.
     ///
-    /// A `true` answer keeps the caller's prepared session and resources. `server`, `dev`, and
+    /// A `false` answer is a configuration the caller must accept: the prepared session, and the
+    /// answers a request reads, would otherwise keep the previous values. `server`, `dev`, and
     /// `diagnostics` are host settings, applied separately from this comparison.
-    pub(crate) fn has_same_build_settings(&self, config: &ResolvedSiteConfig) -> Result<bool> {
+    pub(crate) fn has_same_effective_settings(&self, config: &ResolvedSiteConfig) -> Result<bool> {
         Ok(self.config.get_root() == config.get_root()
             && self.config.package_locations() == config.package_locations()
             && same_section(self.config.site(), config.site())?
@@ -275,6 +276,7 @@ impl ConfigCandidate {
             && same_section(self.config.fonts(), config.fonts())?
             && same_section(self.config.icons(), config.icons())?
             && same_section(self.config.vendor(), config.vendor())?
+            && same_section(self.config.formatter(), config.formatter())?
             && self.config.warnings().len() == config.warnings().len()
             && self
                 .config
@@ -637,18 +639,18 @@ mod tests {
             let source = format!("[site]\nbase-path = \"{base_path}\"\n");
             let candidate = loader.load_text_candidate(&source).unwrap().unwrap();
             assert_eq!(
-                candidate.has_same_build_settings(&config).unwrap(),
+                candidate.has_same_effective_settings(&config).unwrap(),
                 unchanged
             );
         }
     }
 
     #[test]
-    fn edited_section_changes_build_settings() {
+    fn edited_section_changes_effective_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("tola.toml");
-        // Every row edits a section that decides the source check's inputs, so a
-        // reload keeping its session would answer from that section's previous values.
+        // Every row edits a section that decides what the prepared session or an answer reads,
+        // so a reload keeping its previous values would answer from them.
         let rows = [
             ("assets", "[assets]\ncache-busting = true\n"),
             ("fonts", "[typst.fonts]\nsystem = true\n"),
@@ -657,6 +659,7 @@ mod tests {
                 "[icons.collections.local]\nsource-type = \"local-json\"\npath = \"icons.json\"\n",
             ),
             ("vendor", "[vendor]\npath = \"vendor\"\n"),
+            ("formatter", "[formatter]\nindent = 4\n"),
         ];
         for (section, added) in rows {
             std::fs::write(&path, "# base\n").unwrap();
@@ -668,14 +671,14 @@ mod tests {
                 "{section} must load without a warning of its own"
             );
             assert!(
-                !candidate.has_same_build_settings(&config).unwrap(),
-                "{section} must be a build setting"
+                !candidate.has_same_effective_settings(&config).unwrap(),
+                "{section} must be a setting in effect"
             );
         }
     }
 
     #[test]
-    fn comment_edit_leaves_build_settings_unchanged() {
+    fn comment_edit_leaves_effective_settings_unchanged() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("tola.toml");
         std::fs::write(&path, text("Same")).unwrap();
@@ -684,7 +687,7 @@ mod tests {
             .load_text_candidate(&format!("{}# note\n", text("Same")))
             .unwrap()
             .unwrap();
-        assert!(candidate.has_same_build_settings(&config).unwrap());
+        assert!(candidate.has_same_effective_settings(&config).unwrap());
     }
 
     #[test]

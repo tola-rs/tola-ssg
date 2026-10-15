@@ -414,31 +414,25 @@ async function waitForFile(directory: string, file: string): Promise<void> {
 }
 
 export type RecordedService = {
-  /** The bytes the client has sent this service, as they arrived on its own stream. */
-  messages(): Promise<string>
   /** How many times this service has been started to run `verb`. */
   starts(verb: string): Promise<number>
   /** The process one start of this service left behind, for `verb`; undefined before it starts. */
   servicePid(verb: string): Promise<number | undefined>
-  /** Resolve once the client has sent a message holding `text`, at or after byte `from`. */
-  waitForMessage(text: string, from?: number): Promise<void>
 }
 
 /**
- * Make one site's service a proxy that records what the client sends it.
+ * Make one site's service a proxy that records when it starts.
  *
  * The site's `tola.serverPath` becomes a script that runs the proxy, which forwards the protocol
- * to the real service byte for byte and appends the client's own stream, and one line per start,
- * to its own log. Resolves once the proxy has started, so the log already holds what the client
- * sent while it connected.
+ * to the real service byte for byte and appends one line per start to its own log. Resolves once
+ * the proxy has started.
  */
-export async function recordServiceMessages(site: EditorSite): Promise<RecordedService> {
+export async function recordServiceStarts(site: EditorSite): Promise<RecordedService> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tola-service-log-'))
-  const messages = path.join(directory, 'messages.log')
   const starts = path.join(directory, 'starts.log')
   const proxy = path.join(directory, 'proxy.cjs')
   const runner = path.join(directory, 'service.sh')
-  await fs.writeFile(proxy, proxySource(messages, starts, process.env.TOLA_TEST_BINARY ?? ''))
+  await fs.writeFile(proxy, proxySource(starts, process.env.TOLA_TEST_BINARY ?? ''))
   await fs.writeFile(runner, `#!/bin/sh\nexec "\${TOLA_TEST_NODE:-node}" ${quoted(proxy)} "$@"\n`, {
     mode: 0o755,
   })
@@ -446,13 +440,10 @@ export async function recordServiceMessages(site: EditorSite): Promise<RecordedS
     .update('serverPath', runner, vscode.ConfigurationTarget.WorkspaceFolder)
   await waitForFile(directory, starts)
   return {
-    messages: () => fs.readFile(messages, 'utf8').catch(() => ''),
     starts: async (verb) => (await readStarts(starts)).filter((entry) => entry.args.includes(verb)).length,
     servicePid: async (verb) =>
       (await readStarts(starts)).filter((entry) => entry.args.includes(verb)).at(-1)
         ?.service,
-    waitForMessage: (text, from = 0) =>
-      waitForLog(directory, messages, (log) => log.slice(from).includes(text), text),
   }
 }
 
@@ -544,20 +535,14 @@ service.on('exit', (code, signal) => { if (signal) process.kill(process.pid, sig
   }
 }
 
-/** The proxy a recorded service runs: the real service, with the client's own stream kept. */
-function proxySource(messages: string, starts: string, executable: string): string {
+/** The source of the proxy a recorded service runs. */
+function proxySource(starts: string, executable: string): string {
   return `const { spawn } = require("node:child_process");
 const { appendFileSync } = require("node:fs");
-const { Transform } = require("node:stream");
 const args = process.argv.slice(2);
 const service = spawn(${JSON.stringify(executable)}, args, { stdio: ["pipe", "inherit", "inherit"] });
 appendFileSync(${JSON.stringify(starts)}, JSON.stringify({ args, service: service.pid }) + "\\n");
-const keep = new Transform({
-  transform(chunk, _encoding, complete) { appendFileSync(${
-    JSON.stringify(messages)
-  }, chunk); complete(null, chunk); },
-});
-process.stdin.pipe(keep).pipe(service.stdin);
+process.stdin.pipe(service.stdin);
 // A caller ends the service it spawned, which is this proxy: the real one has to go with it.
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => service.kill(signal));
@@ -568,31 +553,6 @@ service.on("exit", (code, signal) => {
   else process.exit(code ?? 0);
 });
 `
-}
-
-/** Wait for one log file to hold what `accept` reads, so the process that writes it was reached. */
-async function waitForLog(
-  directory: string,
-  file: string,
-  accept: (log: string) => boolean,
-  wanted: string,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const seen = () => {
-      void fs.readFile(file, 'utf8').catch(() => '').then((log) => {
-        if (!accept(log)) return
-        watcher.close()
-        clearTimeout(deadline)
-        resolve()
-      })
-    }
-    const watcher = watch(directory, seen)
-    const deadline = setTimeout(() => {
-      watcher.close()
-      reject(new Error(`The service was never sent ${wanted}`))
-    }, 15_000)
-    seen()
-  })
 }
 
 /** One line per service start: the arguments it ran with and the process the real service got. */

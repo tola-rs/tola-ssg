@@ -286,13 +286,11 @@ pub(super) fn initialize_result(
 }
 
 /// Package-source access and status negotiation are fixed for one connection.
-/// Formatting, check mode and preview origin may change through configuration notifications.
+/// Check mode and preview origin may change through configuration notifications.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct InitializationOptions {
     pub package_source_directory: Option<std::path::PathBuf>,
-    #[serde(default)]
-    pub formatter: FormatterOptions,
     /// When a source change reruns the site's check.
     #[serde(default)]
     pub check_mode: CheckMode,
@@ -334,59 +332,17 @@ impl CheckMode {
 /// setting does not reset the others.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Settings {
-    pub formatter: FormatterSettings,
     pub check_mode: Option<CheckMode>,
     pub preview_origin: Option<String>,
 }
 
-/// The formatter settings a client named, each absent when it named none.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct FormatterSettings {
-    pub print_width: Option<usize>,
-    pub prose_wrap: Option<bool>,
-}
-
-/// What an author is told when a formatter setting holds a value this server cannot read.
-const UNREAD_PRINT_WIDTH: &str =
-    "Tola cannot read the `tola.formatterPrintWidth` setting; set it to a number";
-
-/// What an author is told when the prose-wrap setting holds a value this server cannot read.
-const UNREAD_PROSE_WRAP: &str =
-    "Tola cannot read the `tola.formatterProseWrap` setting; set it to `true` or `false`";
-
 impl Settings {
-    /// The settings one settings value has, and one message per setting it named with a value this
-    /// server cannot read.
+    /// The settings one settings value names, each absent where the value named none.
     ///
     /// The value is the table a client sends in `workspace/didChangeConfiguration` or one section
-    /// of a `workspace/configuration` answer. A value the reader cannot use is stated rather than
-    /// silently ignored, and the message names the editor setting an author can change: the two
-    /// formatter keys are the settings clients declare, while a check mode or a preview origin has
-    /// no author-facing key to point at.
-    pub(super) fn read(value: &serde_json::Value) -> (Self, Vec<&'static str>) {
-        let formatter = value
-            .get("formatter")
-            .and_then(serde_json::Value::as_object);
-        let named = |key: &str| formatter.is_some_and(|formatter| formatter.contains_key(key));
-        let print_width = formatter
-            .and_then(|formatter| formatter.get("printWidth"))
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|width| usize::try_from(width).ok());
-        let prose_wrap = formatter
-            .and_then(|formatter| formatter.get("proseWrap"))
-            .and_then(serde_json::Value::as_bool);
-        let mut unread = Vec::new();
-        if named("printWidth") && print_width.is_none() {
-            unread.push(UNREAD_PRINT_WIDTH);
-        }
-        if named("proseWrap") && prose_wrap.is_none() {
-            unread.push(UNREAD_PROSE_WRAP);
-        }
-        let settings = Self {
-            formatter: FormatterSettings {
-                print_width,
-                prose_wrap,
-            },
+    /// of a `workspace/configuration` answer.
+    pub(super) fn read(value: &serde_json::Value) -> Self {
+        Self {
             check_mode: value
                 .get("checkMode")
                 .and_then(serde_json::Value::as_str)
@@ -395,8 +351,7 @@ impl Settings {
                 .get("previewOrigin")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
-        };
-        (settings, unread)
+        }
     }
 
     /// Whether these settings named nothing this server reads.
@@ -439,26 +394,6 @@ impl CheckProgress {
         }
     }
 }
-
-/// How the client's own settings shape the formatter's output.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub(super) struct FormatterOptions {
-    pub print_width: usize,
-    pub prose_wrap: bool,
-}
-
-impl Default for FormatterOptions {
-    fn default() -> Self {
-        Self {
-            print_width: DEFAULT_PRINT_WIDTH,
-            prose_wrap: false,
-        }
-    }
-}
-
-/// The width a source is formatted to when the client declares none.
-const DEFAULT_PRINT_WIDTH: usize = 120;
 
 /// The position one Enter key press acts on.
 #[derive(Debug, Deserialize, Serialize)]

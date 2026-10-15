@@ -193,6 +193,17 @@ pub enum Commands {
         build: BuildOverrideArgs,
     },
 
+    /// Format the site's Typst sources.
+    Fmt {
+        #[command(flatten)]
+        config: ConfigFileArgs,
+        #[command(flatten)]
+        packages: TypstPackageArgs,
+        /// Report the sources that are not formatted, without writing them.
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Inspect site sources and build results.
     Inspect {
         #[command(flatten)]
@@ -585,6 +596,7 @@ impl Commands {
             Self::Dev { .. } => "dev",
             Self::Preview { .. } => "preview",
             Self::Check { .. } => "check",
+            Self::Fmt { .. } => "fmt",
             Self::Inspect { .. } => "inspect",
             Self::Vendor { .. } => "vendor",
             Self::Doctor(_) => "doctor",
@@ -603,6 +615,7 @@ impl Commands {
         match self {
             Self::Build { config, .. }
             | Self::Check { config, .. }
+            | Self::Fmt { config, .. }
             | Self::Vendor { config, .. }
             | Self::Dev { config, .. }
             | Self::Preview { config, .. }

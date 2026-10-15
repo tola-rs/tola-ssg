@@ -23,7 +23,7 @@ pub(super) fn imports(
     boundary: &tola_typst::SourceBoundary,
 ) -> Result<Option<WorkspaceEdit>> {
     let root = tola_build::filesystem::normalize_existing_prefix(config.get_root());
-    let site = crate::files::site_files(config);
+    let site = crate::files::owned_file_ids(config);
     let moved = moved_paths(&site, &root, files);
     #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();

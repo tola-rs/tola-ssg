@@ -75,7 +75,10 @@ impl IdeWorld for IdeView<'_, '_> {
 
     fn files(&self) -> Vec<FileId> {
         match self.config {
-            Some(config) => self.files.get_or_init(|| files::site_files(config)).clone(),
+            Some(config) => self
+                .files
+                .get_or_init(|| files::owned_file_ids(config))
+                .clone(),
             None => Vec::new(),
         }
     }

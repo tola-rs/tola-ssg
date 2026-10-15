@@ -3,7 +3,6 @@ import * as vscode from 'vscode'
 import {
   CloseAction,
   DefinitionRequest,
-  DidChangeConfigurationNotification,
   DidChangeTextDocumentNotification,
   DidCloseTextDocumentNotification,
   DidOpenTextDocumentNotification,
@@ -95,15 +94,6 @@ function untitledDocumentUri(params: unknown): string | undefined {
   return named !== undefined && vscode.Uri.parse(named).scheme === 'untitled' ? named : undefined
 }
 
-/** The formatter settings one folder declares, in the shape a service reads them in. */
-function formatterSettings(selected: ServedWorkspace): { printWidth: number; proseWrap: boolean } {
-  const settings = vscode.workspace.getConfiguration('tola', selected.folder.uri)
-  return {
-    printWidth: settings.get<number>('formatterPrintWidth', 120),
-    proseWrap: settings.get<boolean>('formatterProseWrap', false),
-  }
-}
-
 /** Only site selections own publishing features; every served workspace owns a language client. */
 export class Sites {
   private readonly workspaces = new Map<string, WorkspaceClient>()
@@ -159,17 +149,6 @@ export class Sites {
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshInBackground()),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (!event.affectsConfiguration('tola')) return
-        // A service that is told the settings changed reads the formatter's width and wrapping
-        // again, so no service is restarted for them; a setting that selects the service a folder
-        // gets restarts exactly that folder, through the refresh below.
-        for (const site of this.workspaces.values()) {
-          if (
-            event.affectsConfiguration('tola.formatterPrintWidth', site.selection.folder.uri) ||
-            event.affectsConfiguration('tola.formatterProseWrap', site.selection.folder.uri)
-          ) {
-            void this.notifyFormatterSettings(site)
-          }
-        }
         void this.refresh().catch((error) => this.report(error))
       }),
       vscode.workspace.onDidGrantWorkspaceTrust(() => this.refreshInBackground()),
@@ -310,18 +289,6 @@ export class Sites {
         current: () => this.clientForDocument(document) === site,
       }
       : undefined
-  }
-
-  /** Tell one running service the formatter settings its folder now declares, which it applies where it stands. */
-  private async notifyFormatterSettings(site: WorkspaceClient): Promise<void> {
-    try {
-      await site.client.sendNotification(DidChangeConfigurationNotification.type, {
-        settings: { formatter: formatterSettings(site.selection) },
-      })
-    } catch (error) {
-      // A superseded service has nothing to apply them to.
-      if (this.clientForWorkspace(site.key) === site) this.report(error)
-    }
   }
 
   private async commandSite(): Promise<Selection | undefined> {
@@ -529,7 +496,7 @@ export class Sites {
   ): LanguageClientOptions {
     return {
       workspaceFolder: selected.folder,
-      initializationOptions: { formatter: formatterSettings(selected), sourceCheckStatus: true },
+      initializationOptions: { sourceCheckStatus: true },
       documentSelector: [
         { scheme: 'file', language: 'typst' },
         ...(selected.kind === 'site'

@@ -74,6 +74,11 @@ pub(crate) fn dispatch(
             output,
             cancellation,
         ),
+        Commands::Fmt {
+            config,
+            packages,
+            check,
+        } => commands::fmt::run(config, packages, scope, check, output, cancellation),
         Commands::Inspect {
             config,
             packages,

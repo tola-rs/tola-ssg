@@ -101,6 +101,7 @@ tola-minify.workspace = true
 tola-lsp = { workspace = true, features = ["network"] }
 tola-config.workspace = true
 tola-typst = { workspace = true, features = ["embed-fonts"] }
+tola-typst-syntax = { workspace = true, features = ["format"] }
 anyhow = "1.0.104"
 anstream = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

@@ -176,8 +176,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             return Ok(ControlFlow::Continue(()));
         }
         // A settings change is not a source change: it re-reads what the client says about this
-        // connection — the formatter, when a check runs, where the site is served — and leaves the
-        // site's revision, its requests, and its held compilation as they are.
+        // connection — when a check runs, where the site is served — and leaves the site's
+        // revision, its requests, and its held compilation as they are.
         if message.method == notification::DidChangeConfiguration::METHOD {
             self.configured(message)?;
             return Ok(ControlFlow::Continue(()));

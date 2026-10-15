@@ -5467,6 +5467,7 @@ dependencies = [
  "tola-minify",
  "tola-packages",
  "tola-typst",
+ "tola-typst-syntax",
  "toml 1.1.5+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
@@ -5505,6 +5506,7 @@ dependencies = [
  "bytes",
  "comemo",
  "hex",
+ "ignore",
  "image",
  "mime",
  "percent-encoding",
@@ -5532,6 +5534,7 @@ dependencies = [
  "tola-slugify",
  "tola-subprocess",
  "tola-typst",
+ "tola-typst-syntax",
  "toml 1.1.5+spec-1.1.0",
  "toml_edit 0.25.13+spec-1.1.0",
  "tracing",
@@ -5720,6 +5723,7 @@ name = "tola-typst-syntax"
 version = "0.8.0"
 dependencies = [
  "anyhow",
+ "serde",
  "typst-library",
  "typst-syntax",
  "typstyle-core",

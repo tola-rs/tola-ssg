@@ -259,6 +259,8 @@ mod tests {
         uri_string,
     };
 
+    /// The options a formatting request carries; indentation is the site's `[formatter]`
+    /// configuration, so the tab size here never reaches the formatter.
     fn spaces(tab_size: u32) -> lsp_types::FormattingOptions {
         lsp_types::FormattingOptions {
             tab_size,
@@ -983,6 +985,32 @@ mod tests {
         assert_eq!(edits[0].new_text, "#let x = 1");
         assert_eq!(edits[0].range.start.line, 2, "{edits:?}");
         assert_eq!(edits[0].range.end.line, 2, "the heading stays: {edits:?}");
+
+        client.shutdown();
+    }
+
+    /// The site's `[formatter]` configuration is the authority: the request's tab stop decides
+    /// nothing, so the site's indentation applies.
+    #[test]
+    fn site_formatter_configuration_applies() {
+        let site = SiteDirectory::new();
+        site.write("tola.toml", "[formatter]\nindent = 4\n");
+        let text = "#let f() = {\n  let x = 1\n  x\n}\n";
+        site.write("content/document.typ", text);
+        let mut client = EditorSession::start(&site);
+        client.open("content/document.typ", text);
+
+        // The formatter reads the site's configuration once a check has resolved it, so this waits
+        // for the document's own report first.
+        let _ = client.diagnostics("content/document.typ");
+
+        let edits = client
+            .formatting("content/document.typ", spaces(2))
+            .expect("a replacement");
+        assert!(
+            edits[0].new_text.contains("\n    let x = 1\n    x\n"),
+            "{edits:?}"
+        );
 
         client.shutdown();
     }

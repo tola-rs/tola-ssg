@@ -11,7 +11,8 @@ use super::section::build::{
     AfterPublishHookConfig, BeforeBuildHookConfig, HooksConfig, MinifyConfig, ReferencesConfig,
 };
 use super::section::{
-    AssetsConfig, FontsConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig, VendorConfig,
+    AssetsConfig, FontsConfig, FormatterConfig, IconsConfig, SiteSectionConfig, TypstSectionConfig,
+    VendorConfig,
 };
 use super::{
     BuildSectionConfig, ConfigDiagnostics, ConfigError, ConfigPresence, ConfigSource, FieldPath,
@@ -45,6 +46,9 @@ pub struct SiteConfigSchema {
 
     #[config(sub)]
     pub vendor: VendorConfig,
+
+    #[config(sub)]
+    pub formatter: FormatterConfig,
 }
 
 impl SiteConfigSchema {
@@ -52,13 +56,14 @@ impl SiteConfigSchema {
     ///
     /// Each section declares its own key, so adding a section to this schema is the one edit
     /// that extends the list a host needs to decode the core sections.
-    pub const SECTIONS: [&'static str; 6] = [
+    pub const SECTIONS: [&'static str; 7] = [
         SiteSectionConfig::TEMPLATE_SECTION,
         BuildSectionConfig::TEMPLATE_SECTION,
         AssetsConfig::TEMPLATE_SECTION,
         TypstSectionConfig::TEMPLATE_SECTION,
         IconsConfig::TEMPLATE_SECTION,
         VendorConfig::TEMPLATE_SECTION,
+        FormatterConfig::TEMPLATE_SECTION,
     ];
 
     /// Decode the core sections while preserving host-owned sections in the source document.
@@ -137,6 +142,7 @@ pub fn section_help(section: &str) -> Option<&'static str> {
         (ReferencesConfig::TEMPLATE_SECTION, ReferencesConfig::HELP),
         (AssetsConfig::TEMPLATE_SECTION, AssetsConfig::HELP),
         (VendorConfig::TEMPLATE_SECTION, VendorConfig::HELP),
+        (FormatterConfig::TEMPLATE_SECTION, FormatterConfig::HELP),
         (FontsConfig::TEMPLATE_SECTION, FontsConfig::HELP),
         (IconsConfig::TEMPLATE_SECTION, IconsConfig::HELP),
         (HooksConfig::TEMPLATE_SECTION, HooksConfig::HELP),
@@ -168,6 +174,7 @@ fn core_declared_values() -> impl Iterator<Item = &'static [(FieldPath, &'static
         FontsConfig::DECLARED_VALUES,
         IconsConfig::DECLARED_VALUES,
         VendorConfig::DECLARED_VALUES,
+        FormatterConfig::DECLARED_VALUES,
         HooksConfig::DECLARED_VALUES,
         BeforeBuildHookConfig::DECLARED_VALUES,
         OutputCommandConfig::DECLARED_VALUES,
@@ -189,6 +196,7 @@ fn core_declared_fields() -> impl Iterator<Item = &'static [(FieldPath, Option<&
         FontsConfig::DECLARED_FIELDS,
         IconsConfig::DECLARED_FIELDS,
         VendorConfig::DECLARED_FIELDS,
+        FormatterConfig::DECLARED_FIELDS,
         HooksConfig::DECLARED_FIELDS,
         BeforeBuildHookConfig::DECLARED_FIELDS,
         OutputCommandConfig::DECLARED_FIELDS,
@@ -334,6 +342,7 @@ mod tests {
             "build.minify.html",
             "typst.fonts.paths",
             "icons.collections",
+            "formatter.print-width",
         ] {
             assert!(paths.contains(&expected), "`{expected}` is missing");
         }

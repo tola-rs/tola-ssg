@@ -18,6 +18,7 @@ use lsp_types::{
     SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensResult, Uri,
 };
+use tola_build::config::ResolvedSiteConfig;
 use tola_build::diagnostic::Diagnostic;
 use tola_typst::typst::syntax::Source;
 
@@ -97,16 +98,23 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .and_then(|source| answer(&source, &workspace.root))
     }
 
+    /// The style this connection's formatting answers write in.
+    fn formatter_style(&self) -> tola_typst_syntax::format::Options {
+        crate::formatting::style(
+            self.configuration
+                .as_deref()
+                .map(ResolvedSiteConfig::formatter),
+        )
+    }
+
     pub(super) fn formatting(
         &mut self,
         id: RequestId,
         parameters: DocumentFormattingParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let formatter = workspace.formatter;
-        let _ = &parameters;
+        let style = self.formatter_style();
         let edits = self.text_request(&parameters.text_document.uri, |source, _| {
-            crate::formatting::edits(source.text(), &parameters.options, &formatter)
+            crate::formatting::edits(source.text(), &style)
         });
         self.reply(Response::new_ok(id, edits))
     }
@@ -117,13 +125,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: DocumentRangeFormattingParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let formatter = workspace.formatter;
+        let style = self.formatter_style();
         let edits = self.text_request(&parameters.text_document.uri, |source, _| {
             let lines = source.lines();
             let bytes = crate::position::byte_offset(lines, parameters.range.start).ok()?
                 ..crate::position::byte_offset(lines, parameters.range.end).ok()?;
-            crate::formatting::range_edits(source.text(), bytes, &parameters.options, &formatter)
+            crate::formatting::range_edits(source.text(), bytes, &style)
         });
         self.reply(Response::new_ok(id, edits))
     }

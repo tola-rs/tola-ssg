@@ -41,7 +41,7 @@ where
         let boundary = session.resources().source_boundary(configuration);
         let mut symbols = Vec::new();
         self.disk.begin();
-        for id in crate::files::site_files(configuration) {
+        for id in crate::files::owned_file_ids(configuration) {
             request
                 .sources
                 .cancellation

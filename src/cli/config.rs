@@ -123,6 +123,45 @@ pub(super) fn load_site(
         output,
         cancellation,
     )?;
+    present_site(loaded, output, cancellation)
+}
+
+/// The site configuration a command works on: the one `tola.toml` names or discovery finds, or the
+/// working directory under the documented defaults when it holds none.
+pub(super) fn load_site_or_defaults(
+    config_file: &ConfigFileArgs,
+    packages: &TypstPackageArgs,
+    scope: InputScope,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<crate::config::LoadedConfig> {
+    let overrides = ConfigOverrides::default();
+    match load_optional_config(
+        config_file,
+        packages,
+        scope,
+        &overrides,
+        output,
+        cancellation,
+    )? {
+        Some(loaded) => present_site(loaded, output, cancellation),
+        None => {
+            let root = source_root(config_file)?;
+            let source = tola_build::config::ConfigSource::defaults(&root, scope)?;
+            let loaded =
+                crate::config::resolve(source, package_locations(packages, scope)?, &overrides)?;
+            present_site(loaded, output, cancellation)
+        }
+    }
+}
+
+/// The steps every loaded site takes before a command reads it: the diagnostics it shows, the site
+/// paths its output renders against, and the session log's destination.
+fn present_site(
+    loaded: crate::config::LoadedConfig,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<crate::config::LoadedConfig> {
     output.apply_diagnostic_limits(loaded.diagnostics());
     let config = loaded.config();
     output.install_source_files(

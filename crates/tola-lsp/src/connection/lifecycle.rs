@@ -10,7 +10,7 @@ use lsp_server::{ErrorCode, Notification, RequestId, Response};
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
 use lsp_types::{
-    ConfigurationItem, ConfigurationParams, InitializeParams, MessageType, WorkDoneProgress,
+    ConfigurationItem, ConfigurationParams, InitializeParams, WorkDoneProgress,
     WorkDoneProgressBegin,
 };
 use tola_build::diagnostic::Diagnostic;
@@ -58,7 +58,6 @@ impl Workspace {
             .map(serde_json::from_value)
             .transpose()?
             .unwrap_or_default();
-        let formatter = options.formatter;
         let check_mode = options.check_mode;
         let preview_origin = options.preview_origin;
         let line_folding_only = parameters
@@ -80,7 +79,6 @@ impl Workspace {
             diagnostics: ClientDiagnostics::new(root.clone()),
             root,
             package_sources,
-            formatter,
             check_mode,
             source_check_status: options.source_check_status,
             preview_origin,
@@ -169,10 +167,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             Ok(parameters) => parameters,
             Err(_) => return self.log_invalid_notification(InvalidNotification::Configuration),
         };
-        let (settings, unread) = Settings::read(&parameters.settings);
-        for message in unread {
-            self.show_message(MessageType::WARNING, message.to_owned())?;
-        }
+        let settings = Settings::read(&parameters.settings);
         if !settings.is_empty() {
             self.settings_pull = None;
             self.apply_settings(settings);
@@ -202,12 +197,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let Phase::Ready(workspace) = &mut self.phase else {
             return;
         };
-        if let Some(width) = settings.formatter.print_width {
-            workspace.formatter.print_width = width;
-        }
-        if let Some(wrap) = settings.formatter.prose_wrap {
-            workspace.formatter.prose_wrap = wrap;
-        }
         if let Some(mode) = settings.check_mode {
             workspace.check_mode = mode;
         }
@@ -253,7 +242,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             if let Ok(sections) = response.response_result
                 && let Some(section) = sections.as_array().and_then(|sections| sections.first())
             {
-                let (settings, _unread) = Settings::read(section);
+                let settings = Settings::read(section);
                 self.apply_settings(settings);
             }
         }
@@ -268,6 +257,7 @@ mod tests {
     use crate::connection::tests::{
         initialize, messages, open_document, ready, ready_workspace, uninitialized,
     };
+    use crate::protocol::CheckMode;
     use lsp_server::{Message, Request};
     use lsp_types::Uri;
     use serde_json::json;
@@ -380,7 +370,8 @@ mod tests {
     }
 
     /// A settings notification that has no settings asks the client for the one section Tola
-    /// reads, and an answer with no section leaves every setting as it stands.
+    /// reads, and settings the notification itself carries supersede that pull: the answer asked
+    /// for is not read.
     #[test]
     fn inline_settings_supersede_pulls() {
         let mut connection = ready(Vec::new());
@@ -397,18 +388,18 @@ mod tests {
         let _ = connection
             .notification(Notification::new(
                 notification::DidChangeConfiguration::METHOD.into(),
-                json!({"settings": {"formatter": {"printWidth": 80}}}),
+                json!({"settings": {"checkMode": "onSave"}}),
             ))
             .unwrap();
         connection
             .response(Response::new_ok(
                 pulled.id,
                 json!([{
-                    "formatter": {"printWidth": 120}
+                    "checkMode": "onType"
                 }]),
             ))
             .unwrap();
-        assert_eq!(connection.workspace().formatter.print_width, 80);
+        assert_eq!(connection.workspace().check_mode, CheckMode::OnSave);
     }
 
     #[test]
@@ -416,7 +407,7 @@ mod tests {
         let mut connection = ready(Vec::new());
         let workspace = ready_workspace(&mut connection);
         workspace.features.configuration = true;
-        workspace.formatter.print_width = 93;
+        workspace.check_mode = CheckMode::OnSave;
         let _ = connection
             .notification(Notification::new(
                 notification::DidChangeConfiguration::METHOD.into(),
@@ -439,35 +430,28 @@ mod tests {
             .response(Response::new_ok(pulled.id.clone(), json!([null])))
             .unwrap();
         let workspace = connection.workspace();
-        assert_eq!(workspace.formatter.print_width, 93);
+        assert_eq!(workspace.check_mode, CheckMode::OnSave);
     }
 
-    /// A formatter setting whose value the reader cannot use is stated, not silently ignored.
+    /// A notification that names one setting leaves the settings it does not name as they stand:
+    /// a client that changes one key never resets the others.
     #[test]
-    fn unreadable_setting_is_stated() {
+    fn notification_naming_one_setting_keeps_the_others() {
         let mut connection = ready(Vec::new());
         ready_workspace(&mut connection);
-        let _ = connection
-            .notification(Notification::new(
-                notification::DidChangeConfiguration::METHOD.into(),
-                json!({"settings": {"formatter": {"printWidth": "wide", "proseWrap": true}}}),
-            ))
-            .unwrap();
-        let shown = messages(&mut connection)
-            .into_iter()
-            .filter_map(|message| match message {
-                Message::Notification(notification)
-                    if notification.method == notification::ShowMessage::METHOD =>
-                {
-                    let params: lsp_types::ShowMessageParams =
-                        serde_json::from_value(notification.params).unwrap();
-                    Some(params.message)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(shown.len(), 1, "{shown:?}");
-        assert!(shown[0].contains("tola.formatterPrintWidth"), "{shown:?}");
-        assert!(connection.workspace().formatter.prose_wrap);
+        let origin = "http://localhost:9000";
+        for settings in [
+            json!({"settings": {"checkMode": "onSave", "previewOrigin": origin}}),
+            json!({"settings": {"checkMode": "onType"}}),
+        ] {
+            let _ = connection
+                .notification(Notification::new(
+                    notification::DidChangeConfiguration::METHOD.into(),
+                    settings,
+                ))
+                .unwrap();
+        }
+        assert_eq!(connection.workspace().check_mode, CheckMode::OnType);
+        assert_eq!(connection.named_origin.as_deref(), Some(origin));
     }
 }

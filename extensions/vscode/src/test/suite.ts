@@ -19,7 +19,7 @@ import {
   openMarked,
   openPublishedPage,
   recordOutputChannels,
-  recordServiceMessages,
+  recordServiceStarts,
   recordSiteSurfaces,
   replace,
   symbols,
@@ -204,7 +204,7 @@ export async function run(): Promise<void> {
   await check('Stopped services offer restart', () =>
     withSite(async (site) => {
       const recorded = waitForOutput('Started Tola language service for')
-      const service = await recordServiceMessages(site)
+      const service = await recordServiceStarts(site)
       // The recorded service is the current one once its own client finished initializing.
       await recorded
       assert.equal((await symbols(site.source)).length, 1)
@@ -520,34 +520,6 @@ export async function run(): Promise<void> {
       }
     }))
 
-  await check(
-    'Formatter width change keeps the open preview',
-    () =>
-      withPreview((opened) =>
-        withSite(async (site) => {
-          const service = await recordServiceMessages(site)
-          try {
-            await symbols(site.source)
-            const started = await service.starts('lsp')
-            await vscode.window.showTextDocument(site.source)
-            await vscode.commands.executeCommand('tola.openPreview', site.source)
-            assert.equal(opened[0]?.status, 200)
-            await vscode.workspace.getConfiguration('tola', site.source)
-              .update('formatterPrintWidth', 40, vscode.ConfigurationTarget.WorkspaceFolder)
-            await service.waitForMessage('workspace/didChangeConfiguration')
-            const sent = await service.messages()
-            assert.match(sent.slice(sent.indexOf('workspace/didChangeConfiguration')), /"printWidth":40/)
-            assert.equal(await service.starts('lsp'), started, 'The settings change restarted the service')
-            const response = await fetch(opened[0].url, { signal: AbortSignal.timeout(15_000) })
-            assert.equal(response.status, 200, 'The settings change stopped the preview server')
-          } finally {
-            await vscode.workspace.getConfiguration('tola', site.source)
-              .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
-          }
-        })
-      ),
-  )
-
   await check('Selected config edits clear diagnostics', () =>
     withSite(async (site) => {
       const document = await vscode.workspace.openTextDocument(site.configuration)
@@ -595,7 +567,7 @@ export async function run(): Promise<void> {
 
   await check('Build survives stopped language services', () =>
     withSite(async (site) => {
-      const service = await recordServiceMessages(site)
+      const service = await recordServiceStarts(site)
       await symbols(site.source)
       const pid = await service.servicePid('lsp')
       assert.ok(pid)

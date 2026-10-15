@@ -42,6 +42,11 @@ pub(in crate::cli) fn run(
             "base_path": config.site().base_path.base_path(),
             "url": config.site_url(),
         },
+        "formatter": {
+            "indent": config.formatter().indent,
+            "print_width": config.formatter().print_width,
+            "prose_wrap": config.formatter().prose_wrap,
+        },
         "package_path": config.package_locations().data().map(|location| location.root()),
         "package_cache_path": config.package_locations().cache().map(|location| location.root()),
         "vendored_package_path": config.vendor().typst_packages(),
@@ -102,6 +107,9 @@ mod tests {
         assert_eq!(shown["site"]["base_path"], "/preview/");
         assert_eq!(shown["site"]["url"], "https://override.example/preview/");
         assert_eq!(shown["minify"]["html"], false);
+        assert_eq!(shown["formatter"]["indent"], 2);
+        assert_eq!(shown["formatter"]["print_width"], 120);
+        assert_eq!(shown["formatter"]["prose_wrap"], "none");
         assert_eq!(shown["server"]["interface"], "127.0.0.1");
         assert_eq!(shown["server"]["port"], 5277);
         assert_eq!(shown["dev"]["watch"], true);

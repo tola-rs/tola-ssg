@@ -69,6 +69,18 @@ pub mod editor {
     pub use tola_lsp::codes::editor::CONFIGURATION;
 }
 
+/// Formatting the site's Typst sources.
+pub mod fmt {
+    use tola_build::diagnostic::DiagnosticCode;
+
+    /// A source the formatter could not format.
+    pub const UNFORMATTABLE: DiagnosticCode = DiagnosticCode::new("fmt.unformattable");
+    /// A source that is not formatted.
+    pub const UNFORMATTED: DiagnosticCode = DiagnosticCode::new("fmt.unformatted");
+    /// A source that could not be read as UTF-8 text.
+    pub const UNREADABLE: DiagnosticCode = DiagnosticCode::new("fmt.unreadable");
+}
+
 /// Hook execution around publication.
 pub mod hook {
     pub use tola_build::codes::hook::AFTER_PUBLISH;
