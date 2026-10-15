@@ -311,10 +311,11 @@ An exact file mapping takes precedence over a tree member's URL. CSS `url(...)` 
 the published stylesheet. Tola does not bundle JavaScript or rewrite CSS resource references.
 Read `tola help "[assets]"` for complete declarations.
 
-Compiler fonts and browser fonts have separate inputs: `[typst.fonts]` supplies Typst;
-browsers need published files loaded through CSS `@font-face`. Setting a Typst font does not install
-it in the browser. `site.language` supplies the default language; `site.languages` is template data
-for a site's own language routing and switcher. Read `tola help "@tola/site"` for their shape.
+Compiler fonts and browser fonts have separate inputs: `[typst.fonts]` supplies Typst, and
+`tola fonts` lists what a build discovered; browsers need published files loaded through CSS
+`@font-face`. Setting a Typst font does not install it in the browser. `site.language` supplies the
+default language; `site.languages` is template data for a site's own language routing and
+switcher. Read `tola help "@tola/site"` for their shape.
 
 If using Tailwind, scan the actual `content/`, `site/`, and entry files. Put its input outside the
 published tree and run a finite stylesheet recipe before the build. Choose utilities or ordinary

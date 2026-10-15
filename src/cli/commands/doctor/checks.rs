@@ -255,8 +255,10 @@ fn sampled(
         diagnostic = diagnostic.with_note(crate::terminal::display_path_within(path, root));
     }
     if let Some(extra) = paths.len().checked_sub(SAMPLED).filter(|count| *count > 0) {
-        diagnostic =
-            diagnostic.with_note(crate::terminal::plural_count(extra, &format!("more {noun}")));
+        diagnostic = diagnostic.with_note(crate::terminal::plural_count(
+            extra,
+            &format!("more {noun}"),
+        ));
     }
     diagnostic
 }

@@ -94,6 +94,7 @@ impl TypstHost {
             FontOptions::new()
                 .with_custom_paths(font_dirs)
                 .with_system_fonts(system_fonts)
+                .with_embedded_fonts(resources.include_embedded_fonts())
                 .with_source_boundary(source_boundary.clone()),
         ));
         fonts.load(&cancellation.bundle_cancellation())?;
@@ -114,17 +115,8 @@ impl TypstHost {
         resources: &BuildResources,
         cancellation: &BuildCancellation,
     ) -> Result<Self, tola_typst::FontLoadError> {
-        // A vendored font directory holds system faces the site chose to include, so it joins the
-        // configured directories and is searched before system discovery.
-        let vendored = config.vendor.fonts().filter(|path| path.is_dir());
-        let mut font_dirs: Vec<&Path> = config
-            .typst
-            .fonts
-            .paths
-            .iter()
-            .map(PathBuf::as_path)
-            .collect();
-        font_dirs.extend(vendored.as_deref());
+        let directories = config.compiler_font_directories(resources);
+        let font_dirs: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
         Self::new_with_packages(
             &font_dirs,
             resources.package_locations(config),
@@ -180,16 +172,15 @@ impl TypstHost {
 
     /// Whether this host may serve one build of `config` with `resources`.
     pub(crate) fn matches(&self, config: &ResolvedSiteConfig, resources: &BuildResources) -> bool {
-        let vendored = config.vendor.fonts().filter(|path| path.is_dir());
-        self.fonts.options().custom_paths.iter().eq(config
-            .typst
-            .fonts
-            .paths
+        let directories = config.compiler_font_directories(resources);
+        self.fonts
+            .options()
+            .custom_paths
             .iter()
-            .map(PathBuf::as_path)
-            .chain(vendored.as_deref()))
+            .eq(directories.iter().map(PathBuf::as_path))
             && self.package_locations == resources.package_locations(config)
             && self.fonts.options().include_system_fonts == config.system_fonts_allowed(resources)
+            && self.fonts.options().include_embedded_fonts == resources.include_embedded_fonts()
             && self.network_access == resources.network_access()
             && self.source_boundary == resources.source_boundary(config)
             && Arc::ptr_eq(&self.file_cache, &resources.file_cache())

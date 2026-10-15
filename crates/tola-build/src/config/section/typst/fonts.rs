@@ -45,6 +45,9 @@ fonts, which remain available with `--pure`. `system = true` adds host fonts whe
 permits them; `--pure` excludes them even if this setting is on. Keep it off when another machine
 must build with the same font inputs.
 
+`--font-path DIR` on a command adds a host directory for that invocation, ahead of these paths;
+`--ignore-system-fonts` and `--ignore-embedded-fonts` narrow that invocation the same way.
+
 Browser fonts are separate: publish them through `[assets]` and load them with CSS `@font-face`.
 A Typst font setting does not install a browser font:
 

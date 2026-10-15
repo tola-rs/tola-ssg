@@ -22,9 +22,9 @@ pub(crate) fn writes_settings(editor: Editor) -> bool {
     editor.settings_file().is_some()
 }
 pub(crate) use packages::{
-    EditorPackageInputs, GeneratedDirectory, HeldFile, generated_directory, generated_package_files,
-    initial_package_inputs, obsolete_package_paths, prepare_package_inputs, read_package_directory,
-    remove_obsolete_package_paths,
+    EditorPackageInputs, GeneratedDirectory, HeldFile, generated_directory,
+    generated_package_files, initial_package_inputs, obsolete_package_paths,
+    prepare_package_inputs, read_package_directory, remove_obsolete_package_paths,
 };
 
 pub(crate) fn startup_instructions(editors: &[Editor]) -> String {

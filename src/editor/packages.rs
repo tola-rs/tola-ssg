@@ -183,7 +183,13 @@ fn collect_obsolete_package_paths(
             let relative = below(root, &version);
             if expected_versions.contains(relative) {
                 retained = true;
-                collect_obsolete_children(root, &version, &expected_files, cancellation, &mut found)?;
+                collect_obsolete_children(
+                    root,
+                    &version,
+                    &expected_files,
+                    cancellation,
+                    &mut found,
+                )?;
             } else {
                 found.paths.push(version);
             }
@@ -365,7 +371,9 @@ fn refused_path(root: &Path, relative: &Path, last: &'static str) -> Option<Refu
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
-            Err(source) => return Some(RefusedPath::unreadable(prefix(relative, index + 1), source)),
+            Err(source) => {
+                return Some(RefusedPath::unreadable(prefix(relative, index + 1), source));
+            }
         };
         let required = if index + 1 == component_count {
             last
