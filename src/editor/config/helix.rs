@@ -35,7 +35,7 @@ pub(super) fn merge(source: Option<&str>, directory: &EditorDirectory) -> Result
         Value::from(
             directory
                 .root()
-                .join(crate::editor::GENERATED_PACKAGE_DIRECTORY)
+                .join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY)
                 .to_str()
                 .context("editor package path is not UTF-8")?,
         ),

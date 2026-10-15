@@ -5,6 +5,8 @@ use std::path::Path;
 use crate::tree::{EntryKind, Tree};
 use crate::writes::FileWrites;
 
+use tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
+
 pub(super) fn render(writes: &FileWrites) -> String {
     let mut tree = Tree::default();
     for directory in writes.directory_paths() {
@@ -13,7 +15,7 @@ pub(super) fn render(writes: &FileWrites) -> String {
     let mut has_package_files = false;
     for file in writes.file_paths() {
         let relative = writes.relative_path(file);
-        if relative.starts_with(crate::editor::GENERATED_PACKAGE_DIRECTORY) {
+        if relative.starts_with(PACKAGE_MIRROR_DIRECTORY) {
             has_package_files = true;
         } else {
             tree.insert(relative, EntryKind::File);
@@ -21,7 +23,7 @@ pub(super) fn render(writes: &FileWrites) -> String {
     }
     if has_package_files {
         tree.insert(
-            Path::new(crate::editor::GENERATED_PACKAGE_DIRECTORY),
+            Path::new(PACKAGE_MIRROR_DIRECTORY),
             EntryKind::Directory,
         );
     }

@@ -12,15 +12,13 @@ use std::borrow::Cow;
 
 use tola_build::cancellation::BuildCancellation;
 use tola_build::config::ResolvedSiteConfig;
-
-pub(crate) const GENERATED_PACKAGE_DIRECTORY: &str =
-    tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
+use tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
 
 pub(crate) fn generated_package_files() -> Vec<(PathBuf, Cow<'static, str>)> {
     let mut files = Vec::new();
     for package in tola_packages::resolvable_packages() {
         let spec = package.spec();
-        let root = Path::new(GENERATED_PACKAGE_DIRECTORY)
+        let root = Path::new(PACKAGE_MIRROR_DIRECTORY)
             .join(spec.namespace.as_str())
             .join(spec.name.as_str())
             .join(spec.version.to_string());
@@ -49,7 +47,14 @@ pub(super) fn add_editor_package_replacements(writes: &mut FileWrites) -> Result
 }
 
 pub(crate) fn obsolete_package_paths(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    collect_obsolete_package_paths(root, &generated_package_files(), &Default::default())
+    let found =
+        collect_obsolete_package_paths(root, &generated_package_files(), &Default::default())?;
+    match found.refused.into_iter().next() {
+        // A command that removes paths stops on one Tola could not inspect: a path it cannot see
+        // is a path it must not walk past.
+        Some(refused) => Err(refused.error()),
+        None => Ok(found.paths),
+    }
 }
 
 /// One failure inside Tola's generated package mirror.
@@ -63,7 +68,7 @@ fn mirror_failure(operation: &str, path: &Path, source: io::Error) -> anyhow::Er
             crate::terminal::display_path_as_given(path)
         ))
         .context(format!(
-            "Tola could not {operation}: check its permissions, then rerun `tola editor setup`"
+            "Tola could not {operation}: check its permissions, then run `tola editor packages`"
         ))
 }
 
@@ -73,17 +78,38 @@ fn mirror_failure(operation: &str, path: &Path, source: io::Error) -> anyhow::Er
 /// instead of a host location.
 fn package_directory_failure(option: &str, source: io::Error) -> anyhow::Error {
     anyhow::Error::new(source).context(format!(
-        "Tola could not read the package directory {option} names; check the directory and its permissions, then rerun `tola editor setup`"
+        "Tola could not read the package directory {option} names; check the directory and its permissions, then run `tola editor packages`"
     ))
+}
+
+/// One walk of the generated package directory: the paths no generated file names, and the paths
+/// the walk could not inspect.
+#[derive(Default)]
+struct ObsoletePaths {
+    /// Paths below the directory that this Tola does not generate.
+    paths: Vec<PathBuf>,
+    /// Paths the walk could not inspect, which a removing command must not walk past.
+    refused: Vec<RefusedPath>,
+}
+
+impl ObsoletePaths {
+    /// Record one path the walk could not inspect, spelled relative to the site root.
+    fn refuse(&mut self, root: &Path, path: &Path, source: io::Error) {
+        let relative = path
+            .strip_prefix(root)
+            .expect("a package directory is below the site root");
+        self.refused
+            .push(RefusedPath::unreadable(relative.to_path_buf(), source));
+    }
 }
 
 fn collect_obsolete_package_paths(
     root: &Path,
     generated: &[(PathBuf, Cow<'static, str>)],
     cancellation: &BuildCancellation,
-) -> Result<Vec<PathBuf>> {
+) -> Result<ObsoletePaths> {
     cancellation.ensure_active()?;
-    let mut package_root = root.join(GENERATED_PACKAGE_DIRECTORY);
+    let mut package_root = root.join(PACKAGE_MIRROR_DIRECTORY);
     package_root.push("tola");
     let expected_files = generated
         .iter()
@@ -93,116 +119,345 @@ fn collect_obsolete_package_paths(
         .iter()
         .filter_map(|(path, _)| path.parent())
         .collect::<std::collections::BTreeSet<_>>();
-    let mut obsolete = Vec::new();
+    let mut found = ObsoletePaths::default();
     let names = match std::fs::read_dir(&package_root) {
         Ok(names) => names,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(obsolete),
-        Err(error) => {
-            return Err(mirror_failure(
-                "read the generated package directory",
-                &package_root,
-                error,
-            ));
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(found),
+        Err(source) => {
+            found.refuse(root, &package_root, source);
+            return Ok(found);
         }
     };
     for name in names {
         cancellation.ensure_active()?;
-        let name = name
-            .map_err(|error| {
-                mirror_failure("read the generated package directory", &package_root, error)
-            })?
-            .path();
-        let metadata = std::fs::symlink_metadata(&name).map_err(|error| {
-            mirror_failure("read the generated package directory", &name, error)
-        })?;
+        let name = match name {
+            Ok(name) => name.path(),
+            Err(source) => {
+                found.refuse(root, &package_root, source);
+                continue;
+            }
+        };
+        let metadata = match std::fs::symlink_metadata(&name) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                found.refuse(root, &name, source);
+                continue;
+            }
+        };
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            obsolete.push(name);
+            if !claimed(below(root, &name), &expected_files) {
+                found.paths.push(name);
+            }
             continue;
         }
-        let versions = std::fs::read_dir(&name).map_err(|error| {
-            mirror_failure("read the generated package directory", &name, error)
-        })?;
+        let versions = match std::fs::read_dir(&name) {
+            Ok(versions) => versions,
+            Err(source) => {
+                found.refuse(root, &name, source);
+                continue;
+            }
+        };
         let mut retained = false;
         for version in versions {
             cancellation.ensure_active()?;
-            let version = version
-                .map_err(|error| {
-                    mirror_failure("read the generated package directory", &name, error)
-                })?
-                .path();
-            let metadata = std::fs::symlink_metadata(&version).map_err(|error| {
-                mirror_failure("read the generated package directory", &version, error)
-            })?;
+            let version = match version {
+                Ok(version) => version.path(),
+                Err(source) => {
+                    found.refuse(root, &name, source);
+                    continue;
+                }
+            };
+            let metadata = match std::fs::symlink_metadata(&version) {
+                Ok(metadata) => metadata,
+                Err(source) => {
+                    found.refuse(root, &version, source);
+                    continue;
+                }
+            };
             if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-                obsolete.push(version);
+                if !claimed(below(root, &version), &expected_files) {
+                    found.paths.push(version);
+                }
                 continue;
             }
-            let relative = version
-                .strip_prefix(root)
-                .expect("package directory is below the site root");
+            let relative = below(root, &version);
             if expected_versions.contains(relative) {
                 retained = true;
-                let (_, nested) =
-                    collect_obsolete_children(root, &version, &expected_files, cancellation)?;
-                obsolete.extend(nested);
+                collect_obsolete_children(root, &version, &expected_files, cancellation, &mut found)?;
             } else {
-                obsolete.push(version);
+                found.paths.push(version);
             }
         }
-        if !retained {
-            obsolete.push(name);
+        // A directory Tola writes is one its own files fill, so it is not a path to remove even
+        // while no version of it is on disk yet.
+        if !retained && !claimed(below(root, &name), &expected_files) {
+            found.paths.push(name);
         }
     }
-    obsolete.sort();
-    Ok(obsolete)
+    found.paths.sort();
+    Ok(found)
 }
 
-/// Collect every path below one retained version that the generated files do not name, and
-/// report whether any generated file lives below the directory: a directory without one is
-/// itself obsolete.
+/// Collect every path below one retained version that the generated files do not name, and report
+/// whether a generated file lives below the directory: a directory without one is itself a path
+/// another version left behind, listed in place of everything under it.
 fn collect_obsolete_children(
     root: &Path,
     directory: &Path,
     expected_files: &BTreeSet<&Path>,
     cancellation: &BuildCancellation,
-) -> Result<(bool, Vec<PathBuf>)> {
+    found: &mut ObsoletePaths,
+) -> Result<bool> {
     let mut retained = false;
-    let mut obsolete = Vec::new();
-    for child in std::fs::read_dir(directory)
-        .map_err(|error| mirror_failure("read the generated package directory", directory, error))?
-    {
+    let children = match std::fs::read_dir(directory) {
+        Ok(children) => children,
+        Err(source) => {
+            found.refuse(root, directory, source);
+            return Ok(retained);
+        }
+    };
+    for child in children {
         cancellation.ensure_active()?;
-        let child = child
-            .map_err(|error| {
-                mirror_failure("read the generated package directory", directory, error)
-            })?
-            .path();
-        let metadata = std::fs::symlink_metadata(&child).map_err(|error| {
-            mirror_failure("read the generated package directory", &child, error)
-        })?;
+        let child = match child {
+            Ok(child) => child.path(),
+            Err(source) => {
+                found.refuse(root, directory, source);
+                continue;
+            }
+        };
+        let metadata = match std::fs::symlink_metadata(&child) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                found.refuse(root, &child, source);
+                continue;
+            }
+        };
+        // A path Tola writes is refused rather than removed when it is not the plain file or
+        // directory the generated set expects, so it is never a path another version left behind.
+        let relative = below(root, &child);
+        let named = claimed(relative, expected_files);
         if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-            let (nested_retained, nested) =
-                collect_obsolete_children(root, &child, expected_files, cancellation)?;
-            if nested_retained {
+            let listed = found.paths.len();
+            if collect_obsolete_children(root, &child, expected_files, cancellation, found)?
+                || named
+            {
                 retained = true;
-                obsolete.extend(nested);
             } else {
-                obsolete.push(child);
+                // Nothing generated lives below it, so the directory itself is the leftover.
+                found.paths.truncate(listed);
+                found.paths.push(child);
             }
         } else if metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
-            let relative = child
-                .strip_prefix(root)
-                .expect("package file is below the site root");
-            if expected_files.contains(relative) {
+            if named {
                 retained = true;
             } else {
-                obsolete.push(child);
+                found.paths.push(child);
             }
-        } else {
-            obsolete.push(child);
+        } else if !named {
+            found.paths.push(child);
         }
     }
-    Ok((retained, obsolete))
+    Ok(retained)
+}
+
+/// Whether the generated files name this path or one below it.
+///
+/// A path Tola writes is a path a refresh refuses rather than removes when it is not a plain file
+/// or directory, so it is never a path another version left behind.
+fn claimed(relative: &Path, expected_files: &BTreeSet<&Path>) -> bool {
+    expected_files
+        .iter()
+        .any(|expected| expected.starts_with(relative))
+}
+
+/// The path one walked entry has below the site root.
+fn below<'a>(root: &Path, path: &'a Path) -> &'a Path {
+    path.strip_prefix(root)
+        .expect("a package path is below the site root")
+}
+
+/// Why Tola will not write one path it generates.
+///
+/// A command that writes the generated directory refuses these paths, and `tola doctor` reports
+/// them, so both read the walk below instead of deciding for themselves what the directory holds.
+#[derive(Debug)]
+pub(crate) struct RefusedPath {
+    /// The refused path, relative to the site root.
+    relative: PathBuf,
+    reason: RefusalReason,
+}
+
+/// Why one generated path is refused.
+#[derive(Debug)]
+enum RefusalReason {
+    /// The path is a symbolic link.
+    Symlink,
+    /// The path is a directory where a file belongs, or a file where a directory belongs.
+    WrongKind { expected: &'static str },
+    /// Tola could not inspect the path.
+    Unreadable { source: io::Error },
+}
+
+impl RefusedPath {
+    fn symlink(relative: PathBuf) -> Self {
+        Self {
+            relative,
+            reason: RefusalReason::Symlink,
+        }
+    }
+
+    fn wrong_kind(relative: PathBuf, expected: &'static str) -> Self {
+        Self {
+            relative,
+            reason: RefusalReason::WrongKind { expected },
+        }
+    }
+
+    pub(crate) fn unreadable(relative: PathBuf, source: io::Error) -> Self {
+        Self {
+            relative,
+            reason: RefusalReason::Unreadable { source },
+        }
+    }
+
+    /// The refused path as the site author reads it.
+    pub(crate) fn displayed(&self) -> String {
+        crate::terminal::display_path_as_given(&self.relative)
+    }
+
+    /// What is wrong with the path, without the path itself.
+    pub(crate) fn condition(&self) -> String {
+        match &self.reason {
+            RefusalReason::Symlink => "is a symbolic link".to_owned(),
+            RefusalReason::WrongKind { expected } => format!("is not a {expected}"),
+            RefusalReason::Unreadable { .. } => "could not be read".to_owned(),
+        }
+    }
+
+    /// The failure a command that writes the generated directory stops with.
+    fn error(self) -> anyhow::Error {
+        let displayed = self.displayed();
+        match self.reason {
+            RefusalReason::Symlink => anyhow::anyhow!(
+                "`{displayed}` is a symbolic link; remove it, then run `tola editor packages`"
+            ),
+            RefusalReason::WrongKind { expected } => anyhow::anyhow!(
+                "`{displayed}` is not a {expected}; move the existing path aside, then run `tola editor packages`"
+            ),
+            RefusalReason::Unreadable { source } => mirror_failure(
+                "read the generated package directory",
+                &self.relative,
+                source,
+            ),
+        }
+    }
+}
+
+/// Why Tola will not write `relative` below `root`, if it will not.
+///
+/// `last` is what the path's own component must be: `file` for one generated file, `directory` for
+/// the generated package directory itself. A path Tola is about to create is not refused.
+fn refused_path(root: &Path, relative: &Path, last: &'static str) -> Option<RefusedPath> {
+    let mut path = root.to_path_buf();
+    let component_count = relative.components().count();
+    for (index, component) in relative.components().enumerate() {
+        path.push(component);
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+            Err(source) => return Some(RefusedPath::unreadable(prefix(relative, index + 1), source)),
+        };
+        let required = if index + 1 == component_count {
+            last
+        } else {
+            "directory"
+        };
+        let displayed = prefix(relative, index + 1);
+        if metadata.file_type().is_symlink() {
+            return Some(RefusedPath::symlink(displayed));
+        }
+        if (required == "file" && !metadata.is_file())
+            || (required == "directory" && !metadata.is_dir())
+        {
+            return Some(RefusedPath::wrong_kind(displayed, required));
+        }
+    }
+    None
+}
+
+/// The first `components` components of one generated path.
+fn prefix(relative: &Path, components: usize) -> PathBuf {
+    relative.components().take(components).collect()
+}
+
+/// How the generated package directory itself stands, before the files below it are read.
+pub(crate) enum GeneratedDirectory {
+    /// The directory is not there, and a refresh writes it.
+    Missing,
+    /// Tola will not write below it, and why.
+    Refused(RefusedPath),
+    /// Every generated path below it is a plain file or directory.
+    Usable,
+}
+
+pub(crate) fn generated_directory(root: &Path) -> GeneratedDirectory {
+    let relative = Path::new(PACKAGE_MIRROR_DIRECTORY);
+    match refused_path(root, relative, "directory") {
+        Some(refused) => GeneratedDirectory::Refused(refused),
+        None if root.join(relative).is_dir() => GeneratedDirectory::Usable,
+        None => GeneratedDirectory::Missing,
+    }
+}
+
+/// How one generated package file stands beside the bytes this Tola ships.
+pub(crate) enum HeldFile {
+    /// The file holds the bytes this Tola ships.
+    Current,
+    /// The file holds other bytes.
+    Differing,
+    /// The file is not there.
+    Missing,
+    /// Tola will not write here, and why.
+    Refused(RefusedPath),
+}
+
+/// The generated package directory as one read of it found things, which `tola doctor` reports
+/// from: a path it names is a path a writing command decides the same way about.
+pub(crate) struct PackageDirectory {
+    /// Every generated package file, in the order Tola generates them, with what the path is.
+    pub(crate) files: Vec<(PathBuf, HeldFile)>,
+    /// Paths below the directory that this Tola does not generate.
+    pub(crate) obsolete: Vec<PathBuf>,
+    /// Paths Tola could not inspect while reading.
+    pub(crate) refused: Vec<RefusedPath>,
+}
+
+pub(crate) fn read_package_directory(root: &Path) -> PackageDirectory {
+    let generated = generated_package_files();
+    let found = collect_obsolete_package_paths(root, &generated, &Default::default())
+        .expect("a fresh cancellation token stays active");
+    let files = generated
+        .into_iter()
+        .map(|(relative, source)| {
+            let held = match refused_path(root, &relative, "file") {
+                Some(refused) => HeldFile::Refused(refused),
+                None => match std::fs::read(root.join(&relative)) {
+                    Ok(bytes) if bytes == source.as_bytes() => HeldFile::Current,
+                    Ok(_) => HeldFile::Differing,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => HeldFile::Missing,
+                    Err(source) => {
+                        HeldFile::Refused(RefusedPath::unreadable(relative.clone(), source))
+                    }
+                },
+            };
+            (relative, held)
+        })
+        .collect();
+    PackageDirectory {
+        files,
+        obsolete: found.paths,
+        refused: found.refused,
+    }
 }
 
 pub(super) fn ensure_generated_package_paths_are_safe(root: &Path) -> Result<()> {
@@ -215,38 +470,9 @@ fn check_generated_package_paths(
     cancellation: &BuildCancellation,
 ) -> Result<()> {
     for (relative, _) in generated {
-        let mut path = root.to_path_buf();
-        let component_count = relative.components().count();
-        for (index, component) in relative.components().enumerate() {
-            cancellation.ensure_active()?;
-            path.push(component);
-            let metadata = match std::fs::symlink_metadata(&path) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                Err(error) => {
-                    return Err(mirror_failure(
-                        "read the generated package directory",
-                        &path,
-                        error,
-                    ));
-                }
-            };
-            let displayed = crate::terminal::display_path_as_given(
-                &relative.components().take(index + 1).collect::<PathBuf>(),
-            );
-            if metadata.file_type().is_symlink() {
-                anyhow::bail!(
-                    "`{displayed}` is a symbolic link; remove it, then rerun `tola editor setup`"
-                );
-            }
-            let final_component = index + 1 == component_count;
-            if (!final_component && !metadata.is_dir()) || (final_component && !metadata.is_file())
-            {
-                anyhow::bail!(
-                    "`{displayed}` is not a {}; move the existing path aside, then rerun `tola editor setup`",
-                    if final_component { "file" } else { "directory" }
-                );
-            }
+        cancellation.ensure_active()?;
+        if let Some(refused) = refused_path(root, relative, "file") {
+            return Err(refused.error());
         }
     }
     Ok(())
@@ -319,7 +545,7 @@ fn package_inputs(
         let version = package.join(spec.version.to_string());
         inputs.links.insert(
             version.clone(),
-            root.join(GENERATED_PACKAGE_DIRECTORY).join(version),
+            root.join(PACKAGE_MIRROR_DIRECTORY).join(version),
         );
     }
     // Package roots in search order. The first root that provides an identity keeps it,
@@ -389,14 +615,14 @@ impl EditorPackageInputs {
             match fs::symlink_metadata(path) {
                 Ok(metadata) if !metadata.is_dir() || metadata.file_type().is_symlink() => {
                     bail!(
-                        "`{label}` is not a directory; move it aside, then rerun `tola editor setup`"
+                        "`{label}` is not a directory; move it aside, then run `tola editor packages`"
                     );
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(anyhow::Error::new(error).context(format!(
-                        "Tola could not read `{label}`; check its permissions, then rerun `tola editor setup`"
+                        "Tola could not read `{label}`; check its permissions, then run `tola editor packages`"
                     )));
                 }
             }
@@ -561,7 +787,7 @@ fn synchronize_directory(
             }
             crate::sys::link_directory(target, &path).with_context(|| {
                 format!(
-                    "Tola could not link a local package into `{PACKAGE_VIEW_DIRECTORY}`; check that the directory is writable, then rerun `tola editor setup`"
+                    "Tola could not link a local package into `{PACKAGE_VIEW_DIRECTORY}`; check that the directory is writable, then run `tola editor packages`"
                 )
             })?;
         } else {
@@ -734,7 +960,8 @@ mod tests {
 
         let obsolete =
             collect_obsolete_package_paths(directory.path(), &generated, &Default::default())
-                .unwrap();
+                .unwrap()
+                .paths;
 
         assert!(obsolete.is_empty(), "{obsolete:?}");
     }
@@ -747,7 +974,7 @@ mod tests {
 
         for package in tola_packages::resolvable_packages() {
             let spec = package.spec();
-            let root = Path::new(GENERATED_PACKAGE_DIRECTORY)
+            let root = Path::new(PACKAGE_MIRROR_DIRECTORY)
                 .join(spec.namespace.as_str())
                 .join(spec.name.as_str())
                 .join(spec.version.to_string());

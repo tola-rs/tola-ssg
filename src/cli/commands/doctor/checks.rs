@@ -2,6 +2,7 @@
 
 use crate::cancellation::Cancellation;
 use crate::cli::log::destination;
+use crate::editor::{GeneratedDirectory, HeldFile};
 use std::path::{Path, PathBuf};
 
 use tola_build::diagnostic::{Diagnostic, Severity};
@@ -80,72 +81,7 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
         );
     }
 
-    let editor_packages = config
-        .get_root()
-        .join(crate::editor::GENERATED_PACKAGE_DIRECTORY);
-    if !editor_packages.is_dir() {
-        diagnostics.push(
-            path_diagnostic(
-                crate::codes::doctor::EDITOR_PACKAGES_MISSING,
-                Severity::Warning,
-                root,
-                &editor_packages,
-                &format!(
-                    "editor packages are missing from `{}`",
-                    crate::editor::GENERATED_PACKAGE_DIRECTORY
-                ),
-            )
-            .with_help("run `tola editor packages` to create them"),
-        );
-    } else {
-        let mut stale = Vec::new();
-        let mut unreadable = Vec::new();
-        for (relative, expected) in crate::editor::generated_package_files() {
-            let path = config.get_root().join(relative);
-            match std::fs::read(&path) {
-                // A file Tola cannot read is reported as unreadable, never as a version mismatch.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => stale.push(path),
-                Err(_) => unreadable.push(path),
-                Ok(bytes) if bytes != expected.as_bytes() => stale.push(path),
-                Ok(_) => {}
-            }
-        }
-        if let Ok(obsolete) = crate::editor::obsolete_package_paths(config.get_root()) {
-            stale.extend(obsolete);
-        }
-        stale.sort();
-        stale.dedup();
-        if !stale.is_empty() {
-            let mut diagnostic = path_diagnostic(
-                crate::codes::doctor::EDITOR_PACKAGES_STALE,
-                Severity::Warning,
-                root,
-                &editor_packages,
-                "editor packages do not match this Tola version",
-            )
-            .with_help("run `tola editor packages` to update them");
-            for path in stale {
-                diagnostic =
-                    diagnostic.with_note(crate::terminal::display_path_within(&path, root));
-            }
-            diagnostics.push(diagnostic);
-        }
-        if !unreadable.is_empty() {
-            let mut diagnostic = path_diagnostic(
-                crate::codes::doctor::EDITOR_FILE_UNREADABLE,
-                Severity::Warning,
-                root,
-                &editor_packages,
-                "Tola could not read some editor package files",
-            )
-            .with_help("Make them readable, then rerun `tola doctor`");
-            for path in unreadable {
-                diagnostic =
-                    diagnostic.with_note(crate::terminal::display_path_within(&path, root));
-            }
-            diagnostics.push(diagnostic);
-        }
-    }
+    diagnostics.extend(editor_package_diagnostics(root));
 
     for arguments in config.build().hooks.enabled_commands() {
         if let Some(command) = arguments.first()
@@ -166,6 +102,163 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
 
     diagnostics.extend(vendor_diagnostics(&config));
     diagnostics
+}
+
+/// What `tola doctor` reports about the generated package directory: the paths a writing command
+/// refuses, what differs from the sources this Tola ships, what is missing, and what another
+/// version left behind.
+fn editor_package_diagnostics(root: &Path) -> Vec<Diagnostic> {
+    let directory = root.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY);
+    let mut diagnostics = Vec::new();
+    match crate::editor::generated_directory(root) {
+        GeneratedDirectory::Missing => {
+            diagnostics.push(
+                path_diagnostic(
+                    crate::codes::doctor::EDITOR_PACKAGES_MISSING,
+                    Severity::Warning,
+                    root,
+                    &directory,
+                    "the generated package directory is missing",
+                )
+                .with_help("run `tola editor packages` to create it"),
+            );
+            return diagnostics;
+        }
+        GeneratedDirectory::Refused(refused) => {
+            diagnostics.push(
+                path_diagnostic(
+                    crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE,
+                    Severity::Warning,
+                    root,
+                    &directory,
+                    "Tola will not write the generated package directory",
+                )
+                .with_note(format!("{} {}", refused.displayed(), refused.condition()))
+                .with_help("Move it aside, then run `tola editor packages`"),
+            );
+            return diagnostics;
+        }
+        GeneratedDirectory::Usable => {}
+    }
+
+    let generated = crate::editor::generated_package_files();
+    let found = crate::editor::read_package_directory(root);
+    let mut differ = Vec::new();
+    let mut missing = Vec::new();
+    // Every file below a refused path reports that one path, so the map holds each refusal once.
+    let mut refused = std::collections::BTreeMap::new();
+    for (relative, held) in found.files {
+        let path = root.join(relative);
+        match held {
+            HeldFile::Differing => differ.push(path),
+            HeldFile::Missing => missing.push(path),
+            HeldFile::Refused(refusal) => {
+                refused.insert(refusal.displayed(), refusal);
+            }
+            HeldFile::Current => {}
+        }
+    }
+    for refusal in found.refused {
+        refused.insert(refusal.displayed(), refusal);
+    }
+    if !refused.is_empty() {
+        let mut diagnostic = path_diagnostic(
+            crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE,
+            Severity::Warning,
+            root,
+            &directory,
+            "Tola will not write some paths in the generated package directory",
+        )
+        .with_note(format!(
+            "{} Tola will not write",
+            crate::terminal::plural_count(refused.len(), "path")
+        ));
+        for (displayed, refusal) in refused.iter().take(SAMPLED) {
+            diagnostic = diagnostic.with_note(format!("{displayed} {}", refusal.condition()));
+        }
+        if let Some(extra) = refused
+            .len()
+            .checked_sub(SAMPLED)
+            .filter(|count| *count > 0)
+        {
+            diagnostic = diagnostic.with_note(crate::terminal::plural_count(extra, "more path"));
+        }
+        diagnostics.push(diagnostic.with_help("Move them aside, then run `tola editor packages`"));
+    }
+
+    // A stable order, so two runs of the same directory name the same files.
+    differ.sort();
+    missing.sort();
+    if !differ.is_empty() || !missing.is_empty() || !found.obsolete.is_empty() {
+        let mut diagnostic = path_diagnostic(
+            crate::codes::doctor::EDITOR_PACKAGES_STALE,
+            Severity::Warning,
+            root,
+            &directory,
+            "editor packages do not match the sources this Tola ships",
+        );
+        diagnostic = sampled(
+            diagnostic,
+            root,
+            &differ,
+            format!("{} of {} files differ", differ.len(), generated.len()),
+            "file",
+        );
+        diagnostic = sampled(
+            diagnostic,
+            root,
+            &missing,
+            format!(
+                "{} missing",
+                crate::terminal::plural_count(missing.len(), "file")
+            ),
+            "file",
+        );
+        diagnostic = sampled(
+            diagnostic,
+            root,
+            &found.obsolete,
+            format!(
+                "{} left over from another version",
+                crate::terminal::plural_count(found.obsolete.len(), "path")
+            ),
+            "path",
+        );
+        if !differ.is_empty() {
+            diagnostic = diagnostic
+                .with_note("the editor opens these files for `@tola/*` definitions")
+                .with_note(
+                    "while they differ, the editor uses the copies inside Tola; a build always does",
+                );
+        }
+        diagnostics.push(diagnostic.with_help("run `tola editor packages` to regenerate them"));
+    }
+    diagnostics
+}
+
+/// How many paths of one class a report names before it counts the rest.
+const SAMPLED: usize = 3;
+
+/// Add one class of the report: its count, at most [`SAMPLED`] of its paths, and the rest counted.
+fn sampled(
+    mut diagnostic: Diagnostic,
+    root: &Path,
+    paths: &[PathBuf],
+    count: String,
+    noun: &str,
+) -> Diagnostic {
+    if paths.is_empty() {
+        return diagnostic;
+    }
+    diagnostic = diagnostic.with_note(count);
+    for path in paths.iter().take(SAMPLED) {
+        diagnostic = diagnostic.with_note(crate::terminal::display_path_within(path, root));
+    }
+    if let Some(extra) = paths.len().checked_sub(SAMPLED).filter(|count| *count > 0) {
+        diagnostic =
+            diagnostic.with_note(crate::terminal::plural_count(extra, &format!("more {noun}")));
+    }
+    diagnostic
 }
 
 fn environment_diagnostics(root: &Path) -> Vec<Diagnostic> {
@@ -319,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_editor_files_are_reported() {
+    fn refused_package_paths_are_reported_once() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
         std::fs::write(
@@ -331,21 +424,48 @@ mod tests {
             .into_iter()
             .next()
             .expect("builtin packages provide editor files");
+        // A directory where one generated file belongs: a path Tola will not write, which is not a
+        // file that differs from the sources this Tola ships.
         std::fs::create_dir_all(directory.path().join(&relative)).unwrap();
+        let displayed = relative.to_string_lossy().into_owned();
 
         let reported = diagnose_at(&path);
-        reported
+        let refused = reported
             .iter()
-            .find(|diagnostic| {
-                diagnostic.code == crate::codes::doctor::EDITOR_FILE_UNREADABLE
-                    && diagnostic
-                        .notes
-                        .iter()
-                        .any(|note| note.contains(".tola/builtin-packages"))
-            })
-            .expect("a package file Tola cannot read is reported as unreadable");
+            .find(|diagnostic| diagnostic.code == crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE)
+            .expect("a generated package path Tola refuses is reported");
+        assert!(
+            refused
+                .notes
+                .iter()
+                .any(|note| note.contains(&displayed) && note.contains("is not a file")),
+            "{:?}",
+            refused.notes
+        );
+        let reported_elsewhere: Vec<&str> = reported
+            .iter()
+            .filter(|diagnostic| diagnostic.code != crate::codes::doctor::EDITOR_PACKAGES_UNUSABLE)
+            .flat_map(|diagnostic| diagnostic.notes.iter().map(String::as_str))
+            .collect();
+        assert!(
+            !reported_elsewhere
+                .iter()
+                .any(|note| note.contains(&displayed)),
+            "the refused path is reported once: {reported_elsewhere:?}"
+        );
+    }
 
+    #[test]
+    fn unreadable_editor_settings_file_is_reported() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tola.toml");
+        std::fs::write(
+            &path,
+            "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(directory.path().join(".vscode/settings.json")).unwrap();
+
         let reported = diagnose_at(&path);
         reported
             .iter()

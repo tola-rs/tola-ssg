@@ -41,15 +41,18 @@ pub mod doctor {
     /// The configured content root is not a directory.
     pub const CONTENT_ROOT_MISSING: DiagnosticCode =
         DiagnosticCode::new("doctor.content_root_missing");
-    /// A file an editor check reads could not be read.
+    /// An editor settings file Tola could not read.
     pub const EDITOR_FILE_UNREADABLE: DiagnosticCode =
         DiagnosticCode::new("doctor.editor_file_unreadable");
     /// Generated editor packages are missing.
     pub const EDITOR_PACKAGES_MISSING: DiagnosticCode =
         DiagnosticCode::new("doctor.editor_packages_missing");
-    /// Generated editor packages do not match this release.
+    /// Generated editor packages do not match the sources this Tola ships.
     pub const EDITOR_PACKAGES_STALE: DiagnosticCode =
         DiagnosticCode::new("doctor.editor_packages_stale");
+    /// The generated package directory holds a path Tola will not write.
+    pub const EDITOR_PACKAGES_UNUSABLE: DiagnosticCode =
+        DiagnosticCode::new("doctor.editor_packages_unusable");
     /// The configured entry is not a file.
     pub const ENTRY_MISSING: DiagnosticCode = DiagnosticCode::new("doctor.entry_missing");
     /// A hook command is not installed.
@@ -193,6 +196,7 @@ mod tests {
                 doctor::EDITOR_FILE_UNREADABLE,
                 doctor::EDITOR_PACKAGES_MISSING,
                 doctor::EDITOR_PACKAGES_STALE,
+                doctor::EDITOR_PACKAGES_UNUSABLE,
                 doctor::ENTRY_MISSING,
                 doctor::HOOK_COMMAND_MISSING,
                 doctor::PACKAGE_LOCATIONS,

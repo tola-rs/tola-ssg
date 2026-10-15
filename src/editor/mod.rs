@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::writes::FileWrites;
+
+use tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
+
 pub(crate) use site::EditorDirectory;
 
 pub(crate) use config::{Editor, manual_editors, names, settings};
@@ -19,8 +22,8 @@ pub(crate) fn writes_settings(editor: Editor) -> bool {
     editor.settings_file().is_some()
 }
 pub(crate) use packages::{
-    EditorPackageInputs, GENERATED_PACKAGE_DIRECTORY, generated_package_files,
-    initial_package_inputs, obsolete_package_paths, prepare_package_inputs,
+    EditorPackageInputs, GeneratedDirectory, HeldFile, generated_directory, generated_package_files,
+    initial_package_inputs, obsolete_package_paths, prepare_package_inputs, read_package_directory,
     remove_obsolete_package_paths,
 };
 
@@ -192,7 +195,7 @@ pub(crate) fn dry_run_report(setup: &EditorSetup, obsolete: &[PathBuf]) -> Strin
     let mut generated_files = Vec::new();
     for path in writes.file_paths() {
         let relative = writes.relative_path(path);
-        if relative.starts_with(GENERATED_PACKAGE_DIRECTORY) {
+        if relative.starts_with(PACKAGE_MIRROR_DIRECTORY) {
             generated_files.push(relative);
         } else {
             settings_files.push(relative);
