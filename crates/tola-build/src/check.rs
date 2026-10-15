@@ -1,10 +1,4 @@
-//! Read-only compiler diagnostics for one editor revision.
-//!
-//! Uses build input preparation, source analysis, and Bundle compilation without
-//! running external commands or writing output. A revision that cannot compile the
-//! site still resolves the world its own imports, packages, and fonts come from, and
-//! one of its sources compiles in that world on its own: an editor answers about the
-//! file the author is editing, not only about sites that compile.
+//! Read-only compiler diagnostics for one editor revision, even when the site does not compile.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,20 +8,12 @@ use crate::cancellation::{BuildCancellation, BuildCancelled};
 use crate::compiler::TypstHost;
 use crate::config::ResolvedSiteConfig;
 use crate::content::ContentUnit;
-use crate::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
-/// Memoized derivations one eviction keeps in the process-wide compiler cache.
-///
-/// `comemo` ages every result once per eviction and keeps it while its age stays within the
-/// bound, so one generation retains what the revision that evicted touched and releases the
-/// revisions it superseded.
+/// Derivation generations the process-wide compiler cache retains across one eviction.
 const RETAINED_DERIVATION_GENERATIONS: usize = 1;
 
 /// Compiler resources for read-only checks of successive editor revisions.
-///
-/// One resolved configuration is used throughout the session. Unsaved source
-/// text, local icon collections, and ignore rules share one input view.
-/// Successfully prepared fonts and icons survive source errors.
 pub struct SourceDiagnosticSession {
     config: Arc<ResolvedSiteConfig>,
     resources: crate::resources::BuildResources,
@@ -36,6 +22,7 @@ pub struct SourceDiagnosticSession {
     icons: Option<crate::icon::IconInventory>,
     analysis: Option<CheckAnalysisEvidence>,
     reused_analysis: bool,
+    frozen_modules: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -56,9 +43,53 @@ struct CheckAnalysisEvidence {
 pub struct SourceRevision {
     diagnostics: Vec<Diagnostic>,
     checked: Option<SourceCompilation>,
+    accessed: CheckReads,
+}
+
+#[derive(Default)]
+struct CheckReads {
+    disk_reads: Vec<PathBuf>,
+    package_checks: Vec<tola_typst::PackageCheck>,
+    file_reads: Vec<tola_typst::FileRead>,
+}
+
+impl CheckReads {
+    fn record(&mut self, accessed: &tola_typst::AccessedDeps) {
+        self.file_reads.extend(accessed.reads.iter().cloned());
+        self.disk_reads.extend(
+            accessed
+                .disk_reads
+                .iter()
+                .map(|read| read.as_path().to_path_buf()),
+        );
+        self.package_checks
+            .extend(accessed.package_checks.iter().cloned());
+    }
+}
+
+/// Why a check stopped before it could resolve its configuration.
+enum CheckStop {
+    Cancelled(BuildCancelled),
+    Revision(Box<SourceRevision>),
 }
 
 impl SourceRevision {
+    /// Successful read-time observations from source analysis and compilation, including
+    /// observations retained before a failed check. Different digests remain distinct.
+    pub fn file_reads(&self) -> &[tola_typst::FileRead] {
+        &self.accessed.file_reads
+    }
+
+    /// Physical read attempts made by this check, including failed input reads.
+    pub fn disk_reads(&self) -> &[PathBuf] {
+        &self.accessed.disk_reads
+    }
+
+    /// Every package candidate checked before this revision completed or failed.
+    pub fn package_checks(&self) -> &[tola_typst::PackageCheck] {
+        &self.accessed.package_checks
+    }
+
     /// All diagnostics from this source revision.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
@@ -82,19 +113,22 @@ impl SourceRevision {
     /// Whether this revision compiled: the site's root program, or the one source a check
     /// compiled on its own.
     pub fn compiled(&self) -> bool {
-        self.checked
-            .as_ref()
-            .is_some_and(|checked| checked.evaluation.is_some())
+        !self
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == tola_diagnostic::Severity::Error)
+            && self
+                .checked
+                .as_ref()
+                .is_some_and(|checked| checked.evaluation.is_some())
     }
 }
 
-/// A checked site: the world that resolved it, and the Bundle when the root program compiled.
-///
-/// Source checks do not export outputs, run hooks, or publish revisions. The world outlives a
-/// failed compilation, because an editor answers about a file the site's own program never
-/// reached, and that file compiles on its own against the same imports, packages, and fonts.
+/// A checked site: the resolved world, and the Bundle when the root program compiled.
 pub struct SourceCompilation {
     world: Arc<tola_typst::TypstWorld>,
+    /// The root program this world attempted, absent for independent source checks.
+    site_entry: Option<typst::syntax::FileId>,
     /// What compiled, absent when nothing did.
     evaluation: Option<Evaluation>,
 }
@@ -111,10 +145,21 @@ enum Evaluation {
     },
 }
 
+enum SourceCheckInput<'a> {
+    Path(&'a str),
+    File(typst::syntax::FileId),
+}
+
 impl SourceCompilation {
     /// The immutable world containing the inputs this check resolved.
     pub fn world(&self) -> &tola_typst::TypstWorld {
         &self.world
+    }
+
+    /// The actual root program of this check, including a package driver.
+    /// A standalone fallback never declares site-wide metadata, even if it compiles.
+    pub fn site_entry(&self) -> Option<typst::syntax::FileId> {
+        self.site_entry
     }
 
     /// The realized Bundle, before file export or publication, absent when the root program did
@@ -144,11 +189,7 @@ impl SourceCompilation {
         }
     }
 
-    /// The addressable documents this compilation realized, in document order.
-    ///
-    /// Only documents that hold HTML are listed: a document the site does not serve as a page
-    /// has no route. A caller attributes a route to the sources it was realized from by matching
-    /// [`RealizedDocument::sources`]; one source can appear in many documents.
+    /// The addressable HTML documents this compilation realized, in document order.
     pub fn realized_documents(
         &self,
         cancellation: &BuildCancellation,
@@ -168,6 +209,7 @@ impl SourceCompilation {
                 permalink: tola_address::route_for_output(&output),
                 output,
                 sources: document.source_ids(),
+                rendered_sources: document.rendered_source_ids(&cancellation)?,
             });
         }
         Ok(documents)
@@ -181,11 +223,10 @@ pub struct RealizedDocument {
     pub output: tola_address::OutputPath,
     /// The site-relative route the document is served at.
     pub permalink: tola_address::UrlPath,
-    /// The file identities the document's original body has, before target realization.
-    ///
-    /// These describe provenance, not ownership: a document that includes a template has the
-    /// template's identity too, and a source included by many documents appears in all of them.
+    /// Original body identities: provenance, not ownership.
     pub sources: Vec<typst::syntax::FileId>,
+    /// Additional identities from realized HTML; these are contributions, not primary ownership.
+    pub rendered_sources: Vec<typst::syntax::FileId>,
 }
 
 impl CheckAnalysisEvidence {
@@ -258,11 +299,31 @@ impl CheckAnalysisEvidence {
     }
 }
 
+/// What one check collected while it evaluated a revision, including what a failed attempt read.
+#[derive(Default)]
+struct RevisionEvaluation {
+    world: Option<Arc<tola_typst::TypstWorld>>,
+    reads: crate::compiler::BuildInputs,
+    file_reads: Vec<tola_typst::FileRead>,
+    warnings: tola_typst::Diagnostics,
+    declaration_warnings: Vec<Diagnostic>,
+    reused_site_program: bool,
+}
+
+impl RevisionEvaluation {
+    /// Keep the world a failed stage resolved, then return its failure.
+    fn keep_failed_world(
+        &mut self,
+        world: Option<Arc<tola_typst::TypstWorld>>,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        self.world.clone_from(&world);
+        error
+    }
+}
+
 impl SourceDiagnosticSession {
     /// Create a session for one resolved configuration.
-    ///
-    /// Create another session after changing configuration. Font changes are
-    /// detected by each check and do not require replacing the session.
     pub fn new(config: Arc<ResolvedSiteConfig>) -> Self {
         Self::with_resources(config, crate::resources::BuildResources::default())
     }
@@ -279,12 +340,23 @@ impl SourceDiagnosticSession {
             icons: None,
             analysis: None,
             reused_analysis: false,
+            frozen_modules: false,
+        }
+    }
+
+    /// A one-shot query already selected its entry from these prepared module inputs.
+    /// Its caller owns the manifest freshness checks around inspection.
+    pub(crate) fn with_prepared_modules(
+        config: Arc<ResolvedSiteConfig>,
+        resources: crate::resources::BuildResources,
+    ) -> Self {
+        Self {
+            frozen_modules: true,
+            ..Self::with_resources(config, resources)
         }
     }
 
     /// Create a session for independent documents without a site's content inventory.
-    ///
-    /// The configuration supplies the workspace root, fonts, and package access.
     pub fn for_documents(
         config: Arc<ResolvedSiteConfig>,
         resources: crate::resources::BuildResources,
@@ -304,13 +376,7 @@ impl SourceDiagnosticSession {
         self.reused_analysis
     }
 
-    /// Release the parsed sources one session stopped reading.
-    ///
-    /// The file cache is shared for the life of a session, so a file a reader asked for outside a
-    /// revision's own sources would otherwise stay parsed until the process exits. One call ends a
-    /// revision; a slot a live world still references is kept, so no answer changes. Site content
-    /// sources are not in this cache — a check serves those from its candidate sources — so this
-    /// releases imported files, not the explicitly captured content sources and entry program.
+    /// Release the parsed sources one session stopped reading; a live world keeps its slots.
     pub fn evict_stale_file_cache_entries(&self) {
         if let Some(host) = &self.host {
             host.evict_stale_file_cache_entries(TypstHost::RETAINED_FILE_CACHE_EPOCHS);
@@ -318,11 +384,6 @@ impl SourceDiagnosticSession {
     }
 
     /// Check one immutable set of unsaved sources without changing source files.
-    ///
-    /// Overlay paths are absolute filesystem paths; aliases with different text
-    /// for the same physical file are rejected. Compiler and input errors
-    /// are returned as diagnostics; a cancelled revision returns `BuildCancelled`
-    /// so consumers can retain the diagnostics from their last completed check.
     pub fn check(
         &mut self,
         overlays: Vec<(PathBuf, Arc<str>)>,
@@ -358,6 +419,7 @@ impl SourceDiagnosticSession {
         let reusable = self
             .host
             .as_ref()
+            .filter(|host| host.matches(config, &self.resources))
             .map(|host| host.font_inventory_is_fresh(cancellation))
             .transpose()?
             .unwrap_or(false);
@@ -395,77 +457,144 @@ impl SourceDiagnosticSession {
             &mut self.icons,
             overrides,
         )?;
-        let host = host.with_icons(packages.icons.collections());
+        let host = host
+            .with_icons(packages.icons.collections())
+            .with_local_packages(Arc::clone(&config.module_inputs.packages));
         let bindings = crate::package::SiteBindings::from_config(
             config,
             crate::asset::AssetUrls::for_check(config, cancellation)?,
-        );
+        )
+        .prepare_modules(config, &host, cancellation)?;
         Ok((host, content, bindings))
     }
 
+    /// The configuration a check runs under, or why it stopped.
+    fn check_configuration(
+        &mut self,
+        cancellation: &BuildCancellation,
+    ) -> Result<Arc<ResolvedSiteConfig>, CheckStop> {
+        cancellation.ensure_active().map_err(CheckStop::Cancelled)?;
+        if self.frozen_modules {
+            return Ok(Arc::clone(&self.config));
+        }
+        crate::modules::prepared::configure(&self.config, self.resources.input_scope())
+            .map(Arc::new)
+            .map_err(|error| {
+                CheckStop::Revision(Box::new(SourceRevision {
+                    diagnostics: source_failure_diagnostics(&error, self.config.get_root()),
+                    checked: None,
+                    accessed: CheckReads::default(),
+                }))
+            })
+    }
+
     /// Check one source on its own, with the diagnostics it produced.
-    ///
-    /// Site sessions supply their content records even when the root program does not compile.
-    /// Document sessions use the workspace's fonts and packages without discovering site content.
     pub fn inspect_source(
         &mut self,
         relative: &str,
         overlays: Vec<(PathBuf, Arc<str>)>,
         cancellation: &BuildCancellation,
     ) -> Result<SourceRevision, BuildCancelled> {
-        cancellation.ensure_active()?;
-        let configuration = Arc::clone(&self.config);
+        self.inspect_source_input(SourceCheckInput::Path(relative), overlays, cancellation)
+    }
+
+    /// Check a complete source identity, preserving a local package's own import root.
+    pub fn inspect_source_file(
+        &mut self,
+        source: typst::syntax::FileId,
+        overlays: Vec<(PathBuf, Arc<str>)>,
+        cancellation: &BuildCancellation,
+    ) -> Result<SourceRevision, BuildCancelled> {
+        self.inspect_source_input(SourceCheckInput::File(source), overlays, cancellation)
+    }
+
+    fn inspect_source_input(
+        &mut self,
+        source: SourceCheckInput<'_>,
+        overlays: Vec<(PathBuf, Arc<str>)>,
+        cancellation: &BuildCancellation,
+    ) -> Result<SourceRevision, BuildCancelled> {
+        let configuration = match self.check_configuration(cancellation) {
+            Ok(configuration) => configuration,
+            Err(CheckStop::Cancelled(error)) => return Err(error),
+            Err(CheckStop::Revision(revision)) => return Ok(*revision),
+        };
         let config = configuration.as_ref();
         let mut diagnostics = Vec::new();
+        let mut accessed = CheckReads::default();
         let prepared =
             (|| -> anyhow::Result<Option<(Arc<tola_typst::TypstWorld>, typst::syntax::FileId)>> {
                 let overrides = crate::filesystem::SourceOverrides::new(overlays, cancellation)?;
                 let (host, content, bindings) = self.prepared(config, &overrides, cancellation)?;
                 let sources = crate::content::SourceSet::without_metadata(&content, config)?;
                 let library = bindings.library(sources.inputs().to_source_records());
-                let path = config.get_root().join(relative);
                 let files = host.file_resolver();
+                let main = match source {
+                    SourceCheckInput::File(id) => id,
+                    SourceCheckInput::Path(relative) => {
+                        let path = tola_typst::normalize_path(&config.get_root().join(relative));
+                        host.source_boundary().check(&path)?;
+                        let main = tola_typst::file_id_from_path(&path, config.get_root())
+                            .or_else(|| {
+                                let ids = files.local_package_ids(&path).ok()?;
+                                match ids.as_slice() {
+                                    [id] => Some(*id),
+                                    _ => None,
+                                }
+                            })
+                            .or_else(|| {
+                                crate::filesystem::package_document_id(
+                                    &path,
+                                    Some(config.package_locations()),
+                                )
+                            });
+                        let Some(main) = main else { return Ok(None) };
+                        main
+                    }
+                };
+                let explicit = if matches!(main.root(), typst::syntax::VirtualRoot::Project) {
+                    vec![config.get_root().join(main.vpath().get_without_slash())]
+                } else {
+                    Vec::new()
+                };
                 let loaded = tola_typst::ExplicitSources::build_with_files_cancellable(
-                    std::slice::from_ref(&path),
+                    &explicit,
                     config.get_root(),
                     files,
                     &cancellation.bundle_cancellation(),
                 )
                 .map_err(|failure| {
-                    let (error, _) = failure.into_error_and_accessed();
+                    let (error, observed) = failure.into_error_and_accessed();
+                    accessed.record(&observed);
                     anyhow::Error::new(tola_typst::CompileError::from(error))
                 })?;
-                let (sources, _) = loaded.into_sources_and_accessed();
+                let (sources, observed) = loaded.into_sources_and_accessed();
+                accessed.record(&observed);
                 let candidate_files = host.candidate_files(Arc::new(sources));
-                let world = Arc::new(host.world(
+                let world = Arc::new(host.world_with_id(
                     config.get_root(),
-                    &path,
+                    main,
                     &library,
                     candidate_files,
                     &cancellation.bundle_cancellation(),
                 )?);
-                // The id is the one this world resolves the file at, which is how the editor names it.
-                let main = tola_typst::file_id_from_path(&path, config.get_root()).or_else(|| {
-                    crate::filesystem::package_document_id(&path, Some(config.package_locations()))
-                });
-                Ok(main.map(|main| (world, main)))
+                Ok(Some((world, main)))
             })();
         cancellation.ensure_active()?;
-        let (world, main) = match prepared {
-            Ok(Some(prepared)) => prepared,
-            Ok(None) => {
-                return Ok(SourceRevision {
-                    diagnostics,
-                    checked: None,
-                });
-            }
+        let prepared = match prepared {
+            Ok(Some(prepared)) => Some(prepared),
+            Ok(None) => None,
             Err(error) => {
                 diagnostics.extend(source_failure_diagnostics(&error, config.get_root()));
-                return Ok(SourceRevision {
-                    diagnostics,
-                    checked: None,
-                });
+                None
             }
+        };
+        let Some((world, main)) = prepared else {
+            return Ok(SourceRevision {
+                diagnostics,
+                checked: None,
+                accessed,
+            });
         };
         let mut warnings = tola_typst::Diagnostics::new();
         // A source that does not compile on its own still resolves what it imports, so the world
@@ -473,17 +602,19 @@ impl SourceDiagnosticSession {
         let evaluation = match tola_typst::compile_source_with_evidence(&world, main) {
             Ok(compiled) => {
                 warnings.extend_distinct(compiled.diagnostics());
-                let (document, accessed, _) = compiled.into_parts();
+                let (document, observed, _) = compiled.into_parts();
+                accessed.record(&observed);
                 Some(Evaluation::Source {
                     document: Box::new(document),
-                    file_reads: accessed.reads,
+                    file_reads: observed.reads,
                 })
             }
             Err(failure) => {
                 if failure.is_cancelled() {
                     return Err(BuildCancelled);
                 }
-                let (_, error) = failure.into_parts();
+                let (observed, error) = failure.into_parts();
+                accessed.record(&observed);
                 diagnostics.extend(source_failure_diagnostics(
                     &anyhow::Error::new(error),
                     config.get_root(),
@@ -492,160 +623,189 @@ impl SourceDiagnosticSession {
             }
         };
         diagnostics.extend(crate::compiler::warning_diagnostics(config, &mut warnings));
+        tola_diagnostic::coalesce_reports(&mut diagnostics);
         Ok(SourceRevision {
             diagnostics,
-            checked: Some(SourceCompilation { world, evaluation }),
+            accessed,
+            checked: Some(SourceCompilation {
+                world,
+                site_entry: None,
+                evaluation,
+            }),
+        })
+    }
+
+    /// Evaluate one revision against the session's held world and prepared inputs, collecting
+    /// everything the caller reports even when the attempt fails.
+    fn evaluate_revision(
+        &mut self,
+        config: &ResolvedSiteConfig,
+        overlays: Vec<(PathBuf, Arc<str>)>,
+        cancellation: &BuildCancellation,
+        evaluation: &mut RevisionEvaluation,
+    ) -> anyhow::Result<SourceCompilation> {
+        let overrides = crate::filesystem::SourceOverrides::new(overlays, cancellation)?;
+        let unsaved = overrides
+            .sources()
+            .map(|(path, source)| (path.to_path_buf(), Arc::clone(&source.text)))
+            .collect::<BTreeMap<_, _>>();
+        let (host, content, bindings) = self.prepared(config, &overrides, cancellation)?;
+        let mut prepared = None;
+        let mut reuse = crate::compiler::analysis::SourceAnalysisReuse::None;
+        if let Some(held) = &self.analysis
+            && let Some(decision) = held.decide(
+                &content,
+                &bindings,
+                &unsaved,
+                host.source_boundary(),
+                cancellation,
+            )?
+        {
+            evaluation.reused_site_program = decision.reuses_site_program()
+                && held.dependencies.virtual_reads_match(
+                    |evidence| match evidence.locator() {
+                        tola_typst::ReadLocator::ProvidedRoot(relative) => overrides
+                            .get_physical(&crate::filesystem::normalize_existing_prefix(
+                                &config.get_root().join(relative),
+                            ))
+                            .is_some_and(|source| source.digest == evidence.digest()),
+                        _ => host.virtual_read_matches(evidence),
+                    },
+                    cancellation,
+                )?;
+            prepared = Some(
+                held.cache
+                    .clone()
+                    .prepare_for_rebuild(&decision, config.project_entry_path().as_deref()),
+            );
+            reuse = crate::compiler::analysis::SourceAnalysisReuse::retained(
+                prepared
+                    .as_ref()
+                    .expect("the reuse holds its prepared cache"),
+                &held.dependencies,
+            );
+        }
+        let evaluated = crate::compiler::bundle::evaluate(
+            config,
+            &host,
+            &content,
+            // A check renders no configured assets: declarations resolve to their mounted names.
+            bindings,
+            &cancellation.bundle_cancellation(),
+            reuse,
+            &mut evaluation.reads,
+        )
+        .map_err(|failure| evaluation.keep_failed_world(failure.world, failure.error))?;
+        self.reused_analysis = prepared.is_some()
+            && evaluated
+                .source_analysis()
+                .reused_dependency_readers()
+                .len()
+                == content.len();
+        evaluation
+            .warnings
+            .extend_distinct(evaluated.source_analysis().diagnostics());
+        evaluation
+            .declaration_warnings
+            .extend_from_slice(evaluated.source_analysis().declaration_warnings());
+        let realized = crate::compiler::bundle::realize(
+            config,
+            &host,
+            &cancellation.bundle_cancellation(),
+            &evaluated,
+            &mut evaluation.reads,
+        )
+        .map_err(|failure| evaluation.keep_failed_world(failure.world, failure.error))?;
+        evaluation
+            .warnings
+            .extend_distinct(realized.compilation.diagnostics());
+        for (_, reads, _) in evaluated.dependency_readers(&realized.compilation) {
+            evaluation.file_reads.extend(reads);
+        }
+        self.analysis = Some(CheckAnalysisEvidence::of(
+            &evaluated,
+            &realized.compilation,
+            config,
+            &content,
+            &unsaved,
+            &host,
+            cancellation,
+        )?);
+        Ok(SourceCompilation {
+            evaluation: Some(Evaluation::Site(Arc::new(realized.compilation))),
+            site_entry: (self.environment == SourceEnvironment::Site)
+                .then_some(typst::World::main(realized.world.as_ref())),
+            world: realized.world,
         })
     }
 
     /// Prepare one immutable revision for diagnostics and semantic queries.
-    ///
-    /// Failed preparation retains reusable resources but never exposes a
-    /// successful compilation. Cancellation is distinct from source errors.
     pub fn inspect(
         &mut self,
         overlays: Vec<(PathBuf, Arc<str>)>,
         cancellation: &BuildCancellation,
     ) -> Result<SourceRevision, BuildCancelled> {
-        cancellation.ensure_active()?;
-        let configuration = Arc::clone(&self.config);
+        let configuration = match self.check_configuration(cancellation) {
+            Ok(configuration) => configuration,
+            Err(CheckStop::Cancelled(error)) => return Err(error),
+            Err(CheckStop::Revision(revision)) => return Ok(*revision),
+        };
         let config = configuration.as_ref();
-        let mut diagnostics = Vec::new();
-        let mut warnings = tola_typst::Diagnostics::new();
-        // A failed evaluation or realization hands back the world it resolved, so a revision still
-        // answers about the files that world resolves.
-        let mut world: Option<Arc<tola_typst::TypstWorld>> = None;
         self.reused_analysis = false;
-        let mut unchanged_program = false;
-        let checked = (|| -> anyhow::Result<SourceCompilation> {
-            let overrides = crate::filesystem::SourceOverrides::new(overlays, cancellation)?;
-            let unsaved = overrides
-                .sources()
-                .map(|(path, source)| (path.to_path_buf(), Arc::clone(&source.text)))
-                .collect::<BTreeMap<_, _>>();
-            let (host, content, bindings) = self.prepared(config, &overrides, cancellation)?;
-            let mut prepared = None;
-            let mut reuse = crate::compiler::analysis::SourceAnalysisReuse::None;
-            if let Some(held) = &self.analysis
-                && let Some(decision) = held.decide(
-                    &content,
-                    &bindings,
-                    &unsaved,
-                    host.source_boundary(),
-                    cancellation,
-                )?
-            {
-                unchanged_program = decision.reuses_site_program()
-                    && held.dependencies.virtual_reads_match(
-                        |evidence| match evidence.locator() {
-                            tola_typst::ReadLocator::ProvidedRoot(relative) => overrides
-                                .get_physical(&crate::filesystem::normalize_existing_prefix(
-                                    &config.get_root().join(relative),
-                                ))
-                                .is_some_and(|source| source.digest == evidence.digest()),
-                            _ => host.virtual_read_matches(evidence),
-                        },
-                        cancellation,
-                    )?;
-                prepared = Some(
-                    held.cache
-                        .clone()
-                        .prepare_for_rebuild(&decision, Some(config.build.entry.as_path())),
-                );
-                reuse = crate::compiler::analysis::SourceAnalysisReuse::retained(
-                    prepared
-                        .as_ref()
-                        .expect("the reuse holds its prepared cache"),
-                    &held.dependencies,
-                );
-            }
-            let mut reads = crate::compiler::BuildInputs::default();
-            let evaluated = crate::compiler::bundle::evaluate(
-                config,
-                &host,
-                &content,
-                // A check renders no configured assets, so every declaration
-                // resolves to the mounted address of the name the configuration
-                // gives it, with no byte identity: a tree member is enumerated
-                // from its source directory without being rendered.
-                bindings,
-                &cancellation.bundle_cancellation(),
-                reuse,
-                &mut reads,
-            )
-            .map_err(|failure| {
-                world.clone_from(&failure.world);
-                failure.error
-            })?;
-            self.reused_analysis = prepared.is_some()
-                && evaluated
-                    .source_analysis()
-                    .reused_dependency_readers()
-                    .len()
-                    == content.len();
-            warnings.extend_distinct(evaluated.source_analysis().diagnostics());
-            diagnostics.extend_from_slice(evaluated.source_analysis().declaration_warnings());
-            let realized = crate::compiler::bundle::realize(
-                config,
-                &host,
-                &cancellation.bundle_cancellation(),
-                &evaluated,
-                &mut reads,
-            )
-            .map_err(|failure| {
-                world.clone_from(&failure.world);
-                failure.error
-            })?;
-            warnings.extend_distinct(realized.compilation.diagnostics());
-            self.analysis = Some(CheckAnalysisEvidence::of(
-                &evaluated,
-                &realized.compilation,
-                config,
-                &content,
-                &unsaved,
-                &host,
-                cancellation,
-            )?);
-            Ok(SourceCompilation {
-                evaluation: Some(Evaluation::Site(Arc::new(realized.compilation))),
-                world: realized.world,
-            })
-        })();
+        let mut evaluation = RevisionEvaluation::default();
+        let checked = self.evaluate_revision(config, overlays, cancellation, &mut evaluation);
         // Repeated queries keep their derivations; an edit ages superseded calculations.
-        if !unchanged_program || !self.reused_analysis || checked.is_err() {
+        if !evaluation.reused_site_program || !self.reused_analysis || checked.is_err() {
             typst::comemo::evict(RETAINED_DERIVATION_GENERATIONS);
         }
         cancellation.ensure_active()?;
-        diagnostics.extend(crate::compiler::warning_diagnostics(config, &mut warnings));
+        let mut diagnostics = evaluation.declaration_warnings;
+        diagnostics.extend(crate::compiler::warning_diagnostics(
+            config,
+            &mut evaluation.warnings,
+        ));
+        tola_diagnostic::coalesce_reports(&mut diagnostics);
+        let mut file_reads = evaluation.file_reads;
+        file_reads.extend(evaluation.reads.successful_reads().cloned());
+        let mut seen = std::collections::HashSet::new();
+        file_reads.retain(|read| seen.insert(read.clone()));
+        let (disk_reads, package_checks) = evaluation.reads.into_parts();
+        let accessed = CheckReads {
+            disk_reads,
+            package_checks,
+            file_reads,
+        };
         match checked {
             Ok(compilation) => Ok(SourceRevision {
                 diagnostics,
                 checked: Some(compilation),
+                accessed,
             }),
             Err(error) if crate::cancellation::is_cancelled(&error) => Err(BuildCancelled),
             Err(error) => {
                 // A source check runs configuration, content, package, and compilation stages, so it
                 // classifies exactly those producers rather than the whole publication chain.
-                let classified = crate::diagnostic::attached(&error)
-                    .map(<[crate::diagnostic::Diagnostic]>::to_vec)
+                let classified = tola_diagnostic::attached(&error)
+                    .map(<[tola_diagnostic::Diagnostic]>::to_vec)
+                    .or_else(|| crate::compiler::error_diagnostics(&error, config.get_root()))
                     .or_else(|| {
-                        crate::compiler::error_diagnostics(&error, config.get_root()).or_else(
-                            || {
-                                crate::icon::error_diagnostic(&error, config.get_root())
-                                    .map(|diagnostic| vec![diagnostic])
-                            },
-                        )
+                        crate::icon::error_diagnostic(&error, config.get_root())
+                            .map(|diagnostic| vec![diagnostic])
                     })
                     .unwrap_or_else(|| {
-                        vec![crate::diagnostic::fallback(
-                            crate::codes::check::SOURCE,
+                        vec![tola_diagnostic::fallback(
+                            tola_diagnostic::codes::check::SOURCE,
                             &error,
                         )]
                     });
                 diagnostics.extend(classified);
+                tola_diagnostic::coalesce_reports(&mut diagnostics);
                 Ok(SourceRevision {
                     diagnostics,
-                    checked: world.map(|world| SourceCompilation {
+                    accessed,
+                    checked: evaluation.world.map(|world| SourceCompilation {
+                        site_entry: (self.environment == SourceEnvironment::Site)
+                            .then_some(typst::World::main(world.as_ref())),
                         world,
                         evaluation: None,
                     }),
@@ -659,13 +819,13 @@ impl SourceDiagnosticSession {
 fn source_failure_diagnostics(
     error: &anyhow::Error,
     root: &Path,
-) -> Vec<crate::diagnostic::Diagnostic> {
-    crate::diagnostic::attached(error)
-        .map(<[crate::diagnostic::Diagnostic]>::to_vec)
+) -> Vec<tola_diagnostic::Diagnostic> {
+    tola_diagnostic::attached(error)
+        .map(<[tola_diagnostic::Diagnostic]>::to_vec)
         .or_else(|| crate::compiler::error_diagnostics(error, root))
         .unwrap_or_else(|| {
-            vec![crate::diagnostic::fallback(
-                crate::codes::check::SOURCE,
+            vec![tola_diagnostic::fallback(
+                tola_diagnostic::codes::check::SOURCE,
                 error,
             )]
         })
@@ -674,12 +834,13 @@ fn source_failure_diagnostics(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostic::Severity;
+    use std::fs;
+    use tola_diagnostic::Severity;
 
     fn site() -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
         let directory = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(directory.path().join("content")).unwrap();
-        std::fs::write(
+        fs::create_dir(directory.path().join("content")).unwrap();
+        fs::write(
             directory.path().join("site.typ"),
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/address:0.0.0": join-route, output-of
@@ -694,12 +855,12 @@ mod tests {
 
     fn documents_workspace() -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
         let directory = tempfile::TempDir::new().unwrap();
-        std::fs::write(
+        fs::write(
             directory.path().join("page.typ"),
             "#let extra = read(\"/data.txt\")\nBody: #extra\n",
         )
         .unwrap();
-        std::fs::write(directory.path().join("data.txt"), "payload\n").unwrap();
+        fs::write(directory.path().join("data.txt"), "payload\n").unwrap();
         let source =
             crate::config::ConfigSource::defaults(directory.path(), crate::InputScope::Online)
                 .unwrap();
@@ -737,7 +898,7 @@ mod tests {
     #[test]
     fn source_errors_report_their_location() {
         let (_directory, config) = site();
-        std::fs::write(
+        fs::write(
             config.build.content_dir.join("post.typ"),
             "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: panic(\"is also a published asset URL\")))\n",
         )
@@ -752,7 +913,7 @@ mod tests {
             .filter(|diagnostic| diagnostic.severity == Severity::Error)
             .collect::<Vec<_>>();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].code, crate::codes::typst::COMPILE);
+        assert_eq!(errors[0].code, tola_diagnostic::codes::typst::COMPILE);
         assert_eq!(
             errors[0].location.as_ref().unwrap().path,
             "content/post.typ"
@@ -815,7 +976,7 @@ mod tests {
             let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
             let source = config.build.content_dir.join(source);
             if let Some(disk) = existing_disk {
-                std::fs::write(&source, disk).unwrap();
+                fs::write(&source, disk).unwrap();
             }
             let diagnostics = session
                 .check(
@@ -843,7 +1004,7 @@ mod tests {
                 ),
             }
             assert_eq!(
-                std::fs::read_to_string(&source).ok().as_deref(),
+                fs::read_to_string(&source).ok().as_deref(),
                 existing_disk,
                 "{name} must leave the disk file unchanged"
             );
@@ -857,14 +1018,14 @@ mod tests {
     /// A source of a site whose own program does not compile checks on its own, because that is
     /// what the editor answers about the file the author is editing from.
     #[test]
-    fn source_checks_alone_when_the_site_fails() {
+    fn source_checks_alone_site_fails() {
         let (_directory, config) = site();
-        std::fs::write(
+        fs::write(
             config.build.content_dir.join("document.typ"),
             "#let brand = 1\n",
         )
         .unwrap();
-        std::fs::write(
+        fs::write(
             config.build.content_dir.join("broken.typ"),
             "#let nothing = absent\n",
         )
@@ -908,7 +1069,7 @@ mod tests {
             .inspect_source("page.typ", Vec::new(), &cancellation)
             .unwrap();
         assert!(revision.compiled(), "{:#?}", revision.diagnostics());
-        let data = std::fs::canonicalize(directory.path().join("data.txt")).unwrap();
+        let data = fs::canonicalize(directory.path().join("data.txt")).unwrap();
         let reads = revision
             .checked()
             .expect("the document resolved a world")
@@ -926,7 +1087,7 @@ mod tests {
     #[test]
     fn failed_compilation_records_no_reads() {
         let (directory, config) = documents_workspace();
-        std::fs::write(
+        fs::write(
             directory.path().join("page.typ"),
             "#let extra = read(\"/data.txt\")\n#absent_name\n",
         )
@@ -1033,7 +1194,7 @@ mod tests {
     fn disappearing_source_loses_diagnostics() {
         let (_directory, config) = site();
         let broken = config.build.content_dir.join("broken.typ");
-        std::fs::write(&broken, "#include \"absent.typ\"\n").unwrap();
+        fs::write(&broken, "#include \"absent.typ\"\n").unwrap();
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
         let failed = session.inspect(Vec::new(), &cancellation).unwrap();
@@ -1044,7 +1205,7 @@ mod tests {
             "a missing include fails the Bundle"
         );
 
-        std::fs::remove_file(&broken).unwrap();
+        fs::remove_file(&broken).unwrap();
         let revision = session.inspect(Vec::new(), &cancellation).unwrap();
         assert!(
             revision
@@ -1084,8 +1245,8 @@ mod tests {
             let (directory, config) = site();
             let content = directory.path().join("content/post.typ");
             let dependency = directory.path().join("content/other.typ");
-            std::fs::write(&content, "Body.\n").unwrap();
-            std::fs::write(&dependency, "Dependency.\n").unwrap();
+            fs::write(&content, "Body.\n").unwrap();
+            fs::write(&dependency, "Dependency.\n").unwrap();
             let cancellation = BuildCancellation::new();
             let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
             // Every case but `Opened` starts from a revision holding an unsaved document, so the
@@ -1108,11 +1269,9 @@ mod tests {
                 _ => vec![(content.clone(), Arc::clone(&held))],
             };
             match change {
-                Change::DiskDependency => {
-                    std::fs::write(&dependency, "Changed on disk.\n").unwrap()
-                }
+                Change::DiskDependency => fs::write(&dependency, "Changed on disk.\n").unwrap(),
                 Change::AddedSource => {
-                    std::fs::write(directory.path().join("content/added.typ"), "Added.\n").unwrap()
+                    fs::write(directory.path().join("content/added.typ"), "Added.\n").unwrap()
                 }
                 _ => {}
             }
@@ -1141,7 +1300,7 @@ mod tests {
     #[test]
     fn reused_revision_realizes_the_same_documents() {
         let (_directory, config) = site();
-        std::fs::write(config.build.content_dir.join("post.typ"), "Body.\n").unwrap();
+        fs::write(config.build.content_dir.join("post.typ"), "Body.\n").unwrap();
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
         let first = session.inspect(Vec::new(), &cancellation).unwrap();
@@ -1175,14 +1334,14 @@ mod tests {
         let (directory, mut config) = site();
         let root = config.get_root().to_path_buf();
         let assets = root.join("assets");
-        std::fs::create_dir_all(assets.join("brand")).unwrap();
+        fs::create_dir_all(assets.join("brand")).unwrap();
         for (name, id) in [
             ("logo.svg", "logo"),
             ("plain.svg", "plain"),
             ("brand.svg", "sitting"),
             ("brand/logo.svg", "brand"),
         ] {
-            std::fs::write(
+            fs::write(
                 assets.join(name),
                 format!("<svg width=\"4\" height=\"4\" id=\"{id}\"/>"),
             )
@@ -1200,7 +1359,7 @@ mod tests {
             .collect();
         configured.assets.cache_busting = true;
         let entry = configured.build.entry.clone();
-        std::fs::write(
+        fs::write(
             &entry,
             format!(
                 "#import \"@tola/image:0.0.0\": image-metadata\n\
@@ -1218,7 +1377,9 @@ mod tests {
     fn shadowed_path_warnings(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
         diagnostics
             .iter()
-            .filter(|diagnostic| diagnostic.code == crate::codes::reference::ASSET_URL_SHADOWED)
+            .filter(|diagnostic| {
+                diagnostic.code == tola_diagnostic::codes::reference::ASSET_URL_SHADOWED
+            })
             .collect()
     }
 
@@ -1314,5 +1475,193 @@ mod tests {
             session.check(Vec::new(), &canceller.token()),
             Err(crate::cancellation::BuildCancelled)
         ));
+    }
+    #[test]
+    fn public_reports_keep_unsaved_evidence() {
+        let (_directory, config) = site();
+        let source = config.build.content_dir.join("reports.typ");
+        fs::write(&source, "Saved body").unwrap();
+        let text = r#"#import "@tola/diagnostic:0.0.0": report
+#let value = emph[unsaved 🧭]
+#report("unknown variable", severity: "error", code: "check.unused_import/中文", at: value,
+  hints: ("A correction",), related: ((message: "Source context", at: value), (message: "No location", at: none)))
+#report("later info", severity: "info", code: "info")
+#report("later hint", severity: "hint", code: "hint")
+"#;
+        let mut session = SourceDiagnosticSession::new(Arc::clone(&config));
+        let cancellation = BuildCancellation::new();
+        for _ in 0..2 {
+            let revision = session
+                .inspect(vec![(source.clone(), Arc::from(text))], &cancellation)
+                .unwrap();
+            assert!(
+                !revision.compiled(),
+                "an accumulated error prevents success"
+            );
+            let reports: Vec<_> = revision
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.producer.is_some())
+                .collect();
+            assert_eq!(reports.len(), 3, "all reports survive: {reports:#?}");
+            let issue = reports
+                .iter()
+                .find(|diagnostic| diagnostic.severity == Severity::Error)
+                .unwrap();
+            assert_eq!(
+                issue.producer.as_ref().unwrap().name.as_deref(),
+                Some("project")
+            );
+            assert_eq!(
+                issue.producer.as_ref().unwrap().code.as_deref(),
+                Some("check.unused_import/中文")
+            );
+            assert!(
+                issue.cause.is_none(),
+                "public wording cannot create a core correction"
+            );
+            assert_eq!(issue.help.len(), 1);
+            assert_eq!(issue.related.len(), 2);
+            assert!(issue.related[1].location.is_none());
+            let at = issue.location.as_ref().unwrap();
+            assert_eq!(at.path, "content/reports.typ");
+            assert!(at.range.is_some());
+            assert!(
+                at.source_lines
+                    .iter()
+                    .any(|line| line.text.contains("unsaved 🧭"))
+            );
+            assert!(
+                reports
+                    .iter()
+                    .any(|diagnostic| diagnostic.severity == Severity::Info)
+            );
+            assert!(
+                reports
+                    .iter()
+                    .any(|diagnostic| diagnostic.severity == Severity::Hint)
+            );
+            assert_eq!(fs::read_to_string(&source).unwrap(), "Saved body");
+        }
+        assert!(!config.build.publish_dir.exists());
+    }
+
+    #[test]
+    fn realization_errors_block_publication() {
+        let (_directory, config) = site();
+        fs::write(
+            &config.build.entry,
+            r#"#import "@tola/diagnostic:0.0.0": report
+#document("index.html")[#context {
+  report("stop publication", severity: "error", code: "publish", at: none)
+  report("still collected", severity: "hint", code: "context")
+}]
+"#,
+        )
+        .unwrap();
+        let mut session = crate::BuildSession::new();
+        let failed = session
+            .build_and_write(&config, crate::build::BuildRequest::default())
+            .expect_err("a report error must fail the candidate");
+        let diagnostics =
+            tola_diagnostic::attached(&failed).expect("structured reports remain attached");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "stop publication"
+                    && diagnostic.severity == Severity::Error
+                    && diagnostic.location.is_none())
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "still collected"
+                    && diagnostic.severity == Severity::Hint)
+        );
+        assert!(!config.build.publish_dir.exists());
+    }
+
+    #[test]
+    fn independent_error_not_successful_compilations() {
+        let (_directory, config) = documents_workspace();
+        let source = config.get_root().join("page.typ");
+        let text = "#import \"@tola/diagnostic:0.0.0\": report\n#report(\"source issue\", severity: \"error\")";
+        let mut session = SourceDiagnosticSession::for_documents(
+            Arc::clone(&config),
+            crate::BuildResources::default(),
+        );
+        let revision = session
+            .inspect_source(
+                "page.typ",
+                vec![(source, Arc::from(text))],
+                &BuildCancellation::new(),
+            )
+            .unwrap();
+        assert!(!revision.compiled());
+        assert!(
+            revision
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message == "source issue"
+                    && diagnostic.severity == Severity::Error)
+        );
+    }
+
+    #[test]
+    fn repeated_issues_merge_all_context() {
+        let (_directory, config) = site();
+        fs::write(config.build.content_dir.join("reports.typ"), r#"#import "@tola/diagnostic:0.0.0": report
+#let value = emph[one source]
+#for note in ("first", "second") {
+  report("same issue", code: "same", at: value, hints: (note,), related: ((message: note, at: value),))
+}
+"#).unwrap();
+        let mut session = SourceDiagnosticSession::new(config);
+        let revision = session
+            .inspect(Vec::new(), &BuildCancellation::new())
+            .unwrap();
+        assert!(revision.compiled(), "warnings do not prevent success");
+        let reports: Vec<_> = revision
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.producer.is_some())
+            .collect();
+        assert_eq!(reports.len(), 1, "{reports:#?}");
+        assert_eq!(reports[0].help.len(), 2);
+        assert_eq!(reports[0].related.len(), 2);
+    }
+    #[test]
+    fn error_wording_cannot_hide_failures() {
+        let (_directory, config) = site();
+        fs::write(
+            config.build.content_dir.join("reports.typ"),
+            r#"#import "@tola/diagnostic:0.0.0": report
+#report("bundle export is experimental", severity: "error", at: none)
+#report("html export is under active development and incomplete", severity: "info", at: none)
+"#,
+        )
+        .unwrap();
+        let mut session = SourceDiagnosticSession::new(config);
+        let revision = session
+            .inspect(Vec::new(), &BuildCancellation::new())
+            .unwrap();
+        assert!(!revision.compiled());
+        assert!(
+            revision
+                .diagnostics()
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.message == "bundle export is experimental"
+                        && diagnostic.severity == Severity::Error
+                )
+        );
+        assert!(
+            revision
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message
+                    == "html export is under active development and incomplete"
+                    && diagnostic.severity == Severity::Info)
+        );
     }
 }

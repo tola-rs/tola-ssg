@@ -47,42 +47,17 @@ const STRIP_MIN_COLUMNS: usize = 8;
 const MAX_STRIPS: usize = 4;
 
 /// Why an input could not be encoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// A dimension is zero or exceeds VP8's 14-bit maximum.
+    #[error("the image is empty or larger than WebP's 16,383-pixel limit")]
     Dimensions,
     /// The pixel buffer length does not match `width × height × 4`.
+    #[error("the pixel buffer does not match width × height × 4")]
     BufferLength,
     /// The selected prediction modes exceed VP8's 19-bit frame-header length.
+    #[error("the image's prediction modes exceed WebP's frame-header limit")]
     HeaderTooLarge,
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Dimensions => {
-                formatter.write_str("the image is empty or larger than WebP's 16,383-pixel limit")
-            }
-            Self::BufferLength => {
-                formatter.write_str("the pixel buffer does not match width × height × 4")
-            }
-            Self::HeaderTooLarge => {
-                formatter.write_str("the image's prediction modes exceed WebP's frame-header limit")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-/// Encode straight-alpha RGBA8 pixels as one lossy WebP still image.
-pub(crate) fn encode_rgba(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    quality: u8,
-) -> Result<Vec<u8>, Error> {
-    encode_rgba_with_mode(rgba, width, height, quality, TrellisMode::Restricted)
 }
 
 pub(crate) fn encode_rgba_with_mode(
@@ -229,8 +204,7 @@ fn encode_frame_from_rgba_with_strips<S: Simd>(
     encode_frame(width, height, quantizer, filter_level, &macroblocks, &spool)
 }
 
-/// Exact acceptance is only worth its cost while the estimated gain is small or the image is
-/// tiny; above these bounds the fitted table is emitted unchanged.
+/// Exact acceptance runs only while the estimated gain is small or the image is tiny.
 const SMALL_FIT_SAVINGS: u64 = 8 * 256;
 const SMALL_IMAGE_AREA: usize = 1 << 14;
 
@@ -329,8 +303,7 @@ fn encode_frame(
         .ok_or(Error::HeaderTooLarge)
 }
 
-/// Exact acceptance is only worth its cost while the estimated gain is small or the image is
-/// tiny; above these bounds the fitted table is emitted unchanged.
+/// Exact acceptance runs only while the estimated gain is small or the image is tiny.
 fn should_check_exactly(savings: u64, width: usize, height: usize) -> bool {
     savings <= SMALL_FIT_SAVINGS || width * height < SMALL_IMAGE_AREA
 }
@@ -380,18 +353,7 @@ fn write_mode_partition(
 ) -> Vec<u8> {
     let mut first_partition = BoolWriter::new();
     vp8::write_frame_header(&mut first_partition, quantizer, filter_level, probs);
-    let mut modes = vp8::BmodeContexts::new(macroblock_columns);
-    for (index, macroblock) in macroblocks.iter().enumerate() {
-        let x = index % macroblock_columns;
-        match &macroblock.luma {
-            Luma::Intra16 { mode, .. } => {
-                modes.write_intra(&mut first_partition, x, *mode, macroblock.chroma_mode);
-            }
-            Luma::Intra4 { modes: subblocks } => {
-                modes.write_b_pred(&mut first_partition, x, subblocks, macroblock.chroma_mode);
-            }
-        }
-    }
+    write_modes(&mut first_partition, macroblock_columns, macroblocks);
     first_partition.finish()
 }
 
@@ -402,15 +364,13 @@ fn write_residual_partition(
     spool: &CoefficientSpool,
 ) -> Vec<u8> {
     let mut residual_partition = BoolWriter::new();
-    let mut tokens = TokenWriter::with_probs(macroblock_columns, *probs);
-    for (index, macroblock) in macroblocks.iter().enumerate() {
-        tokens.write_macroblock(
-            &mut residual_partition,
-            index % macroblock_columns,
-            macroblock,
-            spool,
-        );
-    }
+    write_residual(
+        &mut residual_partition,
+        macroblock_columns,
+        macroblocks,
+        spool,
+        *probs,
+    );
     residual_partition.finish()
 }
 
@@ -582,9 +542,7 @@ const ACTIVITY_GRID: usize = 8;
 
 /// Whether this source is textured enough to search intra4 before intra16.
 ///
-/// The sampler walks an 8x8 macroblock grid and sums the absolute differences of
-/// horizontally and vertically adjacent samples inside each 4x4 block. This is an integer
-/// content measure, so it is independent of quality and runtime timing.
+/// Integer content measure over sampled macroblocks; independent of quality and timing.
 fn i4_first(source: &YuvPlanes) -> bool {
     let stride = source.y_stride;
     let columns = source.y_stride / MACROBLOCK_SIDE;
@@ -1140,80 +1098,63 @@ fn encode_macroblock<S: Simd>(
         }
     }
 
-    let i4;
-    if i4_first {
-        i4 = analyze_i4(
+    let score_i4 = |limit: u64| {
+        analyze_i4(
             &luma_samples,
             reconstructed,
             quantizer,
             neighbors,
             contexts,
             (macroblock_x, macroblock_y),
-            best_luma_score,
+            limit,
         )
         .map(|i4| {
             let score = quantizer.score(i4.sse, || {
                 i4.rate + zero_chroma_rate + contexts.i4_mode_cost(macroblock_x, &i4.modes)
             });
             (i4, score)
-        });
+        })
+    };
+    let refine = |limit: u64| {
+        analyze_luma(
+            &luma_samples,
+            &luma_prediction,
+            quantizer,
+            neighbors,
+            Quantization::Trellis,
+            limit,
+            zero_chroma_rate + vp8::i16_mode_cost(luma_mode),
+        )
+    };
+
+    let i4 = if i4_first {
+        let candidate = score_i4(best_luma_score);
         if lambda != 0 {
             // The subblock score bounds the refinement. An exact tie still favours the
             // refined intra16 candidate, so the refinement only needs to beat it strictly.
-            let limit = i4.as_ref().map_or(best_luma_score, |(_, score)| {
+            let limit = candidate.as_ref().map_or(best_luma_score, |(_, score)| {
                 best_luma_score.min(score.saturating_add(1))
             });
-            let refined = analyze_luma(
-                &luma_samples,
-                &luma_prediction,
-                quantizer,
-                neighbors,
-                Quantization::Trellis,
-                limit,
-                zero_chroma_rate + vp8::i16_mode_cost(luma_mode),
-            );
-            if let Some((refined, score)) = refined
+            if let Some((refined, score)) = refine(limit)
                 && score < best_luma_score
             {
                 best_luma = refined;
                 best_luma_score = score;
             }
         }
+        candidate
     } else {
         if lambda != 0 {
             // The winning nearest pass already derived this mode's transforms.
-            let refined = analyze_luma(
-                &luma_samples,
-                &luma_prediction,
-                quantizer,
-                neighbors,
-                Quantization::Trellis,
-                best_luma_score,
-                zero_chroma_rate + vp8::i16_mode_cost(luma_mode),
-            );
-            if let Some((refined, score)) = refined
+            if let Some((refined, score)) = refine(best_luma_score)
                 && score < best_luma_score
             {
                 best_luma = refined;
                 best_luma_score = score;
             }
         }
-        i4 = analyze_i4(
-            &luma_samples,
-            reconstructed,
-            quantizer,
-            neighbors,
-            contexts,
-            (macroblock_x, macroblock_y),
-            best_luma_score,
-        )
-        .map(|i4| {
-            let score = quantizer.score(i4.sse, || {
-                i4.rate + zero_chroma_rate + contexts.i4_mode_cost(macroblock_x, &i4.modes)
-            });
-            (i4, score)
-        });
-    }
+        score_i4(best_luma_score)
+    };
 
     let mut selected = (
         Luma::Intra16 {
@@ -1448,7 +1389,10 @@ fn analyze_i4<S: Simd>(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a candidate is scored from the quantizer, its prediction, context, and method, and the search's limits"
+)]
 fn analyze_subblock<S: Simd>(
     quantizer: &Quantizer<S>,
     samples: &[u8; 16],
@@ -1667,6 +1611,7 @@ fn commit_pixels(plane: &mut Plane, x: usize, y: usize, side: usize, pixels: &[u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode_rgba;
 
     fn gradient(width: usize, height: usize) -> Vec<u8> {
         let mut rgba = Vec::with_capacity(width * height * 4);
@@ -1760,7 +1705,7 @@ mod tests {
                     .zip(&mut expected)
                     {
                         for row in 0..side {
-                            let start = (y * side + row) * plane.stride() + x * side;
+                            let start = (y * side + row) * plane.frame_stride() + x * side;
                             pixels[start..start + side].copy_from_slice(
                                 &plane.row(y * side + row)[x * side..(x + 1) * side],
                             );

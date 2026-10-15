@@ -47,6 +47,14 @@ pub(super) fn build_overrides(build: &BuildOverrideArgs) -> BuildOverrides {
     }
 }
 
+/// The configuration overrides this invocation's build flags select.
+pub(super) fn config_overrides(build: &BuildOverrideArgs) -> ConfigOverrides {
+    ConfigOverrides {
+        build: build_overrides(build),
+        ..ConfigOverrides::default()
+    }
+}
+
 pub(super) fn server_overrides(server: &ServerArgs) -> ServerOverrides {
     ServerOverrides {
         interface: server.interface,
@@ -80,21 +88,13 @@ pub(super) fn load_config(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<crate::config::LoadedConfig> {
-    let loaded = (|| {
-        crate::config::load(
-            config_file.path.as_deref(),
-            scope,
-            package_locations(packages, scope)?,
-            overrides,
-        )
-    })();
-    match loaded {
-        Ok(loaded) => Ok(loaded),
-        Err(error) => {
-            start_error_log(config_file, output, cancellation);
-            Err(error)
-        }
-    }
+    crate::config::load(
+        config_file.path.as_deref(),
+        scope,
+        package_locations(packages, scope)?,
+        overrides,
+    )
+    .inspect_err(|_| start_error_log(config_file, output, cancellation))
 }
 
 /// The site configuration a command works on, when its directory has one.
@@ -209,10 +209,10 @@ pub(super) fn start_error_log(
         Ok(root) => destination::start_after_error(output, &root, &cancellation.token()),
         Err(_) => {
             let _ = output.diagnostic(
-                &tola_build::diagnostic::Diagnostic::new(
+                &tola_diagnostic::Diagnostic::new(
                     crate::codes::log::UNAVAILABLE,
-                    tola_build::diagnostic::Severity::Warning,
-                    "cannot determine the site directory for logging",
+                    tola_diagnostic::Severity::Warning,
+                    "Tola could not find the site, so no log file was written",
                 )
                 .with_help("Run the command inside the site"),
             );

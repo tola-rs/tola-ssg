@@ -1,22 +1,8 @@
 //! Baseline alignment for inline frames in HTML export.
-//!
-//! For a frame of height H, baseline B (from its top), and text size S, Typst exports an SVG
-//! of height H/S em. Its bottom initially sits on the surrounding text baseline. Raising it
-//! by (B-H)/S em therefore aligns B with that baseline. The signed descent H-B comes from the
-//! final layout, including text edges, paragraph leading, padding, and explicit baseline shifts.
-//! Ink may overflow the viewport; its bounds do not determine baseline alignment.
-//!
-//! Typst 0.15.1 writes no such correction. [PR 8729] adds it to the encoder for every inline
-//! frame; once a Typst release Tola adopts has it, delete this module and its call in
-//! `crate::compiler::bundle`.
-//!
-//! [PR 8729]: https://github.com/typst/typst/pull/8729
 
 use tola_typst::{BundleCancellation, BundleCompilation, HtmlFrameStyleError};
 
 /// Align every inline frame with the surrounding text.
-///
-/// Returns how many frames changed.
 pub(crate) fn align_inline_frames(
     compilation: &mut BundleCompilation,
     cancellation: &BundleCancellation,
@@ -42,8 +28,6 @@ pub(crate) fn align_inline_frames(
 }
 
 /// Whether a frame takes part in line layout.
-///
-/// Typst 0.15.1 marks block-level frames with `display` and leaves inline frames without it.
 fn is_inline_level(frame: &typst_html::HtmlFrame) -> bool {
     !frame.css.iter().any(|property| property.name == "display")
 }

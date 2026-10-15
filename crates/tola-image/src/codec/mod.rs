@@ -19,10 +19,14 @@ use super::cancellation::{Cancellation, ensure_active_if_present};
 use super::recipe::PixelRecipe;
 use super::resample::{ResampledPixels, resample};
 use super::{ImageFormat, ImageMetadata, ImageRecipe, check_dimensions, pixel_bytes};
-use crate::HOLD_IN_MEMORY;
+use crate::{ImageError, ImageResult, ReexportProblem, SizeLimit, zeroed_plane};
 
 /// Report what one image's bytes say about themselves, without decoding its pixels.
-pub fn inspect(bytes: &[u8]) -> Result<ImageMetadata> {
+pub fn inspect(bytes: &[u8]) -> ImageResult<ImageMetadata> {
+    inspect_metadata(bytes).map_err(|error| ImageError::wrapping(error, None))
+}
+
+fn inspect_metadata(bytes: &[u8]) -> Result<ImageMetadata> {
     if looks_like_xml(bytes) {
         return inspect_svg(bytes);
     }
@@ -37,7 +41,16 @@ pub fn render(
     cancellation: &dyn Cancellation,
 ) -> Result<Arc<[u8]>> {
     cancellation.ensure_active()?;
-    let result = DecodedSource::open(bytes, cancellation)?.render(recipe, cancellation);
+    let decoded = DecodedSource::open(bytes, cancellation).map_err(anyhow::Error::new)?;
+    recipe.validate(decoded.metadata())?;
+    let pixels = decoded
+        .pixels(recipe.pixels(), cancellation)
+        .map_err(anyhow::Error::new)?;
+    // The decoder's plane is freed before encoding allocates the encoded bytes.
+    drop(decoded);
+    let result = pixels
+        .encode(recipe, cancellation)
+        .map_err(anyhow::Error::new);
     cancellation.ensure_active()?;
     result
 }
@@ -55,7 +68,11 @@ pub struct DecodedSource {
 
 impl DecodedSource {
     /// Decode an image into the sRGB RGBA8 pixels every recipe starts from.
-    pub fn open(bytes: &[u8], cancellation: &dyn Cancellation) -> Result<Self> {
+    pub fn open(bytes: &[u8], cancellation: &dyn Cancellation) -> ImageResult<Self> {
+        Self::decode(bytes, cancellation).map_err(|error| ImageError::wrapping(error, None))
+    }
+
+    fn decode(bytes: &[u8], cancellation: &dyn Cancellation) -> Result<Self> {
         cancellation.ensure_active()?;
         let result = Self::open_active(bytes, cancellation);
         cancellation.ensure_active()?;
@@ -63,10 +80,9 @@ impl DecodedSource {
     }
 
     fn open_active(bytes: &[u8], cancellation: &dyn Cancellation) -> Result<Self> {
-        ensure!(
-            !looks_like_xml(bytes),
-            "`resize-image` cannot resize an SVG or XML file; use a PNG, JPEG, WebP, GIF, or BMP image"
-        );
+        if looks_like_xml(bytes) {
+            return Err(ImageError::NeedsRaster.into());
+        }
         let Source {
             mut decoder,
             width,
@@ -91,27 +107,24 @@ impl DecodedSource {
                 decoder.icc_profile()?.context(PROFILE_DAMAGED)?,
             ))),
         };
-        // Each owned plane must fit the decoder's 512 MiB allotment. The two reservations are
-        // checked independently, so their total can exceed that budget, and backend scratch is
-        // not covered at all.
-        let mut limits = Limits::default();
-        limits
-            .reserve_buffer(width, height, color)
-            .context("the image is too large to decode; use a smaller image")?;
-        if color != ColorType::Rgba8 || transform.is_some() {
-            limits
-                .clone()
-                .reserve_buffer(width, height, ColorType::Rgba8)
-                .context("the image is too large to decode; use a smaller image")?;
+        // Normalization rewrites the plane in place after dropping the decoder; only raw pixels
+        // reduce the decoder's scratch allowance.
+        let decode_allotment = 512 * 1024 * 1024;
+        let samples = u64::from(width) * u64::from(height);
+        let raw_bytes = samples.saturating_mul(u64::from(color.bytes_per_pixel()));
+        let required = samples.saturating_mul(u64::from(color.bytes_per_pixel().max(4)));
+        if required > decode_allotment {
+            return Err(ImageError::TooLarge {
+                limit: SizeLimit::Decode,
+                allowed: decode_allotment,
+                actual: required,
+            }
+            .into());
         }
+        let mut limits = Limits::default();
+        limits.max_alloc = Some(decode_allotment - raw_bytes);
         cancellation.ensure_active()?;
         let raw = decoder.decode(color, width, height, limits)?;
-        // The plane every later row walk is cut from must hold exactly the geometry it claims:
-        // a short or padded decode would otherwise leave rows paired with the wrong samples.
-        ensure!(
-            raw.len() == pixel_bytes(width, height, usize::from(color.bytes_per_pixel()))?,
-            DAMAGED
-        );
         cancellation.ensure_active()?;
         let rgba = normalize_color(raw, color, (width, height), transform, cancellation)?;
         cancellation.ensure_active()?;
@@ -134,6 +147,15 @@ impl DecodedSource {
     /// Two recipes that share their pixels resample once: encode the result for each of them with
     /// [`ResampledPixels::encode`].
     pub fn pixels(
+        &self,
+        pixels: PixelRecipe,
+        cancellation: &dyn Cancellation,
+    ) -> ImageResult<ResampledPixels> {
+        self.resample_pixels(pixels, cancellation)
+            .map_err(|error| ImageError::wrapping(error, None))
+    }
+
+    fn resample_pixels(
         &self,
         pixels: PixelRecipe,
         cancellation: &dyn Cancellation,
@@ -162,8 +184,10 @@ impl DecodedSource {
         cancellation.ensure_active()?;
         recipe.validate(&self.metadata)?;
         let result = self
-            .pixels(recipe.pixels(), cancellation)?
-            .encode(recipe, cancellation);
+            .pixels(recipe.pixels(), cancellation)
+            .map_err(anyhow::Error::new)?
+            .encode(recipe, cancellation)
+            .map_err(anyhow::Error::new);
         cancellation.ensure_active()?;
         result
     }
@@ -194,14 +218,10 @@ impl Decoder<'_> {
         limits: Limits,
     ) -> Result<Vec<u8>> {
         if let Self::Raster(decoder) = &mut self {
-            decoder
-                .set_limits(limits)
-                .context("the image is too large to decode; use a smaller image")?;
+            decoder.set_limits(limits).context(DECODE_TOO_LARGE)?;
         }
         let length = pixel_bytes(width, height, usize::from(color.bytes_per_pixel()))?;
-        let mut bytes = Vec::new();
-        bytes.try_reserve_exact(length).context(HOLD_IN_MEMORY)?;
-        bytes.resize(length, 0);
+        let mut bytes = zeroed_plane(length)?;
         match self {
             Self::Jpeg(mut decoder) => decoder
                 .decode_into(&mut bytes)
@@ -288,9 +308,7 @@ impl<'a> Source<'a> {
             ImageFormat::WebP => scan_webp(bytes, cancellation)?,
             ImageFormat::Gif => scan_gif(bytes, cancellation)?,
             ImageFormat::Bmp => scan_bmp(bytes)?,
-            ImageFormat::Jpeg | ImageFormat::Svg => bail!(
-                "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP"
-            ),
+            ImageFormat::Jpeg | ImageFormat::Svg => return Err(unsupported_format()),
         };
         ensure_active_if_present(cancellation)?;
         let mut decoder: Box<dyn ImageDecoder + 'a> = match format {
@@ -307,13 +325,11 @@ impl<'a> Source<'a> {
             ImageFormat::Bmp => {
                 Box::new(BmpDecoder::new(Cursor::new(bytes)).context(damaged_image("BMP"))?)
             }
-            ImageFormat::Jpeg | ImageFormat::Svg => bail!(
-                "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP"
-            ),
+            ImageFormat::Jpeg | ImageFormat::Svg => return Err(unsupported_format()),
         };
         decoder
             .set_limits(Limits::default())
-            .context("the image is too large to decode; use a smaller image")?;
+            .context(DECODE_TOO_LARGE)?;
         let (width, height) = decoder.dimensions();
         check_dimensions(width, height)?;
         let color = decoder.color_type();
@@ -413,7 +429,13 @@ impl<'a> Source<'a> {
         let color = match input_space {
             ColorSpace::Luma => ColorType::L8,
             ColorSpace::RGB | ColorSpace::YCbCr => ColorType::Rgb8,
-            _ => bail!("CMYK and YCCK JPEG images are not supported; re-export the image as RGB"),
+            _ => {
+                return Err(ImageError::Reexport {
+                    format: ImageFormat::Jpeg,
+                    problem: ReexportProblem::ColorModel,
+                }
+                .into());
+            }
         };
         let orientation = decoder
             .exif()
@@ -472,9 +494,17 @@ const PROFILE_DAMAGED: &str = "the embedded color profile is damaged; convert th
 /// How damaged bytes with no format-specific wording read.
 const DAMAGED: &str = "the image is damaged or incomplete; re-export it";
 
+const DECODE_TOO_LARGE: &str = "the image is too large to decode; use a smaller image";
+
 /// The failure a container's decoder reports for damaged bytes.
 fn damaged_image(format: &str) -> String {
     format!("the {format} image is damaged or incomplete; re-export it")
+}
+
+fn unsupported_format() -> anyhow::Error {
+    anyhow::anyhow!(
+        "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP"
+    )
 }
 
 /// The format one image's bytes declare, refused when Tola cannot read it.
@@ -487,9 +517,7 @@ fn image_format(bytes: &[u8]) -> Result<ImageFormat> {
         image::ImageFormat::WebP => Ok(ImageFormat::WebP),
         image::ImageFormat::Gif => Ok(ImageFormat::Gif),
         image::ImageFormat::Bmp => Ok(ImageFormat::Bmp),
-        _ => bail!(
-            "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP"
-        ),
+        _ => Err(unsupported_format()),
     }
 }
 
@@ -516,168 +544,167 @@ mod color;
 mod container;
 mod encode;
 
-/// Encoders and sample images the codec module's tests share.
 #[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use crate::ImageRecipe;
-    use crate::NO_CANCELLATION;
-    use crate::{CropAnchor, OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
-    use image::codecs::jpeg::JpegEncoder;
-    use image::codecs::png::PngEncoder;
-    use image::{ExtendedColorType, ImageEncoder};
-
-    pub(super) fn png(
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-        color: ExtendedColorType,
-        icc: Option<Vec<u8>>,
-        exif: Option<Vec<u8>>,
-    ) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut encoder = PngEncoder::new(&mut bytes);
-        if let Some(icc) = icc {
-            encoder.set_icc_profile(icc).unwrap();
-        }
-        if let Some(exif) = exif {
-            encoder.set_exif_metadata(exif).unwrap();
-        }
-        encoder.write_image(pixels, width, height, color).unwrap();
-        bytes
-    }
-
-    /// An sRGB ICC profile whose transfer curves are linear, so a grey converts to near 188
-    /// rather than staying on 128.
-    pub(super) fn linear_profile() -> Vec<u8> {
-        let mut profile = moxcms::ColorProfile::new_srgb();
-        // Without this the encoded profile still describes sRGB, and the curves below do not
-        // govern the transform.
-        profile.cicp = None;
-        let curve = moxcms::curve_from_gamma(1.0);
-        profile.red_trc = Some(curve.clone());
-        profile.green_trc = Some(curve.clone());
-        profile.blue_trc = Some(curve);
-        profile.encode().unwrap()
-    }
-
-    /// One flat grey 3x3 JPEG carrying `linear_profile`, so a converted pixel lands near 188 and
-    /// a profile the decode drops leaves it on 128.
-    pub(super) fn linear_icc_jpeg() -> Vec<u8> {
-        let mut jpeg = Vec::new();
-        let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 100);
-        encoder.set_icc_profile(linear_profile()).unwrap();
-        encoder
-            .write_image(&[128; 3 * 3 * 3], 3, 3, ExtendedColorType::Rgb8)
-            .unwrap();
-        jpeg
-    }
-
-    pub(super) fn recipe(
-        bytes: &[u8],
-        width: u32,
-        height: u32,
-        format: OutputFormat,
-        quality: Option<u8>,
-    ) -> ImageRecipe {
-        ImageRecipe::resolve(
-            &inspect(bytes).unwrap(),
-            ResizeOptions {
-                width: Some(width),
-                height: Some(height),
-                operation: ResizeOperation::Scale,
-                anchor: CropAnchor::Center,
-                format,
-                quality,
-                filter: ResizeFilter::Triangle,
-                background: None,
-            },
-        )
-        .unwrap()
-    }
-
-    /// One source rendered as PNG at `width × height`, the fixture most codec tests need.
-    pub(super) fn render_png(source: &[u8], width: u32, height: u32) -> Arc<[u8]> {
-        render(
-            source,
-            &recipe(source, width, height, OutputFormat::Png, None),
-            &NO_CANCELLATION,
-        )
-        .unwrap()
-    }
-
-    /// Assemble one PNG chunk: length, type, data, and the CRC the format carries.
-    pub(super) fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(kind);
-        hasher.update(data);
-        let mut chunk = Vec::new();
-        chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        chunk.extend_from_slice(kind);
-        chunk.extend_from_slice(data);
-        chunk.extend_from_slice(&hasher.finalize().to_be_bytes());
-        chunk
-    }
-
-    /// Insert a chunk directly after the image header, where the format still lets a reader
-    /// honour it.
-    pub(super) fn insert_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-        let header_bytes =
-            u32::from_be_bytes(png[8..12].try_into().expect("a chunk length")) as usize;
-        let at = 8 + 12 + header_bytes;
-        png.splice(at..at, png_chunk(kind, data));
-    }
-
-    pub(super) fn orientation_exif(orientation: u8) -> Vec<u8> {
-        vec![
-            b'I',
-            b'I',
-            42,
-            0,
-            8,
-            0,
-            0,
-            0,
-            1,
-            0,
-            0x12,
-            1,
-            3,
-            0,
-            1,
-            0,
-            0,
-            0,
-            orientation,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
-    }
-
-    pub(super) fn rgba(bytes: &[u8]) -> Vec<u8> {
-        image::load_from_memory(bytes)
-            .unwrap()
-            .into_rgba8()
-            .into_raw()
-    }
-}
-
-#[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use self::test_support::*;
     use super::*;
     use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::cancellation::ImageCancelled;
-    use crate::codec::test_support::*;
     use crate::codec::{inspect, render};
     use image::ExtendedColorType;
     use image::ImageEncoder;
     use image::codecs::jpeg::JpegEncoder;
+
+    pub(crate) mod test_support {
+        use crate::ImageRecipe;
+        use crate::NO_CANCELLATION;
+        use crate::codec::{inspect, render};
+        use crate::{CropAnchor, OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
+        use image::codecs::jpeg::JpegEncoder;
+        use image::codecs::png::PngEncoder;
+        use image::{ExtendedColorType, ImageEncoder};
+        use std::sync::Arc;
+
+        pub(crate) fn png(
+            pixels: &[u8],
+            width: u32,
+            height: u32,
+            color: ExtendedColorType,
+            icc: Option<Vec<u8>>,
+            exif: Option<Vec<u8>>,
+        ) -> Vec<u8> {
+            let mut bytes = Vec::new();
+            let mut encoder = PngEncoder::new(&mut bytes);
+            if let Some(icc) = icc {
+                encoder.set_icc_profile(icc).unwrap();
+            }
+            if let Some(exif) = exif {
+                encoder.set_exif_metadata(exif).unwrap();
+            }
+            encoder.write_image(pixels, width, height, color).unwrap();
+            bytes
+        }
+
+        /// An sRGB ICC profile whose transfer curves are linear, so a grey converts to near 188
+        /// rather than staying on 128.
+        pub(crate) fn linear_profile() -> Vec<u8> {
+            let mut profile = moxcms::ColorProfile::new_srgb();
+            // Without this the encoded profile still describes sRGB, and the curves below do not
+            // govern the transform.
+            profile.cicp = None;
+            let curve = moxcms::curve_from_gamma(1.0);
+            profile.red_trc = Some(curve.clone());
+            profile.green_trc = Some(curve.clone());
+            profile.blue_trc = Some(curve);
+            profile.encode().unwrap()
+        }
+
+        /// One flat grey 3x3 JPEG carrying `linear_profile`, so a converted pixel lands near 188 and
+        /// a profile the decode drops leaves it on 128.
+        pub(crate) fn linear_icc_jpeg() -> Vec<u8> {
+            let mut jpeg = Vec::new();
+            let mut encoder = JpegEncoder::new_with_quality(&mut jpeg, 100);
+            encoder.set_icc_profile(linear_profile()).unwrap();
+            encoder
+                .write_image(&[128; 3 * 3 * 3], 3, 3, ExtendedColorType::Rgb8)
+                .unwrap();
+            jpeg
+        }
+
+        pub(crate) fn recipe(
+            bytes: &[u8],
+            width: u32,
+            height: u32,
+            format: OutputFormat,
+            quality: Option<u8>,
+        ) -> ImageRecipe {
+            ImageRecipe::resolve(
+                &inspect(bytes).unwrap(),
+                ResizeOptions {
+                    width: Some(width),
+                    height: Some(height),
+                    operation: ResizeOperation::Scale,
+                    anchor: CropAnchor::Center,
+                    format,
+                    quality,
+                    filter: ResizeFilter::Triangle,
+                    background: None,
+                },
+            )
+            .unwrap()
+        }
+
+        /// One source rendered as PNG at `width × height`, the fixture most codec tests need.
+        pub(crate) fn render_png(source: &[u8], width: u32, height: u32) -> Arc<[u8]> {
+            render(
+                source,
+                &recipe(source, width, height, OutputFormat::Png, None),
+                &NO_CANCELLATION,
+            )
+            .unwrap()
+        }
+
+        /// Assemble one PNG chunk: length, type, data, and the CRC the format carries.
+        pub(crate) fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(kind);
+            hasher.update(data);
+            let mut chunk = Vec::new();
+            chunk.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            chunk.extend_from_slice(kind);
+            chunk.extend_from_slice(data);
+            chunk.extend_from_slice(&hasher.finalize().to_be_bytes());
+            chunk
+        }
+
+        /// Insert a chunk directly after the image header, where the format still lets a reader
+        /// honour it.
+        pub(crate) fn insert_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+            let header_bytes =
+                u32::from_be_bytes(png[8..12].try_into().expect("a chunk length")) as usize;
+            let at = 8 + 12 + header_bytes;
+            png.splice(at..at, png_chunk(kind, data));
+        }
+
+        pub(crate) fn orientation_exif(orientation: u8) -> Vec<u8> {
+            vec![
+                b'I',
+                b'I',
+                42,
+                0,
+                8,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0x12,
+                1,
+                3,
+                0,
+                1,
+                0,
+                0,
+                0,
+                orientation,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
+        }
+
+        pub(crate) fn rgba(bytes: &[u8]) -> Vec<u8> {
+            image::load_from_memory(bytes)
+                .unwrap()
+                .into_rgba8()
+                .into_raw()
+        }
+    }
 
     #[test]
     fn exif_orientation_is_applied_once() {
@@ -890,7 +917,13 @@ mod tests {
             .err()
             .expect("a 1.6 GB plane exceeds the 512 MiB budget");
         assert!(
-            format!("{error:#}").contains("too large to decode"),
+            matches!(
+                error,
+                ImageError::TooLarge {
+                    limit: SizeLimit::Decode,
+                    ..
+                }
+            ),
             "{error:#}"
         );
     }

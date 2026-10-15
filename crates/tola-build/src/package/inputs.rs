@@ -14,8 +14,7 @@ pub(crate) struct PackageInputs {
     pub(crate) icons: IconInventory,
 }
 
-/// Each reusable resource is accepted after its own successful preparation.
-/// These values do not represent published output or a successful source check.
+/// Values accepted after their own successful preparation; not published output.
 pub(crate) fn prepare_package_inputs(
     config: &ResolvedSiteConfig,
     resources: &BuildResources,

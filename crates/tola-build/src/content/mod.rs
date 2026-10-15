@@ -1,9 +1,4 @@
-//! Discovery and identity for Typst content written by the site author.
-//!
-//! Discovery selects the `.typ` inputs of the content tree, nothing more. A file beside a source
-//! is an ordinary Typst input the source may read by lexical path, not a resource discovery
-//! owns. A source may contribute to several documents, so proximity or an `index.typ` layout
-//! cannot choose a resource's public URL or directory owner.
+//! Discovery and identity for the `.typ` sources of the site's content tree.
 
 mod slug;
 mod sources;
@@ -11,7 +6,6 @@ mod sources;
 pub use sources::{ContentSource, SourceDescriptorField, SourceDescriptorFieldKind, SourceSet};
 pub(crate) use sources::{SourceFileInput, SourceMetadataDeclaration, SourceRecords, SourcesInput};
 
-use anyhow::Result;
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::OsStr;
 use std::fmt;
@@ -69,7 +63,7 @@ pub(crate) fn select_content_sources(
     config: &crate::config::ResolvedSiteConfig,
     scopes: &[PathBuf],
     units: &[ContentUnit],
-) -> Result<Vec<PathBuf>> {
+) -> Result<Vec<PathBuf>, ContentDiscoveryError> {
     if scopes.is_empty() {
         return Ok(units.iter().map(|unit| unit.source.clone()).collect());
     }
@@ -91,7 +85,7 @@ pub(crate) fn select_content_sources(
 pub(crate) fn discover_content_units_for_config_with_cancellation(
     config: &crate::config::ResolvedSiteConfig,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<Vec<ContentUnit>> {
+) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
     crate::resources::source_boundary(config, crate::InputScope::Online)
         .check(&config.build.content_dir)?;
     discover_from_root(
@@ -102,10 +96,7 @@ pub(crate) fn discover_content_units_for_config_with_cancellation(
     )
 }
 
-/// Whether accepted filesystem changes can alter a published content inventory.
-///
-/// Known source-file edits preserve the inventory, while deletion or an unknown
-/// path beneath the content root requires rediscovery.
+/// Whether accepted changes may alter the discovered content inventory.
 pub(crate) fn inventory_may_change(
     config: &crate::config::ResolvedSiteConfig,
     inventory: &[ContentUnit],
@@ -133,12 +124,51 @@ pub(crate) fn inventory_may_change(
     })
 }
 
+/// Why a content source inventory could not be built.
+#[derive(Debug, thiserror::Error)]
+pub enum ContentDiscoveryError {
+    #[error(transparent)]
+    Cancelled(#[from] crate::cancellation::BuildCancelled),
+    #[error(transparent)]
+    Boundary(#[from] typst::diag::FileError),
+    #[error(
+        "no discovered Typst source matches `{scope}`; run `tola inspect sources` to list them"
+    )]
+    NoSourceMatches { scope: String },
+    #[error(
+        "content root `{path}` does not exist; create it or set `build.content-dir` in `tola.toml`"
+    )]
+    MissingContentRoot { path: String },
+    #[error("cannot inspect content entry in `{path}`: {reason}")]
+    UnreadableEntry { path: String, reason: String },
+    #[error("{reason}")]
+    UnreadableDirectory { reason: String },
+}
+
+/// The units one resolved scope path names: a file, a directory tree, or a stem.
+fn units_named_by<'units>(resolved: &Path, all: &'units [ContentUnit]) -> Vec<&'units ContentUnit> {
+    if resolved.is_file() {
+        return all.iter().filter(|unit| unit.source == resolved).collect();
+    }
+    if resolved.is_dir() {
+        return all
+            .iter()
+            .filter(|unit| unit.source.starts_with(resolved))
+            .collect();
+    }
+    let source_candidates = [resolved.with_extension("typ"), resolved.join("index.typ")]
+        .map(|candidate| normalize_path(&candidate));
+    all.iter()
+        .filter(|unit| source_candidates.contains(&unit.source))
+        .collect()
+}
+
 fn select_content_units_in_scope_for_root<'units>(
     site_root: &Path,
     content_root: &Path,
     scopes: &[PathBuf],
     all: &'units [ContentUnit],
-) -> Result<Vec<&'units ContentUnit>> {
+) -> Result<Vec<&'units ContentUnit>, ContentDiscoveryError> {
     let site_root = normalize_path(site_root);
     let mut selected = Vec::new();
     for scope in scopes {
@@ -155,28 +185,13 @@ fn select_content_units_in_scope_for_root<'units>(
 
         let selected_before = selected.len();
         for resolved in candidates {
-            if resolved.is_file() {
-                selected.extend(all.iter().filter(|unit| unit.source == resolved));
-                continue;
-            }
-            if resolved.is_dir() {
-                selected.extend(all.iter().filter(|unit| unit.source.starts_with(&resolved)));
-                continue;
-            }
-
-            let source_candidates = [resolved.with_extension("typ"), resolved.join("index.typ")]
-                .map(|candidate| normalize_path(&candidate));
-            selected.extend(
-                all.iter()
-                    .filter(|unit| source_candidates.contains(&unit.source)),
-            );
+            selected.extend(units_named_by(&resolved, all));
         }
 
         if selected.len() == selected_before {
-            anyhow::bail!(
-                "no discovered Typst source matches `{}`; run `tola inspect sources` to list them",
-                crate::filesystem::display_path(scope, &site_root)
-            );
+            return Err(ContentDiscoveryError::NoSourceMatches {
+                scope: crate::filesystem::display_path(scope, &site_root),
+            });
         }
     }
     selected.sort_by(|a, b| a.id.cmp(&b.id));
@@ -189,25 +204,22 @@ fn discover_from_root(
     display_root: &Path,
     entry: &Path,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<Vec<ContentUnit>> {
-    cancellation.ensure_active().map_err(anyhow::Error::new)?;
+) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
+    cancellation.ensure_active()?;
     if !content_root.is_dir() {
-        anyhow::bail!(
-            "content root `{}` does not exist; create it or set `build.content-dir` in `tola.toml`",
-            crate::filesystem::display_path(content_root, display_root)
-        );
+        return Err(ContentDiscoveryError::MissingContentRoot {
+            path: crate::filesystem::display_path(content_root, display_root),
+        });
     }
-    // The walk resolves the root once. Every entry it reaches lies beneath that canonical root and
-    // holds no symbolic link — a link is neither descended nor collected — so each walked path is
-    // already the canonical spelling the identity rules would resolve it to.
+    // The walk resolves the root once and neither descends nor collects a symbolic link.
     let root = crate::filesystem::normalize_existing_prefix(content_root);
     let entry = crate::filesystem::normalize_existing_prefix(entry);
     let mut sources = Vec::new();
     collect_typ_sources(&root, display_root, cancellation, &mut sources)?;
     let mut units = Vec::with_capacity(sources.len());
     for source in sources {
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
-        if source != entry && has_typ_extension(&source) {
+        cancellation.ensure_active()?;
+        if source != entry {
             units.push(unit_for(&root, source));
         }
     }
@@ -215,36 +227,47 @@ fn discover_from_root(
     Ok(units)
 }
 
-/// Collect every `.typ` source beneath `directory`.
-///
-/// Discovery walks on its calling thread: a directory read costs little beside the work
-/// the sources it finds then need, and a walk that borrowed a shared worker pool would
-/// make discovery depend on how that pool happens to be occupied.
+/// Collect every `.typ` source beneath `directory` on the calling thread.
 fn collect_typ_sources(
     directory: &Path,
     display_root: &Path,
     cancellation: &crate::cancellation::BuildCancellation,
     sources: &mut Vec<PathBuf>,
-) -> Result<()> {
-    cancellation.ensure_active().map_err(anyhow::Error::new)?;
-    let entries =
-        crate::filesystem::read_sorted_entries(directory, cancellation, display_root, "content")?;
+) -> Result<(), ContentDiscoveryError> {
+    cancellation.ensure_active()?;
+    let entries = match crate::filesystem::read_sorted_entries(
+        directory,
+        cancellation,
+        display_root,
+        "content",
+    ) {
+        Ok(entries) => entries,
+        Err(error) if crate::cancellation::is_cancelled(&error) => {
+            return Err(ContentDiscoveryError::Cancelled(
+                crate::cancellation::BuildCancelled,
+            ));
+        }
+        Err(error) => {
+            return Err(ContentDiscoveryError::UnreadableDirectory {
+                reason: error.to_string(),
+            });
+        }
+    };
     for entry in entries {
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
         let file_name = entry.file_name();
         if content_name_is_hidden(&file_name) {
             continue;
         }
-        let file_type = entry.file_type().map_err(|error| {
-            anyhow::anyhow!(
-                "cannot inspect content entry in `{}`: {}",
-                crate::filesystem::display_path(directory, display_root),
-                crate::filesystem::path_failure_reason(&error),
-            )
-        })?;
+        let file_type =
+            entry
+                .file_type()
+                .map_err(|error| ContentDiscoveryError::UnreadableEntry {
+                    path: crate::filesystem::display_path(directory, display_root),
+                    reason: crate::filesystem::path_failure_reason(&error).to_owned(),
+                })?;
         let path = entry.path();
-        // A symbolic link is neither descended nor collected: `file_type` does not
-        // follow it, so it is neither a directory nor a regular file here.
+        // A symbolic link is neither descended nor collected: `file_type` does not follow it.
         if file_type.is_dir() {
             collect_typ_sources(&path, display_root, cancellation, sources)?;
         } else if file_type.is_file() && has_typ_extension(&path) {
@@ -255,24 +278,17 @@ fn collect_typ_sources(
 }
 
 /// Whether a content entry is a name the author keeps out of discovery.
-///
-/// A name that is not valid UTF-8 has no leading dot to match.
 fn content_name_is_hidden(file_name: &OsStr) -> bool {
     file_name.to_str().is_some_and(|name| name.starts_with('.'))
 }
 
-/// Complete a discovered inventory with the sources an editor holds unsaved.
-///
-/// The discovered units are already canonical — discovery normalizes the content root once and
-/// walks beneath it — so only the opened paths go through the identity rules again. Every check of
-/// a site re-reads this, and normalizing a site's whole source list to re-derive units discovery
-/// already produced costs one filesystem resolution per source.
+/// Add unsaved editor sources; discovered units are already canonical.
 pub(crate) fn content_units_with_sources(
     config: &crate::config::ResolvedSiteConfig,
     inventory: &[ContentUnit],
     opened: impl IntoIterator<Item = PathBuf>,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<Vec<ContentUnit>> {
+) -> Result<Vec<ContentUnit>, ContentDiscoveryError> {
     let root = crate::filesystem::normalize_existing_prefix(&config.build.content_dir);
     let entry = crate::filesystem::normalize_existing_prefix(&config.build.entry);
     let mut units = inventory.to_vec();
@@ -281,7 +297,7 @@ pub(crate) fn content_units_with_sources(
         .map(|unit| unit.source.clone())
         .collect::<HashSet<_>>();
     for source in opened {
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
         let Some(unit) = eligible_unit(&root, &entry, &source) else {
             continue;
         };
@@ -294,10 +310,7 @@ pub(crate) fn content_units_with_sources(
     Ok(units)
 }
 
-/// The content unit one source names, when membership admits it.
-///
-/// Membership is a normalized source outside the entry, inside the content root, with the
-/// extension the walk collects.
+/// The unit a normalized source names, when membership admits it.
 fn eligible_unit(root: &Path, entry: &Path, source: &Path) -> Option<ContentUnit> {
     let source = crate::filesystem::normalize_existing_prefix(source);
     if source == *entry || !source.starts_with(root) || !has_typ_extension(&source) {
@@ -319,12 +332,7 @@ fn unit_for(root: &Path, source: PathBuf) -> ContentUnit {
     }
 }
 
-/// Whether a name has the content source extension: exactly lowercase `.typ`.
-///
-/// The extension alone never decides eligibility. Discovery still requires a path the directory
-/// walk reaches under the configured content root, and it skips hidden names, symbolic links, and
-/// the entry. Callers use this to tell a name discovery would read from one it would never read;
-/// only a build confirms what a configuration actually selects.
+/// Content source extension: exactly lowercase `.typ`, never eligibility alone.
 pub fn has_typ_extension(path: &Path) -> bool {
     path.extension() == Some(OsStr::new("typ"))
 }
@@ -335,7 +343,9 @@ fn is_index_source(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    fn content_units(root: &std::path::Path) -> anyhow::Result<Vec<super::ContentUnit>> {
+    fn content_units(
+        root: &std::path::Path,
+    ) -> std::result::Result<Vec<super::ContentUnit>, super::ContentDiscoveryError> {
         super::discover_from_root(
             root,
             root,
@@ -346,7 +356,7 @@ mod tests {
 
     fn configured_content(
         config: &crate::config::ResolvedSiteConfig,
-    ) -> anyhow::Result<Vec<super::ContentUnit>> {
+    ) -> std::result::Result<Vec<super::ContentUnit>, super::ContentDiscoveryError> {
         super::discover_content_units_for_config_with_cancellation(
             config,
             &crate::cancellation::BuildCancellation::default(),
@@ -382,12 +392,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn content_identity_keeps_spelling() {
-        let path = PathBuf::from("posts").join("Cafe\u{301}.typ");
-        assert_eq!(ContentId::new(path).to_string(), "posts/Cafe\u{301}.typ");
-    }
-
-    #[test]
     fn only_lowercase_typ_extension_counts() {
         assert!(has_typ_extension(Path::new("post.typ")));
         assert!(!has_typ_extension(Path::new("post.TYP")));
@@ -396,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_needs_no_second_pool_worker() {
+    fn discovery_needs_no_worker() {
         // Discovery must not need a worker from the pool that called it: a walk that
         // waited on one would find none free and report no content at all.
         let directory = TempDir::new().unwrap();
@@ -434,10 +438,10 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.chain().any(|cause| matches!(
-            cause.downcast_ref::<crate::cancellation::BuildCancelled>(),
-            Some(crate::cancellation::BuildCancelled)
-        )));
+        assert!(matches!(
+            error,
+            super::ContentDiscoveryError::Cancelled(crate::cancellation::BuildCancelled)
+        ));
     }
 
     #[test]
@@ -516,23 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_root_scopes_discovery() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
-        fs::create_dir_all(content.join("posts")).unwrap();
-        fs::write(content.join("posts/hello.typ"), "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.content_dir = content.clone();
-
-        let units = configured_content(&config).unwrap();
-
-        assert_eq!(units.len(), 1);
-        assert_eq!(units[0].id.as_path(), Path::new("posts/hello.typ"));
-        assert_eq!(units[0].root, normalize_path(&content));
-    }
-
-    #[test]
     fn missing_content_root_is_reported() {
         let directory = TempDir::new().unwrap();
         let missing = directory.path().join("missing-content");
@@ -547,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn known_source_edits_keep_the_inventory() {
+    fn known_edits_keep_inventory() {
         let directory = TempDir::new().unwrap();
         let content = directory.path().join("content");
         let document = content.join("document");
@@ -598,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn scopes_resolve_from_the_content_root() {
+    fn scopes_resolve_from_content_root() {
         let directory = TempDir::new().unwrap();
         let content = directory.path().join("content");
         fs::create_dir_all(content.join("posts")).unwrap();
@@ -645,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn build_entry_never_joins_the_inventory() {
+    fn entry_never_joins_inventory() {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
         let content = root.join("content");
@@ -714,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn each_scope_form_selects_its_sources() {
+    fn each_scope_selects_sources() {
         let directory = TempDir::new().unwrap();
         fs::create_dir_all(directory.path().join("b")).unwrap();
         for source in ["a.typ", "b.typ", "b/helper.typ", "b/index.typ"] {

@@ -75,6 +75,8 @@
 //! - `SiteConfig` -> `site`
 //! - `CssConfig` -> `css`
 
+#![warn(missing_docs)]
+
 mod config;
 
 use proc_macro::TokenStream;

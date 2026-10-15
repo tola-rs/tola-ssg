@@ -7,7 +7,6 @@
 //! A descriptor is a file in the reserved namespace whose path is its own content, so a read
 //! recovers the request without a lookup table.
 
-use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use tola_typst::{ContentDigest, PackageSpec, ReadLocator};
 use typst::foundations::{Bytes, PathOrStr};
@@ -22,6 +21,55 @@ use tola_image::{IMAGE_PIPELINE_REVISION, ImageRecipe};
 
 /// Keeps the derivative digest distinct from any other hash over the same bytes.
 const KEY_DOMAIN: &[u8] = b"tola:image-variant\0";
+
+/// Why a read in the observation namespace is not a request this crate wrote.
+#[derive(Debug, thiserror::Error)]
+pub enum DescriptorError {
+    /// The path does not end in the request extension.
+    #[error("image request descriptor must end in .json")]
+    MissingExtension,
+    /// The encoded bytes are not lowercase hexadecimal.
+    #[error("image request descriptor must use lowercase hexadecimal encoding")]
+    NotLowerHex,
+    /// The encoded bytes are not hexadecimal.
+    #[error("invalid image request encoding")]
+    Encoding(#[source] hex::FromHexError),
+    /// The descriptor did not decode.
+    #[error("invalid image request descriptor")]
+    Malformed(#[source] serde_json::Error),
+    /// The descriptor was written by another processing revision.
+    #[error("unsupported image request processing revision")]
+    UnsupportedRevision,
+    /// Re-encoding the descriptor does not reproduce its bytes.
+    #[error("noncanonical image request descriptor")]
+    Noncanonical,
+    /// Re-encoding failed.
+    #[error(transparent)]
+    Serialization(serde_json::Error),
+    /// The source digest is not lowercase hexadecimal.
+    #[error("image source digest must use lowercase hexadecimal encoding")]
+    DigestNotLowerHex,
+    /// The source digest is not hexadecimal.
+    #[error("invalid image source digest")]
+    DigestEncoding(#[source] hex::FromHexError),
+    /// The source package does not parse.
+    #[error("invalid image source package")]
+    SourcePackage(#[source] PackageSpecMessage),
+    /// The source package does not round-trip to the same spelling.
+    #[error("noncanonical image source package")]
+    NoncanonicalSourcePackage,
+    /// The source path is not a virtual path.
+    #[error("invalid image source path")]
+    SourcePath,
+    /// The source path is not a canonical rooted file path.
+    #[error("image source path must be a canonical rooted file path")]
+    NoncanonicalSourcePath,
+}
+
+/// The parser's message for one unparsable package spec.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct PackageSpecMessage(String);
 
 #[derive(Clone, Debug)]
 pub struct ImageRequest {
@@ -97,7 +145,7 @@ impl ImageRequest {
 
     /// Recover only this protocol's requests from successful read evidence. A file in the protocol
     /// namespace with a malformed descriptor is an error, not a dependency to skip silently.
-    pub fn from_read(locator: &ReadLocator) -> Result<Option<Self>> {
+    pub fn from_read(locator: &ReadLocator) -> Result<Option<Self>, DescriptorError> {
         let (ReadLocator::Package { package, path }
         | ReadLocator::ProvidedPackage { package, path }) = locator
         else {
@@ -190,7 +238,7 @@ impl SourceDescriptor {
         }
     }
 
-    fn into_source(self) -> Result<(DataSource, RootedPath)> {
+    fn into_source(self) -> Result<(DataSource, RootedPath), DescriptorError> {
         if let Self::Bytes { origin, bytes } = self {
             let (_, origin) = origin.into_source()?;
             return Ok((DataSource::Bytes(Bytes::new(bytes)), origin));
@@ -198,60 +246,53 @@ impl SourceDescriptor {
         let (root, path) = match self {
             Self::Site { path } => (VirtualRoot::Project, path),
             Self::Package { package, path } => {
-                let spec = package
-                    .parse::<PackageSpec>()
-                    .map_err(anyhow::Error::msg)
-                    .context("invalid image source package")?;
-                ensure!(
-                    spec.to_string() == package,
-                    "noncanonical image source package"
-                );
+                let spec = package.parse::<PackageSpec>().map_err(|error| {
+                    DescriptorError::SourcePackage(PackageSpecMessage(error.to_string()))
+                })?;
+                if spec.to_string() != package {
+                    return Err(DescriptorError::NoncanonicalSourcePackage);
+                }
                 (VirtualRoot::Package(spec), path)
             }
             Self::Bytes { .. } => unreachable!(),
         };
-        let virtual_path = VirtualPath::new(&path).context("invalid image source path")?;
-        ensure!(
-            !virtual_path.is_root() && virtual_path.get_with_slash() == path,
-            "image source path must be a canonical rooted file path",
-        );
+        let virtual_path = VirtualPath::new(&path).map_err(|_| DescriptorError::SourcePath)?;
+        if virtual_path.is_root() || virtual_path.get_with_slash() != path {
+            return Err(DescriptorError::NoncanonicalSourcePath);
+        }
         let origin = RootedPath::new(root, virtual_path);
         Ok((DataSource::Path(PathOrStr::Str(path.into())), origin))
     }
 }
 
-fn decode_observation(path: &str) -> Result<Option<(ImageRequest, Vec<u8>)>> {
+fn decode_observation(path: &str) -> Result<Option<(ImageRequest, Vec<u8>)>, DescriptorError> {
     let path = path.strip_prefix('/').unwrap_or(path);
     let Some(encoded) = path.strip_prefix(IMAGE_REQUEST_OBSERVATION_DIRECTORY) else {
         return Ok(None);
     };
     let encoded = encoded
         .strip_suffix(IMAGE_REQUEST_OBSERVATION_EXTENSION)
-        .context("image request descriptor must end in .json")?;
-    ensure!(
-        !encoded.is_empty() && is_lower_hex(encoded),
-        "image request descriptor must use lowercase hexadecimal encoding",
-    );
-    let bytes = hex::decode(encoded).context("invalid image request encoding")?;
+        .ok_or(DescriptorError::MissingExtension)?;
+    if encoded.is_empty() || !is_lower_hex(encoded) {
+        return Err(DescriptorError::NotLowerHex);
+    }
+    let bytes = hex::decode(encoded).map_err(DescriptorError::Encoding)?;
     // ImageRecipe's deserializer validates structural bounds and encoding options; the producer
     // additionally validates it against actual metadata.
     let descriptor: RequestDescriptor<ImageRecipe> =
-        serde_json::from_slice(&bytes).context("invalid image request descriptor")?;
-    ensure!(
-        descriptor.revision == IMAGE_PIPELINE_REVISION,
-        "unsupported image request processing revision",
-    );
-    ensure!(
-        serde_json::to_vec(&descriptor)? == bytes,
-        "noncanonical image request descriptor",
-    );
-    ensure!(
-        is_lower_hex(&descriptor.source_digest),
-        "image source digest must use lowercase hexadecimal encoding",
-    );
+        serde_json::from_slice(&bytes).map_err(DescriptorError::Malformed)?;
+    if descriptor.revision != IMAGE_PIPELINE_REVISION {
+        return Err(DescriptorError::UnsupportedRevision);
+    }
+    if serde_json::to_vec(&descriptor).map_err(DescriptorError::Serialization)? != bytes {
+        return Err(DescriptorError::Noncanonical);
+    }
+    let digest_hex = &descriptor.source_digest;
+    if !is_lower_hex(digest_hex) {
+        return Err(DescriptorError::DigestNotLowerHex);
+    }
     let mut digest = [0; 32];
-    hex::decode_to_slice(&descriptor.source_digest, &mut digest)
-        .context("invalid image source digest")?;
+    hex::decode_to_slice(digest_hex, &mut digest).map_err(DescriptorError::DigestEncoding)?;
     let (source, origin) = descriptor.source.into_source()?;
     Ok(Some((
         ImageRequest::new(
@@ -367,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_and_path_sources_share_derivative_identity() {
+    fn sources_share_derivative_identity() {
         let bytes = b"same pixels".to_vec();
         let digest = ContentDigest::of(&bytes);
         let by_path = ImageRequest::new(

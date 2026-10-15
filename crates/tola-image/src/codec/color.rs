@@ -34,15 +34,15 @@ pub(in crate::codec) fn normalize_color(
     if color == ColorType::Rgba8 && transform.is_none() {
         return Ok(raw);
     }
-    let (layout, is_sixteen_bit) = match color {
-        ColorType::L8 => (Layout::Gray, false),
-        ColorType::La8 => (Layout::GrayAlpha, false),
-        ColorType::Rgb8 => (Layout::Rgb, false),
-        ColorType::Rgba8 => (Layout::Rgba, false),
-        ColorType::L16 => (Layout::Gray, true),
-        ColorType::La16 => (Layout::GrayAlpha, true),
-        ColorType::Rgb16 => (Layout::Rgb, true),
-        ColorType::Rgba16 => (Layout::Rgba, true),
+    let (layout, sample_bytes) = match color {
+        ColorType::L8 => (Layout::Gray, 1),
+        ColorType::La8 => (Layout::GrayAlpha, 1),
+        ColorType::Rgb8 => (Layout::Rgb, 1),
+        ColorType::Rgba8 => (Layout::Rgba, 1),
+        ColorType::L16 => (Layout::Gray, 2),
+        ColorType::La16 => (Layout::GrayAlpha, 2),
+        ColorType::Rgb16 => (Layout::Rgb, 2),
+        ColorType::Rgba16 => (Layout::Rgba, 2),
         _ => bail!(
             "this image uses a color format Tola cannot resize; save it as 8-bit or 16-bit RGB"
         ),
@@ -80,7 +80,6 @@ pub(in crate::codec) fn normalize_color(
     };
     cancellation.ensure_active()?;
     let Some(profile) = profile else {
-        let sample_bytes = if is_sixteen_bit { 2 } else { 1 };
         return rewrite_plane(
             raw,
             layout,
@@ -94,20 +93,11 @@ pub(in crate::codec) fn normalize_color(
                     .chunks_exact(layout.channels() * sample_bytes)
                     .zip(output.as_chunks_mut::<4>().0.iter_mut())
                 {
-                    let sample = |channel: usize| -> u8 {
-                        if is_sixteen_bit {
-                            let offset = channel * 2;
-                            ((u32::from(u16::from_ne_bytes([src[offset], src[offset + 1]])) + 128)
-                                / 257) as u8
-                        } else {
-                            src[channel]
-                        }
-                    };
-                    dst[0] = sample(0);
-                    dst[1] = sample(if grayscale { 0 } else { 1 });
-                    dst[2] = sample(if grayscale { 0 } else { 2 });
+                    dst[0] = sample_at(src, 0, sample_bytes);
+                    dst[1] = sample_at(src, if grayscale { 0 } else { 1 }, sample_bytes);
+                    dst[2] = sample_at(src, if grayscale { 0 } else { 2 }, sample_bytes);
                     dst[3] = if layout.has_alpha() {
-                        sample(layout.channels() - 1)
+                        sample_at(src, layout.channels() - 1, sample_bytes)
                     } else {
                         u8::MAX
                     };
@@ -127,7 +117,7 @@ pub(in crate::codec) fn normalize_color(
         rendering_intent: RenderingIntent::RelativeColorimetric,
         ..TransformOptions::default()
     };
-    if is_sixteen_bit {
+    if sample_bytes == 2 {
         let transform = profile
             .create_transform_16bit(color_layout, srgb, Layout::Rgba, options)
             .context(PROFILE_UNSUPPORTED)?;
@@ -135,7 +125,7 @@ pub(in crate::codec) fn normalize_color(
         rewrite_plane(
             raw,
             layout,
-            2,
+            sample_bytes,
             dimensions,
             cancellation,
             || {
@@ -163,14 +153,7 @@ pub(in crate::codec) fn normalize_color(
                     *dst = ((u32::from(*src) + 128) / 257) as u8;
                 }
                 if layout.has_alpha() {
-                    for (source, destination) in input
-                        .chunks_exact(layout.channels() * 2)
-                        .zip(output.as_chunks_mut::<4>().0.iter_mut())
-                    {
-                        let offset = (layout.channels() - 1) * 2;
-                        let alpha = u16::from_ne_bytes([source[offset], source[offset + 1]]);
-                        destination[3] = ((u32::from(alpha) + 128) / 257) as u8;
-                    }
+                    restore_alpha(input, output, layout, 2);
                 }
                 Ok(())
             },
@@ -183,7 +166,7 @@ pub(in crate::codec) fn normalize_color(
         rewrite_plane(
             raw,
             layout,
-            1,
+            sample_bytes,
             dimensions,
             cancellation,
             || {
@@ -210,16 +193,34 @@ pub(in crate::codec) fn normalize_color(
                     .transform(color_input, output)
                     .context(PROFILE_UNSUPPORTED)?;
                 if layout.has_alpha() {
-                    for (source, destination) in input
-                        .chunks_exact(layout.channels())
-                        .zip(output.as_chunks_mut::<4>().0.iter_mut())
-                    {
-                        destination[3] = source[layout.channels() - 1];
-                    }
+                    restore_alpha(input, output, layout, 1);
                 }
                 Ok(())
             },
         )
+    }
+}
+
+/// One source sample as eight bits, narrowing a sixteen-bit sample around its midpoint.
+fn sample_at(source: &[u8], channel: usize, sample_bytes: usize) -> u8 {
+    let offset = channel * sample_bytes;
+    match sample_bytes {
+        2 => {
+            ((u32::from(u16::from_ne_bytes([source[offset], source[offset + 1]])) + 128) / 257)
+                as u8
+        }
+        _ => source[offset],
+    }
+}
+
+/// Copy each source pixel's alpha into the RGBA row, which the color transform leaves untouched.
+fn restore_alpha(input: &[u8], output: &mut [u8], layout: Layout, sample_bytes: usize) {
+    let channels = layout.channels();
+    for (source, destination) in input
+        .chunks_exact(channels * sample_bytes)
+        .zip(output.as_chunks_mut::<4>().0.iter_mut())
+    {
+        destination[3] = sample_at(source, channels - 1, sample_bytes);
     }
 }
 
@@ -268,7 +269,7 @@ mod tests {
     use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::codec::render;
-    use crate::codec::test_support::*;
+    use crate::codec::tests::test_support::*;
     use image::codecs::png::PngDecoder;
     use image::{ExtendedColorType, ImageDecoder};
     use std::io::Cursor;

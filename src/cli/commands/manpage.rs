@@ -1,3 +1,7 @@
+//! The roff manual page, generated from the CLI's own grammar.
+//!
+//! Only the title and section are Tola's: every command, flag, and description comes from the same
+//! Clap definition that `--help` renders, so the two cannot drift.
 use std::path::Path;
 
 use anyhow::{Context, Result};

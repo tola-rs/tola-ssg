@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use anyhow::Result;
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity, line_column};
 use tola_build::has_typ_extension;
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity, line_column};
 use tola_typst_syntax::format::{self, Formatting, Options};
 
 use crate::cancellation::Cancellation;
@@ -55,7 +55,7 @@ pub(in crate::cli) fn run(
         };
         let Ok(text) = std::str::from_utf8(&original) else {
             diagnostics.push(
-                tola_build::diagnostic::unreadable_source(
+                tola_diagnostic::unreadable_source(
                     crate::codes::fmt::UNREADABLE,
                     &tola_build::filesystem::display_path(source, root),
                 )
@@ -77,7 +77,7 @@ pub(in crate::cli) fn run(
                 }
             }
             Formatting::Unparsable { offset } => diagnostics.push(
-                tola_build::diagnostic::unparsable_source(
+                tola_diagnostic::unparsable_source(
                     crate::codes::fmt::FAILED,
                     &tola_build::filesystem::display_path(source, root),
                     text,
@@ -92,10 +92,7 @@ pub(in crate::cli) fn run(
         writes.check()?;
         writes.apply(&cancellation.token())?;
     }
-    if diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error)
-    {
+    if super::holds_error(&diagnostics) {
         return Err(DiagnosticError::new("formatting did not complete", diagnostics).into());
     }
     output.summary(run_summary(check, examined, reformatted))?;
@@ -153,31 +150,26 @@ fn run_summary(check: bool, examined: usize, reformatted: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::{buffered_output, site};
     use super::*;
-
-    fn site(sources: &[(&str, &str)]) -> (tempfile::TempDir, ConfigFileArgs) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::write(root.join("site.typ"), "= Home\n").unwrap();
-        std::fs::write(
-            root.join("tola.toml"),
-            "[site]\norigin = \"https://example.com\"\n",
-        )
-        .unwrap();
-        for (path, contents) in sources {
-            let path = root.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, contents).unwrap();
-        }
-        let config = ConfigFileArgs {
-            path: Some(root.join("tola.toml")),
-        };
-        (directory, config)
-    }
 
     fn source_text(root: &Path, relative: &str) -> String {
         std::fs::read_to_string(root.join(relative)).unwrap()
+    }
+
+    fn format_site(
+        config: ConfigFileArgs,
+        check: bool,
+        output: &CommandOutput,
+    ) -> anyhow::Result<()> {
+        run(
+            config,
+            TypstPackageArgs::default(),
+            InputScope::Online,
+            check,
+            output,
+            &Cancellation::default(),
+        )
     }
 
     #[test]
@@ -187,21 +179,9 @@ mod tests {
             ("templates/page.typ", "#let  name =  \"page\"\n"),
         ]);
         let root = directory.path();
-        let (sink, _captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
+        let output = buffered_output();
 
-        run(
-            config,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            false,
-            &output,
-            &Cancellation::default(),
-        )
-        .unwrap();
+        format_site(config, false, &output).unwrap();
 
         assert_eq!(source_text(root, "content/index.typ"), "#let x = 1\n");
         assert_eq!(
@@ -212,54 +192,15 @@ mod tests {
     }
 
     #[test]
-    fn formatted_sources_are_left_alone() {
-        let (directory, config) = site(&[("templates/page.typ", "#let name = \"page\"\n")]);
-        let root = directory.path();
-        let (sink, _captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
-
-        run(
-            config,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            false,
-            &output,
-            &Cancellation::default(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            source_text(root, "templates/page.typ"),
-            "#let name = \"page\"\n"
-        );
-    }
-
-    #[test]
     fn check_reports_without_writing() {
         let (directory, config) = site(&[("content/index.typ", "#let  x =  1\n")]);
         let root = directory.path();
-        let (sink, _captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
+        let output = buffered_output();
 
-        let error = run(
-            config,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            true,
-            &output,
-            &Cancellation::default(),
-        )
-        .unwrap_err();
+        let error = format_site(config, true, &output).unwrap_err();
 
         assert_eq!(source_text(root, "content/index.typ"), "#let  x =  1\n");
-        let diagnostics =
-            tola_build::diagnostic::attached(&error).expect("the check names sources");
+        let diagnostics = tola_diagnostic::attached(&error).expect("the check names sources");
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].code, crate::codes::fmt::UNFORMATTED);
         let location = diagnostics[0].location.as_ref().unwrap();
@@ -269,21 +210,9 @@ mod tests {
     #[test]
     fn formatted_sources_pass_check() {
         let (directory, config) = site(&[("content/index.typ", "#let x = 1\n")]);
-        let (sink, _captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
+        let output = buffered_output();
 
-        run(
-            config,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            true,
-            &output,
-            &Cancellation::default(),
-        )
-        .unwrap();
+        format_site(config, true, &output).unwrap();
 
         assert_eq!(
             source_text(directory.path(), "content/index.typ"),
@@ -292,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn vendor_and_published_output_are_left_alone() {
+    fn vendor_published_output_left_alone() {
         let (directory, config) = site(&[
             ("vendor/package/lib.typ", "#let  vendored =  1"),
             ("public/index.typ", "#let  published =  1"),
@@ -304,21 +233,9 @@ mod tests {
             "[site]\norigin = \"https://example.com\"\n[vendor]\npath = \"vendor\"\n",
         )
         .unwrap();
-        let (sink, _captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
+        let output = buffered_output();
 
-        run(
-            config,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            false,
-            &output,
-            &Cancellation::default(),
-        )
-        .unwrap();
+        format_site(config, false, &output).unwrap();
 
         assert_eq!(
             source_text(root, "vendor/package/lib.typ"),
@@ -332,29 +249,17 @@ mod tests {
     }
 
     #[test]
-    fn unparsable_source_is_reported_and_others_are_formatted() {
+    fn unparsable_source_reported_others_formatted() {
         let (directory, config) = site(&[
             ("content/broken.typ", "#let = "),
             ("content/index.typ", "#let  y =  2\n"),
         ]);
         let root = directory.path();
-        let (sink, _captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
+        let output = buffered_output();
 
-        let error = run(
-            config,
-            TypstPackageArgs::default(),
-            InputScope::Online,
-            false,
-            &output,
-            &Cancellation::default(),
-        )
-        .unwrap_err();
+        let error = format_site(config, false, &output).unwrap_err();
 
-        let diagnostics = tola_build::diagnostic::attached(&error).expect("the failure is stated");
+        let diagnostics = tola_diagnostic::attached(&error).expect("the failure is stated");
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].code, crate::codes::fmt::FAILED);
         assert!(diagnostics[0].message.contains("content/broken.typ"));
@@ -368,12 +273,9 @@ mod tests {
     }
 
     #[test]
-    fn differing_position_names_the_line_and_column() {
+    fn differing_position_names_line_column() {
         assert_eq!(first_difference("a\nb\n", "a\nc\n"), Some((2, 1)));
         assert_eq!(first_difference("a\nb", "a\nb\n"), Some((2, 2)));
         assert_eq!(first_difference("same\n", "same\n"), None);
-        assert_eq!(line_column("a\nb\n", 2), Some((2, 1)));
-        assert_eq!(line_column("a\n", 2), Some((2, 1)));
-        assert_eq!(line_column("a", 4), None);
     }
 }

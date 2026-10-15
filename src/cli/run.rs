@@ -3,7 +3,6 @@
 use std::process::ExitCode;
 
 use serde_json::json;
-use tola_build::diagnostic;
 
 use super::Cli;
 use super::log::{LogFile, LogOrigin};
@@ -53,8 +52,10 @@ pub(crate) fn run() -> ExitCode {
         Ok(pager) => pager,
         Err(error) => {
             let terminal = Terminal::new(cli.color, cli.quiet, None);
-            let _ =
-                terminal.diagnostic(&diagnostic::fallback(crate::codes::terminal::PAGER, &error));
+            let _ = terminal.diagnostic(&tola_diagnostic::fallback(
+                crate::codes::terminal::PAGER,
+                &error,
+            ));
             return ExitCode::FAILURE;
         }
     };
@@ -84,6 +85,33 @@ pub(crate) fn run() -> ExitCode {
         {
             let _ = output.status("Cancelled");
             CANCELLED_EXIT_CODE
+        }
+        Err(error) if error.is::<clap::Error>() => {
+            let clap_error = error.downcast_ref::<clap::Error>().unwrap();
+            let _ = clap_error.print();
+            let code = clap_error.exit_code() as u8;
+            if code != 0 {
+                output.record_failure(&error);
+            }
+            code
+        }
+        Err(error) if error.is::<super::external::CommandExit>() => {
+            if let Some(diagnostics) = tola_diagnostic::attached(&error) {
+                let _ = output.diagnostics(diagnostics);
+                output.record_failure(&error);
+            }
+            let status = error
+                .downcast_ref::<super::external::CommandExit>()
+                .unwrap()
+                .0;
+            status
+                .code()
+                .and_then(|code| u8::try_from(code).ok())
+                .unwrap_or_else(|| {
+                    tola_subprocess::terminating_signal(&status)
+                        .and_then(|signal| u8::try_from(128 + signal).ok())
+                        .unwrap_or(1)
+                })
         }
         Err(error) => {
             let diagnostics = attached_or_fallback(&error, crate::codes::command::FAILED);
@@ -216,11 +244,11 @@ fn install_panic_report(log: Option<LogFile>, terminal: Terminal) {
 /// process unwinds out of the command's error path and a panic on the main thread exits as 101.
 fn explained_panic_diagnostic(
     payload: &(dyn std::any::Any + Send),
-) -> Option<diagnostic::Diagnostic> {
+) -> Option<tola_diagnostic::Diagnostic> {
     let explained = tola_typst::diagnostic::explained_panic(payload)?;
-    let mut diagnostic = diagnostic::Diagnostic::new(
-        tola_build::codes::typst::HTML_EXPORT,
-        diagnostic::Severity::Error,
+    let mut diagnostic = tola_diagnostic::Diagnostic::new(
+        tola_diagnostic::codes::typst::HTML_EXPORT,
+        tola_diagnostic::Severity::Error,
         explained.message,
     );
     if let Some(help) = explained.help {
@@ -294,7 +322,7 @@ mod tests {
     #[test]
     fn internal_error_names_its_log() {
         let recorded = internal_error_diagnostic(Some(std::path::Path::new("session.jsonl")));
-        assert_eq!(recorded.message, "Tola hit an internal error");
+        assert_eq!(recorded.message, "Tola could not finish this command");
         assert!(recorded.help[0].message.contains("session.jsonl"));
 
         let unrecorded = internal_error_diagnostic(None);
@@ -320,7 +348,7 @@ mod tests {
     fn known_html_panic_keeps_export_code() {
         let diagnostic = explained_panic_diagnostic(&"head to be present in document output")
             .expect("the missing-head panic is explained");
-        assert_eq!(diagnostic.code, tola_build::codes::typst::HTML_EXPORT);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::typst::HTML_EXPORT);
         assert!(explained_panic_diagnostic(&"something else went wrong").is_none());
     }
 }

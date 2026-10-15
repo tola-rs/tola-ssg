@@ -113,37 +113,37 @@ fn append_child(
     origin: &IssueOrigin<'_>,
     diagnostic: &mut SourceDiagnostic,
 ) {
-    if let Some(description) = describe(issue, path, region) {
-        diagnostic.spanned_hint(
+    let (hint, range, child_path, child_region) = match describe(issue, path, region) {
+        Some(description) => (
             issue.sentence(
                 &description.field,
                 description.kind,
                 &description.origin_path,
             ),
-            origin.span(origin.marker_range()),
-        );
-        for note in &issue.notes {
-            diagnostic.hint(note.as_str());
+            origin.marker_range(),
+            Vec::new(),
+            description.child,
+        ),
+        None => {
+            let full = [path, &issue.path].concat();
+            let range = if region.is_generated() {
+                origin.marker_range()
+            } else {
+                origin.locate(&full)
+            };
+            (
+                eco_format!("{}: {}", region.position(&full), issue.message),
+                range,
+                full,
+                region.clone(),
+            )
         }
-        for child in &issue.children {
-            append_child(child, &[], &description.child, origin, diagnostic);
-        }
-    } else {
-        let full = [path, &issue.path].concat();
-        let range = if region.is_generated() {
-            origin.marker_range()
-        } else {
-            origin.locate(&full)
-        };
-        diagnostic.spanned_hint(
-            eco_format!("{}: {}", region.position(&full), issue.message),
-            origin.span(range),
-        );
-        for note in &issue.notes {
-            diagnostic.hint(note.as_str());
-        }
-        for child in &issue.children {
-            append_child(child, &full, region, origin, diagnostic);
-        }
+    };
+    diagnostic.spanned_hint(hint, origin.span(range));
+    for note in &issue.notes {
+        diagnostic.hint(note.as_str());
+    }
+    for child in &issue.children {
+        append_child(child, &child_path, &child_region, origin, diagnostic);
     }
 }

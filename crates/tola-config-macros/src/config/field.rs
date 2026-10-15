@@ -26,10 +26,13 @@ pub struct ConfigField {
 
 impl ConfigField {
     /// Parse a configuration field from its Rust declaration.
-    pub fn from_field(field: &syn::Field) -> syn::Result<Option<Self>> {
-        let Some(ident) = field.ident.as_ref() else {
-            return Ok(None);
-        };
+    ///
+    /// The derive accepts only structs with named fields, so every field has an identifier.
+    pub fn from_field(field: &syn::Field) -> syn::Result<Self> {
+        let ident = field
+            .ident
+            .as_ref()
+            .expect("a named field has an identifier");
         let attrs = ConfigAttrs::parse(&field.attrs, ConfigAttrScope::Field)?;
         if attrs.skip && attrs.collection.is_some() {
             return Err(syn::Error::new_spanned(
@@ -117,7 +120,7 @@ impl ConfigField {
         };
         validate_toml_key(&toml_name, key_span)?;
 
-        Ok(Some(Self {
+        Ok(Self {
             rust_ident: ident.clone(),
             toml_name,
             doc: extract_doc_comment(&field.attrs),
@@ -128,7 +131,7 @@ impl ConfigField {
             sub: attrs.sub,
             collection: attrs.collection,
             ty: field.ty.clone(),
-        }))
+        })
     }
 }
 

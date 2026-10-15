@@ -1,9 +1,96 @@
 use std::hash::{Hash, Hasher};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{ImageFormat, ImageMetadata, check_dimensions};
+
+/// Why one resize request cannot become a recipe.
+#[derive(Debug, thiserror::Error)]
+pub enum ImageRequestError {
+    /// The source has no positive pixel dimensions.
+    #[error("image dimensions must be positive")]
+    InvalidDimensions,
+    /// The request names a vector recipe where resampling was asked for.
+    #[error("vector recipes are rendered, not resampled")]
+    VectorRecipeNotResampled,
+    /// The stored crop extends past the source.
+    #[error("the resize crop is outside the source image")]
+    CropOutsideSource,
+    /// The stored crop is neither the whole source nor one anchored fill crop.
+    #[error("image crop must be the complete source or one of its anchored fill crops")]
+    CropNotAnchoredFill,
+    /// The crop coordinates cannot be added without overflowing.
+    #[error("image crop coordinates overflow")]
+    CropCoordinatesOverflow,
+    /// The recipe names a crop and a vector, or neither.
+    #[error("the image recipe needs exactly one source region")]
+    SourceRegionCount,
+    /// The stored recipe mixes raster crop and vector geometry.
+    #[error("the image recipe mixes raster and vector source geometry")]
+    MixedSourceGeometry,
+    /// A vector coordinate is not a finite number.
+    #[error("the SVG source geometry is not finite")]
+    SvgGeometryNotFinite,
+    /// The vector source or crop is not a positive rectangle.
+    #[error("the SVG source geometry is invalid")]
+    SvgGeometryInvalid,
+    /// The vector crop extends past the source.
+    #[error("the SVG crop is outside the source")]
+    SvgCropOutsideSource,
+    /// The recorded SVG renderer revision is not the current one.
+    #[error("the saved copy of this SVG was made by another Tola version; run the build again")]
+    SvgRendererUnsupported,
+    /// The parsed SVG reports no usable intrinsic size.
+    #[error("the SVG has no valid intrinsic size")]
+    SvgIntrinsicSize,
+    /// An SVG derivative must name its raster format.
+    #[error(
+        "`resize-image` cannot choose a format for an SVG; pass `format: \"png\"`, `\"jpg\"` (or `\"jpeg\"`), or `\"webp\"` to rasterize it, or use `image()` for vector display"
+    )]
+    SvgFormatRequired,
+    /// JPEG quality is outside 1 to 100.
+    #[error("`quality` must be 1 to 100 for JPEG output")]
+    JpegQuality,
+    /// JPEG cannot encode this frame size.
+    #[error("JPEG output cannot exceed 65535 pixels wide or tall; reduce `width` or `height`")]
+    JpegDimensions,
+    /// WebP quality is outside 0 to 100.
+    #[error("`quality` must be 0 to 100 for WebP output")]
+    WebpQuality,
+    /// WebP cannot encode this frame size.
+    #[error("WebP output cannot exceed 16383 pixels wide or tall; reduce `width` or `height`")]
+    WebpDimensions,
+    /// `anchor` was supplied for an operation that never crops.
+    #[error("`anchor` applies only to `op: \"fill\"`; the other operations keep the whole source")]
+    AnchorWithoutFill,
+    /// A requested dimension is zero.
+    #[error("`width` and `height` must be positive pixel counts")]
+    NonPositiveDimensions,
+    /// An operation needs a dimension the request omits.
+    #[error("`resize-image` needs `{dimension}` for this `op`; pass `{dimension}`")]
+    MissingDimension {
+        /// The missing option, `width` or `height`.
+        dimension: &'static str,
+    },
+    /// The scaled pixel count cannot be addressed.
+    #[error("the resized image would be too large; use a smaller `width` and `height`")]
+    ResizedTooLarge,
+    /// The recipe is not a vector recipe.
+    #[error("the image recipe is not a vector recipe")]
+    NotAVectorRecipe,
+    /// The recipe carries no SVG renderer identity.
+    #[error("the image recipe has no SVG renderer identity")]
+    NoSvgRendererIdentity,
+    /// The source changed after its variants were prepared.
+    #[error("the image changed since Tola prepared its variants; run the build again")]
+    SourceChanged,
+    /// JPEG would drop the source transparency.
+    #[error(
+        "JPEG output cannot keep transparency; set `background`, or use `format: \"png\"` or `format: \"webp\"`"
+    )]
+    JpegTransparency,
+}
 
 /// How a request's dimensions shape the derivative.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,8 +316,10 @@ impl Crop {
 struct Exact(f64);
 
 impl Exact {
-    fn checked(value: f64) -> Result<Self> {
-        ensure!(value.is_finite(), "the SVG source geometry is not finite");
+    fn checked(value: f64) -> Result<Self, ImageRequestError> {
+        if !value.is_finite() {
+            return Err(ImageRequestError::SvgGeometryNotFinite);
+        }
         Ok(Self(if value == 0.0 { 0.0 } else { value }))
     }
 
@@ -249,7 +338,7 @@ impl TryFrom<u64> for Exact {
     type Error = anyhow::Error;
 
     fn try_from(bits: u64) -> Result<Self> {
-        Self::checked(f64::from_bits(bits))
+        Self::checked(f64::from_bits(bits)).map_err(anyhow::Error::from)
     }
 }
 
@@ -276,7 +365,7 @@ pub struct VectorGeometry {
 }
 
 impl VectorGeometry {
-    fn new(source: (f64, f64), crop: (f64, f64, f64, f64)) -> Result<Self> {
+    fn new(source: (f64, f64), crop: (f64, f64, f64, f64)) -> Result<Self, ImageRequestError> {
         let geometry = Self {
             source: (Exact::checked(source.0)?, Exact::checked(source.1)?),
             crop: (
@@ -305,24 +394,23 @@ impl VectorGeometry {
         )
     }
 
-    fn validate(self) -> Result<()> {
+    fn validate(self) -> Result<(), ImageRequestError> {
         let (source_width, source_height) = self.source();
         let (x, y, width, height) = self.crop();
-        ensure!(
-            source_width > 0.0
-                && source_height > 0.0
-                && x >= 0.0
-                && y >= 0.0
-                && width > 0.0
-                && height > 0.0,
-            "the SVG source geometry is invalid"
-        );
+        if !(source_width > 0.0
+            && source_height > 0.0
+            && x >= 0.0
+            && y >= 0.0
+            && width > 0.0
+            && height > 0.0)
+        {
+            return Err(ImageRequestError::SvgGeometryInvalid);
+        }
         let slack_x = 1e-9 * source_width.max(1.0);
         let slack_y = 1e-9 * source_height.max(1.0);
-        ensure!(
-            x + width <= source_width + slack_x && y + height <= source_height + slack_y,
-            "the SVG crop is outside the source"
-        );
+        if !(x + width <= source_width + slack_x && y + height <= source_height + slack_y) {
+            return Err(ImageRequestError::SvgCropOutsideSource);
+        }
         Ok(())
     }
 }
@@ -355,11 +443,10 @@ impl SvgRender {
         self.hash
     }
 
-    fn validate(self) -> Result<()> {
-        ensure!(
-            self.revision == SVG_RENDERER_REVISION,
-            "the SVG renderer revision is not supported; run the build again"
-        );
+    fn validate(self) -> Result<(), ImageRequestError> {
+        if self.revision != SVG_RENDERER_REVISION {
+            return Err(ImageRequestError::SvgRendererUnsupported);
+        }
         Ok(())
     }
 }
@@ -417,6 +504,8 @@ pub struct PixelRecipe {
     pub(super) background: Option<Background>,
 }
 
+pub(crate) const VECTOR_RECIPE_IS_RENDERED: &str = "vector recipes are rendered, not resampled";
+
 impl PixelRecipe {
     /// The width these pixels are rendered to.
     pub const fn width(self) -> u32 {
@@ -449,41 +538,42 @@ impl PixelRecipe {
         }
     }
 
-    fn validate_structure(self) -> Result<()> {
-        check_dimensions(self.width, self.height)?;
+    fn validate_structure(self) -> Result<(), ImageRequestError> {
+        check_dimensions(self.width, self.height)
+            .map_err(|_| ImageRequestError::InvalidDimensions)?;
         match (self.crop, self.vector) {
             (Some(crop), None) => {
-                check_dimensions(crop.width, crop.height)?;
-                ensure!(
-                    crop.x.checked_add(crop.width).is_some()
-                        && crop.y.checked_add(crop.height).is_some(),
-                    "image crop coordinates overflow"
-                );
+                check_dimensions(crop.width, crop.height)
+                    .map_err(|_| ImageRequestError::InvalidDimensions)?;
+                if crop.x.checked_add(crop.width).is_none()
+                    || crop.y.checked_add(crop.height).is_none()
+                {
+                    return Err(ImageRequestError::CropCoordinatesOverflow);
+                }
             }
             (None, Some(vector)) => vector.validate()?,
-            _ => bail!("the image recipe needs exactly one source region"),
+            _ => return Err(ImageRequestError::SourceRegionCount),
         }
         Ok(())
     }
 
     /// Whether these pixels can be resampled from an image with this metadata.
-    pub fn validate(self, metadata: &ImageMetadata) -> Result<()> {
-        self.validate_structure()?;
+    pub fn validate(self, metadata: &ImageMetadata) -> Result<(), ImageRequestError> {
         let Some(crop) = self.raster_crop() else {
-            bail!("vector recipes are rendered, not resampled");
+            return Err(ImageRequestError::VectorRecipeNotResampled);
         };
-        check_dimensions(metadata.width, metadata.height)?;
-        ensure!(
-            crop.x + crop.width <= metadata.width && crop.y + crop.height <= metadata.height,
-            "the resize crop is outside the source image"
-        );
-        ensure!(
-            crop == Crop::full(metadata)
-                || CropAnchor::ALL
-                    .into_iter()
-                    .any(|anchor| crop == Crop::anchored(metadata, self.width, self.height, anchor)),
-            "image crop must be the complete source or one of its anchored fill crops"
-        );
+        check_dimensions(metadata.width, metadata.height)
+            .map_err(|_| ImageRequestError::InvalidDimensions)?;
+        if crop.x + crop.width > metadata.width || crop.y + crop.height > metadata.height {
+            return Err(ImageRequestError::CropOutsideSource);
+        }
+        if crop != Crop::full(metadata)
+            && !CropAnchor::ALL
+                .into_iter()
+                .any(|anchor| crop == Crop::anchored(metadata, self.width, self.height, anchor))
+        {
+            return Err(ImageRequestError::CropNotAnchoredFill);
+        }
         Ok(())
     }
 }
@@ -557,8 +647,12 @@ impl ImageRecipe {
     ///
     /// The resolved recipe carries the encoding the request settled on, which is never
     /// [`OutputFormat::Auto`].
-    pub fn resolve(metadata: &ImageMetadata, options: ResizeOptions) -> Result<Self> {
-        check_dimensions(metadata.width, metadata.height)?;
+    pub fn resolve(
+        metadata: &ImageMetadata,
+        options: ResizeOptions,
+    ) -> Result<Self, ImageRequestError> {
+        check_dimensions(metadata.width, metadata.height)
+            .map_err(|_| ImageRequestError::InvalidDimensions)?;
         validate_request(options)?;
         let mut crop = Crop::full(metadata);
         let (width, height) = match options.operation {
@@ -618,6 +712,7 @@ impl ImageRecipe {
             svg: None,
         };
         recipe.pixels.normalize_filter();
+        recipe.validate_structure()?;
         recipe.validate(metadata)?;
         Ok(recipe)
     }
@@ -630,15 +725,13 @@ impl ImageRecipe {
         source: (f64, f64),
         options: ResizeOptions,
         render: SvgRender,
-    ) -> Result<Self> {
-        ensure!(
-            source.0.is_finite() && source.1.is_finite() && source.0 > 0.0 && source.1 > 0.0,
-            "the SVG has no valid intrinsic size"
-        );
-        ensure!(
-            options.format != OutputFormat::Auto,
-            "`resize-image` cannot choose a format for an SVG; pass `format: \"png\"`, `\"jpg\"` (or `\"jpeg\"`), or `\"webp\"` to rasterize it, or use `image()` for vector display"
-        );
+    ) -> Result<Self, ImageRequestError> {
+        if !(source.0.is_finite() && source.1.is_finite() && source.0 > 0.0 && source.1 > 0.0) {
+            return Err(ImageRequestError::SvgIntrinsicSize);
+        }
+        if options.format == OutputFormat::Auto {
+            return Err(ImageRequestError::SvgFormatRequired);
+        }
         validate_request(options)?;
         let mut crop = (0.0, 0.0, source.0, source.1);
         let (width, height) = match options.operation {
@@ -744,35 +837,31 @@ impl ImageRecipe {
         self.pixels.vector
     }
 
-    fn validate_structure(&self) -> Result<()> {
+    fn validate_structure(&self) -> Result<(), ImageRequestError> {
         self.pixels.validate_structure()?;
         match (self.pixels.crop, self.pixels.vector, self.svg) {
             (Some(_), None, None) | (None, Some(_), Some(_)) => {}
-            _ => bail!("the image recipe mixes raster and vector source geometry"),
+            _ => return Err(ImageRequestError::MixedSourceGeometry),
         }
         if let Some(svg) = self.svg {
             svg.validate()?;
         }
         match self.encoding {
             Encoding::Jpeg { quality } => {
-                ensure!(
-                    (1..=100).contains(&quality),
-                    "`quality` must be 1 to 100 for JPEG output"
-                );
-                ensure!(
-                    self.width() <= 65_535 && self.height() <= 65_535,
-                    "JPEG output cannot exceed 65535 pixels wide or tall; reduce `width` or `height`"
-                );
+                if !(1..=100).contains(&quality) {
+                    return Err(ImageRequestError::JpegQuality);
+                }
+                if self.width() > 65_535 || self.height() > 65_535 {
+                    return Err(ImageRequestError::JpegDimensions);
+                }
             }
             Encoding::WebP { quality } => {
-                ensure!(
-                    quality.is_none_or(|quality| quality <= 100),
-                    "`quality` must be 0 to 100 for WebP output"
-                );
-                ensure!(
-                    self.width() <= 16_383 && self.height() <= 16_383,
-                    "WebP output cannot exceed 16383 pixels wide or tall; reduce `width` or `height`"
-                );
+                if !quality.is_none_or(|quality| quality <= 100) {
+                    return Err(ImageRequestError::WebpQuality);
+                }
+                if self.width() > 16_383 || self.height() > 16_383 {
+                    return Err(ImageRequestError::WebpDimensions);
+                }
             }
             Encoding::Png => {}
         }
@@ -780,94 +869,98 @@ impl ImageRecipe {
     }
 
     /// Whether a source with this metadata can be rendered by this raster recipe.
-    pub fn validate(&self, metadata: &ImageMetadata) -> Result<()> {
-        self.validate_structure()?;
+    pub fn validate(&self, metadata: &ImageMetadata) -> Result<(), ImageRequestError> {
         self.pixels.validate(metadata)?;
         self.validate_colors(metadata.has_alpha)
     }
 
     /// Whether the parsed SVG with this size and hash can be rendered by this recipe.
-    pub fn validate_svg(&self, width: f64, height: f64, hash: u128) -> Result<()> {
-        self.validate_structure()?;
+    pub fn validate_svg(
+        &self,
+        width: f64,
+        height: f64,
+        hash: u128,
+    ) -> Result<(), ImageRequestError> {
         let Some(vector) = self.pixels.vector else {
-            bail!("the image recipe is not a vector recipe");
+            return Err(ImageRequestError::NotAVectorRecipe);
         };
         let Some(svg) = self.svg else {
-            bail!("the image recipe has no SVG renderer identity");
+            return Err(ImageRequestError::NoSvgRendererIdentity);
         };
-        ensure!(
-            svg.hash() == hash,
-            "the image changed since Tola prepared its variants; run the build again"
-        );
         let (source_width, source_height) = vector.source();
         let tolerance = 1e-6 * width.abs().max(1.0);
-        ensure!(
-            (source_width - width).abs() <= tolerance
-                && (source_height - height).abs() <= tolerance,
-            "the image changed since Tola prepared its variants; run the build again"
-        );
+        if svg.hash() != hash
+            || (source_width - width).abs() > tolerance
+            || (source_height - height).abs() > tolerance
+        {
+            return Err(ImageRequestError::SourceChanged);
+        }
         self.validate_colors(true)
     }
 
-    fn validate_colors(&self, has_alpha: bool) -> Result<()> {
-        ensure!(
-            self.format() != ImageFormat::Jpeg || !has_alpha || self.pixels.background.is_some(),
-            "JPEG output cannot keep transparency; set `background`, or use `format: \"png\"` or `format: \"webp\"`"
-        );
+    fn validate_colors(&self, has_alpha: bool) -> Result<(), ImageRequestError> {
+        if self.format() == ImageFormat::Jpeg && has_alpha && self.pixels.background.is_none() {
+            return Err(ImageRequestError::JpegTransparency);
+        }
         Ok(())
     }
 }
 
 /// The shape every request must have, whatever source it names.
-fn validate_request(options: ResizeOptions) -> Result<()> {
-    ensure!(
-        options.operation == ResizeOperation::Fill || options.anchor == CropAnchor::Center,
-        "`anchor` applies only to `op: \"fill\"`; the other operations keep the whole source"
-    );
-    for dimension in [options.width, options.height].into_iter().flatten() {
-        ensure!(
-            dimension > 0,
-            "`width` and `height` must be positive pixel counts"
-        );
+fn validate_request(options: ResizeOptions) -> Result<(), ImageRequestError> {
+    if options.operation != ResizeOperation::Fill && options.anchor != CropAnchor::Center {
+        return Err(ImageRequestError::AnchorWithoutFill);
+    }
+    if [options.width, options.height]
+        .into_iter()
+        .flatten()
+        .any(|dimension| dimension == 0)
+    {
+        return Err(ImageRequestError::NonPositiveDimensions);
     }
     Ok(())
 }
 
 /// The width a request must carry for its operation.
-fn requested_width(options: &ResizeOptions) -> Result<u32> {
+fn requested_width(options: &ResizeOptions) -> Result<u32, ImageRequestError> {
     options
         .width
-        .ok_or_else(|| anyhow::anyhow!("`resize-image` needs `width` for this `op`; pass `width`"))
+        .ok_or(ImageRequestError::MissingDimension { dimension: "width" })
 }
 
 /// The height a request must carry for its operation.
-fn requested_height(options: &ResizeOptions) -> Result<u32> {
-    options.height.ok_or_else(|| {
-        anyhow::anyhow!("`resize-image` needs `height` for this `op`; pass `height`")
+fn requested_height(options: &ResizeOptions) -> Result<u32, ImageRequestError> {
+    options.height.ok_or(ImageRequestError::MissingDimension {
+        dimension: "height",
     })
 }
 
 /// Nearest integer, with ties upward, and at least one pixel for extremely thin images.
-fn scaled_dimension(dimension: u32, numerator: u32, denominator: u32) -> Result<u32> {
+fn scaled_dimension(
+    dimension: u32,
+    numerator: u32,
+    denominator: u32,
+) -> Result<u32, ImageRequestError> {
     let scaled = ((u64::from(dimension) * u64::from(numerator) + u64::from(denominator) / 2)
         / u64::from(denominator))
     .max(1);
-    u32::try_from(scaled).map_err(|_| {
-        anyhow::anyhow!("the resized image would be too large; use a smaller `width` and `height`")
-    })
+    u32::try_from(scaled).map_err(|_| ImageRequestError::ResizedTooLarge)
 }
 
 /// Nearest integer at least one pixel, refusing values that cannot be a pixel count.
-fn rounded_pixel(value: f64) -> Result<u32> {
+fn rounded_pixel(value: f64) -> Result<u32, ImageRequestError> {
     let rounded = value.round().max(1.0);
-    ensure!(
-        rounded <= f64::from(u32::MAX),
-        "the resized image would be too large; use a smaller `width` and `height`"
-    );
+    if rounded > f64::from(u32::MAX) {
+        return Err(ImageRequestError::ResizedTooLarge);
+    }
     Ok(rounded as u32)
 }
 
-fn scaled_pixels_f64(dimension: f64, numerator: f64, denominator: f64) -> Result<u32> {
+fn scaled_pixels_f64(
+    dimension: f64,
+    numerator: f64,
+    denominator: f64,
+) -> Result<u32, ImageRequestError> {
     rounded_pixel(dimension * numerator / denominator)
 }
 

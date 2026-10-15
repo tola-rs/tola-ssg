@@ -100,12 +100,12 @@ mod tests {
     }
 
     #[test]
-    fn paths_stay_relative_to_their_root() {
+    fn paths_stay_relative() {
         let root = Path::new("/srv/site");
 
         assert_eq!(
-            display_path_within(&root.join(".tola/logs/session.jsonl"), root),
-            ".tola/logs/session.jsonl"
+            display_path_within(&root.join(".tola/state/logs/session.jsonl"), root),
+            ".tola/state/logs/session.jsonl"
         );
         assert_eq!(display_path_within(root, root), ".");
         assert_eq!(

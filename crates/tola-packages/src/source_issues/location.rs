@@ -23,12 +23,7 @@ impl IssueOrigin<'_> {
         self.declaration.clone()
     }
 
-    /// The byte range that marks the declaration: its callee when the call is readable, and the
-    /// whole declaration otherwise.
-    ///
-    /// Underlining a multi-line argument draws a caret block around the whole metadata dictionary,
-    /// which buries the message it accompanies. The callee points at the same declaration on one
-    /// line.
+    /// The range marking the declaration: its callee when readable, the whole call otherwise.
     pub(super) fn marker_range(&self) -> std::ops::Range<usize> {
         declaration_call(LinkedNode::new(self.source.root()), &self.declaration)
             .and_then(|call| self.source.find(call.callee().span()))
@@ -113,10 +108,7 @@ pub(super) struct SourceOrigin {
 
 /// The owner and declaration location for `path`.
 ///
-/// A source that declares no metadata has no range, and the file's start answers for it: the
-/// diagnostic still names the file and the field, and there is no declaration to point at. A path
-/// no origin covers is not one of this compilation's sources, which is a programming error rather
-/// than a position to guess.
+/// A source that declares no metadata answers with the file's start; an uncovered path is an error.
 pub(super) fn source_origin(engine: &Engine<'_>, path: &str) -> Result<SourceOrigin, EcoString> {
     let Some(Value::Dict(origin)) =
         crate::library::source_origins(engine).and_then(|origins| origins.get(path).ok())

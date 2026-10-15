@@ -8,7 +8,7 @@ use tola_build::config::{
     AssetsConfig, BuildSectionConfig, FontsConfig, IconsConfig, ResolvedSiteConfig,
     SiteConfigSchema, section::VendorConfig,
 };
-use tola_build::filesystem::normalize_existing_prefix;
+use tola_build::filesystem::{layout, normalize_existing_prefix};
 
 use crate::cli::output::CommandOutput;
 use crate::terminal::{display_path, display_path_within};
@@ -50,29 +50,29 @@ pub(crate) fn trace_unavailable_cause(path: &Path, error: &anyhow::Error) {
 ///
 /// The reader never passed `--log-file` for the automatic session log Tola names, so the message
 /// only reports the path; the help names the argument that can replace it.
-pub(crate) fn unavailable_diagnostic(path: &Path) -> tola_build::diagnostic::Diagnostic {
-    tola_build::diagnostic::Diagnostic::new(
+pub(crate) fn unavailable_diagnostic(path: &Path) -> tola_diagnostic::Diagnostic {
+    tola_diagnostic::Diagnostic::new(
         crate::codes::log::UNAVAILABLE,
-        tola_build::diagnostic::Severity::Warning,
+        tola_diagnostic::Severity::Warning,
         format!("cannot open log `{}`", display_path(path)),
     )
     .with_note("logging is off for this session")
-    .with_help("Make `.tola/logs` writable, or pass `--log-file` to record elsewhere")
+    .with_help("Make `.tola/state/logs` writable, or pass `--log-file` to record elsewhere")
 }
 
 /// The warning for an automatic session log that would sit inside the site's own inputs or
 /// outputs.
-fn conflicted_diagnostic(path: &Path) -> tola_build::diagnostic::Diagnostic {
-    tola_build::diagnostic::Diagnostic::new(
+fn conflicted_diagnostic(path: &Path) -> tola_diagnostic::Diagnostic {
+    tola_diagnostic::Diagnostic::new(
         crate::codes::log::UNAVAILABLE,
-        tola_build::diagnostic::Severity::Warning,
+        tola_diagnostic::Severity::Warning,
         format!(
             "cannot log to `{}`; it overlaps the site's inputs or outputs",
             display_path(path)
         ),
     )
     .with_note("logging is off for this session")
-    .with_help("Move `.tola/logs` aside, or pass `--log-file` to record outside the site")
+    .with_help("Move `.tola/state/logs` aside, or pass `--log-file` to record outside the site")
 }
 
 pub(crate) fn start_site(
@@ -111,7 +111,7 @@ pub(crate) fn start_site(
 fn disable_automatic_log(
     output: &CommandOutput,
     log: &super::LogFile,
-    diagnostic: &tola_build::diagnostic::Diagnostic,
+    diagnostic: &tola_diagnostic::Diagnostic,
 ) {
     if log.disable() {
         let _ = output.diagnostic(diagnostic);
@@ -150,23 +150,23 @@ pub(crate) fn start_after_error(
         super::LogOrigin::Explicit => log.path(),
     };
     let _ = output.diagnostic(
-        &tola_build::diagnostic::Diagnostic::new(
+        &tola_diagnostic::Diagnostic::new(
             crate::codes::log::UNAVAILABLE,
-            tola_build::diagnostic::Severity::Warning,
+            tola_diagnostic::Severity::Warning,
             format!("cannot open log `{}`", display_path_within(reported, root)),
         )
-        .with_help("Use `.tola/logs/`, or a writable path outside the site"),
+        .with_help("Use `.tola/state/logs/`, or a writable path outside the site"),
     );
 }
 
 fn check_unresolved_site(log: &Path, root: &Path) -> Result<()> {
     let root = normalize_existing_prefix(root);
-    let directory = root.join(".tola/logs");
+    let directory = layout::logs(&root);
     let dedicated =
         normalize_existing_prefix(&directory) == directory && log.starts_with(&directory);
     ensure!(
         !log.starts_with(&root) || dedicated,
-        "configuration is unavailable; log to `.tola/logs/` or a path outside the site"
+        "configuration is unavailable; log to `.tola/state/logs/` or a path outside the site"
     );
     Ok(())
 }
@@ -276,13 +276,14 @@ pub(crate) fn check_site(
         &root.join(tola_build::filesystem::SITE_BUILD_LOCK_FILE),
         Some(root),
     )?;
-    if let Some(workspace) =
-        tola_build::filesystem::publication_workspace(&root.join(&build.publish_dir))
+    if let Some(workspace) = tola_build::filesystem::swap_workspace(&root.join(&build.publish_dir))
     {
         check_tree_within(log, &workspace, Some(root))?;
     }
-    if let Some(workspace) = vendor.workspace_path() {
-        check_tree_within(log, &root.join(workspace), Some(root))?;
+    if let Some(path) = vendor.path.as_deref()
+        && let Some(workspace) = tola_build::filesystem::swap_workspace(&root.join(path))
+    {
+        check_tree_within(log, &workspace, Some(root))?;
     }
     for file in std::iter::once(build.entry.as_path()).chain(assets.file_sources()) {
         check_file_within(Some(log), &root.join(file), Some(root))?;
@@ -355,14 +356,18 @@ mod tests {
         let root = directory.path();
         let mut schema = SiteConfigSchema::default();
         schema.vendor.path = Some("vendor".into());
-        for relative in [
-            ".tola-build.lock",
-            ".public-publish/candidate/index.html",
-            ".vendor-vendor/previous/icons/ui.json",
-        ] {
+        let lock = root.join(tola_build::filesystem::SITE_BUILD_LOCK_FILE);
+        let workspace =
+            tola_build::filesystem::swap_workspace(&root.join(&schema.build.publish_dir))
+                .expect("a configured output has a replacement workspace");
+        let candidate = workspace.join("staged/0/index.html");
+        let vendored = tola_build::filesystem::swap_workspace(&root.join("vendor"))
+            .expect("the vendor directory has a replacement workspace")
+            .join("staged/0/icons/ui.json");
+        for log in [&lock, &candidate, &vendored] {
             assert!(
                 check_site(
-                    Some(&root.join(relative)),
+                    Some(log),
                     root,
                     &root.join("tola.toml"),
                     SiteInputSections::from_schema(&schema),
@@ -376,7 +381,7 @@ mod tests {
     /// into `content`, and the refusal is reported once however many rounds revalidate it.
     #[test]
     #[cfg(unix)]
-    fn source_overlapping_logs_stay_out_of_content() {
+    fn source_overlapping_logs_out_content() {
         use std::fs;
 
         for is_automatic in [false, true] {
@@ -384,14 +389,15 @@ mod tests {
             let root = directory.path();
             let source = root.join("content");
             fs::create_dir(&source).unwrap();
-            fs::create_dir(root.join(".tola")).unwrap();
-            std::os::unix::fs::symlink(&source, root.join(".tola/logs")).unwrap();
+            let logs = layout::logs(root);
+            fs::create_dir_all(logs.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&source, &logs).unwrap();
             let name = if is_automatic {
                 "dev-1.jsonl"
             } else {
                 "session.jsonl"
             };
-            let path = root.join(".tola/logs").join(name);
+            let path = logs.join(name);
             let (sink, captured) = crate::terminal::OutputSink::buffered();
             let terminal = crate::terminal::Terminal::with_sink(sink, false, false);
             let log = if is_automatic {
@@ -436,12 +442,12 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
         let log = super::super::LogFile::prepare_session(
-            &root.join(".tola/logs/dev-1.jsonl"),
+            &layout::logs(root).join("dev-1.jsonl"),
             |_, error| panic!("log write failed: {error}"),
         )
         .unwrap();
-        // `.tola` becomes a file before the session opens its log.
-        std::fs::write(root.join(".tola"), "").unwrap();
+        // The site's working directory becomes a file before the session opens its log.
+        std::fs::write(root.join(tola_build::filesystem::INTERNAL_DIR), "").unwrap();
         let (sink, captured) = crate::terminal::OutputSink::buffered();
         let terminal = crate::terminal::Terminal::with_sink(sink, false, false);
         let output = CommandOutput::new(terminal, Some(log));
@@ -453,7 +459,7 @@ mod tests {
             shown.contains(crate::codes::log::UNAVAILABLE.as_str()),
             "{shown}"
         );
-        assert!(shown.contains(".tola/logs/dev-1.jsonl"), "{shown}");
+        assert!(shown.contains(".tola/state/logs/dev-1.jsonl"), "{shown}");
         assert!(!shown.contains("Log: "), "{shown}");
     }
 
@@ -462,12 +468,11 @@ mod tests {
     fn explicit_log_failure_stops_the_command() {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
+        let path = layout::logs(root).join("session.jsonl");
         let log =
-            super::super::LogFile::prepare(&root.join(".tola/logs/session.jsonl"), |_, error| {
-                panic!("log write failed: {error}")
-            })
-            .unwrap();
-        std::fs::write(root.join(".tola"), "").unwrap();
+            super::super::LogFile::prepare(&path, |_, error| panic!("log write failed: {error}"))
+                .unwrap();
+        std::fs::write(root.join(tola_build::filesystem::INTERNAL_DIR), "").unwrap();
         let (sink, _captured) = crate::terminal::OutputSink::buffered();
         let terminal = crate::terminal::Terminal::with_sink(sink, false, false);
         let output = CommandOutput::new(terminal, Some(log));
@@ -481,19 +486,22 @@ mod tests {
         let root = temp.path().join("site");
         let mut writes = FileWrites::new(&root).unwrap();
         writes.create_file("tola.toml", "").unwrap();
+        let mirror = tola_build::filesystem::layout::builtin_packages_relative();
         writes
-            .create_file(".tola/builtin-packages/tola/site/0.0.0/lib.typ", "")
+            .create_file(mirror.join("tola/site/0.0.0/lib.typ"), "")
             .unwrap();
         writes.add_directory("content").unwrap();
         for relative in [
-            "tola.toml",
-            "tola.toml/log",
-            ".tola/builtin-packages",
-            "content",
+            Path::new("tola.toml"),
+            Path::new("tola.toml/log"),
+            mirror.as_path(),
+            Path::new("content"),
         ] {
             assert!(check_writes(Some(&root.join(relative)), &writes, false).is_err());
         }
-        let log = root.join(".tola/init.jsonl");
+        let log = root
+            .join(tola_build::filesystem::INTERNAL_DIR)
+            .join("init.jsonl");
         assert!(check_writes(Some(&log), &writes, false).is_ok());
         assert!(check_writes(Some(&log), &writes, true).is_err());
         assert!(check_writes(Some(&temp.path().join("init.jsonl")), &writes, true).is_ok());

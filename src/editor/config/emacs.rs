@@ -2,13 +2,7 @@
 
 use super::EditorDirectory;
 
-/// Both clients are configured in the author's init file: Eglot's `eglot-server-programs` and
-/// lsp-mode's client registry are user options, and neither reads a site file. The two languages
-/// the server answers are one major mode each here — `typst-ts-mode` opens the Typst sources, and
-/// the site's configuration stays the TOML mode's — and the language id both clients send is the
-/// one Tola answers, `typst`, derived from the mode and from `lsp-activate-on` respectively.
-/// `eglot-server-programs` pairs a mode with its program and arguments, so the entry is the dotted
-/// pair `(typst-ts-mode . ("tola" …))`, the list Eglot reads as the contact.
+/// Eglot's contact keeps initialization options after the command; lsp-mode takes them on the client.
 pub(super) fn snippet(directory: &EditorDirectory) -> String {
     let command = directory.server_command();
     let mut words = vec![elisp_string(command.command)];
@@ -18,18 +12,21 @@ pub(super) fn snippet(directory: &EditorDirectory) -> String {
             .iter()
             .map(|argument| elisp_string(argument)),
     );
-    let command = format!("({})", words.join(" "));
+    let arguments = words.join(" ");
+    let packages = elisp_string(&super::package_source_directory());
     format!(
         r#";; Eglot (Emacs 29+), in the author's init file.
 (with-eval-after-load 'eglot
   (add-to-list 'eglot-server-programs
-               '(typst-ts-mode . {command})))
+               '(typst-ts-mode . ({arguments}
+                 :initializationOptions (:packageSourceDirectory {packages})))))
 
 ;; lsp-mode: its own client, so Tola answers Typst buffers without lsp-mode's Typst client.
 (with-eval-after-load 'lsp-mode
   (lsp-register-client
    (make-lsp-client
-    :new-connection (lsp-stdio-connection '{command})
+    :new-connection (lsp-stdio-connection '({arguments}))
+    :initialization-options '(:packageSourceDirectory {packages})
     :activation-fn (lsp-activate-on "typst")
     :server-id 'tola-lsp)))
 "#
@@ -56,12 +53,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn eglot_entry_passes_the_site_arguments() {
+    fn clients_configure_package_navigation() {
         let snippet = snippet(&editor_directory("."));
-        assert!(
-            snippet.contains(r#"'(typst-ts-mode . ("tola" "lsp"))"#),
-            "Eglot reads the entry as the mode paired with the command list: {snippet}"
-        );
+        assert!(snippet.contains(r#"'(typst-ts-mode . ("tola" "lsp""#));
+        let packages = elisp_string(&super::super::package_source_directory());
+        for prefix in [":initializationOptions ", ":initialization-options '"] {
+            assert!(snippet.contains(&format!("{prefix}(:packageSourceDirectory {packages})")));
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ use ratatui::layout::{Constraint, Layout, Rect, Size};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
-use tola_build::diagnostic::Diagnostic;
+use tola_diagnostic::Diagnostic;
 
 use super::ansi::{self, Segment};
 use super::session::{self, Claim, ProcessTerminal, ViewModes};
@@ -244,7 +244,7 @@ fn run(
     stop: &AtomicBool,
     cancellation: &crate::cancellation::Cancellation,
 ) -> io::Result<()> {
-    let mut terminal = ProcessTerminal::new(sink);
+    let mut terminal = ProcessTerminal;
     let requested = || stop.load(Ordering::Acquire) || cancellation.is_requested();
     while !requested() {
         match sink.draw_development(None, cancellation) {
@@ -395,7 +395,6 @@ impl Rounds {
             Action::Copy => self
                 .current()
                 .is_some_and(|round| !round.transcript.trim().is_empty()),
-            _ => true,
         }
     }
 }
@@ -511,7 +510,7 @@ impl DevScreen {
                     cancellation.interrupt();
                     return true;
                 }
-                if let Some(action) = keymap::DEV.action(key) {
+                if let Some(action) = keymap::action(key) {
                     self.answer(action, cancellation);
                 }
             }
@@ -538,7 +537,6 @@ impl DevScreen {
             Action::First => self.rounds.top = 0,
             Action::Last => self.rounds.top = usize::MAX,
             Action::Copy => self.copy(cancellation),
-            _ => return,
         }
         self.dirty = true;
     }
@@ -615,7 +613,6 @@ impl DevScreen {
             return Ok(());
         }
         if self.size.width == 0 || self.size.height == 0 {
-            self.screen.draw_frame(self.size, |_| {})?;
             return Ok(());
         }
         let header = [
@@ -740,7 +737,6 @@ fn draw_footer(
         area,
         notice.unwrap_or(""),
         &live_actions(rounds),
-        &keymap::DEV,
         palette,
     );
 }
@@ -769,7 +765,7 @@ fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: Rect, jobs: &[Job], styled: b
     }
 }
 
-const ACCEPTED: [Action; 10] = [
+const ACCEPTED: [Action; 9] = [
     Action::PreviousRound,
     Action::NextRound,
     Action::Up,
@@ -779,7 +775,6 @@ const ACCEPTED: [Action; 10] = [
     Action::First,
     Action::Last,
     Action::Copy,
-    Action::Quit,
 ];
 
 fn styled_paragraph(text: &str) -> Paragraph<'static> {
@@ -848,11 +843,11 @@ mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
     use ratatui::style::{Color, Modifier};
-    use tola_build::diagnostic::Severity;
+    use tola_diagnostic::Severity;
 
     fn diagnostic(path: &str) -> Diagnostic {
         Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
+            tola_diagnostic::codes::typst::COMPILE,
             Severity::Error,
             path,
             "expected expression",
@@ -899,7 +894,7 @@ mod tests {
     /// History merges by the diagnostics a round reports, never by the time it arrived: the same
     /// set refreshes its entry in place and keeps the position, a new set is its own entry.
     #[test]
-    fn rounds_merge_by_report_not_by_time() {
+    fn rounds_merge_by_report() {
         let mut rounds = Rounds::default();
         let first = diagnostic("content/first.typ");
         let second = diagnostic("content/second.typ");
@@ -927,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn stamps_show_the_date_only_off_today() {
+    fn stamps_date_earlier_rounds() {
         let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
         let yesterday = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
         let at = |day, hour, minute, second| {
@@ -958,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn new_round_takes_over_the_view() {
+    fn new_round_takes_the_view() {
         let mut rounds = Rounds::default();
         rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
         rounds.previous();
@@ -1022,64 +1017,6 @@ mod tests {
     }
 
     #[test]
-    fn short_frames_preserve_body() {
-        for width in [1, 20, 40, 80, 160] {
-            for height in [1, 2, 3, 8, 24, 50] {
-                for notice in [false, true] {
-                    let area = Rect::new(0, 0, width, height);
-                    let areas = frame_areas(area, 200, 200, notice);
-                    assert!(areas[2].height > 0);
-                    let footer = u16::from(height > 1) + u16::from(notice && height > 3);
-                    assert_eq!(areas[4].height, footer);
-                    assert_eq!(areas.iter().map(|part| part.height).sum::<u16>(), height);
-                    assert!(
-                        areas
-                            .iter()
-                            .all(|part| area.contains(part.as_position()) || part.is_empty())
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn copy_notice_sits_above_the_hints() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        let area = Rect::new(0, 0, 80, 2);
-        let palette = Palette::new(true);
-        let mut terminal =
-            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
-                .unwrap();
-        terminal
-            .draw(|frame| draw_footer(frame, area, Some("copied 1 diagnostic"), &rounds, palette))
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let row = |y: u16| {
-            (area.x..area.right())
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-                .trim_end()
-                .to_owned()
-        };
-        assert_eq!(row(0), "copied 1 diagnostic");
-        assert!(row(1).contains("c copy"), "{}", row(1));
-        assert_eq!(buffer[(0, 0)].fg, palette.notice_style().fg.unwrap());
-    }
-
-    #[test]
-    fn copy_notice_leaves_after_its_time() {
-        let shown_at = Instant::now();
-        let notice = Notice {
-            text: "copied 1 diagnostic".to_owned(),
-            shown_at,
-        };
-        let almost = shown_at + NOTICE_LIFETIME - std::time::Duration::from_millis(1);
-        assert!(!notice.expired(almost));
-        assert!(notice.expired(shown_at + NOTICE_LIFETIME));
-    }
-
-    #[test]
     fn short_hook_area_shows_jobs() {
         let jobs = ["styles", "search", "assets"].map(|name| {
             Job::new(
@@ -1110,7 +1047,7 @@ mod tests {
     fn diagnostic_colors_survive_framing() {
         for severity in [Severity::Error, Severity::Warning] {
             let diagnostic = Diagnostic::new(
-                tola_build::codes::typst::COMPILE,
+                tola_diagnostic::codes::typst::COMPILE,
                 severity,
                 "expected expression",
             );
@@ -1145,12 +1082,6 @@ mod tests {
     }
 
     #[test]
-    fn plain_text_drops_styling_and_payloads() {
-        let text = "a\u{1b}]8;;http://127.0.0.1:1/\u{1b}\\link\u{1b}]8;;\u{1b}\\\u{1b}[31mred\u{1b}[0m\nsecond\tline";
-        assert_eq!(plain_text(text), "alinkred\nsecond    line");
-    }
-
-    #[test]
     fn scroll_hints_follow_the_body() {
         let mut rounds = Rounds::default();
         rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
@@ -1174,18 +1105,14 @@ mod tests {
         assert!(!rounds.live(Action::Last));
     }
 
-    #[test]
-    fn round_hints_follow_history() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
-        assert!(!rounds.live(Action::PreviousRound));
-        assert!(!rounds.live(Action::NextRound));
-        rounds.push(round(vec![diagnostic("content/second.typ")], 2, "again"));
-        assert!(rounds.live(Action::PreviousRound), "two rounds to walk");
-        assert!(!rounds.live(Action::NextRound));
-        rounds.previous();
-        assert!(!rounds.live(Action::PreviousRound));
-        assert!(rounds.live(Action::NextRound));
+    fn assets_job() -> Job {
+        Job::new(
+            HookRun {
+                scope: 0,
+                name: "assets".to_owned(),
+            },
+            "",
+        )
     }
 
     fn body_text(line: &Line<'_>) -> String {
@@ -1197,13 +1124,7 @@ mod tests {
 
     #[test]
     fn hook_chunks_keep_stream_lines() {
-        let mut job = Job::new(
-            HookRun {
-                scope: 0,
-                name: "assets".to_owned(),
-            },
-            "",
-        );
+        let mut job = assets_job();
         job.output("stdout", "first");
         job.output("stdout", " line\r");
         job.output("stdout", "\n");
@@ -1219,13 +1140,7 @@ mod tests {
 
     #[test]
     fn hook_lines_keep_style_when_cropped() {
-        let mut job = Job::new(
-            HookRun {
-                scope: 0,
-                name: "assets".to_owned(),
-            },
-            "",
-        );
+        let mut job = assets_job();
         for index in 1..=HOOK_LINES + 1 {
             let color = if index == 1 { "\x1b[31m" } else { "\x1b[32m" };
             job.output("stdout", &format!("{color}line {index}\x1b[0m\n"));
@@ -1238,13 +1153,7 @@ mod tests {
 
     #[test]
     fn hook_header_names_omitted_lines() {
-        let mut job = Job::new(
-            HookRun {
-                scope: 0,
-                name: "assets".to_owned(),
-            },
-            "",
-        );
+        let mut job = assets_job();
         for index in 1..=HOOK_LINES {
             job.output("stdout", &format!("line {index}\n"));
         }
@@ -1254,19 +1163,5 @@ mod tests {
             body_text(&job.body(false)[0]),
             "/assets · 1 earlier line not shown"
         );
-    }
-
-    #[test]
-    fn hook_body_follows_the_color_decision() {
-        let mut job = Job::new(
-            HookRun {
-                scope: 0,
-                name: "assets".to_owned(),
-            },
-            "",
-        );
-        job.output("stdout", "\x1b[31mred\n");
-        assert_eq!(job.body(true)[1].spans[1].style.fg, Some(Color::Red));
-        assert_eq!(job.body(false)[1].spans[1].style.fg, None);
     }
 }

@@ -23,7 +23,8 @@ summary = [
 - `route-segments`：文件布局赋予该源的身份分段：根索引为 `()`，`about.typ` 与 `about/index.typ` 都是 `("about",)`，`posts/deep.typ` 是 `("posts", "deep")`。
 - `meta`：该源在本轮求值中被看到的 metadata。若它的 metadata 会读取其他源，就要经过多轮才能收敛，因此记录在这几轮之间可能变化。根程序拿到的是稳定后的值。
 
-`tola inspect sources` 读取各源的声明 metadata，不构建站点。
+`tola inspect sources` 列出发现的文件路径，不求值 metadata。
+用模型查询把站点需要的 metadata 返回为 JSON。
 
 这些分段只是 route 的建议。用 `@tola/address` 对分段做 slug 并连接起来，而文档实际以哪条 route 可达，由它自己的 output 决定。
 
@@ -83,7 +84,7 @@ summary = [
 
 返回的每条记录就是你传入的那条记录，只是 `meta` 换成了按声明解析得到的值。未声明 metadata 的源带 `meta: none`，只有这个函数把它读作空字典。解析出的 metadata 始终是字典。
 
-输入顺序和身份字段保持不变。解析不会写回 `all-sources()`，也不会改动 `tola inspect sources` 读取的声明。
+输入顺序和身份字段保持不变。解析不会写回 `all-sources()`，也不会改动原始 metadata 声明。
 
 Example - 在根程序中校验、选择并发布源：
 

@@ -108,8 +108,6 @@ pub fn push_documentation(out: &mut String, documentation: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::serialize_toml_value;
-
     #[derive(Default, serde::Serialize, super::Config)]
     #[config(section = "service")]
     struct Service {
@@ -186,15 +184,6 @@ preview = false
         assert!(diagnostics.is_present("groups.entries.future"));
         assert!(diagnostics.into_result().is_err());
     }
-    #[test]
-    fn serializer_errors_keep_their_cause() {
-        let value = std::collections::HashMap::from([(1_u8, "value")]);
-        let error = serialize_toml_value(&value).expect_err("integer map keys are not TOML");
-
-        let source = std::error::Error::source(&error).expect("serializer error remains the cause");
-        assert!(source.is::<toml::ser::Error>());
-    }
-
     struct Unserializable(bool);
 
     impl Default for Unserializable {

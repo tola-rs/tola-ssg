@@ -17,6 +17,7 @@ struct FailedAttemptInputs {
     observation: InputObservation,
     source_hooks: crate::hooks::SourceHookOutputs,
     failed_hook_outputs: Option<crate::hooks::FailedHookOutputs>,
+    report: Option<super::BuildReport>,
 }
 
 impl BuildFailure {
@@ -50,12 +51,17 @@ impl BuildFailure {
                 observation,
                 source_hooks,
                 failed_hook_outputs: inputs.failed_hook_outputs,
+                report: inputs.report,
             }),
         }
     }
 
     pub fn error(&self) -> &anyhow::Error {
         &self.error
+    }
+    /// Completed projections, absent when capture was disabled or no attempt began.
+    pub fn report(&self) -> Option<&super::BuildReport> {
+        self.inputs.report.as_ref()
     }
     pub fn is_cancelled(&self) -> bool {
         crate::cancellation::is_cancelled(&self.error)
@@ -117,6 +123,36 @@ pub fn configured_input_observation(config: &ResolvedSiteConfig) -> InputObserva
         &crate::icon::configured_collection_watch_evidence(config),
         false,
     );
+    let lock = config.get_root().join("tola.lock");
+    let identity = crate::filesystem::FilesystemSourceIdentity::from_path(&lock);
+    observation.path_pair(
+        InputKind::ModuleManifests,
+        crate::observation::InputPathScope::Exact,
+        false,
+        identity.logical_path(),
+        identity.physical_path(),
+    );
+    for (name, declaration) in config.modules() {
+        let root = match &declaration.source {
+            crate::modules::ModuleSource::Local { path } => config.get_root().join(path),
+            crate::modules::ModuleSource::Remote { .. } => {
+                match crate::modules::declared_root(config.get_root(), name, &declaration.source) {
+                    Ok(root) => root,
+                    Err(_) => continue,
+                }
+            }
+        };
+        for path in [root.clone(), root.join("tola-module.toml")] {
+            let identity = crate::filesystem::FilesystemSourceIdentity::from_path(&path);
+            observation.path_pair(
+                InputKind::ModuleManifests,
+                crate::observation::InputPathScope::Exact,
+                false,
+                identity.logical_path(),
+                identity.physical_path(),
+            );
+        }
+    }
     observation.normalize_paths();
     observation
 }
@@ -146,7 +182,6 @@ pub(super) fn input_observation(
         &crate::hooks::HookOutputEvidence::watch_evidence(hook_outputs),
         true,
     );
-    observation.normalize_paths();
     observation
 }
 
@@ -206,6 +241,15 @@ impl InputFreshness {
     }
 }
 
+/// The changed inputs as one sentence reads them: `a`, `b` and `c`.
+fn joined_inputs(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+    }
+}
+
 /// Revalidate this candidate's evidence before either write policy commits it.
 pub(super) fn input_freshness(
     config: &ResolvedSiteConfig,
@@ -217,7 +261,7 @@ pub(super) fn input_freshness(
     cancellation.ensure_active()?;
     let started = std::time::Instant::now();
     let icons_started = started.elapsed();
-    let icons = producer_caches
+    let icons_fresh = producer_caches
         .icons
         .evidence()
         .is_fresh_for(config, cancellation)?;
@@ -230,6 +274,7 @@ pub(super) fn input_freshness(
         }
     }
     let hooks_elapsed = started.elapsed();
+    let manifests_fresh = config.module_inputs.manifests_are_fresh(cancellation)?;
     let physical_reads_fresh = producer_caches
         .dependencies
         .physical_reads_are_fresh(producer_caches.host.source_boundary(), cancellation)?;
@@ -258,10 +303,11 @@ pub(super) fn input_freshness(
         "verified complete candidate inputs");
     let freshness = InputFreshness::from_checks([
         (InputKind::TypstPhysicalReads, physical_reads_fresh),
+        (InputKind::ModuleManifests, manifests_fresh),
         (InputKind::TypstPackageSelection, package_checks_fresh),
         (InputKind::ContentInventory, content_inventory_fresh),
         (InputKind::ConfiguredAssets, configured_assets_fresh),
-        (InputKind::Icons, icons),
+        (InputKind::Icons, icons_fresh),
         (InputKind::FontInventory, font_inventory_fresh),
         (InputKind::BeforeBuildHookOutputs, hooks_fresh),
     ]);
@@ -270,17 +316,17 @@ pub(super) fn input_freshness(
 }
 
 pub(super) fn stale_input_error(freshness: &InputFreshness) -> anyhow::Error {
-    crate::diagnostic::DiagnosticError::new(
+    tola_diagnostic::DiagnosticError::new(
         "site inputs changed before the output was written",
         vec![
-            crate::diagnostic::Diagnostic::new(
-                crate::codes::write::STALE,
-                crate::diagnostic::Severity::Error,
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::write::STALE,
+                tola_diagnostic::Severity::Error,
                 "a site input changed while the site was being built",
             )
             .with_note(format!(
-                "changed: {}",
-                freshness.stale_input_names().join(", ")
+                "{} no longer match what Tola read",
+                joined_inputs(&freshness.stale_input_names())
             ))
             .with_help("Run the build again once edits have stopped"),
         ],
@@ -310,4 +356,5 @@ pub(crate) struct BuildAttemptInputs {
     pub(super) font_read_paths: Vec<std::path::PathBuf>,
     pub(super) source_hooks: crate::hooks::SourceHookOutputs,
     pub(super) failed_hook_outputs: Option<crate::hooks::FailedHookOutputs>,
+    pub(super) report: Option<super::BuildReport>,
 }

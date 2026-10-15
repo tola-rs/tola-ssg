@@ -1,3 +1,7 @@
+//! Shell completion scripts, generated from the CLI's own grammar.
+//!
+//! Every supported shell comes from `Cli::command()`, so a new flag or verb reaches all of them
+//! without a per-shell list to maintain.
 use anyhow::Result;
 use clap::CommandFactory;
 use clap_complete::{Shell, generate};

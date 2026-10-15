@@ -1,12 +1,65 @@
-//! The expression, call, member, or import item a at sits in.
+//! Source selections and literal module dependencies.
 //!
 //! Every selection answers with byte ranges into the exact immutable source whose tree supplied
 //! it, so a caller that holds that source can quote what it selected.
 
 use std::ops::Range;
+use std::path::Path;
 
 use typst_syntax::ast::AstNode;
-use typst_syntax::{LinkedNode, Side, Source, SyntaxKind, ast};
+use typst_syntax::{LinkedNode, Side, Source, SyntaxKind, SyntaxNode, ast};
+
+/// One literal path a source imports or includes.
+pub struct ModulePath {
+    /// Only `ModuleImport` and `ModuleInclude` produce module paths.
+    pub kind: SyntaxKind,
+    /// Decoded path, as the compiler resolves it.
+    pub text: String,
+    /// The string literal's bytes, including its quotes.
+    pub range: Range<usize>,
+}
+
+/// Literal module dependencies, in source order; expressions require evaluation instead.
+pub fn module_paths(source: &Source) -> Vec<ModulePath> {
+    let mut paths = Vec::new();
+    let mut stack = vec![LinkedNode::new(source.root())];
+    while let Some(node) = stack.pop() {
+        let literal = match node.kind() {
+            SyntaxKind::ModuleInclude => node
+                .get()
+                .children()
+                .find(|child| child.kind() == SyntaxKind::Str)
+                .and_then(|child| child.cast::<ast::Str>()),
+            SyntaxKind::ModuleImport => {
+                node.get()
+                    .cast::<ast::ModuleImport>()
+                    .and_then(|import| match import.source() {
+                        ast::Expr::Str(text) => Some(text),
+                        _ => None,
+                    })
+            }
+            _ => {
+                stack.extend(node.children());
+                continue;
+            }
+        };
+        if let Some(text) = literal
+            && let Some(written) = node.find(text.span())
+        {
+            let range = written.range();
+            // An unfinished quote has no closing byte for `ast::Str::get` to remove.
+            if range.end >= range.start + 2 {
+                paths.push(ModulePath {
+                    kind: node.kind(),
+                    text: text.get().to_string(),
+                    range,
+                });
+            }
+        }
+    }
+    paths.sort_by_key(|path| path.range.start);
+    paths
+}
 
 /// The import statement the at is inside.
 pub struct Import {
@@ -20,6 +73,14 @@ pub struct Import {
     pub path: Vec<String>,
     /// Every item the statement already imports, as its full path.
     pub imported: Vec<Vec<String>>,
+}
+
+/// The node one import item is written in: the renamed item that carries its alias, or the path.
+fn item_whole<'a>(path: &LinkedNode<'a>) -> LinkedNode<'a> {
+    match path.parent() {
+        Some(parent) if parent.kind() == SyntaxKind::RenamedImportItem => parent.clone(),
+        _ => path.clone(),
+    }
 }
 
 /// Select import-item paths, not the local names introduced by `as`.
@@ -67,10 +128,7 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
     if let (Some(items), Some(items_node)) = (items, items_node.as_ref()) {
         for item in items.iter() {
             let path = items_node.find(item.path().span())?;
-            let whole = match path.parent() {
-                Some(parent) if parent.kind() == SyntaxKind::RenamedImportItem => parent.clone(),
-                _ => path.clone(),
-            };
+            let whole = item_whole(&path);
             if whole.range().start <= at && at <= whole.range().end {
                 active = true;
                 if at <= path.range().end {
@@ -141,6 +199,14 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
     Some(selection)
 }
 
+/// The nearest node at or above `leaf` that `wanted` accepts.
+fn enclosing<'a>(
+    leaf: LinkedNode<'a>,
+    wanted: impl Fn(&LinkedNode<'a>) -> bool,
+) -> Option<LinkedNode<'a>> {
+    std::iter::successors(Some(leaf), |node| node.parent().cloned()).find(|node| wanted(node))
+}
+
 /// The member access the at is inside.
 pub struct Member {
     /// The expression the dot reads from.
@@ -169,13 +235,7 @@ pub fn imported_name(source: &Source, at: usize) -> Option<ImportedName> {
     let node = cursor_leaves(source, at)
         .into_iter()
         .flatten()
-        .find_map(|node| {
-            let mut node = node;
-            while node.cast::<ast::ModuleImport>().is_none() {
-                node = node.parent()?.clone();
-            }
-            Some(node)
-        })?;
+        .find_map(|leaf| enclosing(leaf, |node| node.cast::<ast::ModuleImport>().is_some()))?;
     let import = node.cast::<ast::ModuleImport>()?;
     let ast::Imports::Items(items) = import.imports()? else {
         return None;
@@ -184,10 +244,7 @@ pub fn imported_name(source: &Source, at: usize) -> Option<ImportedName> {
     let source = node.find(import.source().span())?.range();
     for item in items.iter() {
         let path = list.find(item.path().span())?;
-        let whole = match path.parent() {
-            Some(parent) if parent.kind() == SyntaxKind::RenamedImportItem => parent,
-            _ => &path,
-        };
+        let whole = item_whole(&path);
         if whole.range().start <= at && at <= whole.range().end {
             // `as` and the new name are the author's own words, not the export's.
             if path.range().start > at || at > path.range().end {
@@ -269,10 +326,8 @@ pub fn name(source: &Source, at: usize) -> Option<Range<usize>> {
 
 /// The `include` statement at the at, whose path the site may not have yet.
 pub fn include_path(source: &Source, at: usize) -> Option<Range<usize>> {
-    let mut node = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
-    while node.kind() != SyntaxKind::ModuleInclude {
-        node = node.parent()?.clone();
-    }
+    let leaf = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+    let node = enclosing(leaf, |node| node.kind() == SyntaxKind::ModuleInclude)?;
     Some(dropped(&node))
 }
 
@@ -299,58 +354,110 @@ pub fn path_base(name: &str) -> Option<PathBase> {
     }
 }
 
+/// Decode string content with Typst's escape rules, including unfinished prefixes.
+pub fn string_prefix(raw: &str) -> String {
+    let literal = SyntaxNode::leaf(SyntaxKind::Str, format!("\"{raw}\""));
+    literal
+        .cast::<ast::Str>()
+        .expect("a string leaf casts to a string literal")
+        .get()
+        .to_string()
+}
+
 /// A path argument the offset sits inside, with the base its call site resolves it from.
 pub struct PathArgument {
-    /// The string's own bytes, without the quotation marks.
+    /// Content bytes, ending at the token's end when its closing quote is absent.
     pub range: Range<usize>,
     /// What the call site resolves it from.
     pub base: PathBase,
+    /// The owning call's callee; an include has no callee.
+    pub callee: Option<Range<usize>>,
+    /// The file format the parameter accepts, when it narrows suggestions.
+    pub extension: Option<&'static str>,
 }
 
 /// The path argument the offset sits inside: a call's string, or an include's path.
 pub fn path_argument(source: &Source, at: usize) -> Option<PathArgument> {
-    let mut node = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+    let literal = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+    let closed = literal.kind() == SyntaxKind::Str;
+    if !closed && !(literal.kind() == SyntaxKind::Error && literal.leaf_text().starts_with('"')) {
+        return None;
+    }
+    let range = literal.range().start + 1..literal.range().end - usize::from(closed);
+    if at < range.start || at > range.end {
+        return None;
+    }
+    let mut argument = literal;
+    let mut in_array = false;
     loop {
-        match node.kind() {
-            // An include statement names a file from the file that writes it.
+        let parent = argument.parent()?;
+        match parent.kind() {
             SyntaxKind::ModuleInclude => {
-                let path = node
-                    .children()
-                    .find(|child| child.kind() == SyntaxKind::Str)?;
                 return Some(PathArgument {
-                    range: inner(path.range())?,
+                    range,
                     base: PathBase::File,
+                    callee: None,
+                    extension: None,
                 });
             }
-            SyntaxKind::FuncCall => {
-                let call = node.cast::<ast::FuncCall>()?;
-                let base = path_base(callee_name(call.callee())?.as_str())?;
-                let text = call.args().items().find_map(argument_string)?;
-                let range = inner(node.find(text.span())?.range())?;
-                return (range.start <= at && at <= range.end)
-                    .then_some(PathArgument { range, base });
+            SyntaxKind::Args => {
+                let call_node = parent.parent()?;
+                let target = call_node
+                    .cast::<ast::FuncCall>()
+                    .map(|call| call.callee())
+                    .or_else(|| call_node.cast::<ast::SetRule>().map(|rule| rule.target()))?;
+                let name = callee_name(target)?;
+                let base = if name == "raw" {
+                    PathBase::File
+                } else {
+                    path_base(&name)?
+                };
+                let extension = if let Some(named) = argument.cast::<ast::Named>() {
+                    match (name.as_str(), named.name().as_str()) {
+                        ("raw", "theme") if !in_array => Some("tmTheme"),
+                        ("raw", "syntaxes") => Some("sublime-syntax"),
+                        ("bibliography", "style") => {
+                            let value = string_prefix(&source.text()[range.clone()]);
+                            if !value.contains('/')
+                                && Path::new(value.as_str()).extension().is_none()
+                            {
+                                return None;
+                            }
+                            Some("csl")
+                        }
+                        ("bibliography" | "raw", _) => return None,
+                        (_, "path") => None,
+                        _ => return None,
+                    }
+                } else {
+                    if name == "raw"
+                        || argument.kind() == SyntaxKind::Array && name != "bibliography"
+                    {
+                        return None;
+                    }
+                    if parent.children().take(argument.index()).any(|previous| {
+                        matches!(
+                            previous.cast::<ast::Arg>(),
+                            Some(ast::Arg::Pos(_) | ast::Arg::Spread(_))
+                        )
+                    }) {
+                        return None;
+                    }
+                    None
+                };
+                return Some(PathArgument {
+                    range,
+                    base,
+                    callee: Some(call_node.find(target.span())?.range()),
+                    extension,
+                });
             }
-            _ => node = node.parent()?.clone(),
-        }
-    }
-}
-
-/// The bytes a string literal holds, without the quotation marks that enclose them.
-fn inner(range: Range<usize>) -> Option<Range<usize>> {
-    (range.end >= range.start + 2).then(|| range.start + 1..range.end - 1)
-}
-
-/// The string one argument writes, when it writes one: a positional path, or `path:`/`style:`.
-fn argument_string(item: ast::Arg<'_>) -> Option<ast::Str<'_>> {
-    match item {
-        ast::Arg::Pos(ast::Expr::Str(text)) => Some(text),
-        ast::Arg::Named(named) if matches!(named.name().get().as_str(), "path" | "style") => {
-            match named.expr() {
-                ast::Expr::Str(text) => Some(text),
-                _ => None,
+            SyntaxKind::Array | SyntaxKind::Parenthesized | SyntaxKind::Named => {
+                in_array |= parent.kind() == SyntaxKind::Array;
+                argument = parent.clone();
             }
+            _ => return None,
         }
-        _ => None,
     }
 }
 
@@ -487,48 +594,47 @@ pub enum CallTarget {
 
 /// The call the at is inside, with the argument it sits in.
 pub fn call(source: &Source, at: usize) -> Option<Call> {
-    let root = LinkedNode::new(source.root());
-    let mut node = root.leaf_at(at, Side::Before)?;
-    loop {
-        if let Some(call) = node.cast::<ast::FuncCall>()
-            && let Some(args) = node.find(call.args().span())
-            && args.range().start <= at
-        {
-            let callee = node.find(call.callee().span())?;
-            let target = match callee.cast::<ast::FieldAccess>() {
-                Some(access) => CallTarget::Field {
-                    receiver: callee.find(access.target().span())?.range(),
-                    field: callee.find(access.field().span())?.range(),
-                },
-                None => CallTarget::Function,
-            };
-            let suffix_start = match &target {
-                CallTarget::Function => callee.range().end,
-                CallTarget::Field { receiver, .. } => receiver.end,
-            };
-            let active_argument = args
-                .children()
-                .filter(|node| node.kind() == SyntaxKind::Comma && node.range().end <= at)
-                .count();
-            let argument_name = args
-                .cast::<ast::Args>()
-                .and_then(|arguments| arguments.items().nth(active_argument))
-                .and_then(|argument| match argument {
-                    ast::Arg::Named(named) => Some(named.name().span()),
-                    ast::Arg::Pos(_) | ast::Arg::Spread(_) => None,
-                })
-                .and_then(|name| args.find(name))
-                .map(|name| name.range());
-            return Some(Call {
-                suffix: suffix_start..node.range().end,
-                callee: callee.range(),
-                target,
-                active_argument,
-                argument_name,
-            });
-        }
-        node = node.parent()?.clone();
-    }
+    let leaf = LinkedNode::new(source.root()).leaf_at(at, Side::Before)?;
+    // The innermost call whose argument list already began at or before the cursor.
+    let node = enclosing(leaf, |node| {
+        node.cast::<ast::FuncCall>()
+            .and_then(|call| node.find(call.args().span()))
+            .is_some_and(|args| args.range().start <= at)
+    })?;
+    let call = node.cast::<ast::FuncCall>()?;
+    let args = node.find(call.args().span())?;
+    let callee = node.find(call.callee().span())?;
+    let target = match callee.cast::<ast::FieldAccess>() {
+        Some(access) => CallTarget::Field {
+            receiver: callee.find(access.target().span())?.range(),
+            field: callee.find(access.field().span())?.range(),
+        },
+        None => CallTarget::Function,
+    };
+    let suffix_start = match &target {
+        CallTarget::Function => callee.range().end,
+        CallTarget::Field { receiver, .. } => receiver.end,
+    };
+    let active_argument = args
+        .children()
+        .filter(|node| node.kind() == SyntaxKind::Comma && node.range().end <= at)
+        .count();
+    let argument_name = args
+        .cast::<ast::Args>()
+        .and_then(|arguments| arguments.items().nth(active_argument))
+        .and_then(|argument| match argument {
+            ast::Arg::Named(named) => Some(named.name().span()),
+            ast::Arg::Pos(_) | ast::Arg::Spread(_) => None,
+        })
+        .and_then(|name| args.find(name))
+        .map(|name| name.range());
+    Some(Call {
+        suffix: suffix_start..node.range().end,
+        callee: callee.range(),
+        target,
+        active_argument,
+        argument_name,
+    })
 }
 
 /// Whether this node is the module path of an import statement.
@@ -550,6 +656,46 @@ mod tests {
         let text = marked.replace('|', "");
         let source = Source::detached(text.clone());
         path_argument(&source, at).map(|argument| (text[argument.range].to_owned(), argument.base))
+    }
+
+    #[test]
+    fn path_roles_follow_the_cursor() {
+        for (marked, expected) in [
+            ("#read(\"da|ta.csv\")", Some("data.csv")),
+            ("#read(path: \"da|ta.csv\")", Some("data.csv")),
+            ("#read(path: \"da|", Some("da")),
+            ("#set raw(theme: \"my|.tmTheme\")", Some("my.tmTheme")),
+            ("#raw(\"text\", theme: \"my|.tmTheme\")", Some("my.tmTheme")),
+            (
+                "#set raw(syntaxes: (\"a.sublime-syntax\", \"b|.sublime-syntax\"))",
+                Some("b.sublime-syntax"),
+            ),
+            ("#bibliography((\"a.bib\", \"b|.bib\"))", Some("b.bib")),
+            ("#bibliography((\"a.bib\", \"b|", Some("b")),
+            (
+                "#bibliography(\"a.bib\", style: \"custom.c|sl\")",
+                Some("custom.csl"),
+            ),
+            (
+                "#bibliography(\"a.bib\", style: \"styles/|\")",
+                Some("styles/"),
+            ),
+            ("#read(\"data.csv\", encoding: \"utf|8\")", None),
+            ("#read(encoding: \"utf|", None),
+            ("#image(alt: \"al|t\")", None),
+            ("#image(alt: \"al|", None),
+            ("#image(style: \"custom.c|sl\")", None),
+            ("#bibliography(\"a.bib\", style: \"ap|a\")", None),
+            ("#bibliography(\"a.bib\", \"b|.bib\")", None),
+            ("#read((\"a.csv\", \"b|.csv\"))", None),
+            ("#raw(\"my|.tmTheme\")", None),
+        ] {
+            assert_eq!(
+                argument(marked),
+                expected.map(|path| (path.to_owned(), PathBase::File)),
+                "{marked}"
+            );
+        }
     }
 
     #[test]

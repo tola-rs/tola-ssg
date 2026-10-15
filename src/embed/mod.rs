@@ -4,6 +4,7 @@ pub mod dev {
     use std::sync::LazyLock;
 
     use tola_address::{RESERVED_ROOT, SiteUrlMount, UrlPath};
+    use tola_build::html::escape_attr;
 
     const HOTRELOAD_FILENAME: &str = "hotreload.js";
     const HOTRELOAD_SOURCE: &str = include_str!("dev/hotreload.js");
@@ -20,21 +21,14 @@ pub mod dev {
     ///
     /// The failing step and the minifier's own message stay in Tola's log; the HTTP response
     /// has only the failure sentence a site author can act on.
-    #[derive(Debug)]
+    #[derive(Debug, thiserror::Error)]
     pub(crate) enum RuntimeMinifyError {
         /// The status stylesheet embedded in the runtime could not be minified.
+        #[error("status stylesheet: {0}")]
         StatusStylesheet(String),
         /// The composed runtime could not be minified.
+        #[error("runtime source: {0}")]
         RuntimeSource(String),
-    }
-
-    impl std::fmt::Display for RuntimeMinifyError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::StatusStylesheet(reason) => write!(f, "status stylesheet: {reason}"),
-                Self::RuntimeSource(reason) => write!(f, "runtime source: {reason}"),
-            }
-        }
     }
 
     /// Compose the development runtime from Tola's own sources and minify it.
@@ -63,8 +57,8 @@ pub mod dev {
         let source = hotreload_browser_path(mount);
         format!(
             r#"<script src="{}" data-tola-runtime data-tola-bootstrap="{}"></script>"#,
-            tola_build::html::escape_attr(&source),
-            tola_build::html::escape_attr(bootstrap),
+            escape_attr(&source),
+            escape_attr(bootstrap),
         )
     }
 
@@ -96,7 +90,7 @@ pub mod dev {
         use super::{hotreload_browser_path, hotreload_js, render_hotreload_js};
 
         #[test]
-        fn runtime_path_follows_the_site_mount() {
+        fn runtime_path_follows_mount() {
             assert_eq!(
                 hotreload_browser_path(&tola_address::SiteUrlMount::root()),
                 "/_tola/hotreload.js"

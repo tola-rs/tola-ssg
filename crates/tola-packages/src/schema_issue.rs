@@ -38,3 +38,74 @@ fn decode(issues: &Array, span: Span) -> SourceResult<Vec<Issue>> {
         })
         .collect()
 }
+
+/// One normalized Issue located relative to the supplied value.
+#[derive(Debug, Clone)]
+pub struct ProjectedIssue {
+    /// Path in the original user-supplied value.
+    pub path: Vec<Value>,
+    /// Whether the rejected value came from the schema, rather than the user.
+    pub generated: bool,
+    /// Text rendered with the schema package's own Issue wording.
+    pub message: String,
+    /// Additional notes carried by this Issue.
+    pub notes: Vec<String>,
+}
+
+/// Decode and normalize schema Issues with the same provenance and wording as `format-issues`.
+pub fn project_issues(issues: &Array) -> Result<Vec<ProjectedIssue>, String> {
+    let decoded = issues
+        .iter()
+        .map(|value| Issue::decode(value).map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut projected = Vec::new();
+    for issue in issue::normalize(&decoded) {
+        project_one(&issue, &[], &issue::Region::root(), None, &mut projected);
+    }
+    Ok(projected)
+}
+
+fn project_one(
+    problem: &Issue,
+    prefix: &[Value],
+    region: &issue::Region,
+    generated_field: Option<&[Value]>,
+    output: &mut Vec<ProjectedIssue>,
+) {
+    let full = [prefix, &problem.path].concat();
+    let notes = problem.notes.iter().map(ToString::to_string).collect();
+    if let Some(description) = issue::describe(problem, prefix, region) {
+        let message = problem
+            .sentence(
+                &description.field,
+                description.kind,
+                &description.origin_path,
+            )
+            .to_string();
+        output.push(ProjectedIssue {
+            path: description.field.clone(),
+            generated: true,
+            message,
+            notes,
+        });
+        for child in &problem.children {
+            project_one(
+                child,
+                &[],
+                &description.child,
+                Some(&description.field),
+                output,
+            );
+        }
+    } else {
+        output.push(ProjectedIssue {
+            path: generated_field.map_or_else(|| full.clone(), |field| field.to_vec()),
+            generated: generated_field.is_some(),
+            message: format!("{}: {}", region.position(&full), problem.message),
+            notes,
+        });
+        for child in &problem.children {
+            project_one(child, &full, region, generated_field, output);
+        }
+    }
+}

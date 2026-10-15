@@ -46,17 +46,24 @@ pub fn icon_file_bytes<'a>(
     package: &tola_typst::PackageSpec,
     path: &std::path::Path,
 ) -> Option<&'a [u8]> {
-    if !is_icon_file(package, path) {
-        return None;
-    }
-    let relative = path
-        .strip_prefix(ICON_OBSERVATION_DIRECTORY)
-        .ok()?
-        .to_str()?;
-    let (collection, name) = relative.split_once('/')?;
+    let (collection, name) = observation_parts(package, path)?;
     collections
         .get(collection, name.strip_suffix(".svg")?)
         .map(|icon| icon.svg().as_bytes())
+}
+
+/// The collection and name one observation path below the icon directory spells.
+fn observation_parts<'a>(
+    package: &tola_typst::PackageSpec,
+    path: &'a std::path::Path,
+) -> Option<(&'a str, &'a str)> {
+    if !is_icon_file(package, path) {
+        return None;
+    }
+    path.strip_prefix(ICON_OBSERVATION_DIRECTORY)
+        .ok()?
+        .to_str()?
+        .split_once('/')
 }
 
 /// Tracked names for suggestions within one mounted collection; aliases are included.
@@ -65,14 +72,7 @@ pub fn icon_collection_names_bytes(
     package: &tola_typst::PackageSpec,
     path: &std::path::Path,
 ) -> Option<Vec<u8>> {
-    if !is_icon_file(package, path) {
-        return None;
-    }
-    let relative = path
-        .strip_prefix(ICON_OBSERVATION_DIRECTORY)
-        .ok()?
-        .to_str()?;
-    let (collection, name) = relative.split_once('/')?;
+    let (collection, name) = observation_parts(package, path)?;
     if name != ".names" {
         return None;
     }
@@ -325,26 +325,15 @@ pub(super) fn tola_icon(
     root_attributes.insert("width".into(), format!("{}em", icon.aspect_ratio()));
     root_attributes.insert("height".into(), "1em".into());
     for (name, value) in attributes {
-        let name = if name.as_str().eq_ignore_ascii_case("class") {
-            Str::from("class")
-        } else if name.as_str().eq_ignore_ascii_case("style") {
-            Str::from("style")
-        } else {
-            name
-        };
-        if label_owns_attribute(name.as_str()) {
+        let name = crate::attribute_key(&name);
+        if label_owns_attribute(name) {
             bail!(
                 span,
                 "set accessibility semantics with `label`, not `{name}`"
             );
         }
-        let value = value.cast::<Str>().at(span)?.to_string();
-        let value = match (name.as_str(), root_attributes.get(name.as_str())) {
-            ("class", Some(source)) => format!("{source} {value}"),
-            ("style", Some(source)) => format!("{};{value}", source.trim_end_matches(';')),
-            _ => value,
-        };
-        root_attributes.insert(name.to_string(), value);
+        let value = value.cast::<Str>().at(span)?;
+        crate::merge_attribute(&mut root_attributes, name, value.as_str());
     }
     root_attributes.retain(|name, _| !label_owns_attribute(name));
     if let Some(label) = label {

@@ -1,3 +1,6 @@
+# Two groups per ecosystem keep the PR count flat: `*-minor-patch` is the lane
+# .github/workflows/dependabot-auto-merge.yml merges once Check is green, `*-major`
+# is reviewed by hand. Order matters, Dependabot assigns the first matching group.
 version: 2
 updates:
   # `directory: "/"` does not reach .github/actions/setup-typescript, hence the glob entry.
@@ -6,16 +9,18 @@ updates:
       - "/"
       - "/.github/actions/**/*"
     schedule:
-      interval: weekly
-      day: tuesday
+      interval: monthly
       time: "09:00"
       timezone: Asia/Shanghai # matches this repository's commit times (UTC+8)
     cooldown:
       default-days: 7 # a week of soak instead of the 3-day default
     groups:
-      actions-minor-patch: # routine bumps ride in one PR
+      actions-minor-patch:
         patterns: ["*"]
         update-types: [minor, patch]
+      actions-major:
+        patterns: ["*"]
+        update-types: [major]
     ignore:
       - dependency-name: "denoland/setup-deno"
 
@@ -30,6 +35,9 @@ updates:
       cargo-minor-patch:
         patterns: ["*"]
         update-types: [minor, patch]
+      cargo-major:
+        patterns: ["*"]
+        update-types: [major]
     open-pull-requests-limit: 3
     ignore:
       - dependency-name: "tola-*" # internal crates released in lockstep
@@ -40,12 +48,16 @@ updates:
   - package-ecosystem: deno
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
     cooldown:
       default-days: 7
     groups:
-      deno:
+      deno-minor-patch:
         patterns: ["*"]
+        update-types: [minor, patch]
+      deno-major:
+        patterns: ["*"]
+        update-types: [major]
 
   # extensions/vscode devDependencies; there is no package-lock.json.
   - package-ecosystem: npm
@@ -56,8 +68,12 @@ updates:
       default-days: 7
     versioning-strategy: increase-if-necessary
     groups:
-      vscode-tooling:
+      vscode-minor-patch:
         patterns: ["*"]
+        update-types: [minor, patch]
+      vscode-major:
+        patterns: ["*"]
+        update-types: [major]
     open-pull-requests-limit: 3
 
   - package-ecosystem: nix
@@ -67,6 +83,8 @@ updates:
     cooldown:
       default-days: 7
     groups:
+      # Commit-pinned inputs carry no semantic version, so splitting by update type
+      # would leave most bumps ungrouped.
       nix-inputs:
         patterns: ["*"]
     ignore:

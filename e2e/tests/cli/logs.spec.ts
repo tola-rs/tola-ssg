@@ -19,7 +19,7 @@ test('compact call traces retain full log ranges', async ({ binary, directory: r
 ]
 `,
   })
-  const log = join(root, '.tola/logs/diagnostics.jsonl')
+  const log = join(root, '.tola/state/logs/diagnostics.jsonl')
   const result = await runCommand(
     binary,
     ['check', '--log-file', log, '--color', 'never'],
@@ -68,7 +68,7 @@ test('shared package warning names each importing source once', async ({ binary,
   for (const name of ['a', 'b']) {
     await writeFile(join(root, `content/${name}.typ`), '#import "@local/warning:0.1.0"\n')
   }
-  const log = join(root, '.tola/logs/diagnostics.jsonl')
+  const log = join(root, '.tola/state/logs/diagnostics.jsonl')
   const result = await runCommand(
     binary,
     ['check', '--package-path', packages, '--log-file', log, '--color', 'never'],
@@ -94,7 +94,7 @@ test('export failures retain compiler diagnostics', async ({ binary, directory: 
 #document("file.pdf",format:"pdf")[#pdf.attach("bad.txt",bytes("hi"),mime-type:"invalid") Hi]
 `,
   })
-  const log = join(root, '.tola/logs/export.jsonl')
+  const log = join(root, '.tola/state/logs/export.jsonl')
   const result = await runCommand(
     binary,
     ['build', '--log-file', log, '--color', 'never'],
@@ -138,7 +138,7 @@ test('doctor json stays out of the log', async ({ binary, directory: root }) => 
       '--config',
       'missing.toml',
       '--log-file',
-      '.tola/logs/session.jsonl',
+      '.tola/state/logs/session.jsonl',
       '--color',
       'always',
     ],
@@ -162,7 +162,7 @@ test('doctor json stays out of the log', async ({ binary, directory: root }) => 
   expect(stderr).toContain('\u001b[')
   expect(stdout).not.toContain('\u001b')
 
-  const log = join(root, '.tola/logs/session.jsonl')
+  const log = join(root, '.tola/state/logs/session.jsonl')
   const source = await readFile(log, 'utf8')
   const records = await readLogRecords(log)
   expect(records[0]!.fields).toMatchObject({ kind: 'command_started', command: 'doctor' })

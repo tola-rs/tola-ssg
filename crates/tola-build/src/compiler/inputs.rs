@@ -4,16 +4,17 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::PathBuf;
 use tola_typst::sort_package_checks;
 
-/// Attempt inputs retained for watcher recovery after failure. Completed builds
-/// use their frozen dependencies for write validation instead.
+/// Attempt inputs retained for watcher recovery after failure.
 #[derive(Default)]
 pub(crate) struct BuildInputs {
     file_reads: FileReads,
     package_checks: PackageChecks,
+    successful_reads: HashSet<tola_typst::FileRead>,
 }
 
 impl BuildInputs {
     pub(crate) fn record_accessed(&mut self, accessed: &tola_typst::AccessedDeps) {
+        self.successful_reads.extend(accessed.reads.iter().cloned());
         self.file_reads.record(
             accessed
                 .disk_reads
@@ -23,6 +24,10 @@ impl BuildInputs {
         );
         self.package_checks
             .record(accessed.package_checks.iter().cloned());
+    }
+
+    pub(crate) fn successful_reads(&self) -> impl Iterator<Item = &tola_typst::FileRead> {
+        self.successful_reads.iter()
     }
 
     pub(crate) fn file_reads_mut(&mut self) -> &mut FileReads {
@@ -40,6 +45,7 @@ impl BuildInputs {
         let Self {
             file_reads,
             package_checks,
+            ..
         } = self;
         (file_reads.into_paths(), package_checks.into_checks())
     }
@@ -62,9 +68,6 @@ impl FileReads {
 }
 
 /// Package-location checks observed by one build attempt.
-///
-/// Availability checks are separate from file reads: a package candidate can
-/// be checked without reading its files.
 #[derive(Default)]
 pub(crate) struct PackageChecks {
     checks: HashSet<tola_typst::PackageCheck>,

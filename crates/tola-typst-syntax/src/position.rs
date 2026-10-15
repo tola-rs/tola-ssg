@@ -1,7 +1,20 @@
 //! Checked conversion between byte offsets and the positions an editor addresses text by.
 
-use anyhow::{Context, Result, bail};
 use typst_syntax::Lines;
+
+/// Why a position addresses no byte of the source.
+#[derive(Debug, thiserror::Error)]
+pub enum PositionError {
+    /// The line is past the document's last line.
+    #[error("source position line exceeds the document")]
+    LineOutOfRange,
+    /// The column falls inside a surrogate pair.
+    #[error("source position splits a UTF-16 surrogate pair")]
+    SplitsSurrogatePair,
+    /// The column is past the end of its line.
+    #[error("source position character exceeds the line")]
+    PastLineEnd,
+}
 
 /// One position in a source: a line, and a column counted in UTF-16 code units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -37,10 +50,13 @@ impl Utf16Range {
 
 /// The byte offset one position addresses, or an error when the position is past the
 /// document's lines or past the end of its line.
-pub fn byte_offset<T: AsRef<str>>(lines: &Lines<T>, position: Utf16Position) -> Result<usize> {
+pub fn byte_offset<T: AsRef<str>>(
+    lines: &Lines<T>,
+    position: Utf16Position,
+) -> Result<usize, PositionError> {
     let line = lines
         .line_to_range(position.line as usize)
-        .context("source position line exceeds the document")?;
+        .ok_or(PositionError::LineOutOfRange)?;
     let text = lines.text()[line.clone()].trim_end_matches(typst_syntax::is_newline);
     let column = position.character as usize;
     let mut utf16 = 0;
@@ -50,13 +66,13 @@ pub fn byte_offset<T: AsRef<str>>(lines: &Lines<T>, position: Utf16Position) -> 
         }
         utf16 += character.len_utf16();
         if utf16 > column {
-            bail!("source position splits a UTF-16 surrogate pair");
+            return Err(PositionError::SplitsSurrogatePair);
         }
     }
     if utf16 == column {
         Ok(line.start + text.len())
     } else {
-        bail!("source position character exceeds the line")
+        Err(PositionError::PastLineEnd)
     }
 }
 

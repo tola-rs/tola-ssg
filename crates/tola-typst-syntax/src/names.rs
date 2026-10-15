@@ -470,6 +470,11 @@ impl SourceNames {
         }
     }
 
+    /// The local declaration whose identifier begins at `at`, when one does.
+    pub(crate) fn declaration_beginning_at(&self, at: usize) -> Option<usize> {
+        self.declaration_starts.get(&at).copied()
+    }
+
     /// Returns a local declaration index; fields and external origins need a name graph.
     pub fn declared_at(&self, cursor: usize) -> Option<usize> {
         let occurrence = self.occurrence(cursor)?;
@@ -480,10 +485,7 @@ impl SourceNames {
                 occurrence.scope,
                 occurrence.range.start,
             ),
-            OccurrenceKind::Import { .. } => self
-                .declaration_starts
-                .get(&occurrence.range.start)
-                .copied(),
+            OccurrenceKind::Import { .. } => self.declaration_beginning_at(occurrence.range.start),
             _ => None,
         }
     }
@@ -680,6 +682,33 @@ impl SourceNames {
         }
     }
 
+    /// Records one field selection as an occurrence of the name path its target spells.
+    ///
+    /// A code field is an `Ident` and a math field a `MathIdent`; both name the same path step.
+    fn record_field<'a>(
+        &mut self,
+        node: &LinkedNode<'_>,
+        scope: usize,
+        field: impl AstNode<'a>,
+        target: ast::Expr<'_>,
+    ) {
+        if let Some(path) = self.path(node, target, scope) {
+            self.occurrences.push(Occurrence {
+                range: self.range(node, field),
+                scope,
+                math: path.math,
+                kind: OccurrenceKind::Field(path),
+            });
+        }
+    }
+
+    /// Walks the child node an AST accessor names, when the node holds one.
+    fn walk_child(&mut self, node: &LinkedNode<'_>, span: typst_syntax::Span, scope: usize) {
+        if let Some(child) = node.find(span) {
+            self.walk(&child, scope);
+        }
+    }
+
     fn walk(&mut self, node: &LinkedNode<'_>, scope: usize) {
         if let Some(binding) = node.cast::<ast::LetBinding>() {
             let init = binding.init();
@@ -717,10 +746,8 @@ impl SourceNames {
         if let Some(closure) = node.cast::<ast::Closure>() {
             // Defaults evaluate in the enclosing scope, not in the parameter scope.
             for parameter in closure.params().children() {
-                if let ast::Param::Named(named) = parameter
-                    && let Some(default) = node.find(named.expr().span())
-                {
-                    self.walk(&default, scope);
+                if let ast::Param::Named(named) = parameter {
+                    self.walk_child(node, named.expr().span(), scope);
                 }
             }
             let body_range = self.range(node, closure.body());
@@ -749,15 +776,11 @@ impl SourceNames {
                     }
                 }
             }
-            if let Some(body) = node.find(closure.body().span()) {
-                self.walk(&body, child_scope);
-            }
+            self.walk_child(node, closure.body().span(), child_scope);
             return;
         }
         if let Some(loop_) = node.cast::<ast::ForLoop>() {
-            if let Some(iterable) = node.find(loop_.iterable().span()) {
-                self.walk(&iterable, scope);
-            }
+            self.walk_child(node, loop_.iterable().span(), scope);
             let body_range = self.range(node, loop_.body());
             let child_scope = self.scope(scope, body_range.clone(), false);
             for name in loop_.pattern().bindings() {
@@ -770,9 +793,7 @@ impl SourceNames {
                     Initializer::Unknown,
                 );
             }
-            if let Some(body) = node.find(loop_.body().span()) {
-                self.walk(&body, child_scope);
-            }
+            self.walk_child(node, loop_.body().span(), child_scope);
             return;
         }
         if let Some(import) = node.cast::<ast::ModuleImport>() {
@@ -783,9 +804,7 @@ impl SourceNames {
                     .path(node, expression, scope)
                     .map_or(ImportSource::Unknown, ImportSource::Name),
             };
-            if let Some(expression) = node.find(import.source().span()) {
-                self.walk(&expression, scope);
-            }
+            self.walk_child(node, import.source().span(), scope);
             let id = self.imports.len();
             self.imports.push(Import {
                 source,
@@ -872,32 +891,14 @@ impl SourceNames {
             return;
         }
         if let Some(field) = node.cast::<ast::FieldAccess>() {
-            if let Some(target) = node.find(field.target().span()) {
-                self.walk(&target, scope);
-            }
-            if let Some(path) = self.path(node, field.target(), scope) {
-                self.occurrences.push(Occurrence {
-                    range: self.range(node, field.field()),
-                    scope,
-                    math: path.math,
-                    kind: OccurrenceKind::Field(path),
-                });
-            }
+            self.walk_child(node, field.target().span(), scope);
+            self.record_field(node, scope, field.field(), field.target());
             return;
         }
         if let Some(field) = node.cast::<ast::MathFieldAccess>() {
-            if let Some(target) = node.find(field.target().span()) {
-                self.walk(&target, scope);
-            }
-            if let Some(target) = field.target().to_untyped().cast::<ast::Expr>()
-                && let Some(path) = self.path(node, target, scope)
-            {
-                self.occurrences.push(Occurrence {
-                    range: self.range(node, field.field()),
-                    scope,
-                    math: path.math,
-                    kind: OccurrenceKind::Field(path),
-                });
+            self.walk_child(node, field.target().span(), scope);
+            if let Some(target) = field.target().to_untyped().cast::<ast::Expr>() {
+                self.record_field(node, scope, field.field(), target);
             }
             return;
         }
@@ -920,9 +921,7 @@ impl SourceNames {
                     });
                 }
             }
-            if let Some(value) = node.find(named.expr().span()) {
-                self.walk(&value, scope);
-            }
+            self.walk_child(node, named.expr().span(), scope);
             return;
         }
         if matches!(node.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent) {

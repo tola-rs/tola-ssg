@@ -6,7 +6,7 @@
 
 /// Build attempts the development server schedules.
 pub mod build {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A rebuild task could not run.
     pub const TASK: DiagnosticCode = DiagnosticCode::new("build.task");
@@ -14,7 +14,7 @@ pub mod build {
 
 /// Source analysis without a build.
 pub mod check {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A source that does not parse as Typst.
     pub const SYNTAX: DiagnosticCode = DiagnosticCode::new("check.syntax");
@@ -24,7 +24,7 @@ pub mod check {
 
 /// The command boundary.
 pub mod command {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A command failed without classifying the failure.
     pub const FAILED: DiagnosticCode = DiagnosticCode::new("command.failed");
@@ -34,9 +34,9 @@ pub mod command {
 
 /// Configuration loading and reloading.
 pub mod config {
-    pub use tola_build::codes::config::{LOAD, RELOAD};
+    pub use tola_diagnostic::codes::config::{LOAD, RELOAD};
 
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A configuration change requires restarting the development server.
     pub const SERVE_RESTART: DiagnosticCode = DiagnosticCode::new("config.serve_restart");
@@ -44,7 +44,7 @@ pub mod config {
 
 /// Read-only site and local-tool checks.
 pub mod doctor {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A site check could not run.
     pub const CHECKS: DiagnosticCode = DiagnosticCode::new("doctor.checks");
@@ -89,7 +89,7 @@ pub mod editor {
 
 /// Formatting the site's Typst sources.
 pub mod fmt {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A source Tola could not format.
     pub const FAILED: DiagnosticCode = DiagnosticCode::new("fmt.failed");
@@ -101,22 +101,20 @@ pub mod fmt {
 
 /// Hook execution around publication.
 pub mod hook {
-    pub use tola_build::codes::hook::AFTER_PUBLISH;
+    pub use tola_diagnostic::codes::hook::AFTER_PUBLISH;
 }
 
 /// Site scaffolding.
 pub mod init {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// The target directory holds files Tola will not overwrite.
     pub const CONFLICT: DiagnosticCode = DiagnosticCode::new("init.conflict");
-    /// The selected features cannot be scaffolded as they stand.
-    pub const SELECTION: DiagnosticCode = DiagnosticCode::new("init.selection");
 }
 
 /// Documentation selectors.
 pub mod help {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A selector does not name a supported documentation target.
     pub const TARGET: DiagnosticCode = DiagnosticCode::new("help.target");
@@ -124,9 +122,15 @@ pub mod help {
     pub const MEMBER: DiagnosticCode = DiagnosticCode::new("help.member");
 }
 
+pub mod skill {
+    use tola_diagnostic::DiagnosticCode;
+
+    pub const SECTION: DiagnosticCode = DiagnosticCode::new("skill.section");
+}
+
 /// Failures with no classified owner.
 pub mod internal {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// Tola failed in a way no producer classified.
     pub const ERROR: DiagnosticCode = DiagnosticCode::new("internal.error");
@@ -134,7 +138,7 @@ pub mod internal {
 
 /// The session log.
 pub mod log {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// The configured log file is not usable.
     pub const LOCATION: DiagnosticCode = DiagnosticCode::new("log.location");
@@ -146,7 +150,7 @@ pub mod log {
 
 /// Browser delivery of a new revision.
 pub mod reload {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// The preferred reload port is already in use.
     pub const PORT_IN_USE: DiagnosticCode = DiagnosticCode::new("reload.port_in_use");
@@ -154,7 +158,7 @@ pub mod reload {
 
 /// The development HTTP server.
 pub mod server {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// The server is reachable beyond this machine.
     pub const NETWORK_EXPOSED: DiagnosticCode = DiagnosticCode::new("server.network_exposed");
@@ -164,7 +168,7 @@ pub mod server {
 
 /// Terminal interaction.
 pub mod terminal {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// Terminal output could not be written.
     pub const WRITE: DiagnosticCode = DiagnosticCode::new("terminal.write");
@@ -173,7 +177,7 @@ pub mod terminal {
 
 /// Filesystem observation.
 pub mod watch {
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// A filesystem watch could not be attached.
     pub const ATTACH: DiagnosticCode = DiagnosticCode::new("watch.attach");
@@ -193,10 +197,10 @@ pub mod watch {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use tola_build::diagnostic::DiagnosticCode;
+    use tola_diagnostic::DiagnosticCode;
 
     /// Every code this module declares or re-exports, keyed by the surface that owns it.
-    const DECLARED_CODES_BY_SURFACE: [(&str, &[DiagnosticCode]); 14] = [
+    const DECLARED_CODES_BY_SURFACE: [(&str, &[DiagnosticCode]); 15] = [
         ("build", &[build::TASK]),
         ("command", &[command::FAILED, command::SIGNAL]),
         (
@@ -221,8 +225,9 @@ mod tests {
         ),
         ("editor", &[editor::CONFIGURATION]),
         ("help", &[help::TARGET, help::MEMBER]),
+        ("skill", &[skill::SECTION]),
         ("hook", &[hook::AFTER_PUBLISH]),
-        ("init", &[init::CONFLICT, init::SELECTION]),
+        ("init", &[init::CONFLICT]),
         ("internal", &[internal::ERROR]),
         ("log", &[log::LOCATION, log::UNAVAILABLE, log::WRITE]),
         ("reload", &[reload::PORT_IN_USE]),

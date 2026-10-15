@@ -132,7 +132,7 @@ mod tests {
     /// The two variables, with `less` on `PATH` as the fallback, decide the pager: the first
     /// present variable wins, and an empty, `cat`, or malformed value disables paging.
     #[test]
-    fn pager_resolution_follows_the_first_present_setting() {
+    fn pager_uses_first_present_setting() {
         let less = Some(Path::new("/usr/bin/less"));
         let disabled = ["", "  ", "cat", "/bin/cat", "cat -u"];
         for value in disabled {

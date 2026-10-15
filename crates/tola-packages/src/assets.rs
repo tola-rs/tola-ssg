@@ -56,11 +56,7 @@ pub(super) fn tola_asset_url(
     Ok(browser_url)
 }
 
-/// What a host binding's string argument names, when it names something in this site.
-///
-/// A domain is a vocabulary, not a lookup: the consumer that resolves the argument decides what
-/// keys belong to it. This exists so that consumer never has to match the binding's name, the
-/// author's spelling of it, or the package an author imported it from.
+/// What a host binding's string argument names, so a consumer never matches the binding's name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgumentDomain {
     /// A site-root URL one `assets` declaration publishes, as `asset-url` takes it.
@@ -70,10 +66,7 @@ pub enum ArgumentDomain {
 /// One host binding whose string argument carries a domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArgumentDomainDeclaration {
-    /// The native's own name: what `Func::name` reports for the value a site imports.
-    ///
-    /// A function's identity is its own name, not the name a site binds or writes it under, so an
-    /// import rename and the several packages that re-export one native all reach this row.
+    /// The native's own name; a function's identity is its name, not a site's binding.
     pub function: &'static str,
     /// The parameter's name as Typst exposes it, which is how the author writes it too.
     pub parameter: &'static str,
@@ -82,9 +75,6 @@ pub struct ArgumentDomainDeclaration {
 }
 
 /// Every host binding whose string argument names something in this site.
-///
-/// The row's names are checked against the native they describe by this module's own test, so a
-/// rename of the function or its parameter cannot leave the table describing nothing.
 pub const ARGUMENT_DOMAINS: &[ArgumentDomainDeclaration] = &[ArgumentDomainDeclaration {
     function: "tola-asset-url",
     parameter: "declared-url",

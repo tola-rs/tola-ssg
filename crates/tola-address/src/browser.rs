@@ -51,14 +51,9 @@ pub fn resolve_browser_reference(
         reference: reference.to_owned(),
     };
 
-    let document_origin =
-        url::Url::parse(DOCUMENT_ORIGIN).expect("the document origin is a valid URL");
-    let fallback = document_origin
-        .join(&mount.browser_path(document))
-        .map_err(|_| invalid())?;
+    let fallback = document_url(document, mount).ok_or_else(invalid)?;
     let base = base_href
-        .and_then(|value| fallback.join(value).ok())
-        .filter(is_allowed_document_base)
+        .and_then(|value| document_base(&fallback, value))
         .unwrap_or(fallback);
     let resolved = base.join(reference).map_err(|_| invalid())?;
 
@@ -81,20 +76,36 @@ pub fn resolve_browser_reference(
 
 /// Whether a document's `<base href>` keeps this build's own origin.
 ///
-/// The value joins exactly as [`resolve_browser_reference`] joins it. A base that cannot be
-/// joined, or that a browser document base rejects, is ignored there, so it leaves this build's
+/// A base that cannot be joined, or that a browser document base rejects, leaves this build's
 /// origin in place and answers `true`. Only a base naming another origin answers `false`, and
 /// then every reference of that page resolves [`External`](ResolvedBrowserReference::External).
 pub fn base_href_keeps_build_origin(document: &UrlPath, mount: &SiteUrlMount, value: &str) -> bool {
-    let document_origin =
-        url::Url::parse(DOCUMENT_ORIGIN).expect("the document origin is a valid URL");
-    let Ok(fallback) = document_origin.join(&mount.browser_path(document)) else {
+    let Some(fallback) = document_url(document, mount) else {
         return true;
     };
-    match fallback.join(value).ok().filter(is_allowed_document_base) {
+    match document_base(&fallback, value) {
         Some(base) => base.origin().ascii_serialization() == DOCUMENT_ORIGIN,
         None => true,
     }
+}
+
+/// The page's own address while a reference resolves: the build's origin plus its mounted route.
+///
+/// A route that cannot be joined under that origin answers `None`; no validated document reaches
+/// it, and each caller decides what an unaddressable page means for its own question.
+fn document_url(document: &UrlPath, mount: &SiteUrlMount) -> Option<url::Url> {
+    url::Url::parse(DOCUMENT_ORIGIN)
+        .expect("the document origin is a valid URL")
+        .join(&mount.browser_path(document))
+        .ok()
+}
+
+/// The document base one written `<base href>` names under the page's own address, when a browser
+/// would accept it as a document base: not an opaque URL, and not a script or data scheme.
+fn document_base(fallback: &url::Url, value: &str) -> Option<url::Url> {
+    let base = fallback.join(value).ok()?;
+    let accepted = !base.cannot_be_a_base() && !matches!(base.scheme(), "data" | "javascript");
+    accepted.then_some(base)
 }
 
 /// The host-relative value a browser would request for an inherited-origin reference.
@@ -111,14 +122,10 @@ fn browser_value(resolved: &url::Url) -> String {
     value
 }
 
-fn is_allowed_document_base(url: &url::Url) -> bool {
-    !url.cannot_be_a_base() && !matches!(url.scheme(), "data" | "javascript")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::url_path;
+    use crate::tests::test_support::url_path;
 
     #[test]
     fn base_href_decides_internal_or_external() {

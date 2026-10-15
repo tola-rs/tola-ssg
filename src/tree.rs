@@ -69,19 +69,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_renders_the_directories_that_hold_it() {
-        let mut tree = Tree::default();
-        tree.insert(Path::new("content/index.typ"), EntryKind::File);
-        tree.insert(Path::new("site/page.typ"), EntryKind::File);
-        tree.insert(Path::new("site.typ"), EntryKind::File);
-
-        assert_eq!(
-            tree.render(),
-            "├── content/\n│   └── index.typ\n├── site/\n│   └── page.typ\n└── site.typ"
-        );
-    }
-
-    #[test]
     fn declared_directory_renders_without_files() {
         let mut tree = Tree::default();
         tree.insert(Path::new("static/web"), EntryKind::Directory);

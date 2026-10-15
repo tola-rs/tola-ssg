@@ -1,9 +1,14 @@
+//! `tola doctor`: read-only checks of the site and the local tools it would build with.
+//!
+//! Findings are collected into one report instead of stopping at the first problem; cancellation is
+//! the only failure that ends it early. An error-level finding fails the command, carrying the same
+//! diagnostics.
 use crate::cancellation::Cancellation;
 mod checks;
 
 use anyhow::Result;
 use serde::Serialize;
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_diagnostic::{Diagnostic, DiagnosticError};
 
 use crate::cli::output::CommandOutput;
 use crate::cli::{ConfigFileArgs, TypstPackageArgs};
@@ -28,11 +33,7 @@ pub(in crate::cli) fn run(
             environment.tola_version, environment.typst_version, environment.os, environment.arch,
         ))?;
     }
-    if report
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error)
-    {
+    if super::holds_error(&report.diagnostics) {
         return Err(DiagnosticError::new("site checks failed", report.diagnostics).into());
     }
     output.diagnostics(&report.diagnostics)?;
@@ -149,7 +150,8 @@ mod tests {
                 .iter()
                 .any(|diagnostic| {
                     diagnostic["severity"] == "error"
-                        && diagnostic["code"] == serde_json::json!(tola_build::codes::config::IO)
+                        && diagnostic["code"]
+                            == serde_json::json!(tola_diagnostic::codes::config::IO)
                 })
         );
     }

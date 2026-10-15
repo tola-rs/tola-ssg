@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::cancellation::{BuildCancellation, BuildCancelled};
-use crate::filesystem::INTERNAL_DIR;
+use crate::filesystem::{INTERNAL_DIR, layout};
 use crate::image::PixelCache;
 
 /// Which original inputs a reusable build may consume. Hooks remain trusted host code.
@@ -15,6 +15,26 @@ pub enum InputScope {
     Online,
     Offline,
     Pure,
+}
+
+impl InputScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Offline => "offline",
+            Self::Pure => "pure",
+        }
+    }
+
+    /// The scope `online`, `offline`, or `pure` names, and nothing else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "online" => Some(Self::Online),
+            "offline" => Some(Self::Offline),
+            "pure" => Some(Self::Pure),
+            _ => None,
+        }
+    }
 }
 
 /// Network access for built-in package and remote-icon fetching.
@@ -121,15 +141,7 @@ impl BuildResources {
     /// Offline builds may reuse this machine-dependent copy. Pure builds require a local or
     /// vendored original and never use this cache; deleting it cannot remove a pure build's source.
     pub fn icon_cache_directory(site_root: &Path) -> PathBuf {
-        site_root.join(".tola/cache/icons/sha256")
-    }
-
-    /// Where encoded image variants are kept under one site root.
-    ///
-    /// A variant is stored only after its bytes are complete, and read back only when they match
-    /// the digest recorded beside them, so removing the directory costs a render and nothing else.
-    pub fn image_cache_directory(site_root: &Path) -> PathBuf {
-        site_root.join(INTERNAL_DIR).join("cache/images")
+        layout::icon_cache(site_root).join("sha256")
     }
 
     /// Exclude system fonts from a build.
@@ -189,14 +201,13 @@ impl BuildResources {
 ///
 /// Configuration is read before a resolved configuration exists, so it shares this much of the
 /// boundary and adds the output exclusions later through [`source_boundary`]. The package view
-/// below the internal directory is the one exception: `tola editor setup` publishes a site's
-/// packages there, and a definition into a package names those files, so a file-only client reads
-/// them as sources while every other generated path stays refused.
+/// and fetched module sources are readable inside the internal directory; other generated paths
+/// stay refused.
 pub(crate) fn base_source_boundary(root: &Path, scope: InputScope) -> tola_typst::SourceBoundary {
     tola_typst::SourceBoundary::new(root, scope == InputScope::Pure)
-        .excluding_except(
+        .excluding_except_many(
             root.join(INTERNAL_DIR),
-            root.join(crate::filesystem::PACKAGE_MIRROR_DIRECTORY),
+            [layout::builtin_packages(root), layout::modules(root)],
         )
         .excluding(root.join(crate::filesystem::SITE_BUILD_LOCK_FILE))
 }
@@ -394,6 +405,15 @@ fn request_error(error: reqwest::Error) -> HttpDownloadError {
 mod tests {
     use super::*;
 
+    /// The name a scope writes is the name it reads back.
+    #[test]
+    fn scope_names_round_trip() {
+        for scope in [InputScope::Online, InputScope::Offline, InputScope::Pure] {
+            assert_eq!(InputScope::parse(scope.as_str()), Some(scope));
+        }
+        assert_eq!(InputScope::parse("Online"), None);
+    }
+
     /// The view `tola editor setup` publishes is read while every other generated path stays
     /// refused, so a file-only client can open the file a definition named.
     #[test]
@@ -401,10 +421,10 @@ mod tests {
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
         let boundary = base_source_boundary(root, InputScope::Online);
-        let view = root.join(".tola/builtin-packages/tola/source/0.0.0/lib.typ");
+        let view = layout::builtin_packages(root).join("tola/source/0.0.0/lib.typ");
         std::fs::create_dir_all(view.parent().unwrap()).unwrap();
         std::fs::write(&view, "#let value = 1\n").unwrap();
-        let sibling = root.join(".tola/inspection/state.json");
+        let sibling = root.join(INTERNAL_DIR).join("inspection/state.json");
         std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
         std::fs::write(&sibling, "{}").unwrap();
 
@@ -497,7 +517,7 @@ mod tests {
 
         assert!(
             diagnostics.iter().any(|diagnostic| {
-                diagnostic.severity == crate::diagnostic::Severity::Error
+                diagnostic.severity == tola_diagnostic::Severity::Error
                     && diagnostic.message.contains("public/value.txt")
             }),
             "{diagnostics:#?}"

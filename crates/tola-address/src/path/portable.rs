@@ -45,6 +45,11 @@ pub(crate) fn validate_portable_segment(
     Ok(())
 }
 
+/// Whether `character` is a C0 or C1 control character, which no published path segment holds.
+pub(crate) fn is_control_character(character: char) -> bool {
+    matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f)
+}
+
 /// Conservative key for case-insensitive and normalization-aware filesystems.
 pub fn portable_collision_key(component: &str) -> String {
     component.chars().nfd().default_case_fold().nfd().collect()

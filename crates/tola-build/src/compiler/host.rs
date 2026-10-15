@@ -27,8 +27,7 @@ impl tola_typst::FileProvider for TolaPackageFiles {
     }
 }
 
-/// Resolve one virtual-package file against the builtin packages and, when the
-/// host has bound icon collections, their captured bytes.
+/// Resolve one virtual-package file against the builtin packages and bound icons.
 fn package_target(
     id: typst::syntax::FileId,
     icons: Option<&tola_icons::IconCollections>,
@@ -56,11 +55,16 @@ fn package_target(
 }
 
 /// Immutable dynamic files for one prepared attempt, not a live icon collection handle.
-struct SitePackageFiles(Arc<tola_icons::IconCollections>);
+struct SitePackageFiles {
+    icons: Arc<tola_icons::IconCollections>,
+    virtual_files: Arc<FileMap>,
+}
 
 impl tola_typst::FileProvider for SitePackageFiles {
     fn target(&self, id: typst::syntax::FileId) -> Option<tola_typst::FileTarget> {
-        package_target(id, Some(&self.0))
+        self.virtual_files
+            .target(id)
+            .or_else(|| package_target(id, Some(&self.icons)))
     }
 
     /// The `tola` namespace belongs to Tola, so only the packages above exist in it.
@@ -76,6 +80,8 @@ pub struct TypstHost {
     network_access: NetworkAccess,
     source_boundary: tola_typst::SourceBoundary,
     files: FileResolver,
+    local_packages: Arc<LocalPackages>,
+    virtual_files: Arc<FileMap>,
     icons: Arc<tola_icons::IconCollections>,
     file_cache: Arc<SharedFileCache>,
     fonts: Arc<FontStore>,
@@ -101,6 +107,8 @@ impl TypstHost {
             files: file_resolver(package_locations.clone(), resources.network_access())
                 .with_source_boundary(source_boundary.clone()),
             icons: Arc::default(),
+            local_packages: Arc::default(),
+            virtual_files: Arc::default(),
             package_locations,
             network_access: resources.network_access(),
             source_boundary,
@@ -124,6 +132,24 @@ impl TypstHost {
             resources.source_boundary(config),
             cancellation,
         )
+        .map(|host| host.with_local_packages(Arc::clone(&config.module_inputs.packages)))
+    }
+
+    /// Options select hooks before those hooks can produce configured fonts.
+    pub(crate) fn for_module_options(
+        config: &ResolvedSiteConfig,
+        resources: &BuildResources,
+        cancellation: &BuildCancellation,
+    ) -> Result<Self, tola_typst::FontLoadError> {
+        Self::new_with_packages(
+            &[],
+            resources.package_locations(config),
+            resources,
+            false,
+            resources.source_boundary(config),
+            cancellation,
+        )
+        .map(|host| host.with_local_packages(Arc::clone(&config.module_inputs.packages)))
     }
 
     /// Compiler results can be reused only within the same font-resource generation.
@@ -132,17 +158,40 @@ impl TypstHost {
             && self.package_locations == other.package_locations
             && self.network_access == other.network_access
             && self.source_boundary == other.source_boundary
+            && self.local_packages == other.local_packages
+            && Arc::ptr_eq(&self.virtual_files, &other.virtual_files)
     }
 
     /// Bind validated icons before creating any source sets or candidate files.
-    /// Older hosts and worlds keep their own immutable icon collections.
     pub(crate) fn with_icons(&self, icons: Arc<tola_icons::IconCollections>) -> Self {
+        let mut host = self.clone();
+        host.files = self.files.clone().with_provider(SitePackageFiles {
+            icons: Arc::clone(&icons),
+            virtual_files: Arc::clone(&self.virtual_files),
+        });
+        host.icons = icons;
+        host
+    }
+
+    /// Bind one immutable selection of local packages without changing builtin files.
+    pub(crate) fn with_local_packages(&self, packages: Arc<LocalPackages>) -> Self {
         let mut host = self.clone();
         host.files = self
             .files
             .clone()
-            .with_provider(SitePackageFiles(Arc::clone(&icons)));
-        host.icons = icons;
+            .with_local_packages(Arc::clone(&packages));
+        host.local_packages = packages;
+        host
+    }
+
+    /// Supply exact host-generated files, keeping builtin packages, icons and local bindings.
+    pub(crate) fn with_virtual_files(&self, files: FileMap) -> Self {
+        let mut host = self.clone();
+        host.virtual_files = Arc::new(files);
+        host.files = self.files.clone().with_provider(SitePackageFiles {
+            icons: Arc::clone(&self.icons),
+            virtual_files: Arc::clone(&host.virtual_files),
+        });
         host
     }
 
@@ -223,18 +272,62 @@ impl TypstHost {
             .build(cancellation)
     }
 
+    /// Compile a native package or virtual entry while retaining the project's root.
+    pub(crate) fn world_with_id(
+        &self,
+        root: &Path,
+        main: typst::syntax::FileId,
+        library: &tola_packages::library::SiteLibrary,
+        candidate_files: Arc<FileView>,
+        cancellation: &BundleCancellation,
+    ) -> Result<TypstWorld, WorldBuildError> {
+        TypstWorld::builder_with_id(main, root)
+            .with_file_view(candidate_files, Arc::clone(&self.file_cache))
+            .with_fonts(Arc::clone(&self.fonts))
+            .with_shared_library(library.shared())
+            .build(cancellation)
+    }
+
+    /// Compiles by entry file id, or by `build.entry` when the configuration names none.
+    pub(crate) fn site_world(
+        &self,
+        config: &ResolvedSiteConfig,
+        library: &tola_packages::library::SiteLibrary,
+        candidate_files: Arc<FileView>,
+        cancellation: &BundleCancellation,
+    ) -> Result<TypstWorld, WorldBuildError> {
+        match config.entry_file() {
+            Some(main) => self.world_with_id(
+                config.get_root(),
+                main,
+                library,
+                candidate_files,
+                cancellation,
+            ),
+            None => self.world(
+                config.get_root(),
+                &config.build.entry,
+                library,
+                candidate_files,
+                cancellation,
+            ),
+        }
+    }
+
     pub(crate) fn candidate_files(&self, sources: Arc<ExplicitSources>) -> Arc<FileView> {
         Arc::new(FileView::new(sources, Arc::new(self.files.clone())))
     }
 
     pub(crate) fn read_is_process_stable(&self, locator: &ReadLocator) -> bool {
         match locator {
-            ReadLocator::ProvidedRoot(_) => false,
             ReadLocator::ProvidedPackage { package, path } => {
-                crate::package::package_file_is_process_stable(package, path)
+                self.virtual_package_bytes(package, path).is_none()
+                    && crate::package::package_file_is_process_stable(package, path)
             }
-            ReadLocator::Root(_) | ReadLocator::Package { .. } => false,
-            ReadLocator::NonPersistent(_) => false,
+            ReadLocator::Root(_)
+            | ReadLocator::Package { .. }
+            | ReadLocator::ProvidedRoot(_)
+            | ReadLocator::NonPersistent(_) => false,
         }
     }
 
@@ -242,19 +335,42 @@ impl TypstHost {
     pub(crate) fn virtual_read_matches(&self, evidence: &ReadEvidence) -> bool {
         match evidence.locator() {
             ReadLocator::ProvidedPackage { package, path } => {
+                if let Some(bytes) = self.virtual_package_bytes(package, path) {
+                    return ContentDigest::of(&bytes) == evidence.digest();
+                }
                 match package::icon_file_target(&self.icons, package, path) {
                     tola_typst::FileTarget::Bytes(bytes) => {
                         ContentDigest::of(&bytes) == evidence.digest()
                     }
-                    _ => false,
+                    _ => {
+                        path == Path::new("typst.toml")
+                            && self
+                                .local_packages
+                                .package(package)
+                                .is_some_and(|selected| {
+                                    ContentDigest::of(selected.manifest_bytes())
+                                        == evidence.digest()
+                                })
+                    }
                 }
             }
             _ => false,
         }
     }
 
+    fn virtual_package_bytes(&self, package: &PackageSpec, path: &Path) -> Option<Arc<[u8]>> {
+        let path = typst::syntax::VirtualPath::new(path.to_str()?).ok()?;
+        let id = typst::syntax::FileId::new(typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Package(package.clone()),
+            path,
+        ));
+        match self.virtual_files.target(id) {
+            Some(FileTarget::Bytes(bytes)) => Some(bytes),
+            _ => None,
+        }
+    }
+
     /// Keep parsed imports across short runs of builds that reuse their compilation.
-    /// Explicit content sources and the entry program live in the explicit sources.
     pub(crate) const RETAINED_FILE_CACHE_EPOCHS: usize = 10;
 
     pub(crate) fn evict_stale_file_cache_entries(&self, max_age: usize) {
@@ -324,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn site_paths_have_no_package_target() {
+    fn site_paths_have_no_target() {
         let files = TolaPackageFiles;
         assert_eq!(
             tola_typst::FileProvider::target(&files, tola_typst::file_id("images/photo.webp")),
@@ -333,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn site_config_changes_keep_the_host() {
+    fn site_config_keeps_host() {
         let dir = TempDir::new().unwrap();
         let mut config = crate::config::tests::load_test_config(dir.path(), "");
         configure_site(
@@ -351,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn font_root_change_invalidates_the_host() {
+    fn font_root_invalidates_host() {
         let dir = TempDir::new().unwrap();
         let mut config = crate::config::tests::load_test_config(dir.path(), "");
         configure_site(
@@ -370,7 +486,7 @@ mod tests {
     /// System fonts join a build only when the site opts in and the invocation permits them;
     /// either decision alone can keep them out.
     #[test]
-    fn system_fonts_need_site_opt_in_and_permission() {
+    fn system_fonts_need_opt_in() {
         let dir = TempDir::new().unwrap();
         let mut config = crate::config::tests::load_test_config(dir.path(), "");
         let resources = BuildResources::default();
@@ -391,6 +507,83 @@ mod tests {
 
         assert!(first.has_same_inputs(&cloned));
         assert!(!first.has_same_inputs(&second));
+    }
+
+    #[test]
+    fn local_bindings_survive_host_changes() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let module = root.join("module");
+        std::fs::create_dir(&module).unwrap();
+        std::fs::write(module.join("lib.typ"), "module source").unwrap();
+        let config = crate::config::tests::load_test_config(root, "");
+        let base = compiler_host(&config).unwrap();
+        let package = LocalPackage::new(
+            "@tola-modules/sample:0.0.0".parse().unwrap(),
+            &module,
+            typst::syntax::VirtualPath::new("lib.typ").unwrap(),
+        )
+        .unwrap();
+        let registry =
+            || Arc::new(LocalPackages::new([package.clone()], ["tola-modules"]).unwrap());
+        let selected = base.with_local_packages(registry());
+        assert!(!base.has_same_inputs(&selected));
+        assert!(selected.has_same_inputs(&base.with_local_packages(registry())));
+        let source = virtual_file_id("<module-options>");
+        let mut virtual_files = FileMap::new();
+        virtual_files.insert(source, Arc::<[u8]>::from(&b"virtual source"[..]));
+        let prepared = selected
+            .with_virtual_files(virtual_files)
+            .with_icons(Arc::default());
+        assert_eq!(
+            prepared.files.read(source, root).unwrap(),
+            b"virtual source"
+        );
+        assert_eq!(
+            prepared.files.read(package.entry_id(), root).unwrap(),
+            b"module source"
+        );
+        let builtin = typst::syntax::FileId::new(typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Package("@tola/schema:0.0.0".parse().unwrap()),
+            typst::syntax::VirtualPath::new("typst.toml").unwrap(),
+        ));
+        assert!(prepared.files.read(builtin, root).is_ok());
+        let overrides = crate::filesystem::SourceOverrides::new(
+            vec![(module.join("lib.typ"), Arc::<str>::from("editor source"))],
+            &BuildCancellation::default(),
+        )
+        .unwrap();
+        let editor = prepared.with_source_overrides(&overrides).unwrap();
+        assert_eq!(editor.files.read(source, root).unwrap(), b"virtual source");
+        assert_eq!(
+            editor.files.read(package.entry_id(), root).unwrap(),
+            b"editor source"
+        );
+        assert_eq!(
+            prepared.files.read(package.entry_id(), root).unwrap(),
+            b"module source"
+        );
+
+        let manifest = ReadEvidence::new(
+            ReadLocator::ProvidedPackage {
+                package: package.spec().clone(),
+                path: "typst.toml".into(),
+            },
+            package.manifest_bytes(),
+        );
+        assert!(!selected.read_is_process_stable(manifest.locator()));
+        assert!(selected.virtual_read_matches(&manifest));
+        let changed = LocalPackage::new(
+            package.spec().clone(),
+            &module,
+            typst::syntax::VirtualPath::new("another-entry.typ").unwrap(),
+        )
+        .unwrap();
+        let changed = base.with_local_packages(Arc::new(
+            LocalPackages::new([changed], ["tola-modules"]).unwrap(),
+        ));
+        assert!(!selected.has_same_inputs(&changed));
+        assert!(!changed.virtual_read_matches(&manifest));
     }
 
     #[test]

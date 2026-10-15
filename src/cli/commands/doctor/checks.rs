@@ -5,7 +5,7 @@ use crate::cli::log::destination;
 use crate::editor::{GeneratedDirectory, HeldFile};
 use std::path::{Path, PathBuf};
 
-use tola_build::diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::{Diagnostic, Severity};
 
 pub(super) fn diagnose(
     config_file: &crate::cli::ConfigFileArgs,
@@ -19,7 +19,7 @@ pub(super) fn diagnose(
         Ok(locations) => locations,
         Err(error) => {
             destination::start_after_error(output, &root, &cancellation.token());
-            let mut diagnostics = vec![tola_build::diagnostic::fallback(
+            let mut diagnostics = vec![tola_diagnostic::fallback(
                 crate::codes::doctor::PACKAGE_LOCATIONS,
                 &error,
             )];
@@ -37,10 +37,10 @@ pub(super) fn diagnose(
     match loaded {
         Ok(loaded) => {
             output.apply_diagnostic_limits(loaded.diagnostics());
-            let config = loaded.config();
-            destination::start_site(output, config, &cancellation.token())?;
-            let mut diagnostics = tola_build::config::diagnostic::warning_diagnostics(config);
-            diagnostics.extend(diagnose_loaded(loaded.into_config()));
+            let config = tola_build::modules::prepare(loaded.config(), scope)?;
+            destination::start_site(output, &config, &cancellation.token())?;
+            let mut diagnostics = tola_build::config::diagnostic::warning_diagnostics(&config);
+            diagnostics.extend(diagnose_loaded(config));
             Ok(diagnostics)
         }
         Err(error) => {
@@ -109,7 +109,7 @@ fn diagnose_loaded(config: tola_build::config::ResolvedSiteConfig) -> Vec<Diagno
 /// refuses, what differs from the sources this Tola ships, what is missing, and what another
 /// version left behind.
 fn editor_package_diagnostics(root: &Path) -> Vec<Diagnostic> {
-    let directory = root.join(tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY);
+    let directory = tola_build::filesystem::layout::builtin_packages(root);
     let mut diagnostics = Vec::new();
     match crate::editor::generated_directory(root) {
         GeneratedDirectory::Missing => {
@@ -121,7 +121,7 @@ fn editor_package_diagnostics(root: &Path) -> Vec<Diagnostic> {
                     &directory,
                     "the generated package directory is missing",
                 )
-                .with_help("run `tola editor packages` to create it"),
+                .with_help("Run `tola editor packages` to create it"),
             );
             return diagnostics;
         }
@@ -232,7 +232,7 @@ fn editor_package_diagnostics(root: &Path) -> Vec<Diagnostic> {
                     "while they differ, the editor uses the copies inside Tola; a build always does",
                 );
         }
-        diagnostics.push(diagnostic.with_help("run `tola editor packages` to regenerate them"));
+        diagnostics.push(diagnostic.with_help("Run `tola editor packages` to regenerate them"));
     }
     diagnostics
 }
@@ -311,7 +311,7 @@ fn vendor_diagnostics(config: &tola_build::config::ResolvedSiteConfig) -> Vec<Di
                 vendor,
                 "`vendor.path` is not a directory",
             )
-            .with_help("run `tola vendor` to write the site's external sources into it"),
+            .with_help("Run `tola vendor` to write the site's external sources into it"),
         ];
     }
     let links = links_inside(vendor);
@@ -423,7 +423,7 @@ fn links_inside(directory: &Path) -> Vec<PathBuf> {
 }
 
 fn path_diagnostic(
-    code: tola_build::diagnostic::DiagnosticCode,
+    code: tola_diagnostic::DiagnosticCode,
     severity: Severity,
     root: &Path,
     path: &Path,
@@ -442,15 +442,46 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    const MINIMAL_CONFIG: &str = "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n";
+
+    #[test]
+    fn theme_supplies_missing_entry() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        std::fs::create_dir(root.join("content")).unwrap();
+        std::fs::create_dir(root.join("theme")).unwrap();
+        std::fs::write(
+            root.join("theme/site.typ"),
+            "#panic(\"doctor must not compile\")",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("theme/tola-module.toml"),
+            "schema-version=1\nname='notes'\nversion='1.0.0'\n[site]\nentry='site.typ'\n",
+        )
+        .unwrap();
+        let path = root.join("tola.toml");
+        std::fs::write(
+            &path,
+            "[modules.notes]\npath='theme'\n[theme]\nmodule='notes'\n",
+        )
+        .unwrap();
+        let diagnostics = diagnose_at(&path);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| item.severity == Severity::Error),
+            "{diagnostics:?}"
+        );
+        assert!(!root.join("site.typ").exists());
+        assert!(!root.join("public").exists());
+    }
+
     #[test]
     fn pure_scope_reports_selected_package_roots() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
-        std::fs::write(
-            &path,
-            "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, MINIMAL_CONFIG).unwrap();
         let reported = diagnose_config(
             &path,
             &crate::cli::TypstPackageArgs {
@@ -476,7 +507,7 @@ mod tests {
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == tola_build::codes::config::IO)
+                .any(|diagnostic| diagnostic.code == tola_diagnostic::codes::config::IO)
         );
     }
 
@@ -484,11 +515,7 @@ mod tests {
     fn refused_package_paths_are_reported_once() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
-        std::fs::write(
-            &path,
-            "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, MINIMAL_CONFIG).unwrap();
         let (relative, _) = crate::editor::generated_package_files()
             .into_iter()
             .next()
@@ -528,11 +555,7 @@ mod tests {
     fn unreadable_editor_settings_file_is_reported() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
-        std::fs::write(
-            &path,
-            "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n",
-        )
-        .unwrap();
+        std::fs::write(&path, MINIMAL_CONFIG).unwrap();
         std::fs::create_dir_all(directory.path().join(".vscode/settings.json")).unwrap();
 
         let reported = diagnose_at(&path);
@@ -641,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn font_directory_without_font_files_is_reported() {
+    fn font_without_font_files_reported() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
         std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();
@@ -658,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn font_directory_with_fonts_is_not_reported() {
+    fn font_directory_fonts_not_reported() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tola.toml");
         std::fs::write(&path, "[typst.fonts]\npaths = [\"fonts\"]\n").unwrap();

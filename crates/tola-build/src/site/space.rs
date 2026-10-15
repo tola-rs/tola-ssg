@@ -139,19 +139,17 @@ impl AddressSpace {
         if output_alias != permalink && self.url_is_registered(&output_alias) {
             return Err(AddressRegistrationError::UrlAlreadyRegistered { url: output_alias });
         }
-        // A page may define one fragment target more than once: a tree that is both a page of its
-        // own and part of a parent repeats its anchor where the parent renders it. The index
-        // answers which fragments a page defines, and a repeated definition answers that the same
-        // way once.
-        let fragment_set: FxHashSet<String> = fragments.into_iter().collect();
-        let resource = Resource::Page { document };
-        self.register_resource(permalink.clone(), resource);
+        // A tree that is both a page of its own and part of a parent repeats its anchor where the
+        // parent renders it, so a repeated definition still answers which fragments exist once.
+        let mut fragments = fragments.into_iter().collect::<Vec<_>>();
+        fragments.sort_unstable();
+        fragments.dedup();
+        self.by_url
+            .insert(permalink.clone(), Resource::Page { document });
         self.by_output.insert(output, permalink.clone());
         if output_alias != permalink {
             self.output_aliases.insert(output_alias, permalink.clone());
         }
-        let mut fragments = fragment_set.into_iter().collect::<Vec<_>>();
-        fragments.sort_unstable();
         self.fragments.insert(permalink, fragments.into());
         Ok(())
     }
@@ -164,8 +162,7 @@ impl AddressSpace {
         if self.url_is_registered(&url) {
             return Err(AddressRegistrationError::UrlAlreadyRegistered { url });
         }
-        let resource = Resource::Asset { route };
-        self.register_resource(url, resource);
+        self.by_url.insert(url, Resource::Asset { route });
         Ok(())
     }
 
@@ -184,11 +181,6 @@ impl AddressSpace {
                 self.output_aliases.insert(alias, exact);
             }
         }
-    }
-
-    fn register_resource(&mut self, url: UrlPath, resource: Resource) {
-        let previous = self.by_url.insert(url, resource);
-        debug_assert!(previous.is_none());
     }
 
     fn url_is_registered(&self, url: &UrlPath) -> bool {
@@ -230,6 +222,20 @@ impl AddressSpace {
         }
     }
 
+    /// Whether this published page contains the explicitly named HTML fragment.
+    ///
+    /// This proves presence only: it does not map a source position to an occurrence,
+    /// and repeated HTML identifiers are represented once in the address index.
+    pub fn page_has_fragment(&self, output: &OutputPath, fragment: &str) -> bool {
+        self.page_by_output(output)
+            .and_then(|page| self.fragments.get(&page.permalink))
+            .is_some_and(|fragments| {
+                fragments
+                    .binary_search_by(|item| item.as_str().cmp(fragment))
+                    .is_ok()
+            })
+    }
+
     /// Resolve one decoded site-root route and its serialized fragment.
     ///
     /// Resolve relative URLs, document bases, deployment mounts, and external schemes with
@@ -243,9 +249,9 @@ impl AddressSpace {
         route: &UrlPath,
         fragment: &str,
         target: RequiredResourceKind,
-        mut dependencies: Option<&mut AddressDependencies>,
+        dependencies: &mut AddressDependencies,
     ) -> AddressResolution {
-        let Some((url, resource)) = self.lookup_route(route, &mut dependencies) else {
+        let Some((url, resource)) = self.lookup_route(route, dependencies) else {
             return AddressResolution::NotFound;
         };
         if target == RequiredResourceKind::NonDocumentResource && resource.is_page() {
@@ -273,7 +279,7 @@ impl AddressSpace {
         &self,
         route: &UrlPath,
         target: RequiredResourceKind,
-        dependencies: &mut Option<&mut AddressDependencies>,
+        dependencies: &mut AddressDependencies,
     ) -> Option<UrlPath> {
         if target != RequiredResourceKind::DocumentOrResource || route.as_str().ends_with('/') {
             return None;
@@ -286,7 +292,7 @@ impl AddressSpace {
     fn lookup_route<'a>(
         &'a self,
         route: &UrlPath,
-        dependencies: &mut Option<&mut AddressDependencies>,
+        dependencies: &mut AddressDependencies,
     ) -> Option<(&'a UrlPath, &'a Resource)> {
         self.lookup_resource(route, dependencies).or_else(|| {
             self.lookup_alias(route, dependencies)
@@ -297,26 +303,22 @@ impl AddressSpace {
     fn lookup_resource<'a>(
         &'a self,
         url: &UrlPath,
-        dependencies: &mut Option<&mut AddressDependencies>,
+        dependencies: &mut AddressDependencies,
     ) -> Option<(&'a UrlPath, &'a Resource)> {
         let found = self.by_url.get_key_value(url);
-        if let Some(dependencies) = dependencies {
-            observe_once(&mut dependencies.resources, url, || {
-                found.map(|(_, resource)| resource.is_page())
-            });
-        }
+        observe_once(&mut dependencies.resources, url, || {
+            found.map(|(_, resource)| resource.is_page())
+        });
         found
     }
 
     fn lookup_alias<'a>(
         &'a self,
         url: &UrlPath,
-        dependencies: &mut Option<&mut AddressDependencies>,
+        dependencies: &mut AddressDependencies,
     ) -> Option<&'a UrlPath> {
         let found = self.output_aliases.get(url);
-        if let Some(dependencies) = dependencies {
-            observe_once(&mut dependencies.aliases, url, || found.cloned());
-        }
+        observe_once(&mut dependencies.aliases, url, || found.cloned());
         found
     }
 
@@ -325,7 +327,7 @@ impl AddressSpace {
         resource: &Resource,
         url: &UrlPath,
         fragment: &str,
-        dependencies: Option<&mut AddressDependencies>,
+        dependencies: &mut AddressDependencies,
     ) -> AddressResolution {
         if !resource.is_page() {
             return AddressResolution::Found { url: url.clone() };
@@ -349,17 +351,13 @@ impl AddressSpace {
                 .is_ok()
         });
         if let Some(found) = found {
-            if let Some(dependencies) = dependencies {
-                dependencies.observe_fragment(url, found, fragments, true);
-            }
+            dependencies.observe_fragment(url, found, fragments, true);
             return AddressResolution::Found { url: url.clone() };
         }
         if decoded.eq_ignore_ascii_case("top") {
             return AddressResolution::Found { url: url.clone() };
         }
-        if let Some(dependencies) = dependencies {
-            dependencies.observe_fragment(url, &decoded, fragments, false);
-        }
+        dependencies.observe_fragment(url, &decoded, fragments, false);
         AddressResolution::FragmentNotFound {
             fragment: decoded.into_owned(),
             available: Arc::clone(fragments),
@@ -405,7 +403,7 @@ mod tests {
             &reference.route,
             reference.fragment.as_deref().unwrap_or_default(),
             target,
-            None,
+            &mut AddressDependencies::default(),
         )
     }
 
@@ -436,6 +434,32 @@ mod tests {
                 "{url}"
             );
         }
+    }
+
+    #[test]
+    fn published_fragments_scoped_exact_page() {
+        let mut space = AddressSpace::default();
+        space
+            .register_page(
+                html_page("/one/", "one/index.html"),
+                ["same".into(), "one".into(), "same".into()],
+            )
+            .unwrap();
+        space
+            .register_page(
+                html_page("/two/", "two/index.html"),
+                ["same".into(), "two".into()],
+            )
+            .unwrap();
+        let one = OutputPath::parse("one/index.html").unwrap();
+        let two = OutputPath::parse("two/index.html").unwrap();
+        assert!(space.page_has_fragment(&one, "same"));
+        assert!(space.page_has_fragment(&two, "same"));
+        assert!(space.page_has_fragment(&one, "one"));
+        assert!(!space.page_has_fragment(&two, "one"));
+        assert!(
+            !space.page_has_fragment(&OutputPath::parse("missing/index.html").unwrap(), "same")
+        );
     }
 
     fn site_asset_route(source: &str, url: &str) -> SiteAssetRoute {

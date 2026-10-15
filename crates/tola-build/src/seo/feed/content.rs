@@ -158,49 +158,26 @@ impl FeedContent {
         }
 
         if content.is::<SmartQuoteElem>() {
-            let fields = ensure_fields(&content, path, &["double"])?;
-            let double = match fields.get("double") {
-                Ok(Value::Bool(double)) => *double,
-                Ok(value) => return Err(type_error(&field_path(path, "double"), "boolean", value)),
-                Err(_) => true,
+            return Self::smart_quote(&content, path);
+        }
+
+        macro_rules! styled_body {
+            ($element:ty, $inline:expr) => {
+                if let Some(element) = content.to_packed::<$element>() {
+                    ensure_fields(&content, path, &["body"])?;
+                    return Self::from_typst_inside(
+                        element.body.clone(),
+                        &field_path(path, "body"),
+                        inside_link,
+                        cancellation,
+                    )
+                    .map(|content| content.wrap($inline));
+                }
             };
-            // Quote shaping needs a language and surrounding layout context.
-            // Preserve the character as written without capturing either.
-            return Ok(Self::text(if double { "\"" } else { "'" }));
         }
-
-        if let Some(element) = content.to_packed::<StrongElem>() {
-            ensure_fields(&content, path, &["body"])?;
-            return Self::from_typst_inside(
-                element.body.clone(),
-                &field_path(path, "body"),
-                inside_link,
-                cancellation,
-            )
-            .map(|content| content.wrap(FeedInline::Strong));
-        }
-
-        if let Some(element) = content.to_packed::<EmphElem>() {
-            ensure_fields(&content, path, &["body"])?;
-            return Self::from_typst_inside(
-                element.body.clone(),
-                &field_path(path, "body"),
-                inside_link,
-                cancellation,
-            )
-            .map(|content| content.wrap(FeedInline::Emphasis));
-        }
-
-        if let Some(element) = content.to_packed::<StrikeElem>() {
-            ensure_fields(&content, path, &["body"])?;
-            return Self::from_typst_inside(
-                element.body.clone(),
-                &field_path(path, "body"),
-                inside_link,
-                cancellation,
-            )
-            .map(|content| content.wrap(FeedInline::Strikethrough));
-        }
+        styled_body!(StrongElem, FeedInline::Strong);
+        styled_body!(EmphElem, FeedInline::Emphasis);
+        styled_body!(StrikeElem, FeedInline::Strikethrough);
 
         if let Some(element) = content.to_packed::<LinkElem>() {
             if inside_link {
@@ -212,35 +189,7 @@ impl FeedContent {
                     },
                 });
             }
-            ensure_fields(&content, path, &["dest", "body"])?;
-            let LinkTarget::Dest(Destination::Url(destination)) = &element.dest else {
-                return Err(FeedContentError::Invalid {
-                    path: field_path(path, "dest"),
-                    violation: FeedContentViolation::Value {
-                        message: "feed content links must use URL destinations",
-                        help: "Use a URL, not a label or location",
-                    },
-                });
-            };
-            let Some(destination) = normalize_link_destination(destination.as_str()) else {
-                return Err(FeedContentError::Invalid {
-                    path: field_path(path, "dest"),
-                    violation: FeedContentViolation::Value {
-                        message: "feed content links must be relative, HTTP(S), mailto, or tel URLs",
-                        help: "Write a relative or `http`/`https`/`mailto`/`tel` URL",
-                    },
-                });
-            };
-            let body = Self::from_typst_inside(
-                element.body.clone(),
-                &field_path(path, "body"),
-                true,
-                cancellation,
-            )?;
-            return Ok(body.wrap(|body| FeedInline::Link {
-                destination: destination.to_string(),
-                body,
-            }));
+            return Self::link(&content, element, path, cancellation);
         }
 
         Err(FeedContentError::Invalid {
@@ -249,6 +198,54 @@ impl FeedContent {
                 element: content.func().name().to_string(),
             },
         })
+    }
+
+    fn smart_quote(content: &Content, path: &str) -> Result<Self, FeedContentError> {
+        let fields = ensure_fields(content, path, &["double"])?;
+        let double = match fields.get("double") {
+            Ok(Value::Bool(double)) => *double,
+            Ok(value) => return Err(type_error(&field_path(path, "double"), "boolean", value)),
+            Err(_) => true,
+        };
+        // Quote shaping needs a language and layout context; keep the written character.
+        Ok(Self::text(if double { "\"" } else { "'" }))
+    }
+
+    fn link(
+        content: &Content,
+        element: &LinkElem,
+        path: &str,
+        cancellation: &BuildCancellation,
+    ) -> Result<Self, FeedContentError> {
+        ensure_fields(content, path, &["dest", "body"])?;
+        let LinkTarget::Dest(Destination::Url(destination)) = &element.dest else {
+            return Err(FeedContentError::Invalid {
+                path: field_path(path, "dest"),
+                violation: FeedContentViolation::Value {
+                    message: "feed content links must use URL destinations",
+                    help: "Use a URL, not a label or location",
+                },
+            });
+        };
+        let Some(destination) = normalize_link_destination(destination.as_str()) else {
+            return Err(FeedContentError::Invalid {
+                path: field_path(path, "dest"),
+                violation: FeedContentViolation::Value {
+                    message: "feed content links must be relative, HTTP(S), mailto, or tel URLs",
+                    help: "Write a relative or `http`/`https`/`mailto`/`tel` URL",
+                },
+            });
+        };
+        let body = Self::from_typst_inside(
+            element.body.clone(),
+            &field_path(path, "body"),
+            true,
+            cancellation,
+        )?;
+        Ok(body.wrap(|body| FeedInline::Link {
+            destination: destination.to_string(),
+            body,
+        }))
     }
 
     pub(super) fn to_plain_text(

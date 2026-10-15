@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use thiserror::Error;
 
-use super::portable::validate_portable_segment;
+use super::portable::{is_control_character, validate_portable_segment};
 use super::{PortablePathError, UrlPath, portable_collision_key};
 
 /// The one segment Tola reserves at the top of every published output root.
@@ -74,7 +74,7 @@ impl OutputPath {
         if decoded_relative.contains('\\') {
             return Err(OutputPathError::Backslash);
         }
-        if decoded_relative.chars().any(is_control) {
+        if decoded_relative.chars().any(is_control_character) {
             return Err(OutputPathError::Control);
         }
         if decoded_relative.starts_with('/') {
@@ -208,10 +208,6 @@ fn validate_segment(segment: &str, first: bool) -> Result<(), OutputPathError> {
     }
     validate_portable_segment(segment, first)?;
     Ok(())
-}
-
-fn is_control(character: char) -> bool {
-    matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f)
 }
 
 #[cfg(test)]

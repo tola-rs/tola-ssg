@@ -737,6 +737,21 @@ Example - 解析、显示日期并报告字段错误：
   '',
 ]
 
+[exports.partial-date]
+
+summary = [
+  '''
+日历日期，保留输入声明的年、月或日粒度。
+
+接受严格的 `YYYY`、`YYYY-MM`、`YYYY-MM-DD` 字符串，或不带时间的原生日期。年份范围为 1 到 9999，提供的月份和日期必须构成合法日历日期。完整日期时间、纯时间值、时间戳字符串和首尾空白都会被拒绝。
+
+结果只包含声明的分量：`(precision: "year", year: int)`、`(precision: "month", year: int, month: int)` 或 `(precision: "day", year: int, month: int, day: int)`。原生日期具有日粒度。缺失的分量保持缺失；解析不会选择时间或时区。
+
+Example - 保留日期粒度并报告数组成员错误：
+''',
+  '',
+]
+
 [exports.timestamp]
 
 summary = [

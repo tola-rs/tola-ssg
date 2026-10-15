@@ -24,11 +24,11 @@ const DIAGNOSTIC_TARGET: &str = "tola::diagnostic";
 /// Diagnostics attached to `error`, or one fallback diagnostic carrying `code`.
 pub(crate) fn attached_or_fallback(
     error: &anyhow::Error,
-    code: tola_build::diagnostic::DiagnosticCode,
+    code: tola_diagnostic::DiagnosticCode,
 ) -> Vec<Diagnostic> {
-    tola_build::diagnostic::attached(error)
+    tola_diagnostic::attached(error)
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| vec![tola_build::diagnostic::fallback(code, error)])
+        .unwrap_or_else(|| vec![tola_diagnostic::fallback(code, error)])
 }
 
 #[derive(Clone, Copy)]
@@ -192,12 +192,6 @@ impl CommandOutput {
         self.terminal.block(text)
     }
 
-    /// Write a complete block whose styling the caller already applied, recording its plain text.
-    pub(crate) fn styled_block(&self, plain: &str, rendered: &str) -> io::Result<()> {
-        self.record_text(TEXT_KIND, plain, None);
-        self.terminal.styled_block(rendered)
-    }
-
     /// Announce the hooks this command executes, grouped by the stage that owns them.
     ///
     /// A command that schedules no stage prints nothing; a hook the build mode leaves
@@ -227,10 +221,6 @@ impl CommandOutput {
             None,
         );
         self.terminal.hooks(&rendered)
-    }
-
-    pub(crate) fn blank_line(&self) -> io::Result<()> {
-        self.terminal.blank_line()
     }
 
     pub(crate) fn diagnostic(&self, diagnostic: &Diagnostic) -> io::Result<()> {
@@ -306,47 +296,6 @@ impl CommandOutput {
         self.terminal.write_stdout_line(bytes)
     }
 
-    pub(crate) fn is_interactive(&self) -> bool {
-        self.terminal.is_interactive()
-    }
-
-    pub(crate) fn select_many(
-        &self,
-        text: &str,
-        choices: &[&str],
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<Vec<usize>> {
-        self.terminal.select_many(text, choices, cancelled)
-    }
-
-    pub(crate) fn select_one(
-        &self,
-        text: &str,
-        choices: &[&str],
-        initial: usize,
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<usize> {
-        self.terminal.select_one(text, choices, initial, cancelled)
-    }
-
-    pub(crate) fn read_line(
-        &self,
-        text: &str,
-        default: &str,
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<String> {
-        self.terminal.read_line(text, default, cancelled)
-    }
-
-    pub(crate) fn confirm(
-        &self,
-        text: &str,
-        default: bool,
-        cancelled: &dyn Fn() -> bool,
-    ) -> anyhow::Result<bool> {
-        self.terminal.confirm(text, default, cancelled)
-    }
-
     pub(crate) fn record_resolved(
         &self,
         round: Option<RoundIdentity<'_>>,
@@ -392,7 +341,10 @@ impl CommandOutput {
 fn failure_chain(error: &anyhow::Error) -> String {
     let mut message = String::new();
     for cause in error.chain() {
-        if (cause.is::<tola_build::diagnostic::DiagnosticError>() && cause.source().is_some())
+        if (cause.is::<tola_diagnostic::DiagnosticError>() && cause.source().is_some())
+            || (cause.is::<tola_build::modules::ModuleResolutionError>()
+                && cause.source().is_some())
+            || (cause.is::<tola_build::modules::query::QueryError>() && cause.source().is_some())
             || cause.is::<tola_typst::BundleCompileFailure>()
             || cause.is::<tola_typst::CompileFailure>()
             || cause.is::<tola_typst::ScanFailure>()
@@ -436,12 +388,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (output, _) = buffered_command_output(&directory, false);
         let warning = Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
+            tola_diagnostic::codes::typst::COMPILE,
             Severity::Warning,
             "layout was ignored during HTML export",
         );
         let failure = Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
+            tola_diagnostic::codes::typst::COMPILE,
             Severity::Error,
             "expected block",
         );
@@ -499,11 +451,7 @@ mod tests {
         output
             .hook_overview(&hooks, BuildMode::Production, EVERY_STAGE)
             .unwrap();
-        let source = std::fs::read_to_string(output.log().unwrap().path()).unwrap();
-        let records = source
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .collect::<Vec<_>>();
+        let records = log_records(output.log().unwrap().path());
         assert_eq!(records.len(), 2);
         assert!(records.iter().all(|record| {
             !record["fields"]["message"]
@@ -547,20 +495,19 @@ mod tests {
                 .unwrap_err();
         let expected = failure.error().to_string();
         let diagnostic = Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
+            tola_diagnostic::codes::typst::COMPILE,
             Severity::Error,
             "missing name",
         );
         let error: anyhow::Error =
-            tola_build::diagnostic::DiagnosticError::attach(failure.into(), vec![diagnostic])
-                .into();
+            tola_diagnostic::DiagnosticError::attach(failure.into(), vec![diagnostic]).into();
         assert_eq!(failure_chain(&error), expected);
         assert!(
             error
                 .chain()
-                .any(|cause| cause.is::<tola_typst::CompileError>())
+                .any(|cause| cause.is::<tola_typst::BundleCompileFailure>())
         );
-        assert!(tola_build::diagnostic::attached(&error).is_some());
+        assert!(tola_diagnostic::attached(&error).is_some());
         assert_eq!(error.chain().count(), 3);
     }
 }

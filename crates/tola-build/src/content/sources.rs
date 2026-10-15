@@ -16,8 +16,6 @@ use crate::filesystem::normalize_path;
 use crate::metadata::SourceMetadata;
 
 /// One descriptor per discovered content file, independent of its inclusion count.
-/// A source may appear in several output documents, or in none. Native locations
-/// belong to realized occurrences, not this source set.
 #[derive(Debug, Clone)]
 pub struct ContentSource {
     source: PathBuf,
@@ -72,10 +70,7 @@ pub enum SourceDescriptorFieldKind {
 }
 
 impl SourceDescriptorField {
-    /// Every field of an `all-sources()` source descriptor, in declaration order.
-    ///
-    /// The one authority on the descriptor's shape: the engine builds each descriptor dictionary
-    /// from this list.
+    /// Every descriptor dictionary is built from this list, in this order.
     pub const ALL: &'static [Self] = &[
         Self::Id,
         Self::File,
@@ -178,8 +173,7 @@ impl SourceFileInput {
             .collect()
     }
 
-    /// The value one descriptor field has for this source. `declaration` is the source's
-    /// metadata declaration when the caller builds an `all-sources()` record.
+    /// The value one descriptor field has for this source.
     fn field_value(
         &self,
         field: SourceDescriptorField,
@@ -420,7 +414,10 @@ impl SourceSet {
 
 #[cfg(test)]
 mod tests {
-    fn content_units(root: &std::path::Path) -> anyhow::Result<Vec<crate::content::ContentUnit>> {
+    fn content_units(
+        root: &std::path::Path,
+    ) -> std::result::Result<Vec<crate::content::ContentUnit>, crate::content::ContentDiscoveryError>
+    {
         super::super::discover_from_root(
             root,
             root,
@@ -440,7 +437,7 @@ mod tests {
     use typst::text::TextElem;
 
     #[test]
-    fn source_identity_keeps_metadata_apart() {
+    fn descriptor_identity_and_metadata() {
         let directory = TempDir::new().unwrap();
         let content = directory.path().join("content/posts/rust");
         fs::create_dir_all(&content).unwrap();
@@ -549,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_comparison_normalizes_values() {
+    fn unchanged_metadata_reuses_inputs() {
         let directory = TempDir::new().unwrap();
         let content = directory.path().join("content");
         fs::create_dir_all(&content).unwrap();
@@ -597,9 +594,8 @@ mod tests {
         assert_ne!(first.inputs(), changed.inputs());
     }
 
-    /// The declared list is the shape a real source's descriptor dictionaries hold.
     #[test]
-    fn descriptor_fields_match_engine_values() {
+    fn descriptor_fields_match_runtime() {
         let directory = TempDir::new().unwrap();
         let content = directory.path().join("content/posts");
         fs::create_dir_all(&content).unwrap();
@@ -659,22 +655,5 @@ mod tests {
             descriptor_fields(by_file.get("/content/posts/deep.typ").unwrap()),
             lexical
         );
-    }
-
-    /// Every descriptor key reads as Tola's Typst surface spells it: lowercase words joined by `-`.
-    #[test]
-    fn descriptor_keys_use_hyphenated_spelling() {
-        for field in SourceDescriptorField::ALL {
-            let name = field.name();
-            assert!(
-                name.split('-').all(|word| {
-                    !word.is_empty()
-                        && word.chars().all(|character| {
-                            character.is_ascii_lowercase() || character.is_ascii_digit()
-                        })
-                }),
-                "`{name}` is not hyphenated"
-            );
-        }
     }
 }

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::{IconCollectionSource, IconsConfig, Sha256Digest};
-use crate::diagnostic::{Diagnostic, Severity};
 use crate::filesystem::SourceOverrides;
+use tola_diagnostic::{Diagnostic, Severity};
 
 use input::{IconFileRead, SvgDirectoryRead};
 
@@ -247,7 +247,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
         .chain()
         .find_map(|source| source.downcast_ref::<IconError>())?;
     let diagnostic = Diagnostic::new(
-        crate::codes::icons::COLLECTION,
+        tola_diagnostic::codes::icons::COLLECTION,
         Severity::Error,
         error.to_string(),
     );
@@ -275,10 +275,10 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
         },
         IconError::Remote { urls, .. } => {
             let diagnostic = match urls.len() {
-                2.. => diagnostic.with_note(format!("tried {}", tried_hosts(urls))),
+                2.. => diagnostic.with_note(format!("Tola tried {}", tried_hosts(urls))),
                 _ => diagnostic,
             };
-            diagnostic.with_help("check the connection and the address")
+            diagnostic.with_help("Check the connection and the address")
         }
         IconError::RemoteTooLarge { .. } => diagnostic.with_help(
             "Use a smaller collection, or declare the icons as a local file in `icons.collections`",
@@ -300,8 +300,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
     })
 }
 
-/// Observe each configured collection and reuse only imports whose source evidence still holds.
-/// Reuse requires a caller-supplied successful inventory, not a failed attempt.
+/// Observe each configured collection, reusing imports whose evidence still holds.
 pub(crate) fn prepare(
     config: &ResolvedSiteConfig,
     cancellation: &BuildCancellation,
@@ -331,7 +330,7 @@ pub(crate) fn prepare(
             .and_then(|inventory| inventory.resolved_collections.get(namespace));
         let collection = prepare_collection(
             namespace,
-            &CollectionContext {
+            &CollectionInputs {
                 config,
                 internal: &internal,
                 cancellation,
@@ -390,17 +389,14 @@ pub(crate) fn prepare(
     })
 }
 
-/// The verified bytes of one configured remote icon collection.
-///
-/// Reads the site's vendored copy, the collection cache, or the collection itself, in that order,
-/// and checks the bytes against the digest the configuration declares. `tola vendor` freezes what
-/// this answers into `{vendor}/icons/<namespace>.json`.
-pub fn remote_collection_bytes(
+/// The request one configured remote collection sends.
+fn remote_request<'a>(
     config: &ResolvedSiteConfig,
-    namespace: &str,
-    resources: &crate::resources::BuildResources,
-    cancellation: &BuildCancellation,
-) -> anyhow::Result<Vec<u8>> {
+    namespace: &'a str,
+    cancellation: &'a BuildCancellation,
+    resources: &'a crate::resources::BuildResources,
+    boundary: &'a tola_typst::SourceBoundary,
+) -> anyhow::Result<remote::RemoteCollection<'a>> {
     let Some(IconCollectionSource::RemoteJson {
         preset,
         version,
@@ -419,19 +415,28 @@ pub fn remote_collection_bytes(
         *sha256,
         mirrors.as_deref(),
     );
-    let vendored = config.vendor.icon_collection(namespace);
-    let verified = remote::collection_bytes(&remote::RemoteCollection {
+    Ok(remote::RemoteCollection {
         namespace,
-        urls: &urls,
+        urls,
         sha256,
-        vendored: vendored.as_deref(),
-        cache_root: &crate::BuildResources::icon_cache_directory(config.get_root()),
+        vendored: config.vendor.icon_collection(namespace),
+        cache_root: crate::BuildResources::icon_cache_directory(config.get_root()),
         cancellation,
         resources,
-        boundary: &resources.source_boundary(config),
-    })?;
-    parse_collection(namespace, verified.read_from.as_deref(), &verified.bytes)?;
-    remote::store_downloaded(namespace, &verified);
+        boundary,
+    })
+}
+
+/// The verified bytes of one configured remote icon collection.
+pub fn remote_collection_bytes(
+    config: &ResolvedSiteConfig,
+    namespace: &str,
+    resources: &crate::resources::BuildResources,
+    cancellation: &BuildCancellation,
+) -> anyhow::Result<Vec<u8>> {
+    let boundary = resources.source_boundary(config);
+    let request = remote_request(config, namespace, cancellation, resources, &boundary)?;
+    let (_, verified) = remote::load_collection(request)?;
     Ok(verified.bytes)
 }
 
@@ -454,9 +459,6 @@ fn fill_mirror(template: &str, name: &str, version: &str) -> String {
 }
 
 /// The addresses and digest one remote namespace fetches, in the order tried.
-///
-/// Configuration validation accepts exactly one declaration, and only indexed presets. A preset
-/// names every mirror that serves its release; a declared `url` names exactly one address.
 fn remote_endpoint(
     namespace: &str,
     preset: Option<&str>,
@@ -494,7 +496,7 @@ fn remote_endpoint(
 }
 
 /// The site-wide facts every collection in one build shares.
-struct CollectionContext<'a> {
+struct CollectionInputs<'a> {
     config: &'a ResolvedSiteConfig,
     internal: &'a Path,
     cancellation: &'a BuildCancellation,
@@ -505,10 +507,10 @@ struct CollectionContext<'a> {
 
 fn prepare_collection(
     namespace: &str,
-    context: &CollectionContext<'_>,
+    context: &CollectionInputs<'_>,
     previous: Option<&Arc<ResolvedCollection>>,
 ) -> anyhow::Result<Arc<ResolvedCollection>> {
-    let CollectionContext {
+    let CollectionInputs {
         config,
         internal,
         cancellation,
@@ -517,21 +519,8 @@ fn prepare_collection(
         boundary,
     } = *context;
     let (collection, reads) = match &config.icons.collections[namespace] {
-        IconCollectionSource::RemoteJson {
-            preset,
-            version,
-            url,
-            sha256,
-            mirrors,
-        } => {
-            let (urls, sha256) = remote_endpoint(
-                namespace,
-                preset.as_deref(),
-                version.as_deref(),
-                url.as_deref(),
-                *sha256,
-                mirrors.as_deref(),
-            );
+        IconCollectionSource::RemoteJson { .. } => {
+            let request = remote_request(config, namespace, cancellation, resources, boundary)?;
             if let Some(previous) = previous {
                 let reusable = match &previous.reads {
                     CollectionReads::Pinned => resources.input_scope() != crate::InputScope::Pure,
@@ -542,20 +531,12 @@ fn prepare_collection(
                     return Ok(Arc::clone(previous));
                 }
             }
-            let vendored = config.vendor.icon_collection(namespace);
-            let (collection, read) = remote::load_collection(remote::RemoteCollection {
-                namespace,
-                urls: &urls,
-                sha256,
-                vendored: vendored.as_deref(),
-                cache_root: &crate::BuildResources::icon_cache_directory(config.get_root()),
-                cancellation,
-                resources,
-                boundary,
-            })?;
+            let (collection, verified) = remote::load_collection(request)?;
             (
                 Arc::new(collection),
-                read.map_or(CollectionReads::Pinned, CollectionReads::Json),
+                verified
+                    .source
+                    .map_or(CollectionReads::Pinned, CollectionReads::Json),
             )
         }
         IconCollectionSource::LocalJson { path } => {
@@ -574,15 +555,7 @@ fn prepare_collection(
             )
         }
         IconCollectionSource::LocalSvgDir { path } => {
-            return prepare_directory(
-                namespace,
-                path,
-                internal,
-                cancellation,
-                previous,
-                overrides,
-                boundary,
-            );
+            return prepare_directory(namespace, path, context, previous);
         }
     };
     cancellation.ensure_active()?;
@@ -592,12 +565,16 @@ fn prepare_collection(
 fn prepare_directory(
     namespace: &str,
     directory: &Path,
-    internal: &Path,
-    cancellation: &BuildCancellation,
+    context: &CollectionInputs<'_>,
     previous: Option<&Arc<ResolvedCollection>>,
-    overrides: &SourceOverrides,
-    boundary: &tola_typst::SourceBoundary,
 ) -> anyhow::Result<Arc<ResolvedCollection>> {
+    let CollectionInputs {
+        internal,
+        cancellation,
+        overrides,
+        boundary,
+        ..
+    } = *context;
     reject_internal_source(directory, internal)?;
     let (paths, membership) = input::svg_paths(directory, overrides, cancellation, boundary)?;
     let retained = previous.and_then(|inventory| match &inventory.reads {
@@ -887,13 +864,13 @@ mod tests {
         };
         let reason = source.to_string();
         let diagnostic = error_diagnostic(&anyhow::Error::new(error), root).unwrap();
-        assert_eq!(diagnostic.code, crate::codes::icons::COLLECTION);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::icons::COLLECTION);
         assert_eq!(diagnostic.location.unwrap().path, "icons/brand.json");
         assert_eq!(diagnostic.notes, [reason]);
     }
 
     #[test]
-    fn remote_source_resolves_to_its_endpoints() {
+    fn remote_source_resolves_endpoints() {
         let indexed = crate::icon::iconify::indexed("lucide").expect("the index has `lucide`");
         let version = indexed.newest().version;
         let (urls, sha256) = remote_endpoint("brand", Some("lucide"), None, None, None, None);

@@ -717,19 +717,6 @@
       err(..normalize-schema-issues(parsed.issues))
     }
   }
-  let path-text(path) = {
-    let rendered = "$"
-    for segment in path {
-      if type(segment) == int {
-        rendered += "[" + str(segment) + "]"
-      } else if segment.match(regex("^[A-Za-z_][A-Za-z0-9_-]*$")) != none {
-        rendered += "." + segment
-      } else {
-        rendered += "[" + repr(segment).replace("`", "\\u{60}") + "]"
-      }
-    }
-    rendered
-  }
   let format-issues(issues) = {
     assert-issues(issues, "format-issues")
     import "@tola/host:0.0.0": format-schema-issues
@@ -1674,6 +1661,41 @@
     parse-date(value)
   },
   output: datetime,
+)
+
+/// A calendar date preserving its declared year, month, or day precision.
+///
+/// Accept strict `YYYY`, `YYYY-MM`, and `YYYY-MM-DD` strings, or a native date without a time.
+/// Years are 1 through 9999, and supplied months and days must form a valid calendar date.
+/// Full datetimes, time-only values, timestamp strings, and surrounding whitespace are rejected.
+///
+/// The result contains only the declared components: `(precision: "year", year: int)`,
+/// `(precision: "month", year: int, month: int)`, or
+/// `(precision: "day", year: int, month: int, day: int)`. Native dates have day precision.
+/// Missing components stay absent; parsing does not choose a time or timezone.
+///
+/// Example - preserve a date's precision and report an array member error:
+/// ```typst
+/// #import "@tola/schema:0.0.0": array-of, parse, partial-date, schema, try-parse
+/// #assert.eq(parse("2026", partial-date), (precision: "year", year: 2026))
+/// #assert.eq(parse("2026-11", partial-date), (precision: "month", year: 2026, month: 11))
+/// #assert.eq(parse("2024-02-29", partial-date), (precision: "day", year: 2024, month: 2, day: 29))
+/// #let checked = try-parse((dates: ("2026", "2026-02-30")), schema((dates: array-of(partial-date))))
+/// #assert.eq(checked.issues.first().path, ("dates", 1))
+/// ```
+///
+/// Related: date, timestamp, parse, try-parse
+#let partial-date = convert(
+  union(datetime, str),
+  value => {
+    import "@tola/host:0.0.0": parse-partial-date
+    parse-partial-date(value)
+  },
+  output: variant("precision",
+    schema((precision: literal("year"), year: int)),
+    schema((precision: literal("month"), year: int, month: int)),
+    schema((precision: literal("day"), year: int, month: int, day: int)),
+  ),
 )
 
 /// A timestamp, returned as `(rfc3339: str, unix-seconds: int, subsecond: str)`.

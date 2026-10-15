@@ -13,13 +13,56 @@ use anyhow::{Result, bail, ensure};
 use image::metadata::Orientation;
 
 use crate::cancellation::Cancellation;
-use crate::recipe::{Background, PixelRecipe, ResizeFilter};
+use crate::recipe::{Background, PixelRecipe, ResizeFilter, VECTOR_RECIPE_IS_RENDERED};
 use crate::rows::{any_row, for_each_row};
-use crate::{pixel_bytes, rgba_buffer};
+use crate::{ImageError, ImageMetadata, ImageResult, pixel_bytes, rgba_buffer};
 
 use convolution::convolved_pixels;
 use nearest::nearest_pixels;
 use plane::{AlphaRepresentation, SourcePlane, source_plane};
+
+impl PixelRecipe {
+    /// Conservative pixel-plane peak for admission before decoding, in bytes.
+    ///
+    /// Includes the decoded source and assumes a materialized orientation crop. Alpha declarations
+    /// select the wider intermediate even when decoding later finds every sample opaque.
+    /// Codec scratch, encoded bytes, retained caches, and per-thread row scratch are excluded.
+    pub fn estimated_working_bytes(self, source: &ImageMetadata) -> u64 {
+        let area = |width: u32, height: u32| u64::from(width) * u64::from(height);
+        let output = area(self.width(), self.height()).saturating_mul(4);
+        let Some(crop) = self.raster_crop() else {
+            return output;
+        };
+        let decoded = area(source.width, source.height).saturating_mul(4);
+        if (crop.width, crop.height) == (self.width(), self.height()) {
+            return decoded.saturating_add(output);
+        }
+        let oriented = area(crop.width, crop.height).saturating_mul(4);
+        if self.filter == ResizeFilter::Nearest {
+            return decoded.saturating_add(oriented).saturating_add(output);
+        }
+        let (width, height, reduced) = match reduce::ReducedBlock::of(
+            (crop.width, crop.height),
+            (self.width(), self.height()),
+        ) {
+            Some(block) => {
+                let (width, height) = block.dimensions(crop.width, crop.height);
+                let bytes =
+                    area(width, height).saturating_mul(if source.has_alpha { 8 } else { 4 });
+                (width, height, bytes)
+            }
+            None => (crop.width, crop.height, 0),
+        };
+        let intermediate = area(self.width(), height)
+            .min(area(width, self.height()))
+            .saturating_mul(if source.has_alpha { 16 } else { 8 });
+        decoded
+            .saturating_add(oriented)
+            .saturating_add(reduced)
+            .saturating_add(intermediate)
+            .saturating_add(output)
+    }
+}
 
 /// Output pixels of one recipe, and whether any of them stays transparent.
 pub struct ResampledPixels {
@@ -50,6 +93,15 @@ impl ResampledPixels {
     /// `rgba` is row-major straight-alpha sRGB, `width × height` pixels. A background
     /// composites it exactly as a resampled plane would.
     pub fn from_rendered(
+        pixels: PixelRecipe,
+        rgba: Vec<u8>,
+        cancellation: &dyn Cancellation,
+    ) -> ImageResult<Self> {
+        Self::rendered(pixels, rgba, cancellation)
+            .map_err(|error| ImageError::wrapping(error, None))
+    }
+
+    fn rendered(
         pixels: PixelRecipe,
         rgba: Vec<u8>,
         cancellation: &dyn Cancellation,
@@ -100,7 +152,7 @@ pub(crate) fn resample(
     cancellation: &dyn Cancellation,
 ) -> Result<ResampledPixels> {
     let Some(crop) = pixels.raster_crop() else {
-        bail!("vector recipes are rendered, not resampled");
+        bail!(VECTOR_RECIPE_IS_RENDERED);
     };
     let alpha = if opaque {
         AlphaRepresentation::Opaque
@@ -183,14 +235,35 @@ fn flatten_onto(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use self::test_support::plane;
     use super::convolution::convolved_reduced;
     use super::*;
     use crate::ImageCancelled;
     use crate::NO_CANCELLATION;
     use crate::recipe::{ImageRecipe, OutputFormat, ResizeOperation, ResizeOptions};
-    use crate::resample::test_support::plane;
     use crate::{ImageFormat, ImageMetadata};
+
+    pub(crate) mod test_support {
+        use crate::resample::plane::{AlphaRepresentation, SourcePlane};
+
+        /// A window over pixels a test owns.
+        pub(crate) fn plane(
+            pixels: &[u8],
+            width: u32,
+            height: u32,
+            alpha: AlphaRepresentation,
+        ) -> SourcePlane<'_> {
+            SourcePlane::Window {
+                pixels,
+                stride: width,
+                origin: 0,
+                width,
+                height,
+                alpha,
+            }
+        }
+    }
 
     fn pixels(
         source_width: u32,
@@ -626,28 +699,5 @@ mod tests {
             lanczos > triangle,
             "the Lanczos kernel covers {lanczos} pixels"
         );
-    }
-}
-
-/// Cancellation and source windows the `resample` module's tests share.
-#[cfg(test)]
-pub(crate) mod test_support {
-    use super::plane::{AlphaRepresentation, SourcePlane};
-
-    /// A window over pixels a test owns.
-    pub(super) fn plane(
-        pixels: &[u8],
-        width: u32,
-        height: u32,
-        alpha: AlphaRepresentation,
-    ) -> SourcePlane<'_> {
-        SourcePlane::Window {
-            pixels,
-            stride: width,
-            origin: 0,
-            width,
-            height,
-            alpha,
-        }
     }
 }

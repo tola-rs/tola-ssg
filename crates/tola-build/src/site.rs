@@ -24,7 +24,7 @@ pub struct SiteRevision {
     outputs: crate::output::revision::OutputRevision,
     index: SiteIndex,
     references: references::References,
-    diagnostics: Vec<crate::diagnostic::Diagnostic>,
+    diagnostics: Vec<tola_diagnostic::Diagnostic>,
     mode: crate::mode::BuildMode,
     input_observation: crate::observation::InputObservation,
 }
@@ -45,7 +45,7 @@ impl SiteRevision {
         outputs: crate::output::revision::OutputRevision,
         index: SiteIndex,
         references: references::References,
-        diagnostics: Vec<crate::diagnostic::Diagnostic>,
+        diagnostics: Vec<tola_diagnostic::Diagnostic>,
         mode: crate::mode::BuildMode,
         input_observation: crate::observation::InputObservation,
     ) -> Self {
@@ -115,7 +115,7 @@ impl SiteRevision {
         &self.references
     }
 
-    pub fn diagnostics(&self) -> &[crate::diagnostic::Diagnostic] {
+    pub fn diagnostics(&self) -> &[tola_diagnostic::Diagnostic] {
         &self.diagnostics
     }
 

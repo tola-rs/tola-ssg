@@ -273,9 +273,7 @@ fn source_documents(
         let document = introspector
             .document(location)
             .ok_or(ReferenceQueryFailure::SourceOutsideDocument)?;
-        let output = introspector
-            .path(document)
-            .and_then(|path| logical_output(path.get_with_slash()))
+        let output = location_output(document, introspector)
             .ok_or(ReferenceQueryFailure::SourceOutsideDocument)?;
         if !output_index.paths.contains_key(&output) {
             return Err(ReferenceQueryFailure::SourceOutsideDocument);
@@ -316,10 +314,7 @@ fn selected_targets(
         if content.to_packed::<DocumentElem>().is_some()
             || content.to_packed::<AssetElem>().is_some()
         {
-            if let Some(output) = introspector
-                .path(location)
-                .and_then(|path| logical_output(path.get_with_slash()))
-            {
+            if let Some(output) = location_output(location, introspector) {
                 targets.outputs.insert(output);
             }
         } else {
@@ -348,14 +343,7 @@ fn descendants(selector: Selector, ancestor: Selector) -> Selector {
     }
 }
 
-/// The link each ref lowers to, keyed by that link's location.
-///
-/// A ref does not reach an HTML output as itself: it lowers to a link inside the ref's own range.
-/// Realization hands a built-in rule's output the input element's span, so that link carries the
-/// ref's own span, while any `link(…)` call — including one a show rule writes in a ref's place —
-/// carries the span of its call site and stays a link. Looking a lowering up per ref keeps the work
-/// linear in the Bundle's references, and refs written by one expression stay apart because each is
-/// searched inside its own range. A link this map does not name is a link the site wrote.
+/// The link each ref lowers to, keyed by that link's location; a link it omits is the site's own.
 #[comemo::memoize]
 fn ref_lowerings(
     introspector: Tracked<dyn Introspector + '_>,
@@ -440,9 +428,7 @@ fn document_occurrences(
             .unwrap_or(occurrence);
         let (Some(document), Some(output)) = (
             introspector.document(occurrence.location),
-            introspector
-                .path(occurrence.location)
-                .and_then(|path| logical_output(path.get_with_slash())),
+            location_output(occurrence.location, introspector),
         ) else {
             continue;
         };
@@ -458,25 +444,13 @@ fn document_occurrences(
     Ok(references)
 }
 
-/// Orders occurrences the way a Bundle writes them: by document, then by realization order.
-///
-/// The channel hands occurrences over in the order they were recorded — parallel document
-/// compilations merge in document order, and a nested realization finishes inside its parent —
-/// but a cached compilation replays its records wherever the cache is consulted, so arrival order
-/// is not the order to report. The sort is stable, so occurrences of one element keep the order
-/// they were recorded in.
+/// Order occurrences by document and realization order: a cache replays records, so arrival order
+/// is not the order to report.
 fn order_references(
     references: &mut [DocumentOccurrence],
     introspector: Tracked<dyn Introspector + '_>,
 ) {
-    let documents = discovery_order(
-        introspector,
-        &Selector::Or(
-            [DocumentElem::ELEM.select(), AssetElem::ELEM.select()]
-                .into_iter()
-                .collect(),
-        ),
-    );
+    let documents = discovery_order(introspector, &output_selector());
     let elements = discovery_order(
         introspector,
         &Selector::Or(
@@ -529,6 +503,23 @@ fn logical_output(path: &str) -> Option<OutputPath> {
     OutputPath::parse(path.trim_start_matches('/')).ok()
 }
 
+/// The logical output `location` belongs to.
+fn location_output(
+    location: Location,
+    introspector: Tracked<dyn Introspector + '_>,
+) -> Option<OutputPath> {
+    logical_output(introspector.path(location)?.get_with_slash())
+}
+
+/// Every output a Bundle publishes: its documents and its assets.
+fn output_selector() -> Selector {
+    Selector::Or(
+        [DocumentElem::ELEM.select(), AssetElem::ELEM.select()]
+            .into_iter()
+            .collect(),
+    )
+}
+
 #[derive(Default, PartialEq, Eq, Hash)]
 struct NativeOutputIndex {
     paths: BTreeMap<OutputPath, NativeOutput>,
@@ -545,18 +536,10 @@ impl NativeOutputIndex {
 }
 
 fn native_output_index(introspector: Tracked<dyn Introspector + '_>) -> NativeOutputIndex {
-    let selector = Selector::Or(
-        [DocumentElem::ELEM.select(), AssetElem::ELEM.select()]
-            .into_iter()
-            .collect(),
-    );
     let mut output_index = NativeOutputIndex::default();
-    for content in introspector.query(&selector) {
+    for content in introspector.query(&output_selector()) {
         let location = content.location().expect("queried outputs have locations");
-        let Some(output) = introspector
-            .path(location)
-            .and_then(|path| logical_output(path.get_with_slash()))
-        else {
+        let Some(output) = location_output(location, introspector) else {
             continue;
         };
         let kind = if content.to_packed::<DocumentElem>().is_some() {
@@ -793,7 +776,7 @@ fn location_target(
     introspector: Tracked<dyn Introspector + '_>,
     output_index: &NativeOutputIndex,
 ) -> Option<ResolvedTarget> {
-    let output = logical_output(introspector.path(location)?.get_with_slash())?;
+    let output = location_output(location, introspector)?;
     let native = output_index.paths.get(&output)?;
     let route = native.route.clone();
     Some(if native.location == location {

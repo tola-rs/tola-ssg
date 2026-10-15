@@ -41,6 +41,13 @@ pub(crate) fn file_contents(file: &str) -> &'static str {
 }
 
 /// Every code theme the package carries, in catalog order.
+const A11Y_SOURCE: ThemeSource = ThemeSource {
+    project: "ericwbailey/a11y-syntax-highlighting",
+    revision: "3200c11458e415933ca33ced7cdc3b4cf428c93b",
+    file: "dist/highlight/a11y-light.css, dist/highlight/a11y-dark.css",
+    license: "MIT",
+};
+
 pub fn themes() -> &'static [CodeTheme] {
     CODE_THEMES
 }
@@ -199,23 +206,13 @@ static CODE_THEMES: &[CodeTheme] = &[
         name: "a11y",
         appearance: ThemeAppearance::Light,
         file: "code-themes/a11y.tmTheme",
-        source: &ThemeSource {
-            project: "ericwbailey/a11y-syntax-highlighting",
-            revision: "3200c11458e415933ca33ced7cdc3b4cf428c93b",
-            file: "dist/highlight/a11y-light.css, dist/highlight/a11y-dark.css",
-            license: "MIT",
-        },
+        source: &A11Y_SOURCE,
     },
     CodeTheme {
         name: "a11y-dark",
         appearance: ThemeAppearance::Dark,
         file: "code-themes/a11y-dark.tmTheme",
-        source: &ThemeSource {
-            project: "ericwbailey/a11y-syntax-highlighting",
-            revision: "3200c11458e415933ca33ced7cdc3b4cf428c93b",
-            file: "dist/highlight/a11y-light.css, dist/highlight/a11y-dark.css",
-            license: "MIT",
-        },
+        source: &A11Y_SOURCE,
     },
     CodeTheme {
         name: "dracula",

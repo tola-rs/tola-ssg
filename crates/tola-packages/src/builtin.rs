@@ -10,15 +10,9 @@ use typst::syntax::{LinkedNode, Source, ast};
 
 use crate::protocol::{CAPABILITY_OBSERVATION_PATH, SOURCE_OBSERVATION_DIRECTORY};
 
-/// The namespace every builtin package belongs to.
-///
-/// Tola owns this namespace: only the packages this crate lists exist in it, and a package
-/// directory holding one is ignored rather than used.
+/// The namespace every builtin package belongs to; only the packages this crate lists exist in it.
 pub const TOLA_NAMESPACE: &str = "tola";
-/// The fixed import version every builtin package uses.
-///
-/// The implementation version is this crate's own version, which
-/// [`BuiltinPackage::host_version`] reports.
+/// The fixed import version; the implementation version is this crate's own.
 const TOLA_PACKAGE_VERSION: PackageVersion = PackageVersion {
     major: 0,
     minor: 0,
@@ -132,11 +126,7 @@ static PACKAGE_EXPORTS: LazyLock<Vec<Vec<&'static str>>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The names one module source publishes: its top-level `#let` bindings and the members it
-/// imports explicitly, in source order, each name once even when a later statement rebinds it.
-///
-/// A wildcard import publishes whatever the module it reads happens to hold, and a statement
-/// inside a body publishes nothing, so neither can leak a helper or a standard-library name.
+/// The names a module source publishes; a wildcard or a body statement leaks no name.
 fn export_names(module: &'static str) -> Vec<&'static str> {
     let source = Source::detached(module);
     let root = LinkedNode::new(source.root());
@@ -181,7 +171,7 @@ fn spelling(
 }
 
 /// Holds exactly one row per variant, in the order [`TolaPackage::all`] lists them.
-const PACKAGE_DEFINITIONS: [PackageDefinition; 13] = [
+const PACKAGE_DEFINITIONS: [PackageDefinition; 16] = [
     PackageDefinition {
         name: "host",
         sources: PackageSources::Fixed(&[PackageSource::new(
@@ -194,6 +184,13 @@ const PACKAGE_DEFINITIONS: [PackageDefinition; 13] = [
         sources: PackageSources::Fixed(&[PackageSource::new(
             "lib.typ",
             include_str!("embed/site.typ"),
+        )]),
+    },
+    PackageDefinition {
+        name: "module",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/module.typ"),
         )]),
     },
     PackageDefinition {
@@ -277,6 +274,20 @@ const PACKAGE_DEFINITIONS: [PackageDefinition; 13] = [
             include_str!("embed/hash.typ"),
         )]),
     },
+    PackageDefinition {
+        name: "uuid",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/uuid.typ"),
+        )]),
+    },
+    PackageDefinition {
+        name: "diagnostic",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/diagnostic.typ"),
+        )]),
+    },
 ];
 
 const _: () = {
@@ -293,6 +304,7 @@ const _: () = {
 pub enum TolaPackage {
     Host,
     Site,
+    Module,
     Address,
     Icon,
     Image,
@@ -304,6 +316,8 @@ pub enum TolaPackage {
     Code,
     Web,
     Hash,
+    Uuid,
+    Diagnostic,
 }
 
 /// The name of the `@tola/source` package: the one spelling the engine and the language server
@@ -328,6 +342,7 @@ impl TolaPackage {
         &[
             Self::Host,
             Self::Site,
+            Self::Module,
             Self::Address,
             Self::Icon,
             Self::Image,
@@ -339,6 +354,8 @@ impl TolaPackage {
             Self::Code,
             Self::Web,
             Self::Hash,
+            Self::Uuid,
+            Self::Diagnostic,
         ]
     }
 
@@ -370,6 +387,7 @@ impl TolaPackage {
         match self {
             Self::Host => true,
             Self::Site
+            | Self::Module
             | Self::Address
             | Self::Icon
             | Self::Image
@@ -380,7 +398,9 @@ impl TolaPackage {
             | Self::Document
             | Self::Code
             | Self::Web
-            | Self::Hash => false,
+            | Self::Hash
+            | Self::Uuid
+            | Self::Diagnostic => false,
         }
     }
 
@@ -491,11 +511,6 @@ mod tests {
     use super::*;
 
     /// Tola's own Typst surface: lowercase words joined by `-`, never `_`.
-    ///
-    /// The check reads the real surface: the exports each entrypoint's syntax tree publishes, the
-    /// parameters of every exported function, and the fixed field names the package natives
-    /// insert. Host-language identifiers, upstream protocol names, and site data are not Tola's
-    /// to spell.
     #[test]
     fn typst_names_use_hyphenated_spelling() {
         for package in TolaPackage::all().iter().copied() {

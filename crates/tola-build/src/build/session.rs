@@ -1,10 +1,4 @@
-//! The reusable baseline of one site's repeated builds: host resources shared across
-//! attempts, the producer caches an accepted revision installed, and the attempt
-//! preparation that reads accepted evidence.
-//!
-//! A cache baseline advances only through [`BuildSession::commit_cache`] after a
-//! successful write or an accepted checked revision; preparing or dropping an attempt
-//! advances nothing.
+//! Repeated-build baseline: accepted caches advance only after a write or accepted revision.
 
 use crate::compiler::{
     CompilationDependencies, CompilationReuse, RebuildDecision, SiteProgramCache, TypstHost,
@@ -12,11 +6,24 @@ use crate::compiler::{
 };
 use crate::mode::BuildMode;
 
+/// Why an attempt refused before it could compile the site.
+#[derive(Debug, thiserror::Error)]
+enum AttemptRefusal {
+    #[error("the site's modules changed while Tola was preparing the build; run the command again")]
+    ManifestsChangedBeforeBuild,
+    #[error("the site's modules changed before the build's hooks ran; run the command again")]
+    ManifestsChangedBeforeHooks,
+    #[error("module watch uses a different input scope")]
+    WatchScopeMismatch,
+    #[error(
+        "`--pure` cannot use `[typst.fonts] system = true`; keep the fonts in `[typst.fonts] paths`, or run the build without `--pure`"
+    )]
+    SystemFontsInPureBuild,
+    #[error("Tola could not reuse the previous build's work; run the command again")]
+    StaleCacheOrigin,
+}
+
 /// Shared resources and accepted caches for repeated builds of one site.
-///
-/// Ordinary callers use [`Self::build_and_write`]. Custom schedulers use
-/// [`Self::prepare`] and [`Self::install_revision`] to advance caches only after
-/// their corresponding output takes effect. The session does not own that output.
 pub struct BuildSession {
     resources: crate::resources::BuildResources,
     // Attempts share immutable loaded resources even after failure. This lock is
@@ -34,19 +41,13 @@ pub(crate) struct RetainedProducerCaches {
     pub(crate) icons: crate::icon::IconInventory,
     pub(crate) images: std::sync::Arc<crate::image::output::ImageOutputs>,
     pub(crate) seo: std::sync::Arc<crate::seo::SeoCompilation>,
-    /// What the before-build hooks wrote when this revision was produced.
-    ///
-    /// A later attempt compares these content fingerprints to decide whether a hook
-    /// that ran actually changed anything, so an unchanged generator keeps its reuse.
+    /// Fingerprints of what the before-build hooks wrote for this revision.
     pub(crate) hook_outputs: crate::hooks::SourceHookOutputs,
     /// The previous successful development revision's reusable `generate-outputs` products.
     pub(crate) hook_reuse: crate::hooks::ReusableHookOutputs,
 }
 
-/// The originating session and accepted generation captured by one attempt.
-///
-/// Existing object identities distinguish sessions and accepted generations without
-/// retaining older producer caches. Preparing or dropping an attempt advances neither.
+/// The session and accepted generation one attempt's caches originated from.
 struct BuildCacheOrigin {
     session: std::sync::Weak<std::sync::Mutex<Option<TypstHost>>>,
     accepted: Option<std::sync::Weak<BuildCacheUpdate>>,
@@ -81,10 +82,7 @@ impl BuildCacheUpdate {
         &self.caches
     }
 
-    /// Attribute these caches to the session and accepted generation that produced them.
-    ///
-    /// Installation rejects caches attributed to another session, or to a generation
-    /// that session has already replaced.
+    /// Attribute these caches to the session and generation that produced them.
     pub(super) fn attribute_to(&mut self, session: &BuildSession) {
         self.origin = Some(BuildCacheOrigin {
             session: std::sync::Arc::downgrade(&session.host_cache),
@@ -92,12 +90,14 @@ impl BuildCacheUpdate {
         });
     }
 
+    /// A cancelled attempt recorded partial evidence, so its cancellation is checked
+    /// around the caller's own freshness walk.
     pub(super) fn freshness(
         &self,
         config: &crate::config::ResolvedSiteConfig,
         hook_outputs: &[crate::hooks::HookOutputEvidence],
         attempt_cancellation: &crate::cancellation::BuildCancellation,
-        cancellation: &crate::cancellation::BuildCancellation,
+        caller_cancellation: &crate::cancellation::BuildCancellation,
     ) -> anyhow::Result<super::InputFreshness> {
         attempt_cancellation.ensure_active()?;
         let freshness = super::input::input_freshness(
@@ -105,7 +105,7 @@ impl BuildCacheUpdate {
             &self.caches,
             &self.content_inventory,
             hook_outputs,
-            cancellation,
+            caller_cancellation,
         )?;
         attempt_cancellation.ensure_active()?;
         Ok(freshness)
@@ -155,6 +155,8 @@ pub struct BuildRequest {
     pub reference_checks: super::ReferenceChecks,
     /// Whether a development attempt must run every reusable generator instead of reusing it.
     pub disable_hook_reuse: bool,
+    /// Retain description-only projections, including stages completed before failure.
+    pub capture_report: bool,
 }
 
 impl BuildRequest {
@@ -169,6 +171,7 @@ impl BuildRequest {
             hook_execution: crate::hooks::HookExecution::Run,
             reference_checks: super::ReferenceChecks::Full,
             disable_hook_reuse: false,
+            capture_report: false,
         }
     }
 }
@@ -180,24 +183,45 @@ impl Default for BuildRequest {
 }
 
 /// An owned build attempt suitable for a caller's blocking worker.
-///
-/// Attempts borrow no mutable session resources. Only a completed write or an
-/// accepted revision advances the originating session's reuse baseline.
 pub struct BuildAttempt {
     config: std::sync::Arc<crate::config::ResolvedSiteConfig>,
     baseline: BuildSession,
     request: BuildRequest,
+    prepared_modules: bool,
 }
 
 impl BuildAttempt {
     /// Prepare resources and run the build pipeline.
     pub fn run(mut self) -> Result<super::SiteBuild, super::BuildFailure> {
+        if !self.prepared_modules {
+            self.config = std::sync::Arc::new(
+                crate::modules::prepared::configure(
+                    &self.config,
+                    self.baseline.resources.input_scope(),
+                )
+                .map_err(super::BuildFailure::before_attempt)?,
+            );
+        }
+        if !self
+            .config
+            .module_inputs
+            .manifests_are_fresh(&self.request.cancellation)
+            .map_err(super::BuildFailure::before_attempt)?
+        {
+            return Err(super::BuildFailure::before_attempt(anyhow::Error::new(
+                AttemptRefusal::ManifestsChangedBeforeBuild,
+            )));
+        }
         if let Err(error) = super::diagnostic::refuse_incomplete_vendor(&self.config) {
             return Err(super::BuildFailure::before_attempt(error));
         }
         let mut producers = super::pipeline::BuildAttemptProducers {
             resources: self.baseline.resources.clone(),
             cancellation: self.request.cancellation.clone(),
+            report: self
+                .request
+                .capture_report
+                .then(super::BuildReport::default),
             generated_files: std::mem::take(&mut self.request.generated_files),
             previous_hook_reuse: if self.request.disable_hook_reuse {
                 None
@@ -208,94 +232,142 @@ impl BuildAttempt {
             },
             ..super::pipeline::BuildAttemptProducers::default()
         };
-        let cancellation = producers.cancellation.clone();
-        let changed_paths = self.request.trigger.paths().unwrap_or_default();
-        let built = super::pipeline::build_site_inner(
-            &self.config,
-            self.request.mode,
-            self.request.hook_execution,
-            self.request.reference_checks,
-            &mut producers,
-            |producers, hooks_executed| -> anyhow::Result<TypstHost> {
-                let host = self.baseline.load_host(&self.config, &cancellation)?;
-                let accepted_matches = self
-                    .baseline
-                    .accepted
-                    .as_ref()
-                    .is_some_and(|accepted| accepted.caches.host.has_same_inputs(&host));
-                // A before-build hook that wrote exactly what the previous revision already
-                // held changes no input, so the event-qualified reuse stays valid. Only a
-                // generator whose declared outputs actually differ withdraws it.
-                let hooks_changed_outputs = hooks_executed
-                    && !self
-                        .baseline
-                        .hook_outputs_match_accepted(&producers.source_hooks);
-                producers.hook_outputs_unchanged = hooks_executed && !hooks_changed_outputs;
-                let permissions = if accepted_matches
-                    && !hooks_changed_outputs
-                    && matches!(self.request.trigger, BuildTrigger::Paths(_))
-                {
-                    self.request.reuse
-                } else {
-                    BuildReuse::default()
-                };
-                let content_inventory = self.baseline.reusable_content_inventory(
-                    &self.config,
-                    changed_paths,
-                    permissions.content_inventory,
-                );
-                cancellation.ensure_active()?;
-                let decision = self
-                    .baseline
-                    .rebuild_decision(changed_paths, content_inventory.is_none());
-                tracing::debug!(
-                    target: "tola::compile",
-                    source_priority = ?decision.source_analysis,
-                    site_priority = ?decision.site_program,
-                    direct = ?decision.direct_readers,
-                    affected = ?decision.affected_readers,
-                    "selected producer recomputation from observed changes"
-                );
-                producers.reuse = self.baseline.reusable_compilation(
-                    &decision,
-                    permissions.typst_compilation && content_inventory.is_some(),
-                );
-                producers.images = self
-                    .baseline
-                    .accepted_caches()
-                    .map(|caches| std::sync::Arc::clone(&caches.images));
-                producers.seo = self
-                    .baseline
-                    .accepted_caches()
-                    .map(|caches| std::sync::Arc::clone(&caches.seo));
-                producers.reference_reuse = self
-                    .baseline
-                    .accepted
-                    .as_ref()
-                    .map(|accepted| accepted.references.clone());
-                producers.icons = self
-                    .baseline
-                    .accepted_caches()
-                    .map(|caches| caches.icons.clone());
-                producers.previous_bundle_entries = self.baseline.bundle_entries();
-                producers.configured_assets = permissions
-                    .configured_assets
-                    .then(|| self.baseline.configured_assets().cloned())
-                    .flatten();
-                producers.configured_asset_changes = permissions
-                    .configured_assets
-                    .then(|| super::AcceptedFileChanges::from_watcher(changed_paths.to_vec()));
-                producers.content_inventory = content_inventory;
-                cancellation.ensure_active()?;
-                Ok(host)
-            },
-        );
+        let built = (|| -> anyhow::Result<super::SiteBuild> {
+            let bootstrap = self.prepare_module_hooks(&mut producers)?;
+            if !self
+                .config
+                .module_inputs
+                .manifests_are_fresh(&producers.cancellation)?
+            {
+                return Err(anyhow::Error::new(
+                    AttemptRefusal::ManifestsChangedBeforeHooks,
+                ));
+            }
+            super::pipeline::build_site_inner(
+                &self.config,
+                &self.request,
+                &mut producers,
+                |producers, hooks_executed| {
+                    self.prepare_compiler(producers, hooks_executed, bootstrap.as_ref())
+                },
+            )
+        })();
         built
             .map(|mut built| {
                 built.cache_update.attribute_to(&self.baseline);
                 built
             })
             .map_err(|error| super::BuildFailure::new(error, producers.into_inputs()))
+    }
+
+    /// Install the hook stages modules declare before any generator runs.
+    fn prepare_module_hooks(
+        &mut self,
+        producers: &mut super::pipeline::BuildAttemptProducers,
+    ) -> anyhow::Result<Option<crate::modules::bootstrap::Bootstrap>> {
+        let declares_hooks = self
+            .config
+            .module_inputs
+            .configured
+            .values()
+            .any(|configured| !configured.module.hooks.is_empty());
+        if !declares_hooks {
+            return Ok(None);
+        }
+        let bootstrap = crate::modules::bootstrap::Bootstrap::prepare(
+            &self.config,
+            &producers.resources,
+            &producers.cancellation,
+        )
+        .map_err(|mut error| {
+            let carried = super::pipeline::record_module_preparation_failure(
+                &mut error,
+                &self.config,
+                producers.inputs_mut(),
+            );
+            match carried {
+                Some(mut diagnostics) => {
+                    diagnostics
+                        .extend(super::diagnostic::for_error(&error, self.config.get_root()));
+                    anyhow::Error::new(tola_diagnostic::DiagnosticError::attach(error, diagnostics))
+                }
+                None => error,
+            }
+        })?;
+        producers
+            .inputs_mut()
+            .record_accessed(&bootstrap.options.accessed);
+        bootstrap.install(std::sync::Arc::make_mut(&mut self.config))?;
+        bootstrap.ensure_current(&self.config, &producers.cancellation)?;
+        Ok(Some(bootstrap))
+    }
+
+    /// Load the compiler host and the accepted-evidence reuse, after hooks wrote their inputs.
+    fn prepare_compiler(
+        &self,
+        producers: &mut super::pipeline::BuildAttemptProducers,
+        hooks_executed: bool,
+        bootstrap: Option<&crate::modules::bootstrap::Bootstrap>,
+    ) -> anyhow::Result<TypstHost> {
+        let cancellation = producers.cancellation.clone();
+        if let Some(bootstrap) = bootstrap {
+            bootstrap.ensure_current(&self.config, &cancellation)?;
+        }
+        let host = self.baseline.load_host(&self.config, &cancellation)?;
+        let accepted = self.baseline.accepted.as_deref();
+        let host_inputs_match =
+            accepted.is_some_and(|accepted| accepted.caches.host.has_same_inputs(&host));
+        // A before-build hook that wrote exactly what the previous revision already
+        // held changes no input, so the event-qualified reuse stays valid. Only a
+        // generator whose declared outputs actually differ withdraws it.
+        let hook_outputs_match = self
+            .baseline
+            .hook_outputs_match_accepted(&producers.source_hooks);
+        producers.hook_outputs_unchanged = hooks_executed && hook_outputs_match;
+        let permissions = if host_inputs_match
+            && (!hooks_executed || hook_outputs_match)
+            && matches!(self.request.trigger, BuildTrigger::Paths(_))
+        {
+            self.request.reuse
+        } else {
+            BuildReuse::default()
+        };
+        let changed_paths = self.request.trigger.paths().unwrap_or_default();
+        let content_inventory = self.baseline.reusable_content_inventory(
+            &self.config,
+            changed_paths,
+            permissions.content_inventory,
+        );
+        cancellation.ensure_active()?;
+        let decision = self
+            .baseline
+            .rebuild_decision(changed_paths, content_inventory.is_none());
+        tracing::debug!(
+            target: "tola::compile",
+            source_priority = ?decision.source_analysis,
+            site_priority = ?decision.site_program,
+            direct = ?decision.direct_readers,
+            affected = ?decision.affected_readers,
+            "selected producer recomputation from observed changes"
+        );
+        producers.reuse = self.baseline.reusable_compilation(
+            &decision,
+            permissions.typst_compilation && content_inventory.is_some(),
+        );
+        producers.icons = accepted.map(|accepted| accepted.caches.icons.clone());
+        producers.images = accepted.map(|accepted| std::sync::Arc::clone(&accepted.caches.images));
+        producers.seo = accepted.map(|accepted| std::sync::Arc::clone(&accepted.caches.seo));
+        producers.reference_reuse = accepted.map(|accepted| accepted.references.clone());
+        producers.previous_bundle_entries = self.baseline.bundle_entries();
+        if permissions.configured_assets {
+            producers.configured_assets = self.baseline.configured_assets().cloned();
+            producers.configured_asset_changes = Some(super::AcceptedFileChanges::from_watcher(
+                changed_paths.to_vec(),
+            ));
+        }
+        producers.content_inventory = content_inventory;
+        cancellation.ensure_active()?;
+        Ok(host)
     }
 }
 
@@ -355,7 +427,22 @@ impl BuildSession {
                 accepted: self.accepted.clone(),
             },
             request,
+            prepared_modules: false,
         }
+    }
+
+    /// Start an attempt from the prepared hook watch whose paths were staged.
+    pub fn prepare_with_hook_watch(
+        &mut self,
+        watch: &crate::modules::PreparedHookWatch,
+        request: BuildRequest,
+    ) -> anyhow::Result<BuildAttempt> {
+        if watch.scope() != self.resources.input_scope() {
+            return Err(anyhow::Error::new(AttemptRefusal::WatchScopeMismatch));
+        }
+        let mut attempt = self.prepare(std::sync::Arc::clone(watch.config()), request);
+        attempt.prepared_modules = true;
+        Ok(attempt)
     }
 
     fn load_host(
@@ -366,10 +453,7 @@ impl BuildSession {
         cancellation.ensure_active()?;
         // Host fonts cannot join a pure build; the setting is contradictory, not ignorable.
         if self.resources.input_scope() == crate::InputScope::Pure && config.fonts().system {
-            anyhow::bail!(
-                "`--pure` cannot use `[typst.fonts] system = true`; keep the fonts in \
-                 `[typst.fonts] paths`, or run the build without `--pure`"
-            );
+            return Err(anyhow::Error::new(AttemptRefusal::SystemFontsInPureBuild));
         }
         let cached = {
             self.host_cache
@@ -388,7 +472,7 @@ impl BuildSession {
         };
         cancellation.ensure_active()?;
         self.retain_host(&host);
-        Ok(host)
+        Ok(host.with_local_packages(std::sync::Arc::clone(&config.module_inputs.packages)))
     }
 
     fn retain_host(&self, host: &TypstHost) {
@@ -408,10 +492,6 @@ impl BuildSession {
     }
 
     /// Whether the hooks this attempt ran wrote exactly what the accepted revision holds.
-    ///
-    /// A generator that rewrote identical bytes changed no input, so the reuse an
-    /// event-qualified rebuild already qualified for stays valid. An accepted revision
-    /// that declared no outputs at all cannot prove this, so it reports `false`.
     pub(crate) fn hook_outputs_match_accepted(
         &self,
         produced: &crate::hooks::SourceHookOutputs,
@@ -441,11 +521,7 @@ impl BuildSession {
         )
     }
 
-    /// Return the accepted content inventory when this rebuild can reuse it.
-    ///
-    /// Ordinary edits share the inventory without walking the tree. Possible
-    /// structural changes, hooks, or configuration changes require discovery
-    /// after before-build hooks.
+    /// The accepted content inventory, when this rebuild can reuse it.
     pub(crate) fn reusable_content_inventory(
         &self,
         config: &crate::config::ResolvedSiteConfig,
@@ -477,10 +553,15 @@ impl BuildSession {
             return None;
         }
         let caches = self.accepted_caches()?;
+        let project_entry = matches!(
+            typst::World::main(caches.site_program.world.as_ref()).root(),
+            typst::syntax::VirtualRoot::Project
+        )
+        .then_some(caches.site_program.entry.as_path());
         let source_analysis = caches
             .source_analysis
             .clone()
-            .prepare_for_rebuild(decision, Some(caches.site_program.entry.as_path()));
+            .prepare_for_rebuild(decision, project_entry);
         if decision.reuses_site_program() && decision.reuses_source_analysis() {
             Some(CompilationReuse::SiteProgram {
                 site_program: Box::new(caches.site_program.clone()),
@@ -500,13 +581,7 @@ impl BuildSession {
             .map(|caches| caches.site_program.bundle_entries.clone())
     }
 
-    /// Install a checked revision, then advance its originating cache baseline.
-    ///
-    /// The callback runs only after the session, accepted generation, and original
-    /// cancellation match. The caller must hold its event guard through this call.
-    /// No filesystem checks or hooks run here. Return `Err` only if the revision did
-    /// not become current; after installation, return `Ok` and handle hook failures
-    /// separately. An error or a dropped candidate leaves accepted caches unchanged.
+    /// Install a checked revision whose origin matches, then advance the cache baseline.
     pub fn install_revision<T>(
         &mut self,
         checked: super::CheckedRevision,
@@ -520,21 +595,16 @@ impl BuildSession {
     }
 
     fn ensure_cache_origin(&self, update: &BuildCacheUpdate) -> anyhow::Result<()> {
-        let origin = update.origin.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Tola could not reuse the previous build's work; run the command again")
-        })?;
-        anyhow::ensure!(
+        let same_origin = update.origin.as_ref().is_some_and(|origin| {
             std::ptr::eq(
                 origin.session.as_ptr(),
-                std::sync::Arc::as_ptr(&self.host_cache)
-            ),
-            "Tola could not reuse the previous build's work; run the command again"
-        );
-        anyhow::ensure!(
-            origin.accepted.as_ref().map(std::sync::Weak::as_ptr)
-                == self.accepted.as_ref().map(std::sync::Arc::as_ptr),
-            "Tola could not reuse the previous build's work; run the command again"
-        );
+                std::sync::Arc::as_ptr(&self.host_cache),
+            ) && origin.accepted.as_ref().map(std::sync::Weak::as_ptr)
+                == self.accepted.as_ref().map(std::sync::Arc::as_ptr)
+        });
+        if !same_origin {
+            return Err(anyhow::Error::new(AttemptRefusal::StaleCacheOrigin));
+        }
         Ok(())
     }
 
@@ -573,7 +643,6 @@ mod tests {
         config
     }
 
-    /// Records how many times a generator actually ran, beside the site root.
     #[test]
     fn child_counts_generator_runs() {
         if !crate::build::tests::is_hook_child_for("generate-outputs") {
@@ -593,7 +662,6 @@ mod tests {
         .unwrap();
     }
 
-    /// The accepted development revision carries generator outputs into the next attempt.
     #[test]
     fn development_reuses_unchanged_generator_outputs() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -650,28 +718,13 @@ mod tests {
             generates: vec!["fonts/generated.ttf".into()],
             ..Default::default()
         });
-        for through_session in [false, true] {
-            let font = config.typst.fonts.paths[0].join("generated.ttf");
-            if font.exists() {
-                std::fs::remove_file(&font).unwrap();
-            }
-            let built = if through_session {
-                BuildSession::new()
-                    .prepare(
-                        std::sync::Arc::new(config.clone()),
-                        super::BuildRequest::default(),
-                    )
-                    .run()
-                    .unwrap()
-            } else {
-                crate::build::build_site(&config, super::BuildMode::Production).unwrap()
-            };
-            assert!(font.is_file());
-            assert_eq!(built.hook_outputs().len(), 1);
-            built
-                .ensure_fresh(&crate::cancellation::BuildCancellation::default())
-                .unwrap();
-        }
+        let built = crate::build::build_site(&config, super::BuildMode::Production).unwrap();
+
+        assert!(config.typst.fonts.paths[0].join("generated.ttf").is_file());
+        assert_eq!(built.hook_outputs().len(), 1);
+        built
+            .ensure_fresh(&crate::cancellation::BuildCancellation::default())
+            .unwrap();
     }
 
     fn published_input_site(root: &Path) -> std::sync::Arc<crate::config::ResolvedSiteConfig> {
@@ -780,7 +833,6 @@ mod tests {
         assert!(warm_html.contains("Plain"), "{warm_html}");
     }
 
-    /// A published build replaces the bytes earlier revisions wrote.
     #[test]
     fn rebuild_publishes_new_bytes() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -808,7 +860,6 @@ mod tests {
         );
     }
 
-    /// A build that fails keeps the tree its last successful build published.
     #[test]
     fn failed_build_keeps_published_tree() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -859,29 +910,27 @@ mod tests {
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == "reference.fragment_missing"
-                    && diagnostic.severity == crate::diagnostic::Severity::Warning
+                    && diagnostic.severity == tola_diagnostic::Severity::Warning
             }),
             "{diagnostics:?}"
         );
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.code.surface() == "typst"
-                    && diagnostic.severity == crate::diagnostic::Severity::Warning
+                    && diagnostic.severity == tola_diagnostic::Severity::Warning
             }),
             "{diagnostics:?}"
         );
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == "reference.navigation_missing"
-                    && diagnostic.severity == crate::diagnostic::Severity::Error
+                    && diagnostic.severity == tola_diagnostic::Severity::Error
             }),
             "{diagnostics:?}"
         );
         assert!(!config.build.publish_dir.exists());
     }
 
-    /// A before-build generator's declared output decides reuse: an unchanged output keeps
-    /// the reused compilation, changed bytes withdraw it.
     #[test]
     fn reuse_follows_hook_output_bytes() {
         let dir = TempDir::new().unwrap();

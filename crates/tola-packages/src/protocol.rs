@@ -10,6 +10,12 @@
 /// The leading underscores keep it clear of the keys an author sets.
 pub const HOST_MODULE: &str = "__tola";
 
+/// The `sys.inputs` member holding module records keyed by the project alias.
+pub const MODULES_MEMBER: &str = "__tola_modules";
+
+/// Private options-validation input; this is a protocol key, not a security boundary.
+pub const MODULE_VALIDATION_MEMBER: &str = "__tola_module_validation";
+
 /// The `sys.inputs` member holding the ordered source records.
 pub const SOURCE_RECORDS_MEMBER: &str = "__tola_source_records";
 
@@ -22,12 +28,7 @@ pub const ASSET_URLS_MEMBER: &str = "__tola_asset_urls";
 /// Site-root sources of exact-file asset declarations, keyed by declared URL.
 pub const ASSET_ORIGINS_MEMBER: &str = "__tola_asset_origins";
 
-/// The `sys.inputs` member holding each source's origin, keyed by the source path the records
-/// carry.
-///
-/// A value holds `source`, the owning source's Typst path, plus `file` and `range`, the
-/// declaration's Typst path and `none | (start, end)` byte range. A shared helper can supply the
-/// declaration. Without one, `file` names the source itself and `range` is `none`.
+/// Each source's origin, keyed by source path: `source`, plus the declaration's `file` and `range`.
 pub const SOURCE_ORIGINS_MEMBER: &str = "__tola_source_origins";
 
 /// The virtual path naming the capability observation one source-analysis read records.

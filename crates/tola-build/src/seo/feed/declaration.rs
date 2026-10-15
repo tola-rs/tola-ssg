@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use typst::foundations::Value;
+use typst::foundations::{Dict, Value};
 
 use super::{
     FeedFormat,
@@ -16,6 +16,30 @@ use crate::seo::declaration::{
     SeoDeclaration, SeoDeclarationError, field_path, index_path, published_date, resolve_target,
 };
 use tola_address::OutputPath;
+
+/// The fields a feed declaration may carry.
+const FEED_FIELDS: &[&str] = &[
+    "output",
+    "format",
+    "id",
+    "title",
+    "description",
+    "language",
+    "authors",
+    "entries",
+];
+
+/// The fields one feed entry may carry.
+const ENTRY_FIELDS: &[&str] = &[
+    "id",
+    "target",
+    "title",
+    "published",
+    "updated",
+    "summary",
+    "content",
+    "authors",
+];
 
 pub(super) struct Author {
     pub(super) name: String,
@@ -109,51 +133,16 @@ impl Feed {
     ) -> Result<Self, RenderError> {
         cancellation.ensure_active()?;
         let fields = &declaration.fields;
-        declaration.check_fields(
-            fields,
-            &[
-                "output",
-                "format",
-                "id",
-                "title",
-                "description",
-                "language",
-                "authors",
-                "entries",
-            ],
-            "",
-        )?;
-        declaration.require_origin(config)?;
-        let output = declaration.output()?;
-        let format = FeedFormat::from_authored_name(
-            &declaration.string(declaration.required(fields, "format", "")?, "/format")?,
-        )
-        .ok_or_else(|| declaration.invalid("/format", "expected `rss`, `atom`, or `json`"))?;
-        check_format_matches_output(declaration, format, &output)?;
-        let output_url = tola_address::asset_url_from_output(&output);
-        let url = config.canonical_url(&output_url);
-        let id = declaration.text(declaration.required(fields, "id", "")?, "/id")?;
-        let title = declaration.text(declaration.required(fields, "title", "")?, "/title")?;
-        if title.trim().is_empty() {
-            return Err(declaration
-                .invalid(
-                    "/title",
-                    "feed title must not be blank; set `title` or `site.title`",
-                )
-                .into());
-        }
-        let description = declaration.text(
-            declaration.required(fields, "description", "")?,
-            "/description",
-        )?;
-        let language =
-            declaration.text(declaration.required(fields, "language", "")?, "/language")?;
-        let authors = parse_authors(
-            declaration,
-            Some(declaration.required(fields, "authors", "")?),
-            "/authors",
-            cancellation,
-        )?;
+        let FeedMetadata {
+            output,
+            format,
+            url,
+            id,
+            title,
+            description,
+            language,
+            authors,
+        } = feed_metadata(declaration, config, cancellation)?;
         let values = declaration.required_array(fields, "entries", "")?;
         let mut entries = Vec::with_capacity(values.len());
         let mut entry_ids = BTreeSet::new();
@@ -165,20 +154,7 @@ impl Feed {
                     .expected(&entry_path, "dictionary", value)
                     .into());
             };
-            declaration.check_fields(
-                fields,
-                &[
-                    "id",
-                    "target",
-                    "title",
-                    "published",
-                    "updated",
-                    "summary",
-                    "content",
-                    "authors",
-                ],
-                &entry_path,
-            )?;
+            declaration.check_fields(fields, ENTRY_FIELDS, &entry_path)?;
             let target = resolve_target(
                 declaration,
                 declaration.required(fields, "target", &entry_path)?,
@@ -190,15 +166,7 @@ impl Feed {
             )?;
             let url: String = target.url.into();
             let id_path = field_path(&entry_path, "id");
-            let id = match fields.get("id").ok() {
-                None | Some(Value::Auto) => url.clone(),
-                Some(value) => declaration.string(value, &id_path)?,
-            };
-            if id.trim().is_empty() {
-                return Err(declaration
-                    .invalid(&id_path, "entry id must not be blank")
-                    .into());
-            }
+            let id = entry_id(declaration, fields, &id_path, &url)?;
             if !entry_ids.insert(id.clone()) {
                 return Err(declaration
                     .invalid(&id_path, format!("duplicate entry id `{id}` in this feed"))
@@ -207,49 +175,28 @@ impl Feed {
             if format == FeedFormat::Atom {
                 validate_atom_id(declaration, &id, &id_path)?;
             }
-            let title = match fields.get("title").ok() {
-                None | Some(Value::Auto) => target.title.ok_or_else(|| {
-                    declaration.invalid(
-                        &field_path(&entry_path, "title"),
-                        format!(
-                            "target document `{}` has no title; set this entry's title",
-                            target.output
-                        ),
-                    )
-                })?,
-                Some(value) => declaration.text(value, &field_path(&entry_path, "title"))?,
-            };
+            let title = entry_title(
+                declaration,
+                fields,
+                &entry_path,
+                target.title.as_deref(),
+                &target.output,
+            )?;
             let published = published_date(
                 declaration,
                 declaration.required(fields, "published", &entry_path)?,
                 &field_path(&entry_path, "published"),
             )?;
-            let updated = match fields.get("updated").ok() {
-                None | Some(Value::None) => None,
-                Some(value) => Some(published_date(
-                    declaration,
-                    value,
-                    &field_path(&entry_path, "updated"),
-                )?),
-            };
-            let summary = parse_entry_text(
+            let updated = entry_updated(declaration, fields, &entry_path)?;
+            let summary = entry_summary(declaration, fields, &entry_path, cancellation)?;
+            let content = entry_content(
                 declaration,
-                fields.get("summary").ok(),
-                &field_path(&entry_path, "summary"),
+                fields,
+                &entry_path,
+                &output,
+                document_contents,
                 cancellation,
             )?;
-            let content_field = field_path(&entry_path, "content");
-            let content = match fields.get("content").ok() {
-                Some(Value::Dict(fields)) => Some(EntryContent::Document(document_contents.load(
-                    declaration,
-                    fields,
-                    &content_field,
-                    &output,
-                    cancellation,
-                )?)),
-                value => parse_entry_text(declaration, value, &content_field, cancellation)?
-                    .map(EntryContent::Authored),
-            };
             let authors = parse_authors(
                 declaration,
                 fields.get("authors").ok(),
@@ -293,6 +240,152 @@ impl Feed {
             entries,
         })
     }
+}
+
+struct FeedMetadata {
+    output: OutputPath,
+    format: FeedFormat,
+    url: String,
+    id: String,
+    title: String,
+    description: String,
+    language: String,
+    authors: Vec<Author>,
+}
+
+fn feed_metadata(
+    declaration: &SeoDeclaration,
+    config: &ResolvedSiteConfig,
+    cancellation: &BuildCancellation,
+) -> Result<FeedMetadata, RenderError> {
+    let fields = &declaration.fields;
+    declaration.check_fields(fields, FEED_FIELDS, "")?;
+    declaration.require_origin(config)?;
+    let output = declaration.output()?;
+    let format = FeedFormat::from_authored_name(
+        &declaration.string(declaration.required(fields, "format", "")?, "/format")?,
+    )
+    .ok_or_else(|| declaration.invalid("/format", "expected `rss`, `atom`, or `json`"))?;
+    check_format_matches_output(declaration, format, &output)?;
+    let output_url = tola_address::asset_url_from_output(&output);
+    let url = config.canonical_url(&output_url);
+    let id = declaration.text(declaration.required(fields, "id", "")?, "/id")?;
+    let title = declaration.text(declaration.required(fields, "title", "")?, "/title")?;
+    if title.trim().is_empty() {
+        return Err(declaration
+            .invalid(
+                "/title",
+                "feed title must not be blank; set `title` or `site.title`",
+            )
+            .into());
+    }
+    let description = declaration.text(
+        declaration.required(fields, "description", "")?,
+        "/description",
+    )?;
+    let language = declaration.text(declaration.required(fields, "language", "")?, "/language")?;
+    let authors = parse_authors(
+        declaration,
+        Some(declaration.required(fields, "authors", "")?),
+        "/authors",
+        cancellation,
+    )?;
+    Ok(FeedMetadata {
+        output,
+        format,
+        url,
+        id,
+        title,
+        description,
+        language,
+        authors,
+    })
+}
+
+fn entry_id(
+    declaration: &SeoDeclaration,
+    fields: &Dict,
+    id_path: &str,
+    url: &str,
+) -> Result<String, SeoDeclarationError> {
+    let id = match fields.get("id").ok() {
+        None | Some(Value::Auto) => url.to_owned(),
+        Some(value) => declaration.string(value, id_path)?,
+    };
+    if id.trim().is_empty() {
+        return Err(declaration.invalid(id_path, "entry id must not be blank"));
+    }
+    Ok(id)
+}
+
+fn entry_title(
+    declaration: &SeoDeclaration,
+    fields: &Dict,
+    entry_path: &str,
+    title: Option<&str>,
+    output: &OutputPath,
+) -> Result<String, SeoDeclarationError> {
+    let title_path = field_path(entry_path, "title");
+    Ok(match fields.get("title").ok() {
+        None | Some(Value::Auto) => title.map(str::to_owned).ok_or_else(|| {
+            declaration.invalid(
+                &title_path,
+                format!("target document `{output}` has no title; set this entry's title"),
+            )
+        })?,
+        Some(value) => declaration.text(value, &title_path)?,
+    })
+}
+
+fn entry_updated(
+    declaration: &SeoDeclaration,
+    fields: &Dict,
+    entry_path: &str,
+) -> Result<Option<atom_syndication::FixedDateTime>, SeoDeclarationError> {
+    Ok(match fields.get("updated").ok() {
+        None | Some(Value::None) => None,
+        Some(value) => Some(published_date(
+            declaration,
+            value,
+            &field_path(entry_path, "updated"),
+        )?),
+    })
+}
+
+fn entry_summary(
+    declaration: &SeoDeclaration,
+    fields: &Dict,
+    entry_path: &str,
+    cancellation: &BuildCancellation,
+) -> Result<Option<EntryText>, RenderError> {
+    parse_entry_text(
+        declaration,
+        fields.get("summary").ok(),
+        &field_path(entry_path, "summary"),
+        cancellation,
+    )
+}
+
+fn entry_content(
+    declaration: &SeoDeclaration,
+    fields: &Dict,
+    entry_path: &str,
+    output: &OutputPath,
+    document_contents: &mut DocumentContents<'_>,
+    cancellation: &BuildCancellation,
+) -> Result<Option<EntryContent>, RenderError> {
+    let content_field = field_path(entry_path, "content");
+    Ok(match fields.get("content").ok() {
+        Some(Value::Dict(fields)) => Some(EntryContent::Document(document_contents.load(
+            declaration,
+            fields,
+            &content_field,
+            output,
+            cancellation,
+        )?)),
+        value => parse_entry_text(declaration, value, &content_field, cancellation)?
+            .map(EntryContent::Authored),
+    })
 }
 
 /// A host derives the media type from the extension, so the format and the extension must agree

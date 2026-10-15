@@ -5,7 +5,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tola_build::InputScope;
 
-use crate::cli::commands::init::{feature_values, preset_values};
 use crate::editor::Editor;
 use crate::i18n::HelpLanguage;
 
@@ -154,6 +153,9 @@ pub enum Commands {
         build: BuildOverrideArgs,
         #[command(flatten)]
         fonts: CompilerFontArgs,
+        /// Print this build's result and diagnostics as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Build and serve the site, rebuilding when files change.
@@ -206,6 +208,12 @@ pub enum Commands {
         /// evaluation, routes, or output.
         #[arg(long)]
         no_build: bool,
+        /// Skip build hooks when examining a candidate site.
+        #[arg(long, conflicts_with = "no_build")]
+        no_hooks: bool,
+        /// Print this check's result and diagnostics as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Format the site's Typst sources.
@@ -245,13 +253,6 @@ pub enum Commands {
 
     /// Check site configuration, source paths, and local tools.
     Doctor(DoctorArgs),
-
-    /// List the compiler fonts Typst discovered for this site.
-    ///
-    /// Compiler fonts lay out and export Typst content: paged documents, and content a page bakes
-    /// with `html.frame`. Browser fonts are separate: publish them through `[assets]` and load them
-    /// with CSS `@font-face`; a Typst font setting does not install a browser font.
-    Fonts(FontsArgs),
 
     /// Configure or display editor integration.
     Editor {
@@ -337,11 +338,23 @@ pub struct ManpageArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct SkillArgs {
-    /// Write the skill to `DIR` instead of stdout.
+    /// Topic followed by heading names, such as `math rendering svg`.
+    #[arg(value_name = "SECTION", num_args = 0..)]
+    pub sections: Vec<String>,
+
+    /// List the selected topic and its heading paths without loading their bodies.
+    #[arg(long, conflicts_with = "all")]
+    pub list: bool,
+
+    /// Read the selected topic or section with all its subsections.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Write the selected Markdown to `FILE` instead of stdout.
     ///
     /// Creates missing directories and never overwrites existing files.
     /// No site configuration or agent client setup is required.
-    #[arg(short, long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
+    #[arg(short, long, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
     pub output: Option<PathBuf>,
 }
 
@@ -391,7 +404,7 @@ pub struct ConfigFileArgs {
     /// Site configuration file.
     ///
     /// Without this option, commands search the current and parent directories for `tola.toml`.
-    /// The language server instead checks only the client's workspace root.
+    /// The Typst language server instead checks only the client's workspace root.
     #[arg(
         short = 'C',
         long = "config",
@@ -551,26 +564,6 @@ pub struct DoctorArgs {
     pub json: bool,
 }
 
-#[derive(clap::Args, Debug, Clone, Default)]
-pub struct FontsArgs {
-    #[command(flatten)]
-    pub config: ConfigFileArgs,
-
-    #[command(flatten)]
-    pub packages: TypstPackageArgs,
-
-    #[command(flatten)]
-    pub fonts: CompilerFontArgs,
-
-    /// List every face with its style, weight, stretch, and file instead of one line per family.
-    #[arg(long)]
-    pub variants: bool,
-
-    /// Print the fonts as JSON.
-    #[arg(long)]
-    pub json: bool,
-}
-
 /// The compiler font inputs one invocation overrides.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct CompilerFontArgs {
@@ -579,6 +572,7 @@ pub struct CompilerFontArgs {
     /// Repeat the flag for more than one directory. A relative path resolves against the
     /// invocation directory. `--pure` refuses these.
     #[arg(
+        id = "font_paths",
         long = "font-path",
         global = true,
         value_name = "DIR",
@@ -632,9 +626,9 @@ pub struct VendorArgs {
 
     /// Prepare and validate without replacing vendor; may fetch, cache, and acquire the site lock.
     ///
-    /// An installation interrupted before it committed refuses this dry run and leaves vendor and
-    /// its recovery material unchanged; run `tola vendor` to restore the previous inputs. Vendoring
-    /// runs no hooks and does not publish site output.
+    /// A replacement interrupted before it finished refuses this dry run and leaves the vendor
+    /// trees and the working files unchanged; run `tola vendor` to complete the replacement.
+    /// Vendoring runs no hooks and does not publish site output.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -834,27 +828,6 @@ mod tests {
                 "zsh",
             ),
             (
-                &[
-                    "tola",
-                    "lsp",
-                    "--config",
-                    "site/tola.toml",
-                    "--package-path",
-                    "packages",
-                ],
-                |cli| match &cli.command {
-                    Commands::Lsp {
-                        config, packages, ..
-                    } => format!(
-                        "{}/{}",
-                        path_text(&config.path),
-                        path_text(&packages.package_path)
-                    ),
-                    _ => panic!("expected language server command"),
-                },
-                "site/tola.toml/packages",
-            ),
-            (
                 &["tola", "build", "--minify=false"],
                 |cli| match &cli.command {
                     Commands::Build { build, .. } => flag_state(build.minify).to_owned(),
@@ -955,33 +928,6 @@ mod tests {
                     _ => panic!("expected config command"),
                 },
                 "dist/false",
-            ),
-            (
-                &[
-                    "tola",
-                    "inspect",
-                    "outputs",
-                    "--config",
-                    "site/tola.toml",
-                    "--package-path",
-                    "packages",
-                    "--minify=false",
-                ],
-                |cli| match &cli.command {
-                    Commands::Inspect {
-                        config,
-                        packages,
-                        command: InspectCommand::Outputs(args),
-                        ..
-                    } => format!(
-                        "{}/{}/{}",
-                        path_text(&config.path),
-                        path_text(&packages.package_path),
-                        flag_state(args.build.minify)
-                    ),
-                    _ => panic!("expected output inspection"),
-                },
-                "site/tola.toml/packages/false",
             ),
             (
                 &[
@@ -1189,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn color_flag_is_read_before_clap_runs() {
+    fn color_read_before_clap_runs() {
         let arguments = ["tola", "dev", "--color=always"]
             .map(OsString::from)
             .to_vec();

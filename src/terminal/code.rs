@@ -282,19 +282,23 @@ fn json_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
 /// The byte after the JSON string that starts at `start`: its closing quote, or the source's end
 /// when it never closes. A `\` escape pair never ends the string.
 fn json_string_end(source: &str, start: usize) -> usize {
+    closing_quote(source, start + 1, '"').unwrap_or(source.len())
+}
+
+fn closing_quote(source: &str, body: usize, quote: char) -> Option<usize> {
     let mut escaped = false;
-    for (offset, character) in source[start + 1..].char_indices() {
+    for (offset, character) in source[body..].char_indices() {
         if escaped {
             escaped = false;
             continue;
         }
         match character {
             '\\' => escaped = true,
-            '"' => return start + 1 + offset + 1,
+            _ if character == quote => return Some(body + offset + character.len_utf8()),
             _ => {}
         }
     }
-    source.len()
+    None
 }
 
 /// Every occurrence of `character` in `line` that stands outside a quoted word, with whether it
@@ -357,6 +361,31 @@ fn just_comment_start(line: &str) -> Option<usize> {
     outside_quotes(line, '#').first().map(|(index, _)| *index)
 }
 
+fn push_comment(
+    runs: &mut Vec<(Range<usize>, CodeKind)>,
+    start: usize,
+    body: &str,
+    comment: Option<usize>,
+) {
+    if let Some(comment) = comment {
+        push(
+            runs,
+            start + comment,
+            start + body.len(),
+            Some(CodeKind::Comment),
+        );
+    }
+}
+
+fn push_quoted(runs: &mut Vec<(Range<usize>, CodeKind)>, start: usize, quoted: Range<usize>) {
+    push(
+        runs,
+        start + quoted.start,
+        start + quoted.end,
+        Some(CodeKind::String),
+    );
+}
+
 /// The runs of a shell fence: its comment, its command word, and its quoted words.
 fn shell_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
     let mut runs = Vec::new();
@@ -379,21 +408,9 @@ fn shell_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
             );
         }
         for quoted in quoted_words(code) {
-            push(
-                &mut runs,
-                start + quoted.start,
-                start + quoted.end,
-                Some(CodeKind::String),
-            );
+            push_quoted(&mut runs, start, quoted);
         }
-        if let Some(comment) = comment {
-            push(
-                &mut runs,
-                start + comment,
-                start + body.len(),
-                Some(CodeKind::Comment),
-            );
-        }
+        push_comment(&mut runs, start, body, comment);
     }
     runs
 }
@@ -433,14 +450,7 @@ fn just_spans(source: &str) -> Vec<(Range<usize>, CodeKind)> {
             in_recipe = true;
             just_header(code, start, &mut runs);
         }
-        if let Some(comment) = comment {
-            push(
-                &mut runs,
-                start + comment,
-                start + body.len(),
-                Some(CodeKind::Comment),
-            );
-        }
+        push_comment(&mut runs, start, body, comment);
     }
     runs
 }
@@ -461,12 +471,7 @@ fn just_header(code: &str, start: usize, runs: &mut Vec<(Range<usize>, CodeKind)
         None => (code, None),
     };
     for quoted in quoted_words(parameters) {
-        push(
-            runs,
-            start + quoted.start,
-            start + quoted.end,
-            Some(CodeKind::String),
-        );
+        push_quoted(runs, start, quoted);
     }
     if let Some(from) = dependencies {
         just_dependencies(code, from, start, runs);
@@ -673,21 +678,7 @@ fn skip_rust_literal(source: &str, start: usize, quote: char) -> usize {
         // A lifetime such as `'a`, not a character literal, so only the apostrophe is consumed.
         return start + 1;
     }
-    let mut escaped = false;
-    for (index, character) in source[start + quote.len_utf8()..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' => escaped = true,
-            _ if character == quote => {
-                return start + quote.len_utf8() + index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    source.len()
+    closing_quote(source, start + quote.len_utf8(), quote).unwrap_or(source.len())
 }
 
 /// The spans of the quoted words in `source`: each opening quote through its closing one, or to
@@ -732,7 +723,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toml_fence_paints_names_values_and_numbers() {
+    fn toml_fence_paints_fields() {
         let source = "title = \"Tola\"\njobs = 4\n";
         let runs = spans(source, "toml");
 
@@ -767,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn typst_fence_spellings_style_the_same_markup() {
+    fn typst_fence_aliases_paint_alike() {
         for language in ["typ", "typst", "typc"] {
             let runs = spans("Let *this* be #emph[that].\n", language);
             assert!(!runs.is_empty(), "{language}");
@@ -812,7 +803,7 @@ mod tests {
 
     /// A shell fence colours its comment, the command it runs, and each quoted word.
     #[test]
-    fn shell_fence_styles_command_and_comment() {
+    fn shell_fence_styles_command() {
         let source =
             "tola vendor          # commit the result\nls \"$TOLA_HOOK_TEMP_DIR\"\necho 'a # b'\n";
         let runs = runs_of(source, "sh");
@@ -881,7 +872,7 @@ mod tests {
 
     /// A Rust fence colours the keywords the language reserves, and skips string literals.
     #[test]
-    fn rust_fence_styles_keywords_outside_literals() {
+    fn rust_fence_styles_keywords() {
         let source = "let answer = \"let\";\n// let\n";
         let runs = runs_of(source, "rust");
 

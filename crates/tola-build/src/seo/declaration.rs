@@ -17,7 +17,13 @@ const FRAGMENT_ENCODE_SET: &percent_encoding::AsciiSet = &percent_encoding::CONT
     .add(b'>')
     .add(b'`');
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "invalid <{}> declaration{}: {}",
+    .label,
+    declaration_location(.output.as_deref(), .field.as_str()),
+    .violation
+)]
 pub(crate) struct SeoDeclarationError {
     label: &'static str,
     span: Span,
@@ -25,28 +31,22 @@ pub(crate) struct SeoDeclarationError {
     field: String,
     /// Every parser returns this error by value; boxing keeps content violations from widening
     /// those result values.
+    #[source]
     violation: Box<DeclarationViolation>,
     /// The diagnostic's hint: the next action the author takes for this violation.
     help: Option<String>,
 }
 
-impl std::fmt::Display for SeoDeclarationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "invalid <{}> declaration", self.label)?;
-        if let Some(output) = &self.output {
-            write!(formatter, " for `{output}`")?;
-        }
-        if !self.field.is_empty() {
-            write!(formatter, " at `{}`", self.field)?;
-        }
-        write!(formatter, ": {}", self.violation)
+/// The output and field clause of a violation's rendering, naming whichever it has.
+fn declaration_location(output: Option<&str>, field: &str) -> String {
+    let mut location = String::new();
+    if let Some(output) = output {
+        location.push_str(&format!(" for `{output}`"));
     }
-}
-
-impl std::error::Error for SeoDeclarationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.violation.as_ref())
+    if !field.is_empty() {
+        location.push_str(&format!(" at `{field}`"));
     }
+    location
 }
 
 impl SeoDeclarationError {
@@ -353,63 +353,7 @@ pub(super) fn resolve_target(
     cancellation: &BuildCancellation,
 ) -> Result<ResolvedDocumentTarget, RenderError> {
     cancellation.ensure_active()?;
-    let introspector = compilation.introspector();
-    let (path, fragment, location) = match value {
-        Value::Str(path) => (
-            parse_target_path(declaration, path.as_str(), field)?,
-            None,
-            None,
-        ),
-        Value::Dict(fields) => {
-            declaration.check_fields(fields, &["output", "fragment"], field)?;
-            let path_field = field_path(field, "output");
-            let raw =
-                declaration.string(declaration.required(fields, "output", field)?, &path_field)?;
-            let fragment = declaration.optional_string(fields, "fragment", field)?;
-            (
-                parse_target_path(declaration, &raw, &path_field)?,
-                fragment,
-                None,
-            )
-        }
-        Value::Label(label) => {
-            let content = introspector
-                .query_unique(&Selector::Label(*label))
-                .map_err(|_| declaration.invalid(field, "no element has this target label"))?;
-            let location = content.location().ok_or_else(|| {
-                declaration
-                    .invalid(field, "this label has no location in a document")
-                    .with_help("Place the label inside a `#document(...)` body")
-            })?;
-            let path = introspector.path(location).ok_or_else(|| {
-                declaration
-                    .invalid(field, "this label does not belong to a document")
-                    .with_help("Place the label inside a `#document(...)` body")
-            })?;
-            (path.clone(), None, Some(location))
-        }
-        Value::Dyn(dynamic) if dynamic.is::<Location>() => {
-            let location = value
-                .clone()
-                .cast::<Location>()
-                .expect("location type checked");
-            let path = introspector.path(location).ok_or_else(|| {
-                declaration
-                    .invalid(field, "this location does not belong to a document")
-                    .with_help("Place the target inside a `#document(...)` body")
-            })?;
-            (path.clone(), None, Some(location))
-        }
-        _ => {
-            return Err(declaration
-                .expected(
-                    field,
-                    "document output path, label, location, or (output, fragment) dictionary",
-                    value,
-                )
-                .into());
-        }
-    };
+    let (path, fragment, location) = target_source(declaration, value, field, compilation)?;
     let document = compilation.document(&path).ok_or_else(|| {
         declaration
             .invalid(
@@ -452,25 +396,9 @@ pub(super) fn resolve_target(
         target_url.set_fragment(Some(&fragment));
     }
     if let Some(location) = location {
-        let base_path = VirtualPath::new(output.as_str()).expect("validated output path");
-        let resolved = typst::model::LateLinkResolver::new(Some(&base_path), introspector)
-            .resolve(location)
-            .ok_or_else(|| {
-                declaration
-                    .invalid(field, "target element has no exported anchor")
-                    .with_help("Target the document's output path, or an element the site links to")
-            })?
-            .into_relative_uri()
-            .map_err(|_| {
-                declaration.invalid(field, "the target link cannot be built from this location")
-            })?;
-        let output_url = tola_address::asset_url_from_output(output);
-        let resolved_url = url::Url::parse(&config.canonical_url(&output_url))
-            .and_then(|base| base.join(&resolved))
-            .map_err(|_| {
-                declaration.invalid(field, "the target link cannot be built from this location")
-            })?;
-        target_url.set_fragment(resolved_url.fragment());
+        let fragment =
+            location_fragment(declaration, field, location, output, config, compilation)?;
+        target_url.set_fragment(fragment.as_deref());
     }
     cancellation.ensure_active()?;
     Ok(ResolvedDocumentTarget {
@@ -478,6 +406,112 @@ pub(super) fn resolve_target(
         url: target_url,
         title: document.info().title.as_ref().map(ToString::to_string),
     })
+}
+
+fn target_source(
+    declaration: &SeoDeclaration,
+    value: &Value,
+    field: &str,
+    compilation: &tola_typst::BundleCompilation,
+) -> Result<(VirtualPath, Option<String>, Option<Location>), SeoDeclarationError> {
+    let introspector = compilation.introspector();
+    Ok(match value {
+        Value::Str(path) => (
+            parse_target_path(declaration, path.as_str(), field)?,
+            None,
+            None,
+        ),
+        Value::Dict(fields) => {
+            declaration.check_fields(fields, &["output", "fragment"], field)?;
+            let path_field = field_path(field, "output");
+            let raw =
+                declaration.string(declaration.required(fields, "output", field)?, &path_field)?;
+            let fragment = declaration.optional_string(fields, "fragment", field)?;
+            (
+                parse_target_path(declaration, &raw, &path_field)?,
+                fragment,
+                None,
+            )
+        }
+        Value::Label(label) => {
+            let content = introspector
+                .query_unique(&Selector::Label(*label))
+                .map_err(|_| declaration.invalid(field, "no element has this target label"))?;
+            let location = content.location().ok_or_else(|| {
+                declaration
+                    .invalid(field, "this label has no location in a document")
+                    .with_help("Place the label inside a `#document(...)` body")
+            })?;
+            let path = introspector
+                .path(location)
+                .ok_or_else(|| outside_document(declaration, field, "label", "label"))?;
+            (path.clone(), None, Some(location))
+        }
+        Value::Dyn(dynamic) if dynamic.is::<Location>() => {
+            let location = value
+                .clone()
+                .cast::<Location>()
+                .expect("location type checked");
+            let path = introspector
+                .path(location)
+                .ok_or_else(|| outside_document(declaration, field, "location", "target"))?;
+            (path.clone(), None, Some(location))
+        }
+        _ => {
+            return Err(declaration.expected(
+                field,
+                "document output path, label, location, or (output, fragment) dictionary",
+                value,
+            ));
+        }
+    })
+}
+
+/// A target naming an element that no `#document(...)` body contains.
+fn outside_document(
+    declaration: &SeoDeclaration,
+    field: &str,
+    subject: &str,
+    placement: &str,
+) -> SeoDeclarationError {
+    declaration
+        .invalid(
+            field,
+            format!("this {subject} does not belong to a document"),
+        )
+        .with_help(format!(
+            "Place the {placement} inside a `#document(...)` body"
+        ))
+}
+
+fn location_fragment(
+    declaration: &SeoDeclaration,
+    field: &str,
+    location: Location,
+    output: &OutputPath,
+    config: &ResolvedSiteConfig,
+    compilation: &tola_typst::BundleCompilation,
+) -> Result<Option<String>, SeoDeclarationError> {
+    let introspector = compilation.introspector();
+    let base_path = VirtualPath::new(output.as_str()).expect("validated output path");
+    let resolved = typst::model::LateLinkResolver::new(Some(&base_path), introspector)
+        .resolve(location)
+        .ok_or_else(|| {
+            declaration
+                .invalid(field, "target element has no exported anchor")
+                .with_help("Target the document's output path, or an element the site links to")
+        })?
+        .into_relative_uri()
+        .map_err(|_| {
+            declaration.invalid(field, "the target link cannot be built from this location")
+        })?;
+    let output_url = tola_address::asset_url_from_output(output);
+    let resolved_url = url::Url::parse(&config.canonical_url(&output_url))
+        .and_then(|base| base.join(&resolved))
+        .map_err(|_| {
+            declaration.invalid(field, "the target link cannot be built from this location")
+        })?;
+    Ok(resolved_url.fragment().map(str::to_owned))
 }
 
 fn parse_target_path(

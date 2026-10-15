@@ -175,17 +175,14 @@ fn walk_text<E>(
         return Ok(());
     }
     match token_class(node, classify) {
-        Some(TokenClass::Text) => {
-            let class = text.unwrap_or(TokenClass::Text);
-            tokens.push(Token {
-                range: node.range(),
-                class,
-                modifiers: inherited,
-            });
-        }
+        // Plain text takes the class its enclosing construct names, which the term list owns.
         Some(class) => tokens.push(Token {
             range: node.range(),
-            class,
+            class: if class == TokenClass::Text {
+                text.unwrap_or(class)
+            } else {
+                class
+            },
             modifiers: inherited,
         }),
         None => {
@@ -286,10 +283,8 @@ fn syntactic_name_class(node: &LinkedNode<'_>) -> TokenClass {
 mod tests {
     use super::*;
 
-    /// Every token of a source, as the text it covers and the class it carries.
-    fn classified(text: &str) -> Vec<(String, TokenClass, Modifiers)> {
-        let source = Source::detached(text.to_owned());
-        let names = NameGraph::new(
+    fn name_graph(source: &Source) -> NameGraph {
+        NameGraph::new(
             [std::sync::Arc::new(crate::names::SourceNames::new(
                 source.clone(),
             ))],
@@ -297,7 +292,13 @@ mod tests {
             None,
             || Ok::<(), std::convert::Infallible>(()),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    /// Every token of a source, as the text it covers and the class it carries.
+    fn classified(text: &str) -> Vec<(String, TokenClass, Modifiers)> {
+        let source = Source::detached(text.to_owned());
+        let names = name_graph(&source);
         tokens(&source, &names)
             .into_iter()
             .map(|token| (text[token.range].to_owned(), token.class, token.modifiers))
@@ -307,15 +308,7 @@ mod tests {
     #[test]
     fn cancelled_scan_returns_no_tokens() {
         let source = Source::detached("#let count = 1\n#count + count");
-        let names = NameGraph::new(
-            [std::sync::Arc::new(crate::names::SourceNames::new(
-                source.clone(),
-            ))],
-            |_| None,
-            None,
-            || Ok::<(), std::convert::Infallible>(()),
-        )
-        .unwrap();
+        let names = name_graph(&source);
         let visits = std::cell::Cell::new(0);
         let cancelled = tokens_with_check(&source, &names, || {
             visits.set(visits.get() + 1);

@@ -21,9 +21,10 @@ pub struct SiteBuild {
     pub(crate) index: SiteIndex,
     pub(crate) graph: crate::output::graph::OutputGraph,
     pub(super) cache_update: BuildCacheUpdate,
-    pub(crate) diagnostics: Vec<crate::diagnostic::Diagnostic>,
+    pub(crate) diagnostics: Vec<tola_diagnostic::Diagnostic>,
     pub(crate) references: crate::site::references::References,
     pub(crate) source_hooks: crate::hooks::SourceHookOutputs,
+    pub(super) report: Option<super::BuildReport>,
 }
 
 /// An immutable revision that has not been checked against its inputs yet.
@@ -130,6 +131,11 @@ impl RevisionCheck {
 }
 
 impl SiteBuild {
+    /// Projections retained by [`super::BuildRequest::capture_report`].
+    pub fn report(&self) -> Option<&super::BuildReport> {
+        self.report.as_ref()
+    }
+
     pub fn config(&self) -> &std::sync::Arc<ResolvedSiteConfig> {
         &self.config
     }
@@ -141,7 +147,7 @@ impl SiteBuild {
     pub fn graph(&self) -> &crate::output::graph::OutputGraph {
         &self.graph
     }
-    pub fn diagnostics(&self) -> &[crate::diagnostic::Diagnostic] {
+    pub fn diagnostics(&self) -> &[tola_diagnostic::Diagnostic] {
         &self.diagnostics
     }
     pub fn references(&self) -> &crate::site::references::References {
@@ -157,14 +163,19 @@ impl SiteBuild {
 
     pub fn input_observation(&self) -> InputObservation {
         let caches = self.cache_update.caches();
-        input_observation(
+        let mut observation = input_observation(
             caches.dependencies.physical_read_paths(),
             caches.dependencies.package_checks().to_vec(),
             Some(&caches.configured_assets),
             Some(caches.icons.evidence()),
             self.source_hooks.outputs(),
             caches.host.font_read_paths(),
-        )
+        );
+        self.config
+            .module_inputs
+            .observe_manifests(&mut observation);
+        observation.normalize_paths();
+        observation
     }
 
     pub fn freshness(
@@ -231,7 +242,7 @@ impl SiteBuild {
 pub struct WriteOutcome {
     output_root: std::path::PathBuf,
     counts: crate::output::summary::OutputCounts,
-    diagnostics: Vec<crate::diagnostic::Diagnostic>,
+    diagnostics: Vec<tola_diagnostic::Diagnostic>,
     config: std::sync::Arc<ResolvedSiteConfig>,
     mode: BuildMode,
     consumer_graph: Option<crate::output::graph::OutputGraph>,
@@ -248,14 +259,17 @@ impl WriteOutcome {
 
     /// Build diagnostics. Configuration warnings remain on the resolved configuration;
     /// its loader may already have presented them.
-    pub fn diagnostics(&self) -> &[crate::diagnostic::Diagnostic] {
+    pub fn diagnostics(&self) -> &[tola_diagnostic::Diagnostic] {
         &self.diagnostics
     }
 
     /// Consume the exact graph that was committed, independent of later writes.
     /// Release the site's build lock before invoking commands. Failure or
     /// cancellation here cannot undo the committed output.
-    pub fn run_after_publish(self, cancellation: &BuildCancellation) -> Result<()> {
+    pub fn run_after_publish(
+        self,
+        cancellation: &BuildCancellation,
+    ) -> Result<Vec<tola_diagnostic::Diagnostic>> {
         if let Some(graph) = self.consumer_graph {
             let files = crate::output::files::HookOutputFiles::materialize_candidate(
                 self.config.get_root(),
@@ -263,9 +277,14 @@ impl WriteOutcome {
                 Some(cancellation),
                 crate::compiler::minified_languages(&self.config),
             )?;
-            hooks::run_after_publish_hooks(&self.config, self.mode, files.root(), cancellation)?;
+            return hooks::run_after_publish_hooks(
+                &self.config,
+                self.mode,
+                files.root(),
+                cancellation,
+            );
         }
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -279,7 +298,7 @@ impl WriteOutcome {
 /// For repeated builds with cache acceptance, use [`super::BuildSession::build_and_write`].
 pub fn write_site(build: &SiteBuild) -> Result<WriteOutcome> {
     let lock = super::SiteBuildLock::acquire(&build.config, &build.cancellation, || {})
-        .map_err(|error| diagnostic::with_write(error, build.config.get_root()))?;
+        .map_err(|error| write_error(build, anyhow::Error::new(error)))?;
     write_site_locked(build, &lock)
 }
 
@@ -287,8 +306,20 @@ pub(super) fn write_site_locked(
     build: &SiteBuild,
     lock: &super::SiteBuildLock,
 ) -> Result<WriteOutcome> {
-    write_site_inner(build, lock)
-        .map_err(|error| diagnostic::with_write(error, build.config.get_root()))
+    write_site_inner(build, lock).map_err(|error| write_error(build, error))
+}
+
+fn write_error(build: &SiteBuild, error: anyhow::Error) -> anyhow::Error {
+    let error = diagnostic::with_write(error, build.config.get_root());
+    if crate::cancellation::is_cancelled(&error) || build.diagnostics.is_empty() {
+        return error;
+    }
+    // The write failure leads; the candidate build's warnings follow it so both stay visible.
+    let mut diagnostics = tola_diagnostic::attached(&error)
+        .expect("a write failure carries diagnostics")
+        .to_vec();
+    diagnostics.extend(build.diagnostics.iter().cloned());
+    tola_diagnostic::DiagnosticError::attach(error, diagnostics).into()
 }
 
 fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<WriteOutcome> {
@@ -430,6 +461,106 @@ mod tests {
     }
 
     #[test]
+    fn missing_manifest_optional_recovery_watch() {
+        let directory = TempDir::new().unwrap();
+        let config = crate::config::tests::load_test_config(
+            directory.path(),
+            "[modules.forest]\npath=\"missing-theme\"\n",
+        );
+        let observation = crate::build::configured_input_observation(&config);
+        assert!(
+            observation
+                .paths()
+                .iter()
+                .any(|entry| entry.input() == InputKind::ModuleManifests
+                    && !entry.required()
+                    && entry.path().ends_with("missing-theme/tola-module.toml"))
+        );
+    }
+
+    #[test]
+    fn changed_module_manifest_rejects_candidate_publication() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("content")).unwrap();
+        let module = root.join("theme");
+        fs::create_dir(&module).unwrap();
+        fs::write(module.join("site.typ"), "#document(\"index.html\")[Old]").unwrap();
+        let manifest = module.join("tola-module.toml");
+        fs::write(
+            &manifest,
+            "schema-version=1\nname=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"site.typ\"\n",
+        )
+        .unwrap();
+        let config = crate::config::tests::load_test_config(
+            root,
+            "[modules.forest]\npath=\"theme\"\n[theme]\nmodule=\"forest\"\n",
+        );
+        let candidate = build_site(&config, BuildMode::Production).unwrap();
+        assert!(
+            candidate
+                .input_observation()
+                .paths()
+                .iter()
+                .any(|entry| entry.input() == InputKind::ModuleManifests
+                    && entry.path().ends_with("theme/tola-module.toml"))
+        );
+        fs::write(
+            &manifest,
+            "schema-version=1\nname=\"forest\"\nversion=\"1.0.1\"\n[site]\nentry=\"site.typ\"\n",
+        )
+        .unwrap();
+        assert!(
+            candidate
+                .freshness(&BuildCancellation::default())
+                .unwrap()
+                .is_stale(InputKind::ModuleManifests)
+        );
+        let error = write_site(&candidate).unwrap_err();
+        assert_eq!(
+            tola_diagnostic::attached(&error).unwrap()[0].code,
+            "write.stale"
+        );
+        assert!(!config.build.publish_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retargeted_module_root_is_rejected() {
+        use std::os::unix::fs::symlink;
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        fs::create_dir(root.join("content")).unwrap();
+        let source =
+            "schema-version=1\nname=\"forest\"\nversion=\"1.0.0\"\n[site]\nentry=\"site.typ\"\n";
+        for name in ["first", "second"] {
+            fs::create_dir(root.join(name)).unwrap();
+            fs::write(root.join(name).join("tola-module.toml"), source).unwrap();
+            fs::write(
+                root.join(name).join("site.typ"),
+                "#document(\"index.html\")[Site]",
+            )
+            .unwrap();
+        }
+        symlink("first", root.join("theme")).unwrap();
+        let config = crate::config::tests::load_test_config(
+            root,
+            "[modules.forest]\npath=\"theme\"\n[theme]\nmodule=\"forest\"\n",
+        );
+        let candidate = build_site(&config, BuildMode::Production).unwrap();
+        fs::remove_file(root.join("theme")).unwrap();
+        symlink("second", root.join("theme")).unwrap();
+        assert!(
+            candidate
+                .freshness(&BuildCancellation::default())
+                .unwrap()
+                .is_stale(InputKind::ModuleManifests)
+        );
+        assert!(write_site(&candidate).is_err());
+        assert!(!config.build.publish_dir.exists());
+    }
+
+    #[test]
     fn stale_typst_reads_stop_the_write() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
@@ -450,7 +581,7 @@ mod tests {
         fs::write(&template, "#let message = \"second\"").unwrap();
 
         let error = write_site(&candidate).unwrap_err();
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
+        let diagnostics = tola_diagnostic::attached(&error).unwrap();
         assert_eq!(diagnostics[0].code, "write.stale");
         assert!(!config.build.publish_dir.exists());
     }
@@ -481,7 +612,7 @@ mod tests {
 
         // The read boundary refuses the output tree while the Bundle compiles, so publication
         // never reaches the write-stage overlap check that `output/root.rs` exercises directly.
-        let diagnostics = error_diagnostics(&error, config.get_root());
+        let diagnostics = error_diagnostics(error.error(), config.get_root());
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == "typst.compile"

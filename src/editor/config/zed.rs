@@ -2,14 +2,10 @@
 
 use super::EditorDirectory;
 
-/// Zed starts a language server only where an extension declares one, so a client names the server
-/// that extension published: for Typst that is the official Typst extension's `tinymist` entry,
-/// whose configured binary and arguments Tola replaces with its own.
-///
-/// A settings `path` that names no file inside the site resolves through `PATH`, and an absolute
-/// path stays the file it names, so the site keeps working when Tola is upgraded elsewhere.
+/// The published Typst extension registers `tinymist`; its binary override starts Tola.
 pub(super) fn snippet(directory: &EditorDirectory) -> String {
     let command = directory.server_command();
+    let packages = super::package_source_directory();
     let settings = serde_json::json!({
         "lsp": {
             "tinymist": {
@@ -17,11 +13,13 @@ pub(super) fn snippet(directory: &EditorDirectory) -> String {
                     "path": command.command,
                     "arguments": command.arguments,
                 },
+                "initialization_options": {
+                    "packageSourceDirectory": packages,
+                },
             },
         },
     });
-    let text = serde_json::to_string_pretty(&settings).expect("editor settings are serializable");
-    crate::writes::with_final_newline(text)
+    super::settings_text(&settings)
 }
 
 #[cfg(test)]
@@ -30,12 +28,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn snippet_answers_the_extension_language() {
+    fn snippet_configures_package_navigation() {
         let settings = parsed_settings(&snippet(&editor_directory(".")));
-        assert_eq!(settings["lsp"]["tinymist"]["binary"]["path"], "tola");
+        let settings = &settings["lsp"]["tinymist"];
+        assert_eq!(settings["binary"]["path"], "tola");
+        assert_eq!(settings["binary"]["arguments"], serde_json::json!(["lsp"]));
         assert_eq!(
-            settings["lsp"]["tinymist"]["binary"]["arguments"],
-            serde_json::json!(["lsp"])
+            settings["initialization_options"]["packageSourceDirectory"],
+            super::super::package_source_directory()
         );
     }
 }

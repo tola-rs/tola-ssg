@@ -6,14 +6,9 @@ use tola_typst::{
 };
 use typst::syntax::{Span, VirtualPath};
 
-use crate::diagnostic::{Diagnostic, Location, Severity};
+use tola_diagnostic::{Diagnostic, Location, Severity};
 
 /// Minify the stylesheet and script payloads of one compiled Bundle.
-///
-/// A payload whose language is not minified, or that the minifier cannot rewrite, is kept
-/// unchanged. One payload written in source is one mistake: its warning names the source that
-/// wrote it and the documents it reached, however many of them hold it. Returns the number of
-/// rewritten payloads.
 pub(crate) fn minify_generated_payloads(
     compilation: &mut BundleCompilation,
     world: &TypstWorld,
@@ -50,15 +45,11 @@ pub(crate) fn minify_generated_payloads(
                 }
             }
         })?;
-    diagnostics.extend(crate::diagnostic::collapse_repeated(unminified));
+    diagnostics.extend(tola_diagnostic::collapse_repeated(unminified));
     Ok(rewritten)
 }
 
 /// The identity of one payload written in source: its kind and the location that wrote it.
-///
-/// One payload that several documents hold is one mistake, so the author fixes one source position
-/// instead of reading the same warning per page. A payload with no source location falls back to
-/// the document with it, and two documents are two records.
 #[derive(PartialEq, Eq, Hash)]
 struct PayloadIdentity {
     kind: HtmlRawText,
@@ -95,7 +86,7 @@ fn unminified_payload(
         PayloadMinifyFailure::Unexpected { reason } => (reason, None),
     };
     let mut diagnostic = Diagnostic::at_location(
-        crate::codes::build::MINIFY,
+        tola_diagnostic::codes::build::MINIFY,
         Severity::Warning,
         location,
         format!("cannot minify the {payload} this document writes"),
@@ -117,8 +108,6 @@ fn unminified_payload(
 }
 
 /// Where one payload came from: the source that wrote it, or the document that has it.
-///
-/// A synthesized payload names no file, so its warning falls back to the document.
 fn payload_location(world: &TypstWorld, document: &VirtualPath, span: Span) -> Location {
     match crate::compiler::source_location(world, span) {
         Some(location) => location,
@@ -157,8 +146,7 @@ impl PayloadMinifyFailure {
                 line,
                 column,
             },
-            // The semantic minifier and the printer report failures Tola's own options cannot
-            // produce, so this arm exists to report one honestly rather than to expect it.
+            // Minifier failures Tola's options cannot produce still report honestly.
             other => Self::Unexpected {
                 reason: other.to_string(),
             },
@@ -228,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_payloads_are_minified_in_place() {
+    fn payloads_minified_in_place() {
         let (_directory, mut realized, cancellation) = crate::compiler::tests::realized_site(SITE);
         let before = payloads(&mut realized.compilation, &cancellation);
         let mut diagnostics = Vec::new();
@@ -314,7 +302,7 @@ mod tests {
         assert_eq!(rewritten, 0);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         let diagnostic = &diagnostics[0];
-        assert_eq!(diagnostic.code, crate::codes::build::MINIFY);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::build::MINIFY);
         assert_eq!(diagnostic.severity, Severity::Warning);
         let location = diagnostic.location.as_ref().expect("a located warning");
         assert_eq!(location.path, "site.typ");

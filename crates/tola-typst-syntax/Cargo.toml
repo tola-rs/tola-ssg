@@ -21,5 +21,5 @@ format = ["dep:typstyle-core"]
 typst-syntax.workspace = true
 typst-library.workspace = true
 typstyle-core = { workspace = true, optional = true }
-anyhow = "1.0.104"
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+thiserror = "2.0.20"

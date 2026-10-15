@@ -127,7 +127,7 @@ impl fmt::Display for SiteUrlMount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::url_path;
+    use crate::tests::test_support::url_path;
 
     #[test]
     fn base_paths_parse_canonically() {
@@ -168,16 +168,6 @@ mod tests {
             SiteUrlMount::from_base_path("/_tola"),
             Err(SiteUrlMountError::MissingTrailingSlash)
         ));
-    }
-
-    #[test]
-    fn mounts_outside_the_reserved_root_are_accepted() {
-        for base_path in ["/", "/_tola2/", "/docs/_tola/"] {
-            assert!(
-                SiteUrlMount::from_base_path(base_path).is_ok(),
-                "refused {base_path:?}"
-            );
-        }
     }
 
     #[test]

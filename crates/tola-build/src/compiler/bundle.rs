@@ -1,10 +1,5 @@
 //! Source analysis followed by root Bundle compilation.
-//!
-//! Source metadata converges before the root program receives its frozen
-//! sources. Document identity and contextual queries belong to Typst's
-//! native Bundle introspection.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,7 +9,6 @@ use tola_typst::BundleOptions;
 use crate::compiler::TypstHost;
 use crate::config::ResolvedSiteConfig;
 use crate::content::{ContentUnit, SourceSet};
-use tola_address::OutputPath;
 
 pub(crate) struct EvaluatedSiteProgram {
     sources: SourceSet,
@@ -35,9 +29,6 @@ pub(crate) struct RealizedBundle {
 }
 
 /// A root Bundle that did not realize, with the world that could not realize it.
-///
-/// The world resolves the same imports, packages, and fonts the failed compilation read, so an
-/// editor answers about a file the site's own program never reached.
 pub(crate) struct RealizeFailure {
     /// The world compiled against, absent when the world itself could not be built.
     pub(crate) world: Option<Arc<tola_typst::TypstWorld>>,
@@ -61,10 +52,7 @@ impl std::fmt::Debug for RealizeFailure {
 }
 
 pub(crate) struct CompiledSiteProgram {
-    pub(crate) document_outputs: BTreeSet<OutputPath>,
-    pub(crate) documents: Vec<crate::site::HtmlPage>,
-    pub(crate) html_inventories:
-        std::collections::BTreeMap<OutputPath, Arc<tola_typst::HtmlDocumentInventory>>,
+    pub(crate) documents: Vec<super::documents::RealizedPage>,
     pub(crate) diagnostics: tola_typst::Diagnostics,
     pub(crate) bundle_entries: tola_typst::BundleEntries,
     pub(crate) compilation: Arc<tola_typst::BundleCompilation>,
@@ -112,13 +100,15 @@ pub(crate) fn export(
     let started = std::time::Instant::now();
     let (documents, bundle_entries) = rayon::join(
         || -> Result<_> {
-            let realized = crate::compiler::documents::from_compilation(compilation, cancellation)?;
-            let document_outputs = compilation
-                .outputs()
-                .filter(|(_, kind)| kind.is_document())
-                .map(|(path, _)| crate::compiler::documents::output_path_for_virtual(path))
-                .collect::<Result<BTreeSet<_>>>()?;
-            Ok((realized, document_outputs))
+            let documents =
+                crate::compiler::documents::from_compilation(compilation, cancellation)?;
+            // Document path errors precede exporter failures, including paged documents.
+            for (path, kind) in compilation.outputs() {
+                if kind.is_document() {
+                    crate::compiler::documents::output_path_for_virtual(path)?;
+                }
+            }
+            Ok(documents)
         },
         || {
             compilation.export_entries(
@@ -129,7 +119,7 @@ pub(crate) fn export(
         },
     );
     cancellation.ensure_active()?;
-    let (realized, document_outputs) = documents?;
+    let documents = documents?;
     let bundle_entries = bundle_entries.map_err(|error| {
         super::diagnostic::with_export_diagnostics(error, world, compilation, config.get_root())
     })?;
@@ -137,9 +127,7 @@ pub(crate) fn export(
         bundle_outputs_ms = started.elapsed().as_secs_f64() * 1000.0,
         "finished immutable Bundle outputs");
     Ok(CompiledSiteProgram {
-        document_outputs,
-        documents: realized.documents,
-        html_inventories: realized.html_inventories,
+        documents,
         diagnostics: compilation.diagnostics().clone(),
         bundle_entries,
         compilation: Arc::clone(compilation),
@@ -158,13 +146,13 @@ pub(crate) fn realize(
     let library = evaluated
         .package_bindings
         .library(evaluated.sources.inputs().to_source_records());
-    let world = match host.world(
-        config.get_root(),
-        &config.build.entry,
+    let prepared = host.site_world(
+        config,
         &library,
         Arc::clone(&evaluated.candidate_files),
         cancellation,
-    ) {
+    );
+    let world = match prepared {
         Ok(world) => Arc::new(world),
         Err(error) => {
             return Err(RealizeFailure {
@@ -174,7 +162,7 @@ pub(crate) fn realize(
         }
     };
     let realized = (|| -> Result<RealizedBundle> {
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
         let mut compilation = match tola_typst::compile_bundle_world(&world, cancellation) {
             Ok(compilation) => {
                 inputs.record_accessed(compilation.accessed());
@@ -185,7 +173,7 @@ pub(crate) fn realize(
                 return Err(anyhow::Error::new(failure));
             }
         };
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
         crate::compiler::html::align_inline_frames(&mut compilation, cancellation)
             .map_err(|error| match error {
                 tola_typst::HtmlFrameStyleError::Cancelled => tola_typst::CompileError::Cancelled,
@@ -194,7 +182,8 @@ pub(crate) fn realize(
                 }
             })
             .context("Tola could not align the inline frames the site renders")?;
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
+        super::diagnostic::ensure_native_reports_succeed(config, compilation.diagnostics())?;
         Ok(RealizedBundle {
             compilation,
             world: Arc::clone(&world),
@@ -204,7 +193,7 @@ pub(crate) fn realize(
         error: super::diagnostic::with_diagnostics(
             error,
             config.get_root(),
-            crate::codes::typst::SITE_PROGRAM,
+            tola_diagnostic::codes::typst::SITE_PROGRAM,
         ),
         world: Some(world),
     })
@@ -241,8 +230,18 @@ impl EvaluatedSiteProgram {
             .chain(std::iter::once_with(|| {
                 (
                     crate::compiler::TypstDependencyReader::SiteProgram,
-                    compilation.file_reads().to_vec(),
-                    compilation.package_checks().to_vec(),
+                    compilation
+                        .file_reads()
+                        .iter()
+                        .chain(self.package_bindings.module_reads())
+                        .cloned()
+                        .collect(),
+                    compilation
+                        .package_checks()
+                        .iter()
+                        .chain(self.package_bindings.module_package_checks())
+                        .cloned()
+                        .collect(),
                 )
             }))
     }
@@ -255,6 +254,7 @@ impl EvaluatedSiteProgram {
             .iter()
             .flat_map(|(_, _, checks)| checks)
             .chain(compilation.package_checks())
+            .chain(self.package_bindings.module_package_checks())
     }
 
     pub(crate) fn source_analysis(&self) -> &crate::compiler::analysis::SourceAnalysisCache {
@@ -272,6 +272,7 @@ fn export_options(config: &ResolvedSiteConfig) -> BundleOptions {
 mod tests {
 
     use crate::compiler::tests::compiler_host;
+    use std::collections::BTreeSet;
     use std::fs;
 
     use tempfile::TempDir;
@@ -370,7 +371,7 @@ Second
 ]"#,
         );
         assert_eq!(
-            compiled.documents[0].properties.title.as_deref(),
+            compiled.documents[0].page.properties.title.as_deref(),
             Some("Combined")
         );
         let body = html(&compiled, "/index.html");
@@ -417,20 +418,20 @@ Second
         )
         .unwrap();
         assert_eq!(
-            compiled.document_outputs,
-            BTreeSet::from([OutputPath::parse("chosen/index.html").unwrap()])
+            compiled
+                .bundle_entries
+                .iter()
+                .map(|output| output.path().get_without_slash())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["chosen/index.html"])
         );
         assert!(html(&compiled, "/chosen/index.html").contains("Chosen body"));
     }
 
     /// A source whose layout segment cannot name a published route fails the build, and the
     /// diagnostic is anchored at that source's own file.
-    ///
-    /// The `segment 1 (…)` echo and the site-program span of the old shape came from the deleted
-    /// `document-path(source)` native, which took a source record and formatted its path; nothing
-    /// surviving does, so a source is named by anchoring the diagnostic at it.
     #[test]
-    fn routeless_source_is_named_in_the_error() {
+    fn routeless_source_is_named() {
         let directory = TempDir::new().unwrap();
         let error = compile_sources(
             &directory,
@@ -447,7 +448,7 @@ Second
         )
         .err()
         .expect("a layout segment that cannot name a route fails the build");
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
+        let diagnostics = tola_diagnostic::attached(&error).unwrap();
         let diagnostic = diagnostics
             .iter()
             .find(|diagnostic| {
@@ -496,7 +497,7 @@ Second
         .err()
         .expect("emitted documents cannot share one recommended output");
         assert!(
-            crate::diagnostic::attached(&error)
+            tola_diagnostic::attached(&error)
                 .unwrap()
                 .iter()
                 .any(|diagnostic| { diagnostic.message.contains("about/index.html") }),
@@ -518,12 +519,12 @@ Second
         )
         .unwrap();
         assert_eq!(
-            compiled.document_outputs,
-            BTreeSet::from([
-                OutputPath::parse("flat/index.html").unwrap(),
-                OutputPath::parse("directory/index.html").unwrap(),
-                OutputPath::parse("index.html").unwrap(),
-            ])
+            compiled
+                .bundle_entries
+                .iter()
+                .map(|output| output.path().get_without_slash())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["flat/index.html", "directory/index.html", "index.html",])
         );
         for (output, identity) in [
             ("/flat/index.html", "about.typ"),
@@ -576,10 +577,14 @@ Second
         )
         .unwrap();
         assert_eq!(
-            compiled.document_outputs,
+            compiled
+                .bundle_entries
+                .iter()
+                .map(|output| output.path().get_without_slash())
+                .collect::<BTreeSet<_>>(),
             BTreeSet::from([
-                OutputPath::parse("pages/fractions-1-2-price.typ/index.html").unwrap(),
-                OutputPath::parse("pages/root-escape.typ/index.html").unwrap(),
+                "pages/fractions-1-2-price.typ/index.html",
+                "pages/root-escape.typ/index.html",
             ])
         );
         assert!(

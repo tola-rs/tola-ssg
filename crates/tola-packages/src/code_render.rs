@@ -37,13 +37,7 @@ const DARK_WEIGHT_PROPERTY: &str = "--tola-code-dark-weight";
 const DARK_STYLE_PROPERTY: &str = "--tola-code-dark-style";
 const DARK_DECORATION_PROPERTY: &str = "--tola-code-dark-decoration";
 
-/// The token an appearance declares for a style it does not resolve.
-///
-/// `none` is a valid custom-property token stream but invalid for `color`, `font-weight`, and
-/// `font-style`: `var()` substitution makes those declarations invalid at computed-value time, so
-/// they compute to the inherited value, and `text-decoration-line` accepts it to clear a
-/// decoration. A CSS-wide keyword such as `inherit` cannot serve here — it would act on the custom
-/// property itself, and the consumer's fallback would resolve the other appearance's value.
+/// The token an unresolved style declares; a CSS-wide keyword would act on the custom property.
 const OFF_TOKEN: &str = "none";
 
 /// The `render-code` host binding: render one synthesized `raw` element as Tola's code markup.
@@ -104,8 +98,7 @@ pub(super) fn tola_render_code(
 
 /// Synthesize the dark appearance from a clone of `raw` that takes `dark_element`'s loaded theme.
 ///
-/// Every other field — text, syntaxes, tab size, align, block, lang — stays the primary's, so
-/// both appearances always describe the same text.
+/// Every other field stays the primary's, so both appearances describe the same text.
 fn synthesize_dark(
     engine: &mut Engine,
     raw: &Content,
@@ -201,10 +194,7 @@ fn render_line(
 
 /// Collect one synthesized line body's ranges, in order, as byte lengths of the line's text.
 ///
-/// The HTML synthesis colors a piece by wrapping it in an `HtmlElem` whose css carries `color`,
-/// marks bold, italic, and underline with the text elements Typst's own highlighter applies, and
-/// wraps every piece but the first in a `StyledElem` carrying its byte offset. A body node or a css
-/// property beyond those refuses the block instead of rendering it with styles silently dropped.
+/// Collect one line body's ranges; a body shape beyond the known styles refuses the block.
 fn collect_ranges(
     body: &Content,
     style: ResolvedStyle,
@@ -253,10 +243,7 @@ fn collect_ranges(
     Ok(())
 }
 
-/// Pair two appearances' ranges over one line, byte range by byte range.
-///
-/// Both lists must cover `total` bytes exactly. A disagreement is refused, never resolved by
-/// truncating or padding: the published line must say what both appearances say.
+/// Pair two appearances' ranges; a coverage disagreement is refused, never padded or truncated.
 fn merge_ranges(
     primary: &[StyledRange],
     dark: Option<&[StyledRange]>,
@@ -365,27 +352,16 @@ fn code_attributes(attrs: Dict, span: Span) -> SourceResult<BTreeMap<String, Str
     let mut attributes = BTreeMap::new();
     attributes.insert("class".to_owned(), CODE_CLASS.to_owned());
     for (name, value) in attrs {
-        let name = if name.as_str().eq_ignore_ascii_case("class") {
-            Str::from("class")
-        } else if name.as_str().eq_ignore_ascii_case("style") {
-            Str::from("style")
-        } else {
-            name
-        };
-        if name.as_str().eq_ignore_ascii_case(LANG_ATTRIBUTE) {
+        let name = crate::attribute_key(&name);
+        if name.eq_ignore_ascii_case(LANG_ATTRIBUTE) {
             bail!(
                 span,
                 "`{name}` belongs to the rendered code";
                 hint: "set the language tag on the raw element"
             );
         }
-        let value = value.cast::<Str>().at(span)?.to_string();
-        let value = match (name.as_str(), attributes.get(name.as_str())) {
-            ("class", Some(source)) => format!("{source} {value}"),
-            ("style", Some(source)) => format!("{};{value}", source.trim_end_matches(';')),
-            _ => value,
-        };
-        attributes.insert(name.to_string(), value);
+        let value = value.cast::<Str>().at(span)?;
+        crate::merge_attribute(&mut attributes, name, value.as_str());
     }
     Ok(attributes)
 }

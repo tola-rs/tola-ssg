@@ -6,6 +6,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use tola_build::config::ResolvedSiteConfig;
+use tola_build::filesystem::normalize_existing_prefix;
+use tola_typst::{PackageLocation, PackageLocations};
 
 /// The executable every editor runs, named as the PATH entries an author's terminal already has.
 pub(super) const SERVER_COMMAND: &str = "tola";
@@ -16,6 +18,14 @@ pub(super) const SERVER_COMMAND: &str = "tola";
 pub(super) struct ServerCommand {
     pub(super) command: &'static str,
     pub(super) arguments: Vec<String>,
+}
+
+impl ServerCommand {
+    pub(super) fn argv(&self) -> Vec<String> {
+        std::iter::once(self.command.to_owned())
+            .chain(self.arguments.iter().cloned())
+            .collect()
+    }
 }
 
 /// One argument as a shell word, quoted only where a shell would split or expand it.
@@ -40,7 +50,15 @@ pub(crate) struct EditorDirectory {
     configuration_file: Option<PathBuf>,
     entry: Option<PathBuf>,
     font_directories: Vec<PathBuf>,
-    packages: tola_typst::PackageLocations,
+    packages: PackageLocations,
+}
+
+/// One package root a bare `tola lsp` would not discover: the argument that selects it, the
+/// settings key that spells it, and the directory.
+struct NamedPackageRoot<'a> {
+    argument: &'static str,
+    key: &'static str,
+    root: &'a Path,
 }
 
 impl EditorDirectory {
@@ -57,7 +75,7 @@ impl EditorDirectory {
     }
 
     /// The directory `init` is creating a site in: settings name the configuration it writes.
-    pub(super) fn initial(root: &Path, packages: &tola_typst::PackageLocations) -> Result<Self> {
+    pub(super) fn initial(root: &Path, packages: &PackageLocations) -> Result<Self> {
         Self {
             root: root.to_path_buf(),
             configuration_file: Some(root.join("tola.toml")),
@@ -69,7 +87,7 @@ impl EditorDirectory {
     }
 
     /// The directory of a workspace that holds no site configuration.
-    pub(crate) fn workspace(root: &Path, packages: &tola_typst::PackageLocations) -> Result<Self> {
+    pub(crate) fn workspace(root: &Path, packages: &PackageLocations) -> Result<Self> {
         Self {
             root: root.to_path_buf(),
             configuration_file: None,
@@ -132,8 +150,7 @@ impl EditorDirectory {
         file.file_name()
             .is_some_and(|name| name == tola_build::config::loading::CONFIG_FILE_NAME)
             && file.parent().is_some_and(|parent| {
-                tola_build::filesystem::normalize_existing_prefix(parent)
-                    == tola_build::filesystem::normalize_existing_prefix(&self.root)
+                normalize_existing_prefix(parent) == normalize_existing_prefix(&self.root)
             })
     }
 
@@ -143,10 +160,6 @@ impl EditorDirectory {
 
     /// The one command every editor is configured with: Tola's language server, started on stdio
     /// with the arguments that select this directory's configuration and its package roots.
-    ///
-    /// A root a bare `tola lsp` discovers on its own stays out of generated entries and settings:
-    /// naming it again would outlive a host that moved its packages, while a root the author
-    /// declared is what the entry has to name.
     pub(super) fn server_command(&self) -> ServerCommand {
         let mut arguments = vec!["lsp".to_owned()];
         if let Some(configuration_file) = &self.configuration_file
@@ -160,29 +173,10 @@ impl EditorDirectory {
                     .to_owned(),
             );
         }
-        let discovered = discovered_packages();
-        for (flag, directory, discovered) in [
-            (
-                "--package-path",
-                self.packages.data(),
-                discovered.as_ref().and_then(|locations| locations.data()),
-            ),
-            (
-                "--package-cache-path",
-                self.packages.cache(),
-                discovered.as_ref().and_then(|locations| locations.cache()),
-            ),
-        ] {
-            let Some(directory) = directory else {
-                continue;
-            };
-            if restates_discovered_root(discovered, directory) {
-                continue;
-            }
-            arguments.push(flag.to_owned());
+        for root in self.named_package_roots() {
+            arguments.push(root.argument.to_owned());
             arguments.push(
-                directory
-                    .root()
+                root.root
                     .to_str()
                     .expect("validated editor package path")
                     .to_owned(),
@@ -194,45 +188,58 @@ impl EditorDirectory {
         }
     }
 
+    /// The package roots this directory names beyond the ones a bare `tola lsp` discovers, with
+    /// the argument that selects and the settings key that spells each.
+    ///
+    /// A root a bare `tola lsp` discovers on its own stays out: naming it again would outlive a
+    /// host that moved its packages, while a root the author declared is what the entry or the
+    /// settings have to name.
+    fn named_package_roots(&self) -> Vec<NamedPackageRoot<'_>> {
+        let discovered = PackageLocations::discover(None, None).ok();
+        let mut named = Vec::new();
+        for (argument, key, declared, discovered) in [
+            (
+                "--package-path",
+                "packagePath",
+                self.packages.data(),
+                discovered.as_ref().and_then(PackageLocations::data),
+            ),
+            (
+                "--package-cache-path",
+                "packageCachePath",
+                self.packages.cache(),
+                discovered.as_ref().and_then(PackageLocations::cache),
+            ),
+        ] {
+            if let Some(location) = declared
+                && !restates_discovered_root(discovered, location)
+            {
+                named.push(NamedPackageRoot {
+                    argument,
+                    key,
+                    root: location.root(),
+                });
+            }
+        }
+        named
+    }
+
     pub(super) fn tola_settings(&self) -> Value {
         let mut settings = serde_json::Map::new();
         if let Some(configuration_file) = &self.configuration_file {
             settings.insert("configPath".into(), json!(configuration_file));
         }
-        let discovered = discovered_packages();
-        for (key, directory, discovered) in [
-            (
-                "packagePath",
-                self.packages.data(),
-                discovered.as_ref().and_then(|locations| locations.data()),
-            ),
-            (
-                "packageCachePath",
-                self.packages.cache(),
-                discovered.as_ref().and_then(|locations| locations.cache()),
-            ),
-        ] {
-            let Some(directory) = directory else {
-                continue;
-            };
-            if restates_discovered_root(discovered, directory) {
-                continue;
-            }
-            settings.insert(key.into(), json!(directory.root()));
+        for root in self.named_package_roots() {
+            settings.insert(root.key.into(), json!(root.root));
         }
         Value::Object(settings)
     }
 }
 
-/// The package roots a bare `tola lsp` discovers on this host.
-fn discovered_packages() -> Option<tola_typst::PackageLocations> {
-    tola_typst::PackageLocations::discover(None, None).ok()
-}
-
 /// Whether a package root only restates what a bare invocation discovers.
 fn restates_discovered_root(
-    discovered: Option<&tola_typst::PackageLocation>,
-    directory: &tola_typst::PackageLocation,
+    discovered: Option<&PackageLocation>,
+    directory: &PackageLocation,
 ) -> bool {
     discovered.is_some_and(|discovered| discovered.root() == directory.root())
 }
@@ -262,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn named_configuration_file_reaches_the_entry() {
+    fn named_config_file_reaches_entry() {
         let directory = EditorDirectory {
             root: PathBuf::from("/site"),
             configuration_file: Some(PathBuf::from("/site/alternate.toml")),

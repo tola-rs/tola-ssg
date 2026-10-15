@@ -26,7 +26,7 @@ pub enum TrellisMode {
 /// `quality` is `0..=100`; higher keeps more detail. The image must be at most 16,383 pixels on
 /// either side.
 pub fn encode_rgba(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, Error> {
-    encoder::encode_rgba(rgba, width, height, quality)
+    encoder::encode_rgba_with_mode(rgba, width, height, quality, TrellisMode::Restricted)
 }
 
 /// Encode straight-alpha RGBA8 pixels with an explicit trellis effort mode.

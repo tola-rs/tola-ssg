@@ -29,13 +29,14 @@ pub use path::{
 };
 pub use route::{RouteSegmentError, slugify_segments};
 
-/// Values the crate's test modules construct more than once.
 #[cfg(test)]
-pub(crate) mod test_support {
-    use crate::UrlPath;
+pub(crate) mod tests {
+    pub(crate) mod test_support {
+        use crate::UrlPath;
 
-    /// The decoded path one valid site-root URL text names.
-    pub(crate) fn url_path(raw: &str) -> UrlPath {
-        UrlPath::parse(raw).expect("test URL path is valid")
+        /// The decoded path one valid site-root URL text names.
+        pub(crate) fn url_path(raw: &str) -> UrlPath {
+            UrlPath::parse(raw).expect("test URL path is valid")
+        }
     }
 }

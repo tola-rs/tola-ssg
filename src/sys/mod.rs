@@ -16,24 +16,17 @@ pub(crate) fn run_command_with_input(
     input: &[u8],
     cancellation: &BuildCancellation,
 ) -> io::Result<ExitStatus> {
-    run_with_input(command, Some(input), cancellation)
-}
-
-fn run_with_input(
-    command: &mut Command,
-    input: Option<&[u8]>,
-    cancellation: &BuildCancellation,
-) -> io::Result<ExitStatus> {
     use std::io::Write as _;
 
     cancellation.ensure_active().map_err(io::Error::other)?;
-    if input.is_some() {
-        command.stdin(std::process::Stdio::piped());
-    }
+    command.stdin(std::process::Stdio::piped());
     let mut child = CommandChild(command.spawn()?);
-    if let Some(input) = input
-        && let Some(mut stdin) = child.0.stdin.take()
     {
+        let mut stdin = child
+            .0
+            .stdin
+            .take()
+            .expect("a piped spawn keeps its input pipe");
         // Dropping the pipe ends the input: a command that reads it to the end can finish.
         let _ = stdin.write_all(input);
     }
@@ -78,14 +71,6 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
-pub(crate) use unix::{
-    clipboard_command, create_new_file, link_count, link_directory, link_removes_as_directory,
-    open_directory_nofollow, open_file_for_read, open_filesystem_root, open_log_for_append,
-    open_log_for_read, rename_without_replacing, write_process_stderr,
-};
+pub(crate) use unix::*;
 #[cfg(windows)]
-pub(crate) use windows::{
-    clipboard_command, create_new_file, link_count, link_directory, link_removes_as_directory,
-    open_directory_nofollow, open_file_for_read, open_filesystem_root, open_log_for_append,
-    open_log_for_read, rename_without_replacing, write_process_stderr,
-};
+pub(crate) use windows::*;

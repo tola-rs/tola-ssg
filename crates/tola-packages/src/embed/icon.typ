@@ -7,7 +7,7 @@
 ///
 /// Ids come from the collections the site declares in `tola.toml` under `icons.collections`:
 /// `tola help "[icons]"` documents each source type, and `tola inspect icons` lists the configured
-/// namespaces and, in one you name, its icon names.
+/// namespaces. `tola inspect icons lucide` lists one `namespace`/`name` row per icon or alias.
 ///
 /// An icon's color comes from its own SVG content. Artwork drawn with `currentColor` follows the
 /// `color` of the page around it, so a theme or a CSS class recolors it; artwork with fixed fills

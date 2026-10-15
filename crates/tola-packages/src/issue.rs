@@ -368,7 +368,7 @@ fn collect_generated(
     ]
     .concat();
     let origin = OriginKind::summary(&kinds);
-    let Some(first) = issue.children.first() else {
+    if issue.children.is_empty() {
         normalized.push(copy_issue(
             issue,
             field,
@@ -378,32 +378,16 @@ fn collect_generated(
             }),
         ));
         return;
-    };
-    let first_path = [prefix, &first.path].concat();
-    if first.generated() {
-        collect_generated(first, field, &first_path, &kinds, normalized);
-    } else {
-        normalized.push(copy_issue(
-            first,
-            field,
-            Some(Origin {
-                kind: origin,
-                path: first_path,
-            }),
-        ));
     }
-    for child in &issue.children[1..] {
-        let child_path = [prefix, &child.path].concat();
+    for child in &issue.children {
+        let path = [prefix, &child.path].concat();
         if child.generated() {
-            collect_generated(child, field, &child_path, &kinds, normalized);
+            collect_generated(child, field, &path, &kinds, normalized);
         } else {
             normalized.push(copy_issue(
                 child,
                 field,
-                Some(Origin {
-                    kind: origin,
-                    path: child_path,
-                }),
+                Some(Origin { kind: origin, path }),
             ));
         }
     }

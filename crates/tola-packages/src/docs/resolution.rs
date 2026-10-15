@@ -58,94 +58,93 @@ impl Declarations {
                         continue;
                     }
                     if let Some(binding) = statement.cast::<ast::LetBinding>() {
-                        if binding
+                        if !binding
                             .kind()
                             .bindings()
                             .iter()
                             .any(|bound| bound.as_str() == name)
                         {
-                            let documentation =
-                                declared_documentation(&file.1, statement.range().start);
-                            let expression = binding
-                                .init()
-                                .context("bundled binding has no initializer")?;
-                            let node = file
-                                .1
-                                .find(expression.span())
-                                .context("bundled initializer has no source")?;
-                            let (declaration, inherited) = self.expression(file, node)?;
-                            return Ok((declaration, documentation.or(inherited)));
-                        }
-                    } else if let Some(import) = statement.cast::<ast::ModuleImport>() {
-                        let Some(ast::Imports::Items(items)) = import.imports() else {
                             continue;
-                        };
-                        for item in items.iter() {
-                            if item.bound_name().as_str() != name {
-                                continue;
-                            }
-                            let documentation =
-                                declared_documentation(&file.1, statement.range().start);
-                            let ast::Expr::Str(path) = import.source() else {
-                                bail!("bundled import is not a literal path")
-                            };
-                            let path = path.get();
-                            let original = item.original_name();
-                            if path.as_str() == "@tola/host:0.0.0" {
-                                let declaration = if original.as_str() == "site" {
-                                    Declaration::Site
-                                } else {
-                                    let value = self
-                                        .natives
-                                        .get(original.as_str())
-                                        .with_context(|| {
-                                            format!(
-                                                "unknown builtin native `{}`",
-                                                original.as_str()
-                                            )
-                                        })?
-                                        .read();
-                                    match value {
-                                        Value::Func(func) => Declaration::Native(func.clone()),
-                                        value => Declaration::Constant(value.clone()),
-                                    }
-                                };
-                                return Ok((declaration, documentation));
-                            }
-                            if path.starts_with("@tola/") {
-                                let spec = path.parse().map_err(|error| {
-                                    anyhow::anyhow!("invalid bundled package import: {error}")
-                                })?;
-                                let package = crate::builtin_package(&spec)
-                                    .context("unknown bundled package import")?;
-                                let mut exports = package
-                                    .export_documentation(&[original.as_str().to_owned()])?;
-                                let export =
-                                    exports.pop().context("bundled import has no declaration")?;
-                                let inherited = DeclaredDocumentation {
-                                    documentation: export.documentation.clone(),
-                                    related: export.related.clone(),
-                                };
-                                return Ok((
-                                    Declaration::Export(export),
-                                    documentation.or(Some(inherited)),
-                                ));
-                            }
-                            let base = std::path::Path::new(file.0)
-                                .parent()
-                                .unwrap_or_else(|| std::path::Path::new(""));
-                            let imported = self.file(
-                                base.join(path.as_str())
-                                    .to_str()
-                                    .context("builtin import path is not UTF-8")?,
-                            )?;
-                            let (declaration, inherited) = self.binding(
-                                imported,
-                                LinkedNode::new(imported.1.root()),
-                                original.as_str(),
-                            )?;
-                            return Ok((declaration, documentation.or(inherited)));
                         }
+                        let documentation =
+                            declared_documentation(&file.1, statement.range().start);
+                        let expression = binding
+                            .init()
+                            .context("bundled binding has no initializer")?;
+                        let node = file
+                            .1
+                            .find(expression.span())
+                            .context("bundled initializer has no source")?;
+                        let (declaration, inherited) = self.expression(file, node)?;
+                        return Ok((declaration, documentation.or(inherited)));
+                    }
+                    let Some(import) = statement.cast::<ast::ModuleImport>() else {
+                        continue;
+                    };
+                    let Some(ast::Imports::Items(items)) = import.imports() else {
+                        continue;
+                    };
+                    for item in items.iter() {
+                        if item.bound_name().as_str() != name {
+                            continue;
+                        }
+                        let documentation =
+                            declared_documentation(&file.1, statement.range().start);
+                        let ast::Expr::Str(path) = import.source() else {
+                            bail!("bundled import is not a literal path")
+                        };
+                        let path = path.get();
+                        let original = item.original_name();
+                        if path.as_str() == "@tola/host:0.0.0" {
+                            if original.as_str() == "site" {
+                                return Ok((Declaration::Site, documentation));
+                            }
+                            let value = self
+                                .natives
+                                .get(original.as_str())
+                                .with_context(|| {
+                                    format!("unknown builtin native `{}`", original.as_str())
+                                })?
+                                .read();
+                            let declaration = match value {
+                                Value::Func(func) => Declaration::Native(func.clone()),
+                                value => Declaration::Constant(value.clone()),
+                            };
+                            return Ok((declaration, documentation));
+                        }
+                        if path.starts_with("@tola/") {
+                            let spec = path.parse().map_err(|error| {
+                                anyhow::anyhow!("invalid bundled package import: {error}")
+                            })?;
+                            let package = crate::builtin_package(&spec)
+                                .context("unknown bundled package import")?;
+                            let mut exports =
+                                package.export_documentation(&[original.as_str().to_owned()])?;
+                            let export =
+                                exports.pop().context("bundled import has no declaration")?;
+                            let inherited = DeclaredDocumentation {
+                                documentation: export.documentation.clone(),
+                                related: export.related.clone(),
+                            };
+                            return Ok((
+                                Declaration::Export(export),
+                                documentation.or(Some(inherited)),
+                            ));
+                        }
+                        let base = std::path::Path::new(file.0)
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new(""));
+                        let imported = self.file(
+                            base.join(path.as_str())
+                                .to_str()
+                                .context("builtin import path is not UTF-8")?,
+                        )?;
+                        let (declaration, inherited) = self.binding(
+                            imported,
+                            LinkedNode::new(imported.1.root()),
+                            original.as_str(),
+                        )?;
+                        return Ok((declaration, documentation.or(inherited)));
                     }
                 }
             }
@@ -303,21 +302,31 @@ pub(super) fn source_function(
 mod tests {
     use super::*;
 
-    use super::super::declaration::tests::parameter;
+    use super::super::declaration::Parameter;
+
+    fn declarations(source: &str) -> Declarations {
+        Declarations {
+            sources: vec![("lib.typ", Source::detached(source))],
+            natives: crate::library::native_scope(),
+        }
+    }
+
+    fn parameter<'a>(signature: &'a Signature, name: &str) -> &'a Parameter {
+        signature
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == name)
+            .unwrap_or_else(|| panic!("missing parameter `{name}`"))
+    }
+
     #[test]
     fn documented_types_reach_the_declaration() {
-        let declarations = Declarations {
-            sources: vec![(
-                "lib.typ",
-                Source::detached(
-                    "/// - value (int | none): what it takes.\n\
-                     /// - label (string): how it is named.\n\
-                     /// -> array\n\
-                     #let sample(value: 1, label: \"x\") = (value,)",
-                ),
-            )],
-            natives: crate::library::native_scope(),
-        };
+        let declarations = declarations(
+            "/// - value (int | none): what it takes.\n\
+             /// - label (string): how it is named.\n\
+             /// -> array\n\
+             #let sample(value: 1, label: \"x\") = (value,)",
+        );
         let file = declarations.file("lib.typ").unwrap();
         let (declaration, docs) = declarations
             .binding(file, LinkedNode::new(file.1.root()), "sample")
@@ -344,13 +353,8 @@ mod tests {
 
     #[test]
     fn documentation_of_undeclared_parameters_is_rejected() {
-        let declarations = Declarations {
-            sources: vec![(
-                "lib.typ",
-                Source::detached("/// - missing (int): nowhere.\n#let sample(value) = value"),
-            )],
-            natives: crate::library::native_scope(),
-        };
+        let declarations =
+            declarations("/// - missing (int): nowhere.\n#let sample(value) = value");
         let file = declarations.file("lib.typ").unwrap();
         let (declaration, docs) = declarations
             .binding(file, LinkedNode::new(file.1.root()), "sample")
@@ -366,15 +370,8 @@ mod tests {
 
     #[test]
     fn import_aliases_keep_attached_documentation() {
-        let declarations = Declarations {
-            sources: vec![(
-                "lib.typ",
-                Source::detached(
-                    "/// Address name.\n#import \"@tola/host:0.0.0\": slugify as name",
-                ),
-            )],
-            natives: crate::library::native_scope(),
-        };
+        let declarations =
+            declarations("/// Address name.\n#import \"@tola/host:0.0.0\": slugify as name");
         let file = declarations.file("lib.typ").unwrap();
         let (declaration, docs) = declarations
             .binding(file, LinkedNode::new(file.1.root()), "name")
@@ -388,18 +385,12 @@ mod tests {
 
     #[test]
     fn aliases_keep_lexical_signatures() {
-        let declarations = Declarations {
-            sources: vec![(
-                "lib.typ",
-                Source::detached(
-                    "#let original(first, fallback: none) = first\n\
-                     #let alias = original\n\
-                     #let original(second) = second\n\
-                     #let original = original",
-                ),
-            )],
-            natives: crate::library::native_scope(),
-        };
+        let declarations = declarations(
+            "#let original(first, fallback: none) = first\n\
+             #let alias = original\n\
+             #let original(second) = second\n\
+             #let original = original",
+        );
         let file = declarations.file("lib.typ").unwrap();
         for (name, expected) in [("alias", "first, fallback: none"), ("original", "second")] {
             let (declaration, _) = declarations

@@ -125,7 +125,7 @@ pub(in crate::codec) fn scan_gif<'a>(
 #[cfg(test)]
 mod tests {
     use crate::NO_CANCELLATION;
-    use crate::codec::test_support::*;
+    use crate::codec::tests::test_support::*;
     use crate::codec::{inspect, render};
     use crate::{
         ImageFormat, ImageRecipe, OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions,

@@ -11,7 +11,7 @@ use std::io::Write;
 use codespan_reporting::diagnostic::{Diagnostic as Renderable, Label};
 use codespan_reporting::term::termcolor::{Buffer, Color, ColorSpec, WriteColor};
 use codespan_reporting::term::{self, Config};
-use tola_build::diagnostic::{Diagnostic, Location, Severity};
+use tola_diagnostic::{Diagnostic, Location, Severity};
 
 use super::ansi;
 use super::source::SourceFiles;
@@ -45,18 +45,18 @@ pub(crate) fn render(
         .expect("diagnostic labels address retained source rows");
     // A source metadata issue names a field, not a call the author wrote: its frames describe the
     // site's parse pipeline. The log file still carries them for diagnosis.
-    if diagnostic.code != tola_build::codes::source::METADATA {
+    if diagnostic.code != tola_diagnostic::codes::source::METADATA {
         // The whole stack, innermost first, in the Typst CLI's shape and depth: no frame can be
         // told to carry the value a diagnostic complains about, so none is dropped.
         for frame in &escaped.trace {
             write!(buffer, "  {}", text::single_line(&frame.message))
                 .expect("writing to a Buffer succeeds");
-            if frame.location.is_some() {
+            if let Some(place) = frame.spelled() {
                 write!(buffer, " at ").expect("writing to a Buffer succeeds");
                 buffer
                     .set_color(ColorSpec::new().set_underline(true))
                     .expect("styling a Buffer succeeds");
-                write!(buffer, "{}", frame.spelled()).expect("writing to a Buffer succeeds");
+                write!(buffer, "{place}").expect("writing to a Buffer succeeds");
                 buffer.reset().expect("styling a Buffer succeeds");
             }
             writeln!(buffer).expect("writing to a Buffer succeeds");
@@ -86,21 +86,26 @@ fn renderable<'a>(
     let mut rendered = match diagnostic.severity {
         Severity::Error => Renderable::error(),
         Severity::Warning => Renderable::warning(),
+        Severity::Info => Renderable::note(),
+        Severity::Hint => Renderable::help(),
     }
     .with_message(escaped.message.as_str())
     .with_labels(labels(escaped, files))
     .with_notes(notes(escaped, files));
-    rendered.code = Some(diagnostic.code.to_string());
+    rendered.code = Some(text::single_line(&diagnostic.code_label()));
     rendered
 }
 
 /// Every note the diagnostic has, including text that has no label to sit under.
 fn notes(escaped: &DiagnosticText<'_>, files: &RenderedFiles<'_>) -> Vec<String> {
     let mut notes = Vec::new();
+    // A primary the renderer cannot show as a span still names its place, and the path
+    // answers a reader on its own.
     if let Some(primary) = &escaped.primary
         && files.range(primary).is_none()
+        && let Some(place) = primary.spelled()
     {
-        notes.push(format!("location: {}", primary.spelled()));
+        notes.push(place);
     }
     notes.extend(escaped.notes.iter().cloned());
     for located in &escaped.help {
@@ -114,7 +119,7 @@ fn notes(escaped: &DiagnosticText<'_>, files: &RenderedFiles<'_>) -> Vec<String>
         .chain(&escaped.help)
         .any(|located| files.range(located).is_some() && files.is_span_shortened(located))
     {
-        notes.push("source excerpts are shortened".to_owned());
+        notes.push("the excerpt is shortened".to_owned());
     }
     notes
 }
@@ -148,6 +153,9 @@ impl<'a> DiagnosticText<'a> {
             help: diagnostic
                 .distinct_help()
                 .map(|help| LocationText::of("help", &help.message, help.location.as_ref()))
+                .chain(diagnostic.related.iter().map(|related| {
+                    LocationText::of("related", &related.message, related.location.as_ref())
+                }))
                 .collect(),
             trace: diagnostic
                 .trace
@@ -201,26 +209,22 @@ impl<'a> LocationText<'a> {
         self.path.as_deref()
     }
 
-    /// The entry as a note reads it.
+    /// The entry as a note reads it: its text first, the place it points at after.
     fn note(&self) -> String {
-        match self.location {
-            Some(_) => format!("{}: {}: {}", self.kind, self.spelled(), self.message),
+        match self.spelled() {
+            Some(place) => format!("{}: {} ({place})", self.kind, self.message),
             None => format!("{}: {}", self.kind, self.message),
         }
     }
 
-    /// The location spelled the way a reader can search for it.
-    ///
-    /// One the record left without a file reads as its own text instead.
-    fn spelled(&self) -> String {
-        let (Some(path), Some(location)) = (self.path(), self.location) else {
-            return self.note();
-        };
-        match (location.line, location.column) {
+    /// The place a reader can search for, or `None` when the record named no file.
+    fn spelled(&self) -> Option<String> {
+        let (path, location) = (self.path()?, self.location?);
+        Some(match (location.line, location.column) {
             (Some(line), Some(column)) => format!("{path}:{line}:{}", column.saturating_sub(1)),
             (Some(line), None) => format!("{path}:{line}"),
             _ => path.to_owned(),
-        }
+        })
     }
 }
 
@@ -243,13 +247,13 @@ fn labels<'a>(escaped: &'a DiagnosticText<'_>, files: &RenderedFiles<'a>) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_build::codes::hook::COMMAND;
-    use tola_build::codes::typst::COMPILE;
-    use tola_build::diagnostic::{Help, SourceLine, SourcePosition, SourceRange, TraceFrame};
+    use tola_diagnostic::codes::hook::COMMAND;
+    use tola_diagnostic::codes::typst::COMPILE;
+    use tola_diagnostic::{Help, SourceLine, SourcePosition, SourceRange, TraceFrame};
     use unicode_width::UnicodeWidthStr;
 
     /// One location whose line the renderer can show without reading a file.
-    fn snippet(line: usize, text: &str) -> Location {
+    pub(super) fn snippet(line: usize, text: &str) -> Location {
         Location {
             path: "site.typ".to_owned(),
             line: Some(line),
@@ -290,7 +294,7 @@ mod tests {
 
     /// A help whose file the renderer cannot read still reaches the reader as a note.
     #[test]
-    fn help_without_source_text_renders_as_note() {
+    fn help_without_source_renders_note() {
         let mut diagnostic = Diagnostic::at_path(
             COMPILE,
             Severity::Error,
@@ -436,10 +440,7 @@ mod tests {
             );
             assert_eq!(rendered.matches("site.typ:4:1").count(), 2, "{rendered}");
             assert!(!rendered.contains("page body"), "{rendered}");
-            assert!(
-                !rendered.contains("source excerpts are shortened"),
-                "{rendered}"
-            );
+            assert!(!rendered.contains("the excerpt is shortened"), "{rendered}");
         }
         {
             let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page");
@@ -464,10 +465,7 @@ mod tests {
             assert!(rendered.contains("页面[界👩‍💻e\u{301}?…"), "{rendered}");
             assert!(!rendered.contains("?…]"), "{rendered}");
             assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
-            assert!(
-                !rendered.contains("source excerpts are shortened"),
-                "{rendered}"
-            );
+            assert!(!rendered.contains("the excerpt is shortened"), "{rendered}");
         }
     }
 
@@ -500,8 +498,8 @@ mod tests {
     /// A source metadata issue names a field; the site's parse pipeline is not evidence the author
     /// needs, so the terminal leaves those frames to the log file.
     #[test]
-    fn source_metadata_omits_the_site_parse_trace() {
-        use tola_build::codes::source::METADATA;
+    fn source_metadata_omits_parse_trace() {
+        use tola_diagnostic::codes::source::METADATA;
 
         let mut diagnostic = Diagnostic::at_path(
             METADATA,
@@ -531,7 +529,7 @@ mod tests {
         let mut location = snippet(93, "report-source-issues(issues)");
         location.path = "@tola/source:0.0.0/lib.typ".to_owned();
         location.source_lines[0].highlight = Some((0, location.source_lines[0].text.len()));
-        diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
+        diagnostic.trace.push(tola_diagnostic::TraceFrame {
             message: "while calling `tola-report-source-issues`".into(),
             location: Some(location),
         });
@@ -578,7 +576,7 @@ mod tests {
             snippet(2, "#let value = absent"),
             "unknown variable: absent",
         );
-        diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
+        diagnostic.trace.push(tola_diagnostic::TraceFrame {
             message: "while calling function".into(),
             location: Some(snippet(1, "#select-pages(all-sources())")),
         });
