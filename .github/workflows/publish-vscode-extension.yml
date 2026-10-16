@@ -1,8 +1,12 @@
 name: Publish VS Code Extension
 
-# The VS Code client is published only from a run somebody started here: a release run never
-# publishes it, so the version the marketplaces learn is always a decision its own run made.
+# The VS Code client publishes itself: pushing a tag named `ext-vscode-*` builds that tag's
+# source and sends it to both marketplaces; a manual run can send one marketplace from any ref.
+# A release run never publishes it, so the version the marketplaces learn is always its own.
 on:
+  push:
+    tags:
+      - 'ext-vscode-*'
   workflow_dispatch:
     inputs:
       ref:
@@ -27,7 +31,7 @@ defaults:
     shell: bash
 
 concurrency:
-  group: publish-vscode-extension-${{ github.event.inputs.ref }}
+  group: publish-vscode-extension-${{ github.event.inputs.ref || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -36,12 +40,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      SOURCE_REF: ${{ github.event.inputs.ref }}
-      MARKETPLACE: ${{ github.event.inputs.marketplace }}
+      SOURCE_REF: ${{ github.event.inputs.ref || github.ref_name }}
+      MARKETPLACE: ${{ github.event.inputs.marketplace || 'both' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ github.event.inputs.ref }}
+          ref: ${{ github.event.inputs.ref || github.ref }}
           persist-credentials: false
       - uses: ./.github/actions/setup-typescript
       - name: Package the extension this ref ships
@@ -86,8 +90,8 @@ jobs:
               exit 1
             fi
             case "$market" in
-              vscode) deno run -A @vscode/vsce publish --no-dependencies --packagePath "$vsix" ;;
-              open-vsx) deno run -A ovsx publish "$vsix" ;;
+              vscode) deno run -A @vscode/vsce publish --no-dependencies --skip-duplicate --packagePath "$vsix" ;;
+              open-vsx) deno run -A ovsx publish --skip-duplicate "$vsix" ;;
             esac
           done
 
