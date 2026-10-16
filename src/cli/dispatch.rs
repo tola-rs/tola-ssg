@@ -69,15 +69,22 @@ pub(crate) fn dispatch(
             packages,
             build,
             fonts,
-        } => commands::check::run(
-            config,
-            packages,
-            scope,
-            build,
-            crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
-            output,
-            cancellation,
-        ),
+            no_build,
+        } => {
+            if no_build {
+                commands::check::sources(config, packages, scope, build, output, cancellation)
+            } else {
+                commands::check::run(
+                    config,
+                    packages,
+                    scope,
+                    build,
+                    crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+                    output,
+                    cancellation,
+                )
+            }
+        }
         Commands::Fmt {
             config,
             packages,

@@ -6,6 +6,7 @@ pub mod colours;
 pub mod continuation;
 pub mod docs;
 pub mod edit;
+pub mod errors;
 pub mod folds;
 #[cfg(feature = "format")]
 pub mod format;

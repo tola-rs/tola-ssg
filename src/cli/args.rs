@@ -199,6 +199,13 @@ pub enum Commands {
         build: BuildOverrideArgs,
         #[command(flatten)]
         fonts: CompilerFontArgs,
+        /// Analyze the site's own sources without building anything.
+        ///
+        /// Every `.typ` file the site owns is parsed, and the sources that do not parse are
+        /// reported. It compiles nothing, so it proves only that the sources parse — not imports,
+        /// evaluation, routes, or output.
+        #[arg(long)]
+        no_build: bool,
     },
 
     /// Format the site's Typst sources.

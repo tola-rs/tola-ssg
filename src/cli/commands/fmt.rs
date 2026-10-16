@@ -3,14 +3,15 @@
 use std::path::Path;
 
 use anyhow::Result;
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity, line_column};
+use tola_build::has_typ_extension;
 use tola_typst_syntax::format::{self, Formatting, Options};
-use tola_typst_syntax::typst_syntax::Lines;
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
 use crate::cli::run::REPORT_URL;
 use crate::cli::{ConfigFileArgs, TypstPackageArgs};
+use crate::terminal::plural_count;
 use tola_build::InputScope;
 
 pub(in crate::cli) fn run(
@@ -44,7 +45,7 @@ pub(in crate::cli) fn run(
     let mut diagnostics = Vec::new();
     let mut examined = 0;
     let mut reformatted = 0;
-    for source in files.iter().filter(|path| is_typst_source(path)) {
+    for source in files.iter().filter(|path| has_typ_extension(path)) {
         cancellation.token().ensure_active()?;
         let relative = source
             .strip_prefix(root)
@@ -53,7 +54,13 @@ pub(in crate::cli) fn run(
             continue;
         };
         let Ok(text) = std::str::from_utf8(&original) else {
-            diagnostics.push(unreadable(source, root));
+            diagnostics.push(
+                tola_build::diagnostic::unreadable_source(
+                    crate::codes::fmt::UNREADABLE,
+                    &tola_build::filesystem::display_path(source, root),
+                )
+                .with_help("Save the file as UTF-8, then run `tola fmt` again"),
+            );
             continue;
         };
         examined += 1;
@@ -69,9 +76,15 @@ pub(in crate::cli) fn run(
                     writes.replace_file_if_unchanged(relative, Some(original), formatted)?;
                 }
             }
-            Formatting::Unparsable { offset } => {
-                diagnostics.push(unparsable(source, root, text, offset))
-            }
+            Formatting::Unparsable { offset } => diagnostics.push(
+                tola_build::diagnostic::unparsable_source(
+                    crate::codes::fmt::FAILED,
+                    &tola_build::filesystem::display_path(source, root),
+                    text,
+                    offset,
+                )
+                .with_note("Tola left it unchanged"),
+            ),
             Formatting::Unrenderable => diagnostics.push(unrenderable(source, root)),
         }
     }
@@ -87,37 +100,6 @@ pub(in crate::cli) fn run(
     }
     output.summary(run_summary(check, examined, reformatted))?;
     Ok(())
-}
-
-fn is_typst_source(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| extension == "typ")
-}
-
-fn unreadable(path: &Path, root: &Path) -> Diagnostic {
-    let source = tola_build::filesystem::display_path(path, root);
-    Diagnostic::at_path(
-        crate::codes::fmt::UNREADABLE,
-        Severity::Error,
-        source.clone(),
-        format!("Tola could not read `{source}` as UTF-8 text"),
-    )
-    .with_help("Save the file as UTF-8, then run `tola fmt` again")
-}
-
-fn unparsable(path: &Path, root: &Path, text: &str, offset: Option<usize>) -> Diagnostic {
-    let source = tola_build::filesystem::display_path(path, root);
-    let diagnostic = Diagnostic::at_path(
-        crate::codes::fmt::FAILED,
-        Severity::Error,
-        source.clone(),
-        format!("`{source}` does not parse as Typst"),
-    )
-    .with_note("Tola left it unchanged")
-    .with_help("Fix the syntax, or keep the file out of the run with `.ignore`");
-    match offset.and_then(|offset| line_column(text, offset)) {
-        Some((line, column)) => diagnostic.with_position(line, column),
-        None => diagnostic,
-    }
 }
 
 fn unrenderable(path: &Path, root: &Path) -> Diagnostic {
@@ -158,12 +140,6 @@ fn first_difference(before: &str, after: &str) -> Option<(usize, usize)> {
     line_column(before, difference)
 }
 
-/// The one-based line and column a byte offset sits at, when the offset lies inside the text.
-fn line_column(text: &str, offset: usize) -> Option<(usize, usize)> {
-    let (line, column) = Lines::new(text).byte_to_line_column(offset)?;
-    Some((line + 1, column + 1))
-}
-
 /// The line a run that reported no failure prints.
 fn run_summary(check: bool, examined: usize, reformatted: usize) -> String {
     match (check, examined, reformatted) {
@@ -171,12 +147,8 @@ fn run_summary(check: bool, examined: usize, reformatted: usize) -> String {
         (true, 1, _) => "The source is formatted".to_owned(),
         (true, _, _) => format!("All {examined} sources are formatted"),
         (false, _, 0) => "No source needed formatting".to_owned(),
-        (false, _, n) => format!("Formatted {} of {examined}", describe_sources(n)),
+        (false, _, n) => format!("Formatted {} of {examined}", plural_count(n, "source")),
     }
-}
-
-fn describe_sources(count: usize) -> String {
-    format!("{count} {}", if count == 1 { "source" } else { "sources" })
 }
 
 #[cfg(test)]
