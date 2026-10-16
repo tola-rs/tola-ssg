@@ -12,6 +12,16 @@ pub mod build {
     pub const TASK: DiagnosticCode = DiagnosticCode::new("build.task");
 }
 
+/// Source analysis without a build.
+pub mod check {
+    use tola_build::diagnostic::DiagnosticCode;
+
+    /// A source that does not parse as Typst.
+    pub const SYNTAX: DiagnosticCode = DiagnosticCode::new("check.syntax");
+    /// A source that could not be read as UTF-8 text.
+    pub const UNREADABLE: DiagnosticCode = DiagnosticCode::new("check.unreadable");
+}
+
 /// The command boundary.
 pub mod command {
     use tola_build::diagnostic::DiagnosticCode;

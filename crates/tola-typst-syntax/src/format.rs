@@ -2,7 +2,7 @@
 
 use crate::edit::Edit;
 use crate::style::ProseWrap;
-use typst_syntax::{LinkedNode, Source, SyntaxKind};
+use typst_syntax::Source;
 use typstyle_core::{Config, Typstyle, WrapMode};
 
 /// The narrowest width a source may be wrapped to.
@@ -36,9 +36,11 @@ pub enum Formatting {
     Stands,
     /// The edit that reformats the source.
     Reformatted(Edit),
-    /// The source has syntax errors; the offset is where the tree marks the first one, when it
-    /// marks a place.
-    Unparsable { offset: Option<usize> },
+    /// The source has syntax errors; the author's text stands.
+    Unparsable {
+        /// The byte offset the tree marks as the first error, when it marks a place.
+        offset: Option<usize>,
+    },
     /// The printer could not render the parsed source.
     Unrenderable,
 }
@@ -55,23 +57,10 @@ pub fn format(source: &str, options: &Options) -> Formatting {
             None => Formatting::Stands,
         },
         Err(typstyle_core::Error::SyntaxError) => Formatting::Unparsable {
-            offset: unparsable_at(source),
+            offset: crate::errors::first_error_range(source).map(|range| range.start),
         },
         Err(typstyle_core::Error::RenderError) => Formatting::Unrenderable,
     }
-}
-
-/// Where the source first fails to parse, when the tree marks a place.
-fn unparsable_at(source: &str) -> Option<usize> {
-    let parsed = Source::detached(source);
-    let mut pending = vec![LinkedNode::new(parsed.root())];
-    while let Some(node) = pending.pop() {
-        if node.kind() == SyntaxKind::Error {
-            return Some(node.range().start);
-        }
-        pending.extend(node.children().rev());
-    }
-    None
 }
 
 /// The edit that formats the part of `source` the byte `range` covers.

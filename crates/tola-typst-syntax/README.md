@@ -11,7 +11,7 @@ source views publish; references, rename, highlighting, and token classification
 graph.
 
 Modules: `syntax`, `names`, `usage`, `imports`, `outline`, `sections`, `folds`, `nesting`,
-`loops`, `tokens`, `colours`, `continuation`, `wraps`, `edit`, `position`, and `docs`; `format`
-(optional) adds source and range formatting.
+`loops`, `tokens`, `colours`, `continuation`, `wraps`, `edit`, `errors`, `position`, and `docs`;
+`format` (optional) adds source and range formatting.
 
 `typst-syntax` and `typst-library` are re-exported at the versions `tola-typst` uses.

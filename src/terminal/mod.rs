@@ -37,6 +37,8 @@ pub(crate) use style::Palette;
 
 pub(crate) use prompt::InputCancelled;
 use prompt::PromptReader;
+#[cfg(test)]
+pub(crate) use sink::BufferedOutput;
 pub(crate) use sink::{OutputSink, StdoutClosed};
 use std::io;
 

@@ -10,6 +10,7 @@ pub use code::DiagnosticCode;
 pub use error::{DiagnosticError, attached, fallback};
 
 use serde::{Deserialize, Serialize};
+use typst::syntax::Lines;
 
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -306,6 +307,47 @@ pub struct Diagnostic {
     pub cause: Option<DiagnosticCause>,
 }
 
+/// The record for a source whose text the parser rejects.
+///
+/// The message states the condition in the author's terms and the help names both ways out. A
+/// caller adds what its own surface owes the reader: a consequence note, or what to run next.
+pub fn unparsable_source(
+    code: DiagnosticCode,
+    source: &str,
+    text: &str,
+    offset: Option<usize>,
+) -> Diagnostic {
+    let diagnostic = Diagnostic::at_path(
+        code,
+        Severity::Error,
+        source.to_owned(),
+        format!("`{source}` does not parse as Typst"),
+    )
+    .with_help("Fix the syntax, or keep the file out of the run with `.ignore`");
+    match offset.and_then(|offset| line_column(text, offset)) {
+        Some((line, column)) => diagnostic.with_position(line, column),
+        None => diagnostic,
+    }
+}
+
+/// The record for a source whose bytes are not UTF-8 text the reader can format or analyze.
+pub fn unreadable_source(code: DiagnosticCode, source: &str) -> Diagnostic {
+    Diagnostic::at_path(
+        code,
+        Severity::Error,
+        source.to_owned(),
+        format!("Tola could not read `{source}` as UTF-8 text"),
+    )
+}
+
+/// The one-based line and column a byte offset sits at, when the offset lies inside the text.
+///
+/// The column counts characters from the line's start, which is what a reader's caret counts.
+pub fn line_column(text: &str, offset: usize) -> Option<(usize, usize)> {
+    let (line, column) = Lines::new(text).byte_to_line_column(offset)?;
+    Some((line + 1, column + 1))
+}
+
 impl Diagnostic {
     pub fn new(code: DiagnosticCode, severity: Severity, message: impl Into<String>) -> Self {
         let message = message.into();
@@ -578,5 +620,12 @@ mod tests {
         let diagnostic = Diagnostic::new(crate::codes::typst::COMPILE, Severity::Error, "\n");
 
         assert_eq!(diagnostic.message, "Tola could not complete the operation");
+    }
+
+    #[test]
+    fn byte_offset_names_its_line_and_column() {
+        assert_eq!(line_column("ab\ncd\n", 3), Some((2, 1)));
+        assert_eq!(line_column("ab\n", 3), Some((2, 1)));
+        assert_eq!(line_column("ab", 3), None);
     }
 }

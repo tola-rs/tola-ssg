@@ -403,6 +403,8 @@ Choose checks for the changed surface:
 - `tola inspect sources` shows declarations; `inspect documents`/`routes` shows emitted outputs.
   Inspection runs no hooks and does not publish the site, so it cannot generate missing hook inputs.
 - `tola check` checks the complete production output and references, running the first two hook stages.
+  `tola check --no-build` instead only parses the site's own sources: it builds nothing, so it proves
+  syntax alone.
 - `tola fmt` formats the site's Typst sources in place; `tola fmt --check` reports the sources that
   are not formatted and exits non-zero without writing them. Both read `[formatter]` from
   `tola.toml`, which your editor's format-on-save uses too (`tola help "[formatter]"`).
