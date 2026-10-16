@@ -5,8 +5,8 @@ name: Publish VS Code Extension
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: "Release tag the extension is built from (e.g. v0.8.0). The version published is the extension's own."
+      ref:
+        description: "Git ref the extension is built from: a branch such as main, or a tag. The version published is the extension's own; the run records the commit it built."
         required: true
         type: string
       marketplace:
@@ -27,7 +27,7 @@ defaults:
     shell: bash
 
 concurrency:
-  group: publish-vscode-extension-${{ github.event.inputs.tag }}
+  group: publish-vscode-extension-${{ github.event.inputs.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -36,28 +36,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      RELEASE_TAG: ${{ github.event.inputs.tag }}
+      SOURCE_REF: ${{ github.event.inputs.ref }}
       MARKETPLACE: ${{ github.event.inputs.marketplace }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ github.event.inputs.ref }}
           persist-credentials: false
       - uses: ./.github/actions/setup-typescript
-      - name: Package the extension this tag ships
+      - name: Package the extension this ref ships
         run: just vscode::package
-      - name: Check the tag ships one package
+      - name: Check the ref ships one package
         working-directory: extensions/vscode
         run: |
           set -euo pipefail
           set -- *.vsix
           if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-            echo "::error::${RELEASE_TAG} packages no single VSIX: $*"
+            echo "::error::${SOURCE_REF} packages no single VSIX: $*"
             exit 1
           fi
           # The version this publishes is the manifest's own: the client keeps its own version, so
-          # the tag only selects the source the package is built from.
-          echo "publishing $1 from ${RELEASE_TAG}"
+          # the ref only selects the source the package is built from.
+          echo "publishing $1 from ${SOURCE_REF}"
       - name: List what the package contains
         working-directory: extensions/vscode
         run: deno run -A @vscode/vsce ls --no-dependencies
@@ -90,3 +90,15 @@ jobs:
               open-vsx) deno run -A ovsx publish "$vsix" ;;
             esac
           done
+
+      - name: Record what this run published
+        working-directory: extensions/vscode
+        run: |
+          set -euo pipefail
+          version=$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("package.json")).version)')
+          {
+            echo "### Published $version to $MARKETPLACE"
+            echo
+            echo "- source ref: \`$SOURCE_REF\`"
+            echo "- commit: \`$(git rev-parse HEAD)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
