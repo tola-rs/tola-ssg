@@ -1,8 +1,15 @@
 name: Publish VS Code Extension
 
 # The VS Code client publishes itself: pushing a tag named `ext-vscode-*` builds that tag's
-# source and sends it to both marketplaces; a manual run can send one marketplace from any ref.
-# A release run never publishes it, so the version the marketplaces learn is always its own.
+# source, keeps the package as a run artifact, and publishes it to Open VSX.
+#
+# The VS Code Marketplace is deliberately absent: trusted publishing (`vsce publish --oidc`) is
+# not open on the Marketplace side yet, and a new Azure DevOps publishing token needs an Azure
+# subscription, so a version reaches the Marketplace by uploading this run's artifact at
+# https://marketplace.visualstudio.com/manage/publishers/tola. Once trusted publishing opens,
+# that upload becomes the `vsce publish --oidc` step below, and this comment goes.
+#
+# A release run never publishes the client, so the version the marketplaces learn is this run's own.
 on:
   push:
     tags:
@@ -10,18 +17,17 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref the extension is built from: a branch such as main, or a tag. The version published is the extension's own; the run records the commit it built."
+        description: "Git ref the extension is built from: a branch such as main, or a tag. The version published is the extension's own."
         required: true
         type: string
-      marketplace:
-        description: "Marketplaces that receive this version."
+      publish:
+        description: "Whether this build goes to Open VSX; either choice keeps the package as a run artifact."
         required: true
         type: choice
-        default: both
+        default: open-vsx
         options:
-          - both
-          - vscode
           - open-vsx
+          - none
 
 permissions:
   contents: read
@@ -41,7 +47,7 @@ jobs:
     timeout-minutes: 30
     env:
       SOURCE_REF: ${{ github.event.inputs.ref || github.ref_name }}
-      MARKETPLACE: ${{ github.event.inputs.marketplace || 'both' }}
+      PUBLISH: ${{ github.event.inputs.publish || 'open-vsx' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -61,48 +67,46 @@ jobs:
           fi
           # The version this publishes is the manifest's own: the client keeps its own version, so
           # the ref only selects the source the package is built from.
-          echo "publishing $1 from ${SOURCE_REF}"
+          echo "built $1 from ${SOURCE_REF}"
       - name: List what the package contains
         working-directory: extensions/vscode
         run: deno run -A @vscode/vsce ls --no-dependencies
-      - name: Publish to the selected marketplaces
+      - name: Keep the package for the Marketplace upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tola-vsix
+          path: extensions/vscode/*.vsix
+          if-no-files-found: error
+      - name: Publish to Open VSX
+        if: env.PUBLISH == 'open-vsx'
         working-directory: extensions/vscode
         env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           set -euo pipefail
+          if [ -z "${OVSX_PAT:-}" ]; then
+            echo "::error::Open VSX holds no token secret: the first version of an extension needs one"
+            exit 1
+          fi
           set -- *.vsix
-          vsix="$1"
-          case "$MARKETPLACE" in
-            both) markets="vscode open-vsx" ;;
-            vscode) markets="vscode" ;;
-            open-vsx) markets="open-vsx" ;;
-            *)
-              echo "::error::unknown marketplace: $MARKETPLACE"
-              exit 1
-              ;;
-          esac
-          for market in $markets; do
-            if [ "$market" = "vscode" ]; then token="${VSCE_PAT:-}"; else token="${OVSX_PAT:-}"; fi
-            if [ -z "$token" ]; then
-              echo "::error::$market was selected and holds no token secret"
-              exit 1
-            fi
-            case "$market" in
-              vscode) deno run -A @vscode/vsce publish --no-dependencies --skip-duplicate --packagePath "$vsix" ;;
-              open-vsx) deno run -A ovsx publish --skip-duplicate "$vsix" ;;
-            esac
-          done
-
-      - name: Record what this run published
+          deno run -A ovsx publish --skip-duplicate "$1"
+      - name: Record what this run built
         working-directory: extensions/vscode
         run: |
           set -euo pipefail
           version=$(deno eval 'console.log(JSON.parse(Deno.readTextFileSync("package.json")).version)')
           {
-            echo "### Published $version to $MARKETPLACE"
+            echo "### Built $version"
             echo
             echo "- source ref: \`$SOURCE_REF\`"
             echo "- commit: \`$(git rev-parse HEAD)\`"
+            if [ "$PUBLISH" = "open-vsx" ]; then
+              echo "- published to: Open VSX"
+            else
+              echo "- published to: nothing"
+            fi
+            echo
+            echo "The package is attached to this run as \`tola-vsix\` (a zip holding the .vsix)."
+            echo "VS Code Marketplace: download it and upload it at"
+            echo "https://marketplace.visualstudio.com/manage/publishers/tola"
           } >> "$GITHUB_STEP_SUMMARY"
