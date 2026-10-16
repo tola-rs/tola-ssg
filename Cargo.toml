@@ -9,11 +9,14 @@ members = [
     "crates/tola-pronunciations",
     "crates/tola-slugify",
     "crates/tola-config-macros",
+    "crates/tola-diagnostic",
+    "crates/tola-highlight",
     "crates/tola-icons",
     "crates/tola-image",
     "crates/tola-config",
     "crates/tola-datalog",
     "crates/tola-subprocess",
+    "crates/tola-nu",
     "crates/tola-typst",
     "crates/tola-typst-syntax",
     "crates/tola-webp",
@@ -51,6 +54,8 @@ tola-build = { version = "0.8.1", path = "crates/tola-build" }
 tola-config = { version = "0.8.1", path = "crates/tola-config" }
 tola-datalog = { version = "0.8.1", path = "crates/tola-datalog" }
 tola-config-macros = { version = "0.8.1", path = "crates/tola-config-macros" }
+tola-diagnostic = { version = "0.8.1", path = "crates/tola-diagnostic" }
+tola-highlight = { version = "0.8.1", path = "crates/tola-highlight" }
 tola-icons = { version = "0.8.1", path = "crates/tola-icons" }
 tola-image = { version = "0.8.1", path = "crates/tola-image" }
 tola-lsp = { version = "0.8.1", path = "crates/tola-lsp" }
@@ -100,14 +105,19 @@ strip = false
 [dependencies]
 arc-swap = "1.9.2"
 tola-address.workspace = true
+tola-diagnostic.workspace = true
+tola-highlight.workspace = true
 tola-packages.workspace = true
 tola-build.workspace = true
+tola-subprocess.workspace = true
+tola-nu.workspace = true
 tola-minify.workspace = true
 tola-lsp = { workspace = true, features = ["network"] }
 tola-config.workspace = true
 tola-typst = { workspace = true, features = ["embed-fonts"] }
 tola-typst-syntax = { workspace = true, features = ["format"] }
 anyhow = "1.0.104"
+dirs = "6.0.0"
 anstream = "1.0.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 cap-std = "4.0.3"

@@ -1,13 +1,17 @@
 //! Presentation-free diagnostics shared by producers and output adapters.
 //!
-//! Producers classify errors; terminal and browser adapters render these records.
+//! The optional `json-schema` feature implements `schemars::JsonSchema` for every
+//! record, using their Serde serialization contract.
+
+#![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 
 mod code;
+pub mod codes;
 mod error;
 
-pub use crate::compiler::diagnostic::font_failure;
 pub use code::DiagnosticCode;
-pub use error::{DiagnosticError, attached, fallback};
+pub use error::{DiagnosticError, attached, collapse_whitespace, fallback};
 
 use serde::{Deserialize, Serialize};
 use typst::syntax::Lines;
@@ -18,6 +22,8 @@ use typst::syntax::Lines;
 pub enum Severity {
     Error,
     Warning,
+    Info,
+    Hint,
 }
 
 /// A zero-based source position whose character offset counts UTF-16 code units.
@@ -63,8 +69,7 @@ impl Location {
     }
 }
 
-/// A retained window of one source line. `highlight` contains zero-based, end-exclusive UTF-8 byte
-/// offsets into `text`.
+/// A retained window of one source line.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceLine {
@@ -115,10 +120,7 @@ pub struct TraceFrame {
 }
 
 /// Collapse the records that one source mistake produced, naming the pages each reached.
-///
-/// The caller passes the identity of the thing the author must change, so two pages that render
-/// one mistake report once. Order follows first appearance.
-pub(crate) fn collapse_repeated<K: std::hash::Hash + Eq>(
+pub fn collapse_repeated<K: std::hash::Hash + Eq>(
     diagnostics: impl IntoIterator<Item = (K, Diagnostic, String)>,
 ) -> Vec<Diagnostic> {
     let mut positions: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
@@ -146,10 +148,9 @@ pub(crate) fn collapse_repeated<K: std::hash::Hash + Eq>(
         .collect()
 }
 
-/// The identity of the source one record names; two references share it when one source
-/// mistake reached several pages.
+/// The identity of the source one record names, shared across pages.
 #[derive(PartialEq, Eq, Hash)]
-pub(crate) struct ReferenceIdentity {
+pub struct ReferenceIdentity {
     pub(crate) code: DiagnosticCode,
     pub(crate) path: Option<String>,
     pub(crate) line: Option<usize>,
@@ -158,7 +159,7 @@ pub(crate) struct ReferenceIdentity {
 }
 
 impl ReferenceIdentity {
-    pub(crate) fn of(diagnostic: &Diagnostic) -> Self {
+    pub fn of(diagnostic: &Diagnostic) -> Self {
         let location = diagnostic.location.as_ref();
         Self {
             code: diagnostic.code,
@@ -182,15 +183,10 @@ fn pages_note(pages: &[String]) -> Option<String> {
 }
 
 /// How many names a listing names before it counts the rest.
-///
-/// One bound serves both the sentence a site author reads and the corrections that answer for the
-/// same names, so a diagnostic and its fixes never disagree about which ones are offered.
-pub(crate) const LISTED_NAMES: usize = 3;
+pub const LISTED_NAMES: usize = 3;
 
 /// Join names the way a sentence reads, naming [`LISTED_NAMES`] and counting the rest.
-///
-/// `unit` is the noun a counted remainder uses, in singular and plural form.
-pub(crate) fn bounded_listing(names: &[String], unit: (&str, &str)) -> String {
+pub fn bounded_listing(names: &[String], unit: (&str, &str)) -> String {
     let quoted = quoted_names(names);
     if names.len() <= LISTED_NAMES {
         return sentence_list(&quoted);
@@ -202,8 +198,7 @@ pub(crate) fn bounded_listing(names: &[String], unit: (&str, &str)) -> String {
     } else {
         format!("{remaining} more {plural}")
     };
-    // The counted remainder is the sentence's final clause, so the names it follows join
-    // with commas and the remainder has the `and`.
+    // The counted remainder is the sentence's final clause and carries the `and`.
     format!("{} and {rest}", quoted[..LISTED_NAMES].join(", "))
 }
 
@@ -223,10 +218,6 @@ pub(crate) fn sentence_list(names: &[String]) -> String {
 }
 
 /// The cause a diagnostic classified, with the values its producer already knows.
-///
-/// A correction reads those values — a configuration key's spelling and the line that writes it,
-/// the name a source leaves unbound, the destination a reference writes — instead of the sentence
-/// an author reads.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -237,13 +228,9 @@ pub enum DiagnosticCause {
     UnknownVariable { name: String },
     /// One reference whose destination the site does not resolve.
     UnresolvedReference {
-        /// The destination the source writes, which is the text a correction replaces. It sits
-        /// inside the range the diagnostic reports, so a correction needs no search for it.
+        /// The destination the source writes, which is the text a correction replaces.
         destination: String,
         /// The destinations that would resolve, as a browser writes them, in the site's own order.
-        ///
-        /// One entry is the address the site publishes; several leave the choice to the author
-        /// rather than guessing among them. Empty when the site publishes none.
         replacements: Vec<String>,
     },
     /// One import statement binding names its source never reads.
@@ -256,17 +243,11 @@ pub enum DiagnosticCause {
 }
 
 /// What a correction removes for one unread import.
-///
-/// The statement decides: one whose every bound name is unread goes whole, while one that also
-/// binds a read name loses only the names no occurrence reads.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum UnreadRemoval {
     /// The whole statement, on the one-based line that writes it.
-    ///
-    /// The line goes with its ending, so the names beside it cannot be left without a statement
-    /// of their own.
     Statement { line: usize },
     /// The spans that write the unread names, each removed on its own.
     Spans { ranges: Vec<SourceRange> },
@@ -278,14 +259,68 @@ pub enum UnreadRemoval {
 pub struct UnknownField {
     /// The key as the document spells it, including the tables it sits under.
     pub name: String,
-    /// The one-based line that writes the key, absent when the document's own spelling cannot be
-    /// found for it.
+    /// The one-based line that writes the key, when the document spells it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
-    /// The exact span that writes the key, absent under the same condition. A correction replaces
-    /// this span, so no editor searches the document for the key's spelling.
+    /// The exact span that writes the key, absent under the same condition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub written: Option<SourceRange>,
+}
+
+/// Host-established ownership of a public report and its optional producer-owned rule code.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DiagnosticProducer {
+    /// Project or full package identity, absent when the native caller has no source identity.
+    pub name: Option<String>,
+    pub code: Option<String>,
+}
+
+/// Trusted input evidence retained across host error wrapping and presentation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticSource {
+    locator: tola_typst::ReadLocator,
+    digest: tola_typst::ContentDigest,
+    editor_path: Option<std::path::PathBuf>,
+}
+
+impl DiagnosticSource {
+    pub fn new(locator: tola_typst::ReadLocator, digest: tola_typst::ContentDigest) -> Self {
+        Self {
+            locator,
+            digest,
+            editor_path: None,
+        }
+    }
+
+    pub fn input_identity(&self) -> (&tola_typst::ReadLocator, tola_typst::ContentDigest) {
+        (&self.locator, self.digest)
+    }
+
+    /// Attach an actual host-resolved editor file, independently of the display label.
+    pub fn with_editor_path(mut self, path: std::path::PathBuf) -> Self {
+        assert!(
+            path.is_absolute(),
+            "a host diagnostic editor path must be absolute"
+        );
+        self.editor_path = Some(path);
+        self
+    }
+
+    pub fn editor_path(&self) -> Option<&std::path::Path> {
+        self.editor_path.as_deref()
+    }
+}
+
+/// Context accompanying an issue, distinct from advice about correcting it.
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelatedInformation {
+    pub message: String,
+    pub location: Option<Location>,
+    #[serde(skip)]
+    #[cfg_attr(feature = "json-schema", schemars(skip))]
+    pub source: Option<DiagnosticSource>,
 }
 
 /// A diagnostic record shared by terminal and browser output.
@@ -294,12 +329,19 @@ pub struct UnknownField {
 pub struct Diagnostic {
     pub severity: Severity,
     pub code: DiagnosticCode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub producer: Option<DiagnosticProducer>,
+    #[serde(skip)]
+    #[cfg_attr(feature = "json-schema", schemars(skip))]
+    pub source: Option<DiagnosticSource>,
     pub message: String,
     pub location: Option<Location>,
     /// Site files containing literal package imports or includes, not proven call sites.
     pub imported_by: Vec<String>,
     pub notes: Vec<String>,
     pub help: Vec<Help>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<RelatedInformation>,
     /// The call stack behind this diagnostic, innermost first, as the terminal shows it.
     pub trace: Vec<TraceFrame>,
     /// The cause this diagnostic classified, absent when no correction applies.
@@ -308,9 +350,6 @@ pub struct Diagnostic {
 }
 
 /// The record for a source whose text the parser rejects.
-///
-/// The message states the condition in the author's terms and the help names both ways out. A
-/// caller adds what its own surface owes the reader: a consequence note, or what to run next.
 pub fn unparsable_source(
     code: DiagnosticCode,
     source: &str,
@@ -341,8 +380,6 @@ pub fn unreadable_source(code: DiagnosticCode, source: &str) -> Diagnostic {
 }
 
 /// The one-based line and column a byte offset sits at, when the offset lies inside the text.
-///
-/// The column counts characters from the line's start, which is what a reader's caret counts.
 pub fn line_column(text: &str, offset: usize) -> Option<(usize, usize)> {
     let (line, column) = Lines::new(text).byte_to_line_column(offset)?;
     Some((line + 1, column + 1))
@@ -359,13 +396,28 @@ impl Diagnostic {
         Self {
             severity,
             code,
+            producer: None,
+            source: None,
             message,
             location: None,
             imported_by: Vec::new(),
             notes: Vec::new(),
             help: Vec::new(),
+            related: Vec::new(),
             trace: Vec::new(),
             cause: None,
+        }
+    }
+
+    /// Display identity without treating a producer's rule text as a core code.
+    pub fn code_label(&self) -> String {
+        let Some(producer) = &self.producer else {
+            return self.code.to_string();
+        };
+        let name = producer.name.as_deref().unwrap_or("unknown");
+        match &producer.code {
+            Some(code) => format!("{name}: {code}"),
+            None => name.to_owned(),
         }
     }
 
@@ -385,6 +437,9 @@ impl Diagnostic {
 
     /// Present the site's panic sentence while retaining Typst's original message in the record.
     pub fn display_message(&self) -> &str {
+        if self.producer.is_some() {
+            return &self.message;
+        }
         self.message
             .strip_prefix("panicked with: ")
             .unwrap_or(&self.message)
@@ -432,9 +487,6 @@ impl Diagnostic {
     }
 
     /// Name the position inside the located file, without its text.
-    ///
-    /// A producer that knows where the failure is but does not hold the file text names the
-    /// position; a renderer that can read the file shows it, and one that cannot still names it.
     pub fn with_position(mut self, line: usize, column: usize) -> Self {
         assert!(line > 0, "a diagnostic line number must be one-based");
         assert!(column > 0, "a diagnostic column must be one-based");
@@ -448,9 +500,6 @@ impl Diagnostic {
     }
 
     /// Name the exact range inside the located file, when the producer retained one.
-    ///
-    /// A renderer that can read the file underlines the range; one that cannot still names its
-    /// start through the position.
     pub fn with_source_range(mut self, range: SourceRange) -> Self {
         let location = self
             .location
@@ -485,36 +534,87 @@ fn distinct<T: PartialEq>(messages: &[T]) -> impl Iterator<Item = &T> {
         .map(|(_, message)| message)
 }
 
+/// Merge repeated public issues from this one source snapshot without losing their context.
+pub fn coalesce_reports(diagnostics: &mut Vec<Diagnostic>) {
+    let mut merged: Vec<Diagnostic> = Vec::with_capacity(diagnostics.len());
+    for diagnostic in diagnostics.drain(..) {
+        let same = diagnostic.producer.as_ref().and_then(|_| {
+            let location = diagnostic.location.as_ref()?;
+            let range = location.range?;
+            merged.iter_mut().find(|existing| {
+                existing.producer == diagnostic.producer
+                    && existing.severity == diagnostic.severity
+                    && existing.message == diagnostic.message
+                    && existing.location.as_ref().is_some_and(|at| {
+                        let same_source = match (&existing.source, &diagnostic.source) {
+                            (Some(left), Some(right)) => {
+                                left.input_identity() == right.input_identity()
+                            }
+                            (None, None) => at.path == location.path,
+                            _ => false,
+                        };
+                        same_source && at.range == Some(range)
+                    })
+            })
+        });
+        if let Some(existing) = same {
+            merge_distinct(&mut existing.help, diagnostic.help);
+            merge_distinct(&mut existing.related, diagnostic.related);
+            merge_distinct(&mut existing.notes, diagnostic.notes);
+            merge_distinct(&mut existing.trace, diagnostic.trace);
+            merge_distinct(&mut existing.imported_by, diagnostic.imported_by);
+        } else {
+            merged.push(diagnostic);
+        }
+    }
+    *diagnostics = merged;
+}
+
+fn merge_distinct<T: PartialEq>(retained: &mut Vec<T>, incoming: impl IntoIterator<Item = T>) {
+    for item in incoming {
+        if !retained.contains(&item) {
+            retained.push(item);
+        }
+    }
+}
+
+/// Accumulated reports finish evaluation normally but prevent a successful host operation.
+pub fn ensure_reports_succeed(diagnostics: &[Diagnostic]) -> anyhow::Result<()> {
+    if diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.producer.is_some() && diagnostic.severity == Severity::Error)
+    {
+        return Err(DiagnosticError::new(
+            "a reported error prevents this operation",
+            diagnostics.to_vec(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn repeated_references_count_distinct_pages() {
-        for pages in [
-            vec!["index.html", "index.html"],
-            vec!["index.html", "about.html", "index.html"],
-        ] {
-            let diagnostic = Diagnostic::new(
-                crate::codes::typst::COMPILE,
-                Severity::Warning,
-                "missing destination",
-            );
-            let grouped = collapse_repeated(
-                pages
-                    .iter()
-                    .map(|page| (0, diagnostic.clone(), (*page).to_owned())),
-            );
-            assert_eq!(grouped.len(), 1);
-            if pages.contains(&"about.html") {
-                assert_eq!(grouped[0].notes.len(), 1);
-                let note = &grouped[0].notes[0];
-                assert_eq!(note.matches("index.html").count(), 1);
-                assert_eq!(note.matches("about.html").count(), 1);
-            } else {
-                assert!(grouped[0].notes.is_empty());
-            }
-        }
+    fn one_mistake_names_each_page() {
+        let diagnostic = Diagnostic::new(
+            crate::codes::typst::COMPILE,
+            Severity::Warning,
+            "missing destination",
+        );
+        let grouped = collapse_repeated(
+            ["index.html", "index.html", "about.html"]
+                .map(|page| (0, diagnostic.clone(), page.to_owned())),
+        );
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].notes.len(), 1);
+        assert_eq!(
+            grouped[0].notes[0],
+            "it appears on `index.html` and `about.html`"
+        );
     }
 
     #[test]
@@ -557,7 +657,7 @@ mod tests {
         assert_eq!(value["code"], "config.invalid");
     }
 
-    /// The wire shape a client parses back out of `Diagnostic::data`.
+    /// The wire shape a client reads from a diagnostic's `cause`.
     #[test]
     fn unread_import_serializes_its_removal() {
         let statement = DiagnosticCause::UnreadImport {
@@ -623,9 +723,128 @@ mod tests {
     }
 
     #[test]
-    fn byte_offset_names_its_line_and_column() {
+    fn byte_offset_reports_position() {
         assert_eq!(line_column("ab\ncd\n", 3), Some((2, 1)));
         assert_eq!(line_column("ab\n", 3), Some((2, 1)));
         assert_eq!(line_column("ab", 3), None);
+    }
+
+    fn report(owner: &str, code: &str) -> Diagnostic {
+        let mut diagnostic = Diagnostic::at_path(
+            crate::codes::report::ISSUE,
+            Severity::Warning,
+            "content/a.typ",
+            "one issue",
+        );
+        diagnostic.location.as_mut().unwrap().range = Some(SourceRange {
+            start: SourcePosition {
+                line: 1,
+                character: 3,
+            },
+            end: SourcePosition {
+                line: 1,
+                character: 5,
+            },
+        });
+        diagnostic.producer = Some(DiagnosticProducer {
+            name: Some(owner.into()),
+            code: Some(code.into()),
+        });
+        diagnostic
+    }
+
+    #[test]
+    fn coalescing_keeps_all_context() {
+        let mut first = report("project", "typst.compile");
+        first.help.push(Help {
+            message: "first correction".into(),
+            location: None,
+        });
+        let mut second = report("project", "typst.compile");
+        second.help.push(Help {
+            message: "second correction".into(),
+            location: None,
+        });
+        second.related.push(RelatedInformation {
+            message: "context".into(),
+            location: None,
+            source: None,
+        });
+        let mut diagnostics = vec![
+            first,
+            second.clone(),
+            second,
+            report("@tola-modules/other:0.0.0", "typst.compile"),
+            report("project", "different"),
+        ];
+        coalesce_reports(&mut diagnostics);
+        assert_eq!(diagnostics.len(), 3);
+        assert_eq!(diagnostics[0].help.len(), 2);
+        assert_eq!(diagnostics[0].related.len(), 1);
+        assert_eq!(diagnostics[0].code, crate::codes::report::ISSUE);
+        assert_eq!(diagnostics[0].code_label(), "project: typst.compile");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.cause.is_none())
+        );
+    }
+
+    #[test]
+    fn public_message_wording_stays_literal() {
+        let mut diagnostic = report("project", "rule");
+        diagnostic.message = "panicked with: authored text".into();
+        assert_eq!(diagnostic.display_message(), diagnostic.message);
+    }
+    #[test]
+    fn wrapping_keeps_trusted_identity() {
+        let evidence = |path: &str, bytes: &[u8]| {
+            DiagnosticSource::new(
+                tola_typst::ReadLocator::ProvidedRoot(path.into()),
+                tola_typst::ContentDigest::of(bytes),
+            )
+        };
+        let mut first = report("command:catalog", "same-rule");
+        first.source = Some(evidence("first.typ", b"same source text"));
+        first.help.push(Help {
+            message: "first correction".into(),
+            location: None,
+        });
+        let mut repeated = first.clone();
+        repeated.help = vec![Help {
+            message: "second correction".into(),
+            location: None,
+        }];
+        let mut other_source = first.clone();
+        other_source.source = Some(evidence("second.typ", b"same source text"));
+        let mut other_revision = first.clone();
+        other_revision.source = Some(evidence("first.typ", b"changed source text"));
+        let mut unkeyed = first.clone();
+        unkeyed.source = None;
+        let error = DiagnosticError::new(
+            "report errors",
+            vec![first, repeated, other_source, other_revision, unkeyed],
+        );
+        let diagnostics = error.diagnostics();
+        assert_eq!(
+            diagnostics.len(),
+            4,
+            "display path and range cannot merge distinct inputs"
+        );
+        assert_eq!(
+            diagnostics[0].help.len(),
+            2,
+            "the same input still merges all context"
+        );
+        assert_eq!(diagnostics[0].location, diagnostics[1].location);
+        assert_ne!(
+            diagnostics[0].source.as_ref().unwrap().input_identity(),
+            diagnostics[1].source.as_ref().unwrap().input_identity()
+        );
+        let public = serde_json::to_value(&diagnostics[0]).unwrap();
+        assert!(
+            public.get("source").is_none(),
+            "host evidence is not a wire field"
+        );
     }
 }

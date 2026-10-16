@@ -5,20 +5,12 @@ use std::fmt;
 use serde::Serialize;
 
 /// A stable diagnostic identifier, written `<surface>.<contract>`.
-///
-/// The surface names where the failure was found and the contract names what failed, so a reader
-/// can group diagnostics and a tool can recognize one without matching message text. Codes are
-/// declared once, in [`crate::codes`], and the shape is checked while that declaration compiles.
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct DiagnosticCode(&'static str);
 
 impl DiagnosticCode {
-    /// Declare a diagnostic identifier.
-    ///
-    /// # Panics
-    ///
-    /// Fails to compile when `code` has no `<surface>.<contract>` shape.
+    /// Declare a diagnostic identifier; a malformed shape fails to compile.
     pub const fn new(code: &'static str) -> Self {
         assert!(
             well_formed(code),
@@ -39,8 +31,7 @@ impl DiagnosticCode {
     }
 }
 
-/// The `<surface>.<contract>` shape: lowercase `a`-`z`, digits and `_`, with exactly one dot
-/// between two non-empty parts.
+/// The `<surface>.<contract>` shape: lowercase, digits, `_`, exactly one dot.
 const fn well_formed(code: &str) -> bool {
     let bytes = code.as_bytes();
     let mut index = 0;
@@ -78,12 +69,6 @@ impl fmt::Debug for DiagnosticCode {
 impl PartialEq<&str> for DiagnosticCode {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
-    }
-}
-
-impl From<DiagnosticCode> for String {
-    fn from(code: DiagnosticCode) -> Self {
-        code.0.to_owned()
     }
 }
 

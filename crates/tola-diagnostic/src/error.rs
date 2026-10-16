@@ -10,11 +10,12 @@ pub struct DiagnosticError {
 }
 
 impl DiagnosticError {
-    pub fn new(summary: impl Into<String>, diagnostics: Vec<Diagnostic>) -> Self {
+    pub fn new(summary: impl Into<String>, mut diagnostics: Vec<Diagnostic>) -> Self {
         assert!(
             !diagnostics.is_empty(),
             "a diagnostic error must hold at least one diagnostic"
         );
+        super::coalesce_reports(&mut diagnostics);
         Self {
             summary: summary.into(),
             diagnostics,
@@ -22,15 +23,12 @@ impl DiagnosticError {
         }
     }
 
+    /// Attach diagnostics to the anyhow chain a stage already built.
     pub fn attach(source: anyhow::Error, diagnostics: Vec<Diagnostic>) -> Self {
-        assert!(
-            !diagnostics.is_empty(),
-            "a diagnostic error must hold at least one diagnostic"
-        );
+        let summary = source.to_string();
         Self {
-            summary: source.to_string(),
-            diagnostics,
             source: Some(source),
+            ..Self::new(summary, diagnostics)
         }
     }
 
@@ -64,22 +62,17 @@ pub fn attached(error: &anyhow::Error) -> Option<&[Diagnostic]> {
 }
 
 /// Convert an unclassified error to a diagnostic the site author reads.
-///
-/// Only the outermost message is retained: it is the sentence the failing operation wrote for its
-/// reader. Inner causes describe Tola's own mechanics and stay out of rendered output; command
-/// boundaries record the complete chain to their debug log instead.
 pub fn fallback(code: super::DiagnosticCode, error: &anyhow::Error) -> Diagnostic {
-    let message = error
-        .chain()
-        .next()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    Diagnostic::new(code, Severity::Error, collapse_whitespace(&message))
+    Diagnostic::new(
+        code,
+        Severity::Error,
+        collapse_whitespace(&error.to_string()),
+    )
 }
 
-/// Join a message onto one line so a header stays readable when a cause spans several lines.
-fn collapse_whitespace(message: &str) -> String {
-    message.split_whitespace().collect::<Vec<_>>().join(" ")
+/// Join text a producer wrote across lines into one line, each whitespace run becoming one space.
+pub fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -147,16 +140,34 @@ mod tests {
     }
 
     #[test]
-    fn attach_keeps_the_typed_failure() {
+    fn typed_failure_keeps_diagnostics() {
         #[derive(Debug, thiserror::Error)]
-        #[error("disk read failed")]
-        struct DiskReadFailure;
+        #[error("the staging directory is gone")]
+        struct StagingDirectoryMissing;
+
+        let diagnostics = vec![
+            Diagnostic::new(
+                crate::codes::typst::SOURCE_ANALYSIS,
+                Severity::Error,
+                "the check stopped before the site was analyzed",
+            )
+            .with_note("the previous revision stays published"),
+        ];
 
         let error = anyhow::Error::new(DiagnosticError::attach(
-            anyhow::Error::new(DiskReadFailure),
-            diagnostic_error().diagnostics,
+            anyhow::Error::new(StagingDirectoryMissing),
+            diagnostics.clone(),
         ));
 
-        assert!(error.chain().any(|cause| cause.is::<DiskReadFailure>()));
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.is::<StagingDirectoryMissing>())
+        );
+        assert_eq!(error.to_string(), "the staging directory is gone");
+        let attached = attached(&error).expect("the diagnostics stay attached");
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].code, crate::codes::typst::SOURCE_ANALYSIS);
+        assert_eq!(attached[0].notes.len(), 1);
     }
 }

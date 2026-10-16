@@ -1,0 +1,23 @@
+[package]
+name = "tola-diagnostic"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+description = "Structured diagnostics every Tola producer emits, and the identifiers they carry"
+license = "MIT"
+repository = "https://github.com/tola-rs/tola-ssg"
+documentation = "https://docs.rs/tola-diagnostic"
+
+[dependencies]
+anyhow = "1.0.104"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+tola-typst.workspace = true
+typst.workspace = true
+schemars = { version = "1.2.2", optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+thiserror = "2.0.20"
+
+[features]
+json-schema = ["dep:schemars"]
