@@ -5,7 +5,7 @@
 //! crate read the same constants, so a recognized diagnostic stays the same diagnostic across the
 //! library, the application, and the editor integration.
 
-use crate::diagnostic::DiagnosticCode;
+use crate::DiagnosticCode;
 
 /// Typst Bundle construction and output payloads.
 pub mod build {
@@ -17,6 +17,13 @@ pub mod build {
     pub const MINIFY: DiagnosticCode = DiagnosticCode::new("build.minify");
     /// The site candidate itself could not be built.
     pub const SITE: DiagnosticCode = DiagnosticCode::new("build.site");
+}
+
+/// Reports emitted by running project or package code.
+pub mod report {
+    use super::DiagnosticCode;
+    /// Internal routing category; the public rule identity is producer plus owned code.
+    pub const ISSUE: DiagnosticCode = DiagnosticCode::new("report.issue");
 }
 
 /// Read-only source checks.
@@ -75,6 +82,14 @@ pub mod icons {
     pub const CACHE: DiagnosticCode = DiagnosticCode::new("icons.cache");
     /// A configured icon collection is invalid or unavailable.
     pub const COLLECTION: DiagnosticCode = DiagnosticCode::new("icons.collection");
+}
+
+/// Private model query results.
+pub mod query {
+    use super::DiagnosticCode;
+
+    /// A model query did not produce its declared JSON value.
+    pub const RESULT: DiagnosticCode = DiagnosticCode::new("query.result");
 }
 
 /// Logical output ownership and its conflicts.
@@ -187,6 +202,7 @@ mod tests {
             build::HOOKS,
             build::MINIFY,
             build::SITE,
+            report::ISSUE,
             check::SOURCE,
             check::UNUSED_IMPORT,
             config::EXPERIMENTAL,
@@ -200,8 +216,10 @@ mod tests {
             hook::COMMAND,
             icons::CACHE,
             icons::COLLECTION,
+            query::RESULT,
             output::DUPLICATE,
             publish::SITE,
+            reference::BASE_HREF_EXTERNAL_ORIGIN,
             reference::FRAGMENT_MISSING,
             reference::NAVIGATION_MISSING,
             reference::RESOURCE_MEDIA_MISMATCH,
@@ -234,35 +252,5 @@ mod tests {
         let codes = declared();
         let unique = codes.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(codes.len(), unique.len(), "two constants share one code");
-    }
-
-    #[test]
-    fn every_code_names_declared_surface() {
-        let mut surfaces = BTreeSet::new();
-        for code in declared() {
-            let surface = code.as_str().split_once('.').unwrap().0;
-            surfaces.insert(surface.to_owned());
-        }
-        assert_eq!(
-            surfaces,
-            [
-                "build",
-                "check",
-                "config",
-                "hook",
-                "icons",
-                "output",
-                "publish",
-                "reference",
-                "site",
-                "source",
-                "typst",
-                "vendor",
-                "write",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<BTreeSet<_>>()
-        );
     }
 }

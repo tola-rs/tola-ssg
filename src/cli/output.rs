@@ -258,6 +258,8 @@ impl CommandOutput {
             let level = match diagnostic.severity {
                 Severity::Error => "ERROR",
                 Severity::Warning => "WARN",
+                Severity::Info => "INFO",
+                Severity::Hint => "DEBUG",
             };
             self.record_diagnostic(level, DIAGNOSTIC_TARGET, DIAGNOSTIC_KIND, round, diagnostic);
         }
