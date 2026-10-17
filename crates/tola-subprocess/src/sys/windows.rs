@@ -8,7 +8,7 @@
 use std::io::{self, Read};
 use std::process::ExitStatus;
 use std::sync::{
-    Mutex,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
@@ -73,6 +73,19 @@ pub(crate) fn wrap(mut command: CommandWrap) -> CommandWrap {
     command
 }
 
+/// Windows console inheritance needs no foreground-process-group handoff.
+pub(crate) struct InheritedTerminal;
+
+impl InheritedTerminal {
+    pub(crate) fn prepare(_: &mut std::process::Command) -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(crate) fn restore(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The signal that terminated the child, or `None` when it exited on its own.
 ///
 /// Windows has no signals: a terminated process reports an exit code instead.
@@ -127,18 +140,18 @@ impl<T: Pipe> Read for Reader<T> {
 /// One monitor thread per reading thread, joined by `Drop`.
 struct Monitor {
     owner: std::thread::ThreadId,
-    done: std::sync::Arc<AtomicBool>,
-    armed: std::sync::Arc<Mutex<bool>>,
+    done: Arc<AtomicBool>,
+    armed: Arc<Mutex<bool>>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Monitor {
     fn new(stop: ReaderStop) -> io::Result<Self> {
         let handle = platform::open_current_thread()?;
-        let done = std::sync::Arc::new(AtomicBool::new(false));
-        let stopped = std::sync::Arc::clone(&done);
-        let armed = std::sync::Arc::new(Mutex::new(false));
-        let observed = std::sync::Arc::clone(&armed);
+        let done = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&done);
+        let armed = Arc::new(Mutex::new(false));
+        let observed = Arc::clone(&armed);
         let worker = std::thread::Builder::new()
             .name("tola-subprocess-monitor".into())
             .spawn(move || {

@@ -2,10 +2,11 @@
 //! termination, and cancellation observation.
 //!
 //! One [`Command`] runs one declared program: it owns the child's process
-//! containment (a process group on Unix, a job object on Windows), drains both
-//! output pipes while retaining a bounded head and tail of each, relays what it
-//! reads to an [`Observer`], and terminates the whole tree when the command ends
-//! or the caller's [`Cancellation`] is observed.
+//! containment (a process group on Unix, a job object on Windows) and terminates
+//! that tree when the command ends or the caller's [`Cancellation`] is observed.
+//! [`Command::run`] captures and relays bounded output. Explicit
+//! [`Command::run_inherited`] instead lends the caller's standard streams to the
+//! command and returns its [`Stop`] without capturing output.
 //!
 //! This crate is a mechanism, not a policy layer: it knows nothing about build
 //! stages, declared outputs, configuration files, or how a caller renders what a
@@ -15,7 +16,10 @@
 //! # Guarantees
 //!
 //! - Containment is established at spawn, before the command can create children.
-//! - Stdin is null, never implicitly inherited from the caller's terminal or pipe.
+//! - [`Command::run`] uses null stdin; stream inheritance is explicit.
+//! - [`Command::run_inherited`] gives a Unix child the controlling terminal before
+//!   it starts, when a foreground caller inherits a terminal, and restores the
+//!   foreground group and terminal settings on return or unwinding.
 //! - Captured output is bounded: each stream retains a fixed head and tail, and
 //!   reports how many bytes were omitted. Output volume never fails a run.
 //! - A failed reader ends observation and releases the process tree without
@@ -36,13 +40,13 @@
 //!
 //! - A [`Cancellation`] request is observed by polling, not enforced as a deadline.
 //!   OS scheduling, process termination, and observer callbacks can delay return.
-//! - [`Command::run`] blocks the calling thread. The [`Observer`] callbacks run on
+//! - Both run methods block the calling thread. The [`Observer`] callbacks run on
 //!   that same thread; callers must let them return for polling and draining to
 //!   continue.
 //! - Terminated commands leave their external effects behind: files they wrote,
 //!   network requests they made, and descendants outside the containment domain
-//!   (a process that calls `setsid`, or a Windows process created with breakaway
-//!   rights) are not rolled back or reached.
+//!   (a process that leaves the group with `setpgid` or `setsid`, or a Windows
+//!   process created with breakaway rights) are not rolled back or reached.
 
 #![deny(unsafe_code)]
 

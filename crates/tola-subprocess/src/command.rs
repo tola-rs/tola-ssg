@@ -1,4 +1,4 @@
-//! Running one declared command to its exit, with both streams captured.
+//! Running one declared command to its exit, with captured or inherited streams.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -152,6 +152,54 @@ impl Command {
         self.observe(child, cancellation, observer)
     }
 
+    /// Run with the caller's stdin, stdout, and stderr, without capturing output.
+    ///
+    /// The command retains the same process-tree containment and cancellation as
+    /// [`Self::run`]. On Unix, a foreground caller lends its controlling terminal
+    /// to the child's process group before the program starts and restores the
+    /// foreground group and terminal settings afterwards, including on failure
+    /// or unwinding. A background caller cannot take another job's terminal.
+    /// Only one run in this process may own a controlling terminal at a time.
+    ///
+    /// The caller must not read from or change that terminal while this call is
+    /// running. Terminal job suspension is not managed by this API; cancellation
+    /// still terminates a stopped child. No readers or observer callbacks run.
+    pub fn run_inherited(&self, cancellation: &(impl Cancellation + ?Sized)) -> Result<Stop> {
+        if cancellation.is_cancelled() {
+            return Ok(Stop::Cancelled(None));
+        }
+        let mut command = self.command();
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        let mut terminal =
+            sys::InheritedTerminal::prepare(&mut command).map_err(Error::Terminal)?;
+        let outcome = (|| {
+            if cancellation.is_cancelled() {
+                return Ok(Stop::Cancelled(None));
+            }
+            let wrapper = sys::wrap(CommandWrap::from(command))
+                .spawn()
+                .map_err(Error::Spawn)?;
+            let mut child = Child::new(wrapper);
+            loop {
+                if cancellation.is_cancelled() {
+                    return Ok(Stop::Cancelled(child.terminate()));
+                }
+                if let Some(status) = child.try_wait()? {
+                    child.terminate();
+                    return Ok(Stop::Exited(status));
+                }
+                thread::sleep(CHILD_POLL_INTERVAL);
+            }
+        })();
+        // The child has been stopped before the terminal is reclaimed, including
+        // when spawning or waiting failed. Drop repeats a failed restoration.
+        let restored = terminal.restore().map_err(Error::Terminal);
+        outcome.and_then(|stop| restored.map(|()| stop))
+    }
+
     /// Capture and await a child this command already started.
     pub(crate) fn observe(
         &self,
@@ -169,12 +217,20 @@ impl Command {
     }
 
     fn spawn(&self) -> Result<Child> {
-        let mut command = StdCommand::new(&self.program);
-        command.args(&self.args);
+        let mut command = self.command();
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        let child = sys::wrap(CommandWrap::from(command))
+            .spawn()
+            .map_err(Error::Spawn)?;
+        Ok(Child::new(child))
+    }
+
+    fn command(&self) -> StdCommand {
+        let mut command = StdCommand::new(&self.program);
+        command.args(&self.args);
         if let Some(directory) = &self.cwd {
             command.current_dir(directory);
         }
@@ -188,10 +244,7 @@ impl Command {
                 }
             }
         }
-        let child = sys::wrap(CommandWrap::from(command))
-            .spawn()
-            .map_err(Error::Spawn)?;
-        Ok(Child::new(child))
+        command
     }
 
     fn await_stop(
@@ -459,6 +512,7 @@ mod tests {
     const CHILD_STDIN: &[u8] = b"caller input\n";
     const CHILD_STDOUT: &[u8] = b"root:\0\xffstdout\n";
     const CHILD_STDERR: &[u8] = b"root:\0\xfestderr\n";
+    const CHILD_ARGUMENT: &str = "one argument; $value with spaces\nand Unicode: 树";
     const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(30);
     /// An escaped descendant never closes its pipes, so any finite bound proves the
     /// capture ignored it rather than waiting for end-of-file; a passing run returns
@@ -542,6 +596,45 @@ mod tests {
 
     fn run_child_mode(mode: &str) -> io::Result<i32> {
         match mode {
+            "inherited-cancel-tree" => {
+                inherited_cancel_tree();
+                return Ok(0);
+            }
+            "inherited-exit-tree" => {
+                inherited_exit_tree();
+                return Ok(0);
+            }
+            "inherited-owner" => {
+                let directory = std::env::temp_dir().canonicalize()?;
+                let stop = process_child_command("inherited-io")
+                    .arg(CHILD_ARGUMENT)
+                    .cwd(&directory)
+                    .env(CHILD_ENV, "inherited environment")
+                    .env("TOLA_SUBPROCESS_CWD", &directory)
+                    .run_inherited(&NO_CANCELLATION)
+                    .map_err(io::Error::other)?;
+                if !matches!(stop, Stop::Exited(status) if status.code() == Some(37)) {
+                    return Err(io::Error::other("the inherited exit status was lost"));
+                }
+                return Ok(0);
+            }
+            "inherited-io" => {
+                let mut input = [0; CHILD_STDIN.len()];
+                io::stdin().read_exact(&mut input)?;
+                if input.as_slice() != CHILD_STDIN
+                    || std::env::args_os().last().as_deref() != Some(OsStr::new(CHILD_ARGUMENT))
+                    || std::env::var(CHILD_ENV).as_deref() != Ok("inherited environment")
+                    || std::env::current_dir()?.canonicalize()?
+                        != std::env::var_os("TOLA_SUBPROCESS_CWD").unwrap()
+                {
+                    return Err(io::Error::other("the inherited command inputs changed"));
+                }
+                io::stdout().write_all(CHILD_STDOUT)?;
+                io::stdout().flush()?;
+                io::stderr().write_all(CHILD_STDERR)?;
+                io::stderr().flush()?;
+                return Ok(37);
+            }
             "environment" => {
                 io::stderr().write_all(
                     std::env::var(CHILD_ENV)
@@ -577,7 +670,7 @@ mod tests {
                 io::stderr().write_all(&b"diagnostic".repeat(10_000))?;
                 io::stderr().flush()?;
             }
-            "descendant" => {}
+            "descendant" | "quiet-tree" => {}
             "success" | "tree" | "escaped-tree" | "held-streams" => {
                 io::stdout().write_all(CHILD_STDOUT)?;
                 io::stdout().flush()?;
@@ -589,7 +682,7 @@ mod tests {
             }
             _ => return Err(io::Error::other("unknown child mode")),
         }
-        let descendant = if matches!(mode, "tree" | "escaped-tree") {
+        let descendant = if matches!(mode, "tree" | "quiet-tree" | "escaped-tree") {
             let mut command = std::process::Command::new(process_child_argv()[0].clone());
             command
                 .args(&process_child_argv()[1..])
@@ -630,7 +723,7 @@ mod tests {
                         });
                         control.write_all(&closed)?;
                     }
-                    b'E' if mode == "tree" => return Ok(37),
+                    b'E' if matches!(mode, "tree" | "quiet-tree") => return Ok(37),
                     b'E' if matches!(mode, "descendant" | "escaped-tree") => return Ok(0),
                     _ => return Err(io::Error::other("unexpected child control message")),
                 }
@@ -704,20 +797,115 @@ mod tests {
         }
     }
 
-    #[test]
-    fn command_preserves_caller_stdin() {
+    fn run_piped_child(mode: &str) -> std::process::Output {
         let argv = process_child_argv();
-        let mut caller = StdCommand::new(&argv[0])
+        let mut child = StdCommand::new(&argv[0])
             .args(&argv[1..])
-            .env(CHILD_MODE, "stdin-owner")
+            .env(CHILD_MODE, mode)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        caller.stdin.take().unwrap().write_all(CHILD_STDIN).unwrap();
-        let output = caller.wait_with_output().unwrap();
+        child.stdin.take().unwrap().write_all(CHILD_STDIN).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
 
+    #[test]
+    fn command_preserves_caller_stdin() {
+        run_piped_child("stdin-owner");
+    }
+
+    #[test]
+    fn inherited_command_keeps_stdio() {
+        let output = run_piped_child("inherited-owner");
+        assert!(
+            output
+                .stdout
+                .windows(CHILD_STDOUT.len())
+                .any(|bytes| bytes == CHILD_STDOUT)
+        );
+        assert_eq!(output.stderr, CHILD_STDERR);
+    }
+
+    #[test]
+    fn inherited_cancellation_before_spawn_starts_nothing() {
+        let cancelled: &dyn Cancellation = &|| true;
+        let stop = Command::new("").run_inherited(cancelled).unwrap();
+        assert!(matches!(stop, Stop::Cancelled(None)));
+    }
+
+    #[test]
+    fn inherited_cancellation_terminates_descendants() {
+        assert_inherited_owner("inherited-cancel-tree");
+    }
+
+    fn inherited_cancel_tree() {
+        let (command, listener) = child_with_control("quiet-tree");
+        let peers = RefCell::new(Vec::new());
+        let deadline = Instant::now() + CHILD_READY_TIMEOUT;
+        let stop = command
+            .run_inherited(&|| {
+                if let Some(peer) = accept_control(&listener) {
+                    peers.borrow_mut().push(peer);
+                }
+                peers.borrow().len() == 2 || Instant::now() > deadline
+            })
+            .unwrap();
+
+        assert!(stop.is_cancelled());
+        let mut peers = peers.into_inner();
+        assert_eq!(peers.len(), 2, "the child tree did not become ready");
+        for (_, peer) in &mut peers {
+            assert_control_closed(peer);
+        }
+    }
+
+    #[test]
+    fn inherited_exit_terminates_remaining_descendants() {
+        assert_inherited_owner("inherited-exit-tree");
+    }
+
+    fn inherited_exit_tree() {
+        let (command, listener) = child_with_control("quiet-tree");
+        let peers = RefCell::new(Vec::new());
+        let sent = std::cell::Cell::new(false);
+        let deadline = Instant::now() + CHILD_READY_TIMEOUT;
+        let stop = command
+            .run_inherited(&|| {
+                if let Some(peer) = accept_control(&listener) {
+                    peers.borrow_mut().push(peer);
+                }
+                if peers.borrow().len() == 2 && !sent.replace(true) {
+                    let mut peers = peers.borrow_mut();
+                    let (_, root) = peers.iter_mut().find(|(role, _)| *role == b'R').unwrap();
+                    root.write_all(b"E").unwrap();
+                }
+                Instant::now() > deadline
+            })
+            .unwrap();
+
+        assert!(matches!(stop, Stop::Exited(status) if status.code() == Some(37)));
+        for (_, peer) in &mut peers.into_inner() {
+            assert_control_closed(peer);
+        }
+    }
+
+    /// An isolated caller keeps tests independent of the test runner's terminal.
+    fn assert_inherited_owner(mode: &str) {
+        let argv = process_child_argv();
+        let output = StdCommand::new(&argv[0])
+            .args(&argv[1..])
+            .env(CHILD_MODE, mode)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "{}",

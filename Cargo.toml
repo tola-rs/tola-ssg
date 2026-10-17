@@ -64,6 +64,7 @@ tola-packages = { version = "0.8.1", path = "crates/tola-packages" }
 tola-pronunciations = { version = "0.8.1", path = "crates/tola-pronunciations" }
 tola-slugify = { version = "0.8.1", path = "crates/tola-slugify" }
 tola-subprocess = { version = "0.8.1", path = "crates/tola-subprocess" }
+tola-nu = { version = "0.8.1", path = "crates/tola-nu" }
 tola-typst = { version = "0.8.1", path = "crates/tola-typst" }
 tola-typst-syntax = { version = "0.8.1", path = "crates/tola-typst-syntax" }
 tola-webp = { version = "0.8.1", path = "crates/tola-webp" }

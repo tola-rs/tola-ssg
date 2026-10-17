@@ -151,9 +151,7 @@ mod tests {
     fn stopped_read_marks_the_capture() {
         let mut captured = Captured::default();
         captured.extend(b"partial");
-
         captured.mark_stopped_early();
-
         assert!(captured.stopped_early());
         assert_eq!(captured.render(notice), b"partial");
     }

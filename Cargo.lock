@@ -7386,9 +7386,10 @@ dependencies = [
 name = "tola-subprocess"
 version = "0.8.1"
 dependencies = [
+ "libc",
  "process-wrap",
- "rustix",
- "thiserror",
+ "rustix 1.1.5",
+ "thiserror 2.0.21",
  "windows-sys 0.61.2",
 ]
 

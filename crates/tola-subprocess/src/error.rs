@@ -11,6 +11,9 @@ use std::io;
 pub enum Error {
     #[error("the command could not be started")]
     Spawn(#[source] io::Error),
+    /// A controlling terminal could not be handed over or restored.
+    #[error("the command's terminal could not be prepared or restored")]
+    Terminal(#[source] io::Error),
     /// The child's output pipes were not available to capture.
     #[error("the command's output could not be captured")]
     Capture(#[source] io::Error),
@@ -28,6 +31,7 @@ impl Error {
     pub fn source_io(&self) -> &io::Error {
         match self {
             Self::Spawn(error)
+            | Self::Terminal(error)
             | Self::Capture(error)
             | Self::Reader(error)
             | Self::Wait(error)
