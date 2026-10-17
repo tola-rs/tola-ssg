@@ -19,9 +19,9 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
-pub(crate) use unix::{Pipe, Reader, wrap};
+pub(crate) use unix::{InheritedTerminal, Pipe, Reader, wrap};
 #[cfg(windows)]
-pub(crate) use windows::{Pipe, Reader, wrap};
+pub(crate) use windows::{InheritedTerminal, Pipe, Reader, wrap};
 
 #[cfg(unix)]
 pub use unix::terminating_signal;

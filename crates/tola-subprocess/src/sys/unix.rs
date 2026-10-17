@@ -12,6 +12,9 @@ use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 
 use super::{ReaderStop, Stopped};
 
+mod terminal;
+pub(crate) use terminal::InheritedTerminal;
+
 /// A child pipe this platform can read with a stop request.
 ///
 /// Unix needs the descriptor, to make the read nonblocking.
