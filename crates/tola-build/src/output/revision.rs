@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 
 use super::graph::{OutputFile, OutputGraph};
 use super::manifest::SiteManifest;
+use super::summary::PageAvailability;
 use tola_address::OutputPath;
 
 /// Indexed output bytes, declarations, and manifest for one immutable site revision.
@@ -59,8 +60,8 @@ impl OutputRevision {
         self.outputs.root_ownerships()
     }
 
-    pub fn page_availability(&self) -> crate::output::PageAvailability {
-        crate::output::PageAvailability::from_outputs(self.outputs.outputs())
+    pub fn page_availability(&self) -> PageAvailability {
+        PageAvailability::from_outputs(self.outputs.outputs())
     }
 
     pub fn manifest(&self) -> &SiteManifest {

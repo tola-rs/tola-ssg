@@ -6,6 +6,21 @@ use std::path::Path;
 use crate::cancellation::{BuildCancellation, OptionalCancellation};
 use anyhow::Result;
 
+/// Prose for one directory operation, rendered exactly as the site author reads it.
+#[derive(Debug, thiserror::Error)]
+enum DirectoryError {
+    #[error(
+        "cannot prepare the build's working directory: {reason}; check that the site directory is writable"
+    )]
+    Prepare { reason: &'static str },
+    #[error("cannot read {label} directory `{path}`: {reason}")]
+    Read {
+        label: String,
+        path: String,
+        reason: &'static str,
+    },
+}
+
 /// Read a directory deterministically, checking cancellation while collecting its entries.
 /// Name keys are allocated once per entry, rather than once per sorting comparison.
 pub(crate) fn read_sorted_entries(
@@ -14,12 +29,10 @@ pub(crate) fn read_sorted_entries(
     display_root: &Path,
     label: &str,
 ) -> Result<Vec<fs::DirEntry>> {
-    let failed = |error: std::io::Error| {
-        anyhow::anyhow!(
-            "cannot read {label} directory `{}`: {}",
-            super::display_path(directory, display_root),
-            super::path_failure_reason(&error),
-        )
+    let failed = |error: std::io::Error| DirectoryError::Read {
+        label: label.to_owned(),
+        path: super::display_path(directory, display_root),
+        reason: super::path_failure_reason(&error),
     };
     cancellation.ensure_active()?;
     let mut entries = Vec::new();
@@ -32,6 +45,12 @@ pub(crate) fn read_sorted_entries(
     Ok(entries)
 }
 
+/// Whether a directory holds no entry.
+pub(crate) fn directory_is_empty(directory: &Path) -> std::io::Result<bool> {
+    let mut entries = fs::read_dir(directory)?;
+    entries.next().transpose().map(|entry| entry.is_none())
+}
+
 #[derive(Debug)]
 pub(crate) struct TemporaryDirectory {
     directory: tempfile::TempDir,
@@ -41,11 +60,8 @@ impl TemporaryDirectory {
     pub(crate) fn create(parent: &Path, prefix: &str) -> Result<Self> {
         // The parent is always the site's private scratch directory: an absolute host
         // path would mean nothing to the author, so report the failure without it.
-        let failed = |error: &std::io::Error| {
-            anyhow::anyhow!(
-                "cannot prepare the build's working directory: {}; check that the site directory is writable",
-                super::path::path_failure_reason(error)
-            )
+        let failed = |error: &std::io::Error| DirectoryError::Prepare {
+            reason: super::path::path_failure_reason(error),
         };
         fs::create_dir_all(parent).map_err(|error| failed(&error))?;
         let directory = tempfile::Builder::new()

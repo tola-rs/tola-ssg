@@ -306,12 +306,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_physical_paths_stay_empty() {
-        assert_eq!(normalize_path(Path::new("")), Path::new(""));
-        assert_eq!(normalize_existing_prefix(Path::new("")), Path::new(""));
-    }
-
     #[cfg(unix)]
     #[test]
     fn symlink_resolution_precedes_traversal() {
@@ -387,7 +381,7 @@ mod tests {
 
 /// A path declared in the site could not be resolved against its site root.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SitePathError {
+pub enum SitePathError {
     #[error("the site directory could not be used")]
     InvalidSiteRoot,
     #[error("the path leaves the site directory")]

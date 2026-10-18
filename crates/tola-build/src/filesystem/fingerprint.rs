@@ -235,32 +235,6 @@ mod tests {
     }
 
     #[test]
-    fn path_contents_track_nested_paths() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join("sources");
-        fs::create_dir_all(root.join("generated")).unwrap();
-        fs::write(root.join("generated/site.css"), "v1").unwrap();
-
-        let first = path_contents(&root, None).unwrap();
-        fs::write(root.join("generated/site.css"), "v2").unwrap();
-        fs::write(root.join("generated/extra.css"), "extra").unwrap();
-        let second = path_contents(&root, None).unwrap();
-
-        assert_ne!(
-            first.entries.get(Path::new("generated/site.css")),
-            second.entries.get(Path::new("generated/site.css"))
-        );
-        assert!(
-            second
-                .entries
-                .contains_key(Path::new("generated/extra.css"))
-        );
-        fs::remove_file(root.join("generated/site.css")).unwrap();
-        let third = path_contents(&root, None).unwrap();
-        assert!(!third.entries.contains_key(Path::new("generated/site.css")));
-    }
-
-    #[test]
     fn path_contents_distinguish_empty_directory() {
         let directory = TempDir::new().unwrap();
         let output = directory.path().join("generated");

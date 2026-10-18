@@ -64,9 +64,21 @@ fn failed(root: &Path, error: &ignore::Error) -> anyhow::Error {
         None => "the site's files".to_owned(),
     };
     match error.io_error().map(path_failure_reason) {
-        Some(reason) => anyhow::anyhow!("cannot read {subject}: {reason}"),
-        None => anyhow::anyhow!("cannot read {subject}"),
+        Some(reason) => SourceReadError::WithReason { subject, reason }.into(),
+        None => SourceReadError::WithoutReason { subject }.into(),
     }
+}
+
+/// Prose for one source-tree read failure, rendered exactly as the site author reads it.
+#[derive(Debug, thiserror::Error)]
+enum SourceReadError {
+    #[error("cannot read {subject}: {reason}")]
+    WithReason {
+        subject: String,
+        reason: &'static str,
+    },
+    #[error("cannot read {subject}")]
+    WithoutReason { subject: String },
 }
 
 /// The site path the walker tagged a failure with, when it tagged one.

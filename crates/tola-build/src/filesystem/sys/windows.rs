@@ -1,6 +1,6 @@
 //! Windows: reparse-point classification, UTF-16 path identity, and handle opens.
 
-use std::fs::{File, FileType, Permissions};
+use std::fs::{File, FileType};
 use std::io;
 use std::path::Path;
 
@@ -82,20 +82,6 @@ pub(in crate::filesystem) fn open_lock_file(path: &Path) -> io::Result<File> {
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .security_qos_flags(SECURITY_IDENTIFICATION)
         .open(path)
-}
-
-/// Make one entry writable or read-only.
-pub(in crate::filesystem) fn set_write_permission(
-    permissions: &mut Permissions,
-    writable: bool,
-    _is_dir: bool,
-) {
-    permissions.set_readonly(!writable);
-}
-
-/// The permissions an ordinary file creation has here, when the platform needs them stated.
-pub(in crate::filesystem) fn ordinary_file_permissions() -> Option<Permissions> {
-    None
 }
 
 #[cfg(test)]

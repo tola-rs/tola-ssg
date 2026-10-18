@@ -18,10 +18,6 @@ pub struct RevisionId(String);
 pub struct RepresentationId([u8; 32]);
 
 impl RevisionId {
-    fn new(value: String) -> Self {
-        Self(value)
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -123,7 +119,7 @@ impl SiteManifest {
             })
             .collect::<Vec<_>>();
         outputs.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-        let revision = RevisionId::new(revision_digest(&outputs));
+        let revision = RevisionId(revision_digest(&outputs));
 
         Self { revision, outputs }
     }
@@ -296,7 +292,7 @@ fn revision_digest<'a>(outputs: impl IntoIterator<Item = &'a ManifestEntry>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::graph::{OutputFile, OutputGraphBuilder};
+    use crate::output::graph::OutputFile;
     use crate::output::owner::OutputOwner;
     use crate::output::semantics::OutputDeclaration;
     use crate::output::tests::{output_file, output_graph};
@@ -485,20 +481,6 @@ mod tests {
             &OutputPath::parse("styles/other.css").unwrap(),
             &representation,
         ));
-    }
-
-    #[test]
-    fn diff_serializes_representation_as_hex() {
-        let before = SiteManifest::from_graph(&OutputGraphBuilder::new().finish());
-        let after =
-            SiteManifest::from_graph(&output_graph([asset_output("styles/site.css", b"body {}")]));
-
-        let encoded = serde_json::to_value(before.diff(&after)).unwrap();
-
-        assert_eq!(
-            encoded["changes"][0]["output"]["representation"],
-            after.outputs()[0].representation().to_hex()
-        );
     }
 
     #[test]

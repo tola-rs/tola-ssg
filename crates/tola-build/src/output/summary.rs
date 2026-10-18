@@ -45,19 +45,15 @@ impl OutputCounts {
             if output.owner().is_system() {
                 continue;
             }
-            counts.add_kind(output.kind());
+            match output.kind() {
+                OutputKind::HtmlDocument => counts.pages += 1,
+                OutputKind::PdfDocument | OutputKind::PngDocument | OutputKind::SvgDocument => {
+                    counts.documents += 1;
+                }
+                OutputKind::Asset => counts.assets += 1,
+            }
         }
         counts
-    }
-
-    pub(crate) fn add_kind(&mut self, kind: OutputKind) {
-        match kind {
-            OutputKind::HtmlDocument => self.pages += 1,
-            OutputKind::PdfDocument | OutputKind::PngDocument | OutputKind::SvgDocument => {
-                self.documents += 1
-            }
-            OutputKind::Asset => self.assets += 1,
-        }
     }
 }
 

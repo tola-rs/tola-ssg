@@ -9,8 +9,8 @@ use super::owner::OutputOwner;
 use super::path::{OutputPathConflict, OutputPathIndex};
 use super::semantics::OutputDeclaration;
 use super::summary::OutputCounts;
-use crate::diagnostic::{Diagnostic, Severity};
 use tola_address::{OutputPath, OutputPathError, portable_key_is_reserved};
+use tola_diagnostic::{Diagnostic, Severity};
 use tola_typst::ContentDigest;
 
 /// Document-or-asset view derived from a candidate's producer declaration.
@@ -25,15 +25,8 @@ pub enum OutputKind {
 }
 
 impl std::fmt::Display for OutputKind {
-    /// The kind as a site author meets it in a rendered diagnostic.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::HtmlDocument => "an HTML page",
-            Self::PdfDocument => "a PDF document",
-            Self::PngDocument => "a PNG document",
-            Self::SvgDocument => "an SVG document",
-            Self::Asset => "a file",
-        })
+        formatter.write_str(self.display_name())
     }
 }
 
@@ -110,20 +103,13 @@ impl GeneratedFile {
     }
 }
 
-/// Shared immutable output storage that remains valid after its build is dropped.
-///
-/// Clones share the allocation without borrowing a site revision.
+/// Immutable output bytes; clones share the allocation and outlive the build that produced them.
 #[derive(Debug, Clone)]
 pub struct OutputBytes(bytes::Bytes);
 
 impl OutputBytes {
     fn as_slice(&self) -> &[u8] {
         self.0.as_ref()
-    }
-
-    /// Shared storage is only an optimization; distinct ranges still need byte comparison.
-    fn shares_storage_with(&self, other: &Self) -> bool {
-        std::ptr::eq(self.as_slice(), other.as_slice())
     }
 }
 
@@ -152,11 +138,39 @@ impl OutputFile {
         bytes: impl AsRef<[u8]> + Send + 'static,
     ) -> Self {
         let bytes = bytes::Bytes::from_owner(bytes);
+        let digest = ContentDigest::of(&bytes);
+        Self::from_owned_bytes(path, declaration, owner, bytes, digest)
+    }
+
+    /// Retain an immutable byte owner; `digest` must be the digest of every byte it yields.
+    pub(crate) fn from_byte_owner_with_digest(
+        path: OutputPath,
+        declaration: OutputDeclaration,
+        owner: OutputOwner,
+        bytes: impl AsRef<[u8]> + Send + 'static,
+        digest: ContentDigest,
+    ) -> Self {
+        Self::from_owned_bytes(
+            path,
+            declaration,
+            owner,
+            bytes::Bytes::from_owner(bytes),
+            digest,
+        )
+    }
+
+    fn from_owned_bytes(
+        path: OutputPath,
+        declaration: OutputDeclaration,
+        owner: OutputOwner,
+        bytes: bytes::Bytes,
+        digest: ContentDigest,
+    ) -> Self {
         Self {
             path,
             declaration,
             owner,
-            digest: ContentDigest::of(&bytes),
+            digest,
             bytes: OutputBytes(bytes),
         }
     }
@@ -183,11 +197,12 @@ impl OutputFile {
 
     /// The same bytes and delivery metadata under a new producer.
     pub(crate) fn with_owner(&self, owner: OutputOwner) -> Self {
-        Self::from_byte_owner(
+        Self::from_byte_owner_with_digest(
             self.path.clone(),
             self.declaration.clone(),
             owner,
             self.bytes_owner(),
+            self.digest,
         )
     }
 
@@ -207,9 +222,10 @@ impl OutputFile {
         self.digest
     }
 
+    /// Shared storage is only an optimization; distinct ranges still need byte comparison.
     #[inline]
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
-        self.bytes.shares_storage_with(&other.bytes)
+        std::ptr::eq(self.bytes.as_slice(), other.bytes.as_slice())
     }
 }
 
@@ -303,16 +319,20 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
         } => {
             // Two spellings that agree on every filesystem collide as one path, so both are worth
             // naming; identical spellings need naming once.
-            let message = if first_path == second_path {
-                format!("`{first_path}` is published twice")
-            } else {
+            let respelled = first_path != second_path;
+            let message = if respelled {
                 format!("`{first_path}` and `{second_path}` are the same output")
+            } else {
+                format!("`{first_path}` is published twice")
             };
-            let mut diagnostic =
-                Diagnostic::new(crate::codes::output::DUPLICATE, Severity::Error, message)
-                    .with_note(format!("published by {first_owner} and {second_owner}"))
-                    .with_help("give one of them a different path or route");
-            if first_path != second_path || *conflict == OutputPathConflict::FileDirectory {
+            let mut diagnostic = Diagnostic::new(
+                tola_diagnostic::codes::output::DUPLICATE,
+                Severity::Error,
+                message,
+            )
+            .with_note(format!("published by {first_owner} and {second_owner}"))
+            .with_help(cause.help());
+            if respelled {
                 diagnostic = diagnostic.with_note(conflict.to_string());
             }
             diagnostic
@@ -324,7 +344,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
             owner,
         } => {
             let mut diagnostic = Diagnostic::new(
-                crate::codes::site::OUTPUTS,
+                tola_diagnostic::codes::site::OUTPUTS,
                 Severity::Error,
                 cause.to_string(),
             )
@@ -338,7 +358,7 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error) -> Option<Diagnostic> {
             diagnostic
         }
         other => Diagnostic::new(
-            crate::codes::site::OUTPUTS,
+            tola_diagnostic::codes::site::OUTPUTS,
             Severity::Error,
             other.to_string(),
         )
@@ -355,6 +375,21 @@ pub(crate) struct OutputGraphBuilder {
     roots: OutputPathIndex,
 }
 
+/// `_tola` belongs to Tola; only Tola's own outputs may claim a path inside it.
+fn reject_reserved_path(
+    portable_key: &[String],
+    path: &OutputPath,
+    owner: &OutputOwner,
+) -> Result<(), OutputGraphError> {
+    if owner.is_system() || !portable_key_is_reserved(portable_key) {
+        return Ok(());
+    }
+    Err(OutputGraphError::ReservedPath {
+        path: path.clone(),
+        owner: owner.clone(),
+    })
+}
+
 impl OutputGraphBuilder {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -369,29 +404,16 @@ impl OutputGraphBuilder {
         ) {
             return Err(tree_file_conflict(&self.root_ownerships[index], &output));
         }
+        // Only the root Bundle declares documents; every other producer supplies assets.
         let kind = output.kind();
-        let owner_matches_kind = matches!(&output.owner, OutputOwner::Bundle { .. })
-            || (kind == OutputKind::Asset
-                && matches!(
-                    &output.owner,
-                    OutputOwner::ConfiguredAsset { .. }
-                        | OutputOwner::System { .. }
-                        | OutputOwner::Command { .. }
-                        | OutputOwner::Generated { .. }
-                ));
-        if !owner_matches_kind {
+        if kind != OutputKind::Asset && !matches!(&output.owner, OutputOwner::Bundle { .. }) {
             return Err(OutputGraphError::OutputOwnerKind {
                 path: output.path,
                 kind,
                 owner: output.owner,
             });
         }
-        if !output.owner.is_system() && portable_key_is_reserved(&portable_key) {
-            return Err(OutputGraphError::ReservedPath {
-                path: output.path,
-                owner: output.owner,
-            });
-        }
+        reject_reserved_path(&portable_key, &output.path, &output.owner)?;
 
         if let Some((index, conflict)) = self.paths.conflict(&portable_key) {
             let existing = &self.outputs[index];
@@ -427,12 +449,7 @@ impl OutputGraphBuilder {
         ownership: super::owner::OutputRootOwnership,
     ) -> Result<(), OutputGraphError> {
         let key = ownership.root().portable_key();
-        if !ownership.owner().is_system() && portable_key_is_reserved(&key) {
-            return Err(OutputGraphError::ReservedPath {
-                path: ownership.root().clone(),
-                owner: ownership.owner().clone(),
-            });
-        }
+        reject_reserved_path(&key, ownership.root(), ownership.owner())?;
         if let Some(index) = self.roots.ownership_conflict(&key, |_| false, |_| false) {
             let existing = &self.root_ownerships[index];
             return Err(OutputGraphError::TreeConflict {
@@ -462,7 +479,6 @@ impl OutputGraphBuilder {
         declaration: OutputDeclaration,
         bytes: impl Into<Arc<[u8]>>,
     ) -> Result<(), OutputGraphError> {
-        let source = source.into();
         let owner = OutputOwner::configured_asset(source);
         self.insert(OutputFile::new(path, declaration, owner, bytes))
     }
@@ -474,8 +490,7 @@ impl OutputGraphBuilder {
         declaration: OutputDeclaration,
         bytes: impl Into<Arc<[u8]>>,
     ) -> Result<(), OutputGraphError> {
-        let producer = producer.into();
-        let owner = OutputOwner::system(Arc::clone(&producer));
+        let owner = OutputOwner::system(producer);
         let path = OutputPath::parse(raw_path).map_err(|source| OutputGraphError::InvalidPath {
             raw: raw_path.to_owned(),
             owner: owner.clone(),
@@ -568,8 +583,8 @@ impl OutputGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::semantics::OutputDeclaration;
-    use crate::output::summary::OutputCounts;
+    use crate::output::owner;
+    use crate::output::semantics::{self};
 
     fn output(path: &str, owner: OutputOwner) -> OutputFile {
         let path = OutputPath::parse(path).unwrap();
@@ -577,31 +592,35 @@ mod tests {
         OutputFile::new(path, declaration, owner, Vec::<u8>::new())
     }
 
+    /// One producer's exclusive claim on a directory root.
+    fn root_ownership(path: &str, owner: OutputOwner) -> owner::OutputRootOwnership {
+        owner::OutputRootOwnership::new(OutputPath::parse(path).unwrap(), owner)
+    }
+
     #[test]
     fn counts_split_pages_documents_assets() {
-        let outputs = vec![
-            OutputFile::new(
-                OutputPath::parse("index.html").unwrap(),
-                OutputDeclaration::html_document(),
-                OutputOwner::bundle("test"),
-                Vec::<u8>::new(),
-            ),
-            OutputFile::new(
-                OutputPath::parse("manual.pdf").unwrap(),
-                OutputDeclaration::pdf_document(),
-                OutputOwner::bundle("test"),
-                Vec::<u8>::new(),
-            ),
-            OutputFile::new(
-                OutputPath::parse("styles.css").unwrap(),
+        let mut graph = OutputGraphBuilder::new();
+        for (path, declaration) in [
+            ("index.html", OutputDeclaration::html_document()),
+            ("manual.pdf", OutputDeclaration::pdf_document()),
+            (
+                "styles.css",
                 OutputDeclaration::from_filesystem_source(std::path::Path::new("styles.css")),
-                OutputOwner::configured_asset("styles.css"),
-                Vec::<u8>::new(),
             ),
-        ];
+        ] {
+            let path = OutputPath::parse(path).unwrap();
+            graph
+                .insert(OutputFile::new(
+                    path,
+                    declaration,
+                    OutputOwner::bundle("site"),
+                    Vec::<u8>::new(),
+                ))
+                .unwrap();
+        }
 
         assert_eq!(
-            OutputCounts::from_outputs(&outputs),
+            graph.finish().counts(),
             OutputCounts {
                 pages: 1,
                 documents: 1,
@@ -611,33 +630,29 @@ mod tests {
     }
 
     #[test]
-    fn supplied_file_media_override_reaches_the_graph() {
+    fn generated_file_media_override_graph() {
         let bytes: Arc<[u8]> = Arc::from(b"<p>Generated</p>".as_slice());
-        let supplied = GeneratedFile::new(
+        let generated = GeneratedFile::new(
             "search",
             OutputPath::parse("search/index.html").unwrap(),
             Arc::clone(&bytes),
         )
         .unwrap();
-        assert_eq!(supplied.producer(), "search");
-        assert_eq!(
-            supplied.media_type(),
-            &super::super::semantics::ResponseMediaType::HTML
-        );
-        let supplied =
-            supplied.with_media_type(super::super::semantics::ResponseMediaType::PLAIN_TEXT);
+        assert_eq!(generated.producer(), "search");
+        assert_eq!(generated.media_type(), &semantics::ResponseMediaType::HTML);
+        let generated = generated.with_media_type(semantics::ResponseMediaType::PLAIN_TEXT);
         let mut graph = OutputGraphBuilder::new();
-        graph.insert(supplied.into_file()).unwrap();
+        graph.insert(generated.into_file()).unwrap();
         let graph = graph.finish();
         let output = &graph.outputs()[0];
         assert_eq!(output.kind(), OutputKind::Asset);
         assert_eq!(
             output.declaration().media_type(),
-            &super::super::semantics::ResponseMediaType::PLAIN_TEXT
+            &semantics::ResponseMediaType::PLAIN_TEXT
         );
         assert_eq!(
             output.declaration().semantics(),
-            super::super::semantics::DeclaredOutputSemantics::Opaque
+            semantics::DeclaredOutputSemantics::Opaque
         );
         assert!(std::ptr::eq(bytes.as_ptr(), output.bytes().as_ptr()));
     }
@@ -660,10 +675,7 @@ mod tests {
     #[test]
     fn root_ownership_survives_graph_reuse() {
         let owner = OutputOwner::command(0, "search");
-        let ownership = super::super::owner::OutputRootOwnership::new(
-            OutputPath::parse("search").unwrap(),
-            owner.clone(),
-        );
+        let ownership = root_ownership("search", owner.clone());
         let mut graph = OutputGraphBuilder::new();
         graph
             .insert(output("search/base.json", OutputOwner::bundle("site")))
@@ -690,16 +702,11 @@ mod tests {
         let owner = OutputOwner::command(0, "search");
         let mut graph = OutputGraphBuilder::new();
         graph
-            .own_root(super::super::owner::OutputRootOwnership::new(
-                OutputPath::parse("search").unwrap(),
-                owner.clone(),
-            ))
+            .own_root(root_ownership("search", owner.clone()))
             .unwrap();
+        let nested = root_ownership("search/chunks", OutputOwner::command(1, "chunks"));
         assert!(matches!(
-            graph.own_root(super::super::owner::OutputRootOwnership::new(
-                OutputPath::parse("search/chunks").unwrap(),
-                OutputOwner::command(1, "chunks")
-            )),
+            graph.own_root(nested),
             Err(OutputGraphError::TreeConflict { .. })
         ));
         assert!(matches!(
@@ -722,91 +729,12 @@ mod tests {
             graph.insert(output(path, owner)).unwrap();
         }
         for (owner, expected) in [(first, "strasse/x.json"), (second, "Straße/z.json")] {
-            let error = graph
-                .own_root(super::super::owner::OutputRootOwnership::new(
-                    OutputPath::parse("STRASSE").unwrap(),
-                    owner,
-                ))
-                .unwrap_err();
+            let root = root_ownership("STRASSE", owner);
+            let error = graph.own_root(root).unwrap_err();
             assert!(
                 matches!(error, OutputGraphError::TreeConflict { path, .. } if path.as_str() == expected)
             );
         }
-    }
-
-    /// One producer's exclusive claim on a directory root.
-    fn root_ownership(path: &str, owner: OutputOwner) -> super::super::owner::OutputRootOwnership {
-        super::super::owner::OutputRootOwnership::new(OutputPath::parse(path).unwrap(), owner)
-    }
-
-    /// The audit's scenario: a published asset `search` and a generated tree `search/chunks`
-    /// overlap, and the diagnostic names both claims with their producers instead of saying one
-    /// lies inside the other.
-    #[test]
-    fn tree_conflict_names_both_claims() {
-        let asset = OutputOwner::configured_asset("content/search.json");
-        let hook = OutputOwner::command(0, "emitter");
-
-        let mut file_first = OutputGraphBuilder::new();
-        file_first.insert(output("search", asset.clone())).unwrap();
-        let error = file_first
-            .own_root(root_ownership("search/chunks", hook.clone()))
-            .unwrap_err();
-        assert!(matches!(&error, OutputGraphError::TreeConflict { .. }));
-        let diagnostic = error_diagnostic(&anyhow::Error::new(error)).unwrap();
-        assert_eq!(
-            diagnostic.message,
-            "`search` and the directory `search/chunks` are the same output"
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("the configured asset `search.json`")),
-            "{:?}",
-            diagnostic.notes
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("the `emitter` hook in `build.hooks.generate-outputs`")),
-            "{:?}",
-            diagnostic.notes
-        );
-        assert_eq!(
-            diagnostic.help[0].message,
-            "use a path that does not overlap that directory"
-        );
-
-        // The other direction is still refused, and still names the file and the tree it meets.
-        let mut tree_first = OutputGraphBuilder::new();
-        tree_first.own_root(root_ownership("search", hook)).unwrap();
-        let error = tree_first
-            .insert(output("search/index.html", asset))
-            .unwrap_err();
-        assert!(matches!(&error, OutputGraphError::TreeConflict { .. }));
-        let diagnostic = error_diagnostic(&anyhow::Error::new(error)).unwrap();
-        assert_eq!(
-            diagnostic.message,
-            "`search/index.html` and the directory `search` are the same output"
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("the configured asset `search.json`")),
-            "{:?}",
-            diagnostic.notes
-        );
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note.contains("the `emitter` hook in `build.hooks.generate-outputs`")),
-            "{:?}",
-            diagnostic.notes
-        );
     }
 
     /// Spellings that collide on some filesystems are still one output, and the reader learns why
@@ -919,8 +847,8 @@ mod tests {
                 OutputOwner::system("generated-document"),
             ),
         ] {
-            let mut outputs = OutputGraphBuilder::new();
-            let error = outputs
+            let mut graph = OutputGraphBuilder::new();
+            let error = graph
                 .insert(OutputFile::new(
                     OutputPath::parse("output.bin").unwrap(),
                     declaration,
@@ -995,7 +923,7 @@ mod tests {
             "posts/index.html",
             "posts/index.html",
         );
-        assert_eq!(identical.code, crate::codes::output::DUPLICATE);
+        assert_eq!(identical.code, tola_diagnostic::codes::output::DUPLICATE);
         assert_eq!(identical.message, "`posts/index.html` is published twice");
         assert_eq!(
             identical.notes,

@@ -1,7 +1,7 @@
 //! Stable output identities and producers.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tola_address::OutputPath;
@@ -70,7 +70,7 @@ impl OutputOwner {
         matches!(self, Self::System { .. })
     }
 
-    pub fn configured_source(&self) -> Option<&std::path::Path> {
+    pub fn configured_source(&self) -> Option<&Path> {
         match self {
             Self::ConfiguredAsset { source } => Some(source),
             Self::Bundle { .. }

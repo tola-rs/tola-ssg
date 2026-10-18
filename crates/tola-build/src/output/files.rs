@@ -1,20 +1,44 @@
-//! Materialization of validated output snapshots.
+//! Materialization of validated output revisions.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rayon::prelude::*;
 
 use crate::cancellation::{BuildCancellation, OptionalCancellation};
 use crate::filesystem::TemporaryDirectory;
+use crate::filesystem::layout;
+
+/// Prose for one staged output operation, rendered exactly as the site author reads it.
+#[derive(Debug, thiserror::Error)]
+enum StagedOutputError {
+    #[error("could not create the directory for `{relative}`")]
+    Directory {
+        relative: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not create `{path}` in the output directory")]
+    Create {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not write `{path}`")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 use super::graph::{OutputFile, OutputGraph};
 use super::revision::OutputRevision;
-use super::root::STAGING_DIRECTORY_PREFIX;
 
 // Bound work between cancellation checks while writing one staged output.
 const OUTPUT_IO_CHUNK_SIZE: usize = 64 * 1024;
@@ -29,12 +53,11 @@ pub struct HookOutputFiles {
     directory: Arc<TemporaryDirectory>,
 }
 
-/// A complete production tree staged in the site's output workspace.
+/// A complete production tree staged in the site's output swap workspace.
 ///
-/// Dropping this value before commit removes the private tree without
-/// changing the currently published output.
+/// A tree that is never published stays in the workspace, which the next build's recovery
+/// discards, so the currently published output is untouched.
 pub(crate) struct StagedBuildFiles {
-    directory: tempfile::TempDir,
     destination: PathBuf,
 }
 
@@ -45,21 +68,15 @@ impl StagedBuildFiles {
         cancellation: &BuildCancellation,
     ) -> Result<Self> {
         cancellation.ensure_active()?;
-        let destination_path = destination.path();
-        let workspace = destination.prepare_workspace_for_staging()?;
-        let directory = tempfile::Builder::new()
-            .prefix(STAGING_DIRECTORY_PREFIX)
-            .tempdir_in(workspace)
-            .with_context(|| "Tola could not create the output directory; check that the site directory can be written")?;
+        let staged = destination.stage()?;
         write_outputs(
             graph.outputs(),
-            directory.path(),
+            &staged,
             Some(cancellation),
             destination.minify,
         )?;
         Ok(Self {
-            directory,
-            destination: destination_path.to_path_buf(),
+            destination: destination.path().to_path_buf(),
         })
     }
 
@@ -68,7 +85,7 @@ impl StagedBuildFiles {
             destination.path() == self.destination,
             "Tola could not publish the build to a different output directory; run the build again"
         );
-        destination.replace_with(self.directory)?;
+        destination.publish()?;
         Ok(())
     }
 }
@@ -100,12 +117,8 @@ impl HookOutputFiles {
         languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
         cancellation.ensure_active_if_present()?;
-        let directory = TemporaryDirectory::create(
-            &site_root
-                .join(crate::filesystem::INTERNAL_DIR)
-                .join("hook-candidates"),
-            "candidate",
-        )?;
+        let directory =
+            TemporaryDirectory::create(&layout::hook_candidates(site_root), "candidate")?;
         write_outputs(outputs, directory.path(), cancellation, languages)?;
         directory.make_read_only(cancellation)?;
         cancellation.ensure_active_if_present()?;
@@ -157,9 +170,13 @@ fn write_output_directories(
     }
     for directory in directories {
         cancellation.ensure_active_if_present()?;
-        fs::create_dir_all(&directory).with_context(|| {
-            let relative = directory.strip_prefix(root).unwrap_or(&directory).display();
-            format!("could not create the directory for `{relative}`")
+        fs::create_dir_all(&directory).map_err(|source| StagedOutputError::Directory {
+            relative: directory
+                .strip_prefix(root)
+                .unwrap_or(&directory)
+                .display()
+                .to_string(),
+            source,
         })?;
     }
     Ok(())
@@ -175,16 +192,17 @@ fn write_output(
     cancellation.ensure_active_if_present()?;
     let bytes = minified_output_bytes(output, languages);
     let path = root.join(output.path().as_str());
-    let mut file = fs::File::create(&path).with_context(|| {
-        format!(
-            "could not create `{}` in the output directory",
-            output.path()
-        )
+    let mut file = fs::File::create(&path).map_err(|source| StagedOutputError::Create {
+        path: output.path().to_string(),
+        source,
     })?;
     for bytes in bytes.chunks(OUTPUT_IO_CHUNK_SIZE) {
         cancellation.ensure_active_if_present()?;
         file.write_all(bytes)
-            .with_context(|| format!("could not write `{}`", output.path()))?;
+            .map_err(|source| StagedOutputError::Write {
+                path: output.path().to_string(),
+                source,
+            })?;
     }
     Ok(())
 }
@@ -194,29 +212,26 @@ fn write_output(
 fn minified_output_bytes<'a>(
     output: &'a OutputFile,
     languages: tola_minify::MinifiedLanguages,
-) -> std::borrow::Cow<'a, [u8]> {
+) -> Cow<'a, [u8]> {
     if !matches!(output.owner(), super::owner::OutputOwner::Bundle { .. }) {
-        return std::borrow::Cow::Borrowed(output.bytes());
+        return Cow::Borrowed(output.bytes());
     }
-    let Some(request) = tola_minify::MinifyRequest::for_source(
-        std::path::Path::new(output.path().as_str()),
-        languages,
-    ) else {
-        return std::borrow::Cow::Borrowed(output.bytes());
+    let Some(request) =
+        tola_minify::MinifyRequest::for_source(Path::new(output.path().as_str()), languages)
+    else {
+        return Cow::Borrowed(output.bytes());
     };
     let Ok(source) = std::str::from_utf8(output.bytes()) else {
-        return std::borrow::Cow::Borrowed(output.bytes());
+        return Cow::Borrowed(output.bytes());
     };
     match request.minify(source) {
-        Ok(minified) => std::borrow::Cow::Owned(minified.into_bytes()),
-        Err(_) => std::borrow::Cow::Borrowed(output.bytes()),
+        Ok(minified) => Cow::Owned(minified.into_bytes()),
+        Err(_) => Cow::Borrowed(output.bytes()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::output::graph::OutputGraphBuilder;
     use crate::output::owner::OutputOwner;
@@ -243,19 +258,20 @@ mod tests {
         let lock = site_lock(site.path());
         let mut writer = output_write(&destination, &lock);
         writer.minify = tola_minify::MinifiedLanguages::new(true, false);
+        let stage = writer.stage().unwrap();
         let stylesheet = output_file(
             "assets/app.css",
             OutputDeclaration::from_filesystem_source(Path::new("assets/app.css")),
             source.as_bytes(),
         )
         .with_owner(owner);
-        let staged = StagedBuildFiles::materialize(
+        StagedBuildFiles::materialize(
             &output_graph([stylesheet]),
             &writer,
             &BuildCancellation::default(),
         )
         .unwrap();
-        fs::read(staged.directory.path().join("assets/app.css")).unwrap()
+        fs::read(stage.join("assets/app.css")).unwrap()
     }
 
     fn graph() -> OutputGraph {
@@ -267,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn output_view_is_read_only_until_dropped() {
+    fn output_read_only_until_dropped() {
         let site = tempfile::tempdir().unwrap();
         let view = HookOutputFiles::materialize_candidate(
             site.path(),
@@ -316,25 +332,20 @@ mod tests {
         );
     }
 
+    /// Writing a candidate into the workspace leaves the published tree as it was.
     #[test]
-    fn staging_is_invisible_until_commit() {
+    fn staging_published_tree_until_commit() {
         let site = tempfile::TempDir::new().unwrap();
         let output = site.path().join("public");
         let destination = output_root(site.path(), &output);
         let lock = site_lock(site.path());
-        let staging = tempfile::Builder::new()
-            .prefix("published-")
-            .tempdir_in(site.path())
-            .unwrap();
-        fs::write(staging.path().join("index.html"), "published").unwrap();
-        fs::write(staging.path().join("stale.txt"), "stale").unwrap();
-        destination
-            .write(&lock, &BuildCancellation::default())
-            .unwrap()
-            .replace_with(staging)
-            .unwrap();
+        let published = output_write(&destination, &lock);
+        let previous = published.stage().unwrap();
+        fs::write(previous.join("index.html"), "published").unwrap();
+        published.publish().unwrap();
 
         let writer = output_write(&destination, &lock);
+        let stage = writer.stage().unwrap();
         let staged =
             StagedBuildFiles::materialize(&graph(), &writer, &BuildCancellation::default())
                 .unwrap();
@@ -344,23 +355,15 @@ mod tests {
             "published"
         );
         assert_eq!(
-            fs::read(staged.directory.path().join("posts/rust/index.html")).unwrap(),
+            fs::read(stage.join("posts/rust/index.html")).unwrap(),
             b"Rust"
         );
 
         staged.commit(writer).unwrap();
         assert!(!output.join("index.html").exists());
-        assert!(!output.join("stale.txt").exists());
         assert_eq!(
             fs::read(output.join("posts/rust/index.html")).unwrap(),
             b"Rust"
-        );
-        assert!(
-            !destination
-                .output_workspace()
-                .unwrap()
-                .join("previous")
-                .exists()
         );
     }
 
@@ -377,7 +380,7 @@ mod tests {
                 .unwrap();
         let lock = site_lock(site.path());
         let writer = output_write(&destination, &lock);
-        let workspace = crate::filesystem::publication_workspace(&output).unwrap();
+        let workspace = crate::filesystem::swap_workspace(&output).unwrap();
         std::os::unix::fs::symlink(&content, &workspace).unwrap();
 
         let staged =
@@ -389,55 +392,13 @@ mod tests {
     }
 
     #[test]
-    fn dropped_staging_keeps_published_output() {
-        let site = tempfile::TempDir::new().unwrap();
-        let output = site.path().join("public");
-        let destination = output_root(site.path(), &output);
-        fs::create_dir(&output).unwrap();
-        let lock = site_lock(site.path());
-        let writer = output_write(&destination, &lock);
-        fs::write(output.join("index.html"), "published").unwrap();
-
-        let staged =
-            StagedBuildFiles::materialize(&graph(), &writer, &BuildCancellation::default())
-                .unwrap();
-        let staged_root = staged.directory.path().to_path_buf();
-        drop(staged);
-
-        assert!(!staged_root.exists());
-        assert_eq!(
-            fs::read_to_string(output.join("index.html")).unwrap(),
-            "published"
-        );
-    }
-
-    fn staged_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
-        let mut files = BTreeMap::new();
-        let mut pending = vec![root.to_path_buf()];
-        while let Some(directory) = pending.pop() {
-            for entry in fs::read_dir(&directory).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    pending.push(path);
-                } else {
-                    let relative = path.strip_prefix(root).unwrap().to_owned();
-                    files.insert(
-                        relative.to_string_lossy().replace('\\', "/"),
-                        fs::read(&path).unwrap(),
-                    );
-                }
-            }
-        }
-        files
-    }
-
-    #[test]
     fn staging_writes_every_output() {
         let site = tempfile::TempDir::new().unwrap();
         let output = site.path().join("public");
         let destination = output_root(site.path(), &output);
         let lock = site_lock(site.path());
         let writer = output_write(&destination, &lock);
+        let stage = writer.stage().unwrap();
 
         let mut candidate = OutputGraphBuilder::new();
         for (path, bytes) in [
@@ -454,23 +415,22 @@ mod tests {
             );
         }
 
-        let staged = StagedBuildFiles::materialize(
-            &candidate.finish(),
-            &writer,
-            &BuildCancellation::default(),
-        )
-        .unwrap();
+        StagedBuildFiles::materialize(&candidate.finish(), &writer, &BuildCancellation::default())
+            .unwrap();
 
-        let expected = [
+        for (path, bytes) in [
             ("docs/one/index.html", "one"),
             ("docs/two/index.html", "two changed"),
             ("guides/three/index.html", "three"),
             ("index.html", "home"),
-        ]
-        .into_iter()
-        .map(|(path, bytes)| (path.to_owned(), bytes.as_bytes().to_vec()))
-        .collect::<BTreeMap<_, _>>();
-        assert_eq!(staged_tree(staged.directory.path()), expected);
+        ] {
+            assert_eq!(
+                fs::read(stage.join(path)).unwrap(),
+                bytes.as_bytes(),
+                "{path}"
+            );
+        }
+        assert!(!output.exists());
     }
 
     #[test]

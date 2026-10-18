@@ -3,7 +3,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{DEV_SERVER_ADDRESS_FILE, DEV_SERVER_ADDRESS_VERSION};
+use super::DEV_SERVER_ADDRESS_VERSION;
+use super::layout;
 
 /// The address one `tola dev` wrote for a site, withdrawn when that server stops.
 ///
@@ -19,7 +20,7 @@ pub struct DevServerAddress {
 impl DevServerAddress {
     /// Write `address` as the address this site is served at.
     pub fn write(root: &Path, address: &str) -> io::Result<Self> {
-        let path = root.join(DEV_SERVER_ADDRESS_FILE);
+        let path = layout::dev_server_address(root);
         let state = serde_json::json!({
             "version": DEV_SERVER_ADDRESS_VERSION,
             "origin": address,
@@ -33,14 +34,16 @@ impl DevServerAddress {
 
     /// The address a running development server wrote, or `None` when none is serving.
     pub fn read(root: &Path) -> Option<String> {
-        Self::recorded(&root.join(DEV_SERVER_ADDRESS_FILE))
+        Self::recorded(&layout::dev_server_address(root))
     }
 
     fn recorded(path: &Path) -> Option<String> {
         let state: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        (state.get("version")?.as_u64()? == u64::from(DEV_SERVER_ADDRESS_VERSION))
-            .then(|| state.get("origin")?.as_str().map(str::to_owned))?
+        if state.get("version")?.as_u64()? != u64::from(DEV_SERVER_ADDRESS_VERSION) {
+            return None;
+        }
+        state.get("origin")?.as_str().map(str::to_owned)
     }
 }
 
@@ -87,26 +90,22 @@ mod tests {
         drop(later);
     }
 
+    /// A record another version wrote, or one this version cannot read, names no server.
     #[test]
-    fn unknown_version_names_no_address() {
-        let directory = tempfile::tempdir().unwrap();
-        write_recorded(
-            directory.path(),
+    fn no_address_from_foreign_record() {
+        for contents in [
             r#"{"version":0,"origin":"http://127.0.0.1:5277"}"#,
-        );
-        assert_eq!(DevServerAddress::read(directory.path()), None);
-    }
-
-    #[test]
-    fn unreadable_file_names_no_address() {
-        let directory = tempfile::tempdir().unwrap();
-        write_recorded(directory.path(), "not json");
-        assert_eq!(DevServerAddress::read(directory.path()), None);
+            "not json",
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            write_recorded(directory.path(), contents);
+            assert_eq!(DevServerAddress::read(directory.path()), None, "{contents}");
+        }
     }
 
     /// Leave the file a writer other than this one produced, which is how another version reads.
     fn write_recorded(root: &Path, text: &str) {
-        let path = root.join(DEV_SERVER_ADDRESS_FILE);
+        let path = layout::dev_server_address(root);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }

@@ -1,22 +1,8 @@
 //! Unix: symlink classification, raw-byte path identity, and `rustix` opens.
 
-use std::fs::{File, FileType, Permissions};
+use std::fs::{File, Permissions};
 use std::io;
 use std::path::Path;
-
-/// Whether the entry at one observed path is a link-like entry.
-pub(crate) fn automatic_path_is_link_like(_path: &Path, file_type: &FileType) -> io::Result<bool> {
-    Ok(file_type.is_symlink())
-}
-
-/// Encode a filesystem path as a lossless, platform-native hexadecimal identity.
-///
-/// For equality and ownership markers, not display. Preserves raw Unix bytes.
-pub(crate) fn encode_path_identity(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
-
-    hex::encode(path.as_os_str().as_bytes())
-}
 
 /// Open one path as a regular file, following or refusing a final symlink.
 pub(crate) fn open_regular_file(path: &Path, follow_symlink: bool) -> io::Result<File> {
