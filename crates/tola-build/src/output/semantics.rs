@@ -1,5 +1,6 @@
 //! Producer-declared output meaning and deployment-neutral response metadata.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use serde::Serialize;
@@ -79,7 +80,7 @@ impl DeclaredOutputSemantics {
 /// kind. Common constants avoid allocation; parsed values retain their header.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
-pub struct ResponseMediaType(std::borrow::Cow<'static, str>);
+pub struct ResponseMediaType(Cow<'static, str>);
 
 /// A response media type is malformed or contains a wildcard.
 #[derive(Debug, thiserror::Error)]
@@ -93,48 +94,48 @@ pub enum InvalidMediaType {
 }
 
 impl ResponseMediaType {
-    pub const HTML: Self = Self(std::borrow::Cow::Borrowed("text/html; charset=utf-8"));
-    pub const PLAIN_TEXT: Self = Self(std::borrow::Cow::Borrowed("text/plain; charset=utf-8"));
-    pub const CSS: Self = Self(std::borrow::Cow::Borrowed("text/css; charset=utf-8"));
-    pub const JAVASCRIPT: Self = Self(std::borrow::Cow::Borrowed("text/javascript; charset=utf-8"));
-    pub const TYPESCRIPT: Self = Self(std::borrow::Cow::Borrowed("text/typescript; charset=utf-8"));
-    pub const JSON: Self = Self(std::borrow::Cow::Borrowed("application/json"));
-    pub const JSON_FEED: Self = Self(std::borrow::Cow::Borrowed("application/feed+json"));
-    pub const XML: Self = Self(std::borrow::Cow::Borrowed("application/xml"));
-    pub const YAML: Self = Self(std::borrow::Cow::Borrowed("text/yaml; charset=utf-8"));
-    pub const TOML: Self = Self(std::borrow::Cow::Borrowed("text/toml; charset=utf-8"));
-    pub const CSV: Self = Self(std::borrow::Cow::Borrowed("text/csv; charset=utf-8"));
-    pub const RSS: Self = Self(std::borrow::Cow::Borrowed("application/rss+xml"));
-    pub const ATOM: Self = Self(std::borrow::Cow::Borrowed("application/atom+xml"));
-    pub const PDF: Self = Self(std::borrow::Cow::Borrowed("application/pdf"));
-    pub const OCTET_STREAM: Self = Self(std::borrow::Cow::Borrowed("application/octet-stream"));
-    pub const WEB_ASSEMBLY: Self = Self(std::borrow::Cow::Borrowed("application/wasm"));
-    pub const ZIP: Self = Self(std::borrow::Cow::Borrowed("application/zip"));
-    pub const GZIP: Self = Self(std::borrow::Cow::Borrowed("application/gzip"));
-    pub const PNG: Self = Self(std::borrow::Cow::Borrowed("image/png"));
-    pub const JPEG: Self = Self(std::borrow::Cow::Borrowed("image/jpeg"));
-    pub const GIF: Self = Self(std::borrow::Cow::Borrowed("image/gif"));
-    pub const WEBP: Self = Self(std::borrow::Cow::Borrowed("image/webp"));
-    pub const AVIF: Self = Self(std::borrow::Cow::Borrowed("image/avif"));
-    pub const SVG: Self = Self(std::borrow::Cow::Borrowed("image/svg+xml"));
-    pub const ICON: Self = Self(std::borrow::Cow::Borrowed("image/x-icon"));
-    pub const BMP: Self = Self(std::borrow::Cow::Borrowed("image/bmp"));
-    pub const TIFF: Self = Self(std::borrow::Cow::Borrowed("image/tiff"));
-    pub const MP3: Self = Self(std::borrow::Cow::Borrowed("audio/mpeg"));
-    pub const WAV: Self = Self(std::borrow::Cow::Borrowed("audio/wav"));
-    pub const OGG_AUDIO: Self = Self(std::borrow::Cow::Borrowed("audio/ogg"));
-    pub const FLAC: Self = Self(std::borrow::Cow::Borrowed("audio/flac"));
-    pub const AAC: Self = Self(std::borrow::Cow::Borrowed("audio/aac"));
-    pub const MP4: Self = Self(std::borrow::Cow::Borrowed("video/mp4"));
-    pub const WEBM: Self = Self(std::borrow::Cow::Borrowed("video/webm"));
-    pub const OGG_VIDEO: Self = Self(std::borrow::Cow::Borrowed("video/ogg"));
-    pub const AVI: Self = Self(std::borrow::Cow::Borrowed("video/x-msvideo"));
-    pub const QUICK_TIME: Self = Self(std::borrow::Cow::Borrowed("video/quicktime"));
-    pub const WOFF: Self = Self(std::borrow::Cow::Borrowed("font/woff"));
-    pub const WOFF2: Self = Self(std::borrow::Cow::Borrowed("font/woff2"));
-    pub const TTF: Self = Self(std::borrow::Cow::Borrowed("font/ttf"));
-    pub const OTF: Self = Self(std::borrow::Cow::Borrowed("font/otf"));
-    pub const EOT: Self = Self(std::borrow::Cow::Borrowed("application/vnd.ms-fontobject"));
+    pub const HTML: Self = Self(Cow::Borrowed("text/html; charset=utf-8"));
+    pub const PLAIN_TEXT: Self = Self(Cow::Borrowed("text/plain; charset=utf-8"));
+    pub const CSS: Self = Self(Cow::Borrowed("text/css; charset=utf-8"));
+    pub const JAVASCRIPT: Self = Self(Cow::Borrowed("text/javascript; charset=utf-8"));
+    pub const TYPESCRIPT: Self = Self(Cow::Borrowed("text/typescript; charset=utf-8"));
+    pub const JSON: Self = Self(Cow::Borrowed("application/json"));
+    pub const JSON_FEED: Self = Self(Cow::Borrowed("application/feed+json"));
+    pub const XML: Self = Self(Cow::Borrowed("application/xml"));
+    pub const YAML: Self = Self(Cow::Borrowed("text/yaml; charset=utf-8"));
+    pub const TOML: Self = Self(Cow::Borrowed("text/toml; charset=utf-8"));
+    pub const CSV: Self = Self(Cow::Borrowed("text/csv; charset=utf-8"));
+    pub const RSS: Self = Self(Cow::Borrowed("application/rss+xml"));
+    pub const ATOM: Self = Self(Cow::Borrowed("application/atom+xml"));
+    pub const PDF: Self = Self(Cow::Borrowed("application/pdf"));
+    pub const OCTET_STREAM: Self = Self(Cow::Borrowed("application/octet-stream"));
+    pub const WEB_ASSEMBLY: Self = Self(Cow::Borrowed("application/wasm"));
+    pub const ZIP: Self = Self(Cow::Borrowed("application/zip"));
+    pub const GZIP: Self = Self(Cow::Borrowed("application/gzip"));
+    pub const PNG: Self = Self(Cow::Borrowed("image/png"));
+    pub const JPEG: Self = Self(Cow::Borrowed("image/jpeg"));
+    pub const GIF: Self = Self(Cow::Borrowed("image/gif"));
+    pub const WEBP: Self = Self(Cow::Borrowed("image/webp"));
+    pub const AVIF: Self = Self(Cow::Borrowed("image/avif"));
+    pub const SVG: Self = Self(Cow::Borrowed("image/svg+xml"));
+    pub const ICON: Self = Self(Cow::Borrowed("image/x-icon"));
+    pub const BMP: Self = Self(Cow::Borrowed("image/bmp"));
+    pub const TIFF: Self = Self(Cow::Borrowed("image/tiff"));
+    pub const MP3: Self = Self(Cow::Borrowed("audio/mpeg"));
+    pub const WAV: Self = Self(Cow::Borrowed("audio/wav"));
+    pub const OGG_AUDIO: Self = Self(Cow::Borrowed("audio/ogg"));
+    pub const FLAC: Self = Self(Cow::Borrowed("audio/flac"));
+    pub const AAC: Self = Self(Cow::Borrowed("audio/aac"));
+    pub const MP4: Self = Self(Cow::Borrowed("video/mp4"));
+    pub const WEBM: Self = Self(Cow::Borrowed("video/webm"));
+    pub const OGG_VIDEO: Self = Self(Cow::Borrowed("video/ogg"));
+    pub const AVI: Self = Self(Cow::Borrowed("video/x-msvideo"));
+    pub const QUICK_TIME: Self = Self(Cow::Borrowed("video/quicktime"));
+    pub const WOFF: Self = Self(Cow::Borrowed("font/woff"));
+    pub const WOFF2: Self = Self(Cow::Borrowed("font/woff2"));
+    pub const TTF: Self = Self(Cow::Borrowed("font/ttf"));
+    pub const OTF: Self = Self(Cow::Borrowed("font/otf"));
+    pub const EOT: Self = Self(Cow::Borrowed("application/vnd.ms-fontobject"));
 
     /// Parse a concrete response MIME type, including its parameters.
     pub fn parse(input: &str) -> Result<Self, InvalidMediaType> {
@@ -145,7 +146,7 @@ impl ResponseMediaType {
         {
             return Err(InvalidMediaType::NotConcrete);
         }
-        Ok(Self(std::borrow::Cow::Owned(media_type.to_string())))
+        Ok(Self(Cow::Owned(media_type.to_string())))
     }
 
     pub fn as_str(&self) -> &str {
@@ -155,9 +156,8 @@ impl ResponseMediaType {
     /// Type and subtype, without parameters such as the character set.
     pub fn essence(&self) -> &str {
         self.0
-            .split(';')
-            .next()
-            .expect("validated media type")
+            .split_once(';')
+            .map_or(self.0.as_ref(), |(essence, _)| essence)
             .trim_end()
     }
 }
@@ -293,169 +293,88 @@ impl OutputDeclaration {
     }
 }
 
+/// The semantics and media type one extension names; unknown extensions stay opaque.
+fn extension_semantics(extension: &str) -> (DeclaredOutputSemantics, ResponseMediaType) {
+    match extension.to_ascii_lowercase().as_str() {
+        "html" | "htm" => (DeclaredOutputSemantics::Html, ResponseMediaType::HTML),
+        "css" => (DeclaredOutputSemantics::Css, ResponseMediaType::CSS),
+        "mjs" => (
+            DeclaredOutputSemantics::JavaScriptModule,
+            ResponseMediaType::JAVASCRIPT,
+        ),
+        "js" | "cjs" => (
+            DeclaredOutputSemantics::JavaScript,
+            ResponseMediaType::JAVASCRIPT,
+        ),
+        "ts" | "tsx" | "mts" | "cts" => (
+            DeclaredOutputSemantics::TypeScript,
+            ResponseMediaType::TYPESCRIPT,
+        ),
+        "json" | "map" | "webmanifest" => (DeclaredOutputSemantics::Json, ResponseMediaType::JSON),
+        "xml" => (DeclaredOutputSemantics::Xml, ResponseMediaType::XML),
+        "yaml" | "yml" => (DeclaredOutputSemantics::Yaml, ResponseMediaType::YAML),
+        "toml" => (DeclaredOutputSemantics::Toml, ResponseMediaType::TOML),
+        "csv" => (DeclaredOutputSemantics::Csv, ResponseMediaType::CSV),
+        "txt" => (
+            DeclaredOutputSemantics::PlainText,
+            ResponseMediaType::PLAIN_TEXT,
+        ),
+        "svg" => (DeclaredOutputSemantics::Image, ResponseMediaType::SVG),
+        "png" => (DeclaredOutputSemantics::Image, ResponseMediaType::PNG),
+        "jpg" | "jpeg" => (DeclaredOutputSemantics::Image, ResponseMediaType::JPEG),
+        "gif" => (DeclaredOutputSemantics::Image, ResponseMediaType::GIF),
+        "webp" => (DeclaredOutputSemantics::Image, ResponseMediaType::WEBP),
+        "avif" => (DeclaredOutputSemantics::Image, ResponseMediaType::AVIF),
+        "ico" => (DeclaredOutputSemantics::Image, ResponseMediaType::ICON),
+        "bmp" => (DeclaredOutputSemantics::Image, ResponseMediaType::BMP),
+        "tif" | "tiff" => (DeclaredOutputSemantics::Image, ResponseMediaType::TIFF),
+        "mp3" => (DeclaredOutputSemantics::Audio, ResponseMediaType::MP3),
+        "wav" => (DeclaredOutputSemantics::Audio, ResponseMediaType::WAV),
+        "ogg" | "oga" => (DeclaredOutputSemantics::Audio, ResponseMediaType::OGG_AUDIO),
+        "flac" => (DeclaredOutputSemantics::Audio, ResponseMediaType::FLAC),
+        "aac" | "m4a" => (DeclaredOutputSemantics::Audio, ResponseMediaType::AAC),
+        "mp4" | "m4v" => (DeclaredOutputSemantics::Video, ResponseMediaType::MP4),
+        "webm" => (DeclaredOutputSemantics::Video, ResponseMediaType::WEBM),
+        "ogv" => (DeclaredOutputSemantics::Video, ResponseMediaType::OGG_VIDEO),
+        "avi" => (DeclaredOutputSemantics::Video, ResponseMediaType::AVI),
+        "mov" => (
+            DeclaredOutputSemantics::Video,
+            ResponseMediaType::QUICK_TIME,
+        ),
+        "woff" => (DeclaredOutputSemantics::Font, ResponseMediaType::WOFF),
+        "woff2" => (DeclaredOutputSemantics::Font, ResponseMediaType::WOFF2),
+        "ttf" => (DeclaredOutputSemantics::Font, ResponseMediaType::TTF),
+        "otf" => (DeclaredOutputSemantics::Font, ResponseMediaType::OTF),
+        "eot" => (DeclaredOutputSemantics::Font, ResponseMediaType::EOT),
+        "wasm" => (
+            DeclaredOutputSemantics::WebAssembly,
+            ResponseMediaType::WEB_ASSEMBLY,
+        ),
+        "zip" => (DeclaredOutputSemantics::Archive, ResponseMediaType::ZIP),
+        "gz" | "gzip" => (DeclaredOutputSemantics::Archive, ResponseMediaType::GZIP),
+        "rss" => (DeclaredOutputSemantics::Opaque, ResponseMediaType::RSS),
+        "atom" => (DeclaredOutputSemantics::Opaque, ResponseMediaType::ATOM),
+        "pdf" => (DeclaredOutputSemantics::Opaque, ResponseMediaType::PDF),
+        _ => (
+            DeclaredOutputSemantics::Opaque,
+            ResponseMediaType::OCTET_STREAM,
+        ),
+    }
+}
+
 fn filesystem_declaration_for_extension(extension: Option<&str>) -> OutputDeclaration {
-    let media_type = media_type_for_extension(extension);
-    let semantics = if extension.is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
-    }) {
-        DeclaredOutputSemantics::Html
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("css")) {
-        DeclaredOutputSemantics::Css
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("mjs")) {
-        DeclaredOutputSemantics::JavaScriptModule
-    } else if extension.is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("js") || extension.eq_ignore_ascii_case("cjs")
-    }) {
-        DeclaredOutputSemantics::JavaScript
-    } else if extension
-        .is_some_and(|extension| matches_ignore_ascii_case(extension, &["ts", "tsx", "mts", "cts"]))
-    {
-        DeclaredOutputSemantics::TypeScript
-    } else if extension.is_some_and(|extension| {
-        matches_ignore_ascii_case(extension, &["json", "map", "webmanifest"])
-    }) {
-        DeclaredOutputSemantics::Json
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("xml")) {
-        DeclaredOutputSemantics::Xml
-    } else if extension
-        .is_some_and(|extension| matches_ignore_ascii_case(extension, &["yaml", "yml"]))
-    {
-        DeclaredOutputSemantics::Yaml
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("toml")) {
-        DeclaredOutputSemantics::Toml
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("csv")) {
-        DeclaredOutputSemantics::Csv
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("txt")) {
-        DeclaredOutputSemantics::PlainText
-    } else if extension.is_some_and(|extension| {
-        matches_ignore_ascii_case(
-            extension,
-            &[
-                "svg", "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "bmp", "tif", "tiff",
-            ],
-        )
-    }) {
-        DeclaredOutputSemantics::Image
-    } else if extension.is_some_and(|extension| {
-        matches_ignore_ascii_case(
-            extension,
-            &["mp3", "wav", "ogg", "oga", "flac", "aac", "m4a"],
-        )
-    }) {
-        DeclaredOutputSemantics::Audio
-    } else if extension.is_some_and(|extension| {
-        matches_ignore_ascii_case(extension, &["mp4", "m4v", "webm", "ogv", "avi", "mov"])
-    }) {
-        DeclaredOutputSemantics::Video
-    } else if extension.is_some_and(|extension| {
-        matches_ignore_ascii_case(extension, &["woff", "woff2", "ttf", "otf", "eot"])
-    }) {
-        DeclaredOutputSemantics::Font
-    } else if extension.is_some_and(|extension| extension.eq_ignore_ascii_case("wasm")) {
-        DeclaredOutputSemantics::WebAssembly
-    } else if extension
-        .is_some_and(|extension| matches_ignore_ascii_case(extension, &["zip", "gz", "gzip"]))
-    {
-        DeclaredOutputSemantics::Archive
-    } else {
-        DeclaredOutputSemantics::Opaque
+    let Some(extension) = extension else {
+        return OutputDeclaration::opaque(ResponseMediaType::OCTET_STREAM);
     };
+    let (semantics, media_type) = extension_semantics(extension);
     OutputDeclaration::new(semantics, media_type)
 }
 
 fn media_type_for_extension(extension: Option<&str>) -> ResponseMediaType {
-    let Some(extension) = extension else {
-        return ResponseMediaType::OCTET_STREAM;
-    };
-    if matches_ignore_ascii_case(extension, &["html", "htm"]) {
-        ResponseMediaType::HTML
-    } else if extension.eq_ignore_ascii_case("css") {
-        ResponseMediaType::CSS
-    } else if matches_ignore_ascii_case(extension, &["js", "mjs", "cjs"]) {
-        ResponseMediaType::JAVASCRIPT
-    } else if matches_ignore_ascii_case(extension, &["ts", "tsx", "mts", "cts"]) {
-        ResponseMediaType::TYPESCRIPT
-    } else if matches_ignore_ascii_case(extension, &["json", "map", "webmanifest"]) {
-        ResponseMediaType::JSON
-    } else if extension.eq_ignore_ascii_case("xml") {
-        ResponseMediaType::XML
-    } else if matches_ignore_ascii_case(extension, &["yaml", "yml"]) {
-        ResponseMediaType::YAML
-    } else if extension.eq_ignore_ascii_case("toml") {
-        ResponseMediaType::TOML
-    } else if extension.eq_ignore_ascii_case("csv") {
-        ResponseMediaType::CSV
-    } else if extension.eq_ignore_ascii_case("rss") {
-        ResponseMediaType::RSS
-    } else if extension.eq_ignore_ascii_case("atom") {
-        ResponseMediaType::ATOM
-    } else if extension.eq_ignore_ascii_case("pdf") {
-        ResponseMediaType::PDF
-    } else if extension.eq_ignore_ascii_case("wasm") {
-        ResponseMediaType::WEB_ASSEMBLY
-    } else if extension.eq_ignore_ascii_case("zip") {
-        ResponseMediaType::ZIP
-    } else if matches_ignore_ascii_case(extension, &["gz", "gzip"]) {
-        ResponseMediaType::GZIP
-    } else if extension.eq_ignore_ascii_case("png") {
-        ResponseMediaType::PNG
-    } else if matches_ignore_ascii_case(extension, &["jpg", "jpeg"]) {
-        ResponseMediaType::JPEG
-    } else if extension.eq_ignore_ascii_case("gif") {
-        ResponseMediaType::GIF
-    } else if extension.eq_ignore_ascii_case("webp") {
-        ResponseMediaType::WEBP
-    } else if extension.eq_ignore_ascii_case("avif") {
-        ResponseMediaType::AVIF
-    } else if extension.eq_ignore_ascii_case("svg") {
-        ResponseMediaType::SVG
-    } else if extension.eq_ignore_ascii_case("ico") {
-        ResponseMediaType::ICON
-    } else if extension.eq_ignore_ascii_case("bmp") {
-        ResponseMediaType::BMP
-    } else if matches_ignore_ascii_case(extension, &["tif", "tiff"]) {
-        ResponseMediaType::TIFF
-    } else if extension.eq_ignore_ascii_case("mp3") {
-        ResponseMediaType::MP3
-    } else if extension.eq_ignore_ascii_case("wav") {
-        ResponseMediaType::WAV
-    } else if matches_ignore_ascii_case(extension, &["ogg", "oga"]) {
-        ResponseMediaType::OGG_AUDIO
-    } else if extension.eq_ignore_ascii_case("flac") {
-        ResponseMediaType::FLAC
-    } else if matches_ignore_ascii_case(extension, &["aac", "m4a"]) {
-        ResponseMediaType::AAC
-    } else if matches_ignore_ascii_case(extension, &["mp4", "m4v"]) {
-        ResponseMediaType::MP4
-    } else if extension.eq_ignore_ascii_case("webm") {
-        ResponseMediaType::WEBM
-    } else if extension.eq_ignore_ascii_case("ogv") {
-        ResponseMediaType::OGG_VIDEO
-    } else if extension.eq_ignore_ascii_case("avi") {
-        ResponseMediaType::AVI
-    } else if extension.eq_ignore_ascii_case("mov") {
-        ResponseMediaType::QUICK_TIME
-    } else if extension.eq_ignore_ascii_case("woff") {
-        ResponseMediaType::WOFF
-    } else if extension.eq_ignore_ascii_case("woff2") {
-        ResponseMediaType::WOFF2
-    } else if extension.eq_ignore_ascii_case("ttf") {
-        ResponseMediaType::TTF
-    } else if extension.eq_ignore_ascii_case("otf") {
-        ResponseMediaType::OTF
-    } else if extension.eq_ignore_ascii_case("eot") {
-        ResponseMediaType::EOT
-    } else if extension.eq_ignore_ascii_case("txt") {
-        ResponseMediaType::PLAIN_TEXT
-    } else {
-        ResponseMediaType::OCTET_STREAM
+    match extension {
+        Some(extension) => extension_semantics(extension).1,
+        None => ResponseMediaType::OCTET_STREAM,
     }
-}
-
-fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 #[cfg(test)]

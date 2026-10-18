@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use super::path::display_path;
 use super::{
-    FilesystemSourceIdentity, INTERNAL_DIR, SITE_BUILD_LOCK_FILE, canonical_site_root,
-    path_failure_reason, publication_workspace, site_relative_absolute,
+    FilesystemSourceIdentity, INTERNAL_DIR, SITE_BUILD_LOCK_FILE, TreeSwap, canonical_site_root,
+    path_failure_reason, site_relative_absolute, swap_workspace,
 };
 
 /// One site input the output root must not contain.
@@ -26,7 +26,7 @@ pub(crate) struct ProtectedPath {
 pub(crate) struct OutputBoundary {
     pub(crate) site_root: PathBuf,
     pub(crate) output: PathBuf,
-    pub(crate) workspace: PathBuf,
+    pub(crate) swap: TreeSwap,
     pub(crate) protected: Vec<ProtectedPath>,
 }
 
@@ -43,7 +43,8 @@ impl OutputBoundary {
         }
 
         let output = site_relative_absolute(&supplied_root, &site_root, output)?;
-        let workspace = publication_workspace(&output).ok_or(OutputBoundaryError::OutsideSite)?;
+        let swap =
+            TreeSwap::beside(&site_root, &output).map_err(|_| OutputBoundaryError::OutsideSite)?;
         let mut resolved = Vec::new();
         for (kind, path) in protected {
             resolved.push(ProtectedPath {
@@ -55,7 +56,7 @@ impl OutputBoundary {
         let boundary = Self {
             site_root,
             output,
-            workspace,
+            swap,
             protected: resolved,
         };
         boundary.revalidate()?;
@@ -76,7 +77,7 @@ impl OutputBoundary {
                 path: self.site_root.join(SITE_BUILD_LOCK_FILE),
             },
         ];
-        for path in [&self.output, &self.workspace] {
+        for path in [self.output.as_path(), self.swap.workspace()] {
             // The layout rule is decided before the path walk: a publication path below `.tola`
             // or the lock is a misdeclared `build.publish-dir`, whatever kind of entry sits there.
             for protected in &reserved {
@@ -154,8 +155,9 @@ impl OutputBoundary {
     }
 }
 
+/// Why a publication path cannot be used.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum OutputBoundaryError {
+pub enum OutputBoundaryError {
     #[error("{0}")]
     SitePath(#[from] super::SitePathError),
 
@@ -257,7 +259,7 @@ impl DeclaredOutputBoundaries {
             configuration,
             Some(("the `.tola` directory", site_root.join(INTERNAL_DIR))),
             Some(("the site build lock", site_root.join(SITE_BUILD_LOCK_FILE))),
-            publication_workspace(published_root).map(|path| ("the publication workspace", path)),
+            swap_workspace(published_root).map(|path| ("the publication workspace", path)),
             vendor_workspace.map(|path| ("the vendor workspace", path.to_path_buf())),
         ]
         .map(|entry| {

@@ -1,6 +1,5 @@
 //! Logical and physical source identities and the watch boundaries they define.
 
-use super::path::absolute_path;
 use std::path::{Path, PathBuf};
 
 /// Whether one observed source is an exact file or a recursively enumerated tree.
@@ -68,11 +67,9 @@ impl FilesystemSourceIdentity {
     }
 
     pub fn changed_paths_intersect(&self, changed_paths: &[PathBuf]) -> bool {
-        changed_paths.iter().any(|changed| {
-            let changed = absolute_path(changed);
-            paths_intersect(&changed, &self.logical)
-                || paths_intersect(&changed, self.physical_path())
-        })
+        changed_paths
+            .iter()
+            .any(|changed| self.intersects(&Self::from_path(changed)))
     }
 
     /// Whether both logical and physical paths are within the corresponding boundary paths.
@@ -179,4 +176,24 @@ fn portable_path_key(path: &Path) -> Option<Vec<String>> {
                 .map(tola_address::portable_collision_key)
         })
         .collect()
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn removed_alias_intersects_physical_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let real = directory.path().join("real");
+        let alias = directory.path().join("alias");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        fs::write(real.join("member.js"), "before").unwrap();
+        let identity = FilesystemSourceIdentity::from_path(&real);
+        fs::remove_file(alias.join("member.js")).unwrap();
+        assert!(identity.changed_paths_intersect(&[alias.join("member.js")]));
+    }
 }

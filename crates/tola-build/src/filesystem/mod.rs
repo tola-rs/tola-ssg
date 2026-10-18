@@ -1,40 +1,27 @@
-//! Filesystem path identities, source observations, temporary directories, and writes.
+//! Filesystem path identities, source observations, temporary directories, writes, and
+//! whole-tree replacement.
 
 use std::path::Path;
 
 mod dev_server;
 mod file_handle;
 mod identity;
+pub mod layout;
 mod lock;
+mod observation;
 mod output_boundary;
 mod overrides;
 mod owned;
 mod path;
 mod read;
-mod snapshot;
+mod swap;
 mod sys;
 mod write;
 
 /// Disposable local work; formal site inputs must not depend on this directory.
 pub const INTERNAL_DIR: &str = ".tola";
 
-/// The package mirrors `tola editor setup` publishes for a site, below [`INTERNAL_DIR`].
-///
-/// A file-only client is sent into these files by a definition into a package, so the language
-/// server reads the mirrors as sources while every other path below [`INTERNAL_DIR`] stays
-/// generated state.
-pub const PACKAGE_MIRROR_DIRECTORY: &str = ".tola/builtin-packages";
-
-/// The address a running `tola dev` serves a site at, below [`INTERNAL_DIR`].
-///
-/// `tola dev` writes this file once its listener is bound and removes it when it stops, so a
-/// process beside it — the language server, which an editor starts separately — names the address
-/// of one page without the author configuring it twice. A missing file, or one this version does
-/// not read, names no development server. A server killed before it stops leaves its file behind;
-/// the next one replaces it.
-pub const DEV_SERVER_ADDRESS_FILE: &str = ".tola/dev-server.json";
-
-/// The shape [`DEV_SERVER_ADDRESS_FILE`] is written in.
+/// The shape the address file [`layout::dev_server_address`] names is written in.
 pub const DEV_SERVER_ADDRESS_VERSION: u32 = 1;
 
 /// The package document a file below a package directory names, when the directory is one.
@@ -90,36 +77,29 @@ pub fn package_document_id(
 /// The pathname must remain in place while any process can hold the site lock.
 pub const SITE_BUILD_LOCK_FILE: &str = ".tola-build.lock";
 
-/// Publication recovery stays beside its output, independent of disposable local work.
-pub fn publication_workspace(output: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut name = std::ffi::OsString::from(".");
-    name.push(output.file_name()?);
-    name.push("-publish");
-    Some(output.with_file_name(name))
-}
-
 pub use dev_server::DevServerAddress;
 pub(crate) use file_handle::open_regular_file;
 pub use identity::FilesystemSourceIdentity;
 pub(crate) use identity::{FilesystemSourceKind, FilesystemWatchEvidence};
 pub(crate) use lock::{FileLock, FileLockError};
+pub(crate) use observation::{
+    FilesystemSourceFile, FilesystemSourceObservation, observe_file_source, observe_tree_source,
+    observe_tree_source_selected, walk_tree_members, walk_tree_members_selected,
+};
+pub use output_boundary::OutputBoundaryError;
 pub(crate) use output_boundary::{
-    DeclaredOutputBoundaries, DeclaredOutputViolation, OutputBoundary, OutputBoundaryError,
+    DeclaredOutputBoundaries, DeclaredOutputViolation, OutputBoundary,
 };
 pub(crate) use overrides::SourceOverrides;
 pub use owned::owned_files;
-pub(crate) use path::{
-    SitePathError, canonical_site_root, render_relative, site_relative_absolute,
-};
+pub use path::SitePathError;
 pub(crate) use path::{absolute_path, path_failure_reason, root_relative};
+pub(crate) use path::{canonical_site_root, render_relative, site_relative_absolute};
 pub use path::{
     display_path, lexical_path_identity, normalize_existing_prefix, normalize_path, path_is_within,
 };
 pub(crate) use read::{FileReadError, read_chunks, read_file_chunks};
-pub(crate) use snapshot::{
-    FilesystemSourceFile, FilesystemSourceObservation, observe_file_source, observe_tree_source,
-    walk_tree_members,
-};
+pub use swap::{SwapError, SwapMember, TreeSwap, swap_workspace};
 pub(crate) use sys::{automatic_path_is_link_like, encode_path_identity};
 pub use write::atomic_write;
 
@@ -130,7 +110,7 @@ pub(crate) use fingerprint::{
 };
 
 mod directory;
-pub(crate) use directory::{TemporaryDirectory, read_sorted_entries};
+pub(crate) use directory::{TemporaryDirectory, directory_is_empty, read_sorted_entries};
 
 #[cfg(test)]
 mod tests {
