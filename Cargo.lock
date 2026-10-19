@@ -5699,6 +5699,8 @@ dependencies = [
  "comemo",
  "parking_lot",
  "rayon",
+ "resvg",
+ "roxmltree 0.21.1",
  "rustc-hash",
  "ruzstd",
  "serde",

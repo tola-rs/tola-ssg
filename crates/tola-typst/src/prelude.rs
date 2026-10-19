@@ -14,6 +14,7 @@ pub use crate::compile::{
     compile_world_with_evidence,
 };
 pub use crate::session::AccessedDeps;
+pub use crate::svg::{SvgCrop, SvgError, SvgSource};
 pub use crate::world::SourceSnapshot;
 pub use typst_bundle::BundleOptions;
 

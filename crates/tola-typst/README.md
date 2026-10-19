@@ -51,7 +51,7 @@ each excerpt records its scalar and UTF-16 starting columns, including clipped l
 Metadata stays a native Typst value (`metadata_all`, `metadata_first`, `metadata_unique`,
 `metadata_declarations`); `with_inputs_dict` supplies native `sys.inputs`.
 
-Modules: `world`, `compile`, `bundle`, `html`, `diagnostic`, and `spelling`, which offers the
+Modules: `world`, `compile`, `bundle`, `html`, `diagnostic`, `svg`, and `spelling`, which offers the
 declared name one written name nearly spells.
 
 ## Features

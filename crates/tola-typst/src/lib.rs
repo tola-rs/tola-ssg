@@ -14,6 +14,7 @@ pub mod introspection;
 pub mod prelude;
 pub mod reference_occurrence;
 pub mod spelling;
+pub mod svg;
 pub mod world;
 
 mod extract;
