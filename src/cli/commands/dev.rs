@@ -39,5 +39,6 @@ pub(in crate::cli) fn run(
         resources,
         output.clone(),
         cancellation.clone(),
+        development.no_reuse,
     )
 }

@@ -39,6 +39,8 @@ pub(crate) struct RetainedProducerCaches {
     /// A later attempt compares these content fingerprints to decide whether a hook
     /// that ran actually changed anything, so an unchanged generator keeps its reuse.
     pub(crate) hook_outputs: crate::hooks::SourceHookOutputs,
+    /// The previous successful development revision's reusable `generate-outputs` products.
+    pub(crate) hook_reuse: crate::hooks::ReusableHookOutputs,
 }
 
 /// The originating session and accepted generation captured by one attempt.
@@ -151,6 +153,8 @@ pub struct BuildRequest {
     pub hook_execution: crate::hooks::HookExecution,
     /// Whether the attempt checks page references against the published site.
     pub reference_checks: super::ReferenceChecks,
+    /// Whether a development attempt must run every reusable generator instead of reusing it.
+    pub disable_hook_reuse: bool,
 }
 
 impl BuildRequest {
@@ -164,6 +168,7 @@ impl BuildRequest {
             cancellation: crate::cancellation::BuildCancellation::default(),
             hook_execution: crate::hooks::HookExecution::Run,
             reference_checks: super::ReferenceChecks::Full,
+            disable_hook_reuse: false,
         }
     }
 }
@@ -194,6 +199,13 @@ impl BuildAttempt {
             resources: self.baseline.resources.clone(),
             cancellation: self.request.cancellation.clone(),
             generated_files: std::mem::take(&mut self.request.generated_files),
+            previous_hook_reuse: if self.request.disable_hook_reuse {
+                None
+            } else {
+                self.baseline
+                    .accepted_caches()
+                    .map(|caches| caches.hook_reuse.clone())
+            },
             ..super::pipeline::BuildAttemptProducers::default()
         };
         let cancellation = producers.cancellation.clone();
@@ -545,6 +557,9 @@ mod tests {
     use crate::build::tests::*;
     use crate::build::*;
     use crate::config::section::build::BeforeBuildHookConfig;
+    use crate::config::section::build::hooks::{
+        CommandOutput, DevParticipation, OutputCommandConfig,
+    };
     use crate::config::section::{
         AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlPrefix,
     };
@@ -558,6 +573,99 @@ mod tests {
         config.typst.fonts.paths = vec![root.join("fonts")];
         std::fs::create_dir_all(&config.typst.fonts.paths[0]).unwrap();
         config
+    }
+
+    /// Records how many times a generator actually ran, beside the site root.
+    #[test]
+    fn counts_generator_runs() {
+        if !crate::build::tests::is_hook_child_for("generate-outputs") {
+            return;
+        }
+        let path = std::path::Path::new("generator-runs.txt");
+        let count = fs::read_to_string(path)
+            .ok()
+            .and_then(|runs| runs.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        fs::write(path, (count + 1).to_string()).unwrap();
+        fs::write(
+            std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_OUTPUT_DIR").unwrap())
+                .join("search.json"),
+            b"{}",
+        )
+        .unwrap();
+    }
+
+    /// The accepted development revision carries generator outputs into the next attempt.
+    #[test]
+    fn development_reuses_unchanged_generator_outputs() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let mut config = dev_config(root);
+        config.build.hooks.generate_outputs = vec![OutputCommandConfig {
+            name: "search".into(),
+            command: crate::build::tests::hook_child_command(
+                "build::session::tests::counts_generator_runs",
+            ),
+            dev: DevParticipation::Reuse,
+            outputs: vec![CommandOutput::File(
+                tola_address::OutputPath::parse("search.json").unwrap(),
+            )],
+            ..OutputCommandConfig::default()
+        }];
+        let mut session = BuildSession::new();
+
+        session
+            .build_and_write(&config, BuildRequest::new(BuildMode::Development))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("generator-runs.txt")).unwrap(),
+            "1"
+        );
+
+        session
+            .build_and_write(&config, BuildRequest::new(BuildMode::Development))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("generator-runs.txt")).unwrap(),
+            "1",
+            "an unchanged development revision must reuse the generator output"
+        );
+        assert!(config.build.publish_dir.join("search.json").is_file());
+    }
+
+    #[test]
+    fn disabled_reuse_runs_generator_again() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let mut config = dev_config(root);
+        config.build.hooks.generate_outputs = vec![OutputCommandConfig {
+            name: "search".into(),
+            command: crate::build::tests::hook_child_command(
+                "build::session::tests::counts_generator_runs",
+            ),
+            dev: DevParticipation::Reuse,
+            outputs: vec![CommandOutput::File(
+                tola_address::OutputPath::parse("search.json").unwrap(),
+            )],
+            ..OutputCommandConfig::default()
+        }];
+        let mut session = BuildSession::new();
+        let mut request = BuildRequest::new(BuildMode::Development);
+        request.disable_hook_reuse = true;
+
+        session.build_and_write(&config, request).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("generator-runs.txt")).unwrap(),
+            "1"
+        );
+
+        session
+            .build_and_write(&config, BuildRequest::new(BuildMode::Development))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("generator-runs.txt")).unwrap(),
+            "1"
+        );
     }
 
     /// Vendor verification accepts links a full build refuses.

@@ -198,6 +198,19 @@ impl HookEntryReport {
 
 /// Declared-output checks run inside `run`, so missing promised files report the
 /// entry as failed rather than finished.
+/// Report that an entry reused its previous outputs instead of running.
+pub(super) fn report_reused(stage: HookStage, hook: &str) {
+    tracing::info!(
+        target: "tola::hook_status",
+        stage = stage.as_str(),
+        hook,
+        reused = true,
+        duration_seconds = 0.0,
+        success = true,
+        "Reused hook"
+    );
+}
+
 pub(super) fn run_hook_entry<T>(
     stage: HookStage,
     hook: &str,

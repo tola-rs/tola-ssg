@@ -30,7 +30,7 @@ pub(crate) use path::{
     display_path, display_path_as_given, display_path_toward_home, display_path_within,
 };
 pub(crate) use progress::{
-    describe_change, describe_outputs, format_duration, plural_count, serving_line, site_summary,
+    describe_changes, describe_outputs, format_duration, plural_count, serving_line, site_summary,
 };
 pub(crate) use source::SourceFiles;
 pub(crate) use style::Palette;

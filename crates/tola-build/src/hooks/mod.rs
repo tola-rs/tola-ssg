@@ -4,11 +4,13 @@ mod command;
 mod evidence;
 mod generate;
 mod report;
+mod reuse;
 mod runner;
 
 pub(crate) use crate::config::section::build::hooks::hook_identity;
 pub use evidence::{FailedHookOutputs, HookOutputEvidence, SourceHookOutputs};
 pub(crate) use generate::generate_outputs;
+pub(crate) use reuse::ReusableHookOutputs;
 pub use runner::*;
 
 use crate::config::section::build::DevParticipation;
