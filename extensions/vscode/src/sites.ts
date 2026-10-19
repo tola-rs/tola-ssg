@@ -40,6 +40,7 @@ import {
 } from './virtual.ts'
 import { checkedRoutes, checkedSiteRoutes } from './routes.ts'
 import { LanguageService, TolaClient } from './service.ts'
+import { SourceSynchronization } from './synchronization.ts'
 import type { PreviewSite, PreviewStatus } from './preview.ts'
 
 export interface SourceCheckStatus {
@@ -55,6 +56,7 @@ interface WorkspaceClient extends SiteClient {
   /** The untitled Typst buffers this server holds open; the client's own synchronization sends their changes. */
   readonly untitledDocuments: Set<string>
   readonly service: LanguageService
+  readonly synchronization: SourceSynchronization
   sourceCheck: SourceCheckStatus
 }
 
@@ -82,8 +84,7 @@ function escapeGlob(path: string): string {
   return path.replaceAll('\\', '/').replace(/[?*[\]{}]/g, (character) => `[${character}]`)
 }
 
-/** The untitled document a request is about, from the URI its params carry. */
-function untitledDocumentUri(params: unknown): string | undefined {
+function sourceDocumentUri(params: unknown): string | undefined {
   if (!params || typeof params !== 'object') return undefined
   const { uri, textDocument } = params as { uri?: unknown; textDocument?: { uri?: unknown } }
   const named = typeof uri === 'string'
@@ -91,7 +92,7 @@ function untitledDocumentUri(params: unknown): string | undefined {
     : typeof textDocument?.uri === 'string'
     ? textDocument.uri
     : undefined
-  return named !== undefined && vscode.Uri.parse(named).scheme === 'untitled' ? named : undefined
+  return named
 }
 
 /** Only site selections own publishing features; every served workspace owns a language client. */
@@ -103,6 +104,8 @@ export class Sites {
   /** The site every enabled folder selected, as of the latest reconcile: a site is listed before its client starts. */
   private selections = new Map<string, Selection>()
   private queue: Promise<void> = Promise.resolve()
+  /** The folder whose start attempt just settled, waking only the requests that wait for it. */
+  private readonly settled = new vscode.EventEmitter<string>()
   private closing = false
   private readonly virtual = new VirtualSources(
     (key) => this.clientForWorkspace(key),
@@ -185,12 +188,30 @@ export class Sites {
     if (running) return running
     while (true) {
       const transition = this.queue
-      await transition
+      // Waiting for the whole queue would hold this request behind every other folder's handshake;
+      // the transition this folder's own start attempt belongs to is the one it can answer from.
+      const settled = this.awaitFolder(key)
+      try {
+        await Promise.race([transition, settled.ready])
+      } finally {
+        settled.dispose()
+      }
       if (this.closing) return undefined
       const site = this.clientForWorkspace(key)
       // A transition enqueued while this one ran decides the site, so the wait continues with it.
       if (site || this.queue === transition) return site
     }
+  }
+
+  /** Resolves when one folder's start attempt settles, whether it started a client or not. */
+  private awaitFolder(key: string): { ready: Promise<void>; dispose: () => void } {
+    let listener: vscode.Disposable | undefined
+    const ready = new Promise<void>((resolve) => {
+      listener = this.settled.event((settled) => {
+        if (settled === key) resolve()
+      })
+    })
+    return { ready, dispose: () => listener?.dispose() }
   }
 
   private async answers(document: vscode.TextDocument, selected: ServedWorkspace): Promise<boolean> {
@@ -437,6 +458,15 @@ export class Sites {
     const listeners = cancellationSources.map((source) =>
       source.onCancellationRequested(() => cancellation.cancel())
     )
+    if (cancellationSources.some((source) => source.isCancellationRequested)) cancellation.cancel()
+    listeners.push(
+      vscode.workspace.onDidChangeTextDocument((event) => {
+        if (event.document === document && document.version !== version) cancellation.cancel()
+      }),
+      vscode.workspace.onDidCloseTextDocument((closed) => {
+        if (closed === document) cancellation.cancel()
+      }),
+    )
     return {
       token: cancellation.token,
       stale: () =>
@@ -472,13 +502,14 @@ export class Sites {
     token: vscode.CancellationToken,
     action: (token: vscode.CancellationToken) => vscode.ProviderResult<T>,
   ): Promise<T | null | undefined> {
-    if (this.clientForWorkspace(site.key) !== site || !await this.attached(site, document)) return null
+    const version = document.version
     const scope = this.scopedCancellation(document, () => this.clientForWorkspace(site.key) !== site, [
       token,
       site.lifetime,
     ])
     try {
-      if (scope.stale()) return null
+      if (scope.stale() || !await this.attached(site, document)) return null
+      if (!await site.synchronization.wait(document, version, scope.token) || scope.stale()) return null
       const result = await action(scope.token)
       return scope.stale() ? null : result
     } catch (error) {
@@ -511,6 +542,7 @@ export class Sites {
       ],
       diagnosticCollectionName: `tola:${selected.folder.uri.toString()}`,
       outputChannel: this.output,
+      initializationFailedHandler: () => false,
       synchronize: { fileEvents: sourceWatchers },
       errorHandler: {
         error: () => ({ action: ErrorAction.Shutdown, handled: true }),
@@ -525,29 +557,40 @@ export class Sites {
           // A buffer closed while its site was being chosen must not reach the server at all.
           if (document.isClosed) return
           if (isUntitledTypst(document)) site().untitledDocuments.add(document.uri.toString())
-          await next(document)
+          await site().synchronization.open(document, () => next(document))
         },
         didChange: async (event, next) => {
-          if (this.synchronizes(site(), event.document)) await next(event)
+          if (!this.synchronizes(site(), event.document)) return
+          await site().synchronization.change(event.document, event.document.version, () => next(event))
         },
         didSave: async (document, next) => {
-          if (this.synchronizes(site(), document)) await next(document)
+          if (this.synchronizes(site(), document)) {
+            await site().synchronization.save(document, () => next(document))
+          }
         },
         didClose: async (document, next) => {
           if (!this.synchronizes(site(), document)) return
           if (isUntitledTypst(document)) site().untitledDocuments.delete(document.uri.toString())
-          await next(document)
+          await site().synchronization.close(document, () => next(document))
         },
         sendRequest: async (type, params, token, next) => {
-          const untitled = untitledDocumentUri(params)
-          if (untitled === undefined) return next(type, params, token)
+          const uri = sourceDocumentUri(params)
+          if (uri === undefined) return next(type, params, token)
           const document = vscode.workspace.textDocuments.find((candidate) =>
-            candidate.uri.toString() === untitled
+            candidate.uri.toString() === uri
           )
-          // A request for a closed buffer, or for one another site answers, gets no result here:
-          // answering nothing is how the middleware declines a request.
-          if (!document || !await this.attached(site(), document)) return undefined as never
-          return next(type, params, token)
+          if (!document) {
+            return vscode.Uri.parse(uri).scheme === 'untitled'
+              ? undefined as never
+              : next(type, params, token)
+          }
+          const owner = site()
+          return await this.semantic(
+            owner,
+            document,
+            token ?? owner.lifetime,
+            (requestToken) => next(type, params, requestToken),
+          ) as never
         },
         provideCodeLenses: (document, token, next) =>
           selected.kind === 'site'
@@ -756,6 +799,8 @@ export class Sites {
     try {
       const cancellation = new vscode.CancellationTokenSource()
       resources.push(cancellation)
+      const synchronization = new SourceSynchronization()
+      resources.push(synchronization)
       const service = new LanguageService(selected, this.output, () => {
         if (!this.closing && this.workspaces.get(key) === site) {
           this.report(new Error(`Tola language services stopped for ${selected.folder.name}.`))
@@ -811,6 +856,7 @@ export class Sites {
         extraDocuments: new Set(),
         untitledDocuments: new Set(),
         service,
+        synchronization,
         sourceCheck: { revision: -1, state: 'notChecked' },
       }
       if (selected.kind === 'site') resources.push(this.watchConfig(selected.config))
@@ -851,6 +897,7 @@ export class Sites {
       }
       for (const document of vscode.workspace.textDocuments) this.synchronize(document, 'open')
       this.virtual.ready(site)
+      this.settled.fire(key)
       this.output.appendLine(`Started Tola language service for ${selected.folder.name}.`)
     } catch (error) {
       const cancelled = this.closing || site?.service.stopRequested
@@ -867,6 +914,7 @@ export class Sites {
         for (const resource of resources) resource.dispose()
       }
       this.changed()
+      this.settled.fire(key)
       if (cancelled) throw new vscode.CancellationError()
       throw error
     }
@@ -920,17 +968,21 @@ export class Sites {
         }
       }
     }
-    for (const [key, selected] of byFolder) {
-      if (this.closing || this.workspaces.has(key)) continue
+    // A pending handshake belongs only to its workspace folder.
+    const failedFolders = await Promise.all([...byFolder].map(async ([key, selected]) => {
+      if (this.closing || this.workspaces.has(key)) return
       try {
         await this.start(selected)
       } catch (error) {
-        if (isCancellation(error)) continue
-        failures.push(selected.folder.name)
+        if (isCancellation(error)) return
         this.output.appendLine(
           `Tola could not start its language service for ${selected.folder.name}: ${String(error)}`,
         )
+        return selected.folder.name
       }
+    }))
+    for (const folder of failedFolders) {
+      if (folder !== undefined) failures.push(folder)
     }
     this.pages.refresh()
     this.changed()
@@ -958,8 +1010,6 @@ export class Sites {
     const listeners = [
       vscode.window.onDidChangeActiveTextEditor(cancelIfStale),
       vscode.window.onDidChangeTextEditorSelection(cancelIfStale),
-      vscode.workspace.onDidChangeTextDocument(cancelIfStale),
-      vscode.workspace.onDidCloseTextDocument(cancelIfStale),
     ]
     try {
       const locations = document.uri.scheme === packageScheme
@@ -1007,6 +1057,7 @@ export class Sites {
     this.workspaces.clear()
     const stopped = await Promise.allSettled(sites.map((site) => this.stop(site)))
     this.virtual.dispose()
+    this.settled.dispose()
     const failures = stopped.filter((result) => result.status === 'rejected').map((result) => result.reason)
     if (failures.length) {
       throw new Error(

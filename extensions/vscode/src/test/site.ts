@@ -347,6 +347,18 @@ export type BlockedStart = {
   dispose(): Promise<void>
 }
 
+/** A site's next service held before it runs, which opens for every start once released. */
+export type HeldStart = {
+  /** Resolves when the gate's service starts, which is the next start of this site. */
+  reached: Promise<void>
+  /** Let every held or future start of the service run. */
+  release(): Promise<void>
+  /** Release the service and remove what held it. */
+  close(): Promise<void>
+  /** Remove the gate after cancellation has ended the blocked service. */
+  dispose(): void
+}
+
 /**
  * Hold one site's next language service before it runs, and report when its process is reached.
  *
@@ -387,6 +399,46 @@ export async function blockServerStart(site: EditorSite): Promise<BlockedStart> 
       await dispose()
     },
     dispose,
+  }
+}
+
+/**
+ * Point one site's next service at a gate without waiting for that start.
+ *
+ * The gate is a release file rather than a one-shot pipe: once released, every later start runs
+ * too, so the transitions a case leaves queued cannot re-hold the site after the case has ended.
+ * `reached` tells the caller when a transition has spawned the held process.
+ */
+export async function holdServerStart(site: EditorSite): Promise<HeldStart> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tola-start-gate-'))
+  const marker = path.join(directory, 'started')
+  const released = path.join(directory, 'released')
+  const script = path.join(directory, 'service.sh')
+  await fs.writeFile(
+    script,
+    `#!/bin/sh\n: > ${quoted(marker)}\nwhile [ ! -e ${quoted(released)} ]; do sleep 0.02; done\nexec ${
+      quoted(process.env.TOLA_TEST_BINARY ?? '')
+    } "$@"\n`,
+    { mode: 0o755 },
+  )
+  const reached = waitForFile(directory, marker)
+  const setting = () => vscode.workspace.getConfiguration('tola', site.source).get<string>('serverPath')
+  await vscode.workspace.getConfiguration('tola', site.source)
+    .update('serverPath', script, vscode.ConfigurationTarget.WorkspaceFolder)
+  assert.equal(
+    setting(),
+    script,
+    'The workspace folder did not keep the service path this test wrote',
+  )
+  const release = () => fs.writeFile(released, '')
+  return {
+    reached,
+    release,
+    close: async () => {
+      await release()
+      await fs.rm(directory, { recursive: true, force: true })
+    },
+    dispose: () => fs.rm(directory, { recursive: true, force: true }),
   }
 }
 

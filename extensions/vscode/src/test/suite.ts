@@ -9,6 +9,8 @@ import { Assets } from '../assets.ts'
 import { selectSite } from '../selection.ts'
 import { SiteTasks } from '../tasks.ts'
 import { Sites } from '../sites.ts'
+import { SourceSynchronization } from '../synchronization.ts'
+import { type SiteClient, VirtualSources } from '../virtual.ts'
 import {
   blockRequest,
   blockServerStart,
@@ -16,6 +18,8 @@ import {
   definitionTargets,
   disable,
   type EditorSite,
+  type HeldStart,
+  holdServerStart,
   openMarked,
   openPublishedPage,
   recordOutputChannels,
@@ -36,6 +40,42 @@ import {
 
 /** A definition inside `@tola/document` answers with a package document of the site that owns the source. */
 const packageImport = '#import "@tola/document:0.0.0": current-document as identity\n#let value = ident|ity\n'
+
+async function withoutUnhandledRejections(action: () => Promise<void>): Promise<void> {
+  const rejections: unknown[] = []
+  const rejected = (reason: unknown) => rejections.push(reason)
+  process.on('unhandledRejection', rejected)
+  try {
+    await action()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.deepEqual(rejections, [], 'Cancelled initialization left unhandled rejections')
+  } finally {
+    process.off('unhandledRejection', rejected)
+  }
+}
+
+async function withoutRetainedDiagnostics(action: () => Promise<void>): Promise<void> {
+  const create = vscode.languages.createDiagnosticCollection
+  const retained = new Set<vscode.DiagnosticCollection>()
+  vscode.languages.createDiagnosticCollection = (name) => {
+    const collection = create(name)
+    if (!name?.startsWith('tola:')) return collection
+    retained.add(collection)
+    const dispose = collection.dispose.bind(collection)
+    collection.dispose = () => {
+      retained.delete(collection)
+      dispose()
+    }
+    return collection
+  }
+  try {
+    await action()
+    assert.equal(retained.size, 0, 'Stopped language services retained diagnostic collections')
+  } finally {
+    vscode.languages.createDiagnosticCollection = create
+    for (const collection of retained) collection.dispose()
+  }
+}
 
 /** Open one site's heading and return the editor's increase action for it, with its own document. */
 async function increaseHeadingAction(
@@ -67,6 +107,26 @@ async function packageDefinition(site: EditorSite): Promise<{
   return { document, position, uri }
 }
 
+/** A marker that arrives after `milliseconds`, so a case can tell a pending request from a settled one. */
+function timedOut(milliseconds: number): Promise<'timeout'> {
+  return new Promise((resolve) => setTimeout(() => resolve('timeout'), milliseconds))
+}
+
+/** Settle `promise` before the deadline, or fail with what the case is proving did not happen. */
+async function within<T>(promise: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => reject(new Error(message)), milliseconds)
+      }),
+    ])
+  } finally {
+    clearTimeout(deadline)
+  }
+}
+
 export async function run(): Promise<void> {
   const extension = vscode.extensions.getExtension('tola.tola')
   recordOutputChannels()
@@ -75,6 +135,105 @@ export async function run(): Promise<void> {
   await extension.activate()
 
   await runGrammarChecks(extension.extensionPath)
+
+  await check('Requests wait for transmitted source versions', async () => {
+    const document = await vscode.workspace.openTextDocument({ language: 'typst', content: '#value' })
+    const synchronization = new SourceSynchronization()
+    const cancellation = new vscode.CancellationTokenSource()
+    let release!: () => void
+    const transport = new Promise<void>((resolve) => release = resolve)
+    try {
+      const opened = synchronization.open(document, () => transport)
+      let answered = false
+      const waiting = synchronization.wait(document, document.version, cancellation.token).then((sent) => {
+        answered = true
+        return sent
+      })
+      await Promise.resolve()
+      assert.equal(answered, false)
+      release()
+      await opened
+      assert.equal(await waiting, true)
+      const changed = synchronization.change(document, document.version + 1, () => Promise.resolve())
+      const closed = synchronization.close(document, () => Promise.resolve())
+      await Promise.all([changed, closed])
+      const reopened = synchronization.wait(document, document.version, cancellation.token)
+      cancellation.cancel()
+      assert.equal(await reopened, false)
+    } finally {
+      release()
+      cancellation.dispose()
+      synchronization.dispose()
+    }
+  })
+
+  await check('Synchronization belongs to one language service', async () => {
+    const document = await vscode.workspace.openTextDocument({ language: 'typst', content: '#value' })
+    const previous = new SourceSynchronization()
+    const current = new SourceSynchronization()
+    const cancellation = new vscode.CancellationTokenSource()
+    try {
+      await previous.open(document, () => Promise.resolve())
+      let answered = false
+      const waiting = current.wait(document, document.version, cancellation.token).then((sent) => {
+        answered = true
+        return sent
+      })
+      await Promise.resolve()
+      assert.equal(answered, false)
+      current.dispose()
+      assert.equal(await waiting, false)
+    } finally {
+      previous.dispose()
+      current.dispose()
+      cancellation.dispose()
+    }
+  })
+
+  await check('Package requests retain their source version while starting', async () => {
+    const cancellation = new vscode.CancellationTokenSource()
+    let ready!: (session: SiteClient) => void
+    const starting = new Promise<SiteClient>((resolve) => ready = resolve)
+    const requests: string[] = []
+    const document = {
+      uri: vscode.Uri.parse('tola-package:/tola/document/0.0.0/lib.typ?site=file:///site'),
+      version: 1,
+      isClosed: false,
+      getText: () => '#let value = 1',
+    }
+    const session: SiteClient = {
+      key: 'file:///site',
+      lifetime: cancellation.token,
+      client: {
+        sendRequest: (type: { method: string }) => {
+          requests.push(type.method)
+          return Promise.resolve(
+            type.method === 'tola/source' ? { text: document.getText() } : { data: [0, 0, 1, 0, 0] },
+          )
+        },
+      } as unknown as SiteClient['client'],
+    }
+    const virtual = new VirtualSources(() => session, () => starting)
+    try {
+      const pending = virtual.provideDocumentSemanticTokens(
+        document as vscode.TextDocument,
+        cancellation.token,
+      )
+      document.version += 1
+      ready(session)
+      await assert.rejects(pending, vscode.CancellationError)
+      assert.deepEqual(requests, [])
+      const current = await virtual.provideDocumentSemanticTokens(
+        document as vscode.TextDocument,
+        cancellation.token,
+      )
+      assert.deepEqual([...current!.data], [0, 0, 1, 0, 0])
+    } finally {
+      ready(session)
+      virtual.dispose()
+      cancellation.dispose()
+    }
+  })
 
   await check('Documents folders answer language requests', () =>
     withSite(async (workspace) => {
@@ -220,56 +379,119 @@ export async function run(): Promise<void> {
 
   await check('Restart cancels pending initialization', async () => {
     if (process.platform === 'win32') return
-    await withSite(async (site) => {
-      const blocked = await blockServerStart(site)
-      try {
-        await vscode.window.showTextDocument(site.source)
-        await workbenchText({ status: 'service starting', capture: true })
-        await vscode.workspace.getConfiguration('tola', site.source)
-          .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
-        await vscode.commands.executeCommand('tola.restart')
-        assert.equal((await symbols(site.source)).length, 1)
-      } finally {
-        await blocked.dispose()
-      }
-    }, { content: '= Restored heading\n' })
+    await withoutUnhandledRejections(() =>
+      withSite(async (site) => {
+        const blocked = await blockServerStart(site)
+        try {
+          await vscode.window.showTextDocument(site.source)
+          await workbenchText({ status: 'service starting', capture: true })
+          await vscode.workspace.getConfiguration('tola', site.source)
+            .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+          await vscode.commands.executeCommand('tola.restart')
+          assert.equal((await symbols(site.source)).length, 1)
+        } finally {
+          await blocked.dispose()
+        }
+      }, { content: '= Restored heading\n' })
+    )
   })
 
   await check('Closing cancels pending initialization', async () => {
     if (process.platform === 'win32') return
-    await withSite(async (site) => {
-      const blocked = await blockServerStart(site)
-      const output = vscode.window.createOutputChannel('Tola shutdown check')
-      let started!: () => void
-      const reached = new Promise<void>((resolve) => started = resolve)
-      const channel = new Proxy(output, {
-        get(target, property) {
-          const value = Reflect.get(target, property)
-          if (property === 'appendLine') {
-            return (message: string) => {
-              target.appendLine(message)
-              if (message.startsWith('Starting language services')) started()
+    await withoutUnhandledRejections(() =>
+      withSite(async (site) => {
+        const blocked = await blockServerStart(site)
+        const output = vscode.window.createOutputChannel('Tola shutdown check')
+        let started!: () => void
+        const reached = new Promise<void>((resolve) => started = resolve)
+        const channel = new Proxy(output, {
+          get(target, property) {
+            const value = Reflect.get(target, property)
+            if (property === 'appendLine') {
+              return (message: string) => {
+                target.appendLine(message)
+                if (message.startsWith('Starting language services')) started()
+              }
             }
-          }
-          return typeof value === 'function' ? value.bind(target) : value
-        },
+            return typeof value === 'function' ? value.bind(target) : value
+          },
+        })
+        const connections = new Sites(channel, () => Promise.resolve(), () => {})
+        try {
+          const refreshing = connections.refresh()
+          await reached
+          await connections.close()
+          await refreshing
+        } finally {
+          await connections.close()
+          output.dispose()
+          await vscode.workspace.getConfiguration('tola', site.source)
+            .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+          await vscode.commands.executeCommand('tola.restart')
+          await blocked.dispose()
+        }
       })
-      const connections = new Sites(channel, () => Promise.resolve(), () => {})
-      try {
-        const refreshing = connections.refresh()
-        await reached
-        await connections.close()
-        await refreshing
-      } finally {
-        await connections.close()
-        output.dispose()
-        await vscode.workspace.getConfiguration('tola', site.source)
-          .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
-        await vscode.commands.executeCommand('tola.restart')
-        await blocked.dispose()
-      }
-    })
+    )
   })
+
+  await check('Pending initialization leaves other folders available', async () => {
+    if (process.platform === 'win32') return
+    await withoutUnhandledRejections(() =>
+      withSites(2, async ([pending, available]) => {
+        assert.ok(pending && available)
+        const blocked = await blockServerStart(pending)
+        const output = vscode.window.createOutputChannel('Tola folder startup check')
+        const connections = new Sites(output, () => Promise.resolve(), () => {})
+        let refreshing: Promise<void> | undefined
+        try {
+          const started = waitForOutput(`Started Tola language service for ${available.name}.`)
+          refreshing = connections.refresh()
+          await started
+          assert.equal(connections.statusSite(available.source)?.state, 'ready')
+          assert.equal(connections.statusSite(pending.source)?.state, 'starting')
+        } finally {
+          await connections.close()
+          await refreshing
+          output.dispose()
+          await vscode.workspace.getConfiguration('tola', pending.source)
+            .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+          await vscode.commands.executeCommand('tola.restart')
+          await blocked.dispose()
+        }
+      })
+    )
+  })
+
+  await check(
+    'Missing services report startup failure',
+    () =>
+      withoutRetainedDiagnostics(() =>
+        withoutUnhandledRejections(() =>
+          withSite(async (site) => {
+            const settings = vscode.workspace.getConfiguration('tola', site.source)
+            try {
+              await settings.update(
+                'serverPath',
+                path.join(site.root, 'missing-tola'),
+                vscode.ConfigurationTarget.WorkspaceFolder,
+              )
+              await vscode.commands.executeCommand('tola.restart')
+              assert.match(
+                await workbenchText({ contains: 'Tola could not start', dismiss: true }),
+                /Tola could not start/,
+              )
+            } finally {
+              await settings.update(
+                'serverPath',
+                process.env.TOLA_TEST_BINARY,
+                vscode.ConfigurationTarget.WorkspaceFolder,
+              )
+              await vscode.commands.executeCommand('tola.restart')
+            }
+          })
+        )
+      ),
+  )
 
   await check('Delayed transfers discard switched editors', () =>
     withSites(2, async ([first, second]) => {
@@ -902,6 +1124,75 @@ export async function run(): Promise<void> {
         )
       } finally {
         await blocked.close()
+      }
+    })
+  })
+
+  await check('A package request waits for its own site alone', async () => {
+    if (process.platform === 'win32') return
+    await withSites(2, async ([site, other]) => {
+      assert.ok(site && other, 'The case runs against two sites')
+      const { uri } = await packageDefinition(site)
+      // Read and close the document first, so the request below asks the site's provider again.
+      await vscode.commands.executeCommand('vscode.open', uri)
+      const read = vscode.workspace.textDocuments.find((candidate) =>
+        candidate.uri.toString() === uri.toString()
+      )
+      assert.ok(read, 'The package document did not open in the editor')
+      const source = read.getText()
+      const closed = waitForClose(uri)
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor')
+      await closed
+
+      // The other site's handshake is held, so the transition that restarted it cannot settle. Its
+      // gate is never opened during the case: only a transition that restarts this site's service
+      // too, while the other site is held, can reach the wait under test.
+      const heldOther = await holdServerStart(other)
+      let heldSite: HeldStart | undefined
+      let opening: Promise<vscode.TextDocument> | undefined
+      try {
+        await heldOther.reached
+        // Gating this site's service cancels the held handshake of the other site, the way any
+        // restart does, so the next transition starts both sites: this one held too, and the
+        // other still held from the previous one.
+        heldSite = await holdServerStart(site)
+        await heldSite.reached
+        opening = Promise.resolve(vscode.workspace.openTextDocument(uri))
+        // The site has no running client while its gate is held, so only the client that comes up
+        // can answer this request. The open crosses the workbench first, which gives the request
+        // the moment to reach the extension before the gate opens.
+        assert.equal(
+          await Promise.race([
+            opening.then(() => 'opened' as const, () => 'failed' as const),
+            timedOut(2_000),
+          ]),
+          'timeout',
+          'A package request answered while its own site was held',
+        )
+        const started = waitForOutput(`Started Tola language service for ${site.name}.`)
+        await heldSite.release()
+        await started
+        // This site is now ready while the other site is still in its handshake. Its package
+        // request must answer from the site's client, not wait for the other handshake to finish.
+        const document = await within(
+          opening,
+          5_000,
+          "A package request for a ready site waited for another site's handshake",
+        )
+        assert.equal(document.getText(), source, "The package request read another site's source")
+      } finally {
+        // An open gate lets every later start run, so the transitions this case leaves queued
+        // finish even though the executable below is the real one again.
+        await heldSite?.release()
+        await heldOther.release()
+        await vscode.workspace.getConfiguration('tola', site.source)
+          .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+        await vscode.workspace.getConfiguration('tola', other.source)
+          .update('serverPath', process.env.TOLA_TEST_BINARY, vscode.ConfigurationTarget.WorkspaceFolder)
+        await vscode.commands.executeCommand('tola.restart')
+        await heldSite?.dispose()
+        await heldOther.dispose()
+        await opening?.catch(() => {})
       }
     })
   })

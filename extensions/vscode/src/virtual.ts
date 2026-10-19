@@ -270,9 +270,12 @@ export class VirtualSources
     token: vscode.CancellationToken,
     action: (session: SiteClient, token: vscode.CancellationToken) => Promise<T | undefined>,
   ): Promise<T | undefined> {
-    const session = await this.clientWhenReady(validatePackageUri(document.uri))
-    if (!session) return undefined
     const version = document.version
+    const session = await this.clientWhenReady(validatePackageUri(document.uri))
+    if (document.isClosed || document.version !== version || token.isCancellationRequested) {
+      throw new vscode.CancellationError()
+    }
+    if (!session) return undefined
     return this.request(session, token, async (owner, requestToken) => {
       const source = await this.source(document.uri, owner, requestToken)
       if (document.isClosed || document.version !== version) throw new vscode.CancellationError()
