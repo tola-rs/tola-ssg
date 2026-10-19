@@ -51,7 +51,12 @@ impl StagedBuildFiles {
             .prefix(STAGING_DIRECTORY_PREFIX)
             .tempdir_in(workspace)
             .with_context(|| "Tola could not create the output directory; check that the site directory can be written")?;
-        write_outputs(graph.outputs(), directory.path(), Some(cancellation))?;
+        write_outputs(
+            graph.outputs(),
+            directory.path(),
+            Some(cancellation),
+            destination.minify,
+        )?;
         Ok(Self {
             directory,
             destination: destination_path.to_path_buf(),
@@ -73,8 +78,9 @@ impl HookOutputFiles {
         site_root: &Path,
         graph: &OutputGraph,
         cancellation: Option<&BuildCancellation>,
+        languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
-        Self::materialize_outputs(site_root, graph.outputs(), cancellation)
+        Self::materialize_outputs(site_root, graph.outputs(), cancellation, languages)
     }
 
     /// Materialize a committed revision for a filesystem-based consumer.
@@ -82,14 +88,16 @@ impl HookOutputFiles {
         site_root: &Path,
         revision: &OutputRevision,
         cancellation: &BuildCancellation,
+        languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
-        Self::materialize_outputs(site_root, revision.outputs(), Some(cancellation))
+        Self::materialize_outputs(site_root, revision.outputs(), Some(cancellation), languages)
     }
 
     pub(crate) fn materialize_outputs(
         site_root: &Path,
         outputs: &[OutputFile],
         cancellation: Option<&BuildCancellation>,
+        languages: tola_minify::MinifiedLanguages,
     ) -> Result<Self> {
         cancellation.ensure_active_if_present()?;
         let directory = TemporaryDirectory::create(
@@ -98,7 +106,7 @@ impl HookOutputFiles {
                 .join("hook-candidates"),
             "candidate",
         )?;
-        write_outputs(outputs, directory.path(), cancellation)?;
+        write_outputs(outputs, directory.path(), cancellation, languages)?;
         directory.make_read_only(cancellation)?;
         cancellation.ensure_active_if_present()?;
         Ok(Self {
@@ -116,6 +124,7 @@ fn write_outputs(
     outputs: &[OutputFile],
     root: &Path,
     cancellation: Option<&BuildCancellation>,
+    languages: tola_minify::MinifiedLanguages,
 ) -> Result<()> {
     cancellation.ensure_active_if_present()?;
     write_output_directories(outputs, root, cancellation)?;
@@ -125,7 +134,7 @@ fn write_outputs(
     // failing output in output order decides the reported error, whatever order they finish in.
     let written = outputs
         .par_iter()
-        .map(|output| write_output(output, root, cancellation))
+        .map(|output| write_output(output, root, cancellation, languages))
         .collect::<Vec<_>>();
     for result in written {
         result?;
@@ -161,8 +170,10 @@ fn write_output(
     output: &OutputFile,
     root: &Path,
     cancellation: Option<&BuildCancellation>,
+    languages: tola_minify::MinifiedLanguages,
 ) -> Result<()> {
     cancellation.ensure_active_if_present()?;
+    let bytes = minified_output_bytes(output, languages);
     let path = root.join(output.path().as_str());
     let mut file = fs::File::create(&path).with_context(|| {
         format!(
@@ -170,12 +181,36 @@ fn write_output(
             output.path()
         )
     })?;
-    for bytes in output.bytes().chunks(OUTPUT_IO_CHUNK_SIZE) {
+    for bytes in bytes.chunks(OUTPUT_IO_CHUNK_SIZE) {
         cancellation.ensure_active_if_present()?;
         file.write_all(bytes)
             .with_context(|| format!("could not write `{}`", output.path()))?;
     }
     Ok(())
+}
+
+/// The bytes one output publishes: Bundle CSS/JavaScript is minified, everything else is
+/// published as produced. A source that cannot be read as UTF-8 or rewritten keeps its bytes.
+fn minified_output_bytes<'a>(
+    output: &'a OutputFile,
+    languages: tola_minify::MinifiedLanguages,
+) -> std::borrow::Cow<'a, [u8]> {
+    if !matches!(output.owner(), super::owner::OutputOwner::Bundle { .. }) {
+        return std::borrow::Cow::Borrowed(output.bytes());
+    }
+    let Some(request) = tola_minify::MinifyRequest::for_source(
+        std::path::Path::new(output.path().as_str()),
+        languages,
+    ) else {
+        return std::borrow::Cow::Borrowed(output.bytes());
+    };
+    let Ok(source) = std::str::from_utf8(output.bytes()) else {
+        return std::borrow::Cow::Borrowed(output.bytes());
+    };
+    match request.minify(source) {
+        Ok(minified) => std::borrow::Cow::Owned(minified.into_bytes()),
+        Err(_) => std::borrow::Cow::Borrowed(output.bytes()),
+    }
 }
 
 #[cfg(test)]
@@ -184,6 +219,7 @@ mod tests {
 
     use super::*;
     use crate::output::graph::OutputGraphBuilder;
+    use crate::output::owner::OutputOwner;
     use crate::output::root::OwnedOutputRoot;
     use crate::output::semantics::OutputDeclaration;
     use crate::output::tests::{insert_output, output_file, output_graph, site_lock};
@@ -200,6 +236,28 @@ mod tests {
         root.write(lock, &BuildCancellation::default()).unwrap()
     }
 
+    fn staged_stylesheet(owner: OutputOwner, source: &str) -> Vec<u8> {
+        let site = tempfile::TempDir::new().unwrap();
+        let output = site.path().join("public");
+        let destination = output_root(site.path(), &output);
+        let lock = site_lock(site.path());
+        let mut writer = output_write(&destination, &lock);
+        writer.minify = tola_minify::MinifiedLanguages::new(true, false);
+        let stylesheet = output_file(
+            "assets/app.css",
+            OutputDeclaration::from_filesystem_source(Path::new("assets/app.css")),
+            source.as_bytes(),
+        )
+        .with_owner(owner);
+        let staged = StagedBuildFiles::materialize(
+            &output_graph([stylesheet]),
+            &writer,
+            &BuildCancellation::default(),
+        )
+        .unwrap();
+        fs::read(staged.directory.path().join("assets/app.css")).unwrap()
+    }
+
     fn graph() -> OutputGraph {
         output_graph([output_file(
             "posts/rust/index.html",
@@ -211,7 +269,13 @@ mod tests {
     #[test]
     fn output_view_is_read_only_until_dropped() {
         let site = tempfile::tempdir().unwrap();
-        let view = HookOutputFiles::materialize_candidate(site.path(), &graph(), None).unwrap();
+        let view = HookOutputFiles::materialize_candidate(
+            site.path(),
+            &graph(),
+            None,
+            tola_minify::MinifiedLanguages::default(),
+        )
+        .unwrap();
         let root = view.root().to_path_buf();
         assert_eq!(
             fs::read(root.join("posts/rust/index.html")).unwrap(),
@@ -242,6 +306,7 @@ mod tests {
             site.path(),
             &OutputRevision::from_graph(&graph()),
             &canceller.token(),
+            tola_minify::MinifiedLanguages::default(),
         )
         .unwrap_err();
         assert!(
@@ -406,5 +471,34 @@ mod tests {
         .map(|(path, bytes)| (path.to_owned(), bytes.as_bytes().to_vec()))
         .collect::<BTreeMap<_, _>>();
         assert_eq!(staged_tree(staged.directory.path()), expected);
+    }
+
+    #[test]
+    fn bundle_stylesheet_is_minified() {
+        let staged = staged_stylesheet(
+            OutputOwner::bundle("site.typ"),
+            "/*! License */\n.a { color: red; }",
+        );
+        let staged = std::str::from_utf8(&staged).unwrap();
+        assert!(staged.starts_with("/*! License */"), "{staged:?}");
+        assert!(staged.contains(".a{color:red}"), "{staged:?}");
+    }
+
+    #[test]
+    fn command_stylesheet_keeps_bytes() {
+        let source = ".a { color: red; }";
+        assert_eq!(
+            staged_stylesheet(OutputOwner::command(0, "stylesheets"), source),
+            source.as_bytes()
+        );
+    }
+
+    #[test]
+    fn configured_asset_keeps_bytes() {
+        let source = ".a { color: red; }";
+        assert_eq!(
+            staged_stylesheet(OutputOwner::configured_asset("assets/app.css"), source),
+            source.as_bytes()
+        );
     }
 }

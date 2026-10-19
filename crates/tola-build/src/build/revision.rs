@@ -261,6 +261,7 @@ impl WriteOutcome {
                 self.config.get_root(),
                 &graph,
                 Some(cancellation),
+                crate::compiler::minified_languages(&self.config),
             )?;
             hooks::run_after_publish_hooks(&self.config, self.mode, files.root(), cancellation)?;
         }
@@ -303,7 +304,8 @@ fn write_site_inner(build: &SiteBuild, lock: &super::SiteBuildLock) -> Result<Wr
             .iter()
             .map(|path| ("file read by the Bundle", path.as_path())),
     )?;
-    let writing = destination.write(lock, &build.cancellation)?;
+    let mut writing = destination.write(lock, &build.cancellation)?;
+    writing.minify = crate::compiler::minified_languages(config);
     let staged =
         crate::output::files::StagedBuildFiles::materialize(graph, &writing, &build.cancellation)?;
     build.ensure_fresh(&build.cancellation)?;
