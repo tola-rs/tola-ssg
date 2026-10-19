@@ -1,0 +1,13 @@
+name = "Typst"
+grammar = "typst"
+path_suffixes = ["typ"]
+line_comments = ["// "]
+block_comment = { start = "/*", prefix = " * ", end = " */", tab_size = 1 }
+autoclose_before = ";:.,=}])>"
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["comment", "string"] },
+    { start = "$", end = "$", close = false, newline = false, not_in = ["comment", "string"] },
+]

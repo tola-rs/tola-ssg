@@ -1,0 +1,15 @@
+[package]
+name = "tola-zed"
+version = "0.1.0"
+# The extension is built by whoever installs it as a dev extension, not by this repository's build.
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Built for wasm32-wasip2 alone; keeping it its own workspace keeps it out of the site workspace.
+[workspace]

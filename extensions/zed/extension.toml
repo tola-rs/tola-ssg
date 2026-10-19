@@ -1,0 +1,14 @@
+id = "tola"
+name = "Tola"
+version = "0.1.0"
+schema_version = 1
+languages = ["languages/typst"]
+
+# The grammar this extension's Typst language parses with; Zed fetches and builds it at install.
+[grammars.typst]
+repository = "https://github.com/uben0/tree-sitter-typst"
+rev = "e3265a241bbcfb19e40b2c818ddc5b6148f7167a"
+
+[language_servers.tola]
+language = "Typst"
+languages = []
