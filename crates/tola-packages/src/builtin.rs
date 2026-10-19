@@ -181,7 +181,7 @@ fn spelling(
 }
 
 /// Holds exactly one row per variant, in the order [`TolaPackage::all`] lists them.
-const PACKAGE_DEFINITIONS: [PackageDefinition; 11] = [
+const PACKAGE_DEFINITIONS: [PackageDefinition; 12] = [
     PackageDefinition {
         name: "host",
         sources: PackageSources::Fixed(&[PackageSource::new(
@@ -263,6 +263,13 @@ const PACKAGE_DEFINITIONS: [PackageDefinition; 11] = [
             PackageSource::new("web-fields.typ", include_str!("embed/web-fields.typ")),
         ]),
     },
+    PackageDefinition {
+        name: "hash",
+        sources: PackageSources::Fixed(&[PackageSource::new(
+            "lib.typ",
+            include_str!("embed/hash.typ"),
+        )]),
+    },
 ];
 
 const _: () = {
@@ -288,6 +295,7 @@ pub enum TolaPackage {
     Document,
     Code,
     Web,
+    Hash,
 }
 
 /// The name of the `@tola/source` package: the one spelling the engine and the language server
@@ -321,6 +329,7 @@ impl TolaPackage {
             Self::Document,
             Self::Code,
             Self::Web,
+            Self::Hash,
         ]
     }
 
@@ -360,7 +369,8 @@ impl TolaPackage {
             | Self::Schema
             | Self::Document
             | Self::Code
-            | Self::Web => false,
+            | Self::Web
+            | Self::Hash => false,
         }
     }
 
@@ -525,6 +535,7 @@ mod tests {
                 TolaPackage::Document,
                 TolaPackage::Code,
                 TolaPackage::Web,
+                TolaPackage::Hash,
             ]
         );
         assert_eq!(
@@ -569,7 +580,7 @@ mod tests {
     /// that names whatever it was told about still passes.
     #[test]
     fn package_exports_match_their_entrypoints() {
-        let expected: [(&str, &[&str]); 11] = [
+        let expected: [(&str, &[&str]); 12] = [
             ("host", &[]),
             ("site", &["site"]),
             (
@@ -672,6 +683,7 @@ mod tests {
                     "code-stylesheet",
                 ],
             ),
+            ("hash", &["blake3", "bytes-to-hex"]),
             (
                 "web",
                 &[

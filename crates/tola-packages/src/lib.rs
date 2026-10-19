@@ -17,6 +17,7 @@ mod code_themes;
 pub mod date;
 mod diagnostic;
 mod docs;
+mod hash;
 mod icons;
 mod image_request;
 mod images;

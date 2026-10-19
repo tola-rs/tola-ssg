@@ -1,0 +1,36 @@
+# Simplified-Chinese documentation of `@tola/hash`. English stays authoritative in the package's
+# own Typst sources; a unit here overrides one of them.
+
+overview = "BLAKE3 摘要，以及它们的小写十六进制写法"
+
+[exports.blake3]
+
+summary = [
+  '''
+用 BLAKE3 对字节求摘要。
+
+结果是 32 字节，也就是 `bytes-to-hex` 写成 64 个十六进制字符的同一份摘要。
+
+Example - 字符串与它的 UTF-8 编码得到相同摘要：
+''',
+  '',
+]
+
+[exports.blake3.parameters]
+
+value = "要求摘要的字节。"
+
+[exports."bytes-to-hex"]
+
+summary = [
+  '''
+把字节写成小写十六进制，每字节两位。
+
+Example：
+''',
+  '',
+]
+
+[exports."bytes-to-hex".parameters]
+
+value = "要写成十六进制的字节。"

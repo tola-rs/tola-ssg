@@ -346,6 +346,7 @@ static PACKAGES: LazyLock<BTreeMap<&'static str, PackageTranslations>> = LazyLoc
         ("document", include_str!("zh-Hans/packages/document.toml")),
         ("code", include_str!("zh-Hans/packages/code.toml")),
         ("web", include_str!("zh-Hans/packages/web.toml")),
+        ("hash", include_str!("zh-Hans/packages/hash.toml")),
     ]
     .into_iter()
     .map(|(name, asset)| (name, PackageTranslations::parse(asset)))

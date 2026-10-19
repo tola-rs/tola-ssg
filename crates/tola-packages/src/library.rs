@@ -183,6 +183,11 @@ pub(crate) fn native_scope() -> Scope {
         "plain-text",
         Func::from(super::text::tola_plain_text::data()),
     );
+    host.define("blake3", Func::from(super::hash::tola_blake3::data()));
+    host.define(
+        "bytes-to-hex",
+        Func::from(super::hash::tola_bytes_to_hex::data()),
+    );
     host.define(
         "output-url",
         Func::from(super::natives::tola_output_url::data()),
