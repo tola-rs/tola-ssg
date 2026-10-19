@@ -19,6 +19,20 @@ pub use pipeline::build_site;
 pub use revision::{
     CheckedRevision, RevisionCheck, SiteBuild, UncheckedRevision, WriteOutcome, write_site,
 };
+/// Whether a build attempt checks the site's internal references.
+///
+/// Whether a build attempt checks page references.
+///
+/// Vendor verification skips it: references depend on outputs its build does not produce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReferenceChecks {
+    /// Report a page that links to something the site does not publish.
+    #[default]
+    Full,
+    /// Skip the reference check and report no reference diagnostics.
+    Skip,
+}
+
 pub use session::{BuildAttempt, BuildRequest, BuildReuse, BuildSession, BuildTrigger};
 pub(crate) use session::{BuildCacheUpdate, RetainedProducerCaches};
 
@@ -192,6 +206,7 @@ pub(crate) mod tests {
             config,
             mode,
             crate::hooks::HookExecution::Run,
+            super::ReferenceChecks::Full,
             producers,
             |producers, _| {
                 if host.matches(config, &producers.resources)

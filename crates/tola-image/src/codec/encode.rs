@@ -3,15 +3,21 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
-use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
 
+use crate::HOLD_IN_MEMORY;
 use crate::cancellation::Cancellation;
 use crate::recipe::Encoding;
 use crate::resample::ResampledPixels;
 use crate::rows::for_each_row_pair;
 use crate::{ImageRecipe, pixel_bytes};
+
+/// How a failed WebP encode reads to a site author.
+const WEBP_ENCODE_FAILURE: &str = "Tola could not encode this image as WebP; use `format: \"png\"`";
+
+/// How a failed encode reads to a site author.
+const ENCODE_FAILURE: &str = "Tola could not encode the resized image; try another `format`";
 
 struct EncodeWriter<'a> {
     bytes: Vec<u8>,
@@ -61,30 +67,58 @@ fn encode(
     cancellation: &dyn Cancellation,
 ) -> Result<Arc<[u8]>> {
     if let Encoding::WebP { quality } = recipe.encoding {
-        let encoder = webp::Encoder::from_rgba(rgba, recipe.width(), recipe.height());
-        let mut config = webp::WebPConfig::new().map_err(|_| {
-            anyhow::anyhow!("Tola could not encode this image as WebP; use `format: \"png\"`")
-        })?;
-        config.lossless = i32::from(quality.is_none());
-        config.quality = f32::from(quality.unwrap_or(75));
-        config.method = 4;
-        config.thread_level = 0;
-        config.exact = 1;
-        config.alpha_quality = 100;
-        config.near_lossless = 100;
-        cancellation.ensure_active()?;
-        // The safe libwebp wrapper has no cancellation callback. Never publish its result if
-        // cancellation arrived during this indivisible codec call.
-        let encoded = encoder.encode_advanced(&config);
-        cancellation.ensure_active()?;
-        let encoded = encoded.map_err(|_| {
-            anyhow::anyhow!("Tola could not encode this image as WebP; use `format: \"png\"`")
-        })?;
-        ensure!(
-            !encoded.is_empty(),
-            "Tola could not encode this image as WebP; use `format: \"png\"`"
-        );
-        return Ok(Arc::from(&encoded[..]));
+        #[cfg(feature = "libwebp")]
+        {
+            let encoder = webp::Encoder::from_rgba(rgba, recipe.width(), recipe.height());
+            let mut config =
+                webp::WebPConfig::new().map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
+            config.lossless = i32::from(quality.is_none());
+            config.quality = f32::from(quality.unwrap_or(75));
+            config.method = 4;
+            config.thread_level = 0;
+            // Lossless WebP must reproduce the pixels it was given, hidden RGB included; lossy WebP
+            // may drop RGB no one can see, which keeps transparent derivatives smaller.
+            config.exact = i32::from(quality.is_none());
+            config.alpha_quality = 100;
+            config.near_lossless = 100;
+            cancellation.ensure_active()?;
+            // The safe libwebp wrapper has no cancellation callback. Never publish its result if
+            // cancellation arrived during this indivisible codec call.
+            let encoded = encoder.encode_advanced(&config);
+            cancellation.ensure_active()?;
+            let encoded = encoded.map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
+            ensure!(!encoded.is_empty(), WEBP_ENCODE_FAILURE);
+            return Ok(Arc::from(&encoded[..]));
+        }
+        #[cfg(all(not(feature = "libwebp"), feature = "pure-webp"))]
+        {
+            cancellation.ensure_active()?;
+            let encoded = match quality {
+                Some(quality) => {
+                    tola_webp::encode_rgba(rgba, recipe.width(), recipe.height(), quality)
+                        .map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?
+                }
+                None => {
+                    let mut bytes = Vec::new();
+                    image::ImageEncoder::write_image(
+                        image::codecs::webp::WebPEncoder::new_lossless(&mut bytes),
+                        rgba,
+                        recipe.width(),
+                        recipe.height(),
+                        ExtendedColorType::Rgba8,
+                    )
+                    .map_err(|_| anyhow::anyhow!(WEBP_ENCODE_FAILURE))?;
+                    bytes
+                }
+            };
+            cancellation.ensure_active()?;
+            ensure!(!encoded.is_empty(), WEBP_ENCODE_FAILURE);
+            return Ok(Arc::from(encoded.as_slice()));
+        }
+        #[cfg(not(any(feature = "libwebp", feature = "pure-webp")))]
+        {
+            anyhow::bail!("WebP encoding is not enabled in this build");
+        }
     }
     let rgb;
     let (pixels, color) = if has_transparency {
@@ -97,23 +131,60 @@ fn encode(
         bytes: Vec::new(),
         cancellation,
     };
-    let result = match recipe.encoding {
-        Encoding::Jpeg { quality } => JpegEncoder::new_with_quality(&mut writer, quality)
-            .write_image(pixels, recipe.width(), recipe.height(), color),
+    let result: Result<()> = match recipe.encoding {
+        Encoding::Jpeg { quality } => encode_jpeg(
+            &mut writer,
+            pixels,
+            recipe.width(),
+            recipe.height(),
+            color,
+            quality,
+        ),
+        // Level 6 is the measured trade: level 9 saved at most 5% and sometimes grew the file,
+        // for 1.4–3× the encode time.
         Encoding::Png => PngEncoder::new_with_quality(
             &mut writer,
             CompressionType::Level(6),
             FilterType::Adaptive,
         )
-        .write_image(pixels, recipe.width(), recipe.height(), color),
+        .write_image(pixels, recipe.width(), recipe.height(), color)
+        .map_err(anyhow::Error::from),
         Encoding::WebP { .. } => {
-            bail!("Tola could not encode the resized image; try another `format`")
+            bail!(ENCODE_FAILURE)
         }
     };
     // Restore typed cancellation instead of leaking the codec's wrapped I/O error.
     cancellation.ensure_active()?;
-    result.context("Tola could not encode the resized image; try another `format`")?;
+    result.context(ENCODE_FAILURE)?;
     Ok(writer.bytes.into())
+}
+
+/// Encode one plane as JPEG with half-resolution colour: 4:2:0.
+///
+/// Chroma subsampling is the size/quality trade photographs are made for; coloured text and fine
+/// graphics belong in PNG or WebP.
+fn encode_jpeg(
+    writer: &mut impl Write,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    color: ExtendedColorType,
+    quality: u8,
+) -> Result<()> {
+    let color = match color {
+        ExtendedColorType::Rgb8 => jpeg_encoder::ColorType::Rgb,
+        // JPEG cannot carry transparency, and a recipe that reaches this call composited it away.
+        _ => bail!(ENCODE_FAILURE),
+    };
+    let width =
+        u16::try_from(width).context("a JPEG frame holds at most 65,535 pixels per axis")?;
+    let height =
+        u16::try_from(height).context("a JPEG frame holds at most 65,535 pixels per axis")?;
+    let mut encoder = jpeg_encoder::Encoder::new(writer, quality);
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_2_0);
+    encoder
+        .encode(pixels, width, height, color)
+        .map_err(anyhow::Error::from)
 }
 
 /// The color samples of an opaque plane, without its alpha channel.
@@ -125,8 +196,7 @@ fn rgb_plane(
 ) -> Result<Vec<u8>> {
     let bytes = pixel_bytes(width, height, 3)?;
     let mut rgb = Vec::new();
-    rgb.try_reserve_exact(bytes)
-        .context("the image is too large to hold in memory; use a smaller image")?;
+    rgb.try_reserve_exact(bytes).context(HOLD_IN_MEMORY)?;
     rgb.resize(bytes, 0);
     for_each_row_pair(
         &mut rgb,
@@ -153,11 +223,13 @@ fn rgb_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NO_CANCELLATION;
     use crate::codec::test_support::*;
     use crate::codec::{DecodedSource, inspect, render};
-    use crate::{ImageFormat, OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
+    use crate::{ImageFormat, OutputFormat, ResizeOperation, ResizeOptions};
     use std::io::Cursor;
 
+    #[cfg(feature = "libwebp")]
     #[test]
     fn opaque_webp_keeps_rgb_encoding_bytes() {
         for (width, height) in [(1u32, 1u32), (3, 7), (17, 13), (64, 65)] {
@@ -185,7 +257,7 @@ mod tests {
                     config.quality = f32::from(quality.unwrap_or(75));
                     config.method = 4;
                     config.thread_level = 0;
-                    config.exact = 1;
+                    config.exact = i32::from(quality.is_none());
                     config.alpha_quality = 100;
                     config.near_lossless = 100;
                     let rgb_encoded = webp::Encoder::from_rgb(&rgb, width, height)
@@ -194,7 +266,7 @@ mod tests {
                     let encoded = render(
                         &source,
                         &recipe(&source, width, height, OutputFormat::WebP, quality),
-                        &active,
+                        &NO_CANCELLATION,
                     )
                     .unwrap();
                     assert_eq!(
@@ -219,8 +291,8 @@ mod tests {
         );
         let matching = recipe(&source, 1, 1, OutputFormat::Png, None);
         let mismatched = recipe(&source, 2, 1, OutputFormat::Png, None);
-        let decoded = DecodedSource::open(&source, &active).unwrap();
-        let pixels = decoded.pixels(matching.pixels(), &active).unwrap();
+        let decoded = DecodedSource::open(&source, &NO_CANCELLATION).unwrap();
+        let pixels = decoded.pixels(matching.pixels(), &NO_CANCELLATION).unwrap();
         let cancellation = || true;
         assert!(
             pixels
@@ -236,8 +308,8 @@ mod tests {
         let source = png(&pixels, 3, 1, ExtendedColorType::Rgba8, None, None);
         for format in [OutputFormat::Png, OutputFormat::WebP] {
             let recipe = recipe(&source, 3, 1, format, None);
-            let first = render(&source, &recipe, &active).unwrap();
-            let second = render(&source, &recipe, &active).unwrap();
+            let first = render(&source, &recipe, &NO_CANCELLATION).unwrap();
+            let second = render(&source, &recipe, &NO_CANCELLATION).unwrap();
             assert_eq!(first, second);
             assert_eq!(rgba(&first), pixels);
         }
@@ -249,7 +321,7 @@ mod tests {
         let pixels = [200, 40, 70, 0, 10, 20, 30, 127, 99, 88, 77, 255];
         let source = png(&pixels, 3, 1, ExtendedColorType::Rgba8, None, None);
         let lossy = recipe(&source, 3, 1, OutputFormat::WebP, Some(0));
-        let bytes = render(&source, &lossy, &active).unwrap();
+        let bytes = render(&source, &lossy, &NO_CANCELLATION).unwrap();
         assert!(inspect(&bytes).unwrap().is_lossy);
         assert_eq!(
             rgba(&bytes)
@@ -260,6 +332,48 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 127, 255]
         );
+    }
+
+    /// Transparent areas cost no more than they must: RGB under fully transparent pixels is not
+    /// displayed, so the encoder drops it instead of paying for it.
+    #[cfg(feature = "libwebp")]
+    #[test]
+    fn transparent_webp_lets_the_encoder_drop_hidden_rgb() {
+        let (width, height) = (16u32, 16u32);
+        let pixels: Vec<u8> = (0..width * height)
+            .flat_map(|index| {
+                let x = index % width;
+                let y = index / width;
+                let alpha = if x < width / 2 { 255 } else { 0 };
+                [
+                    (x * 13 + y * 7) as u8,
+                    (x * 29 + y * 3) as u8,
+                    (x * 5 + y * 31) as u8,
+                    alpha as u8,
+                ]
+            })
+            .collect();
+        let source = png(&pixels, width, height, ExtendedColorType::Rgba8, None, None);
+
+        let mut config = webp::WebPConfig::new().unwrap();
+        config.lossless = 0;
+        config.quality = 75.0;
+        config.method = 4;
+        config.thread_level = 0;
+        config.exact = 0;
+        config.alpha_quality = 100;
+        config.near_lossless = 100;
+        let reference = webp::Encoder::from_rgba(&pixels, width, height)
+            .encode_advanced(&config)
+            .unwrap();
+
+        let encoded = render(
+            &source,
+            &recipe(&source, width, height, OutputFormat::WebP, Some(75)),
+            &NO_CANCELLATION,
+        )
+        .unwrap();
+        assert_eq!(&encoded[..], &reference[..]);
     }
 
     /// The quality knob is the trade it is documented to be: a lower quality publishes fewer
@@ -282,7 +396,7 @@ mod tests {
         let mut deviations = Vec::new();
         for quality in [10u8, 90] {
             let recipe = recipe(&source, side, side, OutputFormat::Jpeg, Some(quality));
-            let encoded = render(&source, &recipe, &active).unwrap();
+            let encoded = render(&source, &recipe, &NO_CANCELLATION).unwrap();
             sizes.push(encoded.len());
             let decoded = image::DynamicImage::from_decoder(
                 image::codecs::jpeg::JpegDecoder::new(Cursor::new(&encoded[..])).unwrap(),
@@ -314,6 +428,42 @@ mod tests {
             deviations[0],
             deviations[1]
         );
+    }
+
+    /// JPEG spends its bytes on luma: colour is subsampled at half resolution, 4:2:0.
+    #[test]
+    fn jpeg_subsamples_chroma() {
+        let side = 16u32;
+        let pixels: Vec<u8> = (0..side * side)
+            .flat_map(|index| {
+                let x = (index % side) as u8;
+                let y = (index / side) as u8;
+                [x.wrapping_mul(7), y.wrapping_mul(11), x ^ y]
+            })
+            .collect();
+        let source = png(&pixels, side, side, ExtendedColorType::Rgb8, None, None);
+        let encoded = render(
+            &source,
+            &recipe(&source, side, side, OutputFormat::Jpeg, Some(80)),
+            &NO_CANCELLATION,
+        )
+        .unwrap();
+        assert_eq!(jpeg_sampling_factors(&encoded), [0x22, 0x11, 0x11]);
+    }
+
+    /// The sampling factors of a baseline JPEG's three components, from its frame header.
+    fn jpeg_sampling_factors(jpeg: &[u8]) -> [u8; 3] {
+        let mut offset = 2;
+        while offset + 4 <= jpeg.len() {
+            assert_eq!(jpeg[offset], 0xFF, "every segment starts with a marker");
+            if jpeg[offset + 1] == 0xC0 {
+                assert_eq!(jpeg[offset + 9], 3, "a colour JPEG has three components");
+                return [jpeg[offset + 11], jpeg[offset + 14], jpeg[offset + 17]];
+            }
+            let length = usize::from(u16::from_be_bytes([jpeg[offset + 2], jpeg[offset + 3]]));
+            offset += 2 + length;
+        }
+        panic!("the JPEG carries no frame header");
     }
 
     /// Every encoder this crate writes is read back by its own scanner, and an unstated format
@@ -378,7 +528,12 @@ mod tests {
                 ImageFormat::Jpeg,
             ),
         ] {
-            let encoded = render(source, &recipe(source, 8, 8, format, quality), &active).unwrap();
+            let encoded = render(
+                source,
+                &recipe(source, 8, 8, format, quality),
+                &NO_CANCELLATION,
+            )
+            .unwrap();
             let metadata = inspect(&encoded).unwrap();
             assert_eq!(
                 metadata.is_lossy, lossy,
@@ -390,10 +545,7 @@ mod tests {
                     width: Some(4),
                     height: Some(4),
                     operation: ResizeOperation::Fit,
-                    format: OutputFormat::Auto,
-                    quality: None,
-                    filter: ResizeFilter::Lanczos3,
-                    background: None,
+                    ..ResizeOptions::default()
                 },
             )
             .unwrap();
@@ -414,7 +566,7 @@ mod tests {
         let expected = rgba(&source);
         for format in [OutputFormat::Png, OutputFormat::WebP] {
             let recipe = recipe(&source, 4, 3, format, None);
-            let encoded = render(&source, &recipe, &active).unwrap();
+            let encoded = render(&source, &recipe, &NO_CANCELLATION).unwrap();
             assert_eq!(rgba(&encoded), expected, "{format:?} changed opaque pixels");
         }
     }
@@ -435,8 +587,7 @@ mod tests {
                     operation: ResizeOperation::Scale,
                     format,
                     quality,
-                    filter: ResizeFilter::Lanczos3,
-                    background: None,
+                    ..ResizeOptions::default()
                 },
             )
             .unwrap()
@@ -448,17 +599,22 @@ mod tests {
         ];
         let alone: Vec<_> = recipes
             .iter()
-            .map(|recipe| render(&source, recipe, &active).unwrap())
+            .map(|recipe| render(&source, recipe, &NO_CANCELLATION).unwrap())
             .collect();
 
-        let decoded = DecodedSource::open(&source, &active).unwrap();
-        let resampled = decoded.pixels(recipes[0].pixels(), &active).unwrap();
+        let decoded = DecodedSource::open(&source, &NO_CANCELLATION).unwrap();
+        let resampled = decoded
+            .pixels(recipes[0].pixels(), &NO_CANCELLATION)
+            .unwrap();
         for (recipe, expected) in recipes.iter().zip(&alone) {
-            assert_eq!(&resampled.encode(recipe, &active).unwrap(), expected);
+            assert_eq!(
+                &resampled.encode(recipe, &NO_CANCELLATION).unwrap(),
+                expected
+            );
         }
         assert!(
             resampled
-                .encode(&resolve(3, 2, OutputFormat::Png, None), &active)
+                .encode(&resolve(3, 2, OutputFormat::Png, None), &NO_CANCELLATION)
                 .is_err()
         );
         // A length check alone cannot refuse the same pixels in another shape: 2x2 and 4x1 hold
@@ -470,6 +626,6 @@ mod tests {
             resampled_pixels.width() * resampled_pixels.height(),
             reshaped_pixels.width() * reshaped_pixels.height()
         );
-        assert!(resampled.encode(&reshaped, &active).is_err());
+        assert!(resampled.encode(&reshaped, &NO_CANCELLATION).is_err());
     }
 }

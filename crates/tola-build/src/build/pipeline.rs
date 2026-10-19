@@ -109,6 +109,7 @@ pub(super) fn build_site_inner(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
     hook_execution: crate::hooks::HookExecution,
+    reference_checks: super::ReferenceChecks,
     producers: &mut BuildAttemptProducers,
     prepare_compiler: impl FnOnce(
         &mut BuildAttemptProducers,
@@ -143,6 +144,7 @@ pub(super) fn build_site_inner(
             &typst_host,
             mode,
             hook_execution,
+            reference_checks,
             producers,
             build_started,
             before_build_elapsed,
@@ -155,11 +157,13 @@ pub(super) fn build_site_inner(
     built.map_err(|error| diagnostic::with_site(error, config.get_root()))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_site_candidate(
     config: &ResolvedSiteConfig,
     typst_host: &crate::compiler::TypstHost,
     mode: BuildMode,
     hook_execution: crate::hooks::HookExecution,
+    reference_checks: super::ReferenceChecks,
     producers: &mut BuildAttemptProducers,
     build_started: std::time::Instant,
     before_build_elapsed: std::time::Duration,
@@ -190,8 +194,12 @@ fn build_site_candidate(
         )?;
         let compile_elapsed = build_started.elapsed();
         producers.cancellation.ensure_active()?;
-        let candidate =
-            compiled_outputs.seal(config, &producers.cancellation, &mut build_diagnostics)?;
+        let candidate = compiled_outputs.seal(
+            config,
+            &producers.cancellation,
+            reference_checks,
+            &mut build_diagnostics,
+        )?;
         producers.cancellation.ensure_active()?;
         let total_elapsed = build_started.elapsed();
         tracing::debug!(
@@ -288,6 +296,7 @@ impl CompiledSiteOutputs {
         self,
         config: &ResolvedSiteConfig,
         cancellation: &crate::cancellation::BuildCancellation,
+        reference_checks: super::ReferenceChecks,
         diagnostics: &mut Vec<crate::diagnostic::Diagnostic>,
     ) -> Result<SealedSiteCandidate> {
         cancellation.ensure_active()?;
@@ -303,19 +312,24 @@ impl CompiledSiteOutputs {
             self.reference_reuse.as_ref(),
         )?;
         cancellation.ensure_active()?;
-        let reference_diagnostics =
-            crate::site::references::diagnostic::diagnostics(&references, config, cancellation)?;
-        if reference_diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error)
-        {
-            return Err(crate::diagnostic::DiagnosticError::new(
-                "a page links to a target this site does not publish",
-                reference_diagnostics,
-            )
-            .into());
+        if reference_checks == super::ReferenceChecks::Full {
+            let reference_diagnostics = crate::site::references::diagnostic::diagnostics(
+                &references,
+                config,
+                cancellation,
+            )?;
+            if reference_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error)
+            {
+                return Err(crate::diagnostic::DiagnosticError::new(
+                    "a page links to a target this site does not publish",
+                    reference_diagnostics,
+                )
+                .into());
+            }
+            diagnostics.extend(reference_diagnostics);
         }
-        diagnostics.extend(reference_diagnostics);
         if crate::output::PageAvailability::from_outputs(graph.outputs())
             == crate::output::PageAvailability::Empty
         {

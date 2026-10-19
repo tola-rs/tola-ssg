@@ -149,6 +149,8 @@ pub struct BuildRequest {
     /// Whether candidate construction runs hook commands. Publication consumers
     /// are invoked separately through [`super::WriteOutcome::run_after_publish`].
     pub hook_execution: crate::hooks::HookExecution,
+    /// Whether the attempt checks page references against the published site.
+    pub reference_checks: super::ReferenceChecks,
 }
 
 impl BuildRequest {
@@ -161,6 +163,7 @@ impl BuildRequest {
             generated_files: Vec::new(),
             cancellation: crate::cancellation::BuildCancellation::default(),
             hook_execution: crate::hooks::HookExecution::Run,
+            reference_checks: super::ReferenceChecks::Full,
         }
     }
 }
@@ -199,6 +202,7 @@ impl BuildAttempt {
             &self.config,
             self.request.mode,
             self.request.hook_execution,
+            self.request.reference_checks,
             &mut producers,
             |producers, hooks_executed| -> anyhow::Result<TypstHost> {
                 let host = self.baseline.load_host(&self.config, &cancellation)?;
@@ -348,6 +352,13 @@ impl BuildSession {
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> anyhow::Result<TypstHost> {
         cancellation.ensure_active()?;
+        // Host fonts cannot join a pure build; the setting is contradictory, not ignorable.
+        if self.resources.input_scope() == crate::InputScope::Pure && config.fonts().system {
+            anyhow::bail!(
+                "`--pure` cannot use `[typst.fonts] system = true`; keep the fonts in \
+                 `[typst.fonts] paths`, or run the build without `--pure`"
+            );
+        }
         let cached = {
             self.host_cache
                 .lock()
@@ -547,6 +558,42 @@ mod tests {
         config.typst.fonts.paths = vec![root.join("fonts")];
         std::fs::create_dir_all(&config.typst.fonts.paths[0]).unwrap();
         config
+    }
+
+    /// Vendor verification accepts links a full build refuses.
+    #[test]
+    fn reference_checks_can_be_skipped() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let config = dev_config(root);
+        std::fs::write(
+            &config.build.entry,
+            "#document(\"index.html\")[#html.a(href: \"/missing-page.html\")[missing]]",
+        )
+        .unwrap();
+
+        let mut request = BuildRequest::new(BuildMode::Production);
+        request.reference_checks = ReferenceChecks::Skip;
+        BuildSession::with_resources(crate::resources::BuildResources::default())
+            .prepare(std::sync::Arc::new(config.clone()), request)
+            .run()
+            .expect("a build that skips reference checks does not fail on a broken link");
+
+        let Err(failure) =
+            BuildSession::with_resources(crate::resources::BuildResources::default())
+                .prepare(
+                    std::sync::Arc::new(config),
+                    BuildRequest::new(BuildMode::Production),
+                )
+                .run()
+        else {
+            panic!("a full build refuses to publish a broken link")
+        };
+        let error = failure.into_error();
+        assert!(
+            format!("{error:#}").contains("does not publish"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use image::metadata::Orientation;
 use crate::cancellation::Cancellation;
 use crate::recipe::Crop;
 use crate::rows::for_each_row;
-use crate::{pixel_bytes, rgba_buffer};
+use crate::{HOLD_IN_MEMORY, pixel_bytes, rgba_buffer};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum AlphaRepresentation {
@@ -264,10 +264,10 @@ impl PreparedRows {
             let samples = pixel_bytes(self.width, height, 8)? / 8;
             self.rows
                 .try_reserve_exact(samples.saturating_sub(self.rows.len()))
-                .context("the image is too large to hold in memory; use a smaller image")?;
+                .context(HOLD_IN_MEMORY)?;
             self.row_indexes
                 .try_reserve_exact(len.saturating_sub(self.row_indexes.len()))
-                .context("the image is too large to hold in memory; use a smaller image")?;
+                .context(HOLD_IN_MEMORY)?;
             self.slots = len;
             self.rows.resize(samples, [0; 4]);
             self.row_indexes.resize(len, usize::MAX);

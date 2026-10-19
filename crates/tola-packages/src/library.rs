@@ -120,6 +120,12 @@ pub(crate) fn native_scope() -> Scope {
         Func::from(super::images::image_metadata::data()),
     );
     host.define(
+        "image-srcset",
+        Func::from(super::images::image_srcset::data()),
+    );
+
+    host.define("img", Func::from(super::images::img::data()));
+    host.define(
         ALL_SOURCES,
         Func::from(super::natives::tola_sources::data()),
     );

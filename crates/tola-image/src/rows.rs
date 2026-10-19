@@ -8,6 +8,8 @@
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 
+use crate::HOLD_IN_MEMORY;
+
 /// Bytes of the split buffer a call must cover before its rows are worth handing to threads.
 ///
 /// Measured with two pools in one process, alternating and taking the minimum of six rounds: jobs up
@@ -40,6 +42,15 @@ const STAGED_CHUNK_BYTES: usize = 1 << 21;
 const SPLIT_STAGED_BYTES: usize = 1 << 18;
 
 /// Whether a job covering `bytes` bytes, worth handing over only past `threshold`, goes to the pool.
+///
+/// wasm has no thread pool to hand work to, so every job runs on the calling thread there.
+#[cfg(target_arch = "wasm32")]
+fn splits_on_pool(_bytes: usize, _threshold: usize) -> bool {
+    false
+}
+
+/// Whether a job covering `bytes` bytes, worth handing over only past `threshold`, goes to the pool.
+#[cfg(not(target_arch = "wasm32"))]
 fn splits_on_pool(bytes: usize, threshold: usize) -> bool {
     bytes >= threshold && rayon::current_num_threads() >= 2
 }
@@ -153,7 +164,7 @@ where
     let mut staging = Vec::new();
     staging
         .try_reserve_exact(chunk_bytes)
-        .context("the image is too large to hold in memory; use a smaller image")?;
+        .context(HOLD_IN_MEMORY)?;
     staging.resize(chunk_bytes, 0);
     let growing = destination_stride >= source_stride;
     for step in 0..chunks {

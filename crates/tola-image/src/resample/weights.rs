@@ -277,7 +277,7 @@ fn exp_neg(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resample::test_support::active;
+    use crate::NO_CANCELLATION;
 
     #[test]
     fn kernel_series_match_libm_reference() {
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn wider_kernels_reach_more_source_samples() {
         let taps = |filter| {
-            let weights = AxisWeights::new(64, 16, filter, &active).unwrap();
+            let weights = AxisWeights::new(64, 16, filter, &NO_CANCELLATION).unwrap();
             let (start, taps) = weights.at(8);
             assert!(start + taps.len() as u32 <= 64);
             // Absorbing the rounding residual into one weight keeps every tap sum exactly one.

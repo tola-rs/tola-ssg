@@ -19,6 +19,7 @@ use super::cancellation::{Cancellation, ensure_active_if_present};
 use super::recipe::PixelRecipe;
 use super::resample::{ResampledPixels, resample};
 use super::{ImageFormat, ImageMetadata, ImageRecipe, check_dimensions, pixel_bytes};
+use crate::HOLD_IN_MEMORY;
 
 /// Report what one image's bytes say about themselves, without decoding its pixels.
 pub fn inspect(bytes: &[u8]) -> Result<ImageMetadata> {
@@ -87,12 +88,12 @@ impl DecodedSource {
             SampleColor::Unsupported(reason) => bail!("{reason}"),
             SampleColor::StoredIcc(profile) => Some(ColorTransform::Icc(profile)),
             SampleColor::DecoderIcc => Some(ColorTransform::Icc(Cow::Owned(
-                decoder
-                    .icc_profile()?
-                    .context("the embedded color profile is damaged; convert the image to sRGB")?,
+                decoder.icc_profile()?.context(PROFILE_DAMAGED)?,
             ))),
         };
-        // Owned planes share the decoder's budget; backend scratch limits remain best-effort.
+        // Each owned plane must fit the decoder's 512 MiB allotment. The two reservations are
+        // checked independently, so their total can exceed that budget, and backend scratch is
+        // not covered at all.
         let mut limits = Limits::default();
         limits
             .reserve_buffer(width, height, color)
@@ -109,7 +110,7 @@ impl DecodedSource {
         // a short or padded decode would otherwise leave rows paired with the wrong samples.
         ensure!(
             raw.len() == pixel_bytes(width, height, usize::from(color.bytes_per_pixel()))?,
-            "the image is damaged or incomplete; re-export it"
+            DAMAGED
         );
         cancellation.ensure_active()?;
         let rgba = normalize_color(raw, color, (width, height), transform, cancellation)?;
@@ -180,9 +181,7 @@ impl Decoder<'_> {
     /// from the header parse that chose its decode layout and arrives as stored bytes.
     fn icc_profile(&mut self) -> Result<Option<Vec<u8>>> {
         match self {
-            Self::Raster(decoder) => decoder
-                .icc_profile()
-                .context("the embedded color profile is damaged; convert the image to sRGB"),
+            Self::Raster(decoder) => decoder.icc_profile().context(PROFILE_DAMAGED),
             Self::Jpeg(_) => Ok(None),
         }
     }
@@ -201,17 +200,13 @@ impl Decoder<'_> {
         }
         let length = pixel_bytes(width, height, usize::from(color.bytes_per_pixel()))?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .context("the image is too large to hold in memory; use a smaller image")?;
+        bytes.try_reserve_exact(length).context(HOLD_IN_MEMORY)?;
         bytes.resize(length, 0);
         match self {
             Self::Jpeg(mut decoder) => decoder
                 .decode_into(&mut bytes)
-                .context("the JPEG image is damaged or incomplete; re-export it")?,
-            Self::Raster(decoder) => decoder
-                .read_image(&mut bytes)
-                .context("the image is damaged or incomplete; re-export it")?,
+                .context(damaged_image("JPEG"))?,
+            Self::Raster(decoder) => decoder.read_image(&mut bytes).context(DAMAGED)?,
         }
         Ok(bytes)
     }
@@ -264,15 +259,7 @@ impl<'a> Source<'a> {
         let format = image_format(bytes)?;
         if format == ImageFormat::Jpeg {
             let (_, header) = Self::jpeg_header(bytes)?;
-            let (display_width, display_height) =
-                display_dimensions(header.width, header.height, header.orientation);
-            return Ok(ImageMetadata {
-                width: display_width,
-                height: display_height,
-                format: ImageFormat::Jpeg,
-                has_alpha: false,
-                is_lossy: true,
-            });
+            return Ok(header.metadata());
         }
         Ok(Self::raster(bytes, format, None)?.metadata)
     }
@@ -309,20 +296,17 @@ impl<'a> Source<'a> {
         let mut decoder: Box<dyn ImageDecoder + 'a> = match format {
             ImageFormat::Png => Box::new(
                 PngDecoder::with_limits(Cursor::new(bytes), Limits::default())
-                    .context("the PNG image is damaged or incomplete; re-export it")?,
+                    .context(damaged_image("PNG"))?,
             ),
-            ImageFormat::WebP => Box::new(
-                WebPDecoder::new(Cursor::new(bytes))
-                    .context("the WebP image is damaged or incomplete; re-export it")?,
-            ),
-            ImageFormat::Gif => Box::new(
-                GifDecoder::new(Cursor::new(bytes))
-                    .context("the GIF image is damaged or incomplete; re-export it")?,
-            ),
-            ImageFormat::Bmp => Box::new(
-                BmpDecoder::new(Cursor::new(bytes))
-                    .context("the BMP image is damaged or incomplete; re-export it")?,
-            ),
+            ImageFormat::WebP => {
+                Box::new(WebPDecoder::new(Cursor::new(bytes)).context(damaged_image("WebP"))?)
+            }
+            ImageFormat::Gif => {
+                Box::new(GifDecoder::new(Cursor::new(bytes)).context(damaged_image("GIF"))?)
+            }
+            ImageFormat::Bmp => {
+                Box::new(BmpDecoder::new(Cursor::new(bytes)).context(damaged_image("BMP"))?)
+            }
             ImageFormat::Jpeg | ImageFormat::Svg => bail!(
                 "this image format is not supported; save the image as PNG, JPEG, WebP, GIF, or BMP"
             ),
@@ -362,10 +346,7 @@ impl<'a> Source<'a> {
         // mis-parses the chain may refuse a file but never drop color management.
         let declared = jpeg_has_icc(bytes, cancellation)?;
         let profile = parsed.icc_profile();
-        ensure!(
-            !declared || profile.is_some(),
-            "the embedded color profile is damaged; convert the image to sRGB"
-        );
+        ensure!(!declared || profile.is_some(), PROFILE_DAMAGED);
         let icc = profile.is_some();
         let container = ContainerMetadata {
             is_lossy: true,
@@ -393,21 +374,13 @@ impl<'a> Source<'a> {
             ZCursor::new(bytes),
             jpeg_options().jpeg_set_out_colorspace(output_space),
         );
-        let (display_width, display_height) =
-            display_dimensions(header.width, header.height, header.orientation);
         Ok(Self {
             decoder: Decoder::Jpeg(Box::new(decoder)),
             width: header.width,
             height: header.height,
             color,
             orientation: header.orientation,
-            metadata: ImageMetadata {
-                width: display_width,
-                height: display_height,
-                format: ImageFormat::Jpeg,
-                has_alpha: false,
-                is_lossy: true,
-            },
+            metadata: header.metadata(),
             container,
         })
     }
@@ -423,9 +396,7 @@ impl<'a> Source<'a> {
         // maintained JPEG backend directly so unsupported models cannot lose their color meaning.
         let mut decoder =
             zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), jpeg_options());
-        decoder
-            .decode_headers()
-            .context("the JPEG image is damaged or incomplete; re-export it")?;
+        decoder.decode_headers().context(damaged_image("JPEG"))?;
         let (width, height) = decoder
             .dimensions()
             .context("the JPEG has no usable dimensions; re-export it")?;
@@ -471,6 +442,20 @@ struct JpegHeader {
     orientation: Orientation,
 }
 
+impl JpegHeader {
+    /// What a metadata read reports for these headers.
+    fn metadata(&self) -> ImageMetadata {
+        let (width, height) = display_dimensions(self.width, self.height, self.orientation);
+        ImageMetadata {
+            width,
+            height,
+            format: ImageFormat::Jpeg,
+            has_alpha: false,
+            is_lossy: true,
+        }
+    }
+}
+
 /// The zune-jpeg options every read of one source uses. Tola applies its own dimension limits, so
 /// the parse disables the backend's.
 fn jpeg_options() -> DecoderOptions {
@@ -479,6 +464,17 @@ fn jpeg_options() -> DecoderOptions {
         .set_strict_mode(true)
         .set_max_width(usize::MAX)
         .set_max_height(usize::MAX)
+}
+
+/// How a damaged embedded colour profile reads.
+const PROFILE_DAMAGED: &str = "the embedded color profile is damaged; convert the image to sRGB";
+
+/// How damaged bytes with no format-specific wording read.
+const DAMAGED: &str = "the image is damaged or incomplete; re-export it";
+
+/// The failure a container's decoder reports for damaged bytes.
+fn damaged_image(format: &str) -> String {
+    format!("the {format} image is damaged or incomplete; re-export it")
 }
 
 /// The format one image's bytes declare, refused when Tola cannot read it.
@@ -525,15 +521,11 @@ mod encode;
 pub(crate) mod test_support {
     use super::*;
     use crate::ImageRecipe;
-    use crate::{OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
+    use crate::NO_CANCELLATION;
+    use crate::{CropAnchor, OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
     use image::codecs::jpeg::JpegEncoder;
     use image::codecs::png::PngEncoder;
     use image::{ExtendedColorType, ImageEncoder};
-
-    /// A cancellation request that never fires, so a test exercises the byte pipeline alone.
-    pub(super) fn active() -> bool {
-        false
-    }
 
     pub(super) fn png(
         pixels: &[u8],
@@ -594,11 +586,22 @@ pub(crate) mod test_support {
                 width: Some(width),
                 height: Some(height),
                 operation: ResizeOperation::Scale,
+                anchor: CropAnchor::Center,
                 format,
                 quality,
                 filter: ResizeFilter::Triangle,
                 background: None,
             },
+        )
+        .unwrap()
+    }
+
+    /// One source rendered as PNG at `width × height`, the fixture most codec tests need.
+    pub(super) fn render_png(source: &[u8], width: u32, height: u32) -> Arc<[u8]> {
+        render(
+            source,
+            &recipe(source, width, height, OutputFormat::Png, None),
+            &NO_CANCELLATION,
         )
         .unwrap()
     }
@@ -667,6 +670,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::cancellation::ImageCancelled;
     use crate::codec::test_support::*;
@@ -700,7 +704,7 @@ mod tests {
             let dimensions = if orientation >= 5 { (2, 3) } else { (3, 2) };
             assert_eq!((metadata.width, metadata.height), dimensions);
             let recipe = recipe(&source, dimensions.0, dimensions.1, OutputFormat::Png, None);
-            let result = render(&source, &recipe, &active).unwrap();
+            let result = render(&source, &recipe, &NO_CANCELLATION).unwrap();
             let displayed: Vec<_> = rgba(&result)
                 .as_chunks::<4>()
                 .0
@@ -722,15 +726,10 @@ mod tests {
         encoder
             .write_image(&[120; 3 * 2 * 3], 3, 2, ExtendedColorType::Rgb8)
             .unwrap();
-        assert_eq!(
-            (
-                inspect(&source).unwrap().width,
-                inspect(&source).unwrap().height
-            ),
-            (2, 3)
-        );
+        let metadata = inspect(&source).unwrap();
+        assert_eq!((metadata.width, metadata.height), (2, 3));
         let recipe = recipe(&source, 2, 3, OutputFormat::Jpeg, Some(90));
-        let encoded = render(&source, &recipe, &active).unwrap();
+        let encoded = render(&source, &recipe, &NO_CANCELLATION).unwrap();
         let metadata = inspect(&encoded).unwrap();
         assert_eq!(
             (metadata.width, metadata.height, metadata.format),
@@ -795,26 +794,12 @@ mod tests {
     fn jpeg_padding_keeps_the_embedded_profile() {
         let clean = linear_icc_jpeg();
         let stuffed = jpeg_stuffed_before_icc(&clean);
-        let clean_pixels = rgba(
-            &render(
-                &clean,
-                &recipe(&clean, 3, 3, OutputFormat::Png, None),
-                &active,
-            )
-            .unwrap(),
-        );
+        let clean_pixels = rgba(&render_png(&clean, 3, 3));
         assert!(
             (180..=195).contains(&clean_pixels[0]),
             "the embedded profile is applied: {clean_pixels:?}"
         );
-        let stuffed_pixels = rgba(
-            &render(
-                &stuffed,
-                &recipe(&stuffed, 3, 3, OutputFormat::Png, None),
-                &active,
-            )
-            .unwrap(),
-        );
+        let stuffed_pixels = rgba(&render_png(&stuffed, 3, 3));
         assert_eq!(stuffed_pixels, clean_pixels);
     }
 
@@ -829,7 +814,7 @@ mod tests {
         let refusal = render(
             &stuffed,
             &recipe(&stuffed, 3, 3, OutputFormat::Png, None),
-            &active,
+            &NO_CANCELLATION,
         )
         .unwrap_err();
         assert_eq!(
@@ -859,7 +844,7 @@ mod tests {
         let png = render(
             source,
             &recipe(source, 1, 1, OutputFormat::Png, None),
-            &active,
+            &NO_CANCELLATION,
         )
         .unwrap();
         assert_eq!(rgba(&png), [32, 128, 224, 255]);
@@ -876,7 +861,7 @@ mod tests {
             None,
         );
         let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-        let output = render(&source, &recipe, &active).unwrap();
+        let output = render(&source, &recipe, &NO_CANCELLATION).unwrap();
         assert_eq!(rgba(&output), [255, 0, 0, 128]);
     }
 
@@ -894,7 +879,37 @@ mod tests {
         }
         let source = png(&[255, 0, 0], 1, 1, ExtendedColorType::Rgb8, None, None);
         let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-        assert!(render(&source[..source.len() - 5], &recipe, &active).is_err());
+        assert!(render(&source[..source.len() - 5], &recipe, &NO_CANCELLATION).is_err());
+    }
+
+    /// A plane beyond the decoder's budget is refused before any pixel is allocated.
+    #[test]
+    fn decoding_refuses_oversized_plane() {
+        let source = oversized_png(20_000, 20_000);
+        let error = DecodedSource::open(&source, &NO_CANCELLATION)
+            .err()
+            .expect("a 1.6 GB plane exceeds the 512 MiB budget");
+        assert!(
+            format!("{error:#}").contains("too large to decode"),
+            "{error:#}"
+        );
+    }
+
+    fn oversized_png(width: u32, height: u32) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut header = Vec::new();
+        header.extend_from_slice(&width.to_be_bytes());
+        header.extend_from_slice(&height.to_be_bytes());
+        header.extend_from_slice(&[8, 6, 0, 0, 0]);
+        bytes.extend(png_chunk(b"IHDR", &header));
+        // An empty zlib stream: the decoder needs an IDAT to accept the header, but the budget
+        // check refuses the plane before any of it is inflated.
+        bytes.extend(png_chunk(
+            b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ));
+        bytes.extend(png_chunk(b"IEND", &[]));
+        bytes
     }
 
     #[test]
@@ -913,11 +928,11 @@ mod tests {
         let metadata = inspect(&source).unwrap();
         assert_eq!((metadata.width, metadata.height), (1, 2));
         let recipe = recipe(&source, 1, 2, OutputFormat::Png, None);
-        let output = render(&source, &recipe, &active).unwrap();
+        let output = render(&source, &recipe, &NO_CANCELLATION).unwrap();
         assert_eq!(rgba(&output), [1, 0, 0, 255, 2, 0, 0, 255]);
         source[before_iend + 8 + 18] = 8;
         assert!(inspect(&source).is_err());
-        assert!(render(&source, &recipe, &active).is_err());
+        assert!(render(&source, &recipe, &NO_CANCELLATION).is_err());
     }
 
     #[test]

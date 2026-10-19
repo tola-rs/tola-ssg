@@ -7,8 +7,12 @@ use image::ColorType;
 use moxcms::{ColorProfile, DataColorSpace, Layout, RenderingIntent, TransformOptions};
 
 use crate::cancellation::Cancellation;
-use crate::pixel_bytes;
 use crate::rows::rewrite_rows_in_place;
+
+/// How an embedded profile that cannot govern the samples reads.
+const PROFILE_UNSUPPORTED: &str =
+    "the embedded color profile cannot be applied to this image; convert the image to sRGB";
+use crate::{HOLD_IN_MEMORY, pixel_bytes};
 
 /// How a decode converts its samples to sRGB.
 pub(in crate::codec) enum ColorTransform<'a> {
@@ -46,8 +50,8 @@ pub(in crate::codec) fn normalize_color(
     let grayscale = matches!(layout, Layout::Gray | Layout::GrayAlpha);
     let profile = match transform {
         Some(ColorTransform::Icc(icc)) => {
-            let profile = ColorProfile::new_from_slice(icc.as_ref())
-                .context("the embedded color profile is damaged; convert the image to sRGB")?;
+            let profile =
+                ColorProfile::new_from_slice(icc.as_ref()).context(super::PROFILE_DAMAGED)?;
             ensure!(
                 profile.color_space
                     == if grayscale {
@@ -126,9 +130,7 @@ pub(in crate::codec) fn normalize_color(
     if is_sixteen_bit {
         let transform = profile
             .create_transform_16bit(color_layout, srgb, Layout::Rgba, options)
-            .context(
-                "the embedded color profile cannot be applied to this image; convert the image to sRGB",
-            )?;
+            .context(PROFILE_UNSUPPORTED)?;
         cancellation.ensure_active()?;
         rewrite_plane(
             raw,
@@ -154,9 +156,9 @@ pub(in crate::codec) fn normalize_color(
                         *sample = u16::from_ne_bytes([bytes[0], bytes[1]]);
                     }
                 }
-                transform.transform(input_row, output_row).context(
-                    "the embedded color profile cannot be applied to this image; convert the image to sRGB",
-                )?;
+                transform
+                    .transform(input_row, output_row)
+                    .context(PROFILE_UNSUPPORTED)?;
                 for (dst, src) in output.iter_mut().zip(output_row.iter()) {
                     *dst = ((u32::from(*src) + 128) / 257) as u8;
                 }
@@ -176,9 +178,7 @@ pub(in crate::codec) fn normalize_color(
     } else {
         let transform = profile
             .create_transform_8bit(color_layout, srgb, Layout::Rgba, options)
-            .context(
-                "the embedded color profile cannot be applied to this image; convert the image to sRGB",
-            )?;
+            .context(PROFILE_UNSUPPORTED)?;
         cancellation.ensure_active()?;
         rewrite_plane(
             raw,
@@ -206,9 +206,9 @@ pub(in crate::codec) fn normalize_color(
                 } else {
                     input
                 };
-                transform.transform(color_input, output).context(
-                    "the embedded color profile cannot be applied to this image; convert the image to sRGB",
-                )?;
+                transform
+                    .transform(color_input, output)
+                    .context(PROFILE_UNSUPPORTED)?;
                 if layout.has_alpha() {
                     for (source, destination) in input
                         .chunks_exact(layout.channels())
@@ -246,7 +246,7 @@ where
     let mut rgba = raw;
     if rgba.len() < destination_bytes {
         rgba.try_reserve_exact(destination_bytes - rgba.len())
-            .context("the image is too large to hold in memory; use a smaller image")?;
+            .context(HOLD_IN_MEMORY)?;
         rgba.resize(destination_bytes, 0);
     }
     rewrite_rows_in_place(
@@ -265,6 +265,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::codec::render;
     use crate::codec::test_support::*;
@@ -283,12 +284,7 @@ mod tests {
             Some(profile),
             None,
         );
-        let output = render(
-            &source,
-            &recipe(&source, 1, 1, OutputFormat::Png, None),
-            &active,
-        )
-        .unwrap();
+        let output = render_png(&source, 1, 1);
         let pixel = rgba(&output);
         assert!((185..=190).contains(&pixel[0]));
         assert_eq!(pixel[0], pixel[1]);
@@ -308,12 +304,7 @@ mod tests {
     #[test]
     fn jpeg_colour_profile_is_applied() {
         let source = linear_icc_jpeg();
-        let output = render(
-            &source,
-            &recipe(&source, 3, 3, OutputFormat::Png, None),
-            &active,
-        )
-        .unwrap();
+        let output = render_png(&source, 3, 3);
         let pixel = rgba(&output);
         assert!(
             (180..=195).contains(&pixel[0]),
@@ -338,12 +329,7 @@ mod tests {
             Some(profile),
             None,
         );
-        let output = render(
-            &source,
-            &recipe(&source, 1, 1, OutputFormat::Png, None),
-            &active,
-        )
-        .unwrap();
+        let output = render_png(&source, 1, 1);
         let pixel = rgba(&output);
         assert!(
             pixel[..3]
@@ -367,7 +353,7 @@ mod tests {
                 None,
             );
             let recipe = recipe(&source, 1, 1, OutputFormat::Png, None);
-            assert!(render(&source, &recipe, &active).is_err());
+            assert!(render(&source, &recipe, &NO_CANCELLATION).is_err());
         }
     }
 
@@ -375,12 +361,7 @@ mod tests {
     fn png_gamma_is_applied_without_icc() {
         let mut source = png(&[128, 128, 128], 1, 1, ExtendedColorType::Rgb8, None, None);
         insert_png_chunk(&mut source, b"gAMA", &100_000u32.to_be_bytes());
-        let output = render(
-            &source,
-            &recipe(&source, 1, 1, OutputFormat::Png, None),
-            &active,
-        )
-        .unwrap();
+        let output = render_png(&source, 1, 1);
         assert!(
             rgba(&output)[..3]
                 .iter()

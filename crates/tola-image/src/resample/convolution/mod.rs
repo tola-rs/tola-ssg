@@ -8,13 +8,13 @@ use self::intermediate::{ACCUMULATE_PIXELS, WINDOW_ROWS, accumulate_tile, finish
 use self::intermediate::{accumulate_covered_tile, covered_windows, dot_window, dot_window_four};
 use self::output::{LANES, block, covered_taps, taps, write_covered_pixel, write_pixel};
 use crate::cancellation::Cancellation;
-use crate::pixel_bytes;
 use crate::recipe::PixelRecipe;
 use crate::resample::plane::{AlphaRepresentation, CoveredPlane, PreparedRows, SourcePlane};
 use crate::resample::reduce::{ReducedBlock, box_averaged, covered_box_averaged};
 use crate::resample::weights::{AxisWeights, check_coverage_bounds, quantize_coverage};
 use crate::rgba_buffer;
 use crate::rows::for_each_row;
+use crate::{HOLD_IN_MEMORY, pixel_bytes};
 
 mod intermediate;
 mod output;
@@ -108,7 +108,7 @@ fn convolve_opaque(
     intermediate.clear();
     intermediate
         .try_reserve_exact(samples)
-        .context("the image is too large to hold in memory; use a smaller image")?;
+        .context(HOLD_IN_MEMORY)?;
     intermediate.resize(samples, [0i16; 4]);
     let level = Level::new();
     into_intermediate(
@@ -167,7 +167,7 @@ fn convolve_covered(
     intermediate.clear();
     intermediate
         .try_reserve_exact(samples)
-        .context("the image is too large to hold in memory; use a smaller image")?;
+        .context(HOLD_IN_MEMORY)?;
     intermediate.resize(samples, [0i32; 4]);
     let level = Level::new();
     into_covered_intermediate(
@@ -300,9 +300,7 @@ fn into_covered_intermediate(
                     if prepared.len() < samples {
                         prepared
                             .try_reserve_exact(samples - prepared.len())
-                            .context(
-                                "the image is too large to hold in memory; use a smaller image",
-                            )?;
+                            .context(HOLD_IN_MEMORY)?;
                         prepared.resize(samples, [0; 4]);
                     }
                     for offset in 0..count {

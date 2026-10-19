@@ -1,12 +1,12 @@
 //! Freeze build-selected dependencies without exposing an incomplete vendor tree.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
 use tola_build::{BuildResources, InputScope};
@@ -16,7 +16,7 @@ use crate::cli::output::CommandOutput;
 use crate::cli::{ConfigFileArgs, TypstPackageArgs, VendorArgs};
 use crate::terminal::{InputCancelled, display_path_within};
 
-const VENDOR_TREES: [&str; 3] = ["typst-packages", "fonts", "icons"];
+const VENDOR_TREES: [&str; 2] = ["typst-packages", "icons"];
 
 /// The next step for a reader whose `vendor.path` cannot hold a fresh replacement.
 const VENDOR_PATH_CONFLICT_ADVICE: &str =
@@ -57,6 +57,22 @@ pub(in crate::cli) fn run(
     if vendor.dry_run {
         VendorReplacement::reject_interrupted_install(&config)?;
     }
+    // Earlier releases froze host fonts under `fonts/`; Tola reads no vendored fonts now.
+    if let Some(root) = config.vendor().path.as_ref() {
+        let legacy = root.join("fonts");
+        if legacy.is_dir() {
+            let display = tola_build::filesystem::display_path(&legacy, config.get_root());
+            if vendor.dry_run {
+                output.status(format!("Would remove the obsolete `{display}`"))?;
+            } else {
+                fs::remove_dir_all(&legacy)
+                    .with_context(|| format!("could not remove the obsolete `{display}`"))?;
+                output.status(format!(
+                    "Removed the obsolete `{display}`; fonts are site inputs under `[typst.fonts] paths`"
+                ))?;
+            }
+        }
+    }
     let replacement = VendorReplacement::open(&config)?;
     let resources = resources.with_input_scope(scope);
     let prepared: Result<()> = (|| {
@@ -88,9 +104,6 @@ pub(in crate::cli) fn run(
                 &candidate.join("typst-packages").join(&package.relative),
                 &mut Vec::new(),
             )?;
-        }
-        for font in &selection.fonts {
-            copy.file(&font.source, &candidate.join("fonts").join(&font.name))?;
         }
         copy.icons(&icons)?;
         selection.site.ensure_fresh(&cancellation)?;
@@ -197,15 +210,9 @@ struct SelectedPackage {
     relative: PathBuf,
 }
 
-struct SelectedFont {
-    source: PathBuf,
-    name: std::ffi::OsString,
-}
-
 struct SelectedInputs {
     site: tola_build::build::SiteBuild,
     packages: Vec<SelectedPackage>,
-    fonts: Vec<SelectedFont>,
 }
 
 fn build_without_hooks(
@@ -218,6 +225,8 @@ fn build_without_hooks(
         tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production);
     request.cancellation = cancellation.clone();
     request.hook_execution = tola_build::build::HookExecution::Skip;
+    // Resolve frozen inputs, not site validity: references belong to `tola check`.
+    request.reference_checks = tola_build::build::ReferenceChecks::Skip;
     // The caller holds the site lock across selection, verification, and replacement.
     session
         .prepare(config, request)
@@ -255,45 +264,9 @@ fn select_inputs(
             },
         );
     }
-    let configured_fonts = config
-        .fonts()
-        .paths
-        .iter()
-        .map(|path| tola_build::filesystem::normalize_existing_prefix(path))
-        .collect::<Vec<_>>();
-    let font_paths = observation
-        .paths()
-        .iter()
-        .filter(|path| path.input() == tola_build::build::InputKind::FontInventory)
-        .map(|path| tola_build::filesystem::normalize_existing_prefix(path.path()))
-        .filter(|path| {
-            !configured_fonts
-                .iter()
-                .any(|configured| path.starts_with(configured))
-        })
-        .collect::<BTreeSet<_>>();
-    let mut fonts = BTreeMap::new();
-    for source in font_paths {
-        let name = source
-            .file_name()
-            .with_context(|| format!("`{}` has no font file name", source.display()))?
-            .to_owned();
-        if let Some(previous) = fonts.insert(name.clone(), source.clone()) {
-            bail!(
-                "`{}` and `{}` are both named `{}`; keep one in `typst.fonts.paths` instead",
-                previous.display(),
-                source.display(),
-                name.to_string_lossy()
-            );
-        }
-    }
     Ok(SelectedInputs {
         site,
         packages: packages.into_values().collect(),
-        fonts: fonts
-            .into_iter()
-            .map(|(name, source)| SelectedFont { source, name })
-            .collect(),
     })
 }
 
@@ -318,7 +291,7 @@ fn reject_previous_inputs(
         let physical = tola_build::filesystem::normalize_existing_prefix(path);
         ensure!(
             !previous.iter().any(|root| physical.starts_with(root)),
-            "the build still reads `{}` from the previous vendor inputs; keep site-owned sources outside `typst-packages`, `fonts`, and `icons`",
+            "the build still reads `{}` from the previous vendor inputs; keep site-owned sources outside `typst-packages` and `icons`",
             replacement.display_destination(path)
         );
     }
@@ -348,21 +321,6 @@ fn show_selection(
         output.status(format!(
             "{action} `{}` into `{}`",
             package.package,
-            replacement.display_destination(&destination)
-        ))?;
-    }
-    for font in &selection.fonts {
-        let destination = replacement.root.join("fonts").join(&font.name);
-        tracing::debug!(
-            target: "tola::vendor",
-            font = %font.name.to_string_lossy(),
-            source = %font.source.display(),
-            destination = %destination.display(),
-            "selected vendored font"
-        );
-        output.status(format!(
-            "{action} font `{}` into `{}`",
-            font.name.to_string_lossy(),
             replacement.display_destination(&destination)
         ))?;
     }
@@ -1181,7 +1139,7 @@ mod tests {
         let replacement = replacement(site.path());
         seed_old_package(&replacement);
         fs::write(replacement.root.join("notes.txt"), b"author notes").unwrap();
-        fs::write(replacement.workspace.join("replacing"), b"100").unwrap();
+        fs::write(replacement.workspace.join("replacing"), b"10").unwrap();
         fs::rename(
             replacement.root.join("typst-packages"),
             replacement.workspace.join("previous/typst-packages"),
@@ -1197,11 +1155,6 @@ mod tests {
             b"incomplete replacement",
         )
         .unwrap();
-        fs::rename(
-            replacement.candidate().join("fonts"),
-            replacement.root.join("fonts"),
-        )
-        .unwrap();
         replacement.discard().unwrap();
         assert_eq!(
             fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
@@ -1211,7 +1164,6 @@ mod tests {
             fs::read(replacement.root.join("notes.txt")).unwrap(),
             b"author notes"
         );
-        assert!(!replacement.root.join("fonts").exists());
     }
 
     #[test]
@@ -1254,7 +1206,7 @@ mod tests {
         let site = tempfile::TempDir::new().unwrap();
         let replacement = replacement(site.path());
         fs::create_dir(&replacement.root).unwrap();
-        fs::write(replacement.workspace.join("replacing"), b"000").unwrap();
+        fs::write(replacement.workspace.join("replacing"), b"00").unwrap();
         fs::rename(
             replacement.candidate().join("typst-packages"),
             replacement.root.join("typst-packages"),
@@ -1371,12 +1323,12 @@ mod tests {
         );
 
         assert_eq!(
-            copy.vendored_destination(&replacement.candidate().join("fonts/Inter.ttf")),
-            "vendor/fonts/Inter.ttf"
+            copy.vendored_destination(&replacement.candidate().join("icons/lucide.json")),
+            "vendor/icons/lucide.json"
         );
         assert_eq!(
-            copy.vendored_destination(&replacement.workspace.join("previous/fonts/Inter.ttf")),
-            "vendor/fonts/Inter.ttf"
+            copy.vendored_destination(&replacement.workspace.join("previous/icons/lucide.json")),
+            "vendor/icons/lucide.json"
         );
         assert_eq!(
             copy.vendored_destination(&replacement.workspace.join("replacing")),
@@ -1403,7 +1355,7 @@ mod tests {
             b"committed inputs",
         )
         .unwrap();
-        fs::write(replacement.workspace.join("replacing"), b"100").unwrap();
+        fs::write(replacement.workspace.join("replacing"), b"10").unwrap();
         fs::create_dir(replacement.workspace.join("committed")).unwrap();
 
         assert!(VendorReplacement::reject_interrupted_install(&config).is_ok());

@@ -9,13 +9,13 @@ mod plane;
 mod reduce;
 mod weights;
 
-use anyhow::Result;
+use anyhow::{Result, bail, ensure};
 use image::metadata::Orientation;
 
 use crate::cancellation::Cancellation;
 use crate::recipe::{Background, PixelRecipe, ResizeFilter};
-use crate::rgba_buffer;
 use crate::rows::{any_row, for_each_row};
+use crate::{pixel_bytes, rgba_buffer};
 
 use convolution::convolved_pixels;
 use nearest::nearest_pixels;
@@ -44,6 +44,49 @@ impl ResampledPixels {
     pub const fn pixels(&self) -> PixelRecipe {
         self.pixels
     }
+
+    /// Build pixels that were rendered directly, such as an SVG raster, rather than resampled.
+    ///
+    /// `rgba` is row-major straight-alpha sRGB, `width × height` pixels. A background
+    /// composites it exactly as a resampled plane would.
+    pub fn from_rendered(
+        pixels: PixelRecipe,
+        rgba: Vec<u8>,
+        cancellation: &dyn Cancellation,
+    ) -> Result<Self> {
+        cancellation.ensure_active()?;
+        ensure!(
+            rgba.len() == pixel_bytes(pixels.width(), pixels.height(), 4)?,
+            "the rendered pixels do not match their recipe"
+        );
+        Self::assembled(pixels, rgba, false, cancellation)
+    }
+
+    /// Finish one plane: composite its background, or record whether it stayed opaque.
+    fn assembled(
+        pixels: PixelRecipe,
+        mut rgba: Vec<u8>,
+        opaque: bool,
+        cancellation: &dyn Cancellation,
+    ) -> Result<Self> {
+        if let Some(background) = pixels.background {
+            flatten_onto(&mut rgba, pixels.width(), background, cancellation)?;
+            return Ok(Self {
+                pixels,
+                rgba,
+                has_transparency: false,
+            });
+        }
+        let has_transparency = !opaque
+            && any_row(rgba.as_chunks::<4>().0, pixels.width() as usize, |pixel| {
+                pixel[3] != u8::MAX
+            });
+        Ok(Self {
+            pixels,
+            rgba,
+            has_transparency,
+        })
+    }
 }
 
 /// Crop, resample, and flatten decoded pixels into the pixels one recipe publishes.
@@ -56,49 +99,28 @@ pub(crate) fn resample(
     pixels: PixelRecipe,
     cancellation: &dyn Cancellation,
 ) -> Result<ResampledPixels> {
+    let Some(crop) = pixels.raster_crop() else {
+        bail!("vector recipes are rendered, not resampled");
+    };
     let alpha = if opaque {
         AlphaRepresentation::Opaque
     } else {
         AlphaRepresentation::Straight
     };
-    let mut plane = source_plane(
-        rgba,
-        width,
-        height,
-        orientation,
-        pixels.crop,
-        alpha,
-        cancellation,
-    )?;
+    let mut plane = source_plane(rgba, width, height, orientation, crop, alpha, cancellation)?;
     let identity = (pixels.width(), pixels.height()) == (plane.width(), plane.height());
     if !identity && pixels.filter != ResizeFilter::Nearest {
         plane.mark_opaque_if_covered(cancellation)?;
     }
     let opaque = plane.alpha() == AlphaRepresentation::Opaque;
-    let mut rgba = match plane {
+    let rgba = match plane {
         SourcePlane::Materialized { pixels: rgba, .. } if identity => {
             cancellation.ensure_active()?;
             rgba
         }
         plane => resized_pixels(&plane, pixels, cancellation)?,
     };
-    if let Some(background) = pixels.background {
-        flatten_onto(&mut rgba, pixels.width(), background, cancellation)?;
-        return Ok(ResampledPixels {
-            pixels,
-            rgba,
-            has_transparency: false,
-        });
-    }
-    let has_transparency = !opaque
-        && any_row(rgba.as_chunks::<4>().0, pixels.width() as usize, |pixel| {
-            pixel[3] != u8::MAX
-        });
-    Ok(ResampledPixels {
-        pixels,
-        rgba,
-        has_transparency,
-    })
+    ResampledPixels::assembled(pixels, rgba, opaque, cancellation)
 }
 
 fn resized_pixels(
@@ -165,8 +187,9 @@ mod tests {
     use super::convolution::convolved_reduced;
     use super::*;
     use crate::ImageCancelled;
+    use crate::NO_CANCELLATION;
     use crate::recipe::{ImageRecipe, OutputFormat, ResizeOperation, ResizeOptions};
-    use crate::resample::test_support::{active, plane};
+    use crate::resample::test_support::plane;
     use crate::{ImageFormat, ImageMetadata};
 
     fn pixels(
@@ -200,9 +223,9 @@ mod tests {
                 height: Some(height),
                 operation: ResizeOperation::Scale,
                 format: OutputFormat::Png,
-                quality: None,
                 filter,
                 background,
+                ..ResizeOptions::default()
             },
         )
         .unwrap()
@@ -233,7 +256,7 @@ mod tests {
                     ResizeFilter::Lanczos3,
                 ] {
                     let recipe = resolve(width, height, output_width, output_height, filter, None);
-                    let encoded = crate::render(&source, &recipe, &active).unwrap();
+                    let encoded = crate::render(&source, &recipe, &NO_CANCELLATION).unwrap();
                     let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
                     for pixel in decoded.pixels() {
                         assert_eq!(
@@ -313,7 +336,7 @@ mod tests {
                 ResizeFilter::Lanczos3,
             ] {
                 let recipe = resolve(case.width, case.height, 1, 1, filter, None);
-                let encoded = crate::render(&source, &recipe, &active).unwrap();
+                let encoded = crate::render(&source, &recipe, &NO_CANCELLATION).unwrap();
                 let published = image::load_from_memory(&encoded).unwrap().to_rgba8();
                 assert_eq!(
                     published.as_raw().as_slice(),
@@ -340,7 +363,7 @@ mod tests {
             )
             .unwrap();
         let recipe = resolve(1000, 1000, 1, 1, ResizeFilter::Triangle, None);
-        let encoded = crate::render(&source, &recipe, &active).unwrap();
+        let encoded = crate::render(&source, &recipe, &NO_CANCELLATION).unwrap();
         assert_eq!(
             image::load_from_memory(&encoded)
                 .unwrap()
@@ -354,8 +377,12 @@ mod tests {
     fn identity_geometry_returns_source_pixels() {
         let source = [1u8, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255];
         let plane = plane(&source, 2, 2, AlphaRepresentation::Opaque);
-        let resized =
-            resized_pixels(&plane, pixels(2, 2, 2, 2, ResizeFilter::Lanczos3), &active).unwrap();
+        let resized = resized_pixels(
+            &plane,
+            pixels(2, 2, 2, 2, ResizeFilter::Lanczos3),
+            &NO_CANCELLATION,
+        )
+        .unwrap();
         assert_eq!(resized, source);
     }
 
@@ -379,8 +406,8 @@ mod tests {
         let source = plane(&source, width, height, AlphaRepresentation::Opaque);
         for (out_width, out_height) in [(12u32, 8u32), (6, 4), (24, 16)] {
             let recipe = pixels(width, height, out_width, out_height, ResizeFilter::Lanczos3);
-            let fair = convolved_reduced(&source, recipe, &active).unwrap();
-            let staged = convolved_pixels(&source, recipe, &active).unwrap();
+            let fair = convolved_reduced(&source, recipe, &NO_CANCELLATION).unwrap();
+            let staged = convolved_pixels(&source, recipe, &NO_CANCELLATION).unwrap();
             // One source column of a 0..255 ramp, spread over the source pixels that land in one
             // output pixel: the most a half-source-pixel shift can move an output sample.
             let step = 255.0 / (width - 1) as f64;
@@ -408,7 +435,7 @@ mod tests {
             let resized = resized_pixels(
                 &source,
                 pixels(12, 12, width, height, ResizeFilter::Lanczos3),
-                &active,
+                &NO_CANCELLATION,
             )
             .unwrap();
             for pixel in resized.as_chunks::<4>().0 {
@@ -439,7 +466,8 @@ mod tests {
             AlphaRepresentation::Straight,
         );
         for filter in [ResizeFilter::CatmullRom, ResizeFilter::Lanczos3] {
-            let resized = resized_pixels(&source, pixels(2, 2, 5, 5, filter), &active).unwrap();
+            let resized =
+                resized_pixels(&source, pixels(2, 2, 5, 5, filter), &NO_CANCELLATION).unwrap();
             for pixel in resized.as_chunks::<4>().0 {
                 // Partial coverage carries its own premultiplied rounding, so the visible-color
                 // invariant is only meaningful where the output is fully covered.
@@ -467,7 +495,7 @@ mod tests {
                 green: 255,
                 blue: 255,
             },
-            &active,
+            &NO_CANCELLATION,
         )
         .unwrap();
         assert_eq!(
@@ -508,7 +536,7 @@ mod tests {
                     Orientation::NoTransforms,
                     false,
                     pixels(width, height, out_width, out_height, filter),
-                    &active,
+                    &NO_CANCELLATION,
                 )
                 .unwrap();
                 let opaque = resample(
@@ -518,7 +546,7 @@ mod tests {
                     Orientation::NoTransforms,
                     true,
                     pixels(width, height, out_width, out_height, filter),
-                    &active,
+                    &NO_CANCELLATION,
                 )
                 .unwrap();
                 assert_eq!(
@@ -559,7 +587,7 @@ mod tests {
             let resized = resized_pixels(
                 &source,
                 pixels(width, height, output_width, output_height, filter),
-                &active,
+                &NO_CANCELLATION,
             )
             .unwrap();
             for pixel in resized.as_chunks::<4>().0 {
@@ -577,7 +605,8 @@ mod tests {
         source[4 * 4..4 * 4 + 3].copy_from_slice(&[255, 255, 255]);
         let plane = plane(&source, 8, 1, AlphaRepresentation::Opaque);
         let spread = |filter| {
-            let resized = resized_pixels(&plane, pixels(8, 1, 32, 1, filter), &active).unwrap();
+            let resized =
+                resized_pixels(&plane, pixels(8, 1, 32, 1, filter), &NO_CANCELLATION).unwrap();
             resized
                 .as_chunks::<4>()
                 .0
@@ -604,11 +633,6 @@ mod tests {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::plane::{AlphaRepresentation, SourcePlane};
-
-    /// A cancellation request that never fires, so a test exercises the pixels alone.
-    pub(super) fn active() -> bool {
-        false
-    }
 
     /// A window over pixels a test owns.
     pub(super) fn plane(

@@ -7,17 +7,20 @@ use super::le32;
 use crate::cancellation::{Cancellation, ensure_active_if_present};
 use crate::check_dimensions;
 
+/// How a damaged WebP reads to a site author.
+const DAMAGED: &str = "the WebP image is damaged or incomplete; re-export it";
+
 pub(in crate::codec) fn scan_webp<'a>(
     bytes: &'a [u8],
     cancellation: Option<&dyn Cancellation>,
 ) -> Result<ContainerMetadata<'a>> {
     ensure!(
         bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
-        "the WebP image is damaged or incomplete; re-export it"
+        DAMAGED
     );
     ensure!(
         u64::from(le32(&bytes[4..8])) + 8 == bytes.len() as u64,
-        "the WebP image is damaged or incomplete; re-export it"
+        DAMAGED
     );
     let mut metadata = ContainerMetadata::default();
     let mut profile = None;
@@ -25,29 +28,19 @@ pub(in crate::codec) fn scan_webp<'a>(
     let mut offset = 12usize;
     while offset < bytes.len() {
         ensure_active_if_present(cancellation)?;
-        let header = bytes
-            .get(offset..offset + 8)
-            .context("the WebP image is damaged or incomplete; re-export it")?;
+        let header = bytes.get(offset..offset + 8).context(DAMAGED)?;
         let length = le32(&header[4..8]) as usize;
         let end = offset
             .checked_add(8)
             .and_then(|start| start.checked_add(length))
-            .context("the WebP image is damaged or incomplete; re-export it")?;
-        let padded_end = end
-            .checked_add(length & 1)
-            .context("the WebP image is damaged or incomplete; re-export it")?;
-        ensure!(
-            padded_end <= bytes.len(),
-            "the WebP image is damaged or incomplete; re-export it"
-        );
+            .context(DAMAGED)?;
+        let padded_end = end.checked_add(length & 1).context(DAMAGED)?;
+        ensure!(padded_end <= bytes.len(), DAMAGED);
         let data = &bytes[offset + 8..end];
         match &header[..4] {
             b"VP8 " => metadata.is_lossy = true,
             b"VP8X" => {
-                ensure!(
-                    data.len() == 10,
-                    "the WebP image is damaged or incomplete; re-export it"
-                );
+                ensure!(data.len() == 10, DAMAGED);
                 let width = 1 + u32::from_le_bytes([data[4], data[5], data[6], 0]);
                 let height = 1 + u32::from_le_bytes([data[7], data[8], data[9], 0]);
                 check_dimensions(width, height)?;

@@ -2,12 +2,11 @@
 //!
 //! Share a [`FontStore`] across compilations with the same font configuration.
 //!
-//! # Font Sources
+//! # Precedence
 //!
-//! Fonts are searched in order:
-//! 1. Custom paths provided at initialization (e.g., site fonts)
-//! 2. System fonts (if enabled)
-//! 3. Embedded fonts (if enabled via `embed-fonts` feature)
+//! Faces join one store in search order: configured directories, system fonts, then the fonts
+//! this binary carries. An equal match keeps the earlier face, so a site's own font wins over a
+//! same-named carried one and the carried set serves as the fallback.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -53,8 +52,10 @@ const FONT_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub struct FontOptions {
     /// Whether to include system fonts.
     pub include_system_fonts: bool,
-    /// Whether to include embedded fonts (New Computer Modern, etc.).
-    /// Only effective when `embed-fonts` feature is enabled.
+    /// Whether to include the four text families this binary carries: Libertinus Serif, New
+    /// Computer Modern, New Computer Modern Math, and DejaVu Sans Mono.
+    ///
+    /// Only effective with the `embed-fonts` feature.
     pub include_embedded_fonts: bool,
     /// Custom font directories to search.
     pub custom_paths: Vec<PathBuf>,
@@ -81,10 +82,7 @@ impl FontOptions {
         self
     }
 
-    /// Set whether to include embedded fonts.
-    ///
-    /// Embedded fonts include New Computer Modern Math and other default fonts.
-    /// Only effective when `embed-fonts` feature is enabled.
+    /// Set whether to include the fonts this binary carries.
     pub fn with_embedded_fonts(mut self, include: bool) -> Self {
         self.include_embedded_fonts = include;
         self

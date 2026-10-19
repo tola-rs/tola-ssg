@@ -107,8 +107,8 @@ impl ResolvedSiteConfig {
 
     /// Whether the configuration source declares `typst.fonts.paths` itself.
     ///
-    /// An absent key falls back to the scaffold's directory, which a site relying on the fonts
-    /// Tola carries need not create.
+    /// An absent key falls back to the scaffold's directory, which a site using Tola's embedded
+    /// fonts need not create.
     pub fn declares_font_paths(&self) -> bool {
         self.declares_font_paths
     }
@@ -121,14 +121,11 @@ impl ResolvedSiteConfig {
         self.typst.fonts.system && resources.include_system_fonts()
     }
 
-    /// Every directory the compiler discovers fonts in, in search order.
-    ///
-    /// This invocation's own directories come first, then the site's configured paths, then the
-    /// vendored copy, whose faces the site keeps so a `--pure` build can use them.
+    /// Every directory the compiler discovers fonts in, in search order: this invocation's
+    /// own directories, then the site's configured paths.
     pub fn compiler_font_directories(&self, resources: &BuildResources) -> Vec<PathBuf> {
         let mut directories = resources.font_directories().to_vec();
         directories.extend(self.typst.fonts.paths.iter().cloned());
-        directories.extend(self.vendor.fonts().filter(|path| path.is_dir()));
         directories
     }
 
@@ -371,17 +368,18 @@ mod tests {
             vec![root.join("fonts")]
         );
 
+        // Fonts are site inputs: a vendored directory never joins the search path.
         std::fs::create_dir_all(root.join("vendor/fonts")).unwrap();
         assert_eq!(
             config.compiler_font_directories(&resources),
-            vec![root.join("fonts"), root.join("vendor/fonts")]
+            vec![root.join("fonts")]
         );
 
         let invocation = std::path::PathBuf::from("/host/fonts");
         let resources = resources.with_font_directories(vec![invocation.clone()]);
         assert_eq!(
             config.compiler_font_directories(&resources),
-            vec![invocation, root.join("fonts"), root.join("vendor/fonts")]
+            vec![invocation, root.join("fonts")]
         );
     }
 }

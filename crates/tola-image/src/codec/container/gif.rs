@@ -7,6 +7,9 @@ use super::le16;
 use crate::cancellation::{Cancellation, ensure_active_if_present};
 use crate::check_dimensions;
 
+/// How a damaged GIF reads to a site author.
+const DAMAGED: &str = "the GIF image is damaged or incomplete; re-export it";
+
 fn gif_sub_blocks(
     bytes: &[u8],
     offset: &mut usize,
@@ -15,18 +18,12 @@ fn gif_sub_blocks(
 ) -> Result<()> {
     loop {
         ensure_active_if_present(cancellation)?;
-        let length = usize::from(
-            *bytes
-                .get(*offset)
-                .context("the GIF image is damaged or incomplete; re-export it")?,
-        );
+        let length = usize::from(*bytes.get(*offset).context(DAMAGED)?);
         *offset += 1;
         if length == 0 {
             return Ok(());
         }
-        let block = bytes
-            .get(*offset..*offset + length)
-            .context("the GIF image is damaged or incomplete; re-export it")?;
+        let block = bytes.get(*offset..*offset + length).context(DAMAGED)?;
         if let Some(output) = collect.as_deref_mut() {
             output.extend_from_slice(block);
         }
@@ -38,10 +35,7 @@ pub(in crate::codec) fn scan_gif<'a>(
     bytes: &'a [u8],
     cancellation: Option<&dyn Cancellation>,
 ) -> Result<ContainerMetadata<'a>> {
-    ensure!(
-        bytes.len() >= 13,
-        "the GIF image is damaged or incomplete; re-export it"
-    );
+    ensure!(bytes.len() >= 13, DAMAGED);
     let canvas_width = u32::from(le16(&bytes[6..8]));
     let canvas_height = u32::from(le16(&bytes[8..10]));
     check_dimensions(canvas_width, canvas_height)?;
@@ -57,29 +51,22 @@ pub(in crate::codec) fn scan_gif<'a>(
     let mut profile = None;
     loop {
         ensure_active_if_present(cancellation)?;
-        let marker = *bytes
-            .get(offset)
-            .context("the GIF image is damaged or incomplete; re-export it")?;
+        let marker = *bytes.get(offset).context(DAMAGED)?;
         offset += 1;
         match marker {
             0x3b => {
-                ensure!(
-                    frames > 0 && offset == bytes.len(),
-                    "the GIF image is damaged or incomplete; re-export it"
-                );
+                ensure!(frames > 0 && offset == bytes.len(), DAMAGED);
                 break;
             }
             0x2c => {
-                let descriptor = bytes
-                    .get(offset..offset + 9)
-                    .context("the GIF image is damaged or incomplete; re-export it")?;
+                let descriptor = bytes.get(offset..offset + 9).context(DAMAGED)?;
                 let width = u32::from(le16(&descriptor[4..6]));
                 let height = u32::from(le16(&descriptor[6..8]));
                 check_dimensions(width, height)?;
                 ensure!(
                     u32::from(le16(descriptor)) + width <= canvas_width
                         && u32::from(le16(&descriptor[2..4])) + height <= canvas_height,
-                    "the GIF image is damaged or incomplete; re-export it"
+                    DAMAGED
                 );
                 // The decoder leaves uncovered canvas transparent, ignoring the palette background.
                 has_alpha |= width != canvas_width || height != canvas_height;
@@ -88,40 +75,24 @@ pub(in crate::codec) fn scan_gif<'a>(
                 } else {
                     0
                 };
-                ensure!(
-                    bytes.get(offset).is_some(),
-                    "the GIF image is damaged or incomplete; re-export it"
-                );
+                ensure!(bytes.get(offset).is_some(), DAMAGED);
                 offset += 1;
                 gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
                 frames += 1;
                 metadata.is_animated |= frames > 1;
             }
             0x21 => {
-                let label = *bytes
-                    .get(offset)
-                    .context("the GIF image is damaged or incomplete; re-export it")?;
+                let label = *bytes.get(offset).context(DAMAGED)?;
                 offset += 1;
                 if label == 0xf9 {
-                    let control = bytes
-                        .get(offset..offset + 6)
-                        .context("the GIF image is damaged or incomplete; re-export it")?;
-                    ensure!(
-                        control[0] == 4 && control[5] == 0,
-                        "the GIF image is damaged or incomplete; re-export it"
-                    );
+                    let control = bytes.get(offset..offset + 6).context(DAMAGED)?;
+                    ensure!(control[0] == 4 && control[5] == 0, DAMAGED);
                     has_alpha |= control[1] & 1 != 0;
                     offset += 6;
                 } else if label == 0xff {
-                    let size = usize::from(
-                        *bytes
-                            .get(offset)
-                            .context("the GIF image is damaged or incomplete; re-export it")?,
-                    );
+                    let size = usize::from(*bytes.get(offset).context(DAMAGED)?);
                     offset += 1;
-                    let application = bytes
-                        .get(offset..offset + size)
-                        .context("the GIF image is damaged or incomplete; re-export it")?;
+                    let application = bytes.get(offset..offset + size).context(DAMAGED)?;
                     offset += size;
                     if application == b"ICCRGBG1012" {
                         ensure!(
@@ -138,7 +109,7 @@ pub(in crate::codec) fn scan_gif<'a>(
                     gif_sub_blocks(bytes, &mut offset, None, cancellation)?;
                 }
             }
-            _ => bail!("the GIF image is damaged or incomplete; re-export it"),
+            _ => bail!(DAMAGED),
         }
     }
     metadata.has_alpha = Some(has_alpha);
@@ -153,6 +124,7 @@ pub(in crate::codec) fn scan_gif<'a>(
 
 #[cfg(test)]
 mod tests {
+    use crate::NO_CANCELLATION;
     use crate::codec::test_support::*;
     use crate::codec::{inspect, render};
     use crate::{
@@ -175,7 +147,7 @@ mod tests {
             let jpeg = render(
                 &source,
                 &recipe(&source, 1, 1, OutputFormat::Jpeg, None),
-                &active,
+                &NO_CANCELLATION,
             )
             .unwrap();
             assert_eq!(inspect(&jpeg).unwrap().format, ImageFormat::Jpeg);
@@ -190,12 +162,7 @@ mod tests {
             source.splice(19..19, [0x21, 0xf9, 4, 1, 0, 0, transparent_index, 0]);
             let metadata = inspect(&source).unwrap();
             assert!(metadata.has_alpha);
-            let png = render(
-                &source,
-                &recipe(&source, 1, 1, OutputFormat::Png, None),
-                &active,
-            )
-            .unwrap();
+            let png = render_png(&source, 1, 1);
             assert_eq!(rgba(&png)[3], alpha);
             assert!(
                 ImageRecipe::resolve(
@@ -205,9 +172,8 @@ mod tests {
                         height: Some(1),
                         operation: ResizeOperation::Scale,
                         format: OutputFormat::Jpeg,
-                        quality: None,
                         filter: ResizeFilter::Triangle,
-                        background: None,
+                        ..ResizeOptions::default()
                     },
                 )
                 .is_err()
@@ -236,7 +202,7 @@ mod tests {
                     OutputFormat::Png,
                     None,
                 ),
-                &active,
+                &NO_CANCELLATION,
             )
             .unwrap();
             assert_eq!(rgba(&png), expected);
@@ -248,7 +214,7 @@ mod tests {
         let output = render(
             OPAQUE_GIF,
             &recipe(OPAQUE_GIF, 1, 1, OutputFormat::Png, None),
-            &active,
+            &NO_CANCELLATION,
         )
         .unwrap();
         assert_eq!(rgba(&output), [255, 255, 255, 255]);
@@ -262,6 +228,6 @@ mod tests {
             }
         }
         let recipe = recipe(&animation, 1, 1, OutputFormat::Png, None);
-        assert!(render(&animation, &recipe, &active).is_err());
+        assert!(render(&animation, &recipe, &NO_CANCELLATION).is_err());
     }
 }

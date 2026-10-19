@@ -48,8 +48,9 @@ pub(super) fn nearest_pixels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NO_CANCELLATION;
     use crate::resample::plane::AlphaRepresentation;
-    use crate::resample::test_support::{active, plane};
+    use crate::resample::test_support::plane;
 
     #[test]
     fn nearest_reads_the_nearest_sample() {
@@ -64,7 +65,7 @@ mod tests {
 
         let source = [1u8, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255];
         let source = plane(&source, 4, 1, AlphaRepresentation::Opaque);
-        let sampled = nearest_pixels(&source, 2, 1, &active).unwrap();
+        let sampled = nearest_pixels(&source, 2, 1, &NO_CANCELLATION).unwrap();
         assert_eq!(sampled, [4, 5, 6, 255, 10, 11, 12, 255]);
     }
 }

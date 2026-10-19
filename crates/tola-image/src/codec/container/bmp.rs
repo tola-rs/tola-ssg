@@ -5,17 +5,17 @@ use anyhow::{Context, Result, ensure};
 use super::super::{ContainerMetadata, SampleColor};
 use super::le32;
 
+/// How a damaged BMP reads to a site author.
+const DAMAGED: &str = "the BMP image is damaged or incomplete; re-export it";
+
 pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> Result<ContainerMetadata<'_>> {
-    ensure!(
-        bytes.len() >= 18,
-        "the BMP image is damaged or incomplete; re-export it"
-    );
+    ensure!(bytes.len() >= 18, DAMAGED);
     let header_length = le32(&bytes[14..18]) as usize;
     ensure!(
         14usize
             .checked_add(header_length)
             .is_some_and(|end| end <= bytes.len()),
-        "the BMP image is damaged or incomplete; re-export it"
+        DAMAGED
     );
     let mut metadata = ContainerMetadata::default();
     if header_length >= 108 {
@@ -31,17 +31,10 @@ pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> Result<ContainerMetadata<'_>> 
                     length > 0,
                     "the BMP image has an empty color profile; re-export it with sRGB colors"
                 );
-                let start = 14usize
-                    .checked_add(offset)
-                    .context("the BMP image is damaged or incomplete; re-export it")?;
-                let end = start
-                    .checked_add(length)
-                    .context("the BMP image is damaged or incomplete; re-export it")?;
-                metadata.color = SampleColor::StoredIcc(Cow::Borrowed(
-                    bytes
-                        .get(start..end)
-                        .context("the BMP image is damaged or incomplete; re-export it")?,
-                ));
+                let start = 14usize.checked_add(offset).context(DAMAGED)?;
+                let end = start.checked_add(length).context(DAMAGED)?;
+                metadata.color =
+                    SampleColor::StoredIcc(Cow::Borrowed(bytes.get(start..end).context(DAMAGED)?));
             }
             _ => {
                 metadata.color = SampleColor::Unsupported(
@@ -57,6 +50,7 @@ pub(in crate::codec) fn scan_bmp(bytes: &[u8]) -> Result<ContainerMetadata<'_>> 
 mod tests {
     use super::*;
     use crate::ImageFormat;
+    use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::codec::test_support::*;
     use crate::codec::{inspect, render};
@@ -73,12 +67,7 @@ mod tests {
             (metadata.width, metadata.height, metadata.format),
             (2, 1, ImageFormat::Bmp)
         );
-        let output = render(
-            &source,
-            &recipe(&source, 2, 1, OutputFormat::Png, None),
-            &active,
-        )
-        .unwrap();
+        let output = render_png(&source, 2, 1);
         assert_eq!(rgba(&output), [255, 0, 0, 255, 0, 0, 255, 255]);
         assert!(!inspect(&output).unwrap().has_alpha);
     }
@@ -154,7 +143,7 @@ mod tests {
             render(
                 source,
                 &recipe(source, 2, 2, OutputFormat::Png, None),
-                &active,
+                &NO_CANCELLATION,
             )
         };
         assert_eq!(rgba(&resized(&srgb_bytes).unwrap()), rgba(&srgb_bytes));

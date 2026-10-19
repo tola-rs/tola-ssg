@@ -16,9 +16,10 @@
 //! varies. Covered box reduction and prepared rows use eight-byte color–alpha products.
 //! Color conversion and encoding may need their own buffers; rows share plane ownership.
 //! Hosts must bound the images and geometries they admit concurrently and the worker count.
-//! Retained convolution scratch is capped at 2 MiB per thread. Source decoding reserves its raw
-//! and normalization planes from a 512 MiB budget; codec scratch remains best-effort, and this
-//! budget does not cover resampling, encoding, or other images a host keeps alive.
+//! Retained convolution scratch is capped at 2 MiB per thread. Source decoding requires each of
+//! its raw and normalization planes to fit the decoder's 512 MiB allotment; codec scratch remains
+//! best-effort, and this budget does not cover resampling, encoding, or other images a host keeps
+//! alive.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -34,8 +35,8 @@ pub use cancellation::{
 };
 pub use codec::{DecodedSource, inspect, render};
 pub use recipe::{
-    Background, ImageRecipe, OutputFormat, PixelRecipe, ResizeFilter, ResizeOperation,
-    ResizeOptions,
+    Background, CropAnchor, ImageRecipe, OutputFormat, PixelRecipe, ResizeFilter, ResizeOperation,
+    ResizeOptions, SvgRender, VectorGeometry,
 };
 pub use resample::ResampledPixels;
 
@@ -44,7 +45,14 @@ pub use resample::ResampledPixels;
 /// a dependency, feature, or native compiler option that carries one. Every derivative name and
 /// every request descriptor carries this revision, so a derivative rendered under another revision
 /// is never reused as if it were this one.
-pub const IMAGE_PIPELINE_REVISION: u32 = 5;
+///
+/// The pure-Rust WebP encoder is a distinct profile from libwebp.
+pub const IMAGE_PIPELINE_REVISION: u32 =
+    if cfg!(all(feature = "pure-webp", not(feature = "libwebp"))) {
+        10
+    } else {
+        7
+    };
 
 /// The container an image's own bytes are in.
 ///
@@ -115,6 +123,10 @@ fn check_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How a failed plane allocation reads to a site author.
+pub(crate) const HOLD_IN_MEMORY: &str =
+    "the image is too large to hold in memory; use a smaller image";
+
 /// Byte length of one decoded plane, rejecting sizes that cannot be addressed.
 pub(crate) fn pixel_bytes(
     width: u32,
@@ -127,7 +139,7 @@ pub(crate) fn pixel_bytes(
         .checked_mul(height as usize)
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
         .filter(|bytes| *bytes <= isize::MAX as usize)
-        .context("the image is too large to hold in memory; use a smaller image")
+        .context(HOLD_IN_MEMORY)
 }
 
 pub(crate) fn rgba_buffer(width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
@@ -135,8 +147,7 @@ pub(crate) fn rgba_buffer(width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
 
     let bytes = pixel_bytes(width, height, 4)?;
     let mut rgba = Vec::new();
-    rgba.try_reserve_exact(bytes)
-        .context("the image is too large to hold in memory; use a smaller image")?;
+    rgba.try_reserve_exact(bytes).context(HOLD_IN_MEMORY)?;
     rgba.resize(bytes, 0);
     Ok(rgba)
 }

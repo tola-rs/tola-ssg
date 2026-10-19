@@ -1,4 +1,4 @@
-//! The fonts this build has.
+//! The text fonts this crate carries.
 
 use std::io::Read;
 use std::sync::LazyLock;
@@ -76,7 +76,7 @@ fn decompress(compressed: &[u8]) -> Vec<u8> {
     payload
 }
 
-/// The fonts this build has, one per face the container holds.
+/// The carried faces, one per container entry.
 pub(crate) fn fonts() -> impl Iterator<Item = (Font, FontInfo)> {
     CARRIED.fonts.iter().flat_map(|carried| {
         let bytes = Bytes::new(&CARRIED.payload[carried.offset..carried.offset + carried.length]);

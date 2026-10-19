@@ -5,6 +5,9 @@ use super::be32;
 use crate::cancellation::{Cancellation, ensure_active_if_present};
 use crate::check_dimensions;
 
+/// How a damaged PNG reads to a site author.
+const DAMAGED: &str = "the PNG image is damaged or incomplete; re-export it";
+
 /// These scans find animation and color metadata the codec wrappers hide; compressed
 /// pixels are always decoded and encoded by maintained codec libraries.
 pub(in crate::codec) fn scan_png<'a>(
@@ -24,22 +27,17 @@ pub(in crate::codec) fn scan_png<'a>(
     let mut ended = false;
     while offset < bytes.len() {
         ensure_active_if_present(cancellation)?;
-        let header = bytes
-            .get(offset..offset + 8)
-            .context("the PNG image is damaged or incomplete; re-export it")?;
+        let header = bytes.get(offset..offset + 8).context(DAMAGED)?;
         ensure!(
             header[4..8].iter().all(u8::is_ascii_alphabetic) && header[6].is_ascii_uppercase(),
-            "the PNG image is damaged or incomplete; re-export it"
+            DAMAGED
         );
         let length = be32(header) as usize;
         let end = offset
             .checked_add(12)
             .and_then(|start| start.checked_add(length))
-            .context("the PNG image is damaged or incomplete; re-export it")?;
-        ensure!(
-            end <= bytes.len(),
-            "the PNG image is damaged or incomplete; re-export it"
-        );
+            .context(DAMAGED)?;
+        ensure!(end <= bytes.len(), DAMAGED);
         let data = &bytes[offset + 8..end - 4];
         // Inspect metadata without inflating image data. The pixel decoder checks IDAT itself;
         // metadata after IDAT still needs its own integrity check before orientation is trusted.
@@ -49,26 +47,17 @@ pub(in crate::codec) fn scan_png<'a>(
                 ensure_active_if_present(cancellation)?;
                 checksum.update(block);
             }
-            ensure!(
-                checksum.finalize() == be32(&bytes[end - 4..end]),
-                "the PNG image is damaged or incomplete; re-export it"
-            );
+            ensure!(checksum.finalize() == be32(&bytes[end - 4..end]), DAMAGED);
         }
         if matches!(
             &header[4..8],
             b"PLTE" | b"iCCP" | b"sRGB" | b"gAMA" | b"cHRM" | b"cICP"
         ) {
-            ensure!(
-                !seen_pixels,
-                "the PNG image is damaged or incomplete; re-export it"
-            );
+            ensure!(!seen_pixels, DAMAGED);
         }
         match &header[4..8] {
             b"IHDR" => {
-                ensure!(
-                    offset == 8 && data.len() == 13,
-                    "the PNG image is damaged or incomplete; re-export it"
-                );
+                ensure!(offset == 8 && data.len() == 13, DAMAGED);
                 check_dimensions(be32(data), be32(&data[4..]))?;
             }
             b"acTL" | b"fcTL" | b"fdAT" => metadata.is_animated = true,
@@ -139,10 +128,7 @@ pub(in crate::codec) fn scan_png<'a>(
         }
         offset = end;
     }
-    ensure!(
-        ended,
-        "the PNG image is damaged or incomplete; re-export it"
-    );
+    ensure!(ended, DAMAGED);
     // Colour chunks are read by the precedence the format defines — cICP, iCCP, sRGB, then cHRM
     // with gAMA — while every one of them was still checked above for the place, count, and shape
     // the format requires. HDR mastering data outranks the colour chunks it accompanies.
@@ -184,6 +170,7 @@ pub(in crate::codec) fn scan_png<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NO_CANCELLATION;
     use crate::OutputFormat;
     use crate::codec::render;
     use crate::codec::test_support::*;
@@ -249,12 +236,7 @@ mod tests {
             for (kind, data) in chunks {
                 insert_png_chunk(&mut source, kind, &data);
             }
-            let output = render(
-                &source,
-                &recipe(&source, 1, 1, OutputFormat::Png, None),
-                &active,
-            )
-            .unwrap();
+            let output = render_png(&source, 1, 1);
             assert_eq!(rgba(&output)[..3], [128, 128, 128]);
         }
     }
@@ -276,12 +258,7 @@ mod tests {
                 None,
             );
             insert_png_chunk(&mut source, kind, &data);
-            let output = render(
-                &source,
-                &recipe(&source, 1, 1, OutputFormat::Png, None),
-                &active,
-            )
-            .unwrap();
+            let output = render_png(&source, 1, 1);
             let pixel = rgba(&output);
             assert!(
                 (185..=190).contains(&pixel[0]),
@@ -313,7 +290,7 @@ mod tests {
                 render(
                     &source,
                     &recipe(&source, 1, 1, OutputFormat::Png, None),
-                    &active
+                    &NO_CANCELLATION
                 )
                 .is_err()
             );

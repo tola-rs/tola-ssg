@@ -10,6 +10,8 @@
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use tola_typst::{ContentDigest, PackageSpec, ReadLocator};
+use typst::foundations::{Bytes, PathOrStr};
+use typst::loading::DataSource;
 use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 
 use crate::TolaPackage;
@@ -23,22 +25,34 @@ const KEY_DOMAIN: &[u8] = b"tola:image-variant\0";
 
 #[derive(Clone, Debug)]
 pub struct ImageRequest {
-    source: RootedPath,
+    source: DataSource,
+    /// The resolved file for a path source; the call site for a bytes source.
+    origin: RootedPath,
     source_digest: ContentDigest,
     recipe: ImageRecipe,
 }
 
 impl ImageRequest {
-    pub fn new(source: RootedPath, source_digest: ContentDigest, recipe: ImageRecipe) -> Self {
+    pub fn new(
+        source: DataSource,
+        origin: RootedPath,
+        source_digest: ContentDigest,
+        recipe: ImageRecipe,
+    ) -> Self {
         Self {
             source,
+            origin,
             source_digest,
             recipe,
         }
     }
 
-    pub fn source(&self) -> &RootedPath {
+    pub fn source(&self) -> &DataSource {
         &self.source
+    }
+
+    pub fn origin(&self) -> &RootedPath {
+        &self.origin
     }
 
     pub fn source_digest(&self) -> ContentDigest {
@@ -101,7 +115,7 @@ impl ImageRequest {
     fn descriptor(&self) -> RequestDescriptor<&ImageRecipe> {
         RequestDescriptor {
             revision: IMAGE_PIPELINE_REVISION,
-            source: SourceDescriptor::from_path(&self.source),
+            source: SourceDescriptor::from_source(&self.source, &self.origin),
             source_digest: self.source_digest.to_hex(),
             recipe: &self.recipe,
         }
@@ -140,11 +154,31 @@ struct RequestDescriptor<R> {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "root", rename_all = "lowercase", deny_unknown_fields)]
 enum SourceDescriptor {
-    Site { path: String },
-    Package { package: String, path: String },
+    Site {
+        path: String,
+    },
+    Package {
+        package: String,
+        path: String,
+    },
+    /// An in-memory source: the call site that supplied it, plus the bytes.
+    Bytes {
+        origin: Box<SourceDescriptor>,
+        bytes: Vec<u8>,
+    },
 }
 
 impl SourceDescriptor {
+    fn from_source(source: &DataSource, origin: &RootedPath) -> Self {
+        match source {
+            DataSource::Path(_) => Self::from_path(origin),
+            DataSource::Bytes(bytes) => Self::Bytes {
+                origin: Box::new(Self::from_path(origin)),
+                bytes: bytes.to_vec(),
+            },
+        }
+    }
+
     fn from_path(source: &RootedPath) -> Self {
         let path = source.vpath().get_with_slash().to_owned();
         match source.root() {
@@ -156,7 +190,11 @@ impl SourceDescriptor {
         }
     }
 
-    fn into_path(self) -> Result<RootedPath> {
+    fn into_source(self) -> Result<(DataSource, RootedPath)> {
+        if let Self::Bytes { origin, bytes } = self {
+            let (_, origin) = origin.into_source()?;
+            return Ok((DataSource::Bytes(Bytes::new(bytes)), origin));
+        }
         let (root, path) = match self {
             Self::Site { path } => (VirtualRoot::Project, path),
             Self::Package { package, path } => {
@@ -170,13 +208,15 @@ impl SourceDescriptor {
                 );
                 (VirtualRoot::Package(spec), path)
             }
+            Self::Bytes { .. } => unreachable!(),
         };
         let virtual_path = VirtualPath::new(&path).context("invalid image source path")?;
         ensure!(
             !virtual_path.is_root() && virtual_path.get_with_slash() == path,
             "image source path must be a canonical rooted file path",
         );
-        Ok(RootedPath::new(root, virtual_path))
+        let origin = RootedPath::new(root, virtual_path);
+        Ok((DataSource::Path(PathOrStr::Str(path.into())), origin))
     }
 }
 
@@ -212,9 +252,14 @@ fn decode_observation(path: &str) -> Result<Option<(ImageRequest, Vec<u8>)>> {
     let mut digest = [0; 32];
     hex::decode_to_slice(&descriptor.source_digest, &mut digest)
         .context("invalid image source digest")?;
-    let source = descriptor.source.into_path()?;
+    let (source, origin) = descriptor.source.into_source()?;
     Ok(Some((
-        ImageRequest::new(source, ContentDigest::from_bytes(digest), descriptor.recipe),
+        ImageRequest::new(
+            source,
+            origin,
+            ContentDigest::from_bytes(digest),
+            descriptor.recipe,
+        ),
         bytes,
     )))
 }
@@ -238,9 +283,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use tola_image::{
-        ImageFormat, ImageMetadata, OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions,
-    };
+    use tola_image::{ImageFormat, ImageMetadata, OutputFormat, ResizeOperation, ResizeOptions};
 
     fn recipe(width: u32) -> ImageRecipe {
         ImageRecipe::resolve(
@@ -256,9 +299,7 @@ mod tests {
                 height: Some(80),
                 operation: ResizeOperation::Fill,
                 format: OutputFormat::Png,
-                quality: None,
-                filter: ResizeFilter::Lanczos3,
-                background: None,
+                ..ResizeOptions::default()
             },
         )
         .unwrap()
@@ -266,6 +307,10 @@ mod tests {
 
     fn site_source(path: &str) -> RootedPath {
         RootedPath::new(VirtualRoot::Project, VirtualPath::new(path).unwrap())
+    }
+
+    fn path_source(path: &str) -> DataSource {
+        DataSource::Path(PathOrStr::Str(path.into()))
     }
 
     fn locator(path: impl Into<PathBuf>) -> ReadLocator {
@@ -286,11 +331,26 @@ mod tests {
     fn derivative_identity_ignores_location() {
         let source = site_source("/images/hero.png");
         let digest = ContentDigest::of(b"original image bytes");
-        let first = ImageRequest::new(source.clone(), digest, recipe(120));
-        let relocated = ImageRequest::new(site_source("/other/copy.png"), digest, recipe(120));
-        let changed =
-            ImageRequest::new(source.clone(), ContentDigest::of(b"new bytes"), recipe(120));
-        let resized = ImageRequest::new(source, digest, recipe(121));
+        let first = ImageRequest::new(
+            path_source("/images/hero.png"),
+            source.clone(),
+            digest,
+            recipe(120),
+        );
+        let relocated = ImageRequest::new(
+            path_source("/other/copy.png"),
+            site_source("/other/copy.png"),
+            digest,
+            recipe(120),
+        );
+        let changed = ImageRequest::new(
+            path_source("/images/hero.png"),
+            source.clone(),
+            ContentDigest::of(b"new bytes"),
+            recipe(120),
+        );
+        let resized =
+            ImageRequest::new(path_source("/images/hero.png"), source, digest, recipe(121));
 
         assert_eq!(first.key(), relocated.key());
         assert_eq!(first.output_path(), relocated.output_path());
@@ -306,14 +366,22 @@ mod tests {
             VirtualPath::new("/assets/illustration.png").unwrap(),
         );
         for source in [site_source("/images/hero.png"), package_source] {
-            let request =
-                ImageRequest::new(source.clone(), ContentDigest::of(b"pixels"), recipe(120));
+            let request = ImageRequest::new(
+                path_source(source.vpath().get_with_slash()),
+                source.clone(),
+                ContentDigest::of(b"pixels"),
+                recipe(120),
+            );
             let id = request.observation_id();
             let read = locator(id.vpath().get_without_slash());
             let recovered = ImageRequest::from_read(&read).unwrap().unwrap();
             let bytes = observation_bytes(&package_spec(), id.vpath().get_with_slash()).unwrap();
 
-            assert_eq!(recovered.source(), &source);
+            assert_eq!(recovered.origin(), &source);
+            assert_eq!(
+                recovered.source(),
+                &path_source(source.vpath().get_with_slash())
+            );
             assert_eq!(recovered.source_digest(), request.source_digest());
             assert_eq!(recovered.recipe(), request.recipe());
             assert_eq!(recovered.output_path(), request.output_path());
@@ -339,8 +407,51 @@ mod tests {
     }
 
     #[test]
+    fn bytes_and_path_sources_share_derivative_identity() {
+        let bytes = b"same pixels".to_vec();
+        let digest = ContentDigest::of(&bytes);
+        let by_path = ImageRequest::new(
+            path_source("/assets/photo.png"),
+            site_source("/assets/photo.png"),
+            digest,
+            recipe(120),
+        );
+        let by_bytes = ImageRequest::new(
+            DataSource::Bytes(Bytes::new(bytes)),
+            site_source("/content/figure.typ"),
+            digest,
+            recipe(120),
+        );
+
+        assert_eq!(by_path.key(), by_bytes.key());
+        assert_eq!(by_path.output_path(), by_bytes.output_path());
+        assert_ne!(by_path.observation_id(), by_bytes.observation_id());
+    }
+
+    #[test]
+    fn bytes_sources_round_trip() {
+        let origin = site_source("/content/figure.typ");
+        let bytes = Bytes::new(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec());
+        let source = DataSource::Bytes(bytes.clone());
+        let request = ImageRequest::new(
+            source.clone(),
+            origin.clone(),
+            ContentDigest::of(bytes.as_slice()),
+            recipe(120),
+        );
+        let id = request.observation_id();
+        let recovered = ImageRequest::from_read(&locator(id.vpath().get_without_slash()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.source(), &source);
+        assert_eq!(recovered.origin(), &origin);
+        assert_eq!(recovered.output_path(), request.output_path());
+    }
+
+    #[test]
     fn malformed_descriptors_are_rejected() {
         let request = ImageRequest::new(
+            path_source("/hero.png"),
             site_source("/hero.png"),
             ContentDigest::of(b"pixels"),
             recipe(120),
@@ -384,6 +495,7 @@ mod tests {
     #[test]
     fn only_image_package_reads_requests() {
         let request = ImageRequest::new(
+            path_source("/hero.png"),
             site_source("/hero.png"),
             ContentDigest::of(b"pixels"),
             recipe(120),

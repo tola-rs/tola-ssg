@@ -114,9 +114,7 @@ fn svg_length(value: &str) -> Result<Option<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ImageRecipe;
     use crate::codec::inspect;
-    use crate::{OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
 
     #[test]
     fn svg_dimensions_resolve_absolute_units() {
@@ -125,21 +123,6 @@ mod tests {
         assert_eq!(
             (metadata.width, metadata.height, metadata.format),
             (96, 48, ImageFormat::Svg)
-        );
-        assert!(
-            ImageRecipe::resolve(
-                &metadata,
-                ResizeOptions {
-                    width: Some(48),
-                    height: Some(24),
-                    operation: ResizeOperation::Fit,
-                    format: OutputFormat::Png,
-                    quality: None,
-                    filter: ResizeFilter::Lanczos3,
-                    background: None,
-                }
-            )
-            .is_err()
         );
         assert!(inspect(br#"<svg viewBox="0 0 NaN 20"/>"#).is_err());
     }

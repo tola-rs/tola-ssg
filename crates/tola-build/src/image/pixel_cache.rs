@@ -197,9 +197,8 @@ mod tests {
                 height: Some(height),
                 operation: ResizeOperation::Scale,
                 format: OutputFormat::Png,
-                quality: None,
                 filter: ResizeFilter::Triangle,
-                background: None,
+                ..ResizeOptions::default()
             },
         )
         .unwrap()

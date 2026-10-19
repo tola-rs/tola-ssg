@@ -12,14 +12,21 @@ anyhow = "1.0.104"
 crc32fast = "=1.5.1"
 fearless_simd = "=1.0.0"
 image = { version = "=0.25.9", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+jpeg-encoder = "=0.6.1"
 moxcms = "=0.7.11"
 rayon = "1.12.0"
 roxmltree = "0.21.1"
-serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 thiserror = "2.0.20"
-webp = { version = "=0.3.1", default-features = false }
+tola-webp = { path = "../tola-webp", optional = true }
+webp = { version = "=0.3.1", default-features = false, optional = true }
 zune-core = { version = "=0.5.3", default-features = false }
 zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 serde_json = "1.0.151"
+
+[features]
+default = ["libwebp"]
+libwebp = ["dep:webp"]
+pure-webp = ["dep:tola-webp"]

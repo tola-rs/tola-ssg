@@ -598,6 +598,7 @@ impl RebuildLoop {
                 generated_files: Vec::new(),
                 cancellation: canceller.token(),
                 hook_execution: tola_build::build::HookExecution::Run,
+                reference_checks: tola_build::build::ReferenceChecks::Full,
             },
         );
         let prepare_elapsed = rebuild_started.elapsed();

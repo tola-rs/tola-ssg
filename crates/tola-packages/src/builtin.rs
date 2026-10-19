@@ -586,7 +586,10 @@ mod tests {
                 ],
             ),
             ("icon", &["icon", "icon-bytes", "icon-url"]),
-            ("image", &["resize-image", "image-metadata"]),
+            (
+                "image",
+                &["resize-image", "image-metadata", "image-srcset", "img"],
+            ),
             (
                 "source",
                 &[
@@ -827,6 +830,7 @@ mod tests {
         for (api, fields) in [
             ("image-metadata", &crate::images::IMAGE_METADATA_FIELDS[..]),
             ("resize-image", &crate::images::RESIZE_IMAGE_FIELDS[..]),
+            ("image-srcset", &crate::images::IMAGE_SRCSET_FIELDS[..]),
             (
                 "current-document",
                 &crate::natives::CURRENT_DOCUMENT_FIELDS[..],

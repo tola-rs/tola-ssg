@@ -1,7 +1,7 @@
 # Simplified-Chinese documentation of `@tola/image`. English stays authoritative in the package's
 # own Typst sources; a unit here overrides one of them.
 
-overview = "图片 metadata 与按请求缩放的图片"
+overview = "图片 metadata、按请求缩放的图片、响应式图片组与响应式 img 元素"
 
 [exports.resize-image]
 
@@ -9,24 +9,26 @@ summary = [
   '''
 请求构建发布对应的派生结果，并返回它的 URL 与尺寸。
 
-`path` 指向输入文件：可以是相对本次调用解析的字符串，也可以是你已经用 `path()` 解析好的路径。字符串要先解析，再传给其他文件或包。即使资产声明发布了这个文件，也要传文件自身的路径；声明给出的 URL 是给浏览器用的。`width` 与 `height` 都是正的像素数。
+`source` 指向输入图像：可以是相对本次调用解析的字符串、你已经用 `path()` 解析好的路径，或原始图像字节。字符串要先解析，再传给其他文件或包。即使资产声明发布了这个文件，也要传文件自身的路径；声明给出的 URL 是给浏览器用的。`width` 与 `height` 都是正的像素数。
 
 `op` 指定操作：`scale`、`fit-width`、`fit-height`、`fit` 或 `fill`（默认）。它决定你必须传哪几个尺寸：
 
 - `scale` 需要两个尺寸，并且可能改变宽高比。
 - `fit-width` 需要 `width`，`fit-height` 需要 `height`。两者都保持宽高比。
 - `fit` 需要两个尺寸，把整张图片放进这个框内；图片本来就放得下时保持源图尺寸。
-- `fill` 需要两个尺寸，并围绕图片中心裁剪到该尺寸。
+- `fill` 需要两个尺寸，按 `anchor` 指定的部位裁剪到该尺寸。
+
+`anchor` 决定 `fill` 保留哪一部分：`center`（默认）、`top`、`bottom`、`left`、`right`、`top-left`、`top-right`、`bottom-left` 或 `bottom-right`。其他操作保留整张源图，因此除 `center` 之外的值都会被拒绝。
 
 省略的尺寸取 `none`。`fit-width` 只用 `width`，`fit-height` 只用 `height`。除 `fit` 外的操作都能放大源图。派生出的尺寸四舍五入到最近的像素，最少 1 像素。
 
-`format` 为 `auto`、`jpg`、`png` 或 `webp`。`auto` 为有损且不含 alpha 的源图选择 JPEG，其余情况（包括 GIF）一律选择 PNG。JPEG 质量为 1 到 100，默认 75。WebP 在你给出 `quality`（0 到 100）之前都是无损的；PNG 始终无损。有效的 `quality` 只影响 JPEG 与 WebP。JPEG 输出的每轴尺寸不能超过 65,535 像素，WebP 则不能超过 16,383 像素。`quality: none` 表示采用该格式的默认值。
+`format` 为 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`。`auto` 为有损且不含 alpha 的源图选择 JPEG，其余情况（包括 GIF）一律选择 PNG。JPEG 质量为 1 到 100，默认 75。WebP 在你给出 `quality`（0 到 100）之前都是无损的；PNG 始终无损。有效的 `quality` 只影响 JPEG 与 WebP。JPEG 输出的每轴尺寸不能超过 65,535 像素，WebP 则不能超过 16,383 像素。JPEG 会把色度分辨率减半（4:2:0）；彩色文字与精细图形请用 PNG。`quality: none` 表示采用该格式的默认值。SVG 源图会按请求的像素尺寸栅格化，因此必须明确写出位图 `format`；`auto` 无法替它选择。SVG 里的文字使用编译器默认字体，链接图片必须是 data URI。若栅格结果不应依赖这些字体，请把 SVG 中的文字转换为轮廓。
 
-尚不支持 AVIF 输出；请改用 `webp`、`png`、`jpg` 或 `auto`。
+不支持 AVIF 输出；请改用 `webp`、`png`、`jpg` 或 `auto`。
 
-`filter` 指定重采样核：`nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`（默认）。只有裁剪出的区域与输出尺寸不同时，这个核才参与重采样。`background` 接受不透明的 Typst 颜色，Typst 会在合成前把它转换成 sRGB。源图的 `has-alpha` 为真时，JPEG 输出必须提供 `background`；源图不带 alpha 时，JPEG 直接编码。不起作用的 `filter` 或 `background`，得到的派生结果与省略它们时相同。
+`filter` 指定重采样核：`nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`（默认）。只有裁剪出的区域与输出尺寸不同时，这个核才参与重采样；SVG 直接按目标尺寸渲染，`filter` 对它没有作用。`background` 接受不透明的 Typst 颜色，Typst 会在合成前把它转换成 sRGB。源图的 `has-alpha` 为真时，JPEG 输出必须提供 `background`；源图不带 alpha 时，JPEG 直接编码。不起作用的 `filter` 或 `background`，得到的派生结果与省略它们时相同。
 
-结果包含派生结果发布的 `url`、它的 `width` 与 `height`，以及源图自身的 `original-width` 与 `original-height`。无论你是否用上返回的 URL 与尺寸，这次调用都会请求派生结果：构建会发布收敛求值中请求过的每个派生结果，编辑器检查只报告诊断信息。这次调用只发布派生结果；源图保留其资产声明为它发布的内容。`resize-image` 拒绝动画图片与 SVG 源图。URL 包含 `site.base-path`，可直接用于 `html.img(src: resized.url, ...)`。把整数像素尺寸直接传给 `html.img` 的 `width` 与 `height`。
+结果包含派生结果发布的 `url`、它的 `width` 与 `height`，以及源图自身的 `original-width` 与 `original-height`。无论你是否用上返回的 URL 与尺寸，这次调用都会请求派生结果：构建会发布收敛求值中请求过的每个派生结果，编辑器检查只报告诊断信息。这次调用只发布派生结果；源图保留其资产声明为它发布的内容。`resize-image` 拒绝动画图片。URL 包含 `site.base-path`，可直接用于 `html.img(src: resized.url, ...)`。把整数像素尺寸直接传给 `html.img` 的 `width` 与 `height`。
 
 构建会把这次求值请求过的派生结果并入站点的输出图：每个都落在 `_tola/images/` 下，名字由源图字节与处理参数共同决定，等价的请求共用同一个输出。链接它通常直接用返回的 `url`；手上只有输出路径时，用 `output-url` 换成浏览器 URL。`tola inspect outputs` 列出每个已发布的输出，以及它的 `producer` 与 `media-type`。
 
@@ -34,19 +36,23 @@ Example - 缩放到精确的宽高：
 ''',
   'Example - 由宽度推出高度：',
   'Example - 缩放成固定布局的尺寸：',
+  'Example - 保留源图左边缘填满布局槽位：',
   'Example - 把透明区域合成到不透明底色上再编码为 JPEG：',
+  'Example - 为需要位图的消费方栅格化 SVG：',
   '',
 ]
 
 [exports.resize-image.parameters]
 
-path = "相对本次调用的路径字符串，或已经解析好的路径。"
+source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+
+anchor = "裁剪锚点，取 `center`、`top`、`bottom`、`left`、`right`、`top-left`、`top-right`、`bottom-left` 或 `bottom-right`；只对 `op: \"fill\"` 有效。"
 
 background = "不透明的颜色；编码前把透明区域合成到它上面。"
 
 filter = "重采样核，取 `nearest`、`triangle`、`catmull-rom`、`gaussian` 或 `lanczos3`。"
 
-format = "输出格式，取 `auto`、`jpg`、`png` 或 `webp`。"
+format = "输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；SVG 源图必须明确写位图格式。"
 
 height = "输出的高度（像素），为正数；是否需要由 `op` 决定。"
 
@@ -62,16 +68,89 @@ summary = [
   '''
 查看一张图片，读取它的 metadata。
 
-`path` 的行为与 `resize-image` 相同。结果包含 `width`、`height`、`format`、`mime`、`has-alpha` 与 `is-lossy`。尺寸已经把图片的方向考虑在内。`format` 为 `jpg`、`png`、`webp`、`gif`、`bmp` 或 `svg`。查看只读取文件对自身的声明，所以未使用的 GIF 透明声明与 GIF 画布上没有被覆盖的部分都算作 alpha。原始文件的 URL 来自它自己的资产声明：需要 URL 时，把这个文件声明为资产。
+`source` 的行为与 `resize-image` 相同。结果包含 `width`、`height`、`format`、`mime`、`has-alpha` 与 `is-lossy`。尺寸已经把图片的方向考虑在内。`format` 为 `jpg`、`png`、`webp`、`gif`、`bmp` 或 `svg`。尺寸是 CSS 像素；SVG 报告其在 96 DPI 下的固有尺寸，所以以 pt 书写的尺寸要乘以 4/3（`256pt` 报告为 `341`）。没有 `width`/`height` 的矢量图报告其 `viewBox` 尺寸，浏览器则退回 300×150。SVG 算作带 alpha。查看只读取文件对自身的声明，所以未使用的 GIF 透明声明与 GIF 画布上没有被覆盖的部分都算作 alpha。原始文件的 URL 来自它自己的资产声明：需要 URL 时，把这个文件声明为资产。
 
 结果决定缩放方案时，先读一次再缩放：`has-alpha` 决定 JPEG 用不用得上 `background`，`width` 决定目标尺寸。
 
 Example - 读取一张图片的 metadata：
 ''',
   'Example - 按源图自身的尺寸与 alpha 分支：',
+  'Example - 读取矢量图的固有尺寸：',
   '',
 ]
 
 [exports.image-metadata.parameters]
 
-path = "相对本次调用的路径字符串，或已经解析好的路径。"
+source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+
+[exports.image-srcset]
+
+summary = [
+  '''
+按多个宽度生成同一张图片的派生结果，并返回响应式 `img` 需要的值。
+
+照片走这个入口：给它布局需要的宽度，它会为每个宽度各请求一次派生结果，方式与 `resize-image` 请求单个宽度时相同。`sizes` 仍由你写——这里无从知道浏览器最终会用的宽度。SVG 源图会被拒绝：矢量没有 `w` 描述符。显示矢量请用 `image()`，需要位图请用带明确位图格式的 `resize-image`。
+
+`widths` 默认是 `auto`，即采用源图自身的宽度：不写宽度就只转换格式、不重采样。给出宽度列表时会按升序排列并去掉重复值，所以同一个宽度写两次也只会生成一次派生结果。每个派生结果都用 `fit-width` 生成并保持宽高比；宽度大于源图时会放大源图，与 `resize-image` 一致。
+
+结果是给一个 `img` 用的值：`url` 是最宽的那个派生结果，`srcset` 用 `w` 描述符列出每个派生结果，`width` 与 `height` 描述最宽的那个，页面因此能在图片加载前预留位置。`format` 默认 `webp`、`quality` 默认 75，因为这个入口服务的是页面；`quality: none` 表示无损 WebP。
+
+用 `html.elem` 把这些值写出来：`sizes` 会用到视口单位，最后一项不带媒体条件，类型化的 `html.img` 表达不了这些。`srcset` 里的 URL 由 HTML 层自己解析并重写。下面的 `img` 替一个元素完成这次组装。
+
+每个派生结果各自被请求，所以构建会为每个不同宽度各发布一个输出，落在 `_tola/images/` 下，等价请求共用同一个输出：两次调用若有重叠的宽度，就共用那些派生结果。编辑器检查只报告诊断信息，与 `resize-image` 相同。
+
+Example - 按两个宽度生成派生结果：
+''',
+  'Example - 把最宽的那个派生结果记为页面的社交图片：',
+  '',
+]
+
+[exports.image-srcset.parameters]
+
+source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+
+background = "不透明的颜色；编码前把透明区域合成到它上面。"
+
+format = "输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；默认 `webp`。"
+
+quality = "JPEG/WebP 质量为 0 到 100，默认 75；`none` 表示无损 WebP。PNG 忽略它。"
+
+widths = "`auto`（默认，采用源图自身的宽度），或要生成的像素宽度列表；列表按升序排列并去掉重复值。"
+
+[exports.img]
+
+summary = [
+  '''
+把一张图片按多个宽度放进页面，生成响应式 `img`。
+
+`source` 的行为与 `resize-image` 相同。`widths` 为 `auto`（默认，采用源图自身宽度），或要生成的像素宽度列表；`sizes` 说明这个元素在页面上占多宽，默认 `100vw`，即浏览器的假设。元素不是通栏时，请传入你布局预留的宽度，例如 `"(max-width: 760px) 100vw, 720px"`。SVG 源图同样会被拒绝；显示矢量请用 `image()`，需要位图请用带明确位图格式的 `resize-image`。
+
+元素带有最宽派生结果的 `src`、它的像素 `width` 与 `height`（页面因此预留空间），并且只在请求了多个宽度时才写 `srcset` 与 `sizes`。`alt` 即使留空也会写出：缺少 `alt` 属性是不合法的 HTML，而 `alt: ""` 表示装饰图片。`format` 与 `quality` 默认 `webp` 与 75，与 `image-srcset` 相同。
+
+这个函数独占的属性——`src`、`srcset`、`sizes`、`width`、`height` 与 `alt`——不能再出现在 `attrs` 里。`loading` 与 `decoding` 默认 `lazy` 与 `async`，可在 `attrs` 里覆盖。其余属性（包括 `data-*`）原样写出。
+
+这个元素只用于 HTML：请从 HTML 文档里调用；分页文档请改用 `image`。
+
+Example - 一张图片给出两个宽度：
+''',
+  'Example - 最多 720 像素宽的布局，首屏图片优先加载：',
+  '',
+]
+
+[exports.img.parameters]
+
+alt = "替代文本；省略即写出空字符串，把图片标记为装饰。"
+
+attrs = "其余原样写出的 HTML 属性；不能包含这个函数独占的属性。"
+
+background = "不透明的颜色；编码前把透明区域合成到它上面。"
+
+format = "输出格式，取 `auto`、`jpg`（也可写 `jpeg`）、`png` 或 `webp`；默认 `webp`。"
+
+source = "相对本次调用的路径字符串、已解析的路径，或原始图像字节。"
+
+quality = "JPEG/WebP 质量为 0 到 100，默认 75；`none` 表示无损 WebP。PNG 忽略它。"
+
+sizes = "这个元素在页面上占多宽的 CSS 描述，默认 `100vw`。"
+
+widths = "`auto`（默认，采用源图自身的宽度），或要生成的像素宽度列表。"

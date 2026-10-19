@@ -12,6 +12,7 @@ allow = [
   "CC-BY-SA-4.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
+  "IJG",
   "ISC",
   "MIT",
   "MIT-0",

@@ -6,7 +6,7 @@ use fearless_simd::{Level, dispatch, u8x16, u16x8};
 
 use crate::cancellation::Cancellation;
 use crate::rows::for_each_row;
-use crate::{pixel_bytes, rgba_buffer};
+use crate::{HOLD_IN_MEMORY, pixel_bytes, rgba_buffer};
 
 use super::plane::{AlphaRepresentation, CoveredPlane, SourcePlane, premultiply};
 
@@ -183,9 +183,7 @@ pub(super) fn covered_box_averaged(
     let height = plane.height().div_ceil(vertical);
     let samples = pixel_bytes(width, height, 8)? / 8;
     let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(samples)
-        .context("the image is too large to hold in memory; use a smaller image")?;
+    pixels.try_reserve_exact(samples).context(HOLD_IN_MEMORY)?;
     pixels.resize(samples, [0u16; 4]);
     let columns: Vec<u32> = (0..width)
         .map(|x| block_columns(x, plane.width(), horizontal))
@@ -200,7 +198,7 @@ pub(super) fn covered_box_averaged(
                 pixel_bytes(width, 1, 32)?;
                 totals
                     .try_reserve_exact(width as usize)
-                    .context("the image is too large to hold in memory; use a smaller image")?;
+                    .context(HOLD_IN_MEMORY)?;
                 totals.resize(width as usize, [0; 4]);
             }
             totals.fill([0; 4]);
@@ -243,7 +241,8 @@ pub(super) fn covered_box_averaged(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resample::test_support::{active, plane};
+    use crate::NO_CANCELLATION;
+    use crate::resample::test_support::plane;
 
     #[test]
     fn box_reduction_observes_cancellation_within_rows() {
@@ -295,7 +294,7 @@ mod tests {
                 horizontal: 2,
                 vertical: 2,
             },
-            &active,
+            &NO_CANCELLATION,
         )
         .unwrap();
         for (y, expected) in [[30, 50, 65], [105, 125, 140]].into_iter().enumerate() {
@@ -339,7 +338,7 @@ mod tests {
                     horizontal,
                     vertical: 1,
                 },
-                &active,
+                &NO_CANCELLATION,
             )
             .unwrap();
             for pixel in reduced.row(0).as_chunks::<4>().0 {
@@ -360,7 +359,7 @@ mod tests {
                 horizontal: MAX_BLOCK_PIXELS,
                 vertical: 1,
             },
-            &active,
+            &NO_CANCELLATION,
         )
         .unwrap();
         for pixel in reduced.row(0).as_chunks::<4>().0 {

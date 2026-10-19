@@ -40,13 +40,11 @@ paths = [\"static/typst-fonts\"]
 system = false
 ```
 
-Vendored fonts join these directories before system-font discovery. Tola also carries embedded
-fonts, which remain available with `--pure`. `system = true` adds host fonts when the invocation
-permits them; `--pure` excludes them even if this setting is on. Keep it off when another machine
-must build with the same font inputs.
+Embedded fonts stay available under `--pure`. Host fonts are never vendored, and `system = true`
+combined with `--pure` is an error.
 
-`--font-path DIR` on a command adds a host directory for that invocation, ahead of these paths;
-`--ignore-system-fonts` narrows that invocation the same way.
+`--font-path` is invocation-only and refused under `--pure`; `--ignore-system-fonts` narrows one
+invocation.
 
 Browser fonts are separate: publish them through `[assets]` and load them with CSS `@font-face`.
 A Typst font setting does not install a browser font:
