@@ -365,6 +365,12 @@ pub(crate) fn site_relative(path: &Path, root: &Path) -> Option<String> {
         .then(|| crate::filesystem::display_path(path, root))
 }
 
+/// Typst's wording when the world provides no clock.
+///
+/// Typst's diagnostics carry no error kind, so this wording is the only signal that
+/// `datetime.today()` failed. A wording change drops the guidance instead of mislabeling it.
+const MISSING_CLOCK: &str = "unable to get the current date";
+
 pub(super) fn resolved_diagnostic(
     mut diagnostic: tola_typst::Diagnostic,
     root: &Path,
@@ -399,6 +405,16 @@ pub(super) fn resolved_diagnostic(
         diagnostic.message = guidance.message;
         notes.extend(guidance.note);
         help.extend(guidance.help);
+    }
+    if diagnostic.message == MISSING_CLOCK {
+        diagnostic.message =
+            "`datetime.today()` is not available because Tola does not read the current date when building".into();
+        help.push(crate::diagnostic::Help {
+            message: "Replace `datetime.today()` with an explicit date, such as \
+                      `datetime(year: 2026, month: 10, day: 17)`"
+                .into(),
+            location: None,
+        });
     }
     let location = diagnostic
         .location
@@ -1155,6 +1171,33 @@ mod tests {
             Some(crate::diagnostic::DiagnosticCause::UnknownVariable {
                 name: "absent-name".to_owned(),
             })
+        );
+    }
+
+    #[test]
+    fn missing_clock_explains_datetime_today() {
+        let diagnostic = tola_typst::Diagnostic {
+            origin: tola_typst::DiagnosticOrigin::Typst,
+            severity: tola_typst::DiagnosticSeverity::Error,
+            message: MISSING_CLOCK.into(),
+            location: location(Some("/site/site.typ")),
+            hints: Vec::new(),
+            traces: Vec::new(),
+            imported_by: Vec::new(),
+            package_failure: None,
+        };
+
+        let resolved =
+            resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
+
+        assert_eq!(
+            resolved.message,
+            "`datetime.today()` is not available because Tola does not read the current date when building"
+        );
+        assert_eq!(
+            resolved.help[0].message,
+            "Replace `datetime.today()` with an explicit date, such as \
+             `datetime(year: 2026, month: 10, day: 17)`"
         );
     }
 
