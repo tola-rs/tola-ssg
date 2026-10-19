@@ -196,6 +196,7 @@ pub(super) struct RebuildLoop {
     initial_config: Arc<ResolvedSiteConfig>,
     server: ServerConfig,
     dev: DevConfig,
+    disable_hook_reuse: bool,
     config_loader: ConfigLoader,
     sites: CurrentSite,
     changes: FileChangeSource,
@@ -220,6 +221,7 @@ pub(super) struct RebuildStartup {
     pub(super) initial_config: Arc<ResolvedSiteConfig>,
     pub(super) server: ServerConfig,
     pub(super) dev: DevConfig,
+    pub(super) disable_hook_reuse: bool,
     pub(super) config_loader: ConfigLoader,
     pub(super) resources: tola_build::BuildResources,
     pub(super) sites: CurrentSite,
@@ -244,6 +246,7 @@ impl RebuildLoop {
             initial_config: input.initial_config,
             server: input.server,
             dev: input.dev,
+            disable_hook_reuse: input.disable_hook_reuse,
             config_loader: input.config_loader,
             sites: input.sites,
             changes,
@@ -599,6 +602,7 @@ impl RebuildLoop {
                 cancellation: canceller.token(),
                 hook_execution: tola_build::build::HookExecution::Run,
                 reference_checks: tola_build::build::ReferenceChecks::Full,
+                disable_hook_reuse: self.disable_hook_reuse,
             },
         );
         let prepare_elapsed = rebuild_started.elapsed();
@@ -856,9 +860,19 @@ impl RebuildLoop {
         let revision_diff = previous
             .as_ref()
             .map(|previous| previous.manifest().diff(current.manifest()));
-        let changed_counts = revision_diff
+        if let Some(paths) = revision_diff
             .as_ref()
-            .map(|diff| diff.changed_output_counts());
+            .and_then(|diff| diff.describe_changed_paths())
+        {
+            tracing::debug!(
+                target: "tola::compile",
+                round = self.round,
+                "changed outputs\n{paths}"
+            );
+        }
+        let changed_groups = revision_diff
+            .as_ref()
+            .map(|diff| diff.changed_output_groups());
         if let Some(reload) = self.reload.as_ref() {
             match revision_diff {
                 Some(diff) => reload.revision_replaced(diff, &self.reported_diagnostics),
@@ -891,7 +905,7 @@ impl RebuildLoop {
             self.config_loader.acknowledge(candidate);
             self.output.apply_diagnostic_limits(candidate.diagnostics());
         }
-        let summary = format_rebuild_summary(changed_counts, rebuild_started.elapsed(), recovered);
+        let summary = format_rebuild_summary(changed_groups, rebuild_started.elapsed(), recovered);
         let round = crate::cli::output::CompletedRound::published(
             self.round,
             current.manifest().revision().as_str(),
@@ -1040,7 +1054,7 @@ fn resolved_diagnostics<'a>(
 }
 
 fn format_rebuild_summary(
-    counts: Option<tola_build::output::summary::OutputCounts>,
+    groups: Option<tola_build::output::summary::ChangedOutputGroups>,
     elapsed: std::time::Duration,
     recovered: bool,
 ) -> String {
@@ -1050,13 +1064,13 @@ fn format_rebuild_summary(
             crate::terminal::format_duration(elapsed)
         );
     }
-    match counts {
+    match groups {
         // The first installed revision has no earlier one to compare against.
         None => crate::terminal::site_summary("Built", elapsed, ""),
-        Some(counts) => crate::terminal::site_summary(
+        Some(groups) => crate::terminal::site_summary(
             "Rebuilt",
             elapsed,
-            &crate::terminal::describe_change(counts),
+            &crate::terminal::describe_changes(groups),
         ),
     }
 }
@@ -1315,6 +1329,7 @@ mod tests {
                 initial_config: std::sync::Arc::clone(&config),
                 server,
                 dev,
+                disable_hook_reuse: false,
                 config_loader,
                 resources: tola_build::BuildResources::new()
                     .with_input_scope(tola_build::InputScope::Pure),

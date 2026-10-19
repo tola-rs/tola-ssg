@@ -18,22 +18,26 @@ use crate::output::semantics::OutputDeclaration;
 use tola_address::OutputPath;
 
 use super::command::{HookCall, HookDirectories, HookInvocation};
-use super::report::{hook_command_error, run_hook_entry};
+use super::report::{hook_command_error, report_reused, run_hook_entry};
+use super::reuse::{ReusableHookOutput, ReusableHookOutputs, observe};
 
 /// Files and exclusive directory ownerships produced by this candidate's commands.
 #[derive(Debug, Default)]
 pub(crate) struct GeneratedOutputs {
     pub(crate) outputs: Vec<OutputFile>,
     pub(crate) root_ownerships: Vec<OutputRootOwnership>,
+    pub(crate) reuse: ReusableHookOutputs,
 }
 
 /// Run each participating producer against the same immutable upstream files.
 ///
-/// Commands run for every candidate because their file reads cannot be tracked.
+/// A `dev = "reuse"` command runs only when its observed inputs differ from the previous
+/// successful development revision; otherwise its outputs are reused unchanged.
 pub(crate) fn generate_outputs(
     config: &ResolvedSiteConfig,
     upstream: &[OutputFile],
     mode: BuildMode,
+    previous: Option<&ReusableHookOutputs>,
     cancellation: &BuildCancellation,
 ) -> Result<GeneratedOutputs> {
     cancellation.ensure_active().map_err(anyhow::Error::new)?;
@@ -48,26 +52,75 @@ pub(crate) fn generate_outputs(
     if participating.peek().is_none() {
         return Ok(GeneratedOutputs::default());
     }
-    let candidate = HookOutputFiles::materialize_outputs(
-        config.get_root(),
-        upstream,
-        Some(cancellation),
-        crate::compiler::minified_languages(config),
-    )?;
+    // Materialize the input view only when a command actually needs to run: a round whose
+    // generators all reuse their outputs must not copy the built site into a temporary tree.
+    let mut candidate = None;
     let mut generated_outputs = GeneratedOutputs::default();
     for (index, command) in participating {
         cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        let reuses_outputs = mode == BuildMode::Development && command.dev.reuses_outputs();
+        let inputs = if reuses_outputs {
+            Some(observe(config.get_root(), command, upstream)?)
+        } else {
+            None
+        };
+        if let (Some(inputs), Some(previous)) = (inputs.as_ref(), previous)
+            && let Some(previous) = previous.matching(&command.name, inputs)
+        {
+            let owner = OutputOwner::command(index, command.name.as_str());
+            for output in &previous.outputs {
+                generated_outputs
+                    .outputs
+                    .push(output.with_owner(owner.clone()));
+            }
+            for root in &previous.roots {
+                generated_outputs
+                    .root_ownerships
+                    .push(OutputRootOwnership::new(root.root().clone(), owner.clone()));
+            }
+            generated_outputs.reuse.insert(
+                &command.name,
+                ReusableHookOutput {
+                    inputs: inputs.clone(),
+                    outputs: previous.outputs.clone(),
+                    roots: previous.roots.clone(),
+                },
+            );
+            report_reused(HookStage::GenerateOutputs, &command.name);
+            continue;
+        }
+        if candidate.is_none() {
+            candidate = Some(HookOutputFiles::materialize_outputs(
+                config.get_root(),
+                upstream,
+                Some(cancellation),
+                crate::compiler::minified_languages(config),
+            )?);
+        }
+        let candidate = candidate.as_ref().expect("materialized above");
+        let output_start = generated_outputs.outputs.len();
+        let root_start = generated_outputs.root_ownerships.len();
         run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
             generate_entry(
                 &mut generated_outputs,
                 command,
                 index,
-                &candidate,
+                candidate,
                 config,
                 mode,
                 cancellation,
             )
         })?;
+        if let Some(inputs) = inputs {
+            generated_outputs.reuse.insert(
+                &command.name,
+                ReusableHookOutput {
+                    inputs,
+                    outputs: generated_outputs.outputs[output_start..].to_vec(),
+                    roots: generated_outputs.root_ownerships[root_start..].to_vec(),
+                },
+            );
+        }
     }
     cancellation.ensure_active().map_err(anyhow::Error::new)?;
     Ok(generated_outputs)
@@ -294,7 +347,7 @@ fn read_generated_files(
 mod tests {
     use super::*;
     use crate::build::tests::{hook_child_command, is_hook_child_for};
-    use crate::config::section::build::hooks::OutputCommandConfig;
+    use crate::config::section::build::hooks::{DevParticipation, OutputCommandConfig};
     use crate::output::graph::{OutputGraphBuilder, OutputKind};
     use crate::output::semantics::{DeclaredOutputSemantics, ResponseMediaType};
     use std::io::{Read, Write};
@@ -379,6 +432,27 @@ mod tests {
                 0
             );
         }
+        fs::write(
+            generated_root().join("search.json"),
+            serde_json::to_vec(&serde_json::json!({"html": html})).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Records how many times the command actually ran, beside the site root.
+    #[test]
+    fn counts_runs() {
+        if !is_hook_child_for("generate-outputs") {
+            return;
+        }
+        let path = std::path::Path::new("runs.txt");
+        let count = fs::read_to_string(path)
+            .ok()
+            .and_then(|runs| runs.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        fs::write(path, (count + 1).to_string()).unwrap();
+        let candidate = std::path::PathBuf::from(std::env::var_os("TOLA_HOOK_INPUT_DIR").unwrap());
+        let html = fs::read_to_string(candidate.join("index.html")).unwrap();
         fs::write(
             generated_root().join("search.json"),
             serde_json::to_vec(&serde_json::json!({"html": html})).unwrap(),
@@ -474,6 +548,7 @@ mod tests {
             &config,
             upstream.outputs(),
             BuildMode::Production,
+            None,
             &BuildCancellation::new(),
         )
         .unwrap();
@@ -511,6 +586,7 @@ mod tests {
             &config,
             upstream.outputs(),
             BuildMode::Production,
+            None,
             &BuildCancellation::new(),
         )
         .unwrap();
@@ -554,6 +630,7 @@ mod tests {
                 &config,
                 upstream.outputs(),
                 BuildMode::Production,
+                None,
                 &BuildCancellation::new(),
             )
             .unwrap_err();
@@ -571,6 +648,7 @@ mod tests {
             &config,
             upstream.outputs(),
             BuildMode::Production,
+            None,
             &BuildCancellation::new(),
         )
         .unwrap_err();
@@ -586,6 +664,7 @@ mod tests {
             &config,
             upstream.outputs(),
             BuildMode::Development,
+            None,
             &cancellation,
         )
         .unwrap();
@@ -601,6 +680,7 @@ mod tests {
             &config,
             next.outputs(),
             BuildMode::Development,
+            None,
             &cancellation,
         )
         .unwrap();
@@ -637,6 +717,7 @@ mod tests {
                 &config,
                 upstream.outputs(),
                 BuildMode::Production,
+                None,
                 &worker_cancellation,
             )
         });
@@ -671,7 +752,14 @@ mod tests {
             (BuildMode::Development, "dev"),
             (BuildMode::Production, "prod"),
         ] {
-            generate_outputs(&config, upstream.outputs(), mode, &BuildCancellation::new()).unwrap();
+            generate_outputs(
+                &config,
+                upstream.outputs(),
+                mode,
+                None,
+                &BuildCancellation::new(),
+            )
+            .unwrap();
             assert_eq!(
                 crate::build::tests::recorded_build_mode(config.get_root()),
                 expected
@@ -692,6 +780,7 @@ mod tests {
             &config,
             upstream.outputs(),
             BuildMode::Development,
+            None,
             &cancellation,
         )
         .unwrap();
@@ -711,6 +800,7 @@ mod tests {
             &config,
             next.outputs(),
             BuildMode::Development,
+            None,
             &cancellation,
         )
         .unwrap();
@@ -718,5 +808,119 @@ mod tests {
         assert_eq!(second.outputs[0].path().as_str(), "search/index.json");
         let content: serde_json::Value = serde_json::from_slice(second.outputs[0].bytes()).unwrap();
         assert_eq!(content["html"], "<h1>Home</h1>");
+    }
+
+    fn run_count(directory: &tempfile::TempDir) -> u32 {
+        std::fs::read_to_string(directory.path().join("runs.txt"))
+            .ok()
+            .and_then(|runs| runs.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn unchanged_inputs_reuse_development_outputs() {
+        let (directory, mut config, upstream) =
+            output_command_config("counts_runs", &["search.json"]);
+        config.build.hooks.generate_outputs[0].dev = DevParticipation::Reuse;
+        let cancellation = BuildCancellation::new();
+
+        let first = generate_outputs(
+            &config,
+            upstream.outputs(),
+            BuildMode::Development,
+            None,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(run_count(&directory), 1);
+
+        let second = generate_outputs(
+            &config,
+            upstream.outputs(),
+            BuildMode::Development,
+            Some(&first.reuse),
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(
+            run_count(&directory),
+            1,
+            "unchanged inputs must not run the command"
+        );
+        assert_eq!(first.outputs[0].bytes(), second.outputs[0].bytes());
+
+        let mut changed = OutputGraphBuilder::new();
+        changed
+            .insert(OutputFile::new(
+                OutputPath::parse("index.html").unwrap(),
+                OutputDeclaration::html_document(),
+                OutputOwner::bundle("site.typ"),
+                b"<h1>Changed</h1>".to_vec(),
+            ))
+            .unwrap();
+        let third = generate_outputs(
+            &config,
+            changed.outputs(),
+            BuildMode::Development,
+            Some(&second.reuse),
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(
+            run_count(&directory),
+            2,
+            "changed inputs must run the command"
+        );
+        assert_ne!(second.outputs[0].bytes(), third.outputs[0].bytes());
+    }
+
+    #[test]
+    fn run_policy_never_reuses() {
+        let (directory, config, upstream) = output_command_config("counts_runs", &["search.json"]);
+        let cancellation = BuildCancellation::new();
+        let first = generate_outputs(
+            &config,
+            upstream.outputs(),
+            BuildMode::Development,
+            None,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(run_count(&directory), 1);
+        generate_outputs(
+            &config,
+            upstream.outputs(),
+            BuildMode::Development,
+            Some(&first.reuse),
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(run_count(&directory), 2);
+    }
+
+    #[test]
+    fn production_never_reuses() {
+        let (directory, mut config, upstream) =
+            output_command_config("counts_runs", &["search.json"]);
+        config.build.hooks.generate_outputs[0].dev = DevParticipation::Reuse;
+        let cancellation = BuildCancellation::new();
+        let first = generate_outputs(
+            &config,
+            upstream.outputs(),
+            BuildMode::Production,
+            None,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(run_count(&directory), 1);
+        generate_outputs(
+            &config,
+            upstream.outputs(),
+            BuildMode::Production,
+            Some(&first.reuse),
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(run_count(&directory), 2);
     }
 }

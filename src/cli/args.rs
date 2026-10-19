@@ -453,6 +453,10 @@ pub struct DevelopmentArgs {
     /// Enable or disable automatic rebuilds; omit the value for true.
     #[arg(short, long, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true", require_equals = false)]
     pub watch: Option<bool>,
+
+    /// Run every reusable generator on each rebuild; disable `dev = "reuse"` for this session.
+    #[arg(long)]
+    pub no_reuse: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]

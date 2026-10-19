@@ -61,6 +61,12 @@ and a failure there cannot undo it.
 `build.publish-dir`. `dev` serves successful builds in memory. The `dev` field defaults to `run`
 for the first two stages and `skip` for after-publish.
 
+`generate-outputs` also accepts `dev = \"reuse\"`. In development, a command whose observed inputs
+are unchanged reuses the previous successful revision's outputs instead of running. The command
+must then be a pure function of the built site, its `rerun-on` paths, its command, and its declared
+outputs. A command that reads time, network, environment state, or files outside the site keeps
+`dev = \"run\"`. Production builds always run every hook.
+
 Commands run from the site root as finite argv arrays, without an implicit shell. Within a stage,
 entries run in configuration order; failure stops the remaining entries. Put dependent steps or
 conditions in the site's own runner, for example `command = [\"just\", \"css\"]`. Tola does not
@@ -150,6 +156,7 @@ impl HooksConfig {
                     fields,
                     diag,
                 );
+                validate_dev(hook.dev, false, index, fields.dev, diag);
                 validate_name_is_unique(&mut named, &hook.name, index, fields.name, diag);
                 for (entry_index, generated) in hook.generates.iter().enumerate() {
                     validate_site_relative(
@@ -223,6 +230,7 @@ impl HooksConfig {
                     fields,
                     diag,
                 );
+                validate_dev(hook.dev, false, index, fields.dev, diag);
                 validate_name_is_unique(&mut named, &hook.name, index, fields.name, diag);
             });
         }
@@ -237,6 +245,7 @@ impl HooksConfig {
 struct HookEntryFields {
     name: FieldPath,
     command: FieldPath,
+    dev: FieldPath,
     rerun_on: FieldPath,
 }
 
@@ -244,18 +253,21 @@ impl HookEntryFields {
     const BEFORE_BUILD: Self = Self {
         name: BeforeBuildHookConfig::FIELDS.name,
         command: BeforeBuildHookConfig::FIELDS.command,
+        dev: BeforeBuildHookConfig::FIELDS.dev,
         rerun_on: BeforeBuildHookConfig::FIELDS.rerun_on,
     };
 
     const GENERATE_OUTPUTS: Self = Self {
         name: OutputCommandConfig::FIELDS.name,
         command: OutputCommandConfig::FIELDS.command,
+        dev: OutputCommandConfig::FIELDS.dev,
         rerun_on: OutputCommandConfig::FIELDS.rerun_on,
     };
 
     const AFTER_PUBLISH: Self = Self {
         name: AfterPublishHookConfig::FIELDS.name,
         command: AfterPublishHookConfig::FIELDS.command,
+        dev: AfterPublishHookConfig::FIELDS.dev,
         rerun_on: AfterPublishHookConfig::FIELDS.rerun_on,
     };
 }
@@ -411,11 +423,15 @@ pub struct OutputCommandConfig {
     /// `TOLA_HOOK_OUTPUT_DIR`; written paths are relative to the final site output.
     #[config(collection = inline)]
     pub command: Vec<String>,
-    /// Whether `tola dev` runs this hook: `"run"` (the default) or `"skip"`.
-    #[config(values = DevParticipation::VALUES)]
+    /// Whether `tola dev` runs this hook: `"run"` (the default), `"reuse"`, or `"skip"`.
+    /// `reuse` skips the command when its inputs are unchanged from the previous successful
+    /// development revision and reuses that revision's outputs.
+    #[config(values = DevParticipation::REUSE_VALUES)]
     pub dev: DevParticipation,
     /// Paths this hook watches, relative to the site root, whose edits trigger a `tola dev` build,
-    /// not only the hook's own command.
+    /// not only the hook's own command. For `dev = "reuse"`, they are also part of the hook's
+    /// input fingerprint: list every site file the command reads, or reuse may serve stale
+    /// output.
     #[serde(rename = "rerun-on")]
     #[config(collection = inline)]
     pub rerun_on: Vec<PathBuf>,
@@ -482,6 +498,13 @@ A page uses it like this: the template head links the generated CSS and JavaScri
 #html.link(rel: \"stylesheet\", href: output-url(\"assets/pagefind-search/pagefind-ui.css\"))
 #html.elem(\"script\", attrs: (src: output-url(\"assets/pagefind-search/pagefind-ui.js\")))
 ```
+
+In development, `dev = \"reuse\"` records the built site's output identities, the `rerun-on` paths'
+contents, the command, and the declared outputs. When all of them match the previous successful
+revision, the command does not run and those outputs are reused unchanged. List every site file the
+command reads in `rerun-on`; an omitted input can make reuse serve stale output. The value is never
+used by production builds. The default remains `dev = \"run\"`. Run `tola dev -v` to list every
+changed output path.
 
 Like every hook stage, this stage runs commands once: Tola does not run long-lived commands such as
 a watch mode, and Tola owns development watching; incremental builds and caches for the command's
@@ -669,6 +692,23 @@ pub(crate) fn hook_identity(stage: HookStage, name: &str) -> String {
     format!("the `{name}` hook in `build.hooks.{}`", stage.as_str())
 }
 
+fn validate_dev(
+    dev: DevParticipation,
+    reuse_allowed: bool,
+    index: usize,
+    field: FieldPath,
+    diag: &mut ConfigDiagnostics,
+) {
+    if dev == DevParticipation::Reuse && !reuse_allowed {
+        let key = message_key(field, index);
+        diag.error_with_help(
+            field,
+            format!("`{key}` is `\"reuse\"`, which only `generate-outputs` accepts"),
+            "Use `\"run\"` or `\"skip\"` for this stage",
+        );
+    }
+}
+
 fn validate_name(name: &str, index: usize, field: FieldPath, diag: &mut ConfigDiagnostics) {
     let key = message_key(field, index);
     if name.trim().is_empty() {
@@ -760,14 +800,26 @@ pub enum DevParticipation {
     ///
     /// Production builds still run it.
     Skip,
+    /// Reuse the previous development revision's outputs when the hook's inputs are unchanged.
+    ///
+    /// Only `generate-outputs` accepts this value. The command must be a pure function of
+    /// its built-site input, its `rerun-on` paths, its command, and its declared outputs;
+    /// a command that reads time, network, or other external state must use [`Self::Run`].
+    Reuse,
 }
 
 impl DevParticipation {
     const VALUES: &'static [&'static str] = &["\"run\"", "\"skip\""];
+    const REUSE_VALUES: &'static [&'static str] = &["\"run\"", "\"skip\"", "\"reuse\""];
 
-    /// Whether a development session runs this command at all.
+    /// Whether a development session runs or reuses this command at all.
     pub const fn participates_in_development(self) -> bool {
         !matches!(self, Self::Skip)
+    }
+
+    /// Whether this entry may reuse a previous development revision's outputs.
+    pub const fn reuses_outputs(self) -> bool {
+        matches!(self, Self::Reuse)
     }
 }
 
@@ -806,6 +858,50 @@ rerun-on = ["scripts/deploy.sh"]
         let decoded: crate::config::SiteConfigSchema = toml::from_str(&template).unwrap();
 
         assert_eq!(decoded.build.hooks, config.build.hooks);
+    }
+
+    #[test]
+    fn reuse_is_only_for_generate_outputs() {
+        let config: HooksConfig = toml::from_str(
+            r#"
+[[generate-outputs]]
+name = "search"
+command = ["search"]
+dev = "reuse"
+outputs = [{ file = "search.json" }]
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.generate_outputs[0].dev, DevParticipation::Reuse);
+        let mut diagnostics = ConfigDiagnostics::new();
+        config.validate(&mut diagnostics);
+        assert!(diagnostics.into_result().is_ok());
+
+        for source in [
+            r#"
+[[before-build]]
+name = "prepare"
+command = ["prepare"]
+dev = "reuse"
+"#,
+            r#"
+[[after-publish]]
+name = "deploy"
+command = ["deploy"]
+dev = "reuse"
+"#,
+        ] {
+            let config: HooksConfig = toml::from_str(source).unwrap();
+            let mut diagnostics = ConfigDiagnostics::new();
+            config.validate(&mut diagnostics);
+            let diagnostics = diagnostics.into_result().unwrap_err();
+            assert!(
+                diagnostics.errors().iter().any(|diagnostic| diagnostic
+                    .message
+                    .contains("only `generate-outputs` accepts")),
+                "{diagnostics}"
+            );
+        }
     }
 
     #[test]

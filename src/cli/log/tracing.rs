@@ -257,6 +257,7 @@ impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> tracing_subscriber::Layer
             duration_seconds: Option<f64>,
             success: bool,
             cancelled: bool,
+            reused: bool,
         }
         impl tracing::field::Visit for Fields {
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
@@ -277,6 +278,7 @@ impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> tracing_subscriber::Layer
                 match field.name() {
                     "success" => self.success = value,
                     "cancelled" => self.cancelled = value,
+                    "reused" => self.reused = value,
                     _ => {}
                 }
             }
@@ -301,6 +303,10 @@ impl<S: Subscriber + for<'lookup> LookupSpan<'lookup>> tracing_subscriber::Layer
                 palette.hook_stage(&stage),
                 palette.hook_name(&hook)
             );
+            if fields.reused {
+                let _ = self.terminal.activity(&format!("Reused {identity}"));
+                return;
+            }
             match fields.duration_seconds {
                 Some(seconds) => {
                     if fields.cancelled {
@@ -498,6 +504,30 @@ mod tests {
         assert!(shown.contains("search"), "{shown:?}");
         assert!(shown.contains("in 500 ms"), "{shown:?}");
         assert!(shown.contains("after 500 ms"), "{shown:?}");
+    }
+
+    #[test]
+    fn reused_hooks_are_announced() {
+        let (sink, output) = OutputSink::buffered();
+        let subscriber =
+            subscriber(1, Terminal::with_sink(sink, false, false), None, None).unwrap();
+        tracing::dispatcher::with_default(&subscriber, || {
+            tracing::info!(
+                target: "tola::hook_status",
+                stage = "generate-outputs",
+                hook = "search",
+                reused = true,
+                duration_seconds = 0.0,
+                success = true,
+                "Reused hook"
+            );
+        });
+        let shown = String::from_utf8(output.bytes()).unwrap();
+        assert!(
+            shown.contains("Reused generate-outputs/search"),
+            "{shown:?}"
+        );
+        assert!(!shown.contains("Finished"), "{shown:?}");
     }
 
     #[test]

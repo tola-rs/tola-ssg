@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 
 use super::graph::{OutputFile, OutputGraph, OutputKind};
 use super::semantics::{DeclaredOutputSemantics, ResponseMediaType};
-use super::summary::OutputCounts;
+use super::summary::{ChangedOutputGroups, OutputProducer};
 use tola_address::OutputPath;
 use tola_typst::hash_length_prefixed;
 
@@ -101,6 +101,9 @@ pub struct ManifestEntry {
     kind: OutputKind,
     semantics: DeclaredOutputSemantics,
     media_type: ResponseMediaType,
+    /// Reporting attribution; not part of output identity or the reload protocol.
+    #[serde(skip)]
+    producer: OutputProducer,
 }
 
 impl SiteManifest {
@@ -116,6 +119,7 @@ impl SiteManifest {
                 media_type: output.declaration().media_type().clone(),
                 size: output.bytes().len() as u64,
                 representation: RepresentationId::from_output(output),
+                producer: OutputProducer::from_output(output),
             })
             .collect::<Vec<_>>();
         outputs.sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -210,16 +214,42 @@ impl RevisionDiff {
         self.from == self.to && self.changes.is_empty()
     }
 
-    pub fn changed_output_counts(&self) -> OutputCounts {
-        let mut counts = OutputCounts::default();
-        for change in &self.changes {
-            let kind = match change {
-                OutputDelta::Added(output) | OutputDelta::Removed(output) => output.kind,
-                OutputDelta::Modified { after, .. } => after.kind,
-            };
-            counts.add_kind(kind);
+    /// One line per changed output, for verbose development diagnostics.
+    pub fn describe_changed_paths(&self) -> Option<String> {
+        if self.changes.is_empty() {
+            return None;
         }
-        counts
+        Some(
+            self.changes
+                .iter()
+                .map(|change| {
+                    let (operation, output) = match change {
+                        OutputDelta::Added(output) => ("added", output),
+                        OutputDelta::Removed(output) => ("removed", output),
+                        OutputDelta::Modified { after, .. } => ("modified", after),
+                    };
+                    format!(
+                        "{} {} {}",
+                        output.producer().label(),
+                        operation,
+                        output.path().as_str()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    pub fn changed_output_groups(&self) -> ChangedOutputGroups {
+        let mut groups = ChangedOutputGroups::default();
+        for change in &self.changes {
+            let output = match change {
+                OutputDelta::Added(output) | OutputDelta::Removed(output) => output,
+                OutputDelta::Modified { after, .. } => after,
+            };
+            groups.add(&output.producer);
+        }
+        groups
     }
 }
 
@@ -239,6 +269,10 @@ impl ManifestEntry {
 
     pub fn kind(&self) -> OutputKind {
         self.kind
+    }
+
+    pub fn producer(&self) -> &OutputProducer {
+        &self.producer
     }
 
     pub fn semantics(&self) -> DeclaredOutputSemantics {
@@ -263,15 +297,27 @@ fn revision_digest<'a>(outputs: impl IntoIterator<Item = &'a ManifestEntry>) -> 
 mod tests {
     use super::*;
     use crate::output::graph::{OutputFile, OutputGraphBuilder};
+    use crate::output::owner::OutputOwner;
     use crate::output::semantics::OutputDeclaration;
     use crate::output::tests::{output_file, output_graph};
 
     fn asset_output(path: &str, bytes: &[u8]) -> OutputFile {
         let output_path = OutputPath::parse(path).unwrap();
-        output_file(
-            path,
+        OutputFile::new(
+            output_path.clone(),
             OutputDeclaration::opaque_from_output_path(&output_path),
-            bytes,
+            OutputOwner::bundle("test"),
+            bytes.to_vec(),
+        )
+    }
+
+    fn hook_output(name: &str, path: &str, bytes: &[u8]) -> OutputFile {
+        let output_path = OutputPath::parse(path).unwrap();
+        OutputFile::new(
+            output_path.clone(),
+            OutputDeclaration::opaque_from_output_path(&output_path),
+            OutputOwner::command(0, name),
+            bytes.to_vec(),
         )
     }
 
@@ -364,13 +410,13 @@ mod tests {
         assert_eq!(&diff.from, before.revision());
         assert_eq!(&diff.to, after.revision());
         assert_eq!(diff.changes().len(), 3);
+        let groups = diff.changed_output_groups();
+        assert_eq!(groups.pages, 0);
+        assert_eq!(groups.documents, 0);
+        assert_eq!(groups.assets, 3);
         assert_eq!(
-            diff.changed_output_counts(),
-            OutputCounts {
-                pages: 0,
-                documents: 0,
-                assets: 3,
-            }
+            diff.describe_changed_paths().unwrap(),
+            "asset removed a.txt\nasset modified b.txt\nasset added d.txt"
         );
         assert!(matches!(
             &diff.changes()[0],
@@ -387,6 +433,28 @@ mod tests {
             &diff.changes()[2],
             OutputDelta::Added(output) if output.path.as_str() == "d.txt"
         ));
+    }
+
+    #[test]
+    fn changed_outputs_group_by_producer() {
+        let before = SiteManifest::from_graph(&output_graph([
+            asset_output("a.txt", b"before"),
+            hook_output("search", "search.json", b"{}"),
+        ]));
+        let after = SiteManifest::from_graph(&output_graph([
+            asset_output("a.txt", b"after"),
+            hook_output("search", "search.json", b"{\"changed\":true}"),
+        ]));
+
+        let groups = before.diff(&after).changed_output_groups();
+
+        assert_eq!(groups.assets, 1);
+        assert_eq!(groups.pages, 0);
+        assert_eq!(groups.hooks.get("search").copied(), Some(1));
+        assert_eq!(
+            before.diff(&after).describe_changed_paths().unwrap(),
+            "asset modified a.txt\nsearch modified search.json"
+        );
     }
 
     #[test]

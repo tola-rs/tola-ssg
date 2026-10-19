@@ -514,6 +514,16 @@ manifests and lockfiles; it takes no globs. `--pure` and `--offline` restrict To
 a script's side effects. Exact declarations, stage directories, and environment variables:
 `tola help "[build.hooks]"`.
 
+`generate-outputs` commands also accept `dev = "reuse"`: in development, Tola runs the command only
+when the compiled site or a `rerun-on` path changed, and otherwise reuses the previous outputs.
+Use it only for a command whose output depends solely on the compiled site, its `rerun-on` paths,
+its command, and its declared `outputs`; a command that reads time, the network, environment state,
+or files outside the site keeps the default `dev = "run"`. With `reuse`, list every site file the
+command reads in `rerun-on`; an omitted file can leave stale output. `dev = "skip"` keeps a command
+out of development, and `tola dev --no-reuse` runs every reusable command for that session.
+Production builds always run the hooks. The rebuild summary names the source of each change
+(`search: 9 changes`), and `tola dev -v` lists every changed output path.
+
 The scaffold can wire a Tailwind `before-build` hook and a Pagefind `generate-outputs` hook; select
 those features at `tola init`. The search feature builds the index; the search UI is yours to add.
 

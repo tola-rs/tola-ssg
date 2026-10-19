@@ -1,6 +1,6 @@
 //! Human-facing progress, status, and output-count wording.
 
-use tola_build::output::summary::OutputCounts;
+use tola_build::output::summary::{ChangedOutputGroups, OutputCounts};
 
 use super::Palette;
 
@@ -80,12 +80,40 @@ pub(crate) fn describe_outputs(counts: OutputCounts) -> String {
     parts.join(", ")
 }
 
-/// What a round changed, stating `nothing changed` rather than a zero count.
-pub(crate) fn describe_change(counts: OutputCounts) -> String {
-    match describe_outputs(counts) {
-        outputs if outputs.is_empty() => "nothing changed".to_owned(),
-        outputs => format!("{outputs} changed"),
+/// What a round changed, attributed to the pages, documents, and producers that own it.
+pub(crate) fn describe_changes(changes: ChangedOutputGroups) -> String {
+    if changes.is_empty() {
+        return "nothing changed".to_owned();
     }
+    let mut parts = Vec::new();
+    if changes.pages > 0 {
+        parts.push(format!("{} changed", plural_count(changes.pages, "page")));
+    }
+    if changes.documents > 0 {
+        parts.push(format!(
+            "{} changed",
+            plural_count(changes.documents, "document")
+        ));
+    }
+    if changes.assets > 0 {
+        parts.push(format!("{} changed", plural_count(changes.assets, "asset")));
+    }
+    if changes.static_files > 0 {
+        parts.push(format!(
+            "static: {}",
+            plural_count(changes.static_files, "change")
+        ));
+    }
+    if changes.generated_files > 0 {
+        parts.push(format!(
+            "generated: {}",
+            plural_count(changes.generated_files, "change")
+        ));
+    }
+    for (name, count) in &changes.hooks {
+        parts.push(format!("{name}: {}", plural_count(*count, "change")));
+    }
+    parts.join("; ")
 }
 
 /// One sentence for a command that worked on the site: the verb, the elapsed time, and an
@@ -102,11 +130,14 @@ pub(crate) fn site_summary(verb: &str, elapsed: std::time::Duration, detail: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        describe_change, describe_outputs, notice, secondary, serving_line, site_summary, status,
+        describe_changes, describe_outputs, notice, secondary, serving_line, site_summary, status,
         stream_label, summary, text,
     };
     use crate::terminal::Palette;
-    use tola_build::output::summary::OutputCounts;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use tola_build::output::summary::{ChangedOutputGroups, OutputCounts};
 
     #[test]
     fn colorless_output_stays_unstyled() {
@@ -180,7 +211,7 @@ mod tests {
             site_summary(
                 "Rebuilt",
                 elapsed,
-                &describe_change(OutputCounts::default())
+                &describe_changes(ChangedOutputGroups::default())
             ),
             "Rebuilt site in 615 ms; nothing changed"
         );
@@ -188,10 +219,9 @@ mod tests {
             site_summary(
                 "Rebuilt",
                 elapsed,
-                &describe_change(OutputCounts {
+                &describe_changes(ChangedOutputGroups {
                     pages: 1,
-                    assets: 0,
-                    documents: 0
+                    ..ChangedOutputGroups::default()
                 })
             ),
             "Rebuilt site in 615 ms; 1 page changed"
@@ -207,6 +237,33 @@ mod tests {
                 })
             ),
             "Built site in 615 ms; 2 pages, 1 asset"
+        );
+    }
+
+    #[test]
+    fn changes_name_their_producers() {
+        assert_eq!(
+            describe_changes(ChangedOutputGroups {
+                pages: 1,
+                hooks: BTreeMap::from([(Arc::from("search"), 9)]),
+                ..ChangedOutputGroups::default()
+            }),
+            "1 page changed; search: 9 changes"
+        );
+        assert_eq!(
+            describe_changes(ChangedOutputGroups {
+                static_files: 1,
+                hooks: BTreeMap::from([(Arc::from("unocss"), 1)]),
+                ..ChangedOutputGroups::default()
+            }),
+            "static: 1 change; unocss: 1 change"
+        );
+        assert_eq!(
+            describe_changes(ChangedOutputGroups {
+                documents: 2,
+                ..ChangedOutputGroups::default()
+            }),
+            "2 documents changed"
         );
     }
 }

@@ -19,7 +19,10 @@ use tola_build::filesystem::DevServerAddress;
 const DEFAULT_WS_PORT: u16 = 35729;
 
 enum ServerPurpose {
-    Development(DevConfig),
+    Development {
+        dev: DevConfig,
+        disable_hook_reuse: bool,
+    },
     Preview,
 }
 
@@ -27,7 +30,7 @@ impl ServerPurpose {
     /// The build mode this server serves.
     fn build_mode(&self) -> tola_build::build::BuildMode {
         match self {
-            Self::Development(_) => tola_build::build::BuildMode::Development,
+            Self::Development { .. } => tola_build::build::BuildMode::Development,
             Self::Preview => tola_build::build::BuildMode::Production,
         }
     }
@@ -35,7 +38,7 @@ impl ServerPurpose {
     /// The command that started this server, as the site author typed it.
     fn command(&self) -> &'static str {
         match self {
-            Self::Development(_) => "tola dev",
+            Self::Development { .. } => "tola dev",
             Self::Preview => "tola preview",
         }
     }
@@ -48,6 +51,7 @@ impl ServerPurpose {
 // and whether the view and its log should name the session they belong to.
 
 /// Start development with observation active before its first watched build.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     config: Arc<ResolvedSiteConfig>,
     server: ServerConfig,
@@ -56,6 +60,7 @@ pub(crate) fn run(
     resources: tola_build::BuildResources,
     output: CommandOutput,
     shutdown: Cancellation,
+    disable_hook_reuse: bool,
 ) -> Result<()> {
     run_server(
         config,
@@ -63,7 +68,10 @@ pub(crate) fn run(
         config_loader,
         resources,
         output,
-        ServerPurpose::Development(dev),
+        ServerPurpose::Development {
+            dev,
+            disable_hook_reuse,
+        },
         shutdown,
     )
 }
@@ -100,7 +108,7 @@ fn run_server(
 ) -> Result<()> {
     shutdown.token().ensure_active()?;
     let view = match &purpose {
-        ServerPurpose::Development(_) => output
+        ServerPurpose::Development { .. } => output
             .begin_dev_view(shutdown.clone())
             .context("could not open the development view; restart `tola dev`")?,
         ServerPurpose::Preview => None,
@@ -109,12 +117,12 @@ fn run_server(
         &config.build().hooks,
         purpose.build_mode(),
         match &purpose {
-            ServerPurpose::Development(_) => crate::terminal::EVERY_STAGE,
+            ServerPurpose::Development { .. } => crate::terminal::EVERY_STAGE,
             ServerPurpose::Preview => crate::terminal::PRE_PUBLICATION_STAGES,
         },
     )?;
     output.activity(match &purpose {
-        ServerPurpose::Development(_) => "Building site…",
+        ServerPurpose::Development { .. } => "Building site…",
         ServerPurpose::Preview => "Building preview…",
     })?;
     let command = purpose.command();
@@ -135,7 +143,7 @@ fn run_server(
         // Register HTTP first so failure cannot strand rebuild or hook workers.
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let sites = CurrentSite::new();
-        let watching = matches!(&purpose, ServerPurpose::Development(dev) if dev.watch);
+        let watching = matches!(&purpose, ServerPurpose::Development { dev, .. } if dev.watch);
         let reload = if watching {
             let reload = ReloadTransport::start(server.interface, DEFAULT_WS_PORT, sites.clone())
                 .context("Tola could not start the browser reload listener")?;
@@ -156,7 +164,7 @@ fn run_server(
         }
         let browser_diagnostics = reload.as_ref().map(ReloadTransport::diagnostics_sender);
         let hooks = match &purpose {
-            ServerPurpose::Development(_) => Some(HookQueue::start(
+            ServerPurpose::Development { .. } => Some(HookQueue::start(
                 output.clone(),
                 browser_diagnostics,
                 shutdown.token(),
@@ -165,12 +173,13 @@ fn run_server(
         };
         let serving = async {
             let (reload_endpoint, mut rebuild) = match purpose {
-                ServerPurpose::Development(dev) if dev.watch => {
+                ServerPurpose::Development { dev, disable_hook_reuse } if dev.watch => {
                     let reload_endpoint = reload.as_ref().map(ReloadTransport::endpoint);
                     let mut rebuild = RebuildLoop::start(RebuildStartup {
                         initial_config: Arc::clone(&config),
                         server: server.clone(),
                         dev,
+                        disable_hook_reuse,
                         config_loader,
                         resources,
                         sites: sites.clone(),
@@ -347,7 +356,7 @@ fn build_site_once(
         Ok(candidate) => candidate,
         Err(error) => {
             cancellation.ensure_active()?;
-            if !matches!(&purpose, ServerPurpose::Development(_)) {
+            if !matches!(&purpose, ServerPurpose::Development { .. }) {
                 return Err(error);
             }
             let mut diagnostics = tola_build::config::diagnostic::warning_diagnostics(&config);
@@ -427,7 +436,7 @@ mod tests {
         output: &CommandOutput,
         purpose: ServerPurpose,
     ) -> Result<()> {
-        let hooks = matches!(&purpose, ServerPurpose::Development(_))
+        let hooks = matches!(&purpose, ServerPurpose::Development { .. })
             .then(|| HookQueue::start(output.clone(), None, BuildCancellation::default()))
             .transpose()
             .expect("start test hook consumer");
@@ -463,7 +472,10 @@ mod tests {
     fn failed_unwatched_build_publishes_nothing() {
         for (purpose, name, keeps_serving) in [
             (
-                ServerPurpose::Development(DevConfig { watch: false }),
+                ServerPurpose::Development {
+                    dev: DevConfig { watch: false },
+                    disable_hook_reuse: false,
+                },
                 "dev",
                 true,
             ),

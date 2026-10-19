@@ -43,6 +43,8 @@ pub(crate) struct BuildAttemptProducers {
     pub(crate) failed_hook_outputs: Option<crate::hooks::FailedHookOutputs>,
     /// Whether the hooks this attempt ran wrote exactly what the accepted revision held.
     pub(crate) hook_outputs_unchanged: bool,
+    /// Reusable `generate-outputs` products from the accepted development revision.
+    pub(crate) previous_hook_reuse: Option<crate::hooks::ReusableHookOutputs>,
 }
 
 impl BuildAttemptProducers {
@@ -186,10 +188,12 @@ fn build_site_candidate(
             std::mem::take(&mut producers.generated_files),
             &producers.cancellation,
         )?;
+        let previous_hook_reuse = producers.previous_hook_reuse.take();
         let compiled_outputs = compiled_outputs.generate_outputs(
             config,
             mode,
             hook_execution.clone(),
+            previous_hook_reuse.as_ref(),
             &producers.cancellation,
         )?;
         let compile_elapsed = build_started.elapsed();
@@ -276,19 +280,27 @@ impl CompiledSiteOutputs {
         config: &ResolvedSiteConfig,
         mode: super::BuildMode,
         hook_execution: crate::hooks::HookExecution,
+        previous: Option<&crate::hooks::ReusableHookOutputs>,
         cancellation: &crate::cancellation::BuildCancellation,
     ) -> Result<Self> {
         if !hook_execution.runs() {
+            self.producer_caches.hook_reuse = crate::hooks::ReusableHookOutputs::default();
             return Ok(self);
         }
-        let generated =
-            crate::hooks::generate_outputs(config, self.outputs.outputs(), mode, cancellation)?;
+        let generated = crate::hooks::generate_outputs(
+            config,
+            self.outputs.outputs(),
+            mode,
+            previous,
+            cancellation,
+        )?;
         for ownership in generated.root_ownerships {
             self.outputs.own_root(ownership)?;
         }
         for output in generated.outputs {
             self.outputs.insert(output)?;
         }
+        self.producer_caches.hook_reuse = generated.reuse;
         Ok(self)
     }
 
@@ -565,6 +577,7 @@ pub(super) fn compile_site_program(
             images,
             seo,
             hook_outputs: producers.source_hooks.clone(),
+            hook_reuse: crate::hooks::ReusableHookOutputs::default(),
         },
         content,
         reference_reuse: producers.reference_reuse.clone(),
