@@ -38,6 +38,7 @@ pub(super) struct ClientFeatures {
     /// starts a check.
     pub(super) watched_files_dynamic: bool,
     pub(super) watched_files_relative: bool,
+    pub(super) semantic_tokens_refresh: bool,
     /// Whether the client accepts `workspace/diagnostic/refresh`.
     pub(super) diagnostic_refresh: bool,
     /// Whether the client receives `window/workDoneProgress` and the `$/progress` reports behind
@@ -126,6 +127,10 @@ impl ClientFeatures {
             watched_files_relative: workspace
                 .and_then(|workspace| workspace.did_change_watched_files.as_ref())
                 .and_then(|watched| watched.relative_pattern_support)
+                .unwrap_or(false),
+            semantic_tokens_refresh: workspace
+                .and_then(|workspace| workspace.semantic_tokens.as_ref())
+                .and_then(|tokens| tokens.refresh_support)
                 .unwrap_or(false),
             diagnostic_refresh: workspace
                 .and_then(|workspace| workspace.diagnostic.as_ref())

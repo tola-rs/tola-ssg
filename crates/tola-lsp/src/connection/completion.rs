@@ -70,6 +70,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                             self.announce(&checked)?;
                             self.publish(checked, checked_revision)?;
                             self.watch_sources()?;
+                            self.refresh_semantic_tokens(checked_revision)?;
                             // The check built this revision's index itself, so a correction waiting
                             // for one reads it now instead of paying for a second walk.
                             if self

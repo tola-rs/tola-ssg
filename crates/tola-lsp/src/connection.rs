@@ -11,6 +11,7 @@ mod completion;
 mod lifecycle;
 mod local_requests;
 mod progress;
+mod refresh;
 mod replies;
 mod routing;
 mod scheduling;
@@ -140,6 +141,7 @@ pub(super) struct Connection<W, D> {
     tokens: std::collections::HashMap<Uri, Option<lsp_types::SemanticTokens>>,
     /// The identifier the next token result has, which a delta request echoes.
     tokens_serial: u64,
+    semantic_refresh: refresh::SemanticRefresh,
     watched_roots: Vec<PathBuf>,
 }
 
@@ -213,6 +215,7 @@ impl<W, D> Connection<W, D> {
             configuration: None,
             tokens: std::collections::HashMap::new(),
             tokens_serial: 0,
+            semantic_refresh: refresh::SemanticRefresh::default(),
             watched_roots: Vec::new(),
         }
     }
