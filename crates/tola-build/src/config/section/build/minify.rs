@@ -38,6 +38,11 @@ Minification happens while building the outputs, and `check`, `dev`, and `previe
 whether to minify from `[build.minify]`. Because minification is fast, all three switches default
 to `true`.
 
+Each switch covers the bytes Tola owns: `html` the published pages, `css` and `javascript` the
+`<style>`/`<script>` elements a page embeds and the CSS/JavaScript sources declared under
+`[assets]`. A `generate-outputs` hook's products are not minified or cache-busted; the producer's
+command handles that itself. The CSS and JavaScript minifiers keep license comments (`/*!`).
+
 `--minify=false` disables all three for one invocation. With `cache-busting = true` under
 `[assets]`, `asset-url` (from `@tola/address`) returns a URL with a `?h=` appended,
 identifying the bytes after minification — the content the browser actually receives; the URL
