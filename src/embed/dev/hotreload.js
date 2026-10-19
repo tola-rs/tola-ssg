@@ -1,4 +1,5 @@
-// Development runtime for pages served by `tola dev`.
+// Development runtime for pages served by `tola dev`. It applies a revision in place when
+// proven safe and otherwise reloads, carrying the reader's native page state across.
 
 (function() {
   const owner = Symbol.for('tola.dev.runtime');
@@ -7,6 +8,7 @@
   if (!(runtimeScript instanceof HTMLScriptElement)
       || !runtimeScript.hasAttribute('data-tola-runtime')) return;
   document[owner] = true;
+
   let bootstrap;
   try {
     bootstrap = JSON.parse(runtimeScript.getAttribute('data-tola-bootstrap'));
@@ -111,7 +113,8 @@
         && /^\s*(javascript|vbscript):/i.test((value || '').replace(/[\t\n\r]/g, '')));
   }
 
-  /// Active behavior prevents document/resource patches and native state restoration.
+  /// Active behavior prevents document and resource patches. A reload still restores the
+  /// reader's changed controls and focus; see `createReloadState`.
   function activeContent(root) {
     const candidates = root.nodeType === 1 ? [root, ...root.querySelectorAll('*')] : Array.from(root.querySelectorAll('*'));
     for (const element of candidates) {
@@ -142,6 +145,50 @@
     return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
   }
 
+  const isPageAvailability = value => value === 'empty' || value === 'present';
+
+  function isValidOutputPath(path) {
+    if (typeof path !== 'string' || !path || path.startsWith('/') || path.endsWith('/')) return false;
+    // A published name may carry a literal `%` or `#`, and this decoded spelling is never turned
+    // back into a URL: resource addresses keep the encoded spelling the server rendered.
+    if (/[\\?\u0000-\u001f\u007f-\u009f]/u.test(path)) return false;
+    return path.split('/').every(segment => isValidOutputSegment(segment));
+  }
+
+  function isValidOutputSegment(segment) {
+    if (!segment || segment === '.' || segment === '..' || /[<>:"|?*]/u.test(segment)) return false;
+    if (segment.endsWith('.') || segment.endsWith(' ')) return false;
+    if (new TextEncoder().encode(segment).length > 255) return false;
+    const stem = segment.split('.')[0].replace(/[ .]+$/u, '').toLowerCase();
+    if (['con', 'prn', 'aux', 'nul', 'conin$', 'conout$'].includes(stem)) return false;
+    return !/^(com|lpt)([1-9¹²³])$/u.test(stem);
+  }
+
+  function isValidOutput(output) {
+    return output
+      && typeof output === 'object'
+      && isValidOutputPath(output.path)
+      && isHexIdentity(output.representation)
+      && Number.isSafeInteger(output.size)
+      && output.size >= 0
+      && ['html-document', 'pdf-document', 'png-document', 'svg-document', 'asset'].includes(output.kind);
+  }
+
+  function validatedOutput(change) {
+    if (!change || typeof change !== 'object') return null;
+    if (change.operation === 'added' || change.operation === 'removed') {
+      return isValidOutput(change.output) ? change.output : null;
+    }
+    if (change.operation !== 'modified' || !change.output || typeof change.output !== 'object') {
+      return null;
+    }
+    const before = change.output.before;
+    const after = change.output.after;
+    if (!isValidOutput(before) || !isValidOutput(after)) return null;
+    if (before.path !== after.path || before.kind !== after.kind) return null;
+    return after;
+  }
+
   function activeScript(script, type = script.getAttribute('type')) {
     if (script.matches(RUNTIME_DOM_SELECTOR)) return false;
     if (script.namespaceURI !== 'http://www.w3.org/1999/xhtml' || script.hasAttribute('src')) return true;
@@ -157,51 +204,113 @@
     return scripts.some(script => !script.closest(RUNTIME_CONTAINER_SELECTOR) && activeScript(script));
   }
 
+  const PATCHED_HEAD_ELEMENTS = new Set(['title', 'meta']);
+  const URL_ATTRIBUTES = ['href', 'src', 'poster', 'data'];
+
+  function contentNodes(parent) {
+    return Array.from(parent.childNodes).filter(node => !(
+      node.nodeType === 1 && node.matches(RUNTIME_DOM_SELECTOR)
+    ));
+  }
+
+  function attributeValue(element, name) {
+    const value = element.getAttribute(name);
+    if (value === null) return null;
+    return URL_ATTRIBUTES.includes(name) ? withoutRepresentation(value) : value;
+  }
+
+  function sameAttributes(left, right, ignored = null) {
+    const names = new Set([...left.attributes].map(attribute => attribute.name)
+      .concat([...right.attributes].map(attribute => attribute.name)));
+    for (const name of names) {
+      if (name === ignored) continue;
+      if (attributeValue(left, name) !== attributeValue(right, name)) return false;
+    }
+    return true;
+  }
+
+  function sameMarkup(left, right) {
+    if (left.nodeType !== right.nodeType) return false;
+    if (left.nodeType !== 1) return left.nodeValue === right.nodeValue;
+    if (left.localName !== right.localName) return false;
+    if (!sameAttributes(left, right)) return false;
+    const leftChildren = contentNodes(left);
+    const rightChildren = contentNodes(right);
+    return leftChildren.length === rightChildren.length
+      && leftChildren.every((child, index) => sameMarkup(child, rightChildren[index]));
+  }
+
+  function requireReplaceableAttribute(element, name, value) {
+    const tag = element.localName;
+    if (name === 'srcset' || name === 'xlink:href' || name === 'poster' || name === 'data') {
+      throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
+    }
+    if (name === 'style' && /url\s*\(/i.test(value || '')) {
+      throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
+    }
+    if (name === 'href' && ['link', 'use', 'image'].includes(tag)) {
+      throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
+    }
+    if (name === 'src' && tag !== 'img') {
+      throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
+    }
+  }
+
+  function createPatchPlan() {
+    const plan = { structural: false, head: [], body: [], images: [] };
+    plan.text = (node, value) => plan.body.push({ op: 'text', node, value });
+    plan.attributes = (node, set, remove) => plan.body.push({ op: 'attributes', node, set, remove });
+    plan.remove = node => {
+      plan.structural = true;
+      plan.body.push({ op: 'remove', node });
+    };
+    plan.replace = (node, replacement) => {
+      plan.structural = true;
+      plan.body.push({ op: 'replace', node, replacement });
+    };
+    plan.insert = (parent, node) => {
+      plan.structural = true;
+      plan.body.push({ op: 'insert', parent, node });
+    };
+    return plan;
+  }
+
+  function applyPatch(plan) {
+    const apply = patch => {
+      switch (patch.op) {
+        case 'text': patch.node.nodeValue = patch.value; break;
+        case 'attributes':
+          for (const [name, value] of patch.set) patch.node.setAttribute(name, value);
+          for (const name of patch.remove) patch.node.removeAttribute(name);
+          break;
+        case 'remove': patch.node.remove(); break;
+        case 'replace': patch.node.replaceWith(patch.replacement); break;
+        case 'insert': patch.parent.appendChild(patch.node); break;
+      }
+    };
+    for (const patch of plan.head) apply(patch);
+    for (const patch of plan.body) apply(patch);
+  }
+
+  /// Runs `tasks` with at most `limit` in flight, then throws the first failure.
+  async function runWithLimit(tasks, limit) {
+    let next = 0;
+    let failure = null;
+    await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, async () => {
+      while (!failure && next < tasks.length) {
+        const task = tasks[next++];
+        try { await task(); }
+        catch (error) { failure = error; }
+      }
+    }));
+    if (failure) throw failure;
+  }
+
+  function sameElements(left = [], right = []) {
+    return left.length === right.length && left.every((element, index) => element === right[index]);
+  }
+
   function createSiteAddresses(readPathPrefix) {
-    const isPageAvailability = value => value === 'empty' || value === 'present';
-
-    function isValidOutputPath(path) {
-      if (typeof path !== 'string' || !path || path.startsWith('/') || path.endsWith('/')) return false;
-      // A published name may carry a literal `%` or `#`, and this decoded spelling is never turned
-      // back into a URL: resource addresses keep the encoded spelling the server rendered.
-      if (/[\\?\u0000-\u001f\u007f-\u009f]/u.test(path)) return false;
-      return path.split('/').every(segment => isValidOutputSegment(segment));
-    }
-
-    function isValidOutputSegment(segment) {
-      if (!segment || segment === '.' || segment === '..' || /[<>:"|?*]/u.test(segment)) return false;
-      if (segment.endsWith('.') || segment.endsWith(' ')) return false;
-      if (new TextEncoder().encode(segment).length > 255) return false;
-      const stem = segment.split('.')[0].replace(/[ .]+$/u, '').toLowerCase();
-      if (['con', 'prn', 'aux', 'nul', 'conin$', 'conout$'].includes(stem)) return false;
-      return !/^(com|lpt)([1-9¹²³])$/u.test(stem);
-    }
-
-    function isValidOutput(output) {
-      return output
-        && typeof output === 'object'
-        && isValidOutputPath(output.path)
-        && isHexIdentity(output.representation)
-        && Number.isSafeInteger(output.size)
-        && output.size >= 0
-        && ['html-document', 'pdf-document', 'png-document', 'svg-document', 'asset'].includes(output.kind);
-    }
-
-    function validatedOutput(change) {
-      if (!change || typeof change !== 'object') return null;
-      if (change.operation === 'added' || change.operation === 'removed') {
-        return isValidOutput(change.output) ? change.output : null;
-      }
-      if (change.operation !== 'modified' || !change.output || typeof change.output !== 'object') {
-        return null;
-      }
-      const before = change.output.before;
-      const after = change.output.after;
-      if (!isValidOutput(before) || !isValidOutput(after)) return null;
-      if (before.path !== after.path || before.kind !== after.kind) return null;
-      return after;
-    }
-
     function outputPath(url) {
       try {
         const resolved = new URL(url, document.baseURI);
@@ -234,7 +343,7 @@
       }
     }
 
-      function withRepresentation(url, representation) {
+    function withRepresentation(url, representation) {
       const next = new URL(url, document.baseURI);
       next.searchParams.set('tola-representation', representation);
       return next.href;
@@ -247,8 +356,6 @@
     }
 
     return {
-      isHexIdentity,
-      isPageAvailability,
       validatedOutput,
       outputPath,
       withRepresentation,
@@ -257,14 +364,27 @@
     };
   }
 
-  function createPageState({ mark, canRestore }) {
-    // Capture and restore share one protocol bound: a page must never restore
-    // state the runtime refuses to capture, and secret fields never round-trip.
+  function createPageState({ canRestore }) {
+    // Capture and restore share one protocol bound: only state the runtime captured can
+    // come back, and secret fields never round-trip.
     const FORM_EXCLUDED_INPUT_TYPES = new Set(['password', 'file', 'hidden', 'button', 'submit', 'reset', 'image']);
     const MAX_FORM_CONTROLS = 128;
     const MAX_CONTROL_VALUE_LENGTH = 65536;
     const MAX_SELECT_OPTIONS = 512;
     const MAX_SELECT_OPTION_LENGTH = 4096;
+
+    /// Controls the reader operated in this document. Trusted events separate that state
+    /// from values a script assigned without announcing a change.
+    const readerTouched = new WeakSet();
+
+    function noteReaderControl(event) {
+      if (!event.isTrusted || !(event.target instanceof Element)) return;
+      if (event.target.closest(RUNTIME_CONTAINER_SELECTOR)) return;
+      readerTouched.add(event.target);
+    }
+
+    document.addEventListener('input', noteReaderControl, true);
+    document.addEventListener('change', noteReaderControl, true);
 
     function formRelation(control) {
       if (!('form' in control) || !control.form) return null;
@@ -277,10 +397,11 @@
       return resolveIdentity(relation) === control.form;
     }
 
-    function captureFormControls() {
+    function captureFormControls(readerTouchedOnly) {
       const controls = [];
       for (const control of Array.from(document.querySelectorAll('input,textarea,select'))) {
         if (controls.length >= MAX_FORM_CONTROLS) break;
+        if (readerTouchedOnly && !readerTouched.has(control)) continue;
         const identity = elementIdentity(control);
         const form = formRelation(control);
         if (!identity || form === undefined) continue;
@@ -366,11 +487,11 @@
       return media;
     }
 
-    function capture() {
+    function capture(readerTouchedOnly = false) {
       return {
-        controls: captureFormControls(),
+        controls: captureFormControls(readerTouchedOnly),
         focus: captureFocus(),
-        media: captureMedia(),
+        media: readerTouchedOnly ? [] : captureMedia(),
       };
     }
 
@@ -381,7 +502,14 @@
       return { navigation, capturedNodes };
     }
 
-    function restoreFormControls(controls, capturedNodes) {
+    /// Restored values arrive after a scripted page initialized its controls, so the
+    /// restore announces the change; a silent restore would leave listener state behind.
+    function notifyRestored(control) {
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+      control.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function restoreFormControls(controls, capturedNodes, notify = false) {
       if (!Array.isArray(controls)) return;
       for (const saved of controls.slice(0, MAX_FORM_CONTROLS)) {
         if (!saved || typeof saved !== 'object') continue;
@@ -391,16 +519,30 @@
         if (saved.tag === 'input' && control instanceof HTMLInputElement
             && control.type.toLowerCase() === saved.type) {
           if (saved.mode === 'checked' && typeof saved.checked === 'boolean'
-              && ['checkbox', 'radio'].includes(saved.type)) control.checked = saved.checked;
+              && ['checkbox', 'radio'].includes(saved.type)) {
+            if (notify) readerTouched.add(control);
+            if (control.checked !== saved.checked) {
+              control.checked = saved.checked;
+              if (notify) notifyRestored(control);
+            }
+          }
           if (saved.mode === 'value' && typeof saved.value === 'string' && saved.value.length <= MAX_CONTROL_VALUE_LENGTH
               && !FORM_EXCLUDED_INPUT_TYPES.has(saved.type)) {
-            control.value = saved.value;
+            if (notify) readerTouched.add(control);
+            if (control.value !== saved.value) {
+              control.value = saved.value;
+              if (notify) notifyRestored(control);
+            }
           }
           continue;
         }
         if (saved.tag === 'textarea' && control instanceof HTMLTextAreaElement
             && saved.mode === 'value' && typeof saved.value === 'string' && saved.value.length <= MAX_CONTROL_VALUE_LENGTH) {
-          control.value = saved.value;
+          if (notify) readerTouched.add(control);
+          if (control.value !== saved.value) {
+            control.value = saved.value;
+            if (notify) notifyRestored(control);
+          }
           continue;
         }
         if (saved.tag === 'select' && control instanceof HTMLSelectElement
@@ -411,8 +553,17 @@
             && saved.selected.every(index => Number.isInteger(index) && index >= 0 && index < saved.options.length)) {
           const options = Array.from(control.options).map(option => option.value);
           if (JSON.stringify(options) !== JSON.stringify(saved.options)) continue;
+          if (notify) readerTouched.add(control);
           const selected = new Set(saved.selected);
-          for (const [index, option] of Array.from(control.options).entries()) option.selected = selected.has(index);
+          let changed = false;
+          for (const [index, option] of Array.from(control.options).entries()) {
+            const wanted = selected.has(index);
+            if (option.selected !== wanted) {
+              option.selected = wanted;
+              changed = true;
+            }
+          }
+          if (changed && notify) notifyRestored(control);
         }
       }
     }
@@ -432,6 +583,16 @@
           || end > element.value.length || ![null, 'forward', 'backward', 'none'].includes(direction)) return;
       try { element.setSelectionRange(start, end, direction); }
       catch (_) {}
+    }
+
+    /// A scripted page may claim focus during its load; only a page that left focus on the
+    /// document root hands it back to the reader.
+    function restoreReaderFocus(saved) {
+      if (!saved) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement
+          && active !== resolveIdentity(saved.identity)) return;
+      restoreFocus(saved);
     }
 
     function restoreMedia(media, capturedNodes) {
@@ -488,28 +649,33 @@
       if (!root.getAttribute('style')) root.removeAttribute('style');
     }
 
+    return {
+      capture,
+      capturePatch,
+      restore,
+      restoreFormControls,
+      restoreReaderFocus,
+      restoreScrollPosition,
+    };
+  }
+
+  /// Persists native page state across a Tola-triggered reload.
+  function createReloadState({ mark, canRestore, hasSiteBehavior, pageState }) {
+    /// Capture the state a Tola reload must carry over. A scripted page keeps the controls
+    /// the reader changed and the current focus: page scripts own every other value.
     function saveReloadState() {
-      if (!canRestore()) {
-        try { sessionStorage.removeItem('tola:reload-position'); } catch (_) {}
-        return;
-      }
       let payload;
       try {
-        payload = JSON.stringify({
+        const scripted = hasSiteBehavior();
+        const position = {
           href: location.href,
           x: Number.isFinite(window.scrollX) ? window.scrollX : 0,
           y: Number.isFinite(window.scrollY) ? window.scrollY : 0,
           requestedAt: Date.now(),
-          navigation: capture(),
-        });
-        if (payload.length > 512 * 1024) {
-          payload = JSON.stringify({
-            href: location.href,
-            x: Number.isFinite(window.scrollX) ? window.scrollX : 0,
-            y: Number.isFinite(window.scrollY) ? window.scrollY : 0,
-            requestedAt: Date.now(),
-          });
-        }
+          scripted,
+        };
+        payload = JSON.stringify({ ...position, navigation: pageState.capture(scripted) });
+        if (payload.length > 512 * 1024) payload = JSON.stringify(position);
         sessionStorage.setItem('tola:reload-position', payload);
       } catch (_) {
         // Storage may be disabled or unavailable in private browsing contexts.
@@ -527,13 +693,25 @@
         return;
       }
       if (!saved || saved.href !== location.href
-          || !Number.isFinite(saved.x) || !Number.isFinite(saved.y)) return;
+          || !Number.isFinite(saved.x) || !Number.isFinite(saved.y)
+          || typeof saved.scripted !== 'boolean') return;
       const restoreSaved = () => {
-        if (!canRestore()) return;
-        restore(saved.navigation);
-        restoreScrollPosition([saved.x, saved.y]);
+        // State belongs to the page that captured it. A page whose site behavior changed
+        // initializes from its new document instead.
+        if (saved.scripted !== hasSiteBehavior()) return;
         if (Number.isFinite(saved.requestedAt)) {
           mark('reload-latency-ms', Math.max(0, Date.now() - saved.requestedAt));
+        }
+        if (saved.scripted) {
+          // This page's scripts initialized it already, so only reader-changed controls
+          // return, announced to listeners. Focus returns only when the page left it
+          // unclaimed; scrolling and media stay with the page.
+          pageState.restoreFormControls(saved.navigation?.controls, null, true);
+          pageState.restoreReaderFocus(saved.navigation?.focus);
+        } else {
+          if (!canRestore()) return;
+          pageState.restore(saved.navigation);
+          pageState.restoreScrollPosition([saved.x, saved.y]);
         }
         mark('reload-restored');
       };
@@ -544,14 +722,7 @@
       }
     }
 
-    return {
-      capture,
-      capturePatch,
-      restore,
-      restoreScrollPosition,
-      saveReloadState,
-      restoreReloadState,
-    };
+    return { saveReloadState, restoreReloadState };
   }
 
   function cssUrls(text, base, rewrite = null) {
@@ -854,7 +1025,7 @@
         for (const url of cssUrls(style.cssText, base).urls) {
           const path = addresses.outputPath(url);
           const representation = new URL(url).searchParams.get('tola-representation');
-          if (path !== null && addresses.isHexIdentity(representation)) inherited.set(path, representation);
+          if (path !== null && isHexIdentity(representation)) inherited.set(path, representation);
         }
       }, (text, base) => fonts.add(cssUrls(text, base, url => url).text));
       for (const [path, representation] of representations) inherited.set(path, representation);
@@ -1079,81 +1250,11 @@
   /// A patch is prepared only when every part of it can be proven safe;
   /// otherwise the caller navigates. Unchanged nodes keep their identity, so
   /// scroll position, focus, form values, and media state survive.
-  function createDocumentPatch({ addresses, pageState, replacements }) {
-    const PATCHED_HEAD_ELEMENTS = new Set(['title', 'meta']);
-    const URL_ATTRIBUTES = ['href', 'src', 'poster', 'data'];
+  function createDocumentPatch({ addresses, pageState }) {
     let sourceDocument = null;
     let sourceRevision = null;
     let sourceLoading = Promise.resolve();
     let sourceFailure = null;
-
-    function contentNodes(parent) {
-      return Array.from(parent.childNodes).filter(node => !(
-        node.nodeType === 1 && node.matches(RUNTIME_DOM_SELECTOR)
-      ));
-    }
-
-    function attributeValue(element, name) {
-      const value = element.getAttribute(name);
-      if (value === null) return null;
-      return URL_ATTRIBUTES.includes(name) ? withoutRepresentation(value) : value;
-    }
-
-    function sameAttributes(left, right, ignored = null) {
-      const names = new Set([...left.attributes].map(attribute => attribute.name)
-        .concat([...right.attributes].map(attribute => attribute.name)));
-      for (const name of names) {
-        if (name === ignored) continue;
-        if (attributeValue(left, name) !== attributeValue(right, name)) return false;
-      }
-      return true;
-    }
-
-    function sameMarkup(left, right) {
-      if (left.nodeType !== right.nodeType) return false;
-      if (left.nodeType !== 1) return left.nodeValue === right.nodeValue;
-      if (left.localName !== right.localName) return false;
-      if (!sameAttributes(left, right)) return false;
-      const leftChildren = contentNodes(left);
-      const rightChildren = contentNodes(right);
-      return leftChildren.length === rightChildren.length
-        && leftChildren.every((child, index) => sameMarkup(child, rightChildren[index]));
-    }
-
-    function requireReplaceableAttribute(element, name, value) {
-      const tag = element.localName;
-      if (name === 'srcset' || name === 'xlink:href' || name === 'poster' || name === 'data') {
-        throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
-      }
-      if (name === 'style' && /url\s*\(/i.test(value || '')) {
-        throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
-      }
-      if (name === 'href' && ['link', 'use', 'image'].includes(tag)) {
-        throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
-      }
-      if (name === 'src' && tag !== 'img') {
-        throw new Error(`the \`${tag}\` \`${name}\` attribute could not be updated in place`);
-      }
-    }
-
-    function createPlan() {
-      const plan = { structural: false, head: [], body: [], images: [] };
-      plan.text = (node, value) => plan.body.push({ op: 'text', node, value });
-      plan.attributes = (node, set, remove) => plan.body.push({ op: 'attributes', node, set, remove });
-      plan.remove = node => {
-        plan.structural = true;
-        plan.body.push({ op: 'remove', node });
-      };
-      plan.replace = (node, replacement) => {
-        plan.structural = true;
-        plan.body.push({ op: 'replace', node, replacement });
-      };
-      plan.insert = (parent, node) => {
-        plan.structural = true;
-        plan.body.push({ op: 'insert', parent, node });
-      };
-      return plan;
-    }
 
     function imageUrl(representations, value) {
       const representation = addresses.representationOf(representations, value);
@@ -1275,23 +1376,6 @@
       // The head holds nothing the patch may restructure.
       if (plan.structural) throw new Error('the update could not be applied in place');
       plan.head.push(...plan.body.splice(bodyBefore));
-    }
-
-    function applyPatch(plan) {
-      const apply = patch => {
-        switch (patch.op) {
-          case 'text': patch.node.nodeValue = patch.value; break;
-          case 'attributes':
-            for (const [name, value] of patch.set) patch.node.setAttribute(name, value);
-            for (const name of patch.remove) patch.node.removeAttribute(name);
-            break;
-          case 'remove': patch.node.remove(); break;
-          case 'replace': patch.node.replaceWith(patch.replacement); break;
-          case 'insert': patch.parent.appendChild(patch.node); break;
-        }
-      };
-      for (const patch of plan.head) apply(patch);
-      for (const patch of plan.body) apply(patch);
     }
 
     async function loadDocument(revision, representation = null) {
@@ -1440,7 +1524,7 @@
       if (!currentBody || !nextBody) throw new Error('the update could not be applied in place');
       if (!sameAttributes(currentBody, nextBody)) throw new Error('the update could not be applied in place');
       const signature = normalizedMarkup(document);
-      const plan = createPlan();
+      const plan = createPatchPlan();
       planHead(plan, representations, document.head, next.head);
       planChildren(plan, representations, currentBody, nextBody);
       await prepareImages(plan);
@@ -1462,6 +1546,198 @@
     }
 
     return { initialize, advance, prepare, prepareClasses };
+  }
+
+  /// Applies one adjacent revision in place, or throws so the caller reloads.
+  function createRevisionApplier({ addresses, evidence, patch, replacements, facade, pageActive, mark }) {
+    function readRevision(diff, pageAvailability) {
+      if (!diff
+        || !isHexIdentity(diff.from)
+        || !isHexIdentity(diff.to)
+        || diff.from === diff.to
+        || !Array.isArray(diff.changes)
+        || diff.changes.length === 0
+        || !isPageAvailability(pageAvailability)) {
+        throw new Error('the site update could not be read');
+      }
+      if (facade.revision !== diff.from) {
+        throw new Error('the page was out of date');
+      }
+      if (facade.pageAvailability !== pageAvailability) {
+        throw new Error('the site now serves different pages');
+      }
+      // Every dependency is an address compared against the mount, so a mount the page could not
+      // decode leaves nothing an in-place update may rely on.
+      if (!addresses.mountDecoded) {
+        throw new Error('the update could not be applied in place');
+      }
+    }
+
+    function readRevisionDependencies() {
+      evidence.drain();
+      // Resource Timing omits pending requests, which may still use the old revision.
+      if (!evidence.complete) {
+        throw new Error('the update could not be applied in place');
+      }
+      const dependencies = evidence.dependencies();
+      if (dependencies.unknown) {
+        throw new Error('the update could not be applied in place');
+      }
+      return dependencies;
+    }
+
+    function validatedOutputs(diff) {
+      const outputs = diff.changes.map(change => addresses.validatedOutput(change));
+      if (outputs.some(output => !output)) throw new Error('the site update could not be read');
+      return outputs;
+    }
+
+    function collectRevisionUpdates(diff, outputs, dependencies, callbacks) {
+      let reload = false;
+      const stylesheets = new Map();
+      const representations = new Map();
+      const media = [];
+      let documentOutput = null;
+      const requestedPath = addresses.outputPath(location.href);
+      for (const [index, change] of diff.changes.entries()) {
+        const output = outputs[index];
+        if (!output) {
+          reload = true;
+          break;
+        }
+        if (change.operation !== 'removed') representations.set(output.path, output.representation);
+        // A new output may replace the fallback serving this address.
+        if (change.operation === 'added' && requestedPath !== null
+            && output.path === requestedPath) {
+          reload = true;
+          continue;
+        }
+        const consumers = dependencies.paths.get(output.path);
+        if (output.kind === 'html-document') {
+          if (facade.activeOutput === output.path) {
+            if (change.operation !== 'modified') reload = true;
+            else documentOutput = output;
+          } else if (consumers) {
+            reload = true;
+          }
+          continue;
+        }
+        if (consumers?.dataFetched && !callbacks.accepts(output.path)) {
+          reload = true;
+          continue;
+        }
+        if (consumers?.unsupported || consumers?.unsafeFetched) {
+          reload = true;
+          continue;
+        }
+        if (change.operation === 'removed') {
+          if (consumers && (!callbacks.accepts(output.path) || consumers.stylesheets.length || consumers.cssImages.length || consumers.media.length)) reload = true;
+          continue;
+        }
+        for (const link of consumers?.stylesheets || []) {
+          stylesheets.set(link, { path: output.path, representation: output.representation });
+        }
+        for (const link of consumers?.cssImages || []) {
+          if (!stylesheets.has(link)) stylesheets.set(link, { path: addresses.outputPath(link.href), representation: null });
+        }
+        if (consumers?.media.length) media.push({ output, references: consumers.media });
+        if (consumers && !consumers.stylesheets.length && !consumers.cssImages.length && !consumers.media.length
+            && !callbacks.accepts(output.path)) reload = true;
+      }
+      return { reload, stylesheets, representations, media, documentOutput };
+    }
+
+    /// Fills the caller's update lists so a preparation failure still disposes staged updates.
+    async function prepareRevisionUpdates(revisionUpdates, diff, behavior, stylesheetUpdates, mediaUpdates) {
+      const { stylesheets, media, representations, documentOutput } = revisionUpdates;
+      let documentUpdate = null;
+      if (documentOutput) {
+        documentUpdate = await (behavior ? patch.prepareClasses : patch.prepare)(documentOutput, diff);
+      }
+      if (documentUpdate?.classesChanged) {
+        for (const link of document.querySelectorAll('link[rel~="stylesheet"][href]:not([data-tola-staging])')) {
+          if (!stylesheets.has(link)) stylesheets.set(link, { path: addresses.outputPath(link.href), representation: null });
+        }
+      }
+      // Prepare the document before staging links; settle all resource workers
+      // before commit or cleanup.
+      const preparations = [
+        ...Array.from(stylesheets, ([link, output]) => async () => {
+          stylesheetUpdates.push(await replacements.prepareStylesheet(output.path, output.representation, [link], representations));
+        }),
+        ...media.map(({ output, references }) => async () => {
+          mediaUpdates.push(await replacements.prepareMedia(output.path, output.representation, references));
+        }),
+      ];
+      await runWithLimit(preparations, 4);
+      return documentUpdate;
+    }
+
+    function verifyRevisionConsumers(outputs, dependencies, callbacks) {
+      evidence.drain();
+      if (!evidence.complete) {
+        throw new Error('the update could not be applied in place');
+      }
+      const currentDependencies = evidence.dependencies();
+      if (currentDependencies.unknown) throw new Error('the page changed how it uses site assets');
+      for (const output of outputs) {
+        if (output.kind === 'html-document') continue;
+        const before = dependencies.paths.get(output.path);
+        const after = currentDependencies.paths.get(output.path);
+        if (after?.unsupported || after?.unsafeFetched || (after?.dataFetched && !callbacks.accepts(output.path))
+            || !sameElements(before?.stylesheets, after?.stylesheets)
+            || !sameElements(before?.cssImages, after?.cssImages)
+            || (before?.media.length || 0) !== (after?.media.length || 0)
+            || before?.media.some((target, index) => target.element !== after.media[index].element
+              || target.attribute !== after.media[index].attribute)) {
+          throw new Error('the page changed how it uses site assets');
+        }
+      }
+    }
+
+    async function applyRevision(diff, pageAvailability) {
+      readRevision(diff, pageAvailability);
+      mark('revision-received');
+      const dependencies = readRevisionDependencies();
+      const outputs = validatedOutputs(diff);
+      const callbacks = createUpdateCallbacks(diff, outputs, dependencies, pageActive);
+      const behavior = evidence.hasSiteBehavior;
+      const revisionUpdates = collectRevisionUpdates(diff, outputs, dependencies, callbacks);
+      if (revisionUpdates.reload) {
+        throw new Error('the update could not be applied in place');
+      }
+
+      const stylesheetUpdates = [];
+      const mediaUpdates = [];
+      let documentUpdate = null;
+      try {
+        documentUpdate = await prepareRevisionUpdates(revisionUpdates, diff, behavior, stylesheetUpdates, mediaUpdates);
+        await callbacks.run();
+        if (facade.revision !== diff.from || facade.revisionReloadRequired) {
+          throw new Error('the site changed before the update was applied');
+        }
+        verifyRevisionConsumers(outputs, dependencies, callbacks);
+        if (evidence.hasSiteBehavior && documentUpdate && !documentUpdate.scripted) {
+          throw new Error('the page now requires navigation');
+        }
+        if (documentUpdate) documentUpdate.validate();
+        for (const update of stylesheetUpdates) update.validate();
+        for (const update of mediaUpdates) update.validate();
+        for (const update of stylesheetUpdates) update.commit();
+        for (const update of mediaUpdates) update.commit();
+        if (documentUpdate) documentUpdate.commit();
+      } catch (error) {
+        for (const update of stylesheetUpdates) update.dispose();
+        for (const update of mediaUpdates) update.dispose();
+        throw error;
+      }
+      facade.revision = diff.to;
+      patch.advance(diff.from, diff.to, documentUpdate?.source);
+      facade.pageAvailability = pageAvailability;
+      mark('revision-committed');
+    }
+
+    return { applyRevision };
   }
 
   /// The bottom-right indicator: whether a rebuild is running and how many errors and warnings
@@ -1722,10 +1998,26 @@
 
     const addresses = createSiteAddresses(() => page.pathPrefix);
     const evidence = createResourceEvidence({ addresses });
-    const pageState = createPageState({ mark, canRestore: () => !evidence.hasSiteBehavior });
+    const canRestore = () => !evidence.hasSiteBehavior;
+    const pageState = createPageState({ canRestore });
+    const reloadState = createReloadState({
+      mark,
+      canRestore,
+      hasSiteBehavior: () => evidence.hasSiteBehavior,
+      pageState,
+    });
     const devStatus = createDevStatus();
     const replacements = createResourceReplacements({ addresses });
-    const patch = createDocumentPatch({ addresses, pageState, replacements });
+    const patch = createDocumentPatch({ addresses, pageState });
+    const revisionApplier = createRevisionApplier({
+      addresses,
+      evidence,
+      patch,
+      replacements,
+      facade,
+      pageActive: () => page.active,
+      mark,
+    });
     const transport = createReloadTransport({
       onMessage: message => facade.handleMessage(message),
       onSocketChange: socket => { facade.ws = socket; },
@@ -1746,175 +2038,6 @@
       }
     }
 
-    async function applyRevision(diff, pageAvailability) {
-      if (!diff
-        || !addresses.isHexIdentity(diff.from)
-        || !addresses.isHexIdentity(diff.to)
-        || diff.from === diff.to
-        || !Array.isArray(diff.changes)
-        || diff.changes.length === 0
-        || !addresses.isPageAvailability(pageAvailability)) {
-        throw new Error('the site update could not be read');
-      }
-      if (facade.revision !== diff.from) {
-        throw new Error('the page was out of date');
-      }
-      if (facade.pageAvailability !== pageAvailability) {
-        throw new Error('the site now serves different pages');
-      }
-      // Every dependency is an address compared against the mount, so a mount the page could not
-      // decode leaves nothing an in-place update may rely on.
-      if (!addresses.mountDecoded) {
-        throw new Error('the update could not be applied in place');
-      }
-      mark('revision-received');
-      evidence.drain();
-      // Resource Timing omits pending requests, which may still use the old revision.
-      if (!evidence.complete) {
-        throw new Error('the update could not be applied in place');
-      }
-      const dependencies = evidence.dependencies();
-      if (dependencies.unknown) {
-        throw new Error('the update could not be applied in place');
-      }
-      const outputs = diff.changes.map(change => addresses.validatedOutput(change));
-      if (outputs.some(output => !output)) throw new Error('the site update could not be read');
-      const callbacks = createUpdateCallbacks(diff, outputs, dependencies, () => page.active);
-
-      let reload = false;
-      const stylesheets = new Map();
-      const representations = new Map();
-      const media = [];
-      let documentOutput = null;
-      const requestedPath = addresses.outputPath(location.href);
-      const behavior = evidence.hasSiteBehavior;
-      for (const change of diff.changes) {
-        const output = addresses.validatedOutput(change);
-        if (!output) {
-          reload = true;
-          break;
-        }
-        if (change.operation !== 'removed') representations.set(output.path, output.representation);
-        // A new output may replace the fallback serving this address.
-        if (change.operation === 'added' && requestedPath !== null
-            && output.path === requestedPath) {
-          reload = true;
-          continue;
-        }
-        const consumers = dependencies.paths.get(output.path);
-        if (output.kind === 'html-document') {
-          if (facade.activeOutput === output.path) {
-            if (change.operation !== 'modified') reload = true;
-            else documentOutput = output;
-          } else if (consumers) {
-            reload = true;
-          }
-          continue;
-        }
-        if (consumers?.dataFetched && !callbacks.accepts(output.path)) {
-          reload = true;
-          continue;
-        }
-        if (consumers?.unsupported || consumers?.unsafeFetched) {
-          reload = true;
-          continue;
-        }
-        if (change.operation === 'removed') {
-          if (consumers && (!callbacks.accepts(output.path) || consumers.stylesheets.length || consumers.cssImages.length || consumers.media.length)) reload = true;
-          continue;
-        }
-        for (const link of consumers?.stylesheets || []) {
-          stylesheets.set(link, { path: output.path, representation: output.representation });
-        }
-        for (const link of consumers?.cssImages || []) {
-          if (!stylesheets.has(link)) stylesheets.set(link, { path: addresses.outputPath(link.href), representation: null });
-        }
-        if (consumers?.media.length) media.push({ output, references: consumers.media });
-        if (consumers && !consumers.stylesheets.length && !consumers.cssImages.length && !consumers.media.length
-            && !callbacks.accepts(output.path)) reload = true;
-      }
-
-      if (reload) {
-        throw new Error('the update could not be applied in place');
-      }
-
-      const stylesheetUpdates = [];
-      const mediaUpdates = [];
-      let documentUpdate = null;
-      try {
-        if (documentOutput) {
-          documentUpdate = await (behavior ? patch.prepareClasses : patch.prepare)(documentOutput, diff);
-        }
-        if (documentUpdate?.classesChanged) {
-          for (const link of document.querySelectorAll('link[rel~="stylesheet"][href]:not([data-tola-staging])')) {
-            if (!stylesheets.has(link)) stylesheets.set(link, { path: addresses.outputPath(link.href), representation: null });
-          }
-        }
-        // Prepare the document before staging links; settle all resource workers
-        // before commit or cleanup.
-        const preparations = [
-          ...Array.from(stylesheets, ([link, output]) => async () => {
-            stylesheetUpdates.push(await replacements.prepareStylesheet(output.path, output.representation, [link], representations));
-          }),
-          ...media.map(({ output, references }) => async () => {
-            mediaUpdates.push(await replacements.prepareMedia(output.path, output.representation, references));
-          }),
-        ];
-        let next = 0;
-        let failure = null;
-        await Promise.all(Array.from({ length: Math.min(4, preparations.length) }, async () => {
-          while (!failure && next < preparations.length) {
-            const prepare = preparations[next++];
-            try { await prepare(); }
-            catch (error) { failure = error; }
-          }
-        }));
-        if (failure) throw failure;
-        await callbacks.run();
-        if (facade.revision !== diff.from || facade.revisionReloadRequired) {
-          throw new Error('the site changed before the update was applied');
-        }
-        evidence.drain();
-        if (!evidence.complete) {
-          throw new Error('the update could not be applied in place');
-        }
-        const currentDependencies = evidence.dependencies();
-        if (currentDependencies.unknown) throw new Error('the page changed how it uses site assets');
-        const sameTargets = (before = [], after = []) => before.length === after.length
-          && before.every((target, index) => target === after[index]);
-        for (const output of outputs) {
-          if (output.kind === 'html-document') continue;
-          const before = dependencies.paths.get(output.path);
-          const after = currentDependencies.paths.get(output.path);
-          if (after?.unsupported || after?.unsafeFetched || (after?.dataFetched && !callbacks.accepts(output.path))
-              || !sameTargets(before?.stylesheets, after?.stylesheets)
-              || !sameTargets(before?.cssImages, after?.cssImages)
-              || (before?.media.length || 0) !== (after?.media.length || 0)
-              || before?.media.some((target, index) => target.element !== after.media[index].element
-                || target.attribute !== after.media[index].attribute)) {
-            throw new Error('the page changed how it uses site assets');
-          }
-        }
-        if (evidence.hasSiteBehavior && documentUpdate && !documentUpdate.scripted) {
-          throw new Error('the page now requires navigation');
-        }
-        if (documentUpdate) documentUpdate.validate();
-        for (const update of stylesheetUpdates) update.validate();
-        for (const update of mediaUpdates) update.validate();
-        for (const update of stylesheetUpdates) update.commit();
-        for (const update of mediaUpdates) update.commit();
-        if (documentUpdate) documentUpdate.commit();
-      } catch (error) {
-        for (const update of stylesheetUpdates) update.dispose();
-        for (const update of mediaUpdates) update.dispose();
-        throw error;
-      }
-      facade.revision = diff.to;
-      patch.advance(diff.from, diff.to, documentUpdate?.source);
-      facade.pageAvailability = pageAvailability;
-      mark('revision-committed');
-    }
-
     function handleMessage(message) {
       if (!page.ready) return;
       if (!message || typeof message !== 'object') return;
@@ -1932,8 +2055,8 @@
             }
             if (message.type === 'connected') {
               // Wait for pending resource updates before comparing the document's revision.
-              if (!addresses.isHexIdentity(message.revision)
-                  || !addresses.isPageAvailability(message.page_availability)
+              if (!isHexIdentity(message.revision)
+                  || !isPageAvailability(message.page_availability)
                   || facade.awaitingPublication
                   || (facade.revision && facade.revision !== message.revision)
                   || (facade.pageAvailability && facade.pageAvailability !== message.page_availability)) {
@@ -1945,7 +2068,7 @@
               facade.pageAvailability = message.page_availability;
               return;
             }
-            return applyRevision(message.diff, message.page_availability);
+            return revisionApplier.applyRevision(message.diff, message.page_availability);
           })
           .catch(error => {
             facade.revisionReloadRequired = true;
@@ -1980,7 +2103,7 @@
       if (facade.revision && evidence.hasSiteBehavior) patch.initialize(facade.revision);
       mark('page-ready');
       mark('initialized');
-      pageState.restoreReloadState();
+      reloadState.restoreReloadState();
       transport.configure(bootstrap.port, bootstrap.session, bootstrap.generation);
       transport.connect();
       addEventListener('pagehide', () => {
@@ -2002,7 +2125,7 @@
 
     facade.handleMessage = handleMessage;
     facade.requestReload = requestReload;
-    facade.saveReloadState = () => pageState.saveReloadState();
+    facade.saveReloadState = () => reloadState.saveReloadState();
     evidence.observe();
 
     return { facade, initialize };

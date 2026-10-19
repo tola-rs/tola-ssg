@@ -25,6 +25,7 @@ declare global {
     fragmentLoaded?: boolean
     fragmentExecutions?: number
     mediaInterruptions?: Record<string, string[]>
+    scriptRuns?: number
   }
 }
 
@@ -554,7 +555,7 @@ test('scripted content reinitializes after edits', async ({ page, sites }) => {
   expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before)
 })
 
-test('scripted submissions match initialized controls', async ({ page, sites }) => {
+test('scripted reload announces restored reader input', async ({ page, sites }) => {
   const script =
     "window.appStore = 'seed'; const search = document.getElementById('search'); search.value = window.appStore; search.addEventListener('input', () => { window.appStore = search.value; }); document.getElementById('submit').addEventListener('click', () => { window.submitted = window.appStore; });"
   const program = (text: string) =>
@@ -574,11 +575,7 @@ test('scripted submissions match initialized controls', async ({ page, sites }) 
   const navigation = page.waitForEvent('load')
   await writeFile(join(site.root, 'site.typ'), program('Second'))
   await navigation
-  await page.evaluate(async () => {
-    const { promise, resolve } = Promise.withResolvers<void>()
-    requestAnimationFrame(() => resolve())
-    await promise
-  })
+  await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
   await page.locator('#submit').click()
 
   const action = await page.evaluate(() => ({
@@ -586,8 +583,154 @@ test('scripted submissions match initialized controls', async ({ page, sites }) 
     visible: (document.querySelector('#search') as HTMLInputElement).value,
     store: window.appStore,
   }))
-  expect(action).toEqual({ submitted: 'seed', visible: 'seed', store: 'seed' })
+  expect(action).toEqual({ submitted: 'retained', visible: 'retained', store: 'retained' })
   expect(await page.evaluate(() => performance.timeOrigin)).not.toBe(before)
+})
+
+test('scripted reload restores reader focus', async ({ page, sites }) => {
+  const program = (text: string) =>
+    htmlProgram(
+      `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("p", attrs: (id: "text"))[${text}]`,
+      'window.scriptRuns = (window.scriptRuns || 0) + 1;',
+    )
+  const site = await sites.dev({
+    initialContent: null,
+    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
+  })
+  await page.goto(site.url, { waitUntil: 'load' })
+  await waitForOpenSocket(page)
+  await page.locator('#search').fill('retained')
+  await page.evaluate(() => {
+    const search = document.querySelector('#search') as HTMLInputElement
+    search.focus()
+    search.setSelectionRange(2, 5, 'forward')
+  })
+  const navigation = page.waitForEvent('load')
+  await writeFile(join(site.root, 'site.typ'), program('Second'))
+  await navigation
+  await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
+  expect(
+    await page.evaluate(() => {
+      const search = document.querySelector('#search') as HTMLInputElement
+      return {
+        focus: document.activeElement?.id,
+        selection: [search.selectionStart, search.selectionEnd, search.selectionDirection],
+      }
+    }),
+  ).toEqual({ focus: 'search', selection: [2, 5, 'forward'] })
+})
+
+test('scripted reload keeps page-claimed focus', async ({ page, sites }) => {
+  const program = (text: string, claimFocus: boolean) =>
+    htmlProgram(
+      `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("input", attrs: (id: "other"))#html.elem("p", attrs: (id: "text"))[${text}]`,
+      claimFocus ? "document.getElementById('other').focus();" : 'window.scriptRuns = 1;',
+    )
+  const site = await sites.dev({
+    initialContent: null,
+    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First', false)),
+  })
+  await page.goto(site.url, { waitUntil: 'load' })
+  await waitForOpenSocket(page)
+  await page.locator('#search').fill('retained')
+  const navigation = page.waitForEvent('load')
+  await writeFile(join(site.root, 'site.typ'), program('Second', true))
+  await navigation
+  await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
+  expect(
+    await page.evaluate(() => ({
+      focus: document.activeElement?.id,
+      value: (document.querySelector('#search') as HTMLInputElement).value,
+    })),
+  ).toEqual({ focus: 'other', value: 'retained' })
+})
+
+test('scripted reload restores reader-selected options', async ({ page, sites }) => {
+  const program = (text: string) =>
+    htmlProgram(
+      `#html.elem("select", attrs: (id: "choice", size: "3"))[
+        #html.elem("option", attrs: (value: "one"))[One]
+        #html.elem("option", attrs: (value: "two"))[Two]
+        #html.elem("option", attrs: (value: "three"))[Three]
+      ]
+      #html.elem("p", attrs: (id: "text"))[${text}]`,
+      'window.scriptRuns = (window.scriptRuns || 0) + 1;',
+    )
+  const site = await sites.dev({
+    initialContent: null,
+    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
+  })
+  await page.goto(site.url, { waitUntil: 'load' })
+  await waitForOpenSocket(page)
+  await page.locator('#choice option', { hasText: 'Two' }).click()
+  await expect(page.locator('#choice')).toHaveValue('two')
+  const navigation = page.waitForEvent('load')
+  await writeFile(join(site.root, 'site.typ'), program('Second'))
+  await navigation
+  await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
+  await expect(page.locator('#choice')).toHaveValue('two')
+})
+
+test('scripted reload keeps script-initialized controls', async ({ page, sites }) => {
+  const script =
+    "document.getElementById('search').value = sessionStorage.getItem('script-value');"
+  const program = (text: string) =>
+    htmlProgram(
+      `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("p", attrs: (id: "text"))[${text}]`,
+      script,
+    )
+  const site = await sites.dev({
+    initialContent: null,
+    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
+  })
+  await page.goto(site.url, { waitUntil: 'load' })
+  await waitForOpenSocket(page)
+  await page.evaluate(() => sessionStorage.setItem('script-value', 'first'))
+  let navigation = page.waitForEvent('load')
+  await writeFile(join(site.root, 'site.typ'), program('Second'))
+  await navigation
+  await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
+  await expect(page.locator('#search')).toHaveValue('first')
+
+  await waitForOpenSocket(page)
+  await page.evaluate(() => sessionStorage.setItem('script-value', 'second'))
+  navigation = page.waitForEvent('load')
+  await writeFile(join(site.root, 'site.typ'), program('Third'))
+  await navigation
+  await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
+  await expect(page.locator('#search')).toHaveValue('second')
+})
+
+test('scripted reload keeps reader-selected radio tabs', async ({ page, sites }) => {
+  const program = (text: string) =>
+    htmlProgram(
+      `#html.elem("div", attrs: (class: "code-group"))[
+        #html.elem("input", attrs: (type: "radio", name: "tabs", id: "tab-1", checked: ""))
+        #html.elem("label", attrs: ("for": "tab-1"))[One]
+        #html.elem("input", attrs: (type: "radio", name: "tabs", id: "tab-2"))
+        #html.elem("label", attrs: ("for": "tab-2"))[Two]
+      ]
+      #html.elem("p", attrs: (id: "text"))[${text}]`,
+      'window.scriptRuns = (window.scriptRuns || 0) + 1;',
+    )
+  const site = await sites.dev({
+    initialContent: null,
+    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
+  })
+  await page.goto(site.url, { waitUntil: 'load' })
+  await waitForOpenSocket(page)
+  await page.locator('label[for="tab-2"]').click()
+
+  for (const text of ['Second', 'Third']) {
+    const navigation = page.waitForEvent('load')
+    await writeFile(join(site.root, 'site.typ'), program(text))
+    await navigation
+    await page.waitForFunction(() => (window as TolaWindow).Tola.timings['reload-restored'] !== undefined)
+    await expect(page.locator('#tab-2')).toBeChecked()
+    await expect(page.locator('#tab-1')).not.toBeChecked()
+    expect(await page.evaluate(() => window.scriptRuns)).toBe(1)
+    await waitForOpenSocket(page)
+  }
 })
 
 for (const scope of ['full response', 'body fragment']) {
