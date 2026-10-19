@@ -229,12 +229,6 @@
         "command": "tola.onEnter",
         "key": "enter",
         "when": "editorTextFocus && !editorReadonly && editorLangId == typst && config.tola.onEnter && !suggestWidgetVisible && !editorHasMultipleSelections"
-      },
-      {
-        "command": "tola.openPreview",
-        "key": "ctrl+k v",
-        "mac": "cmd+k v",
-        "when": "editorLangId == typst"
       }
     ],
     "commands": [
@@ -256,7 +250,13 @@
       },
       {
         "command": "tola.openPreview",
-        "title": "Tola: Open Preview"
+        "title": "Tola: Open Preview",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "tola.openPreviewExternal",
+        "title": "Tola: Open Preview in Browser",
+        "icon": "$(link-external)"
       },
       {
         "command": "tola.openPage",
@@ -350,16 +350,6 @@
           "default": "assets",
           "scope": "resource",
           "description": "Directory for dropped or pasted files, relative to the site root."
-        },
-        "tola.previewTarget": {
-          "type": "string",
-          "enum": [
-            "external",
-            "simpleBrowser"
-          ],
-          "default": "external",
-          "scope": "resource",
-          "description": "Where a published page opens: the system browser, or an editor tab through the built-in Simple Browser."
         }
       }
     },
@@ -406,6 +396,11 @@
           "command": "tola.vendorPackages",
           "when": "resourceLangId == typst && editorTextFocus",
           "group": "z_commands"
+        },
+        {
+          "command": "tola.openPreviewExternal",
+          "when": "resourceLangId == typst",
+          "group": "navigation"
         }
       ],
       "commandPalette": [

@@ -113,6 +113,36 @@ export async function runPreviewChecks(): Promise<void> {
       })
     ))
 
+  await check('A lens data route previews its page', () =>
+    withPreview((opened) =>
+      withSite(async (site) => {
+        await vscode.window.showTextDocument(site.source)
+        await vscode.commands.executeCommand('tola.openPreview', site.source, {
+          route: '/preview/',
+        })
+        const page = opened.at(-1)
+        assert.ok(page, 'the preview opened no page')
+        assert.equal(page.status, 200)
+        assert.equal(page.url.pathname, '/preview/')
+      })
+    ))
+
+  await check('A component opens no preview', () =>
+    withPreview((opened) =>
+      withSite(async (site) => {
+        const component = vscode.Uri.file(path.join(site.root, 'components/nav.typ'))
+        await fs.mkdir(path.dirname(component.fsPath), { recursive: true })
+        await fs.writeFile(component.fsPath, '= Nav\n')
+        await vscode.window.showTextDocument(component)
+        await vscode.commands.executeCommand('tola.openPreview', component)
+        assert.deepEqual(opened, [])
+        assert.match(
+          await workbenchText({ contains: 'publishes no page', dismiss: true }),
+          /publishes no page/,
+        )
+      })
+    ))
+
   await check('Stale lenses refuse another route', () =>
     withPreview((opened) =>
       withSite(async (site) => {

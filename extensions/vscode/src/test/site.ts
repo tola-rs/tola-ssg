@@ -687,12 +687,13 @@ export async function withPreview(
   assertion: (opened: OpenedPreview[], firstOpen: Promise<OpenedPreview>) => Promise<void>,
 ): Promise<void> {
   const original = vscode.env.openExternal
+  const execute = vscode.commands.executeCommand
   const opened: OpenedPreview[] = []
   let observe!: (page: OpenedPreview) => void
   const firstOpen = new Promise<OpenedPreview>((resolve) => {
     observe = resolve
   })
-  vscode.env.openExternal = async (uri) => {
+  const readPage = async (uri: vscode.Uri): Promise<boolean> => {
     const url = new URL(uri.toString())
     const response = await fetch(url, { signal: AbortSignal.timeout(15_000) })
     const page = { url, status: response.status, html: await response.text() }
@@ -700,10 +701,17 @@ export async function withPreview(
     observe(page)
     return response.ok
   }
+  vscode.env.openExternal = readPage
+  vscode.commands.executeCommand = ((command: string, ...args: unknown[]) => {
+    if (command !== 'simpleBrowser.show') return execute(command, ...args)
+    assert.equal(typeof args[0], 'string')
+    return readPage(vscode.Uri.parse(args[0] as string)).then(() => undefined)
+  }) as typeof vscode.commands.executeCommand
   try {
     await assertion(opened, firstOpen)
   } finally {
     vscode.env.openExternal = original
+    vscode.commands.executeCommand = execute
   }
 }
 

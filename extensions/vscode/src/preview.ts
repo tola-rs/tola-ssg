@@ -30,7 +30,6 @@ export class Preview {
   private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100)
   private statusRequest = 0
   private closing = false
-
   constructor(
     private readonly output: vscode.OutputChannel,
     private readonly siteFor: (uri?: vscode.Uri, siteKey?: string) => PreviewSite | undefined,
@@ -47,7 +46,12 @@ export class Preview {
       vscode.commands.registerCommand(
         'tola.openPreview',
         (uri?: vscode.Uri | string, route?: string, siteKey?: string) =>
-          this.handle(() => this.open(uri, route, siteKey)),
+          this.handle(() => this.open(uri, route, siteKey, 'simpleBrowser')),
+      ),
+      vscode.commands.registerCommand(
+        'tola.openPreviewExternal',
+        (uri?: vscode.Uri | string, route?: string, siteKey?: string) =>
+          this.handle(() => this.open(uri, route, siteKey, 'external')),
       ),
       vscode.commands.registerCommand('tola.copyRoute', () => this.handle(() => this.copyRoute())),
       vscode.commands.registerCommand(
@@ -174,7 +178,19 @@ export class Preview {
     )
   }
 
-  async open(uri?: vscode.Uri | string, route?: string, siteKey?: string): Promise<void> {
+  async open(
+    uri?: vscode.Uri | string,
+    route?: string | { route?: string },
+    siteKey?: string,
+    target: 'simpleBrowser' | 'external' = 'simpleBrowser',
+  ): Promise<void> {
+    // A lens hands over its route as a string, while a command that carries the lens data passes
+    // the object: both name the same page.
+    const preferred = typeof route === 'string'
+      ? route
+      : route && typeof route.route === 'string'
+      ? route.route
+      : undefined
     const source = typeof uri === 'string'
       ? vscode.Uri.parse(uri)
       : uri ?? (siteKey === undefined ? vscode.window.activeTextEditor?.document.uri : undefined)
@@ -186,7 +202,16 @@ export class Preview {
     const server = this.ensure(site)
     const publication = await server.publish(source)
     this.ensureSaved(site)
-    const chosen = await this.chooseRoute(source, publication.routes, route)
+    // A component or a template publishes no page of its own, so there is nothing to open: the
+    // author is told which file published nothing rather than shown the wrong page.
+    if (publication.routes.length === 0 && preferred === undefined) {
+      const label = source ? vscode.workspace.asRelativePath(source) : 'this file'
+      void vscode.window.showInformationMessage(
+        `${label} publishes no page; open a page under \`content/\` to preview it`,
+      )
+      return
+    }
+    const chosen = await this.chooseRoute(source, publication.routes, preferred)
     if (!chosen) return
     // A route lens is a checked-source hint; only this publication may authorize its browser path.
     const current = await server.readPublication(source, publication.revision)
@@ -198,7 +223,7 @@ export class Preview {
     this.ensureSaved(site)
     server.ensureActive()
     const address = await server.ready
-    await this.openUrl(site, new URL(chosen, address))
+    await this.openUrl(new URL(chosen, address), target)
     this.refreshStatus()
   }
 
@@ -231,28 +256,17 @@ export class Preview {
     this.ensureSaved(site)
     server.ensureActive()
     const address = await server.ready
-    await this.openUrl(site, new URL(chosen, address))
+    await this.openUrl(new URL(chosen, address), 'simpleBrowser')
     this.refreshStatus()
   }
 
-  /** Where a published page opens: the external browser by default, an editor tab under `tola.previewTarget = simpleBrowser`. */
-  private async openUrl(site: PreviewSite, url: URL): Promise<void> {
-    const target = vscode.workspace.getConfiguration('tola', site.selection.folder.uri).get<string>(
-      'previewTarget',
-      'external',
-    )
-    switch (target) {
-      case 'simpleBrowser':
-        await vscode.commands.executeCommand('simpleBrowser.show', url.href)
-        return
-      case 'external':
-        await vscode.env.openExternal(vscode.Uri.parse(url.href))
-        return
-      default:
-        throw new Error(
-          `Tola cannot open the preview because \`tola.previewTarget\` is \`${target}\`; set it to \`external\` or \`simpleBrowser\``,
-        )
+  /** Where a published page opens: the in-editor Simple Browser, or the system browser. */
+  private async openUrl(url: URL, target: 'simpleBrowser' | 'external'): Promise<void> {
+    if (target === 'external') {
+      await vscode.env.openExternal(vscode.Uri.parse(url.href))
+      return
     }
+    await vscode.commands.executeCommand('simpleBrowser.show', url.href)
   }
 
   async copyRoute(): Promise<void> {
