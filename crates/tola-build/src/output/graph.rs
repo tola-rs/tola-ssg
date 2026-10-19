@@ -181,6 +181,16 @@ impl OutputFile {
         &self.owner
     }
 
+    /// The same bytes and delivery metadata under a new producer.
+    pub(crate) fn with_owner(&self, owner: OutputOwner) -> Self {
+        Self::from_byte_owner(
+            self.path.clone(),
+            self.declaration.clone(),
+            owner,
+            self.bytes_owner(),
+        )
+    }
+
     #[inline]
     pub fn bytes(&self) -> &[u8] {
         self.bytes.as_slice()

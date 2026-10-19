@@ -48,8 +48,12 @@ pub(crate) fn generate_outputs(
     if participating.peek().is_none() {
         return Ok(GeneratedOutputs::default());
     }
-    let candidate =
-        HookOutputFiles::materialize_outputs(config.get_root(), upstream, Some(cancellation))?;
+    let candidate = HookOutputFiles::materialize_outputs(
+        config.get_root(),
+        upstream,
+        Some(cancellation),
+        crate::compiler::minified_languages(config),
+    )?;
     let mut generated_outputs = GeneratedOutputs::default();
     for (index, command) in participating {
         cancellation.ensure_active().map_err(anyhow::Error::new)?;
