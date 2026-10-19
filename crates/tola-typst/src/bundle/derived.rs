@@ -4,15 +4,15 @@
 use crate::diagnostic::CompileError;
 use crate::extract::{Heading, HeadingExtractor, Link, LinkExtractor, extract_elements};
 use crate::introspection::{
-    MetadataCardinalityError, MetadataDeclaration, all_values, first_value, label_selector,
-    metadata_declaration, unique_metadata_value,
+    MetadataCardinalityError, MetadataDeclaration, all_values, first_value, labeled_declarations,
+    unique_metadata_value,
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
-use typst::foundations::{Content, Selector, Value};
+use typst::foundations::{Content, Value};
 use typst::introspection::Introspector;
 use typst::syntax::FileId;
 use typst_bundle::{BundleDocument, BundleFile};
@@ -78,14 +78,7 @@ impl CompiledBundleDocument<'_> {
     /// Unlike [`Self::metadata_all`], retains declaration spans for reporting
     /// malformed protocol values without custom Typst elements.
     pub fn metadata_declarations(&self, label: &str) -> Vec<MetadataDeclaration> {
-        let Some(label) = label_selector(label) else {
-            return Vec::new();
-        };
-        self.introspector()
-            .query(&Selector::Label(label))
-            .iter()
-            .filter_map(metadata_declaration)
-            .collect()
+        labeled_declarations(self.introspector(), label)
     }
 
     /// Links realized in this document, excluding all sibling documents.
@@ -246,7 +239,52 @@ impl CompiledBundleDocument<'_> {
         ids
     }
 
+    /// Source identities actually represented by this document's realized HTML nodes.
+    ///
+    /// Deferred content may not occur in the original body. These IDs describe rendered
+    /// contribution, not page ownership or a source-to-element position mapping.
+    pub fn rendered_source_ids(
+        &self,
+        cancellation: &BundleCancellation,
+    ) -> Result<Vec<FileId>, CompileError> {
+        let Some(root) = self.html_root() else {
+            return Ok(Vec::new());
+        };
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        let mut pending = vec![root];
+        while let Some(element) = pending.pop() {
+            cancellation.ensure_active()?;
+            if let Some(id) = element.span.id()
+                && seen.insert(id)
+            {
+                ids.push(id);
+            }
+            for child in &element.children {
+                cancellation.ensure_active()?;
+                if let Some(id) = child.span().id()
+                    && seen.insert(id)
+                {
+                    ids.push(id);
+                }
+            }
+            pending.extend(
+                element
+                    .children
+                    .iter()
+                    .rev()
+                    .filter_map(|child| match child {
+                        typst_html::HtmlNode::Element(element) => Some(element),
+                        _ => None,
+                    }),
+            );
+        }
+        Ok(ids)
+    }
+
     fn elements(&self) -> Box<dyn Iterator<Item = &typst::foundations::Content> + '_> {
+        // The shared trait object answers selectors only; each document kind's own introspector
+        // is the one that enumerates its realized elements.
         match self.document {
             BundleDocument::Paged(document, _) => {
                 Box::new(document.introspector().elements().all())
@@ -263,7 +301,54 @@ impl CompiledBundleDocument<'_> {
     }
 }
 
+impl<'a> CompiledBundleDocument<'a> {
+    /// The document `file` names, when it is one.
+    pub(super) fn of(
+        path: &'a typst::syntax::VirtualPath,
+        file: &'a BundleFile,
+        compilation: &'a BundleCompilation,
+    ) -> Option<Self> {
+        let BundleFile::Document(document) = file else {
+            return None;
+        };
+        Some(Self {
+            path,
+            document,
+            compilation,
+        })
+    }
+}
+
+/// One rewritten HTML document and the page count it replaced.
+type RewrittenDocument = (typst::syntax::VirtualPath, Box<typst_html::HtmlDocument>);
+
 impl BundleCompilation {
+    /// Every HTML document's replacement, built before anything is installed.
+    fn rewrite_documents<E: crate::diagnostic::CancelledError>(
+        &self,
+        cancellation: &BundleCancellation,
+        mut rewrite: impl FnMut(
+            &typst::syntax::VirtualPath,
+            &typst_html::HtmlDocument,
+        ) -> Result<Option<(Box<typst_html::HtmlDocument>, usize)>, E>,
+    ) -> Result<(Vec<RewrittenDocument>, usize), E> {
+        cancellation.ensure_active_as()?;
+        let mut replacements = Vec::new();
+        let mut count = 0;
+        for (path, file) in self.bundle.files.iter() {
+            cancellation.ensure_active_as()?;
+            let BundleFile::Document(BundleDocument::Html(document)) = file else {
+                continue;
+            };
+            if let Some((replacement, changed)) = rewrite(path, document)? {
+                count += changed;
+                replacements.push((path.clone(), replacement));
+            }
+        }
+        cancellation.ensure_active_as()?;
+        Ok((replacements, count))
+    }
+
     fn html_fragment_index(
         &self,
         path: &typst::syntax::VirtualPath,
@@ -332,22 +417,10 @@ impl BundleCompilation {
             &typst_html::HtmlFrame,
         ) -> typst::diag::SourceResult<Vec<(&'static str, String)>>,
     ) -> Result<usize, crate::html::HtmlFrameStyleError> {
-        cancellation.ensure_active_as()?;
-        let mut replacements = Vec::new();
-        let mut count = 0;
-        for (path, file) in self.bundle.files.iter() {
-            cancellation.ensure_active_as()?;
-            let BundleFile::Document(BundleDocument::Html(document)) = file else {
-                continue;
-            };
-            if let Some((replacement, changed)) =
-                crate::html::style_document_frames(document, path, cancellation, &mut style)?
-            {
-                count += changed;
-                replacements.push((path.clone(), Box::new(replacement)));
-            }
-        }
-        cancellation.ensure_active_as()?;
+        let (replacements, count) = self.rewrite_documents(cancellation, |path, document| {
+            crate::html::style_document_frames(document, path, cancellation, &mut style)
+                .map(|found| found.map(|(replacement, changed)| (Box::new(replacement), changed)))
+        })?;
         install_html_documents(self, replacements);
         Ok(count)
     }
@@ -369,25 +442,17 @@ impl BundleCompilation {
             &str,
         ) -> Option<String>,
     ) -> Result<usize, crate::html::HtmlRawTextError> {
-        cancellation.ensure_active_as()?;
-        let mut replacements = Vec::new();
-        let mut count = 0;
-        for (path, file) in self.bundle.files.iter() {
-            cancellation.ensure_active_as()?;
-            let BundleFile::Document(BundleDocument::Html(document)) = file else {
-                continue;
-            };
+        let (replacements, count) = self.rewrite_documents(cancellation, |path, document| {
             let changes =
                 crate::html::collect_raw_text(document, path, cancellation, &mut rewrite)?;
             if changes.is_empty() {
-                continue;
+                return Ok(None);
             }
-            count += changes.len();
+            let changed = changes.len();
             let mut replacement = document.clone();
             crate::html::apply_raw_text(&mut replacement, changes, cancellation)?;
-            replacements.push((path.clone(), replacement));
-        }
-        cancellation.ensure_active_as()?;
+            Ok(Some((Box::new(replacement), changed)))
+        })?;
         install_html_documents(self, replacements);
         Ok(count)
     }
@@ -484,8 +549,6 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        // A rewrite returns every payload's own text unchanged: the stylesheet, the script,
-        // and the module the page loaded.
         for payload in [
             "<style>.a{color:red}</style>",
             "<script>function answer(){return 42}</script>",

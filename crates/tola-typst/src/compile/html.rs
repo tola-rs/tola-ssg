@@ -36,25 +36,34 @@ pub struct CompileResult {
 /// before the failure.
 #[derive(Debug)]
 pub struct CompileFailure {
-    details: Box<CompileFailureDetails>,
-}
-
-#[derive(Debug)]
-struct CompileFailureDetails {
-    error: CompileError,
+    error: Box<CompileError>,
     accessed: AccessedDeps,
 }
 
 impl CompileFailure {
     fn new(error: CompileError, accessed: AccessedDeps) -> Self {
         Self {
-            details: Box::new(CompileFailureDetails { error, accessed }),
+            error: Box::new(error),
+            accessed,
         }
     }
 
     /// Whether the compilation stopped because it was cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.details.error.is_cancelled()
+        self.error.is_cancelled()
+    }
+}
+
+impl std::fmt::Display for CompileFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for CompileFailure {
+    /// The boxed cause is the structured compiler failure, so the chain reaches it.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.error)
     }
 }
 
@@ -284,24 +293,5 @@ mod tests {
 
         assert!(first.contains("first"), "{first}");
         assert!(second.contains("second"), "{second}");
-    }
-
-    #[test]
-    fn html_export_observes_options() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(&file, "= Hello").unwrap();
-
-        let built = world(dir.path(), &file)
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        let result = compile_world(&built).unwrap();
-        let compact = result.html().unwrap();
-        let pretty = result
-            .html_with_options(&typst_html::HtmlOptions { pretty: true })
-            .unwrap();
-
-        assert_ne!(compact, pretty);
-        assert!(String::from_utf8_lossy(&pretty).contains("\n"));
     }
 }

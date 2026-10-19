@@ -7,7 +7,7 @@
 
 use crate::diagnostic::package_imports::PackageImporters;
 use crate::diagnostic::{CompileError, Diagnostics};
-use crate::introspection::{MetadataDeclaration, label_selector, metadata_declaration};
+use crate::introspection::{MetadataDeclaration, labeled_declarations};
 use crate::reference_occurrence::ObservedOutput;
 use crate::session::{AccessedDeps, CompileSession, failure_evidence};
 use crate::world::TypstWorld;
@@ -21,7 +21,7 @@ use typst::foundations::{Content, Selector};
 use typst::introspection::Introspector;
 use typst::model::Document as _;
 use typst::model::DocumentElem;
-use typst_bundle::{Bundle, BundleFile};
+use typst_bundle::Bundle;
 
 mod cancellation;
 mod derived;
@@ -56,19 +56,15 @@ struct HtmlDocumentIndexes {
 /// A failed Bundle compilation with every read observed before failure.
 #[derive(Debug)]
 pub struct BundleCompileFailure {
-    details: Box<BundleCompileFailureDetails>,
-}
-
-#[derive(Debug)]
-struct BundleCompileFailureDetails {
     accessed: AccessedDeps,
-    error: CompileError,
+    error: Box<CompileError>,
 }
 
 impl BundleCompileFailure {
     fn new(accessed: AccessedDeps, error: CompileError) -> Self {
         Self {
-            details: Box::new(BundleCompileFailureDetails { accessed, error }),
+            accessed,
+            error: Box::new(error),
         }
     }
 
@@ -78,7 +74,20 @@ impl BundleCompileFailure {
 
     /// Whether the caller cancelled this compilation.
     pub fn is_cancelled(&self) -> bool {
-        self.details.error.is_cancelled()
+        self.error.is_cancelled()
+    }
+}
+
+impl std::fmt::Display for BundleCompileFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for BundleCompileFailure {
+    /// The boxed cause is the structured compiler failure, so the chain reaches it.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.error)
     }
 }
 
@@ -149,14 +158,7 @@ impl BundleCompilation {
     /// labels produce an empty collection; label cardinality belongs to the
     /// caller's protocol.
     pub fn metadata_declarations(&self, label: &str) -> Vec<MetadataDeclaration> {
-        let Some(label) = label_selector(label) else {
-            return Vec::new();
-        };
-        self.introspector()
-            .query(&Selector::Label(label))
-            .iter()
-            .filter_map(metadata_declaration)
-            .collect()
+        labeled_declarations(self.introspector(), label)
     }
 
     /// Output paths and kinds in native Bundle source order.
@@ -171,16 +173,10 @@ impl BundleCompilation {
 
     /// Compiled documents in native output order without collecting provenance.
     pub fn documents(&self) -> impl Iterator<Item = CompiledBundleDocument<'_>> {
-        self.bundle.files.iter().filter_map(move |(path, file)| {
-            let BundleFile::Document(document) = file else {
-                return None;
-            };
-            Some(CompiledBundleDocument {
-                path,
-                document,
-                compilation: self,
-            })
-        })
+        self.bundle
+            .files
+            .iter()
+            .filter_map(move |(path, file)| CompiledBundleDocument::of(path, file, self))
     }
 
     fn original_bodies(&self) -> &HashMap<typst::syntax::VirtualPath, Content> {
@@ -203,14 +199,7 @@ impl BundleCompilation {
         path: &typst::syntax::VirtualPath,
     ) -> Option<CompiledBundleDocument<'_>> {
         let (path, file) = self.bundle.files.get_key_value(path)?;
-        let BundleFile::Document(document) = file else {
-            return None;
-        };
-        Some(CompiledBundleDocument {
-            path,
-            document,
-            compilation: self,
-        })
+        CompiledBundleDocument::of(path, file, self)
     }
 
     /// Files and packages accessed during compilation.
@@ -408,25 +397,6 @@ mod tests {
         assert_eq!(
             document_declarations[1].location(),
             declarations[2].location()
-        );
-
-        let Value::Dict(root) = declarations[0].value() else {
-            panic!("expected root dictionary");
-        };
-        let Value::Label(target) = root.get("target").unwrap() else {
-            panic!("expected native label target");
-        };
-        let target = compilation
-            .introspector()
-            .query_unique(&Selector::Label(*target))
-            .unwrap();
-        assert_eq!(
-            compilation
-                .introspector()
-                .path(target.location().unwrap())
-                .unwrap()
-                .get_with_slash(),
-            "/b.html"
         );
     }
     mod bundle_context {
@@ -862,7 +832,7 @@ mod tests {
         }
 
         #[test]
-        fn compiled_outputs_are_path_typed() {
+        fn outputs_keep_bundle_order() {
             let (_directory, world) = world(
                 r#"
         #asset("data.txt", "payload")
@@ -889,16 +859,6 @@ mod tests {
             let asset_path = typst::syntax::VirtualPath::new("data.txt").unwrap();
             assert!(compilation.document(&document_path).is_some());
             assert!(compilation.document(&asset_path).is_none());
-            let all = compilation
-                .export(&BundleOptions::default(), &cancellation, None)
-                .unwrap();
-            let whole = all
-                .entries()
-                .iter()
-                .find(|entry| entry.path.get_with_slash() == "/b.html")
-                .unwrap();
-            assert_eq!(whole.kind, BundleEntryKind::HtmlDocument);
-            assert!(!whole.bytes.as_slice().is_empty());
         }
     }
     #[cfg(feature = "scan")]

@@ -7,6 +7,7 @@
 
 mod cache;
 mod evidence;
+mod local_packages;
 mod provider;
 mod read;
 mod resolver;
@@ -18,6 +19,7 @@ pub use evidence::{
     hash_length_prefixed,
 };
 pub(crate) use evidence::{Loaded, ReadAttempt};
+pub use local_packages::{LocalPackage, LocalPackages};
 pub use provider::{EmptyFiles, FileMap, FileProvider, FileTarget};
 pub use read::{EMPTY_ID, STDIN_ID, decode_utf8, file_id, file_id_from_path, virtual_file_id};
 pub use resolver::FileResolver;

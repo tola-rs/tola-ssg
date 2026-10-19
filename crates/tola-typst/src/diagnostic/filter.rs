@@ -1,6 +1,6 @@
-//! Diagnostic filtering utilities.
+//! Selecting the diagnostics an integration may omit.
 
-use super::NativeDiagnostic;
+use super::{DiagnosticOrigin, NativeDiagnostic};
 use typst::diag::Severity;
 
 const HTML_EXPORT_WARNING: &str = "html export is under active development and incomplete";
@@ -69,10 +69,17 @@ pub enum FilterType {
     MessageContains(String),
     /// Match detached diagnostics containing specific text in message.
     DetachedMessageContains(String),
+    /// Match detached upstream Typst diagnostics containing specific text in message.
+    ///
+    /// The builtin export-warning presets use this variant so a producer's report cannot be
+    /// hidden merely because its message repeats Typst's own export warning.
+    TypstDetachedMessageContains(String),
 }
 
 /// The facts a filter matches against, read from either diagnostic representation.
 struct FilterSubject<'a> {
+    /// The typed producer identity, independently of message and location.
+    origin: &'a DiagnosticOrigin,
     /// Originating package, written as `@{namespace}/{name}`.
     package: Option<String>,
     /// Diagnostic message.
@@ -85,6 +92,7 @@ impl<'a> FilterSubject<'a> {
     fn of_native(native: &'a NativeDiagnostic) -> Self {
         let diagnostic = native.source();
         Self {
+            origin: native.origin(),
             package: diagnostic.span.id().and_then(|id| match id.root() {
                 typst::syntax::VirtualRoot::Package(package) => {
                     Some(format!("@{}/{}", package.namespace, package.name))
@@ -100,6 +108,7 @@ impl<'a> FilterSubject<'a> {
     /// package is identified by the path prefix before its file.
     fn of_resolved(diagnostic: &'a super::message::Diagnostic) -> Self {
         Self {
+            origin: &diagnostic.origin,
             package: diagnostic
                 .location
                 .path
@@ -129,6 +138,11 @@ impl FilterType {
             FilterType::MessageContains(text) => subject.message.contains(text.as_str()),
             FilterType::DetachedMessageContains(text) => {
                 subject.detached && subject.message.contains(text.as_str())
+            }
+            FilterType::TypstDetachedMessageContains(text) => {
+                matches!(subject.origin, DiagnosticOrigin::Typst)
+                    && subject.detached
+                    && subject.message.contains(text.as_str())
             }
         }
     }
@@ -177,7 +191,7 @@ impl DiagnosticFilter {
     pub fn html_export_warning_filter() -> Self {
         Self::new(
             Severity::Warning,
-            FilterType::DetachedMessageContains(HTML_EXPORT_WARNING.into()),
+            FilterType::TypstDetachedMessageContains(HTML_EXPORT_WARNING.into()),
         )
     }
 
@@ -185,7 +199,7 @@ impl DiagnosticFilter {
     pub fn bundle_export_warning_filter() -> Self {
         Self::new(
             Severity::Warning,
-            FilterType::DetachedMessageContains(BUNDLE_EXPORT_WARNING.into()),
+            FilterType::TypstDetachedMessageContains(BUNDLE_EXPORT_WARNING.into()),
         )
     }
 
@@ -210,7 +224,11 @@ impl DiagnosticFilter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::diagnostic::{Diagnostics, producer_warning, resolve_diagnostic};
+    use crate::{BundleCancellation, FileMap, FileResolver, TypstWorld, file_id};
     use typst::diag::SourceDiagnostic;
     use typst::syntax::Span;
 
@@ -245,5 +263,75 @@ mod tests {
                 .collect();
             assert_eq!(kept, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn export_presets_match_upstream_warnings() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let main = directory.path().join("main.typ");
+        let mut files = FileMap::new();
+        files.insert(file_id("main.typ"), b"authored source".to_vec());
+        let world = TypstWorld::builder(&main, directory.path())
+            .with_files(Arc::new(FileResolver::new().with_provider(files)))
+            .with_local_cache()
+            .no_fonts()
+            .build(&BundleCancellation::default())
+            .unwrap();
+        let located = typst::syntax::Source::new(file_id("main.typ"), "authored source".into())
+            .root()
+            .span();
+
+        for (message, preset) in [
+            (
+                HTML_EXPORT_WARNING,
+                DiagnosticFilter::html_export_warning_filter(),
+            ),
+            (
+                BUNDLE_EXPORT_WARNING,
+                DiagnosticFilter::bundle_export_warning_filter(),
+            ),
+        ] {
+            let upstream =
+                NativeDiagnostic::from(SourceDiagnostic::warning(Span::detached(), message));
+            let producer = NativeDiagnostic::from(producer_warning(
+                Span::detached(),
+                "TypstReport",
+                &[("severity", "error"), ("hints", "0")],
+                message,
+            ));
+            let authored = NativeDiagnostic::from(SourceDiagnostic::warning(located, message));
+            for (diagnostic, expected) in
+                [(&upstream, true), (&producer, false), (&authored, false)]
+            {
+                assert_eq!(preset.matches(diagnostic), expected, "native {message}");
+                let resolved = resolve_diagnostic(&world, diagnostic);
+                assert_eq!(
+                    preset.matches_info(&resolved),
+                    expected,
+                    "resolved {message}"
+                );
+            }
+
+            let kept =
+                Diagnostics::resolve(&world, &[upstream, producer.clone(), authored.clone()])
+                    .filter_out(&DiagnosticFilter::typst_export_warning_filters());
+            assert_eq!(kept.raw(), &[producer, authored]);
+            assert_eq!(kept.len(), 2);
+        }
+    }
+
+    #[test]
+    fn detached_message_filter_matches_producer_warning() {
+        let filter = DiagnosticFilter::new(
+            Severity::Warning,
+            FilterType::DetachedMessageContains(BUNDLE_EXPORT_WARNING.into()),
+        );
+        let producer = NativeDiagnostic::from(producer_warning(
+            Span::detached(),
+            "TypstReport",
+            &[("severity", "info"), ("hints", "0")],
+            BUNDLE_EXPORT_WARNING,
+        ));
+        assert!(filter.matches(&producer));
     }
 }

@@ -61,20 +61,29 @@ pub struct ScanResult {
 /// A failed Eval-only scan together with every input observed before failure.
 #[derive(Debug)]
 pub struct ScanFailure {
-    details: Box<ScanFailureDetails>,
-}
-
-#[derive(Debug)]
-struct ScanFailureDetails {
-    error: CompileError,
+    error: Box<CompileError>,
     accessed: AccessedDeps,
 }
 
 impl ScanFailure {
     fn new(error: CompileError, accessed: AccessedDeps) -> Self {
         Self {
-            details: Box::new(ScanFailureDetails { error, accessed }),
+            error: Box::new(error),
+            accessed,
         }
+    }
+}
+
+impl std::fmt::Display for ScanFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ScanFailure {
+    /// The boxed cause is the structured compiler failure, so the chain reaches it.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.error)
     }
 }
 
@@ -531,8 +540,8 @@ mod tests {
         Ok(Value::None)
     }
 
-    /// The runs of the recording native since the last read, on this thread.
-    fn runs() -> usize {
+    /// Take the runs of the recording native since the last read, on this thread.
+    fn take_runs() -> usize {
         RUNS.with(|runs| runs.replace(0))
     }
 
@@ -633,9 +642,9 @@ mod tests {
         let world = recording_world(directory.path(), &path);
 
         let first = scan_world_observed(&world, []);
-        let first_runs = runs();
+        let first_runs = take_runs();
         let second = scan_world_observed(&world, []);
-        let second_runs = runs();
+        let second_runs = take_runs();
 
         assert_eq!(first_runs, 1, "the first scan ran the native");
         assert_eq!(
@@ -748,7 +757,7 @@ mod tests {
             let mut expected = vec![header.clone()];
             expected.extend(std::iter::repeat_n(Value::Str("own".into()), count));
 
-            runs();
+            take_runs();
             let cold = scan_world_observed(&world, [header.clone()]);
             assert_eq!(cold.result().is_ok(), completes, "{name}");
             assert_eq!(captured(&cold), expected, "{name}");
@@ -768,11 +777,11 @@ mod tests {
                     .iter()
                     .all(|read| read.evidence().locator().is_persistent())
             );
-            runs();
+            take_runs();
             let warm = scan_world_observed(&world, [header]);
             assert_eq!(warm.result().is_ok(), completes, "{name}");
             assert_eq!(captured(&warm), expected, "{name}");
-            assert_eq!(runs(), 0, "{name} replays cached captures");
+            assert_eq!(take_runs(), 0, "{name} replays cached captures");
         }
     }
 

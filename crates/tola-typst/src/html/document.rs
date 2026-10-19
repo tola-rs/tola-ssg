@@ -1,11 +1,11 @@
 //! HTML document wrapper.
 
-use typst::foundations::{Selector, Value};
+use typst::foundations::Value;
 use typst::introspection::Introspector;
 
 use crate::introspection::{
-    MetadataCardinalityError, MetadataDeclaration, all_values, first_value, label_selector,
-    metadata_declaration, unique_metadata_value,
+    MetadataCardinalityError, MetadataDeclaration, all_values, first_value, labeled_declarations,
+    unique_metadata_value,
 };
 
 /// A compiled HTML document.
@@ -58,15 +58,7 @@ impl HtmlDocument {
 
     /// Native declarations with their source spans and compiled locations.
     pub fn metadata_declarations(&self, label: &str) -> Vec<MetadataDeclaration> {
-        let Some(label) = label_selector(label) else {
-            return Vec::new();
-        };
-        self.0
-            .introspector()
-            .query(&Selector::Label(label))
-            .iter()
-            .filter_map(metadata_declaration)
-            .collect()
+        labeled_declarations(self.introspector(), label)
     }
 
     /// Unwrap the native Typst HTML document.

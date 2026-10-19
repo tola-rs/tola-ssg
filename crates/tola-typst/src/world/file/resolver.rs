@@ -10,6 +10,7 @@ use typst::diag::{FileError, FileResult};
 use typst::syntax::FileId;
 
 use super::evidence::{DiskReadPath, FileRead, ReadAttempt, ReadEvidence, ReadLocator, ReadOrigin};
+use super::local_packages::LocalPackages;
 use super::provider::{EmptyFiles, FileProvider, FileTarget};
 use super::read::{EMPTY_ID, STDIN_ID, decode_utf8, non_persistent_label, read_disk};
 use super::view::PackageObservations;
@@ -20,6 +21,7 @@ use crate::world::package::{PackageCheck, PackageFetchPolicy, PackageLocations, 
 pub struct FileResolver {
     provider: Arc<dyn FileProvider>,
     packages: PackageStore,
+    local_packages: Arc<LocalPackages>,
     disk_overrides: Arc<FxHashMap<PathBuf, Arc<[u8]>>>,
     boundary: crate::world::SourceBoundary,
 }
@@ -40,6 +42,7 @@ impl FileResolver {
         Self {
             provider: Arc::new(EmptyFiles),
             packages,
+            local_packages: Arc::default(),
             disk_overrides: Arc::new(FxHashMap::default()),
             boundary: crate::world::SourceBoundary::default(),
         }
@@ -72,9 +75,88 @@ impl FileResolver {
         Self {
             provider: Arc::new(provider),
             packages: self.packages,
+            local_packages: self.local_packages,
             disk_overrides: self.disk_overrides,
             boundary: self.boundary,
         }
+    }
+
+    /// Install declared local packages without replacing the file provider.
+    ///
+    /// Provider targets and its exclusive namespaces retain precedence. Local
+    /// packages are selected before global package discovery; their reserved
+    /// namespaces never fall through to host directories or network fetching.
+    pub fn with_local_packages(mut self, packages: Arc<LocalPackages>) -> Self {
+        self.local_packages = packages;
+        self
+    }
+
+    /// The immutable local package selection of this resolver.
+    pub fn local_packages(&self) -> &Arc<LocalPackages> {
+        &self.local_packages
+    }
+
+    /// The editable physical file of a declared local package, without reading its contents.
+    /// Virtual files, including the generated manifest, have no physical source.
+    /// Both the package boundary and the caller's source boundary still apply.
+    pub fn local_package_path(&self, id: FileId) -> FileResult<Option<PathBuf>> {
+        let typst::syntax::VirtualRoot::Package(spec) = id.root() else {
+            return Ok(None);
+        };
+        if self.provider.target(id).is_some()
+            || self
+                .provider
+                .owned_namespaces()
+                .contains(&spec.namespace.as_str())
+        {
+            return Ok(None);
+        }
+        let Some(package) = self.local_packages.package(spec) else {
+            return Ok(None);
+        };
+        if id.vpath().get_without_slash() == "typst.toml" {
+            return Ok(None);
+        }
+        let path = id
+            .vpath()
+            .realize(package.root())
+            .map_err(|_| FileError::AccessDenied)?;
+        check_package_boundary(package.boundary(), &path, id)?;
+        self.boundary.check(&path)?;
+        Ok(Some(path))
+    }
+
+    /// All declared package identities that can address an editor's physical path.
+    /// A shared directory may have several aliases; the caller must not pick one arbitrarily.
+    pub fn local_package_ids(&self, path: &Path) -> FileResult<Vec<FileId>> {
+        self.boundary.check(path)?;
+        let mut ids = Vec::new();
+        for package in self.local_packages.iter() {
+            // Preserve the spelling below the package root: an internal symlink's
+            // relative imports belong to the path the editor actually opened.
+            let prefix = if path.starts_with(package.root()) {
+                Some(package.root())
+            } else {
+                path.ancestors().find(|ancestor| {
+                    ancestor
+                        .canonicalize()
+                        .is_ok_and(|resolved| resolved == package.root())
+                })
+            };
+            let Some(prefix) = prefix else { continue };
+            let Ok(relative) = typst::syntax::VirtualPath::virtualize(prefix, path) else {
+                continue;
+            };
+            if relative.is_root() {
+                continue;
+            }
+            let id = package.file_id(relative);
+            if self.local_package_path(id)?.is_some() {
+                ids.push(id);
+            }
+        }
+        ids.sort_by_key(|id| format!("{:?}", id.get()));
+        Ok(ids)
     }
 
     /// Use immutable bytes for selected physical files without changing file
@@ -138,6 +220,7 @@ impl FileResolver {
         let bytes = match name.strip_prefix('@') {
             // `@namespace/name:version`, then the path inside the package.
             Some(package) => {
+                let package = package.replace('\\', "/");
                 let mut segments = package.splitn(3, '/');
                 let namespace = segments.next().unwrap_or_default();
                 let name = segments
@@ -146,14 +229,18 @@ impl FileResolver {
                 let inner = segments
                     .next()
                     .ok_or_else(|| FileError::NotFound(reported.to_path_buf()))?;
-                let spec = format!("@{namespace}/{name}");
-                let prepared = self
-                    .packages
-                    .prepare_package(spec)
-                    .map_err(|failure| failure.into_error_and_checks().0)?;
-                let path = prepared.directory().join(inner);
-                self.boundary.check(&path)?;
-                read_disk(&path, reported)?
+                let spec = format!("@{namespace}/{name}")
+                    .parse::<typst::syntax::package::PackageSpec>()
+                    .map_err(|_| FileError::NotFound(reported.to_path_buf()))?;
+                let path =
+                    typst::syntax::VirtualPath::new(inner).map_err(|_| FileError::AccessDenied)?;
+                self.read(
+                    FileId::new(typst::syntax::RootedPath::new(
+                        typst::syntax::VirtualRoot::Package(spec),
+                        path,
+                    )),
+                    root,
+                )?
             }
             None => {
                 let path = root.join(reported);
@@ -214,7 +301,7 @@ impl FileResolver {
                     Vec::new(),
                 ),
                 FileTarget::Disk(path) => {
-                    self.read_disk_target(id, non_persistent, path, true, Vec::new())
+                    self.read_disk_target(id, non_persistent, path, true, Vec::new(), None)
                 }
                 FileTarget::Missing => {
                     ReadAttempt::without_inputs(Err(FileError::NotFound(reported_path(id))))
@@ -235,13 +322,43 @@ impl FileResolver {
             )));
         }
 
+        if let typst::syntax::VirtualRoot::Package(spec) = id.root() {
+            if let Some(package) = self.local_packages.package(spec) {
+                if id.vpath().get_without_slash() == "typst.toml" {
+                    return successful_provider_read(
+                        package.manifest(),
+                        locator_for(id, non_persistent, true),
+                        ReadOrigin::Provider,
+                        Vec::new(),
+                    );
+                }
+                let path = match id.vpath().realize(package.root()) {
+                    Ok(path) => path,
+                    Err(_) => return failed_resolution(FileError::AccessDenied, Vec::new()),
+                };
+                return self.read_disk_target(
+                    id,
+                    non_persistent,
+                    path,
+                    true,
+                    Vec::new(),
+                    Some(package.boundary()),
+                );
+            }
+            if self.local_packages.owns_namespace(spec.namespace.as_str()) {
+                return ReadAttempt::without_inputs(Err(FileError::Package(
+                    typst::diag::PackageError::NotFound(spec.clone()),
+                )));
+            }
+        }
+
         let (path, package_checks) = match self.resolve_path(root, id, packages) {
             Ok(resolved) => resolved,
             Err((error, package_checks)) => {
                 return failed_resolution(error, package_checks);
             }
         };
-        self.read_disk_target(id, non_persistent, path, false, package_checks)
+        self.read_disk_target(id, non_persistent, path, false, package_checks, None)
     }
 
     fn read_disk_target(
@@ -251,6 +368,7 @@ impl FileResolver {
         path: PathBuf,
         provider_selected: bool,
         package_checks: Vec<PackageCheck>,
+        package_boundary: Option<&crate::world::SourceBoundary>,
     ) -> ReadAttempt<Arc<[u8]>> {
         if provider_selected && !path.is_absolute() {
             return failed_resolution(FileError::AccessDenied, package_checks);
@@ -268,6 +386,11 @@ impl FileResolver {
                 }
             }
         };
+        if let Some(boundary) = package_boundary
+            && let Err(error) = check_package_boundary(boundary, &path, id)
+        {
+            return failed_resolution(error, package_checks);
+        }
         if let Err(error) = self.boundary.check(&path) {
             return failed_resolution(error, package_checks);
         }
@@ -338,6 +461,23 @@ impl FileResolver {
             Err(_) => Err((FileError::AccessDenied, package_checks)),
         }
     }
+}
+
+fn check_package_boundary(
+    boundary: &crate::world::SourceBoundary,
+    path: &Path,
+    id: FileId,
+) -> FileResult<()> {
+    if boundary.refusal(path)?.is_some() {
+        return Err(FileError::Other(Some(
+            format!(
+                "package source `{}` is outside its declared package root",
+                reported_path(id).display(),
+            )
+            .into(),
+        )));
+    }
+    Ok(())
 }
 
 /// Resolution can observe package selection without attempting a disk read.

@@ -6,6 +6,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use typst::Library;
 use typst::foundations::Dict;
+use typst::syntax::FileId;
 use typst::utils::LazyHash;
 
 use super::core::TypstWorld;
@@ -64,13 +65,18 @@ pub enum WorldBuildError {
 ///
 /// Use `TypstWorld::builder()` to create a builder.
 pub struct WorldBuilder {
-    main_path: PathBuf,
+    main: MainSource,
     root: PathBuf,
     files: Arc<FileResolver>,
     cache: Option<FileCacheMode>,
     fonts: Option<FontMode>,
     library: LibraryMode,
     time: TimeMode,
+}
+
+pub(crate) enum MainSource {
+    Path(PathBuf),
+    Id(FileId),
 }
 
 enum TimeMode {
@@ -81,8 +87,16 @@ enum TimeMode {
 
 impl WorldBuilder {
     pub(crate) fn new(main_path: &Path, root: &Path) -> Self {
+        Self::with_main(MainSource::Path(main_path.to_path_buf()), root)
+    }
+
+    pub(crate) fn new_id(main: FileId, root: &Path) -> Self {
+        Self::with_main(MainSource::Id(main), root)
+    }
+
+    fn with_main(main: MainSource, root: &Path) -> Self {
         Self {
-            main_path: main_path.to_path_buf(),
+            main,
             root: root.to_path_buf(),
             files: Arc::new(FileResolver::new()),
             cache: None,
@@ -204,7 +218,7 @@ impl WorldBuilder {
             store.load(cancellation)?;
         }
         TypstWorld::new(
-            &self.main_path,
+            self.main,
             &self.root,
             self.files,
             cache,

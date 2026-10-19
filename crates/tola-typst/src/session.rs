@@ -79,41 +79,53 @@ impl AccessedDeps {
     }
 }
 
+/// Observe a pure operation against the world's existing file view and input policy.
+/// The operation borrows the same library, packages and fonts; all file attempts, including
+/// failures and package selections, are returned even when its own result is an error.
+pub fn observe_world<T>(
+    world: &TypstWorld,
+    operation: impl FnOnce(&dyn World) -> T,
+) -> (T, AccessedDeps) {
+    let session = CompileSession::start(world);
+    let result = operation(&session);
+    (result, session.finish())
+}
+
 /// Generate the read-evidence accessors of a failed operation.
 ///
-/// The type owns one boxed `details` value with `error` and `accessed` fields.
-/// `stopped` names the operation in the generated documentation.
+/// The type derives `thiserror::Error` from its `error` field and owns an `accessed`
+/// field beside it. `stopped` names the operation in the generated documentation.
 macro_rules! failure_evidence {
     ($failure:ident, $stopped:literal) => {
         impl $failure {
             #[doc = concat!("Files and packages observed before ", $stopped, " stopped.")]
             pub fn accessed(&self) -> &$crate::session::AccessedDeps {
-                &self.details.accessed
+                &self.accessed
             }
 
             #[doc = concat!("Successful file reads observed before ", $stopped, " stopped.")]
             pub fn file_reads(&self) -> &[$crate::world::file::FileRead] {
-                self.details.accessed.reads()
+                self.accessed.reads()
             }
 
             #[doc = concat!("Physical read paths retained before ", $stopped, " stopped.")]
             pub fn disk_reads(&self) -> &[$crate::world::file::DiskReadPath] {
-                self.details.accessed.disk_reads()
+                self.accessed.disk_reads()
             }
 
             #[doc = concat!("Package-directory checks observed before ", $stopped, " stopped.")]
             pub fn package_checks(&self) -> &[$crate::world::package::PackageCheck] {
-                self.details.accessed.package_checks()
+                self.accessed.package_checks()
             }
 
             #[doc = concat!("Structured diagnostics when ", $stopped, " failed.")]
             pub fn diagnostics(&self) -> Option<&$crate::diagnostic::Diagnostics> {
-                self.details.error.diagnostics()
+                self.error.diagnostics()
             }
 
             /// Borrow the underlying structured error.
             pub fn error(&self) -> &$crate::diagnostic::CompileError {
-                &self.details.error
+                self.error.as_ref()
             }
 
             /// Consume the failure into observed inputs and the underlying error.
@@ -123,20 +135,7 @@ macro_rules! failure_evidence {
                 $crate::session::AccessedDeps,
                 $crate::diagnostic::CompileError,
             ) {
-                let details = *self.details;
-                (details.accessed, details.error)
-            }
-        }
-
-        impl std::fmt::Display for $failure {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                self.details.error.fmt(formatter)
-            }
-        }
-
-        impl std::error::Error for $failure {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                Some(&self.details.error)
+                (self.accessed, *self.error)
             }
         }
     };
@@ -663,6 +662,10 @@ mod tests {
         assert_eq!(accessed.reads.len(), 2);
     }
 
+    fn main_text(session: &CompileSession<'_>) -> String {
+        session.source(session.main()).unwrap().text().to_owned()
+    }
+
     #[test]
     fn each_session_observes_one_file_version() {
         let dir = TempDir::new().unwrap();
@@ -675,31 +678,13 @@ mod tests {
             builder.with_shared_cache(cache)
         });
         let first = CompileSession::start(&first_world);
-
-        assert!(
-            first
-                .source(first.main())
-                .unwrap()
-                .text()
-                .contains("Version 1")
-        );
+        // A session retains the version its first read observed; the file changes after it.
+        assert!(main_text(&first).contains("Version 1"));
         fs::write(&main, "= Version 2").unwrap();
 
         let second = CompileSession::start(&second_world);
-        assert!(
-            second
-                .source(second.main())
-                .unwrap()
-                .text()
-                .contains("Version 2")
-        );
-        assert!(
-            first
-                .source(first.main())
-                .unwrap()
-                .text()
-                .contains("Version 1")
-        );
+        assert!(main_text(&second).contains("Version 2"));
+        assert!(main_text(&first).contains("Version 1"));
 
         let first = first.finish();
         let second = second.finish();

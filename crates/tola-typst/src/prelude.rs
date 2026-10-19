@@ -13,7 +13,7 @@ pub use crate::compile::{
     CompileFailure, CompileResult, compile_source_with_evidence, compile_world,
     compile_world_with_evidence,
 };
-pub use crate::session::{AccessedDeps, capture_source_value};
+pub use crate::session::{AccessedDeps, capture_source_value, observe_world};
 pub use crate::svg::{SvgCrop, SvgError, SvgSource};
 pub use crate::world::ExplicitSources;
 pub use typst_bundle::BundleOptions;
@@ -37,8 +37,8 @@ pub use crate::introspection::{MetadataCardinalityError, MetadataDeclaration};
 
 pub use crate::world::file::{
     ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider, FileRead, FileResolver,
-    FileTarget, FileView, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache, file_id,
-    file_id_from_path, hash_length_prefixed, virtual_file_id,
+    FileTarget, FileView, LocalPackage, LocalPackages, ReadEvidence, ReadLocator, ReadOrigin,
+    SharedFileCache, file_id, file_id_from_path, hash_length_prefixed, virtual_file_id,
 };
 
 pub use crate::world::font::{

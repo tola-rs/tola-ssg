@@ -44,7 +44,7 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, World};
 
-use super::builder::{WorldBuildError, WorldBuilder};
+use super::builder::{MainSource, WorldBuildError, WorldBuilder};
 use super::path::normalize_path;
 use super::strategy::{FileAccess, FileCacheMode, FontMode, LibraryMode};
 use crate::world::file::{
@@ -75,8 +75,17 @@ impl TypstWorld {
         WorldBuilder::new(main_path, root)
     }
 
+    /// Compile a complete file identity while retaining the project's root.
+    ///
+    /// This allows a declared package's site driver or model to be the main
+    /// source without copying it into the project or changing package-relative
+    /// imports. The resolver validates the selected source when it is read.
+    pub fn builder_with_id(main: FileId, project_root: &Path) -> WorldBuilder {
+        WorldBuilder::new_id(main, project_root)
+    }
+
     pub(crate) fn new(
-        main_path: &Path,
+        main: MainSource,
         root: &Path,
         files: Arc<FileResolver>,
         cache: FileCacheMode,
@@ -84,18 +93,23 @@ impl TypstWorld {
         library: LibraryMode,
         time: Option<typst_kit::datetime::Time>,
     ) -> Result<Self, WorldBuildError> {
-        files
-            .source_boundary()
-            .check(main_path)
-            .map_err(WorldBuildError::Source)?;
         let root = normalize_path(root);
-        let main_abs = normalize_path(main_path);
-        let main = file_id_from_path(&main_abs, &root).ok_or_else(|| {
-            WorldBuildError::MainOutsideRoot {
-                main: main_abs.clone(),
-                root: root.clone(),
+        let main = match main {
+            MainSource::Path(main_path) => {
+                files
+                    .source_boundary()
+                    .check(&main_path)
+                    .map_err(WorldBuildError::Source)?;
+                let main_abs = normalize_path(&main_path);
+                file_id_from_path(&main_abs, &root).ok_or_else(|| {
+                    WorldBuildError::MainOutsideRoot {
+                        main: main_abs,
+                        root: root.clone(),
+                    }
+                })?
             }
-        })?;
+            MainSource::Id(main) => main,
+        };
         let (files, parsed) = match cache {
             FileCacheMode::Local => (
                 FileAccess::Local(Arc::new(FileView::from_resolver(&root, files))),
@@ -155,6 +169,24 @@ impl TypstWorld {
     /// Normalized root that every file identity is resolved against.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Local package bindings fixed when this world's file view was created.
+    pub fn local_packages(&self) -> &Arc<crate::world::file::LocalPackages> {
+        self.resolver().local_packages()
+    }
+
+    /// Resolve a declared local source for navigation, including an unsaved overlay.
+    /// This resolves identity only; it does not read newer bytes into the compiled world.
+    pub fn local_package_path(&self, id: FileId) -> FileResult<Option<PathBuf>> {
+        self.resolver().local_package_path(id)
+    }
+
+    fn resolver(&self) -> &FileResolver {
+        match &self.files {
+            FileAccess::Local(files) | FileAccess::Frozen(files) => files.resolver(),
+            FileAccess::Live { files, .. } => files,
+        }
     }
 
     /// Read bytes through this world's file view and retain their dependency evidence.
