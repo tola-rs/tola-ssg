@@ -142,22 +142,6 @@ mod tests {
         (directory, world)
     }
 
-    /// A world reading the given inputs with no Tola library, for exercising raw `sys.inputs`.
-    fn world_with_inputs(source: &str, inputs: Dict) -> (TempDir, TypstWorld) {
-        let directory = TempDir::new().unwrap();
-        let main = directory.path().join("main.typ");
-        fs::write(&main, source).unwrap();
-        let files = tola_typst::FileResolver::new().with_provider(IconFiles::default());
-        let world = TypstWorld::builder(&main, directory.path())
-            .with_files(Arc::new(files))
-            .with_local_cache()
-            .no_fonts()
-            .with_inputs_dict(inputs)
-            .build(&tola_typst::BundleCancellation::default())
-            .expect("valid test world");
-        (directory, world)
-    }
-
     /// A world compiling against the given library and icon collections.
     fn world_with_icons(
         source: &str,
@@ -655,19 +639,34 @@ path = "icons/brand"
         )
     }
 
-    /// Compiles `assertions` against `@tola/<package>` in a world with no Tola library, which must
+    /// The world package assertions run in: the host library with no site records, so a package
+    /// can use the host natives it imports without receiving site data.
+    fn package_world(source: &str) -> (TempDir, TypstWorld) {
+        let directory = TempDir::new().unwrap();
+        let main = directory.path().join("main.typ");
+        fs::write(&main, source).unwrap();
+        let files = tola_typst::FileResolver::new().with_provider(IconFiles::default());
+        let world = TypstWorld::builder(&main, directory.path())
+            .with_files(Arc::new(files))
+            .with_local_cache()
+            .no_fonts()
+            .with_shared_library(source_library())
+            .build(&tola_typst::BundleCancellation::default())
+            .expect("valid test world");
+        (directory, world)
+    }
+
+    /// Compiles `assertions` against `@tola/<package>` in a world with no site records, which must
     /// hold.
     fn assert_package(package: &str, assertions: &str) {
-        let (_directory, world) =
-            world_with_inputs(&package_program(package, assertions), Dict::new());
+        let (_directory, world) = package_world(&package_program(package, assertions));
         tola_typst::compile_bundle_world(&world, &Default::default())
             .expect("package assertions must hold");
     }
 
     /// Asserts compiling `assertions` against `@tola/<package>` fails with diagnostics.
     fn reject_package(package: &str, assertions: &str) {
-        let (_directory, world) =
-            world_with_inputs(&package_program(package, assertions), Dict::new());
+        let (_directory, world) = package_world(&package_program(package, assertions));
         tola_typst::compile_bundle_world(&world, &Default::default())
             .expect_err("invalid assertions must fail compiling")
             .diagnostics()
@@ -4909,7 +4908,7 @@ path = "icons/brand"
 #assert.eq(ok(none), (ok: true, value: none))
 #assert.eq(try-parse(none, any), (ok: true, value: none))
 #let problem = issue("Rejected", code: "example", path: ("name", 0))
-#assert.eq(problem, (code: "example", path: ("name", 0), message: "Rejected", notes: (), children: ()))
+#assert.eq(problem, (code: "example", path: ("name", 0), message: "Rejected", notes: (), children: (), origin: none))
 #assert.eq(err(problem), (ok: false, issues: (problem,)))
 #let failed = try-parse(false, str)
 #assert.eq(failed.keys().sorted(), ("issues", "ok"))
@@ -5116,8 +5115,9 @@ path = "icons/brand"
                 r#"
 #let field = non-empty(optional(trim(str), default: "  "))
 #let cause = try-parse((:), schema((name: field))).issues.first()
-#assert.eq((cause.code, cause.path), ("schema.default", ("name",)))
-#assert.eq(cause.children.map(problem => (problem.code, problem.path)), (("schema.non-empty", ()),))
+#assert.eq((cause.code, cause.path), ("schema.non-empty", ("name",)))
+#assert.eq((cause.origin.kind, cause.origin.path), ("default", ()))
+#assert.eq(cause.children, ())
 "#,
             );
         }
@@ -5150,13 +5150,13 @@ path = "icons/brand"
                 r#"
 #let field = optional(array-of(schema((count: int))), default: ((count: "bad"),))
 #let cause = try-parse((:), schema((rows: field))).issues.first()
-// The failing default wraps the child issue, and the child path is relative to the default.
-#assert.eq(cause.code, "schema.default")
+// The cause leads, and its generated value stays an explicit origin.
+#assert.eq(cause.code, "schema.type")
 #assert.eq(cause.path, ("rows",))
-#assert.eq(cause.children.map(problem => (problem.code, problem.path)), (
-  ("schema.type", (0, "count")),
-))
-#assert(format-issues((cause,)).contains("declared default"))
+#assert.eq((cause.origin.kind, cause.origin.path), ("default", (0, "count")))
+#assert.eq(cause.children, ())
+// The cause leads; the generated value's own message is not repeated.
+#assert.eq(format-issues((cause,)), "`$.rows` is not set, and the schema's default value is invalid at `$[0].count`: expected `int`, found `str`")
 "#,
             );
         }
@@ -5167,13 +5167,88 @@ path = "icons/brand"
                 r#"
 #let converted = map(str, _ => (count: "bad"), output: schema((count: int)))
 #let cause = try-parse((value: "raw"), schema((value: converted))).issues.first()
-// A rejected output schema wraps the child issue, whose path is relative to the converted value.
-#assert.eq(cause.code, "schema.output")
+// A rejected output schema becomes an explicit converted-value origin.
+#assert.eq(cause.code, "schema.type")
 #assert.eq(cause.path, ("value",))
-#assert.eq(cause.children.map(problem => (problem.code, problem.path)), (
-  ("schema.type", ("count",)),
+#assert.eq((cause.origin.kind, cause.origin.path), ("output", ("count",)))
+#assert.eq(cause.children, ())
+#assert.eq(format-issues((cause,)), "`$.value` was converted by the schema, but the result is invalid at `$.count`: expected `int`, found `str`")
+"#,
+            );
+        }
+
+        #[test]
+        fn nested_defaults_render_the_innermost_path_once() {
+            assert_schema(
+                r#"
+#let inner = optional(int, default: "bad")
+#let outer = optional(schema((count: inner)), default: (:))
+#let cause = try-parse((:), schema((value: outer))).issues.first()
+#assert.eq(format-issues((cause,)), "`$.value` is not set, and the schema's default value is invalid at `$.count`: expected `int`, found `str`")
+"#,
+            );
+        }
+
+        #[test]
+        fn custom_default_causes_stand_alone() {
+            assert_schema(
+                r#"
+#let field = optional(check(nullable(timestamp), value => {
+  if value == none {
+    (issue("Published blog pages need a publication date; use draft: true while writing pages."),)
+  } else {
+    ()
+  }
+}), default: none)
+#let cause = try-parse((:), schema((published: field))).issues.first()
+#assert.eq(format-issues((cause,)), "`$.published` is not set: Published blog pages need a publication date; use draft: true while writing pages.")
+"#,
+            );
+        }
+
+        #[test]
+        fn authored_default_causes_name_an_inner_path() {
+            assert_schema(
+                r#"
+#let inner = check(schema((end: int)), _ => (issue("End precedes start", path: ("end",)),))
+#let cause = try-parse((:), schema((value: optional(inner, default: (end: 1))))).issues.first()
+#assert.eq(format-issues((cause,)), "`$.value` is not set, and the schema's default fails at `$.end`: End precedes start")
+"#,
+            );
+        }
+
+        #[test]
+        fn ordinary_issues_render_generated_children_as_sentences() {
+            assert_schema(
+                r#"
+#let inner = try-parse((:), schema((inner: optional(int, default: "bad")))).issues
+#let cause = (..issue("outer"), children: inner)
+#assert.eq(format-issues((cause,)), "`$`: outer\n  `$.inner` is not set, and the schema's default value is invalid: expected `int`, found `str`")
+"#,
+            );
+        }
+
+        #[test]
+        fn generated_defaults_keep_notes_and_other_causes() {
+            assert_schema(
+                r#"
+#let member = check(dictionary, _ => (
+  (..issue("invalid metadata", notes: ("review metadata",)),
+   children: (issue("choose a title", path: ("title",)),)),
 ))
-#assert(format-issues((cause,)).contains("converted value"))
+#let cause = try-parse((:), schema((field: optional(member, default: (:))))).issues.first()
+#assert.eq(format-issues((cause,)), "`$.field` is not set: invalid metadata\n  note: review metadata\n  `$.title` in the schema's default value for `$.field`: choose a title")
+"#,
+            );
+        }
+
+        #[test]
+        fn generated_defaults_keep_each_alternative_cause() {
+            assert_schema(
+                r#"
+#let member = union(schema((a: int), unknown: "keep"), schema((b: str), unknown: "keep"))
+#let cause = try-parse((:), schema((field: optional(member, default: (a: "bad", b: 2))))).issues.first()
+#assert.eq(format-issues((cause,)), "`$.field` is not set, and the schema's default value is invalid: does not match any alternative\n  the schema's default value for `$.field`: alternative 1 did not match\n    `$.a` in the schema's default value for `$.field`: expected `int`, found `str`\n  the schema's default value for `$.field`: alternative 2 did not match\n    `$.b` in the schema's default value for `$.field`: expected `str`, found `int`")
 "#,
             );
         }
@@ -6124,6 +6199,262 @@ path = "icons/brand"
                 [
                     (Some("content/note.typ"), Some(4)),
                     (Some("content/note.typ"), Some(4)),
+                ]
+            );
+        }
+
+        #[test]
+        fn generated_default_headline_states_the_cause() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": check, issue, nullable, optional, schema, timestamp
+#let published = optional(
+  check(nullable(timestamp), value => {
+    if value == none {
+      (issue("Published blog pages need a publication date; use draft: true while writing pages."),)
+    } else {
+      ()
+    }
+  }),
+  default: none,
+)
+#let parsed = parse-sources(all-sources(), schema((published: published)))
+#document("index.html")[]
+"#,
+                &[(
+                    "note.typ",
+                    "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((:))",
+                )],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.published` is not set: Published blog pages need a \
+                 publication date; use draft: true while writing pages."
+            );
+            assert!(errors[0].hints.is_empty(), "{:?}", errors[0].hints);
+            assert_eq!(errors[0].location.path.as_deref(), Some("content/note.typ"));
+            assert_eq!(errors[0].location.line, Some(2));
+        }
+
+        #[test]
+        fn source_metadata_failures_carry_their_own_diagnostic_code() {
+            let (directory, world) = source_world(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": check, issue, nullable, optional, schema, timestamp
+#let published = optional(
+  check(nullable(timestamp), value => {
+    if value == none {
+      (issue("Published blog pages need a publication date; use draft: true while writing pages."),)
+    } else {
+      ()
+    }
+  }),
+  default: none,
+)
+#let parsed = parse-sources(all-sources(), schema((published: published)))
+#document("index.html")[]
+"#,
+                &[(
+                    "note.typ",
+                    "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((:))",
+                )],
+            );
+            let error: anyhow::Error =
+                tola_typst::compile_bundle_world(&world, &Default::default())
+                    .expect_err("the schema default must fail")
+                    .into();
+            let diagnostics =
+                crate::compiler::diagnostic::error_diagnostics(&error, directory.path())
+                    .expect("a compile failure has diagnostics");
+            assert_eq!(diagnostics[0].code, crate::codes::source::METADATA);
+            assert!(
+                diagnostics[0].message.starts_with("`content/note.typ`: "),
+                "{}",
+                diagnostics[0].message
+            );
+            // The record keeps the evidence; presentation decides whether to show it.
+            assert!(!diagnostics[0].trace.is_empty());
+        }
+
+        #[test]
+        fn generated_default_names_an_inner_failure() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": optional, schema
+#let parsed = parse-sources(all-sources(), schema((rows: optional(schema((count: int)), default: (count: "bad")))))
+#document("index.html")[]
+"#,
+                &[("note.typ", "")],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.rows` is not set, and the schema's default value is \
+                 invalid at `$.count`: expected `int`, found `str`"
+            );
+            assert!(errors[0].hints.is_empty(), "{:?}", errors[0].hints);
+        }
+
+        #[test]
+        fn generated_default_names_an_authored_inner_failure() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": check, issue, optional, schema
+#let inner = check(schema((end: int)), _ => (issue("End precedes start", path: ("end",)),))
+#let parsed = parse-sources(all-sources(), schema((value: optional(inner, default: (end: 1)))))
+#document("index.html")[]
+"#,
+                &[("note.typ", "")],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.value` is not set, and the schema's default fails at \
+                 `$.end`: End precedes start"
+            );
+            assert!(errors[0].hints.is_empty(), "{:?}", errors[0].hints);
+        }
+
+        #[test]
+        fn nested_generated_defaults_keep_the_innermost_path() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": optional, schema
+#let inner = optional(int, default: "bad")
+#let outer = optional(schema((count: inner)), default: (:))
+#let parsed = parse-sources(all-sources(), schema((value: outer)))
+#document("index.html")[]
+"#,
+                &[("note.typ", "")],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.value` is not set, and the schema's default value is \
+                 invalid at `$.count`: expected `int`, found `str`"
+            );
+            assert!(errors[0].hints.is_empty(), "{:?}", errors[0].hints);
+        }
+
+        #[test]
+        fn generated_output_states_the_conversion() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": map, schema
+#let parsed = parse-sources(all-sources(), schema((generated: map(str, _ => (count: "bad"), output: schema((count: int))))))
+#document("index.html")[]
+"#,
+                &[(
+                    "note.typ",
+                    "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((generated: \"raw\"))",
+                )],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.generated` was converted by the schema, but the result is \
+                 invalid at `$.count`: expected `int`, found `str`"
+            );
+            assert!(errors[0].hints.is_empty(), "{:?}", errors[0].hints);
+        }
+
+        #[test]
+        fn ordinary_issue_renders_a_generated_child_as_a_sentence() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": check, issue, optional, schema, try-parse
+#let inner = try-parse((:), schema((inner: optional(int, default: "bad")))).issues
+#let member = check(dictionary, _ => ((..issue("outer"), children: inner),))
+#let parsed = parse-sources(all-sources(), member)
+#document("index.html")[]
+"#,
+                &[("note.typ", "")],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, "`content/note.typ`: `$`: outer");
+            assert_eq!(
+                errors[0]
+                    .hints
+                    .iter()
+                    .map(|hint| hint.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "`$.inner` is not set, and the schema's default value is invalid: expected \
+                     `int`, found `str`",
+                ]
+            );
+        }
+
+        #[test]
+        fn generated_default_keeps_notes_and_other_causes() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": check, issue, optional, schema
+#let member = check(dictionary, _ => (
+  (..issue("invalid metadata", notes: ("review metadata",)),
+   children: (issue("choose a title", path: ("title",)),)),
+))
+#let parsed = parse-sources(all-sources(), schema((field: optional(member, default: (:)))))
+#document("index.html")[]
+"#,
+                &[("note.typ", "")],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.field` is not set: invalid metadata"
+            );
+            assert_eq!(
+                errors[0]
+                    .hints
+                    .iter()
+                    .map(|hint| hint.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "review metadata",
+                    "`$.title` in the schema's default value for `$.field`: choose a title",
+                ]
+            );
+        }
+
+        #[test]
+        fn generated_default_keeps_each_alternative_cause() {
+            let errors = source_errors(
+                r#"
+#import "@tola/source:0.0.0": all-sources, parse-sources
+#import "@tola/schema:0.0.0": optional, schema, union
+#let member = union(schema((a: int), unknown: "keep"), schema((b: str), unknown: "keep"))
+#let parsed = parse-sources(all-sources(), schema((field: optional(member, default: (a: "bad", b: 2)))))
+#document("index.html")[]
+"#,
+                &[("note.typ", "")],
+            );
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(
+                errors[0].message,
+                "`content/note.typ`: `$.field` is not set, and the schema's default value is \
+                 invalid: does not match any alternative"
+            );
+            assert_eq!(
+                errors[0]
+                    .hints
+                    .iter()
+                    .map(|hint| hint.message.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "the schema's default value for `$.field`: alternative 1 did not match",
+                    "`$.a` in the schema's default value for `$.field`: expected `int`, found `str`",
+                    "the schema's default value for `$.field`: alternative 2 did not match",
+                    "`$.b` in the schema's default value for `$.field`: expected `str`, found `int`",
                 ]
             );
         }

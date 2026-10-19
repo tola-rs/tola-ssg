@@ -7,6 +7,12 @@ use typst::syntax::{Span, VirtualRoot};
 
 use crate::TolaPackage;
 
+/// The producer origin of one source metadata issue.
+///
+/// The diagnostic belongs to the source whose metadata failed, not to a call in the site program,
+/// so consumers can classify it without inspecting paths or wording.
+pub const SOURCE_ISSUE_ORIGIN: &str = "SourceIssue";
+
 pub(crate) fn package_error(
     span: Span,
     package: TolaPackage,

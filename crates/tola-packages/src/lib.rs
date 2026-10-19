@@ -21,10 +21,12 @@ mod hash;
 mod icons;
 mod image_request;
 mod images;
+mod issue;
 pub mod library;
 mod natives;
 mod protocol;
 mod references;
+mod schema_issue;
 mod source_issues;
 mod source_meta;
 mod text;
@@ -41,6 +43,7 @@ pub use code_themes::{
     CodeTheme, THEME_DIRECTORY, ThemeAppearance, ThemeSource, theme_file, theme_names, themes,
     themes_dict,
 };
+pub use diagnostic::SOURCE_ISSUE_ORIGIN;
 pub use docs::{
     DocumentationSegment, ExportDeclaration, ExportDocumentation, Parameter, ParameterKind,
     RelatedTarget, Signature, cast_spelling, documentation_segments, type_spelling,

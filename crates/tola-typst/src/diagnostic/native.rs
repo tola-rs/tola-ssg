@@ -331,6 +331,30 @@ pub fn producer_error(
     )
 }
 
+/// A producer error at the byte `range` of `file`, for a producer that knows the position it
+/// reports but holds no span into that file.
+///
+/// The identity and projection behave exactly as [`producer_error`]'s; only the location's form
+/// differs.
+pub fn producer_error_at(
+    file: FileId,
+    range: std::ops::Range<usize>,
+    name: &str,
+    fields: &[(&str, &str)],
+    message: impl Into<EcoString>,
+    projection: DiagnosticProjection,
+) -> SourceDiagnostic {
+    SourceDiagnostic::error(
+        diagnostic_file_span(
+            Location::Range { file, range },
+            &projection,
+            Some(name),
+            fields,
+        ),
+        message,
+    )
+}
+
 /// The span of one diagnostic reported at the byte `range` of `file` through `projection`, with no
 /// producer identity: the diagnostic keeps the origin Typst gave it, while resolution still
 /// restores that range and omits the wrapper's frames. Use it for a diagnostic Tola reports on

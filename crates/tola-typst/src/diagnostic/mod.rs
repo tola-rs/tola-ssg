@@ -20,7 +20,7 @@ pub use message::{
 };
 pub use native::{
     DiagnosticOrigin, DiagnosticProjection, NativeDiagnostic, ProducerDiagnosticOrigin,
-    producer_error, producer_warning, projected_span,
+    producer_error, producer_error_at, producer_warning, projected_span,
 };
 pub use panic::{ExplainedPanic, explained_panic};
 pub use resolved::{

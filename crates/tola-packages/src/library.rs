@@ -132,15 +132,23 @@ pub(crate) fn native_scope() -> Scope {
     host.define(TOLA_META, Func::from(super::source_meta::tola_meta::data()));
     host.define(
         "report-schema-error",
-        Func::from(super::source_issues::tola_report_schema_error::data()),
+        Func::from(super::source_issues::schema::tola_report_schema_error::data()),
     );
     host.define(
         "parse-source",
-        Func::from(super::source_issues::tola_parse_source::data()),
+        Func::from(super::source_issues::schema::tola_parse_source::data()),
     );
     host.define(
         "report-source-issues",
-        Func::from(super::source_issues::tola_report_source_issues::data()),
+        Func::from(super::source_issues::report::tola_report_source_issues::data()),
+    );
+    host.define(
+        "normalize-schema-issues",
+        Func::from(super::schema_issue::normalize_schema_issues::data()),
+    );
+    host.define(
+        "format-schema-issues",
+        Func::from(super::schema_issue::format_schema_issues::data()),
     );
     host.define(
         "current-document",

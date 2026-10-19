@@ -81,15 +81,38 @@
       type(notes) == array and notes.all(note => type(note) == str),
       message: "issue: `notes` must be an array of strings; found `" + repr(notes) + "`",
     )
-    (code: code, path: path, message: message, notes: notes, children: ())
+    // A failure the author constructs describes a value the input supplied. The schema fills
+    // `origin` when it generated the value itself.
+    (code: code, path: path, message: message, notes: notes, children: (), origin: none)
+  }
+  let assert-origin(origin, owner) = {
+    if origin == none { return }
+    require(
+      type(origin) == dictionary
+        and origin.len() == 2
+        and ("kind", "path").all(key => key in origin),
+      message: owner
+        + ": `origin` must be `none` or a dictionary with `kind` and `path`; found `"
+        + repr(origin)
+        + "`",
+    )
+    require(
+      origin.kind in ("default", "output", "generated"),
+      message: owner
+        + ": `origin.kind` must be `\"default\"`, `\"output\"`, or `\"generated\"`; found `"
+        + repr(origin.kind)
+        + "`",
+    )
+    assert-path(origin.path, owner + " `origin`")
   }
   let assert-issue(problem, owner) = {
     require(
       type(problem) == dictionary
-        and problem.len() == 5
-        and ("code", "path", "message", "notes", "children").all(key => key in problem),
+        and problem.len() in (5, 6)
+        and ("code", "path", "message", "notes", "children").all(key => key in problem)
+        and (problem.len() == 5 or "origin" in problem),
       message: owner
-        + ": expected an Issue with exactly `code`, `path`, `message`, `notes`, and `children`; found `"
+        + ": expected an Issue with `code`, `path`, `message`, `notes`, `children`, and optional `origin`; found `"
         + repr(problem)
         + "`",
     )
@@ -110,6 +133,7 @@
       type(problem.children) == array,
       message: owner + ": Issue `children` must be an array; found `" + repr(type(problem.children)) + "`",
     )
+    assert-origin(problem.at("origin", default: none), owner + " Issue")
     for child in problem.children { assert-issue(child, owner) }
   }
   let assert-issues(issues, owner) = {
@@ -688,7 +712,10 @@
   let try-parse(value, member) = {
     assert-schema(member, "try-parse")
     let parsed = evaluate(member, (present: true, value: value))
-    if parsed.ok { ok(parsed.value) } else { err(..parsed.issues) }
+    if parsed.ok { ok(parsed.value) } else {
+      import "@tola/host:0.0.0": normalize-schema-issues
+      err(..normalize-schema-issues(parsed.issues))
+    }
   }
   let path-text(path) = {
     let rendered = "$"
@@ -703,34 +730,10 @@
     }
     rendered
   }
-  let issue-lines(problem, base: (), provenance: none, indent: "") = {
-    let path = base + problem.path
-    let label = if provenance == none { "" } else { provenance + " " }
-    let lines = (indent + label + "`" + path-text(path) + "`: " + problem.message,)
-    for note in problem.notes { lines.push(indent + "  note: " + note) }
-    let generated = problem.code == "schema.default" or problem.code == "schema.output"
-    let child-provenance = if problem.code == "schema.default" {
-      "declared default"
-    } else if problem.code == "schema.output" {
-      "converted value"
-    } else {
-      provenance
-    }
-    for child in problem.children {
-      lines += issue-lines(
-        child,
-        base: if generated { () } else { path },
-        provenance: child-provenance,
-        indent: indent + "  ",
-      )
-    }
-    lines
-  }
   let format-issues(issues) = {
     assert-issues(issues, "format-issues")
-    let lines = ()
-    for problem in issues { lines += issue-lines(problem) }
-    lines.join("\n", default: "")
+    import "@tola/host:0.0.0": format-schema-issues
+    format-schema-issues(issues)
   }
   let parse(value, member) = {
     let parsed = try-parse(value, member)
@@ -1273,7 +1276,9 @@
 /// Failure issues are nonempty and never accompany a partial value.
 /// Schema validation failures come back as a Result; malformed declarations, invalid callback
 /// return shapes, and callback panics still stop compilation. The input is always present,
-/// including `none`. Missing keys arise only while parsing an object.
+/// including `none`. Missing keys arise only while parsing an object. Render failures with
+/// `format-issues`; a value the schema generated itself is named in that text rather than
+/// appearing as something the input supplied.
 ///
 /// Example - return a Result instead of failing:
 /// ```typst
@@ -1321,7 +1326,8 @@
 /// A path is relative to the checked value: `("author.name",)` names one key, `("author", "name")`
 /// names a nested key, and `("authors", 0)` names an array member.
 /// To add nested causes, spread the Issue into a dictionary and replace `children` with an array
-/// of Issues.
+/// of Issues. The returned Issue describes a value the input supplied; the schema records a
+/// declared default or a conversion in `origin` when it generated the value itself.
 ///
 /// Example - build an Issue with a path:
 /// ```typst
@@ -1338,10 +1344,12 @@
 /// -> dictionary
 #let issue = core.issue
 
-/// Render Issue trees to deterministic text with unambiguous paths, notes, and branch causes.
-/// The text names whether a failing value came from a declared default or a conversion, using the
-/// Issue data alone. Each issue becomes one line, and its child causes are indented below it. A
-/// malformed Issue stops compilation.
+/// Render Issues to deterministic text a site author reads.
+///
+/// An ordinary issue becomes one line with its child causes indented below it. A failure that came
+/// from a declared default or a conversion leads with the field and the reason; the schema's
+/// default or conversion is named only where it helps, and no internal message is repeated. Other
+/// causes and notes are indented below. A malformed Issue stops compilation.
 ///
 /// Example - render an Issue tree as text:
 /// ```typst
@@ -1356,6 +1364,13 @@
 /// #let cause = issue("is required", code: "schema.missing", path: ("title",), notes: ("add a title",))
 /// #let tree = (..issue("metadata is invalid", code: "metadata.invalid"), children: (cause,))
 /// #assert.eq(format-issues((tree,)), "`$`: metadata is invalid\n  `$.title`: is required\n    note: add a title")
+/// ```
+///
+/// Example - lead with a declared default's cause:
+/// ```typst
+/// #import "@tola/schema:0.0.0": format-issues, optional, schema, try-parse
+/// #let cause = try-parse((:), schema((count: optional(int, default: "bad")))).issues.first()
+/// #assert.eq(format-issues((cause,)), "`$.count` is not set, and the schema's default value is invalid: expected `int`, found `str`")
 /// ```
 ///
 /// Related: issue, parse

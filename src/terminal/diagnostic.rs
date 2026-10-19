@@ -42,30 +42,34 @@ pub(crate) fn render(
     // Labels address retained source rows, and the in-memory Buffer cannot fail a write.
     term::emit(&mut buffer, &config, &files, &rendered)
         .expect("diagnostic labels address retained source rows");
-    // The whole stack, innermost first, in the Typst CLI's shape and depth: no frame can be told
-    // to carry the value a diagnostic complains about, so none is dropped.
-    for frame in &escaped.trace {
-        write!(buffer, "  {}", text::single_line(&frame.message))
-            .expect("writing to a Buffer succeeds");
-        if frame.location.is_some() {
-            write!(buffer, " at ").expect("writing to a Buffer succeeds");
-            buffer
-                .set_color(ColorSpec::new().set_underline(true))
-                .expect("styling a Buffer succeeds");
-            write!(buffer, "{}", frame.spelled()).expect("writing to a Buffer succeeds");
-            buffer.reset().expect("styling a Buffer succeeds");
-        }
-        writeln!(buffer).expect("writing to a Buffer succeeds");
-        if let Some(source) = files.compact_span(frame)
-            && !source.is_empty()
-        {
-            write!(buffer, "    ").expect("writing to a Buffer succeeds");
-            buffer
-                .set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(248))))
-                .expect("styling a Buffer succeeds");
-            write!(buffer, "{source}").expect("writing to a Buffer succeeds");
-            buffer.reset().expect("styling a Buffer succeeds");
+    // A source metadata issue names a field, not a call the author wrote: its frames describe the
+    // site's parse pipeline. The log file still carries them for diagnosis.
+    if diagnostic.code != tola_build::codes::source::METADATA {
+        // The whole stack, innermost first, in the Typst CLI's shape and depth: no frame can be
+        // told to carry the value a diagnostic complains about, so none is dropped.
+        for frame in &escaped.trace {
+            write!(buffer, "  {}", text::single_line(&frame.message))
+                .expect("writing to a Buffer succeeds");
+            if frame.location.is_some() {
+                write!(buffer, " at ").expect("writing to a Buffer succeeds");
+                buffer
+                    .set_color(ColorSpec::new().set_underline(true))
+                    .expect("styling a Buffer succeeds");
+                write!(buffer, "{}", frame.spelled()).expect("writing to a Buffer succeeds");
+                buffer.reset().expect("styling a Buffer succeeds");
+            }
             writeln!(buffer).expect("writing to a Buffer succeeds");
+            if let Some(source) = files.compact_span(frame)
+                && !source.is_empty()
+            {
+                write!(buffer, "    ").expect("writing to a Buffer succeeds");
+                buffer
+                    .set_color(ColorSpec::new().set_fg(Some(Color::Ansi256(248))))
+                    .expect("styling a Buffer succeeds");
+                write!(buffer, "{source}").expect("writing to a Buffer succeeds");
+                buffer.reset().expect("styling a Buffer succeeds");
+                writeln!(buffer).expect("writing to a Buffer succeeds");
+            }
         }
     }
     let rendered = String::from_utf8_lossy(buffer.as_slice());
@@ -501,6 +505,29 @@ mod tests {
         assert_eq!(rendered.matches("add a page here").count(), 2, "{rendered}");
         assert!(rendered.contains("[Home]"), "{rendered}");
         assert!(rendered.contains("[About]"), "{rendered}");
+    }
+
+    /// A source metadata issue names a field; the site's parse pipeline is not evidence the author
+    /// needs, so the terminal leaves those frames to the log file.
+    #[test]
+    fn source_metadata_omits_the_site_parse_trace() {
+        use tola_build::codes::source::METADATA;
+
+        let mut diagnostic = Diagnostic::at_path(
+            METADATA,
+            Severity::Error,
+            "content/note.typ",
+            "`$.published` is not set: Published blog pages need a publication date",
+        )
+        .with_position(1, 1);
+        diagnostic.trace.push(TraceFrame {
+            message: "while calling `select-pages`".into(),
+            location: Some(snippet(1, "select-pages(all-sources())")),
+        });
+
+        let rendered = render(&diagnostic, None, false);
+        assert!(rendered.contains("`$.published` is not set"), "{rendered}");
+        assert!(!rendered.contains("select-pages"), "{rendered}");
     }
 
     #[test]

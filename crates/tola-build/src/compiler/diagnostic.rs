@@ -370,7 +370,16 @@ pub(super) fn resolved_diagnostic(
     root: &Path,
     code: crate::diagnostic::DiagnosticCode,
 ) -> crate::diagnostic::Diagnostic {
-    let code = if tola_packages::AssetUrlShadowed::from_origin(&diagnostic.origin).is_some() {
+    // A source metadata issue belongs to the source whose fields failed, not to the Typst call
+    // that reached it. Its producer names that ownership so the site diagnostic can say so.
+    let source_metadata = matches!(
+        &diagnostic.origin,
+        tola_typst::diagnostic::DiagnosticOrigin::Producer(origin)
+            if origin.name() == tola_packages::SOURCE_ISSUE_ORIGIN
+    );
+    let code = if source_metadata {
+        crate::codes::source::METADATA
+    } else if tola_packages::AssetUrlShadowed::from_origin(&diagnostic.origin).is_some() {
         crate::codes::reference::ASSET_URL_SHADOWED
     } else {
         code

@@ -424,7 +424,7 @@ summary = [
   '''
 解析一次后，精确返回 `(ok: true, value: value)` 或 `(ok: false, issues: issues)` 之一。
 
-失败时 issues 非空，也绝不会连同部分值一起返回。schema 校验失败会以 Result 返回；声明本身写错、回调返回形状非法或回调 panic 仍会中止编译。输入总是存在的，包括 `none`；只有解析对象时才会遇到缺失的键。
+失败时 issues 非空，也绝不会连同部分值一起返回。schema 校验失败会以 Result 返回；声明本身写错、回调返回形状非法或回调 panic 仍会中止编译。输入总是存在的，包括 `none`；只有解析对象时才会遇到缺失的键。失败请用 `format-issues` 渲染；schema 自己生成的值会在文本里说明，而不会伪装成输入提供的值。
 
 Example - 返回 Result 而不是失败：
 ''',
@@ -472,7 +472,7 @@ summary = [
   '''
 构造一个 Issue：schema 报告的单个问题。
 
-路径以正在检查的值为基准：`("author.name",)` 命名一个键，`("author", "name")` 命名嵌套键，`("authors", 0)` 命名数组成员。要加入嵌套原因，把 Issue 展开进字典，再把 `children` 换成 Issues 数组。
+路径以正在检查的值为基准：`("author.name",)` 命名一个键，`("author", "name")` 命名嵌套键，`("authors", 0)` 命名数组成员。要加入嵌套原因，把 Issue 展开进字典，再把 `children` 换成 Issues 数组。`issue()` 描述输入提供的值；schema 生成值时会在 `origin` 里记录声明默认值或转换。
 
 Example - 构造带路径的 Issue：
 ''',
@@ -490,13 +490,14 @@ notes = "字符串备注数组，默认为空。"
 
 summary = [
   '''
-把 Issue 树渲染成确定的文本，路径、备注和分支原因都清楚无歧义。
+把 Issue 渲染成站点作者可读的确定文本。
 
-文本会说明失败的值来自声明的默认值还是某次转换，信息全部来自 Issue 本身。每个 issue 占一行，它的子原因缩进排在下面。Issue 本身不合法会中止编译。
+普通 issue 占一行，子原因缩进排在下面。来自声明默认值或转换的失败，先给字段和原因；只有需要时才会提到 schema 的默认值或转换，不会重复内部消息。其它原因和备注缩进排在下面。Issue 本身不合法会中止编译。
 
-Example - 把 Issue 树渲染为文本：
+Example - 把 Issue 渲染为文本：
 ''',
   'Example - 渲染嵌套原因与备注：',
+  'Example - 先给出声明默认值的原因：',
   '',
 ]
 

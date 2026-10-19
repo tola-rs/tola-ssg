@@ -137,6 +137,8 @@ pub mod source {
     /// A source's declaration events could not be read.
     pub const DECLARATION_PROTOCOL: DiagnosticCode =
         DiagnosticCode::new("source.declaration_protocol");
+    /// A source's metadata does not satisfy the site's schema.
+    pub const METADATA: DiagnosticCode = DiagnosticCode::new("source.metadata");
 }
 
 /// Typst compilation, export, and the files it reads.
@@ -210,6 +212,7 @@ mod tests {
             site::OUTPUTS,
             source::DECLARATION_DEPRECATED,
             source::DECLARATION_PROTOCOL,
+            source::METADATA,
             typst::BUNDLE_EXPORT,
             typst::COMPILE,
             typst::FONT,
