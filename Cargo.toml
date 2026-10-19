@@ -15,6 +15,7 @@ members = [
     "crates/tola-subprocess",
     "crates/tola-typst",
     "crates/tola-typst-syntax",
+    "crates/tola-webp",
 ]
 resolver = "3"
 
