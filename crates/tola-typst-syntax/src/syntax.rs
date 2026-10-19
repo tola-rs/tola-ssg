@@ -43,17 +43,19 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
     let colon = node
         .children()
         .find(|child| child.kind() == SyntaxKind::Colon)?;
-    if at < colon.range().end
+    if at < colon.range().start
         || node
             .children()
             .any(|child| child.kind() == SyntaxKind::RightParen && at > child.range().start)
     {
         return None;
     }
-    let ast::Imports::Items(items) = import.imports()? else {
-        return None;
+    let items = match import.imports() {
+        Some(ast::Imports::Items(items)) => Some(items),
+        Some(ast::Imports::Wildcard) => return None,
+        None => None,
     };
-    let items_node = node.find(items.span())?;
+    let items_node = items.and_then(|items| node.find(items.span()));
     let mut selection = Import {
         source: node.find(import.source().span())?.range(),
         replacement: None,
@@ -62,58 +64,77 @@ pub fn import(source: &Source, at: usize) -> Option<Import> {
         imported: Vec::new(),
     };
     let mut active = false;
-    for item in items.iter() {
-        let path = items_node.find(item.path().span())?;
-        let whole = match path.parent() {
-            Some(parent) if parent.kind() == SyntaxKind::RenamedImportItem => parent.clone(),
-            _ => path.clone(),
-        };
-        if whole.range().start <= at && at <= whole.range().end {
-            active = true;
-            if at <= path.range().end {
-                for component in path.children() {
-                    if component.kind() == SyntaxKind::Ident {
-                        if component.range().start <= at && at <= component.range().end {
-                            selection.replacement = Some(component.range());
-                            break;
+    if let (Some(items), Some(items_node)) = (items, items_node.as_ref()) {
+        for item in items.iter() {
+            let path = items_node.find(item.path().span())?;
+            let whole = match path.parent() {
+                Some(parent) if parent.kind() == SyntaxKind::RenamedImportItem => parent.clone(),
+                _ => path.clone(),
+            };
+            if whole.range().start <= at && at <= whole.range().end {
+                active = true;
+                if at <= path.range().end {
+                    for component in path.children() {
+                        if component.kind() == SyntaxKind::Ident {
+                            if component.range().start <= at && at <= component.range().end {
+                                selection.replacement = Some(component.range());
+                                break;
+                            }
+                            if component.range().end < at {
+                                selection.path.push(component.leaf_text().to_string());
+                            }
+                        } else if component.kind() == SyntaxKind::Dot && component.range().end == at
+                        {
+                            selection.replacement = Some(at..at);
                         }
-                        if component.range().end < at {
-                            selection.path.push(component.leaf_text().to_string());
-                        }
-                    } else if component.kind() == SyntaxKind::Dot && component.range().end == at {
-                        selection.replacement = Some(at..at);
                     }
                 }
-            }
-            if selection.replacement.is_some() {
-                let mut repair = whole.range();
-                if let Some(comma) = whole
-                    .next_sibling()
-                    .filter(|next| next.kind() == SyntaxKind::Comma)
-                {
-                    repair.end = comma.range().end;
-                } else if let Some(comma) = whole
-                    .prev_sibling()
-                    .filter(|prev| prev.kind() == SyntaxKind::Comma)
-                {
-                    repair.start = comma.range().start;
+                if selection.replacement.is_some() {
+                    let mut repair = whole.range();
+                    if let Some(comma) = whole
+                        .next_sibling()
+                        .filter(|next| next.kind() == SyntaxKind::Comma)
+                    {
+                        repair.end = comma.range().end;
+                    } else if let Some(comma) = whole
+                        .prev_sibling()
+                        .filter(|prev| prev.kind() == SyntaxKind::Comma)
+                    {
+                        repair.start = comma.range().start;
+                    }
+                    selection.repair = Some(repair);
                 }
-                selection.repair = Some(repair);
+            } else {
+                selection.imported.push(
+                    item.path()
+                        .iter()
+                        .map(|part| part.as_str().into())
+                        .collect(),
+                );
             }
-        } else {
-            selection.imported.push(
-                item.path()
-                    .iter()
-                    .map(|part| part.as_str().into())
-                    .collect(),
-            );
         }
     }
     if !active {
-        let previous = items_node
-            .children()
-            .rfind(|child| !child.kind().is_trivia() && child.range().end <= at);
-        if previous.is_none_or(|previous| previous.kind() == SyntaxKind::Comma) {
+        // The import list completes at the colon, before its first item, after its last item, and
+        // after a comma; only a newline ends it. An empty replacement at the cursor lets the client
+        // filter the exports against the word it is writing.
+        let previous = items_node.as_ref().and_then(|items_node| {
+            items_node
+                .children()
+                .rfind(|child| !child.kind().is_trivia() && child.range().end <= at)
+        });
+        let before_items = items_node.as_ref().is_none_or(|items_node| {
+            items_node
+                .children()
+                .find(|child| !child.kind().is_trivia())
+                .is_none_or(|first| at <= first.range().start)
+        });
+        let blank = previous.is_some_and(|previous| {
+            source.text()[previous.range().end..at]
+                .chars()
+                .all(|ch| matches!(ch, ' ' | '\t'))
+        });
+        if at <= colon.range().end || before_items || blank {
             selection.replacement = Some(at..at);
         }
     }
@@ -137,7 +158,9 @@ pub struct Member {
 pub struct ImportedName {
     /// The range of the import's path string, which names the module.
     pub source: Range<usize>,
-    /// The item's path, in order.
+    /// The selected identifier in the item's path.
+    pub name: Range<usize>,
+    /// The item's path through the selected identifier, in order.
     pub path: Vec<String>,
 }
 
@@ -170,21 +193,25 @@ pub fn imported_name(source: &Source, at: usize) -> Option<ImportedName> {
             if path.range().start > at || at > path.range().end {
                 return None;
             }
-            return Some(ImportedName {
-                source,
-                path: path_parts(&path),
-            });
+            let mut parts = Vec::new();
+            for component in path
+                .children()
+                .filter(|node| node.kind() == SyntaxKind::Ident)
+            {
+                parts.push(component.leaf_text().to_string());
+                let range = component.range();
+                if range.start <= at && at <= range.end {
+                    return Some(ImportedName {
+                        source,
+                        name: range,
+                        path: parts,
+                    });
+                }
+            }
+            return None;
         }
     }
     None
-}
-
-/// The identifier parts of one import path, in order.
-fn path_parts(path: &LinkedNode<'_>) -> Vec<String> {
-    path.children()
-        .filter(|component| component.kind() == SyntaxKind::Ident)
-        .map(|component| component.leaf_text().to_string())
-        .collect()
 }
 
 /// The completion edit and the replaced expression are separate ranges.
@@ -569,5 +596,45 @@ mod tests {
         let at = marked.find('|').expect("an offset marker");
         let source = Source::detached(marked.replace('|', ""));
         assert_eq!(call(&source, at).expect("the call").argument_name, None);
+    }
+
+    #[test]
+    fn imported_paths_select_their_segment() {
+        for (marked, expected) in [
+            (
+                "#import \"lib.typ\": |module.member as local",
+                &["module"][..],
+            ),
+            (
+                "#import \"lib.typ\": mod|ule.member as local",
+                &["module"][..],
+            ),
+            (
+                "#import \"lib.typ\": module|.member as local",
+                &["module"][..],
+            ),
+            (
+                "#import \"lib.typ\": module.|member as local",
+                &["module", "member"][..],
+            ),
+            (
+                "#import \"lib.typ\": module.member| as local",
+                &["module", "member"][..],
+            ),
+        ] {
+            let at = marked.find('|').unwrap();
+            let source = Source::detached(marked.replace('|', ""));
+            let selected = imported_name(&source, at).expect("an imported name");
+            assert_eq!(selected.path, expected, "{marked}");
+            assert_eq!(
+                &source.text()[selected.name],
+                *expected.last().unwrap(),
+                "{marked}"
+            );
+        }
+        let marked = "#import \"lib.typ\": module.member as lo|cal";
+        let at = marked.find('|').unwrap();
+        let source = Source::detached(marked.replace('|', ""));
+        assert!(imported_name(&source, at).is_none());
     }
 }

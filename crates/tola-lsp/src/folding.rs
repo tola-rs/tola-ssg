@@ -13,18 +13,24 @@ use crate::position;
 /// columns too, so a fold hides exactly what it covers.
 pub(super) fn ranges(source: &Source, line_folding_only: bool) -> Option<Vec<FoldingRange>> {
     let folds = tola_typst_syntax::folds::folds(source)?;
+    let first_break = position::first_break(source.text());
     Some(
         folds
             .into_iter()
-            .filter_map(|fold| carried(source.lines(), fold, line_folding_only))
+            .filter_map(|fold| carried(source.lines(), fold, line_folding_only, first_break))
             .collect(),
     )
 }
 
 /// One fold, told the way the client reads folds.
-fn carried(lines: &Lines<String>, fold: Fold, line_folding_only: bool) -> Option<FoldingRange> {
-    let start = fold_position(lines, fold.start_line, fold.start_character)?;
-    let end = fold_position(lines, fold.end_line, fold.end_character)?;
+fn carried(
+    lines: &Lines<String>,
+    fold: Fold,
+    line_folding_only: bool,
+    first_break: Option<usize>,
+) -> Option<FoldingRange> {
+    let start = fold_position(lines, fold.start_line, fold.start_character, first_break)?;
+    let end = fold_position(lines, fold.end_line, fold.end_character, first_break)?;
     let columns = !line_folding_only;
     Some(FoldingRange {
         start_line: start.line,
@@ -42,9 +48,14 @@ fn carried(lines: &Lines<String>, fold: Fold, line_folding_only: bool) -> Option
 ///
 /// The syntax crate's folds hold the compiler's own lines and columns, and the compiler's breaks
 /// include five characters the protocol does not break on, so an end is read through its byte.
-fn fold_position(lines: &Lines<String>, line: u32, character: Option<u32>) -> Option<Position> {
+fn fold_position(
+    lines: &Lines<String>,
+    line: u32,
+    character: Option<u32>,
+    first_break: Option<usize>,
+) -> Option<Position> {
     let at = source::byte_offset(lines, Utf16Position::new(line, character?)).ok()?;
-    position::utf16_range(lines, at..at).map(|at| at.start)
+    position::utf16_range_indexed(lines, at..at, first_break).map(|at| at.start)
 }
 
 #[cfg(test)]

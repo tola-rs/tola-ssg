@@ -7,7 +7,7 @@ use anyhow::Result;
 use tola_typst::typst::syntax::ast::{self, AstNode};
 use tola_typst::typst::syntax::{FileId, LinkedNode, Source, VirtualRoot};
 
-use super::super::semantic::{self, Semantic};
+use super::super::semantic::Semantic;
 use super::declared::{DeclaredOutput, declared_chain_type, declared_output};
 use super::origin::{RecordOrigin, chained_origin, field_chain, record_origin};
 
@@ -211,9 +211,9 @@ fn argument_value<'a>(
     }
     if ty.is_none() {
         ty = semantics
-            .values(argument)?
+            .types(argument)?
             .first()
-            .map(|(value, _)| semantic::type_spelling(&value.ty()));
+            .map(|(value, _)| value.type_name());
     }
     Ok(
         (declared.is_some() || ty.is_some()).then_some(ParameterArgument {

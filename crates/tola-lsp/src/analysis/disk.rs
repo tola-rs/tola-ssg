@@ -1,4 +1,4 @@
-//! The site's own Typst files as one lane last read them.
+//! Parsed source snapshots reused while each source's revalidated bytes stay unchanged.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,13 +8,9 @@ use tola_typst::ContentDigest;
 use tola_typst::typst::syntax::{FileId, Source};
 use tola_typst_syntax::names::SourceNames;
 
-/// The site's own Typst files as one lane last read them, reused while each file's bytes are
-/// unchanged.
-///
-/// References and rename read every file the site holds, and parsing them again for each request
-/// costs more than the answer. Each pass re-reads the bytes — the read is what decides whether
-/// they changed, identified by the same content digest a compiler read records — and a file the
-/// walk no longer sees is dropped.
+/// Parsed names from the bytes a source walk or import closure last read. Reads revalidate the
+/// bytes; reuse never substitutes a timestamp for the compiler's content identity. A completed
+/// pass drops sources neither the walk nor its import closure reached.
 #[derive(Default)]
 pub(crate) struct DiskSources {
     pass: u64,
@@ -52,12 +48,17 @@ impl DiskSources {
                 return None;
             }
         };
+        Some(self.names_from_text(id, text))
+    }
+
+    /// Reuses the parse of these revalidated bytes, including hidden imports and package sources.
+    pub(crate) fn names_from_text(&mut self, id: FileId, text: String) -> Arc<SourceNames> {
         let digest = ContentDigest::of(text.as_bytes());
         if let Some(parsed) = self.parsed.get_mut(&id)
             && parsed.digest == digest
         {
             parsed.pass = self.pass;
-            return Some(Arc::clone(&parsed.names));
+            return Arc::clone(&parsed.names);
         }
         let names = Arc::new(SourceNames::new(Source::new(id, text)));
         self.parsed.insert(
@@ -68,12 +69,29 @@ impl DiskSources {
                 names: Arc::clone(&names),
             },
         );
-        Some(names)
+        names
     }
 
     /// Close the pass [`Self::begin`] opened: drop every file this pass did not read.
     pub(crate) fn retain_pass(&mut self) {
         let pass = self.pass;
         self.parsed.retain(|_, parsed| parsed.pass == pass);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn revalidated_bytes_reuse_parsed_names() {
+        let source = Source::detached("#let marker = 1".to_owned());
+        let mut disk = DiskSources::default();
+        let first = disk.names_from_text(source.id(), source.text().to_owned());
+        let repeated = disk.names_from_text(source.id(), source.text().to_owned());
+        assert!(Arc::ptr_eq(&first, &repeated));
+        let changed = disk.names_from_text(source.id(), "#let current = 2".to_owned());
+        assert!(!Arc::ptr_eq(&first, &changed));
+        assert_eq!(changed.declarations()[0].name, "current");
     }
 }

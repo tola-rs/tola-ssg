@@ -11,6 +11,7 @@ use tola_typst::typst::syntax::{FileId, LinkedNode, VirtualRoot};
 
 use super::super::context::Selection;
 use super::super::imports::calls_package_member;
+use super::super::inference::{ExpressionResolver, binding_is_written};
 use super::super::schema;
 use super::super::semantic::Semantic;
 use super::super::site_schema::declared_schema;
@@ -28,64 +29,28 @@ pub(crate) fn field_chain<'a>(node: &LinkedNode<'a>) -> Option<(LinkedNode<'a>, 
     fields.reverse();
     (!fields.is_empty()).then_some((current, fields))
 }
-/// Assignment and method mutation invalidate an initializer's provenance. The array methods the
-/// trace follows a callback through are read as pure; every other method call on a binding
-/// conservatively leaves its origin unproved.
 fn schema_binding_is_written(
     names: &tola_typst_syntax::names::SourceNames,
     declaration: usize,
-) -> bool {
-    let mut stack = vec![LinkedNode::new(names.source().root())];
-    while let Some(node) = stack.pop() {
-        let target = if let Some(binary) = node.cast::<ast::Binary>()
-            && matches!(
-                binary.op(),
-                ast::BinOp::Assign
-                    | ast::BinOp::AddAssign
-                    | ast::BinOp::SubAssign
-                    | ast::BinOp::MulAssign
-                    | ast::BinOp::DivAssign
-            ) {
-            node.find(binary.lhs().span())
-        } else if let Some(call) = node.cast::<ast::FuncCall>()
-            && let Some(callee) = node.find(call.callee().span())
-            && let Some(access) = callee.cast::<ast::FieldAccess>()
-            && !matches!(access.field().as_str(), "filter" | "map")
-            && !matches!(
-                names.declarations()[declaration].kind,
-                tola_typst_syntax::names::DeclarationKind::Import { .. }
-            )
-        {
-            callee.find(access.target().span())
-        } else {
-            None
-        };
-        if let Some(target) = target {
-            let root = tola_typst_syntax::syntax::root_expression(target);
-            if names.declared_at(root.range().start) == Some(declaration) {
-                return true;
-            }
-        }
-        if let Some(assignment) = node.cast::<ast::DestructAssignment>()
-            && assignment.pattern().bindings().into_iter().any(|name| {
-                names
-                    .source()
-                    .find(name.span())
-                    .is_some_and(|name| names.declared_at(name.range().start) == Some(declaration))
-            })
-        {
-            return true;
-        }
-        stack.extend(node.children());
-    }
-    false
+    semantics: &Semantic<'_>,
+) -> Result<bool> {
+    binding_is_written(
+        names,
+        declaration,
+        names.source().text().len(),
+        |method| {
+            // The projection resolver proves record lineage through these callbacks.
+            matches!(method, "filter" | "map")
+        },
+        || semantics.ensure_active(),
+    )
 }
 
 /// Whether one expression's observed values are all arrays: the evidence that a traced parameter
 /// or loop variable reads its records from one receiver. An expression observed nowhere or too
 /// many times pins nothing.
 fn is_observed_array(node: &LinkedNode<'_>, semantics: &mut Semantic<'_>) -> Result<bool> {
-    let values = semantics.values(node)?;
+    let values = semantics.known_values(node)?;
     Ok(!values.is_empty()
         && values.len() < tola_typst::typst::engine::Sink::MAX_VALUES
         && values
@@ -245,7 +210,7 @@ fn record_origin_within<'a>(
                 let Some(declaration) = names.declared_at(root.range().start) else {
                     return Ok(None);
                 };
-                if schema_binding_is_written(names, declaration) {
+                if schema_binding_is_written(names, declaration, semantics)? {
                     return Ok(None);
                 }
                 // `parse-sources` binds its schema positionally, so a call that names it cannot
@@ -303,7 +268,8 @@ fn record_origin_within<'a>(
             return Ok(None);
         };
         let file = names.source().id();
-        if followed.contains(&(file, declaration)) || schema_binding_is_written(names, declaration)
+        if followed.contains(&(file, declaration))
+            || schema_binding_is_written(names, declaration, semantics)?
         {
             return Ok(None);
         }
@@ -583,7 +549,7 @@ fn call_return_type(call: &LinkedNode<'_>, semantics: &mut Semantic<'_>) -> Resu
     let Some(callee) = call.find(func.callee().span()) else {
         return Ok(None);
     };
-    let Some((Value::Func(func), _)) = semantics.values(&callee)?.into_iter().next() else {
+    let Some((Value::Func(func), _)) = semantics.known_values(&callee)?.into_iter().next() else {
         return Ok(None);
     };
     Ok(Signature::of(func.name().unwrap_or_default(), &func).returns)

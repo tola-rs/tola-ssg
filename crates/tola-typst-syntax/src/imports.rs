@@ -40,6 +40,29 @@ pub struct Binding {
     pub name: String,
 }
 
+/// A name's declaration, established by source identity or official static library metadata.
+pub enum NameDefinition {
+    /// The source snapshot and its declaration index, valid only in this graph.
+    Source {
+        /// The immutable source snapshot containing the declaration.
+        file: FileId,
+        /// The declaration's index inside that snapshot's names.
+        declaration: usize,
+    },
+    /// A library value whose metadata needs no source evaluation.
+    Builtin(Value),
+}
+
+/// One visible module export with the declaration identity this graph established.
+pub struct ModuleExport {
+    /// The spelling callers select from the module.
+    pub name: String,
+    /// The category established by source or static metadata.
+    pub class: NameClass,
+    /// The declaration or static value, absent for an unresolved import cycle.
+    pub definition: Option<NameDefinition>,
+}
+
 /// A source spelling annotated against one immutable dependency view.
 #[derive(Clone, Debug)]
 pub struct ResolvedOccurrence {
@@ -430,6 +453,123 @@ impl NameGraph {
     pub fn sources(&self) -> impl Iterator<Item = &SourceNames> {
         self.files.iter().map(|file| self.sources[file].as_ref())
     }
+    /// The exports one import statement's module supplies, when this graph read the module.
+    ///
+    /// A builtin module enumerates its own scope; a target this graph never read supplies nothing.
+    pub fn module_exports(&self, file: FileId, statement: usize) -> Vec<(String, NameClass)> {
+        self.module_exports_at(file, statement, &[])
+    }
+
+    /// The exports the given path selects inside one import statement's module.
+    pub fn module_exports_at(
+        &self,
+        file: FileId,
+        statement: usize,
+        path: &[String],
+    ) -> Vec<(String, NameClass)> {
+        self.module_exports_matching(file, statement, path, "", || {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap_or_else(|error| match error {})
+        .into_iter()
+        .map(|export| (export.name, export.class))
+        .collect()
+    }
+
+    /// Exports matching a prefix, retaining identities already selected by the module interface.
+    pub fn module_exports_matching<E>(
+        &self,
+        file: FileId,
+        statement: usize,
+        path: &[String],
+        prefix: &str,
+        mut ensure_active: impl FnMut() -> Result<(), E>,
+    ) -> Result<Vec<ModuleExport>, E> {
+        ensure_active()?;
+        let (_, value) = self.import_path(file, statement, path, &mut BTreeSet::new());
+        Ok(self
+            .exports_matching(value, prefix, &mut ensure_active)?
+            .unwrap_or_default())
+    }
+
+    /// Source module members held by a binding; non-module and unresolved values have no interface.
+    pub fn binding_exports<E>(
+        &self,
+        binding: BindingId,
+        prefix: &str,
+        mut ensure_active: impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Vec<ModuleExport>>, E> {
+        ensure_active()?;
+        self.exports_matching(
+            self.value(binding, &mut BTreeSet::new()),
+            prefix,
+            &mut ensure_active,
+        )
+    }
+
+    fn exports_matching<E>(
+        &self,
+        value: NameValue,
+        prefix: &str,
+        ensure_active: &mut impl FnMut() -> Result<(), E>,
+    ) -> Result<Option<Vec<ModuleExport>>, E> {
+        ensure_active()?;
+        let mut exports = Vec::new();
+        match value {
+            NameValue::Module(target) => {
+                let Some(module) = self.exports.get(&target) else {
+                    return Ok(None);
+                };
+                for (name, &binding) in module
+                    .range(prefix.to_owned()..)
+                    .take_while(|(name, _)| name.starts_with(prefix))
+                {
+                    ensure_active()?;
+                    exports.push(ModuleExport {
+                        name: name.clone(),
+                        class: self.export_class(binding),
+                        definition: self.binding_definition(binding),
+                    });
+                    ensure_active()?;
+                }
+            }
+            NameValue::Builtin(value) => {
+                let Some(scope) = value.scope() else {
+                    return Ok(None);
+                };
+                for (name, binding) in scope.iter() {
+                    ensure_active()?;
+                    if name.starts_with(prefix) {
+                        exports.push(ModuleExport {
+                            name: name.to_string(),
+                            class: class(&NameValue::Builtin(binding.read().clone())).unwrap(),
+                            definition: Some(NameDefinition::Builtin(binding.read().clone())),
+                        });
+                    }
+                }
+            }
+            NameValue::Function { .. } | NameValue::Unknown => return Ok(None),
+        }
+        ensure_active()?;
+        Ok(Some(exports))
+    }
+
+    fn export_class(&self, id: BindingId) -> NameClass {
+        let binding = &self.bindings[id];
+        let Some(declaration) = binding.declaration else {
+            return NameClass::Value;
+        };
+        let Some(source) = self.sources.get(&binding.file) else {
+            return NameClass::Value;
+        };
+        match &source.declarations()[declaration].initializer {
+            Initializer::Function { .. } => NameClass::Function,
+            Initializer::Import { path, .. } if path.is_empty() => NameClass::Namespace,
+            Initializer::Alias(path) if path.segments.is_empty() => NameClass::Namespace,
+            _ => NameClass::Value,
+        }
+    }
+
     /// Looks up a binding index produced by this graph; indices from other graphs are invalid.
     pub fn binding(&self, id: BindingId) -> &Binding {
         &self.bindings[id]
@@ -475,6 +615,42 @@ impl NameGraph {
             None => source.imports()[binding.wildcard?].range.clone(),
         };
         Some((binding.file, range))
+    }
+
+    /// The declaration or static library value one graph binding establishes.
+    pub fn binding_definition(&self, binding: BindingId) -> Option<NameDefinition> {
+        let declared = &self.bindings[binding];
+        if let Some(declaration) = declared.declaration {
+            return Some(NameDefinition::Source {
+                file: declared.file,
+                declaration,
+            });
+        }
+        match self.value(binding, &mut BTreeSet::new()) {
+            NameValue::Builtin(value) => Some(NameDefinition::Builtin(value)),
+            _ => {
+                let (file, range) = self.definition(binding)?;
+                let declaration = self.sources[&file].declared_at(range.start)?;
+                Some(NameDefinition::Source { file, declaration })
+            }
+        }
+    }
+
+    /// The declaration selected by a member path inside an import's established interface.
+    pub fn import_definition(
+        &self,
+        file: FileId,
+        statement: usize,
+        path: &[String],
+    ) -> Option<NameDefinition> {
+        let (binding, value) = self.import_path(file, statement, path, &mut BTreeSet::new());
+        if let Some(binding) = binding {
+            return self.binding_definition(binding);
+        }
+        match value {
+            NameValue::Builtin(value) => Some(NameDefinition::Builtin(value)),
+            _ => None,
+        }
     }
 
     /// `id`'s declaration is an item of a statement whose interface is still unknown.
@@ -955,7 +1131,7 @@ impl NameGraph {
     ///
     /// A module whose source this graph holds enumerates its exports, a native value enumerates
     /// its own scope, and a target the graph never read enumerates nothing.
-    fn interface_established(&self, file: FileId, statement: usize) -> bool {
+    pub fn interface_established(&self, file: FileId, statement: usize) -> bool {
         match self.import_value(file, statement, &mut BTreeSet::new()) {
             NameValue::Module(target) => self.sources.contains_key(&target),
             NameValue::Builtin(value) => value.scope().is_some(),
@@ -1438,6 +1614,60 @@ mod tests {
                 .replace_range(edit.range, &edit.replacement);
         }
         sources
+    }
+
+    #[test]
+    fn export_enumeration_propagates_interruption() {
+        let graph = graph(&[
+            ("lib.typ", "#let alpha = 1\n#let another = 2\n"),
+            ("main.typ", "#import \"lib.typ\" as library\n#library"),
+        ]);
+        let binding = binding_at(&graph, "main.typ", "library");
+        for module in [false, true] {
+            let mut checked = 0;
+            let mut check = || {
+                checked += 1;
+                if checked == 4 {
+                    Err("interrupted")
+                } else {
+                    Ok(())
+                }
+            };
+            let error = if module {
+                graph
+                    .module_exports_matching(file("main.typ"), 0, &[], "a", &mut check)
+                    .err()
+                    .expect("interrupted enumeration")
+            } else {
+                graph
+                    .binding_exports(binding, "a", &mut check)
+                    .err()
+                    .expect("interrupted enumeration")
+            };
+            assert_eq!(error, "interrupted");
+        }
+    }
+
+    #[test]
+    fn module_exports_name_imported_declarations() {
+        let graph = graph(&[
+            ("lib.typ", "#let greet() = [hello]\n#let api = 1\n"),
+            ("main.typ", "#import \"lib.typ\": greet\n#greet()"),
+        ]);
+        let exports = graph.module_exports(file("main.typ"), 0);
+        assert!(exports.contains(&("greet".to_owned(), NameClass::Function)));
+        assert!(exports.contains(&("api".to_owned(), NameClass::Value)));
+    }
+
+    #[test]
+    fn module_exports_follow_nested_module_path() {
+        let graph = graph(&[
+            ("sub.typ", "#let greet() = [hi]"),
+            ("lib.typ", "#import \"sub.typ\" as sub"),
+            ("main.typ", "#import \"lib.typ\": sub.greet"),
+        ]);
+        let exports = graph.module_exports_at(file("main.typ"), 0, &["sub".to_owned()]);
+        assert!(exports.contains(&("greet".to_owned(), NameClass::Function)));
     }
 
     #[test]

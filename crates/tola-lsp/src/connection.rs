@@ -19,7 +19,7 @@ mod source_jobs;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
 use std::ops::ControlFlow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -136,16 +136,11 @@ pub(super) struct Connection<W, D> {
     /// Whether the author was already told a check's own work failed, so one failing run of checks
     /// announces itself once rather than on every edit.
     announced_panic: bool,
-    /// The tokens each document last answered with, for the next delta.
-    tokens: std::collections::HashMap<Uri, lsp_types::SemanticTokens>,
+    /// Documents with displayed tokens; `None` records a range reply without a full delta base.
+    tokens: std::collections::HashMap<Uri, Option<lsp_types::SemanticTokens>>,
     /// The identifier the next token result has, which a delta request echoes.
     tokens_serial: u64,
-    /// The site's own Typst files as this connection's direct answers last read them: a source
-    /// change drops them, and the compiler and analysis lanes each keep their own.
-    disk: crate::analysis::DiskSources,
-    /// The name graphs this connection's own answers last built, keyed by the revision they belong
-    /// to: a source change starts a revision the cache cannot answer for.
-    graphs: crate::analysis::GraphCache,
+    watched_roots: Vec<PathBuf>,
 }
 
 /// One open work-done report.
@@ -218,8 +213,7 @@ impl<W, D> Connection<W, D> {
             configuration: None,
             tokens: std::collections::HashMap::new(),
             tokens_serial: 0,
-            disk: crate::analysis::DiskSources::default(),
-            graphs: crate::analysis::GraphCache::default(),
+            watched_roots: Vec::new(),
         }
     }
 
@@ -277,6 +271,20 @@ impl<W, D> Drop for Connection<W, D> {
 }
 
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
+    /// File identities follow the selected configuration; workspace URIs keep the client's root.
+    fn source_root(&self) -> PathBuf {
+        let root = self
+            .configuration
+            .as_ref()
+            .map(|config| config.get_root())
+            .or_else(|| self.named_configuration.as_deref().and_then(Path::parent))
+            .unwrap_or_else(|| match &self.phase {
+                Phase::Ready(workspace) | Phase::Initializing(workspace) => &workspace.root,
+                _ => unreachable!("source roots are selected during initialization"),
+            });
+        tola_build::filesystem::normalize_existing_prefix(root)
+    }
+
     pub(super) fn receive(
         &mut self,
         message: std::result::Result<Message, InvalidMessage>,
@@ -325,6 +333,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 struct PendingRequest {
     serial: u64,
     canceller: BuildCanceller,
+    /// Open-source revisions stay distinct when a closed URI restarts its document version.
+    document_revision: Option<(Uri, u64)>,
     /// The fixes a code action request already earned, held until the compiler lane adds the
     /// narrowing actions the checked world justifies.
     narrowing: Option<Vec<CodeActionOrCommand>>,

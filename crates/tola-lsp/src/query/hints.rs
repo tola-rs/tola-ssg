@@ -18,6 +18,7 @@ use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::package::PackageSpec;
 use tola_typst::typst::syntax::{LinkedNode, Source, SyntaxKind, ast};
 
+use super::expression::single_value;
 use super::semantic::Semantic;
 use crate::position;
 use crate::published::PublishedPackage;
@@ -129,12 +130,13 @@ fn call_hints(
     let Some(callee) = call.find(func_call.callee().span()) else {
         return Ok(Vec::new());
     };
-    let Some(Value::Func(func)) = semantics
-        .values(&callee)?
-        .into_iter()
-        .next()
-        .map(|(value, _)| value)
-    else {
+    let Some(Value::Func(func)) = single_value(
+        semantics
+            .known_values(&callee)?
+            .into_iter()
+            .map(|(value, _)| value)
+            .collect(),
+    ) else {
         return Ok(Vec::new());
     };
     // A content block is the call's body rather than a value of the parameter it sits in, and a
@@ -347,6 +349,26 @@ mod tests {
         );
     }
     /// A call has the parameter name each positional argument fills.
+    #[test]
+    fn ambiguous_callees_omit_parameter_hints() {
+        for (expression, expected) in [
+            (
+                "if false { calc.pow } else { calc.rem }",
+                Vec::<&str>::new(),
+            ),
+            (
+                "if false { calc.pow } else { calc.pow }",
+                vec!["base:", "exponent:"],
+            ),
+        ] {
+            let mut site = QuerySession::with_program(crate::query::tests::FAILED_PROGRAM);
+            let hints = site.inlay_hints(&format!(
+                "#panic(\"stop\")\n#let f = {expression}\n#f(1, 2)|"
+            ));
+            assert_eq!(hint_labels(&hints), expected, "{expression}: {hints:?}");
+        }
+    }
+
     #[test]
     fn inlay_hint_names_the_filled_parameter() {
         let mut site = QuerySession::new();

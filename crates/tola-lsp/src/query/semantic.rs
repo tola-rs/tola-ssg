@@ -11,32 +11,39 @@ use lsp_types::{
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
 pub(super) use tola_packages::type_spelling;
-use tola_packages::{ParameterKind, Signature};
+use tola_packages::{Parameter, ParameterKind, Signature};
+use tola_typst::typst::Library;
 use tola_typst::typst::World;
 use tola_typst::typst::WorldExt;
 use tola_typst::typst::comemo::Track;
 use tola_typst::typst::engine::{Engine, Route, Sink, Traced};
-use tola_typst::typst::foundations::{Func, Repr, Str, Styles, Value, fields_on};
+use tola_typst::typst::foundations::{Func, Repr, Str, Styles, Value};
 use tola_typst::typst::introspection::{EmptyIntrospector, Introspector};
 use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::{
     FileId, LinkedNode, RootedPath, Source, Span, SyntaxKind, VirtualRoot, ast,
 };
 use tola_typst::typst::utils::Protected;
-use tola_typst_syntax::names::{DeclarationKind, Initializer, SourceNames};
+use tola_typst_syntax::names::{DeclarationKind, ImportSource, Initializer, SourceNames};
 
 use super::editing;
+use super::expression::{ExpressionType, members};
+use super::inference::{
+    ExpressionBinding, ExpressionResolver, INITIALIZER_DEPTH, Inference, binding_is_written,
+    expression_name, is_name_reference,
+};
 use crate::position;
-
-/// How far a name's origin follows its initializers; the bound keeps resolution
-/// finite where a well-formed program cannot cycle.
-const TOLA_ORIGIN_DEPTH: usize = 8;
 
 #[derive(Clone)]
 pub(super) struct Binding {
     pub span: Span,
     pub value: Option<Value>,
     pub tola: bool,
+    /// Whether this name is a function parameter, whose value inference supplies from the call.
+    pub parameter: bool,
+    /// The `let` initializer a value-less binding still names; completion reads it when the site's
+    /// evaluation never reached the binding.
+    pub initializer: Option<Span>,
 }
 
 /// One revision's semantic answers, and the traces they came from.
@@ -50,6 +57,7 @@ pub(super) struct Semantic<'a> {
     traces: HashMap<Span, Vec<(Value, Option<Styles>)>>,
     imports: HashMap<Span, Option<Value>>,
     names: HashMap<FileId, Arc<SourceNames>>,
+    inference: Inference,
 }
 
 impl<'a> Semantic<'a> {
@@ -63,16 +71,20 @@ impl<'a> Semantic<'a> {
             traces: HashMap::new(),
             imports: HashMap::new(),
             names: HashMap::new(),
+            inference: Inference::default(),
         }
     }
 
     pub(super) fn trace(&mut self, span: Span) -> Result<Vec<(Value, Option<Styles>)>> {
         self.cancellation.ensure_active()?;
+        // A body span is shared by every invocation; its observations cannot establish values
+        // inside a different invocation whose arguments inference supplied.
+        if self.inference.has_call_frame() {
+            return Ok(Vec::new());
+        }
         if let Some(values) = self.traces.get(&span) {
             return Ok(values.clone());
         }
-        // `trace` swallows compiler errors, so it needs a session whose source
-        // analysis and root Bundle both succeeded.
         let values = tola_typst::typst::trace::<tola_typst::typst_bundle::Bundle>(
             self.compilation.world(),
             span,
@@ -86,6 +98,11 @@ impl<'a> Semantic<'a> {
 
     pub(super) fn import(&mut self, source: &LinkedNode<'_>) -> Result<Option<Value>> {
         self.cancellation.ensure_active()?;
+        // A dynamic source and its cached module may belong to another invocation. Literal
+        // imports retain the same identity in every argument frame.
+        if self.inference.has_call_frame() && source.cast::<ast::Str>().is_none() {
+            return Ok(None);
+        }
         if let Some(value) = self.imports.get(&source.span()) {
             return Ok(value.clone());
         }
@@ -253,6 +270,11 @@ impl<'a> Semantic<'a> {
         Some(names)
     }
 
+    /// The cancellation one request's answers and the source indexes they build stay under.
+    pub(super) fn cancellation(&self) -> &BuildCancellation {
+        self.cancellation
+    }
+
     /// The bytes one span covers in its own file, when the world can address it.
     pub(super) fn span_range(&self, span: Span) -> Option<std::ops::Range<usize>> {
         self.compilation.world().range(span)
@@ -309,7 +331,7 @@ impl<'a> Semantic<'a> {
         &mut self,
         position: LinkedNode<'_>,
     ) -> Result<BTreeMap<String, Binding>> {
-        self.bindings_within(position, TOLA_ORIGIN_DEPTH)
+        self.bindings_within(position, INITIALIZER_DEPTH)
     }
 
     fn bindings_within(
@@ -378,6 +400,8 @@ impl<'a> Semantic<'a> {
                     span: node.span(),
                     value: None,
                     tola: false,
+                    parameter: matches!(declaration.kind, DeclarationKind::Parameter),
+                    initializer: None,
                 };
                 if let Initializer::Import { import, path } = &declaration.initializer {
                     let import = &names.imports()[*import];
@@ -406,6 +430,7 @@ impl<'a> Semantic<'a> {
                             if let Some(init) =
                                 declaration.init().and_then(|init| node.find(init.span()))
                             {
+                                binding.initializer = Some(init.span());
                                 binding.tola = self.tola_origin_within(&init, depth - 1)?;
                             }
                             break;
@@ -424,7 +449,7 @@ impl<'a> Semantic<'a> {
     }
 
     pub(super) fn tola_origin(&mut self, node: &LinkedNode<'_>) -> Result<bool> {
-        self.tola_origin_within(node, TOLA_ORIGIN_DEPTH)
+        self.tola_origin_within(node, INITIALIZER_DEPTH)
     }
 
     fn tola_origin_within(&mut self, node: &LinkedNode<'_>, depth: usize) -> Result<bool> {
@@ -462,30 +487,46 @@ impl<'a> Semantic<'a> {
                     tola: crate::identity::is_tola_span(span),
                     span,
                     value: Some(binding.read().clone()),
+                    parameter: false,
+                    initializer: None,
                 }
             });
         }
     }
 
-    pub(super) fn values(&mut self, node: &LinkedNode<'_>) -> Result<Vec<(Value, Option<Styles>)>> {
-        if node.kind() == SyntaxKind::Contextual
-            && let Some(body) = node.children().next_back()
-        {
-            return self.values(&body);
+    pub(super) fn types(
+        &mut self,
+        node: &LinkedNode<'_>,
+    ) -> Result<Vec<(ExpressionType, Option<Styles>)>> {
+        ExpressionResolver::types(self, node)
+    }
+
+    pub(super) fn known_values(
+        &mut self,
+        node: &LinkedNode<'_>,
+    ) -> Result<Vec<(Value, Option<Styles>)>> {
+        ExpressionResolver::known_values(self, node)
+    }
+
+    /// The library names the position can read, in the mode `node` is written in.
+    ///
+    /// A file binding or import shadows the library's name, so completion inserts these after its
+    /// own bindings.
+    pub(super) fn library_bindings(&self, node: &LinkedNode<'_>) -> Vec<(String, Value)> {
+        if expression_name(node).is_none() || !is_name_reference(node) {
+            return Vec::new();
         }
-        let values = self.trace(node.span())?;
-        if !values.is_empty() {
-            return Ok(values);
-        }
-        if let Some(ident) = node.cast::<ast::Ident>()
-            && let Some(binding) = self.bindings(node.clone())?.remove(ident.as_str())
-        {
-            if let Some(value) = binding.value {
-                return Ok(vec![(value, None)]);
-            }
-            return self.trace(binding.span);
-        }
-        Ok(Vec::new())
+        let Some(mode) = node.mode_after() else {
+            return Vec::new();
+        };
+        let (library, scope) = self.library_scope(mode);
+        let mut names: Vec<(String, Value)> = scope
+            .iter()
+            .map(|(name, binding)| (name.to_string(), binding.read().clone()))
+            .collect();
+        names.push(("std".to_owned(), library.std.read().clone()));
+        names.sort_by(|left, right| left.0.cmp(&right.0));
+        names
     }
 
     /// The functions a call's callee resolves to, which completion and signature help read.
@@ -494,7 +535,7 @@ impl<'a> Semantic<'a> {
         callee: &LinkedNode<'_>,
     ) -> Result<Vec<(Value, bool)>> {
         Ok(self
-            .values(callee)?
+            .known_values(callee)?
             .into_iter()
             .map(|(value, _)| (value, false))
             .collect())
@@ -507,43 +548,16 @@ impl<'a> Semantic<'a> {
         receiver: &LinkedNode<'_>,
         field: &str,
     ) -> Result<Vec<(Value, bool)>> {
-        let receivers = self.values(receiver)?;
-        Ok(receivers
-            .into_iter()
-            .filter_map(|(receiver, _)| {
-                // Typst inserts a receiver only for type and element methods.
-                let method = receiver
-                    .ty()
-                    .scope()
-                    .get(field)
-                    .or_else(|| match &receiver {
-                        Value::Content(content) => content.elem().scope().get(field),
-                        _ => None,
-                    });
-                if let Some(method) = method {
-                    Some((method.read().clone(), true))
-                } else if matches!(
-                    receiver,
-                    Value::Symbol(_) | Value::Func(_) | Value::Type(_) | Value::Module(_)
-                ) {
-                    receiver
-                        .field(field, ())
-                        .ok()
-                        .map(|function| (function, false))
-                } else {
-                    None
-                }
-            })
-            .collect())
+        ExpressionResolver::field_functions(self, receiver, field)
     }
 
-    /// The signatures one callee reflects, with the parameter names of the first of them in the
+    /// The signatures one callee reflects, with the parameters of the first of them in the
     /// order it lists them.
     pub(super) fn signatures(
         &mut self,
         callee: &LinkedNode<'_>,
         name: &str,
-    ) -> Result<(Vec<SignatureInformation>, Vec<String>)> {
+    ) -> Result<(Vec<SignatureInformation>, Vec<Parameter>)> {
         let functions = self.callee_functions(callee)?;
         let definition = if functions
             .iter()
@@ -561,7 +575,7 @@ impl<'a> Semantic<'a> {
         receiver: &LinkedNode<'_>,
         field: &str,
         name: &str,
-    ) -> Result<(Vec<SignatureInformation>, Vec<String>)> {
+    ) -> Result<(Vec<SignatureInformation>, Vec<Parameter>)> {
         let functions = self.field_functions(receiver, field)?;
         Ok(self.reflect_signatures(functions, name, None))
     }
@@ -571,109 +585,45 @@ impl<'a> Semantic<'a> {
         functions: impl IntoIterator<Item = (Value, bool)>,
         name: &str,
         definition: Option<Span>,
-    ) -> (Vec<SignatureInformation>, Vec<String>) {
+    ) -> (Vec<SignatureInformation>, Vec<Parameter>) {
         let mut signatures = Vec::new();
-        let mut names = Vec::new();
+        let mut parameters = Vec::new();
         for (value, method) in functions {
             let Value::Func(func) = value else { continue };
             let docs = self.function_documentation(&func, definition);
-            let (signature, parameters) =
-                signature_information(&func, name, method, docs.as_deref());
+            let (signature, declared) = signature_information(&func, name, method, docs.as_deref());
             if !signatures.contains(&signature) {
                 if signatures.is_empty() {
-                    names = parameters;
+                    parameters = declared;
                 }
                 signatures.push(signature);
             }
         }
-        (signatures, names)
+        (signatures, parameters)
     }
 
-    /// Merge distinct field values observed in every realized document context.
-    pub(super) fn member_values(
+    /// Merge the member types from every established receiver alternative.
+    pub(super) fn member_types(
         &mut self,
         node: &LinkedNode<'_>,
-    ) -> Result<BTreeMap<String, Vec<Value>>> {
-        let mut fields = BTreeMap::<String, Vec<Value>>::new();
-        for (value, styles) in self.values(node)? {
-            for (name, value) in self.fields(&value, styles.as_ref()) {
+    ) -> Result<BTreeMap<String, Vec<ExpressionType>>> {
+        let mut fields = BTreeMap::<String, Vec<ExpressionType>>::new();
+        for (ty, styles) in self.types(node)? {
+            for (name, member) in members(&ty, styles.as_ref(), || self.ensure_active())? {
                 let alternatives = fields.entry(name).or_default();
-                if !alternatives.contains(&value) {
-                    alternatives.push(value);
+                if !alternatives.contains(&member.ty) {
+                    alternatives.push(member.ty);
                 }
             }
         }
         Ok(fields)
     }
 
-    fn fields(&self, value: &Value, styles: Option<&Styles>) -> BTreeMap<String, Value> {
-        let mut fields = BTreeMap::new();
-        let content_scope = match value {
-            Value::Content(content) => Some(content.elem().scope()),
-            _ => None,
-        };
-        for scope in content_scope.into_iter().chain(Some(value.ty().scope())) {
-            for (name, binding) in scope.iter() {
-                if let Value::Func(func) = binding.read()
-                    && func
-                        .params()
-                        .next()
-                        .is_some_and(|param| param.name() == Some("self"))
-                {
-                    fields.insert(name.to_string(), Value::Func(func.clone()));
-                }
-            }
-        }
-        if let Some(scope) = value.scope() {
-            for (name, binding) in scope.iter() {
-                fields.insert(name.to_string(), binding.read().clone());
-            }
-        }
-        for field in fields_on(value.ty()) {
-            if let Ok(value) = value.field(field, ()) {
-                fields.insert((*field).into(), value);
-            }
-        }
-        match value {
-            Value::Dict(dict) => fields.extend(
-                dict.iter()
-                    .map(|(name, value)| (name.to_string(), value.clone())),
-            ),
-            Value::Content(content) => fields.extend(
-                content
-                    .fields()
-                    .into_iter()
-                    .map(|(name, value)| (name.to_string(), value)),
-            ),
-            Value::Args(args) => fields.extend(
-                args.to_named()
-                    .iter()
-                    .map(|(name, value)| (name.to_string(), value.clone())),
-            ),
-            Value::Func(func) => {
-                if let Some((elem, styles)) = func.to_element().zip(styles) {
-                    for param in elem.params() {
-                        if let Some(id) = elem.field_id(param.name)
-                            && let Ok(value) = elem.field_from_styles(
-                                id,
-                                tola_typst::typst::foundations::StyleChain::new(styles),
-                            )
-                        {
-                            fields.insert(param.name.into(), value);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        fields
-    }
-
     pub(super) fn definition(&mut self, node: &LinkedNode<'_>) -> Result<Option<Span>> {
         if let Some(access) = node.cast::<ast::FieldAccess>()
             && let Some(target) = node.find(access.target().span())
         {
-            for (value, _) in self.values(&target)? {
+            for (value, _) in self.known_values(&target)? {
                 if let Some(binding) = value.scope().and_then(|scope| scope.get(&access.field()))
                     && !binding.span().is_detached()
                 {
@@ -687,7 +637,7 @@ impl<'a> Semantic<'a> {
         {
             return Ok(Some(binding.span));
         }
-        for (value, _) in self.values(node)? {
+        for (value, _) in self.known_values(node)? {
             let span = match value {
                 Value::Func(func) => func.span(),
                 Value::Content(content) => content.span(),
@@ -732,7 +682,7 @@ impl<'a> Semantic<'a> {
     ) -> Result<Vec<CandidateSource>> {
         let root = tola_typst_syntax::syntax::root_expression(node.clone());
         let mut sources = Vec::new();
-        for (value, _) in self.values(&root)? {
+        for (value, _) in self.known_values(&root)? {
             sources.extend(record_source(&value));
         }
         Ok(ordered(sources))
@@ -745,7 +695,7 @@ impl<'a> Semantic<'a> {
     /// or no file at all contributes nothing.
     pub(super) fn record_files(&mut self, node: &LinkedNode<'_>) -> Result<HashSet<FileId>> {
         let mut files = HashSet::new();
-        for (value, _) in self.values(node)? {
+        for (value, _) in self.known_values(node)? {
             let Value::Array(records) = value else {
                 continue;
             };
@@ -847,7 +797,7 @@ impl<'a> Semantic<'a> {
                 None
             });
         }
-        crate::identity::client_uri(id, client_root)
+        crate::identity::client_uri(id, self.compilation.world().root(), client_root)
     }
 
     pub(super) fn value_docs(&self, span: Span, value: Option<&Value>) -> Option<String> {
@@ -891,6 +841,90 @@ impl<'a> Semantic<'a> {
             }
         }
         None
+    }
+}
+
+impl ExpressionResolver for Semantic<'_> {
+    fn source(&mut self, file: FileId) -> Option<Source> {
+        self.world_source(file)
+    }
+
+    fn binding(&mut self, node: &LinkedNode<'_>) -> Result<Option<ExpressionBinding>> {
+        let Some(name) = expression_name(node) else {
+            return Ok(None);
+        };
+        if let Some(file) = node.span().id()
+            && let Some(names) = self.source_names(file)
+        {
+            let at = node.range().start;
+            let declaration = names.declared_at(at);
+            let written = match declaration {
+                Some(declaration) => {
+                    binding_is_written(&names, declaration, at, |_| false, || self.ensure_active())?
+                }
+                None => false,
+            };
+            let mut unresolved_wildcard = false;
+            if self.inference.has_call_frame() {
+                let local = names
+                    .resolve(&name, names.scope_at(at), at)
+                    .map(|id| &names.declarations()[id]);
+                let mut scope = names.scope_at(at);
+                loop {
+                    unresolved_wildcard = names.imports().iter().any(|import| {
+                        import.wildcard
+                            && import.scope == scope
+                            && import.range.end <= at
+                            && !matches!(import.source, ImportSource::Path(_))
+                            && !local.is_some_and(|local| {
+                                local.scope == scope && local.visible_from >= import.range.end
+                            })
+                    });
+                    if unresolved_wildcard || local.is_some_and(|local| local.scope == scope) {
+                        break;
+                    }
+                    let Some(parent) = names.scopes()[scope].parent else {
+                        break;
+                    };
+                    scope = parent;
+                }
+            }
+            // An unresolved wildcard can shadow a library name even though it contributes no
+            // known binding. Keep that uncertainty instead of falling through to the library.
+            if written || unresolved_wildcard {
+                return Ok(Some(ExpressionBinding {
+                    span: node.span(),
+                    value: None,
+                    parameter: false,
+                    initializer: None,
+                }));
+            }
+        }
+        Ok(self
+            .bindings(node.clone())?
+            .remove(&name)
+            .map(|binding| ExpressionBinding {
+                span: binding.span,
+                value: binding.value,
+                parameter: binding.parameter,
+                initializer: binding.initializer,
+            }))
+    }
+
+    fn observed(&mut self, span: Span) -> Result<Vec<(Value, Option<Styles>)>> {
+        self.trace(span)
+    }
+
+    fn library(&self) -> &Library {
+        self.compilation.world().library()
+    }
+
+    fn inference(&mut self) -> &mut Inference {
+        &mut self.inference
+    }
+    fn ensure_active(&self) -> Result<()> {
+        self.cancellation.ensure_active()?;
+        Ok(())
     }
 }
 
@@ -996,13 +1030,13 @@ pub(super) fn signature(
 
 /// One function as the editor's signature help shows it: the shared signature on one line, every
 /// parameter labelled by its name alone, which is what the client highlights inside it, and the
-/// names in the order the signature lists them.
+/// parameters in the order the signature lists them.
 fn signature_information(
     func: &Func,
     name: &str,
     method: bool,
     docs: Option<&str>,
-) -> (SignatureInformation, Vec<String>) {
+) -> (SignatureInformation, Vec<Parameter>) {
     let documented = docs.map(tola_typst_syntax::docs::Documentation::parse);
     let mut signature = signature(name, func, documented.as_ref(), &BTreeMap::new());
     // A method call writes its receiver outside the argument list, so the receiver's parameter is
@@ -1035,7 +1069,7 @@ fn signature_information(
         },
         ordered
             .iter()
-            .map(|parameter| parameter.name.to_string())
+            .map(|parameter| (**parameter).clone())
             .collect(),
     )
 }
@@ -1129,12 +1163,29 @@ fn names_itself(repr: &str) -> bool {
         })
 }
 
-pub(super) fn completion(name: &str, values: &[Value], edit: CompletionTextEdit) -> CompletionItem {
-    let value = values.first();
+fn expression_description(ty: &ExpressionType, name: &str) -> String {
+    match ty.value() {
+        Some(value) => description(value, name),
+        None => ty.type_name(),
+    }
+}
+
+pub(super) fn completion(
+    name: &str,
+    values: &[ExpressionType],
+    edit: CompletionTextEdit,
+) -> CompletionItem {
+    let value = values.first().and_then(ExpressionType::value);
     let kind = match value {
         Some(Value::Func(_)) => CompletionItemKind::FUNCTION,
         Some(Value::Module(_)) => CompletionItemKind::MODULE,
         Some(_) => CompletionItemKind::VARIABLE,
+        None if values
+            .iter()
+            .any(|ty| !matches!(ty, ExpressionType::Unknown)) =>
+        {
+            CompletionItemKind::VARIABLE
+        }
         None => CompletionItemKind::FIELD,
     };
     let documentation = match value {
@@ -1143,11 +1194,11 @@ pub(super) fn completion(name: &str, values: &[Value], edit: CompletionTextEdit)
     };
     let description = match values {
         [] => None,
-        [value] => Some(description(value, name)),
+        [value] => Some(expression_description(value, name)),
         values => Some(
             values
                 .iter()
-                .map(|value| description(value, name))
+                .map(|value| expression_description(value, name))
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
@@ -1212,8 +1263,18 @@ pub(super) fn parameter_completions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query::tests::*;
     use tola_typst::typst::foundations::Repr;
     use tola_typst::typst::{Library, LibraryExt as _};
+
+    #[test]
+    fn methods_accept_receiver_types() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        let completions = site.completion("#panic(\"page\")\n#let value = \"a\"\n#value.|");
+        let labels = completion_labels(&completions);
+        assert!(labels.contains(&"to-unicode"), "{labels:?}");
+        assert!(!labels.contains(&"from-unicode"), "{labels:?}");
+    }
 
     /// The largest value the standard library renders reaches a hover whole.
     #[test]

@@ -2,6 +2,8 @@
 
 use tola_typst_syntax::docs::Documentation;
 use typst::foundations::{CastInfo, Func, ParamInfo, Repr, Type};
+use typst::syntax::ast::{self, AstNode};
+use typst::syntax::{Source, Span};
 
 use super::RelatedTarget;
 
@@ -102,6 +104,77 @@ impl Signature {
         }
     }
 
+    /// The callable shape written in a source closure. Types come only from its documentation;
+    /// defaults retain their source spelling without evaluating the initializer.
+    pub fn from_source(
+        name: &str,
+        source: &Source,
+        closure: &ast::Closure<'_>,
+        documentation: &Documentation,
+    ) -> Option<Self> {
+        let parameters = closure
+            .params()
+            .children()
+            .map(|parameter| {
+                let (name, kind, default) = match parameter {
+                    ast::Param::Pos(pattern) => (
+                        match pattern {
+                            ast::Pattern::Normal(ast::Expr::Ident(ident)) => {
+                                ident.get().to_string()
+                            }
+                            _ => source_text(source, pattern.span())?,
+                        },
+                        ParameterKind::Positional,
+                        None,
+                    ),
+                    ast::Param::Named(named) => {
+                        let expression = named
+                            .to_untyped()
+                            .children()
+                            .next_back()
+                            .and_then(|child| child.cast::<ast::Expr>());
+                        (
+                            named.name().get().to_string(),
+                            ParameterKind::Named,
+                            Some(match expression {
+                                Some(expression) => source_text(source, expression.span())?,
+                                None => "none".to_owned(),
+                            }),
+                        )
+                    }
+                    ast::Param::Spread(spread) => (
+                        spread
+                            .sink_ident()
+                            .map_or_else(String::new, |ident| ident.get().to_string()),
+                        ParameterKind::Rest,
+                        None,
+                    ),
+                };
+                let documented = documentation
+                    .parameters
+                    .iter()
+                    .rev()
+                    .find(|parameter| parameter.name == name);
+                Some(Parameter {
+                    name,
+                    ty: (kind != ParameterKind::Rest)
+                        .then(|| documented.and_then(|parameter| parameter.ty.clone()))
+                        .flatten(),
+                    default,
+                    docs: documented
+                        .map(|parameter| parameter.description.clone())
+                        .filter(|docs| !docs.is_empty()),
+                    kind,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            name: name.to_owned(),
+            parameters,
+            returns: documentation.returns.clone(),
+        })
+    }
+
     /// The block Tinymist prints for a function: `let name(`, every parameter on its own line,
     /// then `) = return;`. An unknown return spells `any`; a return that spells the function's own
     /// name is left out, as Tinymist leaves it. No fence, no indentation, no trailing newline.
@@ -163,6 +236,17 @@ impl Signature {
             .filter(|parameter| parameter.kind == ParameterKind::Rest)
             .collect()
     }
+}
+
+fn source_text(source: &Source, span: Span) -> Option<String> {
+    let node = source.find(span)?;
+    Some(
+        source.text()[node.range()]
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// The one spelling of a type's name for every surface: Typst's code spelling (`int`, `str`,
@@ -314,7 +398,7 @@ pub(crate) mod tests {
         assert_eq!(op.ty.as_deref(), Some("str"));
         assert_eq!(op.default.as_deref(), Some("\"fill\""));
         assert!(op.kind == ParameterKind::Named);
-        assert!(parameter(signature, "path").kind == ParameterKind::Positional);
+        assert!(parameter(signature, "source").kind == ParameterKind::Positional);
         assert_eq!(
             parameter(signature, "background").ty.as_deref(),
             Some("color | none")

@@ -123,10 +123,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         // own generated state until a settings change names an origin of its own.
         match Workspace::initialize(parameters) {
             Ok(workspace) => {
-                self.open = OpenSources::new(&workspace.root);
                 self.default_origin = workspace.preview_origin.clone();
                 let reply = protocol::initialize_result(&workspace.features);
                 self.phase = Phase::Initializing(workspace);
+                self.open = OpenSources::new(&self.source_root());
                 self.reply(Response::new_ok(id, reply))
             }
             Err(error) => self.reject(id, ErrorCode::InvalidParams, &error.to_string()),

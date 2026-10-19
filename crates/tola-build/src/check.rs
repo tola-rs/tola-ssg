@@ -31,10 +31,17 @@ const RETAINED_DERIVATION_GENERATIONS: usize = 1;
 pub struct SourceDiagnosticSession {
     config: Arc<ResolvedSiteConfig>,
     resources: crate::resources::BuildResources,
+    environment: SourceEnvironment,
     host: Option<TypstHost>,
     icons: Option<crate::icon::IconSnapshot>,
     analysis: Option<CheckAnalysisEvidence>,
     reused_analysis: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceEnvironment {
+    Site,
+    Documents,
 }
 
 /// Source analysis and the exact inputs it consumed.
@@ -267,10 +274,24 @@ impl SourceDiagnosticSession {
         Self {
             config,
             resources,
+            environment: SourceEnvironment::Site,
             host: None,
             icons: None,
             analysis: None,
             reused_analysis: false,
+        }
+    }
+
+    /// Create a session for independent documents without a site's content inventory.
+    ///
+    /// The configuration supplies the workspace root, fonts, and package access.
+    pub fn for_documents(
+        config: Arc<ResolvedSiteConfig>,
+        resources: crate::resources::BuildResources,
+    ) -> Self {
+        Self {
+            environment: SourceEnvironment::Documents,
+            ..Self::with_resources(config, resources)
         }
     }
 
@@ -324,7 +345,9 @@ impl SourceDiagnosticSession {
         crate::package::SiteBindings,
     )> {
         let boundary = self.resources.source_boundary(config);
-        boundary.check(&config.build.content_dir)?;
+        if self.environment == SourceEnvironment::Site {
+            boundary.check(&config.build.content_dir)?;
+        }
         for path in overrides
             .paths()
             .chain(config.assets.tree_sources())
@@ -350,16 +373,21 @@ impl SourceDiagnosticSession {
             .as_ref()
             .expect("compiler resources are ready")
             .with_source_overrides(overrides)?;
-        let content = crate::content::discover_content_units_for_config_with_cancellation(
-            config,
-            cancellation,
-        )?;
-        let content = crate::content::content_units_with_sources(
-            config,
-            &content,
-            overrides.paths().map(PathBuf::from),
-            cancellation,
-        )?;
+        let content = match self.environment {
+            SourceEnvironment::Site => {
+                let content = crate::content::discover_content_units_for_config_with_cancellation(
+                    config,
+                    cancellation,
+                )?;
+                crate::content::content_units_with_sources(
+                    config,
+                    &content,
+                    overrides.paths().map(PathBuf::from),
+                    cancellation,
+                )?
+            }
+            SourceEnvironment::Documents => Vec::new(),
+        };
         let packages = crate::package::prepare_package_inputs(
             config,
             &self.resources,
@@ -375,12 +403,10 @@ impl SourceDiagnosticSession {
         Ok((host, content, bindings))
     }
 
-    /// Check one source of the site on its own, with the diagnostics it produced.
+    /// Check one source on its own, with the diagnostics it produced.
     ///
-    /// A site that does not compile still resolves its own imports, packages, and fonts, so this
-    /// check prepares the world the site's own program could not reach and compiles one source in
-    /// it. An editor answers about the file the author is editing from exactly that world: what the
-    /// file alone establishes, with the diagnostics that name what stopped the file.
+    /// Site sessions supply their content records even when the root program does not compile.
+    /// Document sessions use the workspace's fonts and packages without discovering site content.
     pub fn inspect_source(
         &mut self,
         relative: &str,
@@ -670,14 +696,24 @@ mod tests {
 
     fn documents_workspace() -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
         let directory = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(directory.path().join("content")).unwrap();
         std::fs::write(
-            directory.path().join("content/page.typ"),
+            directory.path().join("page.typ"),
             "#let extra = read(\"/data.txt\")\nBody: #extra\n",
         )
         .unwrap();
         std::fs::write(directory.path().join("data.txt"), "payload\n").unwrap();
-        let config = Arc::new(crate::config::tests::load_test_config(directory.path(), ""));
+        let source =
+            crate::config::ConfigSource::defaults(directory.path(), crate::InputScope::Online)
+                .unwrap();
+        let config = Arc::new(
+            crate::config::loading::resolve_parsed_site_config(
+                source.decode::<crate::config::SiteConfigSchema>().unwrap(),
+                tola_typst::PackageLocations::default(),
+                &crate::config::loading::BuildOverrides::default(),
+            )
+            .unwrap()
+            .into_config(),
+        );
         (directory, config)
     }
 
@@ -1568,9 +1604,10 @@ mod tests {
     fn compiled_source_reports_disk_reads() {
         let (directory, config) = documents_workspace();
         let cancellation = BuildCancellation::new();
-        let mut session = SourceDiagnosticSession::new(config);
+        let mut session =
+            SourceDiagnosticSession::for_documents(config, crate::BuildResources::default());
         let revision = session
-            .inspect_source("content/page.typ", Vec::new(), &cancellation)
+            .inspect_source("page.typ", Vec::new(), &cancellation)
             .unwrap();
         assert!(revision.compiled(), "{:#?}", revision.diagnostics());
         let data = std::fs::canonicalize(directory.path().join("data.txt")).unwrap();
@@ -1591,14 +1628,15 @@ mod tests {
     fn failed_source_reports_no_reads() {
         let (directory, config) = documents_workspace();
         std::fs::write(
-            directory.path().join("content/page.typ"),
+            directory.path().join("page.typ"),
             "#let extra = read(\"/data.txt\")\n#absent_name\n",
         )
         .unwrap();
         let cancellation = BuildCancellation::new();
-        let mut session = SourceDiagnosticSession::new(config);
+        let mut session =
+            SourceDiagnosticSession::for_documents(config, crate::BuildResources::default());
         let revision = session
-            .inspect_source("content/page.typ", Vec::new(), &cancellation)
+            .inspect_source("page.typ", Vec::new(), &cancellation)
             .unwrap();
         assert!(!revision.compiled(), "{:#?}", revision.diagnostics());
         let reads = revision
@@ -1609,6 +1647,29 @@ mod tests {
             reads.is_empty(),
             "a failed compilation establishes no read evidence: {reads:?}"
         );
+    }
+
+    #[test]
+    fn site_sessions_require_content_roots() {
+        let (_directory, config) = documents_workspace();
+        let mut session = SourceDiagnosticSession::new(config);
+        let cancellation = BuildCancellation::new();
+        for revision in [
+            session.inspect(Vec::new(), &cancellation).unwrap(),
+            session
+                .inspect_source("page.typ", Vec::new(), &cancellation)
+                .unwrap(),
+        ] {
+            assert!(!revision.compiled());
+            assert!(
+                revision
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.contains("content root `content`")),
+                "{:?}",
+                revision.diagnostics()
+            );
+        }
     }
 
     #[test]

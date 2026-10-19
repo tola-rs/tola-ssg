@@ -44,7 +44,6 @@ pub(crate) fn site_selected_interfaces(
     add_walked_sources(&mut sources, root, &boundary, cancellation, |path, id| {
         disk.names(path, id)
     })?;
-    disk.retain_pass();
     // The index skips a package path itself, so the closure resolves path imports alone: nothing
     // here can read a package the site would have to fetch.
     let mut targets = HashMap::new();
@@ -57,8 +56,10 @@ pub(crate) fn site_selected_interfaces(
         None,
         &[],
         false,
+        disk,
         cancellation,
     )?;
+    disk.retain_pass();
     let mut sources: Vec<Arc<SourceNames>> = sources.into_values().collect();
     sources.sort_by_key(|names| names.source().id().vpath().get_without_slash().to_owned());
     Ok(Arc::new(tola_typst_syntax::names::selected_interfaces(

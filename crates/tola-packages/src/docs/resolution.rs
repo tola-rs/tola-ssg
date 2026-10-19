@@ -7,7 +7,7 @@ use typst::syntax::ast::AstNode;
 use typst::syntax::{LinkedNode, Source, SyntaxKind, ast};
 
 use super::RelatedTarget;
-use super::declaration::{ExportDocumentation, Parameter, ParameterKind, Signature};
+use super::declaration::{ExportDocumentation, Signature};
 use super::related;
 
 /// A documentation block and the related targets Tola reads out of it, so a re-export inherits
@@ -282,96 +282,23 @@ pub(super) fn source_function(
     closure: &ast::Closure<'_>,
     documentation: &Documentation,
 ) -> Result<Signature> {
-    let mut parameters = closure
-        .params()
-        .children()
-        .map(|parameter| source_parameter(file, parameter))
-        .collect::<Result<Vec<_>>>()?;
+    let signature = Signature::from_source(name, &file.1, closure, documentation)
+        .context("bundled source is absent")?;
     for documented in &documentation.parameters {
-        let Some(parameter) = parameters
-            .iter_mut()
-            .find(|parameter| parameter.name == documented.name)
-        else {
+        if !signature
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == documented.name)
+        {
             bail!(
                 "`{name}` documents parameter `{}`, which the bundled declaration does not have",
                 documented.name
             );
-        };
-        // A rest parameter's value is Typst's `arguments`, which no annotation replaces.
-        if parameter.kind != ParameterKind::Rest {
-            parameter.ty.clone_from(&documented.ty);
         }
-        parameter.docs =
-            (!documented.description.is_empty()).then(|| documented.description.clone());
     }
-    Ok(Signature {
-        name: name.to_owned(),
-        parameters,
-        returns: documentation.returns.clone(),
-    })
+    Ok(signature)
 }
 
-/// One parameter a bundled closure declares, as its own signature spells it.
-fn source_parameter(file: &FileSource, parameter: ast::Param<'_>) -> Result<Parameter> {
-    let (name, kind, default) = match parameter {
-        ast::Param::Pos(pattern) => (
-            pattern_name(file, &pattern)?,
-            ParameterKind::Positional,
-            None,
-        ),
-        ast::Param::Named(named) => (
-            named.name().as_str().to_owned(),
-            ParameterKind::Named,
-            Some(named_default(file, &named)?),
-        ),
-        ast::Param::Spread(spread) => (
-            spread
-                .sink_ident()
-                .map_or_else(String::new, |sink| sink.as_str().to_owned()),
-            ParameterKind::Rest,
-            None,
-        ),
-    };
-    Ok(Parameter {
-        name,
-        ty: None,
-        default,
-        docs: None,
-        kind,
-    })
-}
-
-/// The name a positional parameter binds, as its own source spells it.
-fn pattern_name(file: &FileSource, pattern: &ast::Pattern<'_>) -> Result<String> {
-    Ok(match pattern {
-        ast::Pattern::Normal(ast::Expr::Ident(ident)) => ident.as_str().to_owned(),
-        _ => source_text(file, pattern.span())?,
-    })
-}
-
-/// The default one named parameter declares, as its own source spells it.
-fn named_default(file: &FileSource, named: &ast::Named<'_>) -> Result<String> {
-    let expression = named
-        .to_untyped()
-        .children()
-        .next_back()
-        .and_then(|child| child.cast::<ast::Expr>());
-    let Some(expression) = expression else {
-        // `name:` is shorthand for a parameter that defaults to `none`.
-        return Ok("none".to_owned());
-    };
-    source_text(file, expression.span())
-}
-
-/// The bundled source text of one span, with line breaks folded into single spaces.
-fn source_text(file: &FileSource, span: typst::syntax::Span) -> Result<String> {
-    let node = file.1.find(span).context("bundled source is absent")?;
-    Ok(file.1.text()[node.range()]
-        .lines()
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join(" "))
-}
 #[cfg(test)]
 mod tests {
     use super::*;

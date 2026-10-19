@@ -82,6 +82,7 @@ pub(super) fn prepare(
     boundary: &SourceBoundary,
     source: &Source,
     cursor: usize,
+    client_root: &crate::uri::ClientRoot,
 ) -> Option<CallHierarchyItem> {
     let resolver = crate::analysis::file_resolver(locations, boundary);
     let named = written_paths(source)
@@ -91,16 +92,15 @@ pub(super) fn prepare(
             crate::analysis::import_target(source.id(), &path.text, root, resolver.as_ref())
         })
         .filter(|id| matches!(id.root(), VirtualRoot::Project));
-    source_item(root, named.unwrap_or(source.id()), None)
+    source_item(root, named.unwrap_or(source.id()), None, client_root)
 }
 
 /// Every source that reaches `source`, with the ranges inside each that write its path.
 ///
-/// `root` is the root the client named, so items keep that spelling; the sources the graph is
-/// built from resolve through it, as every site path compared in the crate does.
+/// Sources resolve through `root`; item URIs keep the spelling `client_root` maps them to.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the incoming read takes disk, root, view, locations, boundary, config, compilation, source, and cancellation"
+    reason = "the incoming read takes source and client roots, disk, view, locations, boundary, config, compilation, source, and cancellation"
 )]
 pub(super) fn incoming(
     disk: &mut crate::analysis::DiskSources,
@@ -112,6 +112,7 @@ pub(super) fn incoming(
     compilation: &SourceCompilation,
     source: &Source,
     cancellation: &BuildCancellation,
+    client_root: &crate::uri::ClientRoot,
 ) -> Result<Vec<CallHierarchyIncomingCall>> {
     cancellation.ensure_active()?;
     let resolver = crate::analysis::file_resolver(locations, boundary);
@@ -184,7 +185,7 @@ pub(super) fn incoming(
         .into_values()
         .filter_map(|reaching| {
             Some(CallHierarchyIncomingCall {
-                from: source_item(root, reaching.source, reaching.detail)?,
+                from: source_item(root, reaching.source, reaching.detail, client_root)?,
                 from_ranges: reaching.ranges,
             })
         })
@@ -202,6 +203,7 @@ pub(super) fn outgoing(
     locations: Option<&PackageLocations>,
     boundary: &SourceBoundary,
     source: &Source,
+    client_root: &crate::uri::ClientRoot,
 ) -> Vec<CallHierarchyOutgoingCall> {
     let resolver = crate::analysis::file_resolver(locations, boundary);
     let resolved = tola_build::filesystem::normalize_existing_prefix(root);
@@ -233,7 +235,7 @@ pub(super) fn outgoing(
         .into_values()
         .filter_map(|reached| {
             Some(CallHierarchyOutgoingCall {
-                to: source_item(root, reached.source, None)?,
+                to: source_item(root, reached.source, None, client_root)?,
                 from_ranges: reached.ranges,
             })
         })
@@ -309,13 +311,18 @@ fn written_paths(source: &Source) -> Vec<WrittenPath> {
 }
 
 /// The item naming one source, with the pages it is served at as its detail.
-fn source_item(root: &Path, source: FileId, detail: Option<String>) -> Option<CallHierarchyItem> {
+fn source_item(
+    root: &Path,
+    source: FileId,
+    detail: Option<String>,
+    client_root: &crate::uri::ClientRoot,
+) -> Option<CallHierarchyItem> {
     Some(CallHierarchyItem {
         name: source.vpath().get_without_slash().to_owned(),
         kind: SymbolKind::FILE,
         tags: None,
         detail,
-        uri: crate::identity::source_uri(source, root).ok()?,
+        uri: crate::identity::client_uri(source, root, client_root)?,
         range: file_range(),
         selection_range: file_range(),
         data: Some(serde_json::to_value(ItemNode::of(source)).expect("item identity is JSON")),
@@ -445,6 +452,7 @@ mod tests {
             revision.checked().expect("the site compiles"),
             &source(root, name),
             cancellation,
+            &crate::uri::ClientRoot::new(root),
         )
         .unwrap()
     }
@@ -565,6 +573,7 @@ mod tests {
             None,
             &crate::sources::base_source_boundary(root, true),
             &source,
+            &crate::uri::ClientRoot::new(root),
         );
 
         assert_eq!(
@@ -605,6 +614,7 @@ mod tests {
             None,
             &crate::sources::base_source_boundary(root, true),
             &source,
+            &crate::uri::ClientRoot::new(root),
         );
 
         assert!(found.is_empty(), "{found:#?}");
@@ -625,6 +635,7 @@ mod tests {
             &crate::sources::base_source_boundary(root, true),
             &source,
             14,
+            &crate::uri::ClientRoot::new(root),
         )
         .expect("an item");
 
@@ -655,6 +666,7 @@ mod tests {
             &crate::sources::base_source_boundary(root, true),
             &source,
             cursor,
+            &crate::uri::ClientRoot::new(root),
         )
         .expect("an item");
 

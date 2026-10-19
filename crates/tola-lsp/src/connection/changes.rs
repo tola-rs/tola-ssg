@@ -2,7 +2,7 @@
 //! watchers that make a file the author never opened start a check.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -10,8 +10,8 @@ use lsp_server::Notification;
 use lsp_types::notification::{self, Notification as LspNotification};
 use lsp_types::request::{self, Request as LspRequest};
 use lsp_types::{
-    DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, Registration,
-    RegistrationParams, Unregistration, UnregistrationParams,
+    DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher, GlobPattern, OneOf, Registration,
+    RegistrationParams, RelativePattern, Unregistration, UnregistrationParams,
 };
 use tola_build::cancellation::BuildCanceller;
 use tola_build::diagnostic::Diagnostic;
@@ -47,12 +47,10 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         ) else {
             return true;
         };
-        let Phase::Ready(workspace) = &self.phase else {
+        let Phase::Ready(_) = &self.phase else {
             return true;
         };
-        let resolved_root = crate::uri::ClientRoot::new(&workspace.root)
-            .resolved()
-            .to_path_buf();
+        let resolved_root = self.source_root();
         params.changes.iter().any(|change| match change.typ {
             lsp_types::FileChangeType::CHANGED => crate::uri::to_file_path(change.uri.as_str())
                 .map_or(true, |path| {
@@ -81,12 +79,15 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         ) {
             return true;
         }
-        if path.starts_with(root) && is_site_input(path) {
+        // Only a successful check of this revision can exclude unread files: a pending or failed
+        // check may have reached dependencies absent from the previous revision's reads.
+        let incomplete_reads = self.checked != Some((self.revision, true));
+        if path.starts_with(root) && (is_site_input(path) || incomplete_reads) {
             return true;
         }
         let normalized = tola_build::filesystem::normalize_existing_prefix(path);
         self.read_paths.contains(&normalized)
-            || (normalized.starts_with(root) && is_site_input(&normalized))
+            || (normalized.starts_with(root) && (is_site_input(&normalized) || incomplete_reads))
     }
 
     /// The newest source change becomes the newest revision, superseding every request and check
@@ -104,9 +105,6 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .checked_add(1)
             .context("source revision counter exhausted")?;
         self.overrides = self.open.overrides();
-        // One revision's reads: the next revision re-reads what it needs, so the cache cannot grow
-        // with every file a long session ever reached.
-        self.disk = crate::analysis::DiskSources::default();
         self.checking = BuildCanceller::new();
         let workspace = self.workspace();
         let check_mode = workspace.check_mode;
@@ -134,6 +132,34 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     /// Ask the client to report changes below the site root, which is how a file the author never
     /// opened still starts a check.
     pub(super) fn watch_sources(&mut self) -> Result<()> {
+        let Phase::Ready(workspace) = &self.phase else {
+            return Ok(());
+        };
+        if !workspace.features.watched_files_dynamic {
+            return Ok(());
+        }
+        let relative = workspace.features.watched_files_relative;
+        let client_root = crate::uri::ClientRoot::new(&workspace.root);
+        let roots = self.input_roots();
+        if self.watched_roots == roots {
+            return Ok(());
+        }
+        let mut watchers = Vec::with_capacity(roots.len());
+        for root in &roots {
+            let glob_pattern = if relative {
+                GlobPattern::Relative(RelativePattern {
+                    base_uri: OneOf::Right(client_root.address(root)?),
+                    pattern: "**/*".to_owned(),
+                })
+            } else {
+                GlobPattern::String(source_glob(&client_root.spell(root)))
+            };
+            watchers.push(FileSystemWatcher {
+                glob_pattern,
+                kind: None,
+            });
+        }
+        self.unwatch_sources()?;
         self.send_request(
             request::RegisterCapability::METHOD,
             RegistrationParams {
@@ -141,27 +167,19 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     id: WATCHED_FILES.to_owned(),
                     method: notification::DidChangeWatchedFiles::METHOD.to_owned(),
                     register_options: serde_json::to_value(
-                        DidChangeWatchedFilesRegistrationOptions {
-                            watchers: vec![FileSystemWatcher {
-                                glob_pattern: GlobPattern::String("**/*".to_owned()),
-                                kind: None,
-                            }],
-                        },
+                        DidChangeWatchedFilesRegistrationOptions { watchers },
                     )
                     .ok(),
                 }],
             },
         )?;
+        self.watched_roots = roots;
         Ok(())
     }
 
     /// Let the client's watchers go, so a restarting server is the one that registers them.
     pub(super) fn unwatch_sources(&mut self) -> Result<()> {
-        let watched = match &self.phase {
-            Phase::Ready(workspace) => workspace.features.watched_files_dynamic,
-            _ => false,
-        };
-        if watched {
+        if !self.watched_roots.is_empty() {
             self.send_request(
                 request::UnregisterCapability::METHOD,
                 UnregistrationParams {
@@ -171,27 +189,321 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     }],
                 },
             )?;
+            self.watched_roots.clear();
         }
         Ok(())
     }
+
+    /// The directories a check can read: the effective source root, then every package root the
+    /// invocation declared outside it.
+    fn input_roots(&self) -> Vec<PathBuf> {
+        let mut roots = vec![self.source_root()];
+        if let Some(locations) = self
+            .configuration
+            .as_ref()
+            .map(|config| config.package_locations())
+        {
+            for location in locations.declared() {
+                let root = tola_build::filesystem::normalize_existing_prefix(location.root());
+                if root.is_dir() && !roots.iter().any(|watched| root.starts_with(watched)) {
+                    roots.push(root);
+                }
+            }
+        }
+        roots
+    }
+}
+
+fn source_glob(root: &Path) -> String {
+    let path = root
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let mut pattern = String::with_capacity(path.len() + 5);
+    for character in path.chars() {
+        if matches!(character, '[' | ']' | '{' | '}' | '*' | '?') {
+            pattern.push('[');
+            pattern.push(character);
+            pattern.push(']');
+        } else {
+            pattern.push(character);
+        }
+    }
+    if !pattern.ends_with('/') {
+        pattern.push('/');
+    }
+    pattern.push_str("**/*");
+    pattern
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::connection::tests::{
-        hover_query, messages, open_document, open_draft, ready, ready_at, rejection, response,
+        hover_query, messages, open_document, open_draft, ready, ready_at, ready_workspace,
+        rejection, response,
     };
     use crate::diagnostic::UnreadImports;
     use crate::server::tests::load_configuration;
-    use lsp_server::ErrorCode;
-    use lsp_server::{Request, RequestId};
+    use lsp_server::{ErrorCode, Message, Request, RequestId};
     use lsp_types::notification::{self, Notification as LspNotification};
     use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tola_typst::typst::syntax::Source;
+
+    #[test]
+    fn watchers_follow_effective_source_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let site = root.join("site");
+        let next = root.join("next");
+        for directory in [&workspace, &site, &next] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        for relative in [false, true] {
+            let mut connection = ready_at(Vec::new(), workspace.clone());
+            connection.named_configuration = Some(site.join("tola.toml"));
+            ready_workspace(&mut connection).features = crate::capabilities::ClientFeatures::new(
+                &serde_json::from_value(json!({"workspace":{"didChangeWatchedFiles":{
+                    "dynamicRegistration":true,"relativePatternSupport":relative
+                }}}))
+                .unwrap(),
+            );
+            connection.watch_sources().unwrap();
+            let written = messages(&mut connection);
+            let [Message::Request(registration)] = written.as_slice() else {
+                panic!("one watcher registration: {written:?}");
+            };
+            let pattern = &registration.params["registrations"][0]["registerOptions"]["watchers"]
+                [0]["globPattern"];
+            if relative {
+                assert_eq!(
+                    pattern["baseUri"],
+                    crate::uri::from_file_path(&site).unwrap().as_str()
+                );
+                assert_eq!(pattern["pattern"], "**/*");
+            } else {
+                let spelling = site
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
+                assert_eq!(pattern, &json!(format!("{spelling}/**/*")));
+            }
+            connection.watch_sources().unwrap();
+            assert!(messages(&mut connection).is_empty());
+            connection.named_configuration = Some(next.join("tola.toml"));
+            connection.watch_sources().unwrap();
+            let written = messages(&mut connection);
+            assert_eq!(written.len(), 2);
+            assert!(
+                matches!(&written[0], Message::Request(request) if request.method == request::UnregisterCapability::METHOD)
+            );
+            assert!(
+                matches!(&written[1], Message::Request(request) if request.method == request::RegisterCapability::METHOD)
+            );
+        }
+    }
+
+    /// A package root the invocation declares outside the site is watched with it, while a root
+    /// inside the site is already covered and registers nothing extra.
+    #[test]
+    fn watchers_include_declared_package_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let site = root.join("site");
+        let vendored = root.join("vendored");
+        for directory in [&site, &vendored, &site.join("vendor")] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(site.join("tola.toml"), "").unwrap();
+        let packages = tola_typst::PackageLocations::from_absolute_roots(None, None)
+            .unwrap()
+            .with_declared_root(vendored.clone())
+            .unwrap()
+            .with_declared_root(site.join("vendor"))
+            .unwrap();
+        let config = tola_build::config::loading::load_site_config(
+            Some(&site.join("tola.toml")),
+            packages,
+            &tola_build::config::loading::BuildOverrides::default(),
+        )
+        .unwrap()
+        .into_config();
+        let mut connection = ready_at(Vec::new(), site.clone());
+        connection.configuration = Some(Arc::new(config));
+        ready_workspace(&mut connection).features = crate::capabilities::ClientFeatures::new(
+            &serde_json::from_value(json!({"workspace":{"didChangeWatchedFiles":{
+                "dynamicRegistration":true,"relativePatternSupport":true
+            }}}))
+            .unwrap(),
+        );
+        connection.watch_sources().unwrap();
+        let written = messages(&mut connection);
+        let [Message::Request(registration)] = written.as_slice() else {
+            panic!("one watcher registration: {written:?}");
+        };
+        let watchers = &registration.params["registrations"][0]["registerOptions"]["watchers"];
+        let bases = watchers
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|watcher| watcher["globPattern"]["baseUri"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(bases.len(), 2, "{watchers:?}");
+        assert_eq!(
+            bases[0],
+            json!(crate::uri::from_file_path(&site).unwrap().as_str())
+        );
+        assert_eq!(
+            bases[1],
+            json!(crate::uri::from_file_path(&vendored).unwrap().as_str())
+        );
+        connection.watch_sources().unwrap();
+        assert!(messages(&mut connection).is_empty());
+    }
+
+    #[test]
+    fn static_watchers_add_no_registration() {
+        let mut connection = ready(Vec::new());
+        connection.watch_sources().unwrap();
+        assert!(messages(&mut connection).is_empty());
+        assert!(connection.watched_roots.is_empty());
+    }
+
+    #[test]
+    fn watcher_globs_escape_root_metacharacters() {
+        assert_eq!(
+            source_glob(Path::new("/site[a]{b}*?")),
+            "/site[[]a[]][{]b[}][*][?]/**/*"
+        );
+        assert_eq!(source_glob(Path::new("/")), "/**/*");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watcher_globs_use_forward_separators() {
+        assert_eq!(
+            source_glob(Path::new(r"C:\site[one]\content")),
+            "C:/site[[]one[]]/content/**/*"
+        );
+    }
+
+    #[test]
+    fn failed_data_change_starts_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("content")).unwrap();
+        std::fs::write(root.join("tola.toml"), "").unwrap();
+        std::fs::write(root.join("data.json"), "invalid").unwrap();
+        std::fs::write(
+            root.join("site.typ"),
+            "#let value = json(\"data.json\")\n#document(\"index.html\", format: \"html\")[Hello]",
+        )
+        .unwrap();
+        let mut connection = ready_at(Vec::new(), root.clone());
+        let mut compiler = crate::compiler::SourceCompiler::new(
+            |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
+            tola_build::BuildResources::default(),
+        );
+        connection.sources_changed(false).unwrap();
+        let checked = compiler.compile(connection.next_job(Instant::now()).unwrap());
+        connection.completed(checked).unwrap();
+        assert_eq!(connection.checked, Some((connection.revision, false)));
+
+        let change = |name: &str| {
+            Notification::new(
+                notification::DidChangeWatchedFiles::METHOD.into(),
+                json!({"changes":[{
+                    "uri": crate::uri::from_file_path(&root.join(name)).unwrap(),
+                    "type": 2,
+                }]}),
+            )
+        };
+        std::fs::write(root.join("data.json"), "{}").unwrap();
+        let _ = connection.notification(change("data.json")).unwrap();
+        let pending_revision = connection.revision;
+        std::fs::write(root.join("data.json"), "{\"value\": 1}").unwrap();
+        let _ = connection.notification(change("data.json")).unwrap();
+        assert!(connection.revision > pending_revision);
+        let checked = compiler.compile(
+            connection
+                .next_job(Instant::now())
+                .expect("the corrected JSON starts a check"),
+        );
+        connection.completed(checked).unwrap();
+        assert_eq!(connection.checked, Some((connection.revision, true)));
+
+        let revision = connection.revision;
+        std::fs::write(root.join("unread.bin"), [0, 1, 2]).unwrap();
+        let _ = connection.notification(change("unread.bin")).unwrap();
+        assert_eq!(connection.revision, revision);
+        assert!(connection.next_job(Instant::now()).is_none());
+    }
+
+    #[test]
+    fn unchecked_data_changes_supersede_checks() {
+        for had_successful_check in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            std::fs::create_dir(root.join("content")).unwrap();
+            std::fs::write(root.join("tola.toml"), "").unwrap();
+            std::fs::write(root.join("data.json"), "{\"ok\": false}").unwrap();
+            let entry = root.join("site.typ");
+            let body = "#document(\"index.html\", format: \"html\")[Hello]";
+            let mut connection = ready_at(Vec::new(), root.clone());
+            let mut compiler = crate::compiler::SourceCompiler::new(
+                |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
+                tola_build::BuildResources::default(),
+            );
+            let change = |name: &str| {
+                Notification::new(
+                    notification::DidChangeWatchedFiles::METHOD.into(),
+                    json!({"changes":[{
+                        "uri": crate::uri::from_file_path(&root.join(name)).unwrap(),
+                        "type": 2,
+                    }]}),
+                )
+            };
+            if had_successful_check {
+                std::fs::write(&entry, body).unwrap();
+                connection.sources_changed(false).unwrap();
+                let checked = compiler.compile(connection.next_job(Instant::now()).unwrap());
+                connection.completed(checked).unwrap();
+                assert_eq!(connection.checked, Some((connection.revision, true)));
+                assert!(!connection.read_paths.contains(&root.join("data.json")));
+            }
+            std::fs::write(
+                &entry,
+                format!("#let value = json(\"data.json\")\n#assert.eq(value.ok, true)\n{body}"),
+            )
+            .unwrap();
+            let _ = connection.notification(change("site.typ")).unwrap();
+            let pending_revision = connection.revision;
+            let pending = compiler.compile(connection.next_job(Instant::now()).unwrap());
+            assert!(matches!(
+                &pending,
+                crate::compiler::SourceCompilation::Checked { checked: Ok(checked), .. }
+                    if !checked.compiled && !checked.diagnostics.is_empty()
+            ));
+            messages(&mut connection);
+
+            std::fs::write(root.join("data.json"), "{\"ok\": true}").unwrap();
+            let _ = connection.notification(change("data.json")).unwrap();
+            assert!(connection.revision > pending_revision);
+            connection.completed(pending).unwrap();
+            assert!(messages(&mut connection).is_empty());
+            assert!(
+                !connection
+                    .checked
+                    .is_some_and(|(revision, _)| revision == pending_revision)
+            );
+
+            let checked = compiler.compile(connection.next_job(Instant::now()).unwrap());
+            connection.completed(checked).unwrap();
+            assert_eq!(connection.checked, Some((connection.revision, true)));
+        }
+    }
 
     /// A change to a file the check never read, and no later check can read as a source, a
     /// configuration, or a bibliography, costs no revision and no site-wide check.
@@ -203,6 +515,7 @@ mod tests {
         connection.read_paths = [root.join("site.typ"), root.join("tola.toml")]
             .into_iter()
             .collect();
+        connection.checked = Some((connection.revision, true));
 
         let change = |name: &str, typ: u32| {
             Notification::new(
@@ -241,6 +554,7 @@ mod tests {
         std::fs::write(root.join("brand/unread.svg"), "<svg></svg>").unwrap();
         let mut connection = ready_at(Vec::new(), root.clone());
         connection.read_paths = [root.join("brand/logo.svg")].into_iter().collect();
+        connection.checked = Some((connection.revision, true));
 
         let change = |path: PathBuf| {
             Notification::new(
@@ -252,6 +566,10 @@ mod tests {
             )
         };
         let _ = connection
+            .notification(change(root.join("brand/unread.svg")))
+            .unwrap();
+        assert_eq!(connection.revision, 0, "an unread asset changes nothing");
+        let _ = connection
             .notification(change(root.join("brand/logo.svg")))
             .unwrap();
         assert_eq!(connection.revision, 1, "an asset the check read matters");
@@ -261,11 +579,6 @@ mod tests {
             .notification(change(directory.path().join("brand/logo.svg")))
             .unwrap();
         assert_eq!(connection.revision, 2, "a symlinked spelling still matters");
-
-        let _ = connection
-            .notification(change(root.join("brand/unread.svg")))
-            .unwrap();
-        assert_eq!(connection.revision, 2, "an unread asset changes nothing");
     }
 
     #[test]

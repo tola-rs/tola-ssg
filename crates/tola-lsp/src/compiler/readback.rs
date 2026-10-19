@@ -121,6 +121,7 @@ where
                     .map_err(SourceFailure::of)?;
             symbols.extend(crate::symbols::pages(
                 &realized,
+                configuration.get_root(),
                 &client_root,
                 &request.query,
             ));
@@ -207,7 +208,7 @@ where
         };
         crate::call_hierarchy::incoming(
             &mut self.disk,
-            &request.sources.root,
+            configuration.get_root(),
             &request.view,
             Some(&locations),
             &boundary,
@@ -215,6 +216,7 @@ where
             compilation,
             &request.source,
             &request.sources.cancellation,
+            &crate::uri::ClientRoot::new(&request.sources.root),
         )
         .map(|calls| SourceReply::IncomingCalls(Some(calls)))
         .map_err(SourceFailure::of)

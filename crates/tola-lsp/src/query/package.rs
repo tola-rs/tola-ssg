@@ -8,6 +8,7 @@ use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, CompletionTextEdit,
     GotoDefinitionResponse, Location, TextEdit, Uri,
 };
+use tola_build::config::ResolvedSiteConfig;
 use tola_packages::{BuiltinPackage, TOLA_NAMESPACE, builtin_package, builtin_packages};
 use tola_typst::typst::syntax::package::{PackageManifest, PackageSpec, PackageVersion};
 use tola_typst::typst::syntax::{
@@ -29,22 +30,26 @@ struct ImportPath<'a> {
 
 fn import_path(source: &Source, cursor: usize) -> Option<ImportPath<'_>> {
     let node = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before)?;
-    let unterminated = node.kind() == SyntaxKind::Error
+    let unclosed = node.kind() == SyntaxKind::Error
         && node.leaf_text().starts_with('"')
         && matches!(
             node.parent_kind(),
             Some(SyntaxKind::ModuleImport | SyntaxKind::ModuleInclude)
         );
-    if !tola_typst_syntax::syntax::is_import_path(&node) && !unterminated {
+    if !tola_typst_syntax::syntax::is_import_path(&node) && !unclosed {
         return None;
     }
     let start = node.range().start + 1;
+    // A string may legally span lines, but an import path is written on one. A token that
+    // reaches past this line leaves the path unfinished here: the edit closes it without
+    // replacing the source below, which the token may have swallowed.
+    let text = source.text();
+    let line_end = text[start..node.range().end]
+        .find(['\r', '\n'])
+        .map_or(node.range().end, |offset| start + offset);
+    let unterminated = unclosed || line_end < node.range().end;
     let end = if unterminated {
-        // An unclosed string token can consume the rest of the program. A path
-        // edit must close this line without deleting the following source.
-        source.text()[start..node.range().end]
-            .find(['\r', '\n'])
-            .map_or(node.range().end, |end| start + end)
+        line_end
     } else {
         node.range().end - 1
     };
@@ -56,6 +61,7 @@ fn import_path(source: &Source, cursor: usize) -> Option<ImportPath<'_>> {
 }
 
 pub(super) fn respond(
+    config: &ResolvedSiteConfig,
     package_access: &PackageAccess<'_>,
     source: &Source,
     cursor: usize,
@@ -68,6 +74,22 @@ pub(super) fn respond(
         unterminated,
     }) = import_path(source, cursor)
     else {
+        if matches!(query, SourceQuery::Completion(_))
+            && let Some((path, unterminated)) = reader_path(source, cursor)
+            && let Some(items) = site_path_completion(
+                config,
+                source,
+                cursor,
+                path.start,
+                path.end,
+                unterminated,
+                None,
+            )?
+        {
+            return Ok(Some(SourceReply::Completion(CompletionResponse::Array(
+                items,
+            ))));
+        }
         return Ok(None);
     };
     let literal = node.cast::<ast::Str>();
@@ -132,6 +154,23 @@ pub(super) fn respond(
             items,
         ))));
     }
+    // A bare quote that names no package names a site file. The spelling the author typed
+    // decides the labels, and the edit replaces only the string's content between its quotes.
+    if matches!(query, SourceQuery::Completion(_))
+        && let Some(items) = site_path_completion(
+            config,
+            source,
+            cursor,
+            content_start,
+            content_end,
+            unterminated,
+            Some("typ"),
+        )?
+    {
+        return Ok(Some(SourceReply::Completion(CompletionResponse::Array(
+            items,
+        ))));
+    }
     let Some(literal) = literal else {
         return Ok(None);
     };
@@ -170,7 +209,7 @@ pub(super) fn respond(
                 .context("invalid embedded source range")?;
             Ok(Some(SourceReply::Definition(Some(
                 GotoDefinitionResponse::Scalar(Location {
-                    uri: definition_uri(id, target.text(), client_root)?,
+                    uri: definition_uri(id, target.text(), config.get_root(), client_root)?,
                     range,
                 }),
             ))))
@@ -186,8 +225,13 @@ pub(super) fn respond(
 /// root by. A site whose mirror is absent or differs from the source this Tola ships keeps the
 /// package URI, which is what a client that knows the scheme opens. A site file is a path, and is
 /// addressed in the client's spelling for the same reason.
-fn definition_uri(id: FileId, source: &str, client_root: &crate::uri::ClientRoot) -> Result<Uri> {
-    let resolved = client_root.resolved();
+fn definition_uri(
+    id: FileId,
+    source: &str,
+    source_root: &Path,
+    client_root: &crate::uri::ClientRoot,
+) -> Result<Uri> {
+    let resolved = source_root;
     if !matches!(id.root(), VirtualRoot::Package(_)) {
         return client_root.address(&resolved.join(id.vpath().get_without_slash()));
     }
@@ -450,6 +494,145 @@ fn package_docs(package: &BuiltinPackage, name: &str, description: Option<&str>)
     text
 }
 
+/// The reader path argument the cursor writes, closed or not.
+///
+/// A closed string is the parser's `Str`; an unfinished one is an error token that can swallow
+/// the rest of the program, so the edit is bounded to the line the path is written on. Only the
+/// call's path argument answers: the first positional argument, or a named `path`/`style`.
+fn reader_path(source: &Source, cursor: usize) -> Option<(std::ops::Range<usize>, bool)> {
+    let text = source.text();
+    if let Some(argument) = tola_typst_syntax::syntax::path_argument(source, cursor)
+        && argument.base == tola_typst_syntax::syntax::PathBase::File
+    {
+        let line_end = text[argument.range.start..argument.range.end]
+            .find(['\r', '\n'])
+            .map_or(argument.range.end, |offset| argument.range.start + offset);
+        if cursor > line_end {
+            return None;
+        }
+        return Some((
+            argument.range.start..line_end,
+            line_end < argument.range.end,
+        ));
+    }
+    let node = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before)?;
+    if node.kind() != SyntaxKind::Error || !node.leaf_text().starts_with('"') {
+        return None;
+    }
+    let mut call = node.parent()?.clone();
+    while !call.is::<ast::FuncCall>() {
+        call = call.parent()?.clone();
+    }
+    let call_node = call.clone();
+    let call = call.cast::<ast::FuncCall>()?;
+    let base = tola_typst_syntax::syntax::path_base(call_name(call)?.as_str())?;
+    if base != tola_typst_syntax::syntax::PathBase::File {
+        return None;
+    }
+    let start = node.range().start + 1;
+    let line_end = text[start..node.range().end]
+        .find(['\r', '\n'])
+        .map_or(node.range().end, |offset| start + offset);
+    if cursor < start || cursor > line_end {
+        return None;
+    }
+    let call_start = call_node.range().start;
+    let open = text[call_start..node.range().start].find('(')?;
+    let before = &text[call_start + open + 1..node.range().start];
+    let argument = before.rsplit(',').next().unwrap_or(before).trim_start();
+    if before.contains(',') && !(argument.starts_with("path:") || argument.starts_with("style:")) {
+        return None;
+    }
+    Some((start..line_end, true))
+}
+
+fn call_name(call: ast::FuncCall<'_>) -> Option<String> {
+    match call.callee() {
+        ast::Expr::Ident(ident) => Some(ident.get().to_string()),
+        ast::Expr::FieldAccess(access) => Some(access.field().get().to_string()),
+        _ => None,
+    }
+}
+
+/// The site files and directories one path argument can name.
+///
+/// A path that starts with `/` is labeled from the site root and every other path from the
+/// writing file's directory, so the label is the spelling Typst's own resolution would use.
+/// `extension` limits an import or include to the files Typst can read there; a reader lists
+/// every site file. The edit replaces only the content between the quotes, which keeps the
+/// client's filter text equal to the path the author typed.
+fn site_path_completion(
+    config: &ResolvedSiteConfig,
+    source: &Source,
+    cursor: usize,
+    start: usize,
+    end: usize,
+    unterminated: bool,
+    extension: Option<&str>,
+) -> Result<Option<Vec<CompletionItem>>> {
+    if source.id().root() != &VirtualRoot::Project {
+        return Ok(None);
+    }
+    let prefix = &source.text()[start..cursor];
+    let rooted = prefix.starts_with('/');
+    let Some(directory) = source.id().vpath().parent() else {
+        return Ok(Some(Vec::new()));
+    };
+    let mut directories = std::collections::BTreeSet::new();
+    let mut files = Vec::new();
+    for id in crate::files::owned_file_ids(config) {
+        if id == source.id()
+            || extension.is_some_and(|extension| id.vpath().extension() != Some(extension))
+        {
+            continue;
+        }
+        let label = if rooted {
+            id.vpath().get_with_slash().to_owned()
+        } else {
+            id.vpath().relative_from(&directory).to_string()
+        };
+        if label.contains(['"', '\\']) {
+            continue;
+        }
+        for (index, _) in label.match_indices('/') {
+            let directory = &label[..=index];
+            if directory != "/" && directory != prefix {
+                directories.insert(directory.to_owned());
+            }
+        }
+        files.push(label);
+    }
+    files.sort();
+    files.dedup();
+    let range =
+        position::utf16_range(source.lines(), start..end).context("invalid import path range")?;
+    let mut items = Vec::new();
+    let labels = directories
+        .into_iter()
+        .map(|label| (label, CompletionItemKind::FOLDER))
+        .chain(
+            files
+                .into_iter()
+                .map(|label| (label, CompletionItemKind::FILE)),
+        );
+    for (label, kind) in labels {
+        let new_text = if unterminated {
+            format!("{label}\"")
+        } else {
+            label.clone()
+        };
+        items.push(CompletionItem {
+            label,
+            kind: Some(kind),
+            text_edit: Some(CompletionTextEdit::Edit(TextEdit { range, new_text })),
+            ..CompletionItem::default()
+        });
+    }
+    for (index, item) in items.iter_mut().enumerate() {
+        item.sort_text = Some(format!("{index:03}"));
+    }
+    Ok(Some(items))
+}
 fn imported_source(
     id: FileId,
     from: &str,
@@ -653,6 +836,7 @@ mod tests {
         let package_access =
             PackageAccess::new(config, &tola_build::BuildResources::new(), published);
         match respond(
+            config,
             &package_access,
             &source,
             cursor,
@@ -776,6 +960,7 @@ mod tests {
         .1;
         let package_access = PackageAccess::new(&config, &tola_build::BuildResources::new(), &[]);
         let reply = respond(
+            &config,
             &package_access,
             &source,
             cursor,

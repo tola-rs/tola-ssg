@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result};
 use lsp_types::SignatureHelp;
-use tola_typst::typst::syntax::Source;
+use tola_packages::ParameterKind;
+use tola_typst::typst::syntax::{Source, ast};
 
 use super::context::{SelectedSyntax, Selection};
 use super::semantic::Semantic;
@@ -17,7 +18,7 @@ impl Selection<'_> {
             return Ok(None);
         };
         let name = &self.source.text()[call.callee.clone()];
-        let (mut signatures, names) = match &call.target {
+        let (mut signatures, parameters) = match &call.target {
             tola_typst_syntax::syntax::CallTarget::Function => {
                 let Some(callee) = tola_typst_syntax::syntax::node_at_range(prepared, &call.callee)
                 else {
@@ -36,22 +37,44 @@ impl Selection<'_> {
         if signatures.is_empty() {
             return Ok(None);
         }
-        // The parameter the call stands in belongs to the signature the editor highlights, which
-        // is where the client reads it: an argument that writes a name marks the parameter it
-        // names, and one written without a name marks its own position among the declared
-        // parameters.
-        let written = call
-            .argument_name
-            .as_ref()
-            .and_then(|written| {
-                names
+        let rest = parameters
+            .iter()
+            .position(|parameter| parameter.kind == ParameterKind::Rest);
+        let written = if let Some(written) = &call.argument_name {
+            parameters
+                .iter()
+                .position(|parameter| {
+                    parameter.kind == ParameterKind::Named
+                        && parameter.name == self.source.text()[written.clone()]
+                })
+                .or(rest)
+        } else {
+            let positional = tola_typst_syntax::syntax::node_at_range(prepared, &call.callee)
+                .and_then(|callee| callee.parent().cloned())
+                .and_then(|node| {
+                    let invocation = node.cast::<ast::FuncCall>()?;
+                    let mut positional = 0;
+                    for argument in invocation.args().items().take(call.active_argument) {
+                        match argument {
+                            ast::Arg::Pos(_) => positional += 1,
+                            ast::Arg::Named(_) => {}
+                            ast::Arg::Spread(_) => return None,
+                        }
+                    }
+                    Some(positional)
+                });
+            positional.and_then(|positional| {
+                parameters
                     .iter()
-                    .position(|declared| declared.as_str() == &self.source.text()[written.clone()])
+                    .enumerate()
+                    .filter(|(_, parameter)| parameter.kind == ParameterKind::Positional)
+                    .nth(positional)
+                    .map(|(index, _)| index)
+                    .or(rest)
             })
-            .unwrap_or(call.active_argument);
-        let parameter_count = signatures[0].parameters.as_ref().map_or(0, Vec::len);
-        signatures[0].active_parameter = (parameter_count > 0)
-            .then(|| u32::try_from(written.min(parameter_count - 1)))
+        };
+        signatures[0].active_parameter = written
+            .map(u32::try_from)
             .transpose()
             .context("active parameter exceeds LSP index range")?;
         Ok(Some(SignatureHelp {
@@ -125,14 +148,37 @@ mod tests {
             }
         }
     }
-    /// The parameter the call stands in is marked on the signature the editor highlights.
     #[test]
-    fn signature_marks_the_active_argument() {
+    fn positional_arguments_skip_named_arguments() {
         let mut site = QuerySession::new();
-        let signature = site
-            .signature("#strong(delta: 300, |\"\")\n")
-            .expect("a signature");
-        assert_eq!(signature.signatures[0].active_parameter, Some(1));
+        for (source, expected) in [
+            ("#text(size: 10pt, |\"hello\")\n", "text:"),
+            ("#let f(a: 1, b) = b\n#f(a: 2, |\"x\")\n", "b:"),
+            ("#let f(a, ..xs) = a\n#f(1, size: 2, |3)\n", "xs:"),
+        ] {
+            let signature = site.signature(source).expect("a signature");
+            let first = &signature.signatures[0];
+            let selected = first.active_parameter.expect("a selected parameter");
+            assert_eq!(
+                first.parameters.as_ref().unwrap()[selected as usize].label,
+                ParameterLabel::Simple(expected.to_owned()),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_positions_mark_no_parameter() {
+        let mut site = QuerySession::new();
+        for source in [
+            "#let f(size: 1) = size\n#f(|2)\n",
+            "#let f(a, b) = a\n#f(..(1,), |2)\n",
+            "#let f(size: 1) = size\n#f(|unknown: 2)\n",
+            "#let f(a, b: 1) = a\n#f(|a: 2)\n",
+        ] {
+            let signature = site.signature(source).expect("a signature");
+            assert_eq!(signature.signatures[0].active_parameter, None, "{source}");
+        }
     }
 
     /// A named argument marks the parameter it names, not the position it was written at.

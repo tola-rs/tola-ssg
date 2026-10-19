@@ -26,7 +26,7 @@ pub(super) fn key_location(
     let Some(range) = crate::position::utf16_range(source.lines(), declared.range.clone()) else {
         return Ok(None);
     };
-    let Some(uri) = crate::identity::client_uri(declared.file, client_root) else {
+    let Some(uri) = crate::identity::client_uri(declared.file, world.root(), client_root) else {
         return Ok(None);
     };
     Ok(Some(Location { uri, range }))

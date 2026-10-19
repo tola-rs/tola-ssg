@@ -388,7 +388,10 @@ pub struct InitArgs {
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct ConfigFileArgs {
-    /// Configuration file; omit to search the current and parent directories for `tola.toml`.
+    /// Site configuration file.
+    ///
+    /// Without this option, commands search the current and parent directories for `tola.toml`.
+    /// The language server instead checks only the client's workspace root.
     #[arg(
         short = 'C',
         long = "config",

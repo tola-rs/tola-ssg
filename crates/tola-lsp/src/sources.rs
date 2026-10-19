@@ -134,17 +134,19 @@ impl OpenSource {
         let Ok(path) = crate::uri::to_site_path(uri) else {
             return;
         };
-        if self.path.as_ref() == Some(&path) {
+        let id = (path.extension() == Some(OsStr::new("typ")))
+            .then(|| crate::identity::path_id(&path, root))
+            .flatten();
+        if self.path.as_ref() == Some(&path)
+            && self.parsed.as_ref().map(|parsed| parsed.source.id()) == id
+        {
             return;
         }
-        self.parsed = (path.extension() == Some(OsStr::new("typ")))
-            .then(|| crate::identity::path_id(&path, root))
-            .flatten()
-            .map(|id| SourceSnapshot {
-                revision,
-                source: Source::new(id, self.text.to_string()),
-                names: Arc::default(),
-            });
+        self.parsed = id.map(|id| SourceSnapshot {
+            revision,
+            source: Source::new(id, self.text.to_string()),
+            names: Arc::default(),
+        });
         self.path = Some(path);
     }
 }
@@ -216,6 +218,18 @@ impl OpenSources {
     /// writing here.
     pub(super) fn exclude_generated(&mut self, generated: SourceBoundary) {
         self.resolved_generated = Some(generated);
+    }
+
+    /// A resolved configuration can select a root before which only the workspace was known.
+    pub(super) fn rebase(&mut self, root: &Path) {
+        let root = tola_build::filesystem::normalize_existing_prefix(root);
+        if self.root == root {
+            return;
+        }
+        self.generated = generated_state_boundary(&root);
+        self.root = root;
+        self.refresh_paths(self.revision);
+        self.view.overrides = self.snapshot().into();
     }
 
     /// Whether one changed document path is state Tola generates or publishes.

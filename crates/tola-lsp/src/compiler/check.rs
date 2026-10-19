@@ -236,7 +236,7 @@ fn check_documents(
 ) -> Result<CheckedSources, SourceFailure> {
     let overrides = sources.overrides.to_vec();
     let mut diagnostics = Vec::new();
-    let mut compiled = false;
+    let mut compiled = true;
     let mut read_paths = Vec::new();
     for (path, text) in &overrides {
         // A document outside the workspace's own directory belongs to another root, and a vendor
@@ -254,9 +254,8 @@ fn check_documents(
         let revision = session
             .inspect_source(relative, overrides.clone(), &sources.cancellation)
             .map_err(SourceFailure::from)?;
-        // A document that resolved a world answers, even when its own file did not compile; a check
-        // that resolved none leaves the revision without a usable world.
-        compiled |= revision.checked().is_some();
+        // File-change filtering may trust the combined reads only when every document compiled.
+        compiled &= revision.compiled();
         diagnostics.extend_from_slice(revision.diagnostics());
         append_document_editor_diagnostics(
             &mut diagnostics,
@@ -279,7 +278,7 @@ fn check_documents(
         configuration: Some(Arc::clone(configuration)),
         compiled,
         diagnostics,
-        read_paths: Some(read_paths),
+        read_paths: compiled.then_some(read_paths),
     })
 }
 
@@ -421,6 +420,66 @@ mod tests {
             "a failed check established no read evidence: {:?}",
             failed.read_paths
         );
+    }
+
+    #[test]
+    fn document_checks_require_every_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let configuration = Arc::new(
+            tola_build::config::loading::resolve_site_config(
+                &root.join("tola.toml"),
+                "",
+                tola_typst::PackageLocations::default(),
+                &tola_build::config::loading::BuildOverrides::default(),
+            )
+            .unwrap()
+            .into_config(),
+        );
+        let mut compiler = SourceCompiler::new(
+            move |_: &Path, _: &[UnsavedSource]| {
+                Ok(ServedWorkspace::Documents(Arc::clone(&configuration)))
+            },
+            tola_build::BuildResources::default(),
+        );
+        let documents: Arc<[UnsavedSource]> = Arc::from([
+            (
+                root.join("data.typ"),
+                Arc::<str>::from("#let value = json(\"values.json\")\n#repr(value)"),
+            ),
+            (root.join("plain.typ"), Arc::<str>::from("Body")),
+        ]);
+        for (revision, contents, compiled) in [(1, "invalid", false), (2, "{}", true)] {
+            std::fs::write(root.join("values.json"), contents).unwrap();
+            let SourceCompilation::Checked { checked, .. } =
+                compiler.compile(SourceJob::Check(CheckRequest {
+                    checked_revision: revision,
+                    sources: inputs_at(&root, revision, Arc::clone(&documents)),
+                    view: SourceView::default(),
+                }))
+            else {
+                panic!("expected document check completion");
+            };
+            let checked = checked.unwrap();
+            assert_eq!(checked.compiled, compiled, "{:?}", checked.diagnostics);
+            if compiled {
+                assert!(
+                    checked
+                        .read_paths
+                        .unwrap()
+                        .iter()
+                        .any(|path| path.ends_with("values.json"))
+                );
+            } else {
+                assert!(checked.read_paths.is_none());
+                assert!(
+                    checked
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.severity == Severity::Error)
+                );
+            }
+        }
     }
 
     #[test]

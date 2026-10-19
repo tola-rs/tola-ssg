@@ -15,6 +15,7 @@ pub(crate) type UnsavedSource = (PathBuf, Arc<str>);
 pub(crate) type SourceOverrides = Arc<[UnsavedSource]>;
 
 pub(crate) struct SourceInputs {
+    /// The client's workspace root, used for configuration discovery and URI spelling.
     pub(crate) root: PathBuf,
     pub(crate) overrides: SourceOverrides,
     /// The source revision these unsaved sources belong to, which is what a compilation may be
@@ -44,32 +45,45 @@ pub(crate) struct QueryRequest {
     pub(crate) query: SourceQuery,
 }
 
+pub(crate) enum AnalysisTask {
+    Query { query: SourceQuery, cursor: usize },
+    Tokens(TokensRead),
+}
+
+pub(crate) struct TokensRead {
+    pub(crate) uri: Uri,
+    pub(crate) kind: TokensKind,
+}
+
+pub(crate) enum TokensKind {
+    Full,
+    Delta(String),
+    Range(lsp_types::Range),
+}
+
 pub(crate) struct AnalysisRequest {
     pub(crate) id: RequestId,
     pub(crate) serial: u64,
-    pub(crate) root: PathBuf,
+    pub(crate) sources: SourceInputs,
+    pub(crate) source_root: PathBuf,
     pub(crate) view: crate::sources::SourceView,
     pub(crate) source: tola_typst::typst::syntax::Source,
-    pub(crate) cursor: usize,
     pub(crate) package_locations: Option<tola_typst::PackageLocations>,
     pub(crate) boundary: tola_typst::SourceBoundary,
-    pub(crate) query: SourceQuery,
-    pub(crate) cancellation: BuildCancellation,
-    /// The source revision this request's graph belongs to, which its reuse must match.
-    pub(crate) source_revision: u64,
+    pub(crate) task: AnalysisTask,
+    pub(crate) package_sources: Option<Arc<PathBuf>>,
 }
 
 /// The request one source-only analysis hands to the compiler lane.
 ///
-/// The analysis proved an import identity the query needs — the same id, serial, view, and
-/// cancellation cross over, so the compiler lane answers the client's request exactly once.
+/// An answer requiring evaluation keeps the same sources, view, id, serial, and cancellation,
+/// so the compiler lane cannot answer against a newer snapshot or admit the request twice.
 pub(crate) struct AnalysisContinuation {
     pub(crate) id: RequestId,
     pub(crate) serial: u64,
-    pub(crate) root: PathBuf,
+    pub(crate) sources: SourceInputs,
     pub(crate) view: crate::sources::SourceView,
     pub(crate) query: SourceQuery,
-    pub(crate) cancellation: BuildCancellation,
 }
 
 pub(crate) enum SourceJob {

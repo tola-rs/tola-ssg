@@ -344,7 +344,7 @@ impl Selection<'_> {
         let declaration = names
             .declared_at(self.cursor)
             .map(|id| &names.declarations()[id]);
-        let observed = semantics.values(node)?;
+        let observed = semantics.types(node)?;
         // The declared shape of one chain is a fact of the source, not of the realized site: a
         // chain answers it whether or not this execution observed any record the chain reads.
         let (root, fields) = match field_chain(node) {
@@ -443,7 +443,7 @@ impl Selection<'_> {
         }
 
         let mut sections = Vec::new();
-        match observed.first().map(|(value, _)| value) {
+        match observed.first().and_then(|(ty, _)| ty.value()) {
             Some(Value::Func(func)) => {
                 docs = semantic::function_docs(func).map(str::to_owned).or(docs);
                 let documented = docs
@@ -476,11 +476,12 @@ impl Selection<'_> {
             _ => {
                 let ty = observed
                     .first()
-                    .map(|(value, _)| semantic::type_spelling(&value.ty()))
-                    .or_else(|| {
-                        declaration.and_then(|declaration| {
-                            self.default_type(prepared, &declaration.range, semantics)
-                        })
+                    .map(|(value, _)| value.type_name())
+                    .or(match declaration {
+                        Some(declaration) => {
+                            self.default_type(prepared, &declaration.range, semantics)?
+                        }
+                        None => None,
                     })
                     .or_else(|| {
                         provisioned
@@ -577,8 +578,8 @@ impl Selection<'_> {
             let Some(node) = node else {
                 continue;
             };
-            if let Some((value, _)) = semantics.values(&node)?.first() {
-                observed.insert(name, semantic::type_spelling(&value.ty()));
+            if let Some((ty, _)) = semantics.types(&node)?.first() {
+                observed.insert(name, ty.type_name());
             }
         }
         Ok(observed)
@@ -625,7 +626,7 @@ impl Selection<'_> {
         // fill; anything else leaves the name to the rungs below.
         let traced = prepared
             .find(call.callee().span())
-            .map(|callee| semantics.values(&callee))
+            .map(|callee| semantics.known_values(&callee))
             .transpose()?
             .and_then(|values| values.into_iter().next())
             .and_then(|(value, _)| match value {
@@ -643,11 +644,11 @@ impl Selection<'_> {
         }
         let observed = prepared
             .find(argument.expr().span())
-            .map(|value| semantics.values(&value))
+            .map(|value| semantics.types(&value))
             .transpose()?
             .unwrap_or_default()
             .first()
-            .map(|(value, _)| semantic::type_spelling(&value.ty()));
+            .map(|(ty, _)| ty.type_name());
         // The block above the callee's declaration describes the parameter this argument fills.
         let documented = match prepared.find(call.callee().span()) {
             Some(callee) => semantics
@@ -692,7 +693,7 @@ impl Selection<'_> {
         };
         let name = field.name().get().to_string();
         let mut described: Vec<schema::DeclaredField> = Vec::new();
-        for (value, _) in semantics.values(&value)? {
+        for (value, _) in semantics.known_values(&value)? {
             if let Some(declared) = semantics
                 .inspect_schema(&value)?
                 .and_then(schema::OutputDescription::read)
@@ -831,15 +832,18 @@ impl Selection<'_> {
         prepared: &Source,
         range: &std::ops::Range<usize>,
         semantics: &mut Semantic<'_>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>> {
         // A named parameter's default is the last child of its own node; the world observed its
         // literal when it observed the parameter at all.
-        let default = tola_typst_syntax::syntax::node_at_range(prepared, range)
+        let Some(default) = tola_typst_syntax::syntax::node_at_range(prepared, range)
             .and_then(|ident| ident.parent().cloned())
             .filter(|param| param.kind() == SyntaxKind::Named)
-            .and_then(|param| param.children().next_back())?;
-        let observed = semantics.values(&default).ok()?;
-        Some(semantic::type_spelling(&observed.first()?.0.ty()))
+            .and_then(|param| param.children().next_back())
+        else {
+            return Ok(None);
+        };
+        let types = semantics.types(&default)?;
+        Ok(types.first().map(|(ty, _)| ty.type_name()))
     }
 
     /// Hover for the star of a wildcard import: every name the module publishes.
@@ -1011,7 +1015,7 @@ impl Selection<'_> {
         }
         Ok(Some(markdown_hover(
             described,
-            position::utf16_range(self.source.lines(), item.source.clone()),
+            position::utf16_range(self.source.lines(), item.name.clone()),
         )))
     }
 }
@@ -1025,6 +1029,34 @@ mod tests {
     use lsp_types::request as lsp_request;
     use lsp_types::request::Request as LspRequest;
     use serde_json::json;
+
+    #[test]
+    fn imported_hover_ranges_cover_selected_names() {
+        let mut site = QuerySession::new();
+        for marked in [
+            "#import \"@tola/address:0.0.0\": out|put-of\n",
+            "🦊 #import \"@tola/address:0.0.0\": |output-of as address\n",
+        ] {
+            let hover = site.hover(marked).expect("an imported export's hover");
+            let source = Source::detached(marked.replace('|', ""));
+            let range = hover.range.expect("the selected name's range");
+            let start = position::byte_offset(source.lines(), range.start).unwrap();
+            let end = position::byte_offset(source.lines(), range.end).unwrap();
+            assert_eq!(&source.text()[start..end], "output-of");
+        }
+    }
+
+    #[test]
+    fn imported_hover_describes_selected_segments() {
+        let mut site = QuerySession::new();
+        site.site
+            .write("content/helpers.typ", "#let calc = std.calc\n");
+        let hover = site
+            .hover_text("#import \"helpers.typ\": ca|lc.abs\n")
+            .expect("a module hover");
+        assert!(hover.contains("<module calc>"), "{hover}");
+        assert!(!hover.contains("let abs("), "{hover}");
+    }
 
     /// A reference the query copy repaired is a stand-in: hover answers the label's own fact,
     /// never a value read from the enclosing construct the repair left behind.

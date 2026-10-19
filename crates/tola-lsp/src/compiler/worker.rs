@@ -63,6 +63,12 @@ pub(crate) enum SourceCompilation {
         serial: u64,
         response: Result<SourceReply, SourceFailure>,
     },
+    Tokens {
+        id: lsp_server::RequestId,
+        serial: u64,
+        read: super::jobs::TokensRead,
+        response: Result<lsp_types::SemanticTokens, SourceFailure>,
+    },
     /// A source-only analysis whose identity proof needs the compiler lane, with the request
     /// that lane answers.
     Continued(AnalysisContinuation),
@@ -180,15 +186,20 @@ where
         let served = (self.load)(&sources.root, &sources.overrides);
         sources.cancellation.ensure_active()?;
         let served = served?;
-        if self
-            .session
-            .as_ref()
-            .is_none_or(|(active, _)| !Arc::ptr_eq(active.configuration(), served.configuration()))
-        {
-            let session = SourceDiagnosticSession::with_resources(
-                Arc::clone(served.configuration()),
-                self.resources.clone(),
-            );
+        if self.session.as_ref().is_none_or(|(active, _)| {
+            active.compiles_site() != served.compiles_site()
+                || !Arc::ptr_eq(active.configuration(), served.configuration())
+        }) {
+            let configuration = Arc::clone(served.configuration());
+            let session = match &served {
+                ServedWorkspace::Site(_) => {
+                    SourceDiagnosticSession::with_resources(configuration, self.resources.clone())
+                }
+                ServedWorkspace::Documents(_) => {
+                    SourceDiagnosticSession::for_documents(configuration, self.resources.clone())
+                }
+            };
+            self.compilations.release();
             self.session = Some((served, session));
         }
         Ok(Self::prepared_session(&mut self.session))
@@ -353,6 +364,40 @@ mod tests {
             sources: inputs(Path::new("/site"), BuildCancellation::new()),
             view: SourceView::default(),
         })));
+    }
+
+    #[test]
+    fn workspace_modes_replace_source_environments() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("page.typ"), "Body\n").unwrap();
+        let configuration = site_configuration(directory.path(), "");
+        let mut loads = 0;
+        let mut compiler = SourceCompiler::new(
+            |_, _| {
+                let served = if loads == 1 {
+                    ServedWorkspace::Documents(Arc::clone(&configuration))
+                } else {
+                    ServedWorkspace::Site(Arc::clone(&configuration))
+                };
+                loads += 1;
+                Ok(served)
+            },
+            BuildResources::new().without_system_fonts(),
+        );
+        let cancellation = BuildCancellation::new();
+        let sources = inputs(directory.path(), cancellation.clone());
+        for compiled in [false, true, false] {
+            let (_, session) = compiler.prepare(&sources).unwrap();
+            let revision = session
+                .inspect_source("page.typ", Vec::new(), &cancellation)
+                .unwrap();
+            assert_eq!(
+                revision.compiled(),
+                compiled,
+                "{:?}",
+                revision.diagnostics()
+            );
+        }
     }
 
     #[test]

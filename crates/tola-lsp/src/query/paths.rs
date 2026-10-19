@@ -138,7 +138,7 @@ mod tests {
     fn written_range(source: &Source, cursor: usize) -> Option<lsp_types::Range> {
         let at = position::utf16_range(source.lines(), cursor..cursor)?.start;
         let root = std::env::current_dir().expect("the tests run in the crate's directory");
-        crate::links::paths(source, &root)?
+        crate::links::paths(source, &root, &crate::uri::ClientRoot::new(&root))?
             .into_iter()
             .find(|link| link.range.start <= at && at <= link.range.end)
             .map(|link| link.range)

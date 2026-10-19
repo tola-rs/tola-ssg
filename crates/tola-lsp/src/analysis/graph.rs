@@ -44,9 +44,10 @@ impl GraphCache {
             && self.targets == *targets
             && graph.sources().count() == sources.len()
             && sources.iter().all(|(file, names)| {
-                graph
-                    .source(*file)
-                    .is_some_and(|cached| cached.source().text() == names.source().text())
+                graph.source(*file).is_some_and(|cached| {
+                    std::ptr::eq(cached, names.as_ref())
+                        || cached.source().text() == names.source().text()
+                })
             }))
         .then(|| Arc::clone(graph))
     }
@@ -141,10 +142,9 @@ pub(crate) fn graph(
         .map(|snapshot| snapshot.names())
         .unwrap_or_else(|| Arc::new(SourceNames::new(source.clone())));
     sources.insert(source.id(), names);
+    // The pass includes the walk and import closure; cancellation leaves it for the next pass.
+    disk.begin();
     if include_dependents {
-        // The walk below closes the pass it opens; a cancellation returns through `?` and leaves
-        // it open, and the next completed pass drops what this one did not see.
-        disk.begin();
         for snapshot in view.iter() {
             if source_allowed(snapshot.source.id(), root, boundary) {
                 sources.insert(snapshot.source.id(), snapshot.names());
@@ -156,7 +156,6 @@ pub(crate) fn graph(
         add_walked_sources(&mut sources, root, boundary, cancellation, |path, id| {
             disk.names(path, id)
         })?;
-        disk.retain_pass();
     }
     let established: Vec<(PendingImport, FileId)> = resolved
         .iter()
@@ -173,8 +172,10 @@ pub(crate) fn graph(
         resolver.as_ref(),
         &established,
         true,
+        disk,
         cancellation,
     )?;
+    disk.retain_pass();
     if let Some(cached) = cache.as_ref()
         && resolved.is_empty()
         && let Some(graph) = cached.cache.find(cached.revision, &sources, &targets)
@@ -281,7 +282,7 @@ pub(super) fn add_walked_sources(
 /// site that spells it, and their own imports must not decide what a site statement selects.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the closure reads the source set, targets, view, root, boundary, resolver, proven targets, package policy, and cancellation"
+    reason = "the closure reads sources, targets, view, root, boundary, resolver, proven targets, package scope, parsed sources, and cancellation"
 )]
 pub(super) fn reach_imports(
     sources: &mut HashMap<FileId, Arc<SourceNames>>,
@@ -292,6 +293,7 @@ pub(super) fn reach_imports(
     resolver: Option<&FileResolver>,
     established: &[(PendingImport, FileId)],
     package_targets: bool,
+    disk: &mut DiskSources,
     cancellation: &BuildCancellation,
 ) -> Result<()> {
     let mut visited = HashSet::new();
@@ -362,10 +364,7 @@ pub(super) fn reach_imports(
                             .flatten()
                     });
                 if let Some(text) = text {
-                    sources.insert(
-                        target,
-                        Arc::new(SourceNames::new(Source::new(target, text))),
-                    );
+                    sources.insert(target, disk.names_from_text(target, text));
                 }
             }
         }
@@ -524,6 +523,65 @@ mod tests {
             assert_eq!(definition(&cached), definition(&fresh));
             let (_, range) = definition(&cached).unwrap();
             assert_eq!(range.start, text.find("marker").unwrap());
+        }
+    }
+
+    #[test]
+    fn imported_aliases_follow_changed_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let library = "#let first = 1\n#let second = 2";
+        std::fs::write(root.join(".library.typ"), library).unwrap();
+        let mut sources = OpenSources::new(root);
+        let importer = open(
+            &mut sources,
+            root,
+            "main.typ",
+            "#import \".exports.typ\": external as local\n#local",
+        );
+        let view = sources.view();
+        let source = &view.get(&importer).unwrap().source;
+        let cursor = source.text().rfind("local").unwrap();
+        let boundary = tola_typst::SourceBoundary::new(root, true);
+        let cancellation = BuildCancellation::new();
+        let mut disk = DiskSources::default();
+        let mut cache = GraphCache::default();
+        let mut previous: Option<Arc<NameGraph>> = None;
+        for target in ["first", "second"] {
+            std::fs::write(
+                root.join(".exports.typ"),
+                format!("#import \".library.typ\": {target} as external"),
+            )
+            .unwrap();
+            let graph = source_only_graph(
+                root,
+                &view,
+                source,
+                None,
+                &boundary,
+                false,
+                &mut disk,
+                Some(CachedGraph {
+                    cache: &mut cache,
+                    revision: sources.revision(),
+                }),
+                &cancellation,
+            )
+            .unwrap();
+            let binding = graph
+                .selected(source.id(), cursor)
+                .unwrap()
+                .binding
+                .unwrap();
+            let (file, range) = graph.definition(binding).unwrap();
+            assert_eq!(&graph.source(file).unwrap().source().text()[range], target);
+            if let Some(previous) = &previous {
+                assert!(std::ptr::eq(
+                    previous.source(file).unwrap(),
+                    graph.source(file).unwrap()
+                ));
+            }
+            previous = Some(graph);
         }
     }
 

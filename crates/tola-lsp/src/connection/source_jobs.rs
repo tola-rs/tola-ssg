@@ -1,11 +1,7 @@
-//! The requests this connection queues to the compiler lane: routes, lenses, workspace symbols,
-//! renames, package sources, incoming calls, and the semantic queries that need the checked world.
-//! `query` answers the configuration document and the source-only name graph itself; the remainder
-//! lands here, and `published_diagnostics` reads back the causes the last check reported.
+//! Dispatches source requests to analysis or compilation while preserving each request's identity.
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 use lsp_server::RequestId;
@@ -15,8 +11,8 @@ use lsp_types::{
 use tola_build::diagnostic::Diagnostic;
 
 use crate::compiler::{
-    AnalysisRequest, IncomingCallsRead, LensesRead, PackageSourceRead, QueryRequest, RenameRead,
-    RouteIndexRead, RouteRead, SourceJob, SymbolsRead,
+    AnalysisRequest, AnalysisTask, IncomingCallsRead, LensesRead, PackageSourceRead, QueryRequest,
+    RenameRead, RouteIndexRead, RouteRead, SourceJob, SymbolsRead,
 };
 use crate::protocol::{self, PackageSourceParams, RouteParams, SourceQuery, SourceReply};
 
@@ -125,6 +121,46 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(())
     }
 
+    pub(super) fn enqueue_analysis(
+        &mut self,
+        id: RequestId,
+        source: tola_typst::typst::syntax::Source,
+        task: AnalysisTask,
+    ) -> Result<()> {
+        let uri = match &task {
+            AnalysisTask::Query { query, .. } => query.document().0,
+            AnalysisTask::Tokens(read) => &read.uri,
+        };
+        let view = self.open.view();
+        let document_revision = view
+            .get(uri)
+            .map(|snapshot| (uri.clone(), snapshot.revision));
+        let root = self.workspace().root.clone();
+        let package_sources = self.workspace().package_sources.clone();
+        let package_locations = self.package_locations();
+        let boundary = self.source_boundary();
+        let Some((serial, cancellation)) = self.admit(&id)? else {
+            return Ok(());
+        };
+        self.requests
+            .get_mut(&id)
+            .expect("admitted analysis")
+            .document_revision = document_revision;
+        self.analyses.push_back(AnalysisRequest {
+            id,
+            serial,
+            sources: self.source_inputs(root, cancellation),
+            source_root: self.source_root(),
+            view,
+            source,
+            package_locations,
+            boundary,
+            task,
+            package_sources,
+        });
+        Ok(())
+    }
+
     pub(super) fn query(&mut self, id: RequestId, query: SourceQuery) -> Result<()> {
         let workspace = self.workspace();
         let root = workspace.root.clone();
@@ -143,89 +179,31 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             let Ok(cursor) = crate::position::byte_offset(source.lines(), position) else {
                 return self.source_reply(id, crate::query::unavailable(&query));
             };
-            let view = self.open.view();
-            let reverse_lookup =
-                matches!(query, SourceQuery::References(_) | SourceQuery::Rename(_));
-            let source_name = reverse_lookup
-                && view
-                    .get(uri)
-                    .map(|snapshot| snapshot.names())
-                    .unwrap_or_else(|| {
-                        Arc::new(tola_typst_syntax::names::SourceNames::new(source.clone()))
-                    })
-                    .occurrence(cursor)
-                    .is_some();
-            if source_name && !view.is_unnamed(source.id()) {
-                let package_locations = self.package_locations();
-                let boundary = self.source_boundary(&root);
-                let Some((serial, cancellation)) = self.admit(&id)? else {
-                    return Ok(());
-                };
-                self.analyses.push_back(AnalysisRequest {
-                    id,
-                    serial,
-                    root,
-                    view,
-                    source,
-                    cursor,
-                    package_locations,
-                    boundary,
-                    query,
-                    source_revision: self.open.revision(),
-                    cancellation,
-                });
-                return Ok(());
+            if matches!(query, SourceQuery::Completion(_))
+                && let Some(reply) = crate::query::source_completion_reply(&source, cursor)
+            {
+                return self.source_reply(id, reply);
             }
-            let source_reply = if source_name
-                || matches!(
-                    query,
-                    SourceQuery::Definition(_)
-                        | SourceQuery::PrepareRename(_)
-                        | SourceQuery::DocumentHighlights(_)
-                ) {
-                let locations = self.package_locations();
-                let boundary = self.source_boundary(&root);
-                self.source_graph(&root, &source).and_then(|graph| {
-                    // A spelling the source-only graph cannot bind — an item or wildcard of a
-                    // dynamic import — answers from the compiler lane instead.
-                    if matches!(
-                        query,
-                        SourceQuery::Definition(_)
-                            | SourceQuery::PrepareRename(_)
-                            | SourceQuery::DocumentHighlights(_)
-                    ) && !crate::analysis::unproven(&graph, &source, cursor, &query).is_empty()
-                    {
-                        return Ok(None);
-                    }
-                    crate::analysis::respond(
-                        &graph,
-                        &source,
-                        cursor,
-                        &query,
-                        &root,
-                        locations.as_ref(),
-                        &boundary,
-                    )
-                })
-            } else {
-                crate::query::source_reply(&source, cursor, &query)
-            };
+            let source_analysis = matches!(
+                query,
+                SourceQuery::Definition(_)
+                    | SourceQuery::PrepareRename(_)
+                    | SourceQuery::DocumentHighlights(_)
+                    | SourceQuery::References(_)
+                    | SourceQuery::Rename(_)
+            );
+            if source_analysis
+                || (matches!(query, SourceQuery::Completion(_))
+                    && (is_untitled(uri)
+                        || !self
+                            .checked
+                            .is_some_and(|(revision, _)| revision == self.revision)))
+            {
+                return self.enqueue_analysis(id, source, AnalysisTask::Query { query, cursor });
+            }
+            let source_reply = crate::query::source_reply(&source, cursor, &query);
             match source_reply {
-                Ok(Some(mut reply)) => {
-                    let client_root = crate::uri::ClientRoot::new(&root);
-                    if let (SourceReply::Definition(Some(definition)), Some(directory)) =
-                        (&mut reply, &package_sources)
-                        && let Err(error) = crate::query::package_source_definition(
-                            definition,
-                            directory,
-                            &client_root,
-                            &self.shutdown.token(),
-                        )
-                    {
-                        return self.reply(failed_response(id, error));
-                    }
-                    return self.source_reply(id, reply);
-                }
+                Ok(Some(reply)) => return self.source_reply(id, reply),
                 Err(error) => return self.reply(failed_response(id, error)),
                 Ok(None) => {}
             }
@@ -293,7 +271,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .item
             .data
             .as_ref()
-            .and_then(|data| crate::call_hierarchy::item_file(data, &root));
+            .and_then(|data| crate::call_hierarchy::item_file(data, &self.source_root()));
         let source = node.and_then(|node| {
             self.source(&parameters.item.uri)
                 .filter(|source| source.id() == node)
@@ -324,10 +302,232 @@ mod tests {
         response,
     };
     use lsp_server::Request;
+    use lsp_types::CompletionResponse;
     use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
+    use std::sync::Arc;
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
+
+    fn finish_analysis(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
+        let request = connection.next_analysis().expect("queued analysis");
+        connection
+            .completed(crate::compiler::analyze(
+                &mut crate::analysis::DiskSources::default(),
+                &mut crate::analysis::GraphCache::default(),
+                request,
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn configured_root_preserves_client_locations() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let content = root.join("content");
+        std::fs::create_dir(&content).unwrap();
+        std::fs::write(root.join("tola.toml"), "").unwrap();
+        std::fs::write(root.join("lib.typ"), "#let marker = 1\n").unwrap();
+        std::fs::write(content.join("lib.typ"), "#let marker = 2\n").unwrap();
+        std::fs::write(content.join("local.typ"), "#let nearby = 3\n").unwrap();
+        let text = "#import \"/lib.typ\": marker\n#import \"local.typ\": nearby\n#marker\n#nearby";
+        std::fs::write(content.join("page.typ"), text).unwrap();
+        std::fs::write(
+            root.join("site.typ"),
+            "#document(\"index.html\", format: \"html\")[#include \"content/page.typ\"]",
+        )
+        .unwrap();
+        let mut workspaces = vec![content];
+        #[cfg(unix)]
+        {
+            let alias = root.join("client");
+            std::os::unix::fs::symlink(&workspaces[0], &alias).unwrap();
+            workspaces.push(alias);
+        }
+        for workspace in workspaces {
+            let mut connection = Connection::new(
+                Vec::new(),
+                |_: &[Diagnostic]| {},
+                tola_build::cancellation::BuildCanceller::new(),
+                tola_build::BuildResources::default(),
+                Some(root.join("tola.toml")),
+                None,
+                &[],
+            );
+            connection
+                .request(Request::new(
+                    1.into(),
+                    request::Initialize::METHOD.into(),
+                    json!({"rootUri":crate::uri::from_file_path(&workspace).unwrap(),"capabilities":{}}),
+                ))
+                .unwrap();
+            response(&mut connection);
+            let _ = connection
+                .notification(lsp_server::Notification::new(
+                    "initialized".into(),
+                    json!({}),
+                ))
+                .unwrap();
+            let uri = crate::uri::from_file_path(&workspace.join("page.typ")).unwrap();
+            open_document(&mut connection, &uri, 1, text);
+            assert_eq!(
+                connection
+                    .source(&uri)
+                    .unwrap()
+                    .id()
+                    .vpath()
+                    .get_without_slash(),
+                "content/page.typ"
+            );
+            let compiler_root = root.clone();
+            let mut compiler = crate::compiler::SourceCompiler::new(
+                move |_: &std::path::Path, _: &[(PathBuf, Arc<str>)]| {
+                    crate::server::tests::load_configuration(&compiler_root)
+                },
+                tola_build::BuildResources::default(),
+            );
+            for warm in [false, true] {
+                if warm {
+                    let checked = compiler.compile(connection.next_job(Instant::now()).unwrap());
+                    connection.completed(checked).unwrap();
+                    assert_eq!(connection.checked, Some((connection.revision, true)));
+                }
+                for (line, target) in [(2, root.join("lib.typ")), (3, workspace.join("local.typ"))]
+                {
+                    connection
+                        .request(Request::new(
+                            2.into(),
+                            request::GotoDefinition::METHOD.into(),
+                            json!({"textDocument":{"uri":uri.as_str()},"position":{"line":line,"character":3}}),
+                        ))
+                        .unwrap();
+                    finish_analysis(&mut connection);
+                    let definition = response(&mut connection).response_result.unwrap();
+                    assert_eq!(
+                        definition["uri"],
+                        crate::uri::from_file_path(&target).unwrap().as_str()
+                    );
+                }
+                connection
+                    .request(Request::new(
+                        3.into(),
+                        request::References::METHOD.into(),
+                        json!({"textDocument":{"uri":uri.as_str()},"position":{"line":2,"character":3},"context":{"includeDeclaration":true}}),
+                    ))
+                    .unwrap();
+                let analysis = connection.next_analysis().unwrap();
+                connection
+                    .completed(crate::compiler::analyze(
+                        &mut crate::analysis::DiskSources::default(),
+                        &mut crate::analysis::GraphCache::default(),
+                        analysis,
+                    ))
+                    .unwrap();
+                let references = response(&mut connection).response_result.unwrap();
+                let targets = references
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|location| location["uri"].as_str().unwrap().to_owned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    targets,
+                    [
+                        uri.as_str().to_owned(),
+                        crate::uri::from_file_path(&root.join("lib.typ"))
+                            .unwrap()
+                            .as_str()
+                            .to_owned()
+                    ]
+                    .into_iter()
+                    .collect()
+                );
+
+                connection
+                    .request(Request::new(
+                        4.into(),
+                        request::CallHierarchyPrepare::METHOD.into(),
+                        json!({"textDocument":{"uri":uri.as_str()},"position":{"line":0,"character":12}}),
+                    ))
+                    .unwrap();
+                let hierarchy = response(&mut connection).response_result.unwrap();
+                assert_eq!(
+                    hierarchy[0]["uri"],
+                    crate::uri::from_file_path(&root.join("lib.typ"))
+                        .unwrap()
+                        .as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn completion_answers_before_first_check() {
+        for (marked, expected) in [
+            (
+                "/// The response.\n#let answer(value) = value\n#ans|",
+                Some("answer"),
+            ),
+            ("#math.eq|", Some("equation")),
+            ("#import \"library.typ\": exp|", Some("exported")),
+            ("// ordinary comment|", None),
+            ("`raw te|xt`", None),
+            ("#let label = \"te|xt\"", None),
+        ] {
+            let cursor = marked.find('|').unwrap();
+            let text = marked.replacen('|', "", 1);
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(
+                directory.path().join("library.typ"),
+                "/// The exported function.\n#let exported(value) = value\n",
+            )
+            .unwrap();
+            let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
+            let uri = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
+            open_document(&mut connection, &uri, 1, &text);
+            let source = Source::detached(text.clone());
+            let position = crate::position::utf16_range(source.lines(), cursor..cursor)
+                .unwrap()
+                .start;
+            connection
+                .request(Request::new(
+                    8.into(),
+                    request::Completion::METHOD.into(),
+                    json!({"textDocument":{"uri":uri.as_str()},"position":position}),
+                ))
+                .unwrap();
+            let analysis = connection.next_analysis();
+            assert_eq!(analysis.is_some(), expected.is_some());
+            if let Some(analysis) = analysis {
+                assert!(connection.writer.is_empty());
+                connection
+                    .completed(crate::compiler::analyze(
+                        &mut crate::analysis::DiskSources::default(),
+                        &mut crate::analysis::GraphCache::default(),
+                        analysis,
+                    ))
+                    .unwrap();
+            }
+            let completion: CompletionResponse =
+                serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
+            let items = match completion {
+                CompletionResponse::Array(items) => items,
+                CompletionResponse::List(list) => list.items,
+            };
+            if let Some(expected) = expected {
+                let selected = items.iter().find(|item| item.label == expected).unwrap();
+                assert!(selected.documentation.is_some(), "{expected}: {selected:?}");
+            } else {
+                assert!(items.is_empty(), "{text}: {items:?}");
+            }
+            assert!(connection.checked.is_none());
+            assert!(matches!(
+                connection.next_job(Instant::now()),
+                Some(SourceJob::Check(_))
+            ));
+            assert!(connection.next_job(Instant::now()).is_none());
+        }
+    }
 
     #[test]
     fn unnamed_highlights_need_no_compilation() {
@@ -346,6 +546,7 @@ mod tests {
                 json!({"textDocument":{"uri":uri.as_str()},"position":position}),
             ))
             .unwrap();
+        finish_analysis(&mut connection);
         let highlights: Vec<lsp_types::DocumentHighlight> =
             serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
         let expected: Vec<_> = text
@@ -367,7 +568,7 @@ mod tests {
     /// The compiler lane finishes what the source-only graph cannot prove, under the client's own
     /// request.
     #[test]
-    fn dynamic_import_references_continue_in_the_compiler_lane() {
+    fn dynamic_references_reach_compiler() {
         let directory = tempfile::tempdir().unwrap();
         let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
         let (uri, position) = dynamic_import_position(&mut connection, directory.path());
@@ -401,7 +602,7 @@ mod tests {
     /// A definition, highlight, or rename preparation the source-only graph cannot bind answers
     /// from the compiler lane, under the same request, instead of from the names lane.
     #[test]
-    fn dynamic_import_editor_requests_reach_the_compiler_lane() {
+    fn dynamic_navigation_reaches_compiler() {
         for (method, matches_query) in [
             (
                 request::GotoDefinition::METHOD,
@@ -433,6 +634,7 @@ mod tests {
                 connection.writer.is_empty(),
                 "{method} answered in the names lane"
             );
+            finish_analysis(&mut connection);
             let Some(SourceJob::Query(request)) = connection.next_job(Instant::now()) else {
                 panic!("the compiler lane owns {method}");
             };
@@ -470,6 +672,7 @@ mod tests {
                 json!({"textDocument":{"uri":uri.as_str()},"position":position}),
             ))
             .unwrap();
+        finish_analysis(&mut connection);
         let highlights: Vec<lsp_types::DocumentHighlight> =
             serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
         assert_eq!(highlights.len(), 2, "{highlights:?}");

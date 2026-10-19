@@ -302,13 +302,12 @@ mod tests {
     #[test]
     fn documents_answer_without_site_configuration() {
         let site = SiteDirectory::documents();
+        let marked = "#let brand = rgb(\"#777\")\n#bra|nd\n";
+        site.write("page.typ", &marked.replace('|', ""));
         let mut client = documents_session(&site);
 
         let hover = client
-            .hover_marked(
-                "content/document.typ",
-                "#let brand = rgb(\"#777\")\n#bra|nd\n",
-            )
+            .hover_marked("page.typ", marked)
             .expect("a hover about a document of a workspace that holds no site configuration");
         let lsp_types::HoverContents::Markup(markup) = hover.contents else {
             panic!("plain markdown, got {:?}", hover.contents);
@@ -318,6 +317,9 @@ mod tests {
             "{}",
             markup.value
         );
+        assert!(!site.path("content").exists());
+        assert!(!site.path("tola.toml").exists());
+        assert!(client.diagnostics("page.typ").is_empty());
 
         client.shutdown();
     }

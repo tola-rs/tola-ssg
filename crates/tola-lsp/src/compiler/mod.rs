@@ -11,9 +11,9 @@ pub(crate) use analyze::analyze;
 pub(crate) use check::{CheckedSources, checked_root};
 pub(crate) use compilations::RevisionCompilations;
 pub(crate) use jobs::{
-    AnalysisRequest, CheckRequest, IncomingCallsRead, LensesRead, PackageSourceRead, QueryRequest,
-    RenameRead, RouteIndexRead, RouteRead, SelectionRead, SourceInputs, SourceJob, SourceOverrides,
-    SymbolsRead,
+    AnalysisRequest, AnalysisTask, CheckRequest, IncomingCallsRead, LensesRead, PackageSourceRead,
+    QueryRequest, RenameRead, RouteIndexRead, RouteRead, SelectionRead, SourceInputs, SourceJob,
+    SourceOverrides, SymbolsRead, TokensKind, TokensRead,
 };
 pub(crate) use worker::{SourceCompilation, SourceCompiler, SourceFailure};
 
@@ -73,6 +73,9 @@ pub(crate) mod tests {
                 assert!(matches!(checked, Err(SourceFailure::Cancelled)));
             }
             SourceCompilation::Answered { response, .. } => {
+                assert!(matches!(response, Err(SourceFailure::Cancelled)));
+            }
+            SourceCompilation::Tokens { response, .. } => {
                 assert!(matches!(response, Err(SourceFailure::Cancelled)));
             }
             SourceCompilation::Continued(_) => panic!("a cancelled analysis is answered"),

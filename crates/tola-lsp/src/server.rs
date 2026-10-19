@@ -85,9 +85,7 @@ pub(crate) mod tests {
         /// A workspace that holds no site configuration: no `tola.toml` at or above its root.
         pub(super) fn documents() -> Self {
             let directory = tempfile::tempdir().expect("a temporary workspace directory");
-            let site = Self { directory };
-            std::fs::create_dir_all(site.path("content")).expect("a content root");
-            site
+            Self { directory }
         }
 
         pub(super) fn root(&self) -> &Path {

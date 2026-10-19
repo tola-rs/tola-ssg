@@ -47,44 +47,55 @@ pub(super) fn legend() -> SemanticTokensLegend {
     }
 }
 
-/// Every token of the source, in the protocol's relative encoding.
-pub(super) fn tokens(source: &Source, names: &NameGraph) -> SemanticTokens {
-    encoded(source, names, |_| true)
-}
-
-/// The tokens the requested range covers, encoded from the first of them.
-///
-/// A range reply has no identifier: only a full reply is a revision a delta is measured from.
-pub(super) fn in_range(
+/// Full or range tokens without a result identifier; the connection commits their delta baseline.
+pub(crate) fn tokens(
     source: &Source,
     names: &NameGraph,
-    range: lsp_types::Range,
-) -> SemanticTokens {
-    let lines = source.lines();
-    let start = crate::position::byte_offset(lines, range.start).unwrap_or(0);
-    let end = crate::position::byte_offset(lines, range.end).unwrap_or(source.text().len());
-    encoded(source, names, |token| {
-        token.range.end > start && token.range.start < end
-    })
+    range: Option<lsp_types::Range>,
+    cancellation: &tola_build::cancellation::BuildCancellation,
+) -> anyhow::Result<SemanticTokens> {
+    let bytes = range.map(|range| {
+        let start = crate::position::byte_offset(source.lines(), range.start).unwrap_or(0);
+        let end =
+            crate::position::byte_offset(source.lines(), range.end).unwrap_or(source.text().len());
+        start..end
+    });
+    Ok(encoded_with_check(
+        source,
+        names,
+        |token| {
+            bytes
+                .as_ref()
+                .is_none_or(|range| token.range.end > range.start && token.range.start < range.end)
+        },
+        || cancellation.ensure_active(),
+    )?)
 }
 
-/// The tokens this predicate keeps, in the protocol's relative encoding.
-fn encoded(source: &Source, names: &NameGraph, keep: impl Fn(&Token) -> bool) -> SemanticTokens {
+fn encoded_with_check<E>(
+    source: &Source,
+    names: &NameGraph,
+    keep: impl Fn(&Token) -> bool,
+    check: impl Fn() -> Result<(), E>,
+) -> Result<SemanticTokens, E> {
+    check()?;
     let mut encoder = Encoder {
         source,
         first_break: crate::position::first_break(source.text()),
         tokens: Vec::new(),
         previous: None,
     };
-    for token in tola_typst_syntax::tokens::tokens(source, names) {
+    for token in tola_typst_syntax::tokens::tokens_with_check(source, names, &check)? {
+        check()?;
         if keep(&token) {
-            encoder.push(token);
+            encoder.push(token, &check)?;
         }
     }
-    SemanticTokens {
+    check()?;
+    Ok(SemanticTokens {
         result_id: None,
         data: encoder.tokens,
-    }
+    })
 }
 
 /// The index one token class has in [`TYPES`].
@@ -170,16 +181,18 @@ impl Encoder<'_> {
     ///
     /// A token never crosses a line break, and its line start and length count UTF-16 code units,
     /// which is the position encoding this server negotiates.
-    fn push(&mut self, token: Token) {
+    fn push<E>(&mut self, token: Token, check: &impl Fn() -> Result<(), E>) -> Result<(), E> {
+        check()?;
         let range = token.range;
         let lines = self.source.lines();
         let (Some(first), Some(last)) = (
             lines.byte_to_line(range.start),
             lines.byte_to_line(range.end.saturating_sub(1)),
         ) else {
-            return;
+            return Ok(());
         };
         for line in first..=last {
+            check()?;
             // A line without a following newline is the source's last line, whose end is the
             // text's own length; `line_to_byte` has no entry past it.
             let Some(line_start) = lines.line_to_byte(line) else {
@@ -230,6 +243,8 @@ impl Encoder<'_> {
             });
             self.previous = Some((line, column));
         }
+        check()?;
+        Ok(())
     }
 }
 
@@ -260,25 +275,31 @@ mod tests {
         .unwrap();
         let mut line = 0;
         let mut start = 0;
-        tokens(&source, &names)
-            .data
-            .into_iter()
-            .map(|token| {
-                line += token.delta_line;
-                start = if token.delta_line == 0 {
-                    start + token.delta_start
-                } else {
-                    token.delta_start
-                };
-                Recorded {
-                    line,
-                    start,
-                    length: token.length,
-                    token_type: TYPES[token.token_type as usize].as_str().to_owned(),
-                    modifiers: token.token_modifiers_bitset,
-                }
-            })
-            .collect()
+        tokens(
+            &source,
+            &names,
+            None,
+            &tola_build::cancellation::BuildCancellation::new(),
+        )
+        .unwrap()
+        .data
+        .into_iter()
+        .map(|token| {
+            line += token.delta_line;
+            start = if token.delta_line == 0 {
+                start + token.delta_start
+            } else {
+                token.delta_start
+            };
+            Recorded {
+                line,
+                start,
+                length: token.length,
+                token_type: TYPES[token.token_type as usize].as_str().to_owned(),
+                modifiers: token.token_modifiers_bitset,
+            }
+        })
+        .collect()
     }
 
     /// The token that begins at the first occurrence of `needle`.

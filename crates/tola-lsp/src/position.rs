@@ -16,7 +16,7 @@ use tola_typst_syntax::position::{
 };
 use tola_typst_syntax::typst_syntax::Lines;
 
-/// The byte offset one position addresses, or an error when it is past the document or its line.
+/// The byte offset one position addresses; columns beyond a line clamp to its end.
 pub(crate) fn byte_offset<T: AsRef<str>>(lines: &Lines<T>, at: Position) -> Result<usize> {
     let text = lines.text();
     // A break after the compiler's own line for this position cannot move it, and one inside that
@@ -27,7 +27,21 @@ pub(crate) fn byte_offset<T: AsRef<str>>(lines: &Lines<T>, at: Position) -> Resu
     if protocol_breaks_differ(first_break(text), reach) {
         return protocol_byte_offset(text, at.line, at.character);
     }
-    source_byte_offset(lines, utf16(at))
+    match source_byte_offset(lines, utf16(at)) {
+        Ok(byte) => Ok(byte),
+        Err(error) => {
+            let Some(line) = lines.line_to_range(at.line as usize) else {
+                return Err(error);
+            };
+            let text =
+                text[line.clone()].trim_end_matches(tola_typst_syntax::typst_syntax::is_newline);
+            if at.character as usize > utf16_len(text) {
+                Ok(line.start + text.len())
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// The positions that bound one byte range, or `None` when the range is reversed or out of reach.
@@ -103,8 +117,7 @@ fn protocol_breaks_differ(first_break: Option<usize>, reach: usize) -> bool {
 
 /// The byte offset the protocol addresses at `line` and `character` of `text`.
 ///
-/// A position past the document's lines or past the end of its line is an error, and a character
-/// that splits a UTF-16 surrogate pair names no byte.
+/// A column beyond a line clamps to its end; a missing line or a split surrogate pair names no byte.
 fn protocol_byte_offset(text: &str, line: u32, character: u32) -> Result<usize> {
     let mut start = 0usize;
     for _ in 0..line {
@@ -126,11 +139,7 @@ fn protocol_byte_offset(text: &str, line: u32, character: u32) -> Result<usize> 
             bail!("source position splits a UTF-16 surrogate pair");
         }
     }
-    if units == character {
-        Ok(end)
-    } else {
-        bail!("source position character exceeds the line")
-    }
+    Ok(end)
 }
 
 /// The protocol position the byte offset `byte` addresses in `text`.
@@ -206,6 +215,23 @@ mod tests {
             utf16_range(&lines, 4..5),
             Some(Range::new(Position::new(1, 0), Position::new(1, 1)))
         );
+    }
+
+    #[test]
+    fn columns_clamp_to_line_ends() {
+        for text in ["a🦊b\r\nnext", "a\u{2028}🦊b\r\nnext"] {
+            let lines = Lines::new(text);
+            let end = text.find('\r').unwrap();
+            assert_eq!(byte_offset(&lines, Position::new(0, 1000)).unwrap(), end);
+            assert_eq!(
+                byte_offset(&lines, Position::new(1, 1000)).unwrap(),
+                text.len()
+            );
+            assert!(byte_offset(&lines, Position::new(2, 0)).is_err());
+        }
+        for (text, split) in [("a🦊b", 2), ("a\u{2028}🦊b", 3)] {
+            assert!(byte_offset(&Lines::new(text), Position::new(0, split)).is_err());
+        }
     }
 
     /// A break that ends the compiler's line is probed with that line, so a position past the
@@ -347,9 +373,9 @@ mod tests {
                     .start;
                 let recovered = byte_offset(&lines, position);
                 if inside_carriage_return_pair(&text, at) {
-                    // A byte between `\r` and `\n` addresses no character, so its position is
-                    // refused rather than read back as a byte of either line.
-                    prop_assert!(recovered.is_err(), "{:?} at {}: {:?}", text, at, position);
+                    // The byte between `\r` and `\n` has no protocol position; its excessive
+                    // column clamps to the position before the break.
+                    prop_assert_eq!(recovered.ok(), Some(at - 1), "{:?} at {}: {:?}", text, at, position);
                     continue;
                 }
                 let line = protocol_lines[position.line as usize];

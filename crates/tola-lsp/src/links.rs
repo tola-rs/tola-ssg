@@ -10,9 +10,12 @@ use lsp_types::{DocumentLink, Hover};
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
 use tola_build::config::ResolvedSiteConfig;
-use tola_typst::typst::foundations::PathOrStr;
+use tola_typst::typst::foundations::{PathOrStr, Value};
+use tola_typst::typst::loading::DataSource;
+use tola_typst::typst::model::CslSource;
 use tola_typst::typst::syntax::ast::AstNode;
 use tola_typst::typst::syntax::{LinkedNode, Source, Span, SyntaxKind, ast};
+use tola_typst_syntax::names::SourceNames;
 
 use crate::position;
 use crate::sentence::listed;
@@ -20,7 +23,7 @@ use crate::sentence::listed;
 /// The file the path at `cursor` names, and the range the author wrote it at.
 fn target_at(source: &Source, root: &Path, cursor: usize) -> Option<(PathBuf, lsp_types::Range)> {
     let at = position::utf16_range(source.lines(), cursor..cursor)?;
-    paths(source, root)?
+    paths(source, root, &crate::uri::ClientRoot::new(root))?
         .into_iter()
         .find(|link| link.range.start <= at.start && at.start <= link.range.end)
         .and_then(|link| {
@@ -89,11 +92,22 @@ fn written_path(source: &Source, range: lsp_types::Range) -> Option<String> {
     Some(source.text().get(start..end)?.to_owned())
 }
 
-/// `root` is the root the client named: a target is addressed as that root spells it, so a
-/// normalized root would answer every link in the wrong spelling.
-pub(super) fn paths(source: &Source, root: &Path) -> Option<Vec<DocumentLink>> {
+/// The source root resolves file identities; the client root chooses their URI spelling.
+pub(super) fn paths(
+    source: &Source,
+    source_root: &Path,
+    client_root: &crate::uri::ClientRoot,
+) -> Option<Vec<DocumentLink>> {
     let mut links = Vec::new();
-    collect_links(&LinkedNode::new(source.root()), source, root, &mut links);
+    let names = SourceNames::new(source.clone());
+    collect_links(
+        &LinkedNode::new(source.root()),
+        source,
+        &names,
+        source_root,
+        client_root,
+        &mut links,
+    );
     links.sort_by_key(|link| (link.range.start.line, link.range.start.character));
     (!links.is_empty()).then_some(links)
 }
@@ -101,7 +115,9 @@ pub(super) fn paths(source: &Source, root: &Path) -> Option<Vec<DocumentLink>> {
 fn collect_links(
     node: &LinkedNode<'_>,
     source: &Source,
-    root: &Path,
+    names: &SourceNames,
+    source_root: &Path,
+    client_root: &crate::uri::ClientRoot,
     links: &mut Vec<DocumentLink>,
 ) {
     let written: Vec<(Span, String)> = match node.kind() {
@@ -115,25 +131,31 @@ fn collect_links(
             .and_then(|include| string_literal(include.source()))
             .into_iter()
             .collect(),
-        SyntaxKind::FuncCall => reader_paths(node),
+        SyntaxKind::FuncCall => reader_paths(node, names),
         _ => Vec::new(),
     };
     for (span, path) in written {
-        push_link(node, span, &path, source, root, links);
+        push_link(node, span, &path, source, source_root, client_root, links);
     }
     for child in node.children() {
-        collect_links(&child, source, root, links);
+        collect_links(&child, source, names, source_root, client_root, links);
     }
 }
 
 /// The paths one reader call names: every positional source, and the named ones that name files.
-fn reader_paths(node: &LinkedNode<'_>) -> Vec<(Span, String)> {
+fn reader_paths(node: &LinkedNode<'_>, names: &SourceNames) -> Vec<(Span, String)> {
     let Some(call) = node.cast::<ast::FuncCall>() else {
         return Vec::new();
     };
     let ast::Expr::Ident(name) = call.callee() else {
         return Vec::new();
     };
+    if node
+        .find(name.span())
+        .is_some_and(|callee| names.declared_at(callee.range().start).is_some())
+    {
+        return Vec::new();
+    }
     // Only a file the site already holds is a link; an output the site creates is not.
     if tola_typst_syntax::syntax::path_base(name.get().as_str())
         != Some(tola_typst_syntax::syntax::PathBase::File)
@@ -144,10 +166,19 @@ fn reader_paths(node: &LinkedNode<'_>) -> Vec<(Span, String)> {
         .items()
         .filter_map(|item| match item {
             ast::Arg::Pos(expression) => string_literal(expression),
-            // `path:` is how a reader takes its file, and `style:` the sheet a bibliography
-            // cites with; both name a file the site has.
-            ast::Arg::Named(named) if matches!(named.name().get().as_str(), "path" | "style") => {
+            ast::Arg::Named(named) if named.name().get().as_str() == "path" => {
                 string_literal(named.expr())
+            }
+            ast::Arg::Named(named)
+                if name.get().as_str() == "bibliography"
+                    && named.name().get().as_str() == "style" =>
+            {
+                let (span, text) = string_literal(named.expr())?;
+                matches!(
+                    Value::Str(text.as_str().into()).cast::<CslSource>().ok(),
+                    Some(CslSource::Normal(DataSource::Path(_)))
+                )
+                .then_some((span, text))
             }
             _ => None,
         })
@@ -168,7 +199,8 @@ fn push_link(
     span: Span,
     path: &str,
     source: &Source,
-    root: &Path,
+    source_root: &Path,
+    client_root: &crate::uri::ClientRoot,
     links: &mut Vec<DocumentLink>,
 ) {
     // A package specification and a URL both name something a source file cannot address.
@@ -178,7 +210,8 @@ fn push_link(
     let Ok(resolved) = PathOrStr::Str(path.into()).resolve(source.id()) else {
         return;
     };
-    let Ok(target) = crate::identity::source_uri(resolved.intern(), root) else {
+    let Some(target) = crate::identity::client_uri(resolved.intern(), source_root, client_root)
+    else {
         return;
     };
     let Some(written) = node.find(span) else {
@@ -217,7 +250,9 @@ mod tests {
         )
         .intern();
         let source = Source::new(id, text.to_owned());
-        let link = paths(&source, root)?.into_iter().next()?;
+        let link = paths(&source, root, &crate::uri::ClientRoot::new(root))?
+            .into_iter()
+            .next()?;
         let target = crate::uri::to_site_path(link.target.as_ref()?.as_str()).ok()?;
         let inside = target.strip_prefix(root).ok()?;
         Some(inside.to_string_lossy().replace('\\', "/"))
@@ -275,7 +310,8 @@ mod tests {
         )
         .intern();
         let source = Source::new(id, text.to_owned());
-        paths(&source, &site_root())
+        let root = site_root();
+        paths(&source, &root, &crate::uri::ClientRoot::new(&root))
             .unwrap_or_default()
             .into_iter()
             .map(|link| {
@@ -336,6 +372,28 @@ mod tests {
     }
 
     #[test]
+    fn bibliography_style_names_are_no_paths() {
+        assert_eq!(
+            rendered(
+                "content/post.typ",
+                "#bibliography(\"refs.bib\", style: \"ieee\")\n"
+            ),
+            [link_line("refs.bib", "content/refs.bib")]
+        );
+    }
+
+    #[test]
+    fn reader_names_respect_lexical_bindings() {
+        assert_eq!(
+            rendered(
+                "site.typ",
+                "#{ let image(path) = path; image(\"caption\") }\n#image(\"logo.svg\")\n"
+            ),
+            [link_line("logo.svg", "logo.svg")]
+        );
+    }
+
+    #[test]
     fn paths_that_name_no_file_declare_no_link() {
         assert_eq!(
             rendered(
@@ -348,8 +406,6 @@ mod tests {
         );
     }
 
-    /// The document link lane hands `paths` the root the editor named, so a target addresses the
-    /// document in that spelling.
     #[test]
     fn link_target_follows_the_caller_root_spelling() {
         let directory = tempfile::tempdir().unwrap();
@@ -360,12 +416,16 @@ mod tests {
         )
         .intern();
         let source = Source::new(id, "#include \"page.typ\"\n".to_owned());
-        let target = paths(&source, &spelled)
-            .unwrap_or_default()
-            .into_iter()
-            .next()
-            .and_then(|link| link.target)
-            .expect("a link target");
+        let target = paths(
+            &source,
+            directory.path(),
+            &crate::uri::ClientRoot::with_resolved(&spelled, directory.path()),
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .and_then(|link| link.target)
+        .expect("a link target");
         assert_eq!(
             target,
             crate::uri::from_file_path(&spelled.join("content/page.typ")).unwrap()

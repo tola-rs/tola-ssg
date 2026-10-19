@@ -333,7 +333,12 @@ mod tests {
             "textDocument/completion",
             "#import \"@tola/document:0.0.0\": current-document\n#context current-document().|\n#unresolved_after_cursor",
         );
-        assert_eq!(invalid, json!([]));
+        let invalid: Vec<lsp_types::CompletionItem> = serde_json::from_value(invalid).unwrap();
+        let invalid = completion_labels(&invalid);
+        assert!(invalid.contains(&"keys"), "{invalid:?}");
+        for field in ["output", "route", "location"] {
+            assert!(!invalid.contains(&field), "{field}: {invalid:?}");
+        }
 
         let checked = site
             .session

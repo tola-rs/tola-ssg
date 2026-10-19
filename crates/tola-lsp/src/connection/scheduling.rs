@@ -74,7 +74,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 
     pub(crate) fn next_analysis(&mut self) -> Option<AnalysisRequest> {
         while let Some(request) = self.analyses.pop_front() {
-            if !request.cancellation.is_cancelled() {
+            if !request.sources.cancellation.is_cancelled() {
                 return Some(request);
             }
         }

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lsp_types::{
@@ -15,12 +16,24 @@ use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::foundations::Value;
 use tola_typst::typst::syntax::ast;
 use tola_typst::typst::syntax::{LinkedNode, Side, Source, Span, SyntaxKind};
+use tola_typst_syntax::names::{Initializer, SourceNames};
 
 use crate::markdown;
 use crate::position;
 use crate::protocol::SourceReply;
 
+mod callable;
+mod definition;
+mod source;
+
+pub(crate) use source::{
+    source_completion_reply, source_import_completion, source_member_completion,
+    source_member_graph_needed, source_name_completion, source_name_graph_needed,
+    source_name_position,
+};
+
 use super::context::{SelectedSyntax, Selection};
+use super::expression::ExpressionType;
 use super::hover::SECTION_JOIN;
 use super::meta::{meta_call, meta_key};
 use super::records::origin::{field_chain, record_origin};
@@ -30,7 +43,7 @@ use super::site_schema::{
     DeclaredKey, declared_documentation, descriptor_line, descriptor_type, rejected_key_note,
 };
 
-/// The type one completion item shows beside its label, as Tinymist's label details hold it.
+/// The type one completion item shows beside its label.
 fn labelled_type(ty: Option<String>) -> CompletionItemLabelDetails {
     CompletionItemLabelDetails {
         detail: None,
@@ -65,6 +78,55 @@ fn is_path_position(source: &Source, cursor: usize) -> bool {
             }
         })
 }
+/// Whether the cursor stands in text no name completion can answer.
+pub(in crate::query) fn opaque_at(source: &Source, cursor: usize) -> bool {
+    let mut current = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before);
+    while let Some(node) = current {
+        if matches!(
+            node.kind(),
+            SyntaxKind::LineComment | SyntaxKind::BlockComment | SyntaxKind::Str | SyntaxKind::Raw
+        ) {
+            return true;
+        }
+        // An interpolation inside a string or raw block is code, not the text around it.
+        if !matches!(
+            node.kind(),
+            SyntaxKind::Text | SyntaxKind::Str | SyntaxKind::Raw
+        ) && node.cast::<ast::Expr>().is_some()
+        {
+            return false;
+        }
+        current = node.parent().cloned();
+    }
+    false
+}
+
+/// Whether the cursor stands in a raw block, which has no code names to offer.
+pub(crate) fn raw_at(source: &Source, cursor: usize) -> bool {
+    let mut current = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before);
+    while let Some(node) = current {
+        match node.kind() {
+            SyntaxKind::Raw => return true,
+            SyntaxKind::Str | SyntaxKind::LineComment | SyntaxKind::BlockComment => return false,
+            _ => {}
+        }
+        current = node.parent().cloned();
+    }
+    false
+}
+
+/// Whether the cursor stands inside a comment, where only the documentation template answers.
+pub(in crate::query) fn comment_at(source: &Source, cursor: usize) -> bool {
+    LinkedNode::new(source.root())
+        .leaf_at(cursor, Side::Before)
+        .is_some_and(|leaf| {
+            matches!(
+                leaf.kind(),
+                SyntaxKind::LineComment | SyntaxKind::BlockComment
+            )
+        })
+}
+
 /// The completion a `///` comment above a function definition offers.
 ///
 /// The template names the closure's own parameters, so an author writes the descriptions where
@@ -137,6 +199,28 @@ pub(in crate::query) fn documentation_template(
     ])))
 }
 
+/// Whether one name can still complete what the author typed: every typed character appears in
+/// the name, in order. A `-` is part of a kebab-case name, so `al-` still reaches `all-sources`,
+/// and a name whose letters are spread out (`m07` for `marker_000_07`) stays reachable.
+pub(super) fn name_matches(name: &str, prefix: &str) -> bool {
+    let mut spelled = name.chars();
+    prefix
+        .chars()
+        .all(|typed| spelled.by_ref().any(|candidate| candidate == typed))
+}
+
+/// The name bytes one cursor has already typed; a name completion has to start with them.
+pub(super) fn typed_prefix(source: &Source, cursor: usize) -> &str {
+    let Some(leaf) = LinkedNode::new(source.root()).leaf_at(cursor, Side::Before) else {
+        return "";
+    };
+    let range = match leaf.kind() {
+        SyntaxKind::Ident | SyntaxKind::MathIdent => leaf.range(),
+        _ => return "",
+    };
+    &source.text()[range.start..cursor]
+}
+
 /// The next node after `node` at any depth: its next sibling, or that of its nearest ancestor
 /// that has one.
 fn next_node<'a>(node: &LinkedNode<'a>) -> Option<LinkedNode<'a>> {
@@ -154,6 +238,32 @@ pub(in crate::query) fn markdown_documentation(text: impl Into<String>) -> Docum
         kind: MarkupKind::Markdown,
         value: markdown::docs(&text.into()),
     })
+}
+
+/// The declaration the site's source binds one name by, following the name an alias spells.
+fn declared(
+    semantics: &mut Semantic<'_>,
+    bindings: &BTreeMap<String, semantic::Binding>,
+    span: Span,
+) -> Option<(Arc<SourceNames>, usize)> {
+    let mut span = span;
+    let mut followed = Vec::new();
+    loop {
+        let range = semantics.span_range(span)?;
+        let names = semantics.source_names(span.id()?)?;
+        let declaration = names.declared_at(range.start)?;
+        // An alias names another binding; that binding's declaration is what the author reads.
+        if let Initializer::Alias(path) = &names.declarations()[declaration].initializer
+            && let Some(root) = path.segments.first()
+            && let Some(target) = bindings.get(names.text(root))
+            && !followed.contains(&target.span)
+        {
+            followed.push(target.span);
+            span = target.span;
+            continue;
+        }
+        return Some((names, declaration));
+    }
 }
 
 /// Leaves documentation the completed value already supplied untouched.
@@ -208,13 +318,14 @@ impl Selection<'_> {
         };
         let (_, prefix) = self.completion_range(replacement.clone())?;
         let mut items = Vec::new();
-        let bindings = semantics.bindings(node)?;
-        for (name, binding) in bindings {
-            if !name.starts_with(prefix) {
+        let mut packages = BTreeMap::new();
+        let bindings = semantics.bindings(node.clone())?;
+        for (name, binding) in &bindings {
+            if !name_matches(name, prefix) {
                 continue;
             }
-            let value = match binding.value {
-                Some(value) => Some(value),
+            let value = match &binding.value {
+                Some(value) => Some(value.clone()),
                 // Only a Tola binding's value is traced here; an ordinary name answers by label.
                 None if binding.tola => semantics
                     .trace(binding.span)?
@@ -223,20 +334,81 @@ impl Selection<'_> {
                     .map(|(value, _)| value),
                 None => None,
             };
+            let declaration = declared(semantics, &bindings, binding.span);
             let mut item = semantic::completion(
-                &name,
-                value.as_slice(),
+                name,
+                &value
+                    .iter()
+                    .cloned()
+                    .map(ExpressionType::Known)
+                    .collect::<Vec<_>>(),
                 self.completion_edit(replacement.clone(), name.clone())?,
             );
             attach_value_docs(&mut item, semantics, binding.span, value.as_ref());
-            items.push(item);
+            if value.is_none()
+                && let Some((names, declaration)) = &declaration
+            {
+                // No value reached this name, so the kind its declaration promises is the only
+                // kind the editor can show.
+                item.kind = Some(definition::declaration_kind(
+                    &names.declarations()[*declaration].initializer,
+                ));
+            }
+            let shape = match &declaration {
+                Some((names, declaration)) => definition::attach_declaration(
+                    &mut item,
+                    names,
+                    &names.declarations()[*declaration],
+                    &mut packages,
+                    semantics.cancellation(),
+                )?,
+                None => None,
+            };
+            let callable = shape.or_else(|| {
+                value.as_ref().and_then(|value| {
+                    callable::Callable::of_value(value, callable::Receiver::Unbound)
+                })
+            });
+            match callable {
+                Some(callable) => items.extend(callable::callable_items(
+                    item,
+                    self.source,
+                    self.cursor,
+                    &replacement,
+                    callable,
+                )),
+                None => items.push(item),
+            }
         }
-        let seen: std::collections::BTreeSet<String> =
+        // A library name the file did not bind still answers, even when the site failed before
+        // evaluating this position; the file's own bindings above shadow it.
+        let mut seen: std::collections::BTreeSet<String> =
             items.iter().map(|item| item.label.clone()).collect();
+        for (name, value) in semantics.library_bindings(&node) {
+            if !name_matches(&name, prefix) || !seen.insert(name.clone()) {
+                continue;
+            }
+            let mut item = semantic::completion(
+                &name,
+                &[ExpressionType::Known(value.clone())],
+                self.completion_edit(replacement.clone(), name.clone())?,
+            );
+            attach_value_docs(&mut item, semantics, Span::detached(), Some(&value));
+            match callable::Callable::of_value(&value, callable::Receiver::Unbound) {
+                Some(callable) => items.extend(callable::callable_items(
+                    item,
+                    self.source,
+                    self.cursor,
+                    &replacement,
+                    callable,
+                )),
+                None => items.push(item),
+            }
+        }
         items.extend(
             parameters
                 .into_iter()
-                .filter(|item| !seen.contains(item.label.as_str())),
+                .filter(|item| seen.insert(item.label.clone())),
         );
         Ok(items)
     }
@@ -260,9 +432,18 @@ impl Selection<'_> {
         };
         let (_, prefix) = self.completion_range(replacement.clone())?;
         let mut items = Vec::new();
+        if import.imported.is_empty() && "*".starts_with(prefix) {
+            let mut item = semantic::completion(
+                "*",
+                &[],
+                self.completion_edit(replacement.clone(), "*".to_owned())?,
+            );
+            item.kind = Some(CompletionItemKind::SNIPPET);
+            item.detail = Some("Import everything.".to_owned());
+            items.push(item);
+        }
         for (name, binding) in semantics.import_bindings(&source, &import.path)? {
-            if !binding.tola
-                || !name.starts_with(prefix)
+            if !name_matches(&name, prefix)
                 || import.imported.iter().any(|path| {
                     path.len() == import.path.len() + 1
                         && path[..import.path.len()] == import.path
@@ -273,7 +454,12 @@ impl Selection<'_> {
             }
             let mut item = semantic::completion(
                 &name,
-                binding.value.as_slice(),
+                &binding
+                    .value
+                    .iter()
+                    .cloned()
+                    .map(ExpressionType::Known)
+                    .collect::<Vec<_>>(),
                 self.completion_edit(replacement.clone(), name.clone())?,
             );
             attach_value_docs(&mut item, semantics, binding.span, binding.value.as_ref());
@@ -296,8 +482,8 @@ impl Selection<'_> {
         else {
             return Ok(Vec::new());
         };
-        let fields = semantics.member_values(&target)?;
-        let receivers = semantics.values(&target)?;
+        let fields = semantics.member_types(&target)?;
+        let receivers = semantics.known_values(&target)?;
         let names = self.names_of(self.source);
         let (root, path) = match field_chain(&target) {
             Some((root, path)) => (root, path),
@@ -323,34 +509,56 @@ impl Selection<'_> {
             .as_ref()
             .map(schema::OutputDescription::fields)
             .unwrap_or_default();
+        // A member of a value supplies its `self`; a module's or a type's member takes the
+        // receiver as its first argument.
+        let receiver = callable::receiver_binds(
+            receivers
+                .iter()
+                .map(|(receiver, _)| !matches!(receiver, Value::Module(_) | Value::Type(_))),
+        );
         let (_, prefix) = self.completion_range(member.replacement.clone())?;
-        let mut items = fields
+        let mut items = Vec::new();
+        for (name, values) in fields
             .into_iter()
-            .filter(|(name, _)| name.starts_with(prefix))
-            .map(|(name, values)| -> Result<CompletionItem> {
-                let mut item = semantic::completion(
-                    &name,
-                    &values,
-                    self.completion_edit(member.replacement.clone(), name.clone())?,
-                );
-                let value = values.first();
-                let span = receivers
-                    .iter()
-                    .filter_map(|(receiver, _)| receiver.scope()?.get(&name))
-                    .find(|binding| Some(binding.read()) == value)
-                    .map_or_else(tola_typst::typst::syntax::Span::detached, |binding| {
-                        binding.span()
-                    });
-                attach_value_docs(&mut item, semantics, span, value);
-                if let Some(index) = declared_fields.iter().position(|(field, _)| field == &name) {
-                    let (_, field) = declared_fields.remove(index);
-                    item.documentation = Some(markdown_documentation(field.field(&name).section()));
-                }
-                Ok(item)
-            })
-            .collect::<Result<Vec<_>>>()?;
+            .filter(|(name, _)| name_matches(name, prefix))
+        {
+            let mut item = semantic::completion(
+                &name,
+                &values,
+                self.completion_edit(member.replacement.clone(), name.clone())?,
+            );
+            let value = values.first().and_then(ExpressionType::value);
+            let span = receivers
+                .iter()
+                .filter_map(|(receiver, _)| receiver.scope()?.get(&name))
+                .find(|binding| Some(binding.read()) == value)
+                .map_or_else(tola_typst::typst::syntax::Span::detached, |binding| {
+                    binding.span()
+                });
+            attach_value_docs(&mut item, semantics, span, value);
+            if let Some(index) = declared_fields.iter().position(|(field, _)| field == &name) {
+                let (_, field) = declared_fields.remove(index);
+                item.documentation = Some(markdown_documentation(field.field(&name).section()));
+            }
+            let callable = receiver.and_then(|receiver| {
+                values.iter().find_map(|ty| {
+                    ty.value()
+                        .and_then(|value| callable::Callable::of_value(value, receiver))
+                })
+            });
+            match callable {
+                Some(callable) => items.extend(callable::callable_items(
+                    item,
+                    self.source,
+                    self.cursor,
+                    &member.replacement,
+                    callable,
+                )),
+                None => items.push(item),
+            }
+        }
         for (name, field) in declared_fields {
-            if !name.starts_with(prefix) {
+            if !name_matches(&name, prefix) {
                 continue;
             }
             let mut item = semantic::completion(
@@ -365,7 +573,7 @@ impl Selection<'_> {
         if let Some(descriptors) = descriptors {
             for field in descriptors.fields() {
                 let name = field.name();
-                if !name.starts_with(prefix) || items.iter().any(|item| item.label == name) {
+                if !name_matches(name, prefix) || items.iter().any(|item| item.label == name) {
                     continue;
                 }
                 let mut item = semantic::completion(
@@ -415,7 +623,7 @@ impl Selection<'_> {
         }
         let mut items = Vec::new();
         for (name, declared) in declared {
-            if !name.starts_with(prefix) || key.written.contains(&name) {
+            if !name_matches(&name, prefix) || key.written.contains(&name) {
                 continue;
             }
             // Every call parsing this source must accept the key: one that neither declares it nor
@@ -536,7 +744,6 @@ impl Selection<'_> {
     }
 }
 
-/// The edit `replacement` names in `source`, with `cursor` as the prefix the author has typed.
 pub(super) fn completion_edit(
     source: &Source,
     cursor: usize,
@@ -569,6 +776,9 @@ mod tests {
     use super::*;
     use crate::query::tests::*;
     use serde_json::json;
+    use tola_typst::GLOBAL_LIBRARY;
+    use tola_typst_syntax::imports::NameGraph;
+    use tola_typst_syntax::names::SourceNames;
 
     /// A half-typed call the site cannot yet compile still completes the members of what it returns.
     #[test]
@@ -878,14 +1088,20 @@ mod tests {
     #[test]
     fn unterminated_import_edit_stays_on_line() {
         let mut site = QuerySession::new();
-        let completion = site.reply("textDocument/completion", "#import \"@tola/do|");
-        let entry = completion
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|item| item["label"] == "@tola/document:0.0.0")
-            .expect("a package completion");
-        assert_eq!(entry["textEdit"]["newText"], "@tola/document:0.0.0\"");
+        for marked in [
+            "#import \"@tola/do|",
+            "#import \"@tola/do|\n#document(\"index.html\", format: \"html\")[Body]",
+        ] {
+            let completion = site.reply("textDocument/completion", marked);
+            let entry = completion
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["label"] == "@tola/document:0.0.0")
+                .expect("a package completion");
+            assert_eq!(entry["textEdit"]["newText"], "@tola/document:0.0.0\"");
+            assert_eq!(entry["textEdit"]["range"]["end"]["line"], 0, "{marked:?}");
+        }
     }
 
     /// A source that declares its metadata completes the fields of that declaration.
@@ -1155,5 +1371,482 @@ mod tests {
                 .any(|item| item.label == "output"),
             "members of the file's own value do not complete"
         );
+    }
+
+    /// A failed evaluation does not hide the standard library: a library value names its members
+    /// from the library itself, as Typst's own IDE does.
+    #[test]
+    fn library_members_survive_failed_site() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        for (marked, expected) in [
+            ("#show math.|", "equation"),
+            ("#show str.|", "len"),
+            ("#show calc.|", "abs"),
+            ("#std.|", "array"),
+        ] {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            assert!(labels.contains(&expected), "{marked:?}: {labels:?}");
+        }
+        let items = site.completion("#let x = nope.gi|");
+        assert!(
+            completion_labels(&items).is_empty(),
+            "an unresolved receiver names no library value"
+        );
+    }
+
+    /// A reader's path argument is completed from the file that writes it, replacing only the
+    /// argument itself rather than the quotation marks around it.
+    #[test]
+    fn reader_paths_replace_their_own_argument() {
+        let mut site = QuerySession::new();
+        site.site.write("assets/cover.svg", "<svg/>");
+        site.site.write("data/site.json", "{}");
+        let items = site.completion("#image(\"asse|\")\n");
+        let item = items
+            .iter()
+            .find(|item| item.label.ends_with("assets/cover.svg"))
+            .expect("the cover image");
+        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            panic!("a plain path edit: {:?}", item.text_edit);
+        };
+        assert_eq!(edit.range.start.character, 8);
+        assert_eq!(edit.range.end.character, 12);
+        assert_eq!(edit.new_text, "../assets/cover.svg");
+
+        let items = site.completion("#read(\"da|\")\n");
+        assert!(
+            completion_labels(&items)
+                .iter()
+                .any(|label| label.ends_with("data/site.json")),
+            "{items:?}"
+        );
+
+        for marked in ["#image(\"asse|\nBody", "#image(\"asse|\nBody \"quoted\""] {
+            let items = site.completion(marked);
+            let item = items
+                .iter()
+                .find(|item| item.label.ends_with("assets/cover.svg"))
+                .expect("the unfinished cover path");
+            let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+                panic!("a plain path edit: {:?}", item.text_edit);
+            };
+            assert_eq!(edit.range.end.line, 0, "{marked:?}");
+            assert_eq!(edit.new_text, "../assets/cover.svg\"", "{marked:?}");
+        }
+    }
+
+    /// A path written from the site root is labeled from the root, and the edit replaces only the
+    /// content between the quotes, so the client filters on the spelling the author typed.
+    #[test]
+    fn import_paths_complete_from_the_site_root() {
+        let mut site = QuerySession::new();
+        site.site.write("components/home.typ", "#let home = 1\n");
+        site.site.write("components/nav.typ", "");
+        site.site.write("assets/cover.svg", "<svg/>");
+        let items = site.completion("#import \"/comp|\"");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"/components/home.typ"), "{labels:?}");
+        assert!(labels.contains(&"/components/"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label.contains("cover.svg")),
+            "{labels:?}"
+        );
+        let item = items
+            .iter()
+            .find(|item| item.label == "/components/home.typ")
+            .expect("the component's own file");
+        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            panic!("a plain path edit: {:?}", item.text_edit);
+        };
+        assert_eq!(edit.range.start.character, 9);
+        assert_eq!(edit.new_text, "/components/home.typ");
+    }
+
+    /// The relative spelling is labeled from the writing file, and an unfinished quote closes
+    /// itself in the inserted path.
+    #[test]
+    fn relative_and_unterminated_import_paths_complete() {
+        let mut site = QuerySession::new();
+        site.site.write("components/home.typ", "");
+        let items = site.completion("#import \"../comp|\"");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"../components/home.typ"), "{labels:?}");
+        assert!(labels.contains(&"../components/"), "{labels:?}");
+
+        let items = site.completion("#import \"/comp|");
+        let item = items
+            .iter()
+            .find(|item| item.label == "/components/home.typ")
+            .expect("the component's own file");
+        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            panic!("a plain path edit: {:?}", item.text_edit);
+        };
+        assert_eq!(edit.new_text, "/components/home.typ\"");
+
+        let items =
+            site.completion("#import \"/comp|\n#document(\"index.html\", format: \"html\")[Body]");
+        let item = items
+            .iter()
+            .find(|item| item.label == "/components/home.typ")
+            .expect("the component's own file");
+        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            panic!("a plain path edit: {:?}", item.text_edit);
+        };
+        assert_eq!(edit.range.end.line, 0);
+        assert_eq!(edit.new_text, "/components/home.typ\"");
+    }
+
+    /// An import item list answers only the module's exports, narrowed by what the author typed.
+    #[test]
+    fn package_import_items_are_the_only_completion() {
+        let package = tola_packages::builtin_package(&tola_packages::TolaPackage::Web.spec())
+            .expect("the web package");
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        for marked in [
+            "#import \"@tola/web:0.0.0\": m|",
+            "#import \"@tola/web:0.0.0\": ma|",
+        ] {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            assert!(labels.contains(&"math-svg"), "{marked:?}: {labels:?}");
+            assert!(
+                labels
+                    .iter()
+                    .all(|label| package.exports().any(|export| export == *label)),
+                "{marked:?}: {labels:?}"
+            );
+        }
+        let items = site.completion("#import \"@tola/web:0.0.0\": math-s|");
+        assert_eq!(completion_labels(&items), ["math-svg"]);
+        for marked in [
+            "#import \"@tola/web:0.0.0\":|",
+            "#import \"@tola/web:0.0.0\": |",
+            "#import \"@tola/web:0.0.0\": math |",
+            "#import \"@tola/web:0.0.0\": math, |",
+        ] {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            assert!(labels.contains(&"math-svg"), "{marked:?}: {labels:?}");
+            assert!(
+                !labels.contains(&"map") && !labels.contains(&"mark"),
+                "{marked:?}: {labels:?}"
+            );
+            assert!(!labels.contains(&"math"), "{marked:?}: {labels:?}");
+        }
+    }
+
+    /// A comment offers only the documentation template the reader handles before this lane.
+    #[test]
+    fn comment_completion_offers_nothing() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        for marked in ["// al|", "/* al| */", "#let alpha = 1\n// al|"] {
+            let items = site.completion(marked);
+            assert!(completion_labels(&items).is_empty(), "{marked:?}");
+        }
+    }
+
+    /// A source-only scope answers the names the author can read there.
+    #[test]
+    fn source_name_completion_reads_visible_scopes() {
+        let text = "#let alpha = 1\n#le";
+        let source = Source::detached(text.to_owned());
+        let names = std::sync::Arc::new(SourceNames::new(source.clone()));
+        let graph = NameGraph::new(
+            [names.clone()],
+            |_| None,
+            Some(&GLOBAL_LIBRARY),
+            || Ok::<(), anyhow::Error>(()),
+        )
+        .expect("source graph");
+        let items = source_name_completion(
+            Some(&graph),
+            &names,
+            &source,
+            text.len(),
+            &tola_build::cancellation::BuildCancellation::new(),
+        )
+        .unwrap()
+        .expect("source names");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"length"), "{labels:?}");
+        assert!(!labels.contains(&"missing-page"), "{labels:?}");
+    }
+
+    /// A library value answers its own members without a compiled world.
+    #[test]
+    fn source_member_completion_reads_library_scopes() {
+        for (text, expected) in [("#math.eq", "equation"), ("#str.le", "len")] {
+            let source = Source::detached(text.to_owned());
+            let names = SourceNames::new(source.clone());
+            let items = source_member_completion(
+                None,
+                &names,
+                &source,
+                text.len(),
+                &tola_build::cancellation::BuildCancellation::new(),
+            )
+            .unwrap()
+            .expect("library members");
+            let labels = completion_labels(&items);
+            assert!(labels.contains(&expected), "{text:?}: {labels:?}");
+        }
+        let text = "#let math = (a: 1)\n#math.eq";
+        let source = Source::detached(text.to_owned());
+        let names = SourceNames::new(source.clone());
+        let items = source_member_completion(
+            None,
+            &names,
+            &source,
+            text.len(),
+            &tola_build::cancellation::BuildCancellation::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!completion_labels(&items).contains(&"equation"));
+    }
+
+    /// A plain string or raw block has no names to offer.
+    #[test]
+    fn completion_inside_string_or_raw_offers_nothing() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        for marked in [
+            "#let alpha = 1\n#let s = \"al|\"",
+            "#let alpha = 1\n#let s = `al|`",
+            "#let alpha = 1\n```\nal|\n```",
+        ] {
+            let items = site.completion(marked);
+            assert!(completion_labels(&items).is_empty(), "{marked:?}");
+        }
+    }
+
+    /// A local module answers every export on the colon itself, and offers the wildcard the
+    /// statement can still use.
+    #[test]
+    fn local_module_items_complete_on_the_colon() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        site.site.write(
+            "components/home.typ",
+            "#let home-features() = [Features]\n#let home-hero() = [Hero]\n",
+        );
+        let items = site.completion("#import \"/components/home.typ\":|");
+        let labels = completion_labels(&items);
+        for label in ["*", "home-features", "home-hero"] {
+            assert!(labels.contains(&label), "{label:?} missing from {labels:?}");
+        }
+    }
+
+    /// A receiver the site never evaluated still answers the type its syntax establishes.
+    #[test]
+    fn inferred_receivers_complete_their_members() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        let cases: [(&str, &[&str]); 9] = [
+            (
+                "#panic(\"page\")\n#let value = \"a\" + \"b\"\n#value.|",
+                &["len"],
+            ),
+            (
+                "#panic(\"page\")\n#let value = if true { \"a\" } else { \"b\" }\n#value.|",
+                &["len"],
+            ),
+            (
+                "#panic(\"page\")\n#let value = (1, 2) + (3,)\n#value.|",
+                &["len"],
+            ),
+            ("#panic(\"page\")\n#let value = str(1)\n#value.|", &["len"]),
+            (
+                "#panic(\"page\")\n#let value = 1 + 2\n#value.|",
+                &["signum"],
+            ),
+            (
+                "#panic(\"page\")\n#let value = 1 / 2\n#value.|",
+                &["signum"],
+            ),
+            (
+                "#panic(\"page\")\n#let value = if true { (left: 1) } else { (right: 2) }\n#value.|",
+                &["left", "right"],
+            ),
+            (
+                "#panic(\"page\")\n#let f() = (custom: 1)\n#f().|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let f() = { let a = 1; (custom: a) }\n#f().|",
+                &["custom"],
+            ),
+        ];
+        for (marked, expected) in cases {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            for label in expected {
+                assert!(labels.contains(label), "{marked:?}: {labels:?}");
+            }
+        }
+        // A function that calls itself must not infer its own body forever.
+        let _ = site.completion("#panic(\"page\")\n#let f() = f()\n#f().|");
+    }
+
+    /// A function call binds its arguments to the closure's parameters, including a function
+    /// imported from another source.
+    #[test]
+    fn inferred_functions_read_their_parameters_and_imports() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        site.site.write(
+            "content/lib.typ",
+            "#let remote() = (remote: 1)\n#let remote-with(x) = (remote: x)\n",
+        );
+        let cases: [(&str, &[&str]); 10] = [
+            (
+                "#panic(\"page\")\n#let f(x) = (custom: x)\n#f(1).|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let f(x: 1) = (custom: x)\n#f(x: 2).|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let g(x) = (custom: x)\n#let f(y) = g(y)\n#f(1).|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#import \"lib.typ\": remote\n#remote().|",
+                &["remote"],
+            ),
+            (
+                "#panic(\"page\")\n#import \"lib.typ\": remote-with\n#remote-with(2).|",
+                &["remote"],
+            ),
+            (
+                "#panic(\"page\")\n#let f(x: 1) = (custom: x)\n#f().|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let f(a, b: 2) = (custom: b)\n#f(1).|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let f((a, b)) = (custom: a)\n#f((1, 2)).|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let f((a: x)) = (custom: x)\n#f((a: 1)).|",
+                &["custom"],
+            ),
+            (
+                "#panic(\"page\")\n#let f(..args) = (custom: args)\n#f(1, 2).|",
+                &["custom"],
+            ),
+        ];
+        for (marked, expected) in cases {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            for label in expected {
+                assert!(labels.contains(label), "{marked:?}: {labels:?}");
+            }
+        }
+        // A local declaration shadows the parameter; the argument must not answer for it.
+        let items =
+            site.completion("#panic(\"page\")\n#let f(x) = { let x = (shadow: 1); x }\n#f(2).|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"shadow"), "{labels:?}");
+        assert!(!labels.contains(&"custom"), "{labels:?}");
+        let _ = site.completion("#panic(\"page\")\n#let f(x) = f(x)\n#f(1).|");
+    }
+
+    /// A contextual expression answers its body's value.
+    #[test]
+    fn inferred_contextual_receivers_complete_their_members() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        let items =
+            site.completion("#panic(\"page\")\n#let value = context { (custom: 1) }\n#value.|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"custom"), "{labels:?}");
+    }
+
+    /// A method call answers the type its receiver and method name determine.
+    #[test]
+    fn inferred_method_calls_complete_their_result() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        let cases: [(&str, &[&str]); 3] = [
+            (
+                "#panic(\"page\")\n#let value = \"a,b\".split(\",\")\n#value.|",
+                &["map", "join", "len"],
+            ),
+            (
+                "#panic(\"page\")\n#let value = (a: 1).keys()\n#value.|",
+                &["map", "join", "len"],
+            ),
+            (
+                "#panic(\"page\")\n#let value = (1.0).signum()\n#value.|",
+                &["signum"],
+            ),
+        ];
+        for (marked, expected) in cases {
+            let items = site.completion(marked);
+            let labels = completion_labels(&items);
+            for label in expected {
+                assert!(labels.contains(label), "{marked:?}: {labels:?}");
+            }
+        }
+    }
+
+    /// A checked site offers only the names that can still match what the author typed, the same
+    /// rule its own lanes apply.
+    #[test]
+    fn checked_names_match_the_typed_prefix() {
+        let document = "#let alpha = 1\n#let beta = 2\n#al";
+        let mut site = QuerySession::new();
+        site.site.write("content/document.typ", document);
+        let items = site.completion(&format!("{document}|"));
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"alpha"), "{labels:?}");
+        assert!(!labels.contains(&"beta"), "{labels:?}");
+    }
+
+    /// A library name answers the file's own names even when the site never evaluated them.
+    #[test]
+    fn library_names_complete_without_compilation() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        let items = site.completion("#ma|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"math"), "{labels:?}");
+        let items = site.completion("#str|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"str"), "{labels:?}");
+    }
+
+    /// A declaration shadows its library name, and a value the evaluation never reached still
+    /// answers the literal its initializer spells.
+    #[test]
+    fn declarations_shadow_library_names() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        let items = site.completion("#let math = (custom: 1)\n#show math.|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"custom"), "{labels:?}");
+        assert!(!labels.contains(&"equation"), "{labels:?}");
+
+        let items = site.completion("#let value = (1, 2)\n#value.|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"len"), "{labels:?}");
+
+        let items = site.completion("#let alias = math\n#show alias.|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"equation"), "{labels:?}");
+
+        let items = site.completion("#let base = (custom: 1)\n#let value = base\n#value.|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"custom"), "{labels:?}");
+    }
+
+    /// An imported value shadows the library's name the same way a local declaration does.
+    #[test]
+    fn imported_values_shadow_library_names() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
+        site.site
+            .write("content/values.typ", "#let math = (custom: 1)\n");
+        let items = site.completion("#import \"values.typ\": math\n#show math.|");
+        let labels = completion_labels(&items);
+        assert!(labels.contains(&"custom"), "{labels:?}");
+        assert!(!labels.contains(&"equation"), "{labels:?}");
     }
 }

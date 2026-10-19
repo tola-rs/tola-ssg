@@ -128,6 +128,13 @@ impl ClientDiagnostics {
         format!("tola/{}", self.result_serial)
     }
 
+    /// Versions restart on open, so an earlier session cannot vouch for the new buffer.
+    pub(crate) fn invalidate_version(&mut self, uri: &Uri) {
+        if let Some(report) = self.reports.get_mut(uri.as_str()) {
+            report.version = None;
+        }
+    }
+
     /// The diagnostics a correction reads for one document, as the server reported them.
     ///
     /// A client that reads no `data` cannot echo a cause back, so a connection serving one

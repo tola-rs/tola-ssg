@@ -9,8 +9,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, DocumentHighlight, DocumentHighlightKind, Hover, Location,
-    Range as ProtocolRange, TextEdit, Uri, WorkspaceEdit,
+    CompletionItem, CompletionItemKind, CompletionTextEdit, DocumentHighlight,
+    DocumentHighlightKind, Hover, Location, Range as ProtocolRange, TextEdit, Uri, WorkspaceEdit,
 };
 use tola_build::cancellation::BuildCancellation;
 use tola_build::check::SourceCompilation;
@@ -37,6 +37,24 @@ pub(super) struct Reference {
     pub written: Range<usize>,
     /// The label's name inside the reference.
     pub name: Range<usize>,
+}
+
+impl Reference {
+    pub(super) fn completion_edit(
+        &self,
+        source: &Source,
+        cursor: usize,
+        name: String,
+    ) -> Result<CompletionTextEdit> {
+        let (range, text) = if (self.name.start..=self.name.end).contains(&cursor) {
+            (self.name.clone(), name)
+        } else {
+            let prefix = &source.text()[self.written.start..self.name.start];
+            let suffix = &source.text()[self.name.end..self.written.end];
+            (self.written.clone(), format!("{prefix}{name}{suffix}"))
+        };
+        super::completion::completion_edit(source, cursor, range, text)
+    }
 }
 
 pub(super) fn referenced(source: &Source, cursor: usize) -> Option<Reference> {
@@ -83,7 +101,7 @@ fn reference(mut node: LinkedNode<'_>) -> Option<Reference> {
 /// A cursor that rests on the marker itself — the leaf `referenced` answers with when it ends
 /// there — has typed none of the name.
 pub(super) fn typed_name<'a>(source: &'a Source, reference: &Reference, cursor: usize) -> &'a str {
-    let typed = cursor.max(reference.name.start);
+    let typed = cursor.clamp(reference.name.start, reference.name.end);
     &source.text()[reference.name.start..typed]
 }
 
@@ -147,15 +165,7 @@ pub(super) fn completion(
             Some(CompletionItem {
                 label: label.clone(),
                 kind: Some(CompletionItemKind::REFERENCE),
-                text_edit: Some(
-                    super::completion::completion_edit(
-                        source,
-                        cursor,
-                        reference.name.clone(),
-                        label,
-                    )
-                    .ok()?,
-                ),
+                text_edit: Some(reference.completion_edit(source, cursor, label).ok()?),
                 ..Default::default()
             })
         })
@@ -250,6 +260,7 @@ fn called_name(call: &LinkedNode<'_>) -> Option<String> {
 fn spellings(
     compilation: &SourceCompilation,
     name: &str,
+    include_declaration: bool,
     cancellation: &BuildCancellation,
 ) -> Result<Vec<(FileId, ProtocolRange)>> {
     let Some(declared) =
@@ -265,9 +276,14 @@ fn spellings(
         };
         let mut spellings = Vec::new();
         collect_spellings(&LinkedNode::new(source.root()), name, &mut spellings);
-        found.extend(spellings.into_iter().filter_map(|spelling| {
-            Some((id, position::utf16_range(source.lines(), spelling.range)?))
-        }));
+        found.extend(
+            spellings
+                .into_iter()
+                .filter(|spelling| include_declaration || !spelling.declares)
+                .filter_map(|spelling| {
+                    Some((id, position::utf16_range(source.lines(), spelling.range)?))
+                }),
+        );
     }
     found.sort_by_key(|(id, range)| {
         (
@@ -306,7 +322,7 @@ fn compiled_with(
 pub(super) struct Spelling {
     /// The name's own bytes, inside the reference's or label's punctuation.
     pub range: Range<usize>,
-    /// Whether the spelling declares the name (`<name>`) rather than references it (`@name`).
+    /// Whether markup attaches the label to an element; a label literal in code is a read.
     pub declares: bool,
 }
 
@@ -325,7 +341,10 @@ fn token_spelling(node: &LinkedNode<'_>, name: &str) -> Option<Spelling> {
     let text = node.leaf_text();
     let (inner, declares) = match node.kind() {
         SyntaxKind::RefMarker => (text.strip_prefix('@')?, false),
-        SyntaxKind::Label => (text.strip_prefix('<')?.strip_suffix('>')?, true),
+        SyntaxKind::Label => (
+            text.strip_prefix('<')?.strip_suffix('>')?,
+            node.parent_kind() == Some(SyntaxKind::Markup),
+        ),
         _ => return None,
     };
     if inner != name {
@@ -366,12 +385,14 @@ pub(super) fn definition(compilation: &SourceCompilation, name: &str) -> Option<
 pub(super) fn locations(
     compilation: &SourceCompilation,
     name: &str,
+    include_declaration: bool,
     cancellation: &BuildCancellation,
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Vec<Location>> {
     let mut found = Vec::new();
-    for (id, range) in spellings(compilation, name, cancellation)? {
-        if let Some(uri) = crate::identity::client_uri(id, client_root) {
+    for (id, range) in spellings(compilation, name, include_declaration, cancellation)? {
+        if let Some(uri) = crate::identity::client_uri(id, compilation.world().root(), client_root)
+        {
             found.push(Location { uri, range });
         }
     }
@@ -386,14 +407,15 @@ pub(super) fn rename(
     cancellation: &BuildCancellation,
     client_root: &crate::uri::ClientRoot,
 ) -> Result<Option<WorkspaceEdit>> {
-    if Label::new(PicoStr::intern(new_name)).is_none() {
+    if !literal_name(new_name) {
         return Ok(None);
     }
     // The protocol's own edit map is keyed by URI, which clippy reads as interior-mutable.
     #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (id, range) in spellings(compilation, name, cancellation)? {
-        let Some(uri) = crate::identity::client_uri(id, client_root) else {
+    for (id, range) in spellings(compilation, name, true, cancellation)? {
+        let Some(uri) = crate::identity::client_uri(id, compilation.world().root(), client_root)
+        else {
             continue;
         };
         changes.entry(uri).or_default().push(TextEdit {
@@ -405,6 +427,18 @@ pub(super) fn rename(
         changes: Some(changes),
         ..WorkspaceEdit::default()
     }))
+}
+
+fn literal_name(name: &str) -> bool {
+    [format!("<{name}>"), format!("@{name}")]
+        .into_iter()
+        .all(|text| {
+            let source = Source::detached(text);
+            referenced(&source, 1).is_some_and(|reference| {
+                reference.written == (0..source.text().len())
+                    && &source.text()[reference.name] == name
+            })
+        })
 }
 
 /// What the site says about the label the reference at `cursor` names: the element that has
@@ -512,6 +546,41 @@ mod tests {
         let reference = referenced(&source, 4).expect("the marker's reference");
         assert_eq!(typed_name(&source, &reference, 4), "");
         assert_eq!(typed_name(&source, &reference, 8), "nam");
+        let source = Source::detached("#ref(<name>)");
+        let cursor = source.text().find('>').unwrap() + 1;
+        let reference = referenced(&source, cursor).expect("the label literal");
+        assert_eq!(typed_name(&source, &reference, cursor), "name");
+    }
+
+    #[test]
+    fn reference_edits_preserve_delimiters() {
+        for marked in ["See |@old", "#ref(|<old>)", "#ref(<old>|)"] {
+            let cursor = marked.find('|').unwrap();
+            let source = Source::detached(marked.replace('|', ""));
+            let reference = referenced(&source, cursor).expect("the selected reference");
+            let edit = reference
+                .completion_edit(&source, cursor, "new".to_owned())
+                .unwrap();
+            let (range, text) = match edit {
+                CompletionTextEdit::Edit(edit) => (edit.range, edit.new_text),
+                CompletionTextEdit::InsertAndReplace(edit) => (edit.replace, edit.new_text),
+            };
+            let start = position::byte_offset(source.lines(), range.start).unwrap();
+            let end = position::byte_offset(source.lines(), range.end).unwrap();
+            assert!(start <= cursor && cursor <= end);
+            let mut changed = source.text().to_owned();
+            changed.replace_range(start..end, &text);
+            assert_eq!(changed, source.text().replace("old", "new"));
+        }
+    }
+
+    #[test]
+    fn literal_labels_read_in_code() {
+        let source = Source::detached("= Title <intro>\n#ref(<intro>)\n");
+        let selected = highlights(&source, "intro");
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].kind, Some(DocumentHighlightKind::WRITE));
+        assert_eq!(selected[1].kind, Some(DocumentHighlightKind::READ));
     }
 
     use std::path::{Path, PathBuf};
@@ -673,7 +742,7 @@ mod tests {
         let expected = crate::uri::from_file_path(&spelled.join("content/page.typ")).unwrap();
 
         let found =
-            locations(compilation, "intro", &cancellation, &client_root).expect("locations");
+            locations(compilation, "intro", true, &cancellation, &client_root).expect("locations");
         assert!(!found.is_empty(), "the label's spellings");
         assert!(
             found.iter().all(|location| location.uri == expected),
@@ -778,6 +847,41 @@ mod tests {
                 .all(|location| location.uri.as_str().ends_with("document.typ")),
             "{references:?}"
         );
+    }
+
+    #[test]
+    fn label_references_exclude_declarations() {
+        let mut site = QuerySession::new();
+        let references = site
+            .references(
+                "#figure([Body]) <intro>\nSee @int|ro and #ref(<intro>)\n",
+                false,
+            )
+            .expect("label reads");
+        assert_eq!(references.len(), 2, "{references:?}");
+        assert!(
+            references
+                .iter()
+                .all(|location| location.range.start.line == 1),
+            "{references:?}"
+        );
+    }
+
+    #[test]
+    fn label_renames_preserve_token_identity() {
+        let mut site = QuerySession::new();
+        let source = "#figure([Body]) <intro>\nSee @int|ro\n";
+        for name in [
+            "two words",
+            "bad>name",
+            "trailing.",
+            ":leading",
+            "",
+            "line\nbreak",
+        ] {
+            assert!(site.rename(source, name).is_none(), "{name}");
+        }
+        assert!(site.rename(source, "章节-二").is_some());
     }
 
     /// Renaming a label edits every spelling of it in the site's own files.

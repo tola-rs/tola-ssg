@@ -155,6 +155,7 @@ struct Binding {
     name: String,
     kind: DeclarationKind,
     range: Range<usize>,
+    name_range: Range<usize>,
 }
 
 /// A heading declaration spans its whole section; its name is the heading's own text.
@@ -175,7 +176,7 @@ fn binding_declaration(binding: &Binding) -> Option<Declaration> {
         detail: None,
         kind: binding.kind,
         range: binding.range.clone(),
-        name_range: binding.range.clone(),
+        name_range: binding.name_range.clone(),
         children: Vec::new(),
     })
 }
@@ -198,7 +199,8 @@ fn collect_bindings(node: &LinkedNode<'_>, bindings: &mut Vec<Binding>) {
                 bindings.push(Binding {
                     name: name.get().to_string(),
                     kind,
-                    range: ident.range(),
+                    range: node.range(),
+                    name_range: ident.range(),
                 });
             }
         }
@@ -317,5 +319,17 @@ mod tests {
     #[test]
     fn empty_source_has_no_outline() {
         assert!(outline(&Source::detached("body only\n")).is_none());
+    }
+
+    #[test]
+    fn function_ranges_enclose_bodies() {
+        let source = Source::detached("#let greet(name) = {\n  [Hi #name]\n}\n");
+        let declarations = outline(&source).unwrap();
+        let declaration = &declarations[0];
+        assert_eq!(&source.text()[declaration.name_range.clone()], "greet");
+        assert!(source.text()[declaration.range.clone()].contains("[Hi #name]"));
+        assert!(declaration.range.start <= declaration.name_range.start);
+        assert!(declaration.range.end >= declaration.name_range.end);
+        assert_eq!(matching(&source, "greet")[0].2, declaration.name_range);
     }
 }

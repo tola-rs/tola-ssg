@@ -11,7 +11,7 @@ use lsp_types::NumberOrString;
 use tola_build::diagnostic::Diagnostic;
 use tola_typst::typst::syntax::{LinkedNode, Source, SyntaxKind};
 
-use crate::compiler::{QueryRequest, SelectionRead, SourceJob, checked_root};
+use crate::compiler::{QueryRequest, SelectionRead, SourceJob};
 use crate::diagnostic::UnreadImports;
 use crate::protocol::{self, SourceQuery, SourceReply};
 
@@ -24,13 +24,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         mut params: lsp_types::CodeActionParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        // A correction reads the same site a check's own report does, under the one rule that names
-        // it: the resolved configuration's root, or the workspace's until one resolves.
-        let root = tola_build::filesystem::normalize_existing_prefix(checked_root(
-            self.configuration.as_ref(),
-            &workspace.root,
-        ));
+        let root = self.source_root();
         let only = params.context.only.as_deref();
         let quickfix = crate::code_actions::admits(only, &lsp_types::CodeActionKind::QUICKFIX);
         let organize =
@@ -171,7 +165,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             });
             let named = !view.is_unnamed(source.id());
             let links = if named {
-                crate::links::paths(source, &root).unwrap_or_default()
+                crate::links::paths(
+                    source,
+                    &root,
+                    &crate::uri::ClientRoot::new(&self.workspace().root),
+                )
+                .unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -304,7 +303,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             self.queries.push_back(SourceJob::Query(QueryRequest {
                 id,
                 serial,
-                sources: self.source_inputs(root, cancellation),
+                sources: self.source_inputs(self.workspace().root.clone(), cancellation),
                 view,
                 package_sources,
                 routes_as_hints,

@@ -263,7 +263,7 @@ pub(super) fn initialize_result(
             diagnostic_provider: features.pull_diagnostics.then(|| {
                 DiagnosticServerCapabilities::Options(DiagnosticOptions {
                     identifier: Some("tola".to_owned()),
-                    inter_file_dependencies: false,
+                    inter_file_dependencies: true,
                     workspace_diagnostics: false,
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })

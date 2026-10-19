@@ -112,12 +112,7 @@ pub(super) fn completions(
         {
             continue;
         }
-        let edit = super::completion::completion_edit(
-            source,
-            cursor,
-            reference.name.clone(),
-            key.to_owned(),
-        )?;
+        let edit = reference.completion_edit(source, cursor, key.to_owned())?;
         if key_matches {
             items.push(CompletionItem {
                 label: key.to_owned(),
@@ -191,7 +186,7 @@ pub(super) fn references(
         let Ok(source) = world.source(id) else {
             continue;
         };
-        let Some(uri) = crate::identity::client_uri(id, client_root) else {
+        let Some(uri) = crate::identity::client_uri(id, config.get_root(), client_root) else {
             continue;
         };
         let mut spellings = Vec::new();

@@ -557,9 +557,11 @@ test('the client registers a watcher for the site sources', async ({ binary, dir
     const registration = await connection.waitForServerRequest('client/registerCapability')
     expect(registration.params?.registrations?.[0]).toMatchObject({
       method: 'workspace/didChangeWatchedFiles',
-      registerOptions: { watchers: [{ globPattern: '**/*' }] },
+      registerOptions: {
+        watchers: [{ globPattern: { baseUri: pathToFileURL(root).href, pattern: '**/*' } }],
+      },
     })
-  }, { workspace: { didChangeWatchedFiles: { dynamicRegistration: true } } })
+  }, { workspace: { didChangeWatchedFiles: { dynamicRegistration: true, relativePatternSupport: true } } })
 })
 
 test('an unopened source the client reports is checked', async ({ binary, directory: root }) => {

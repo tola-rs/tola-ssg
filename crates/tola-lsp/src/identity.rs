@@ -93,16 +93,18 @@ pub(crate) fn source_uri(id: FileId, root: &Path) -> Result<Uri> {
 
 /// The address one file answers under, in the spelling the client named its root with.
 ///
-/// A site file is addressed from the root the client named, never the resolved form the compiler
-/// reads it through; a document of another root — a builtin package's own file — keeps its own
-/// identity.
-pub(crate) fn client_uri(id: FileId, client_root: &crate::uri::ClientRoot) -> Option<Uri> {
+/// File identities resolve from the source root; the client root chooses only the URI spelling.
+pub(crate) fn client_uri(
+    id: FileId,
+    source_root: &Path,
+    client_root: &crate::uri::ClientRoot,
+) -> Option<Uri> {
     if matches!(id.root(), VirtualRoot::Project) {
         return client_root
-            .address(&client_root.resolved().join(id.vpath().get_without_slash()))
+            .address(&source_root.join(id.vpath().get_without_slash()))
             .ok();
     }
-    source_uri(id, client_root.resolved()).ok()
+    source_uri(id, source_root).ok()
 }
 
 pub(crate) fn embedded_source(id: FileId) -> Option<Cow<'static, str>> {

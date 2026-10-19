@@ -11,14 +11,22 @@ pub(super) fn ranges(source: &Source, positions: &[Position]) -> Option<Vec<Sele
         return positions
             .iter()
             .map(|at| {
-                (*at == Position::default()).then_some(SelectionRange {
-                    range: Range::default(),
-                    parent: None,
-                })
+                position::byte_offset(source.lines(), *at)
+                    .ok()
+                    .map(|_| SelectionRange {
+                        range: Range::default(),
+                        parent: None,
+                    })
             })
             .collect();
     }
-    let at: Vec<_> = positions.iter().copied().map(position::utf16).collect();
+    let at: Vec<_> = positions
+        .iter()
+        .map(|at| {
+            let byte = position::byte_offset(source.lines(), *at).ok()?;
+            Some(tola_typst_syntax::position::utf16_range(source.lines(), byte..byte)?.start)
+        })
+        .collect::<Option<_>>()?;
     tola_typst_syntax::nesting::nesting(source, &at)?
         .into_iter()
         .map(|chain| nested(source.lines(), &chain))
@@ -68,5 +76,33 @@ mod tests {
                 .iter()
                 .all(|selection| selection.range == lsp_types::Range::default())
         );
+    }
+
+    #[test]
+    fn selections_follow_protocol_lines() {
+        for separator in ['\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}'] {
+            let source = Source::detached(format!("#let first = 1{separator}#let second = 2"));
+            let byte = source.text().find("second").unwrap() + 3;
+            let at = position::utf16_range(source.lines(), byte..byte)
+                .unwrap()
+                .start;
+            let selected = ranges(&source, &[at]).unwrap();
+            let selected = &selected[0].range;
+            let start = position::byte_offset(source.lines(), selected.start).unwrap();
+            let end = position::byte_offset(source.lines(), selected.end).unwrap();
+            assert_eq!(&source.text()[start..end], "second", "{separator:?}");
+        }
+    }
+
+    #[test]
+    fn selections_clamp_excessive_columns() {
+        for text in ["", "#let value = 1"] {
+            let source = Source::detached(text);
+            let at_end = Position::new(0, position::utf16_len(text) as u32);
+            assert_eq!(
+                ranges(&source, &[Position::new(0, 1000)]),
+                ranges(&source, &[at_end])
+            );
+        }
     }
 }

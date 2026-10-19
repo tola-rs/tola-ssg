@@ -8,9 +8,11 @@ pub(super) mod config;
 mod context;
 mod definition;
 mod editing;
+mod expression;
 mod hints;
 mod hover;
 mod imports;
+mod inference;
 mod labels;
 mod meta;
 mod name_graph;
@@ -26,6 +28,11 @@ mod site_schema;
 
 pub(super) use citations::BibliographyCache;
 pub(in crate::query) use completion::markdown_documentation;
+pub(crate) use completion::{
+    source_completion_reply, source_import_completion, source_member_completion,
+    source_member_graph_needed, source_name_completion, source_name_graph_needed,
+    source_name_position,
+};
 pub(super) use name_graph::source_reply;
 pub(super) use package::package_source_definition;
 pub(super) use records::origin::field_chain;
@@ -131,15 +138,25 @@ pub(super) fn respond(
     {
         return Ok(reply);
     }
+    // A comment has no names to offer; the documentation template above is its one completion.
+    if matches!(query, SourceQuery::Completion(_)) && completion::comment_at(&source, cursor) {
+        return Ok(completion_reply(Vec::new()));
+    }
+    if matches!(query, SourceQuery::Completion(_)) && completion::raw_at(&source, cursor) {
+        return Ok(completion_reply(Vec::new()));
+    }
     if let Some(reply) = source_reply(&source, cursor, query)? {
         return Ok(reply);
     }
     // An import path is neither a name nor a label, so the package lane answers it before the
     // name graph builds over the source set.
-    if let Some(reply) = package::respond(&package_access, &source, cursor, query, client_root)? {
+    if let Some(reply) =
+        package::respond(config, &package_access, &source, cursor, query, client_root)?
+    {
         return Ok(reply);
     }
     if query.answered_from_name_graph()
+        && !completion::opaque_at(&source, cursor)
         && labels::referenced(&source, cursor).is_none()
         && let Some(reply) = {
             graph_reply(
@@ -299,6 +316,11 @@ impl<'a> Selection<'a> {
                         self.cursor,
                     )));
                 }
+                // A plain string or raw block has no names; only the lanes above (paths, asset
+                // URLs, metadata keys) answer there.
+                if completion::opaque_at(self.source, self.cursor) {
+                    return Ok(completion_reply(Vec::new()));
+                }
                 // A value's own wraps answer before the fields it already has, so a name both
                 // spellings could complete reaches the wrap first.
                 let mut items = postfix::completions(self.source, self.cursor);
@@ -326,9 +348,12 @@ impl<'a> Selection<'a> {
                 }
                 // A member position answers the receiver's own records — its members and wraps —
                 // never the general names the reader falls back to for an unresolved receiver.
-                // Every other position reads the author's own text, whether or not the query
-                // copy could compile it.
+                // An import item list answers the module's own exports; the reader's general
+                // completion would add names the statement cannot accept, with a range the client
+                // cannot filter. Every other position reads the author's own text, whether or not
+                // the query copy could compile it.
                 if !self.at_code_member()
+                    && !matches!(self.syntax, SelectedSyntax::Import(_))
                     && let Some((_, ordinary)) = editing::completion(
                         compilation.world(),
                         config,
@@ -509,7 +534,13 @@ impl<'a> Selection<'a> {
                         // key's are the ones any source the site holds spells, since a
                         // bibliography can be cited from any page.
                         let found = if labels::declares(compilation, name) {
-                            labels::locations(compilation, name, cancellation, client_root)?
+                            labels::locations(
+                                compilation,
+                                name,
+                                params.context.include_declaration,
+                                cancellation,
+                                client_root,
+                            )?
                         } else {
                             citations::references(
                                 compilation,
@@ -593,6 +624,11 @@ mod tests {
     use std::path::Path;
     use tola_build::config::loading::{BuildOverrides, load_site_config};
     use tola_typst::typst::syntax::Source;
+    /// A site whose evaluation stops before it includes the page being edited.
+    pub(crate) const FAILED_PROGRAM: &str = r#"#panic("early")
+#document("index.html", format: "html")[#include "content/document.typ"]
+"#;
+
     pub(crate) const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/site:0.0.0": site
 #import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify

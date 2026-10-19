@@ -140,27 +140,31 @@ pub(super) fn editor_diagnostic(
             None => folded.push(format!("help: {}", help.message)),
         }
     }
-    for frame in &diagnostic.trace {
-        match &frame.location {
-            Some(location) => {
-                if !fold_related && let Some(path) = diagnostic_path(root, location) {
-                    add_related(
-                        &mut projected,
-                        client_root,
-                        &path,
-                        location,
-                        frame.message.clone(),
-                        texts,
-                    )?;
-                } else {
-                    folded.push(format!(
-                        "{}: {}",
-                        spelled_location(root, location),
-                        frame.message,
-                    ));
+    // A source metadata issue names a field, not a site call: the editor does not surface the
+    // parse pipeline that reached it.
+    if diagnostic.code != tola_build::codes::source::METADATA {
+        for frame in &diagnostic.trace {
+            match &frame.location {
+                Some(location) => {
+                    if !fold_related && let Some(path) = diagnostic_path(root, location) {
+                        add_related(
+                            &mut projected,
+                            client_root,
+                            &path,
+                            location,
+                            frame.message.clone(),
+                            texts,
+                        )?;
+                    } else {
+                        folded.push(format!(
+                            "{}: {}",
+                            spelled_location(root, location),
+                            frame.message,
+                        ));
+                    }
                 }
+                None => folded.push(frame.message.clone()),
             }
-            None => folded.push(frame.message.clone()),
         }
     }
     // The label lets an editor reader separate notes, help, and trace text from the message.
@@ -628,6 +632,43 @@ mod tests {
                 assert!(diagnostic.message.contains("site/pages.typ:2"));
                 assert!(diagnostic.message.contains("while calling function"));
             }
+        }
+    }
+
+    /// A source metadata issue names a field, not a site call: the editor does not surface the
+    /// parse pipeline that reached it.
+    #[test]
+    fn source_metadata_omits_the_parse_trace() {
+        for related in [false, true] {
+            let mut site = Site::new(&[
+                ("content/page.typ", "Body\n"),
+                ("site/pages.typ", "#let render = () => 1\n#render()\n"),
+            ]);
+            let mut diagnostic = Diagnostic::at_path(
+                tola_build::codes::source::METADATA,
+                Severity::Error,
+                "content/page.typ",
+                "`$.published` is not set",
+            );
+            diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
+                message: "while calling `select-pages`".into(),
+                location: Some(located_at("site/pages.typ", 2, 2)),
+            });
+            if related {
+                site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
+            } else {
+                site.publish(vec![diagnostic]);
+            }
+            let diagnostics = site.diagnostics();
+            let [diagnostic] = diagnostics.as_slice() else {
+                panic!("one diagnostic: {diagnostics:?}");
+            };
+            assert!(
+                !diagnostic.message.contains("select-pages"),
+                "{}",
+                diagnostic.message
+            );
+            assert!(diagnostic.related_information.is_none());
         }
     }
 

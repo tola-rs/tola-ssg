@@ -1,13 +1,12 @@
 //! The requests this connection answers without a check: a source's formatting, folds, outline,
-//! links, tokens, and selection, the on-enter edits in it, the call-hierarchy steps that read one
+//! links and selection, the on-enter edits in it, the call-hierarchy steps that read one
 //! source, the configuration document's answers and the diagnostics pulled from the last check, and
 //! the source reads they all begin from. Requests that need the checked world are queued by
-//! `source_jobs`.
+//! `source_jobs`; semantic tokens enqueue their source analysis here.
 
 use std::borrow::Cow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Result;
 use lsp_server::{ErrorCode, RequestId, Response};
@@ -15,8 +14,8 @@ use lsp_types::{
     CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams, CompletionResponse,
     DiagnosticServerCancellationData, DocumentDiagnosticParams, DocumentFormattingParams,
     DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams, FoldingRangeParams,
-    SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensResult, Uri,
+    SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensParams,
+    SemanticTokensRangeParams, Uri,
 };
 use tola_build::config::ResolvedSiteConfig;
 use tola_build::diagnostic::Diagnostic;
@@ -26,18 +25,18 @@ use crate::diagnostic::Pulled;
 use crate::protocol::{self, EnterParams, EnterReply, SourceQuery, SourceReply};
 
 use super::Connection;
-use super::replies::failed_response;
 
 /// Whether this URI names a document the editor holds unsaved.
 pub(super) fn is_untitled(uri: &Uri) -> bool {
     uri.as_str().starts_with("untitled:")
 }
 impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
-    pub(super) fn source_boundary(&self, root: &Path) -> tola_typst::SourceBoundary {
+    pub(super) fn source_boundary(&self) -> tola_typst::SourceBoundary {
+        let root = self.source_root();
         self.configuration.as_ref().map_or_else(
             || {
                 crate::sources::base_source_boundary(
-                    root,
+                    &root,
                     self.resources.input_scope() == tola_build::InputScope::Pure,
                 )
             },
@@ -51,51 +50,20 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .map(|config| self.resources.package_locations(config))
     }
 
-    /// The source-only name graph over one source, as this connection's own answers read it.
-    pub(super) fn source_graph(
-        &mut self,
-        root: &Path,
-        source: &Source,
-    ) -> Result<Arc<tola_typst_syntax::imports::NameGraph>> {
-        let locations = self.package_locations();
-        let boundary = self.source_boundary(root);
-        let view = self.open.view();
-        crate::analysis::source_only_graph(
-            root,
-            &view,
-            source,
-            locations.as_ref(),
-            &boundary,
-            false,
-            &mut self.disk,
-            Some(crate::analysis::CachedGraph {
-                cache: &mut self.graphs,
-                revision: self.open.revision(),
-            }),
-            &self.shutdown.token(),
-        )
-    }
-
     pub(super) fn source(&self, uri: &Uri) -> Option<Source> {
-        let workspace = self.workspace();
-        let boundary = self.source_boundary(&workspace.root);
+        let root = self.source_root();
+        let boundary = self.source_boundary();
         if let Ok(path) = crate::uri::to_site_path(uri.as_str()) {
             boundary.check(&path).ok()?;
         }
         self.open
             .source(uri)
             .cloned()
-            .or_else(|| crate::sources::load(uri, &workspace.root, &self.overrides, &boundary))
+            .or_else(|| crate::sources::load(uri, &root, &self.overrides, &boundary))
     }
 
-    fn text_request<T>(
-        &self,
-        uri: &Uri,
-        answer: impl FnOnce(&Source, &Path) -> Option<T>,
-    ) -> Option<T> {
-        let workspace = self.workspace();
-        self.source(uri)
-            .and_then(|source| answer(&source, &workspace.root))
+    fn text_request<T>(&self, uri: &Uri, answer: impl FnOnce(&Source) -> Option<T>) -> Option<T> {
+        self.source(uri).and_then(|source| answer(&source))
     }
 
     /// The style this connection's formatting answers write in.
@@ -113,7 +81,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         parameters: DocumentFormattingParams,
     ) -> Result<()> {
         let style = self.formatter_style();
-        let edits = self.text_request(&parameters.text_document.uri, |source, _| {
+        let edits = self.text_request(&parameters.text_document.uri, |source| {
             crate::formatting::edits(source.text(), &style)
         });
         self.reply(Response::new_ok(id, edits))
@@ -126,7 +94,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         parameters: DocumentRangeFormattingParams,
     ) -> Result<()> {
         let style = self.formatter_style();
-        let edits = self.text_request(&parameters.text_document.uri, |source, _| {
+        let edits = self.text_request(&parameters.text_document.uri, |source| {
             let lines = source.lines();
             let bytes = crate::position::byte_offset(lines, parameters.range.start).ok()?
                 ..crate::position::byte_offset(lines, parameters.range.end).ok()?;
@@ -138,7 +106,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
     pub(super) fn folding(&mut self, id: RequestId, parameters: FoldingRangeParams) -> Result<()> {
         let workspace = self.workspace();
         let line_folding_only = workspace.line_folding_only;
-        let ranges = self.text_request(&parameters.text_document.uri, |source, _| {
+        let ranges = self.text_request(&parameters.text_document.uri, |source| {
             crate::folding::ranges(source, line_folding_only)
         });
         self.reply(Response::new_ok(id, ranges))
@@ -152,7 +120,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let workspace = self.workspace();
         let hierarchical = workspace.features.hierarchical_symbols;
         let uri = &parameters.text_document.uri;
-        let symbols = self.text_request(uri, |source, _| {
+        let symbols = self.text_request(uri, |source| {
             crate::symbols::outline(source, uri, hierarchical)
         });
         self.reply(Response::new_ok(id, symbols))
@@ -186,58 +154,70 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 Option::<Vec<lsp_types::DocumentLink>>::None,
             ));
         }
-        let links = self.text_request(&parameters.text_document.uri, crate::links::paths);
+        let root = self.source_root();
+        let client_root = crate::uri::ClientRoot::new(&self.workspace().root);
+        let links = self
+            .source(&parameters.text_document.uri)
+            .and_then(|source| crate::links::paths(&source, &root, &client_root));
         self.reply(Response::new_ok(id, links))
     }
 
     pub(super) fn enter(&mut self, id: RequestId, parameters: EnterParams) -> Result<()> {
-        let edits = self.text_request(&parameters.uri, |source, _| {
+        let edits = self.text_request(&parameters.uri, |source| {
             crate::on_enter::edits(source, parameters.position)
         });
         self.reply(Response::new_ok(id, EnterReply { edits }))
     }
 
-    fn current_tokens(&mut self, uri: &Uri) -> Result<Option<lsp_types::SemanticTokens>> {
-        let workspace = self.workspace();
-        let Some(source) = self.source(uri) else {
-            return Ok(None);
-        };
-        let root = workspace.root.clone();
-        let graph = self.source_graph(&root, &source)?;
-        Ok(Some(crate::tokens::tokens(&source, &graph)))
-    }
-
-    fn remember_tokens(&mut self, uri: Uri, mut tokens: lsp_types::SemanticTokens) {
-        self.tokens_serial += 1;
-        tokens.result_id = Some(self.tokens_serial.to_string());
-        self.tokens.insert(uri, tokens);
-    }
-
-    pub(super) fn tokens_delta(
+    fn enqueue_tokens(
         &mut self,
         id: RequestId,
-        parameters: SemanticTokensDeltaParams,
+        uri: Uri,
+        kind: crate::compiler::TokensKind,
     ) -> Result<()> {
-        let uri = parameters.text_document.uri;
-        let current = match self.current_tokens(&uri) {
-            Ok(Some(tokens)) => tokens,
-            Ok(None) => {
-                return self.reply(Response::new_ok(
-                    id,
-                    Option::<SemanticTokensFullDeltaResult>::None,
-                ));
-            }
-            Err(error) => return self.reply(failed_response(id, error)),
+        let Some(source) = self.source(&uri) else {
+            return self.reply(Response::new_ok(
+                id,
+                Option::<lsp_types::SemanticTokens>::None,
+            ));
         };
-        let delta = self
+        self.enqueue_analysis(
+            id,
+            source,
+            crate::compiler::AnalysisTask::Tokens(crate::compiler::TokensRead { uri, kind }),
+        )
+    }
+
+    pub(super) fn commit_tokens(
+        &mut self,
+        id: RequestId,
+        read: crate::compiler::TokensRead,
+        mut tokens: lsp_types::SemanticTokens,
+    ) -> Result<()> {
+        use crate::compiler::TokensKind;
+        if matches!(read.kind, TokensKind::Range(_)) {
+            self.tokens.entry(read.uri).or_insert(None);
+            return self.reply(Response::new_ok(id, tokens));
+        }
+        let delta = match &read.kind {
+            TokensKind::Delta(previous_result_id) => self
+                .tokens
+                .get(&read.uri)
+                .and_then(Option::as_ref)
+                .filter(|previous| {
+                    previous.result_id.as_deref() == Some(previous_result_id.as_str())
+                })
+                .map(|previous| crate::tokens::delta(previous, &tokens)),
+            _ => None,
+        };
+        self.tokens_serial += 1;
+        tokens.result_id = Some(self.tokens_serial.to_string());
+        self.tokens.insert(read.uri.clone(), Some(tokens));
+        let current = self
             .tokens
-            .get(&uri)
-            .filter(|previous| {
-                previous.result_id.as_deref() == Some(parameters.previous_result_id.as_str())
-            })
-            .map(|previous| crate::tokens::delta(previous, &current));
-        self.remember_tokens(uri.clone(), current);
-        let current = self.tokens.get(&uri).expect("current tokens were retained");
+            .get(&read.uri)
+            .and_then(Option::as_ref)
+            .expect("current tokens were retained");
         let reply = match delta {
             Some(mut delta) => {
                 delta.result_id.clone_from(&current.result_id);
@@ -248,17 +228,24 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         self.reply(reply)
     }
 
+    pub(super) fn tokens_delta(
+        &mut self,
+        id: RequestId,
+        parameters: SemanticTokensDeltaParams,
+    ) -> Result<()> {
+        self.enqueue_tokens(
+            id,
+            parameters.text_document.uri,
+            crate::compiler::TokensKind::Delta(parameters.previous_result_id),
+        )
+    }
+
     pub(super) fn tokens(&mut self, id: RequestId, parameters: SemanticTokensParams) -> Result<()> {
-        let uri = parameters.text_document.uri;
-        let tokens = match self.current_tokens(&uri) {
-            Ok(Some(tokens)) => tokens,
-            Ok(None) => {
-                return self.reply(Response::new_ok(id, Option::<SemanticTokensResult>::None));
-            }
-            Err(error) => return self.reply(failed_response(id, error)),
-        };
-        self.remember_tokens(uri.clone(), tokens);
-        self.reply(Response::new_ok(id, self.tokens.get(&uri)))
+        self.enqueue_tokens(
+            id,
+            parameters.text_document.uri,
+            crate::compiler::TokensKind::Full,
+        )
     }
 
     pub(super) fn tokens_range(
@@ -266,22 +253,11 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: SemanticTokensRangeParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let Some(source) = self.source(&parameters.text_document.uri) else {
-            return self.reply(Response::new_ok(
-                id,
-                Option::<lsp_types::SemanticTokens>::None,
-            ));
-        };
-        let root = workspace.root.clone();
-        let graph = self.source_graph(&root, &source);
-        match graph {
-            Ok(graph) => self.reply(Response::new_ok(
-                id,
-                Some(crate::tokens::in_range(&source, &graph, parameters.range)),
-            )),
-            Err(error) => self.reply(failed_response(id, error)),
-        }
+        self.enqueue_tokens(
+            id,
+            parameters.text_document.uri,
+            crate::compiler::TokensKind::Range(parameters.range),
+        )
     }
 
     /// The configuration document this workspace resolves.
@@ -381,8 +357,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: CallHierarchyPrepareParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
+        let root = self.source_root();
         let uri = &parameters.text_document_position_params.text_document.uri;
         let position = parameters.text_document_position_params.position;
         let Some(source) = self.source(uri) else {
@@ -391,13 +366,14 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let Ok(cursor) = crate::position::byte_offset(source.lines(), position) else {
             return self.source_reply(id, SourceReply::PrepareCallHierarchy(None));
         };
-        let boundary = self.source_boundary(&root);
+        let boundary = self.source_boundary();
         let item = crate::call_hierarchy::prepare(
             &root,
             self.package_locations().as_ref(),
             &boundary,
             &source,
             cursor,
+            &crate::uri::ClientRoot::new(&self.workspace().root),
         );
         self.source_reply(
             id,
@@ -411,8 +387,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         id: RequestId,
         parameters: CallHierarchyOutgoingCallsParams,
     ) -> Result<()> {
-        let workspace = self.workspace();
-        let root = workspace.root.clone();
+        let root = self.source_root();
         let source = self.source(&parameters.item.uri).filter(|source| {
             parameters
                 .item
@@ -424,12 +399,13 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let Some(source) = source else {
             return self.source_reply(id, SourceReply::OutgoingCalls(None));
         };
-        let boundary = self.source_boundary(&root);
+        let boundary = self.source_boundary();
         let calls = crate::call_hierarchy::outgoing(
             &root,
             self.package_locations().as_ref(),
             &boundary,
             &source,
+            &crate::uri::ClientRoot::new(&self.workspace().root),
         );
         self.source_reply(
             id,
@@ -484,6 +460,7 @@ mod tests {
     };
     use crate::server::tests::load_configuration;
     use lsp_server::{Message, Notification, Request};
+    use lsp_types::SemanticTokensFullDeltaResult;
     use lsp_types::notification::{self, Notification as LspNotification};
     use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
@@ -491,6 +468,17 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
+
+    fn finish_analysis(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
+        let request = connection.next_analysis().expect("queued source analysis");
+        connection
+            .completed(crate::compiler::analyze(
+                &mut crate::analysis::DiskSources::default(),
+                &mut crate::analysis::GraphCache::default(),
+                request,
+            ))
+            .unwrap();
+    }
 
     fn full_tokens(
         connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>,
@@ -504,6 +492,7 @@ mod tests {
                 json!({"textDocument":{"uri":uri.as_str()}}),
             ))
             .unwrap();
+        finish_analysis(connection);
         serde_json::from_value(response(connection).response_result.unwrap()).unwrap()
     }
 
@@ -523,6 +512,142 @@ mod tests {
     }
 
     #[test]
+    fn source_analysis_leaves_control_free() {
+        for method in [
+            request::SemanticTokensFullRequest::METHOD,
+            request::SemanticTokensFullDeltaRequest::METHOD,
+            request::SemanticTokensRangeRequest::METHOD,
+            request::GotoDefinition::METHOD,
+            request::PrepareRenameRequest::METHOD,
+            request::DocumentHighlightRequest::METHOD,
+            request::References::METHOD,
+            request::Rename::METHOD,
+        ] {
+            let mut connection = ready(Vec::new());
+            let uri = open_draft(&mut connection, "#let count = 1\n#count");
+            connection.request(Request::new(1.into(), method.into(), json!({
+                "textDocument":{"uri":uri.as_str()}, "position":{"line":1,"character":3},
+                "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":6}},
+                "previousResultId":"missing", "context":{"includeDeclaration":true}, "newName":"renamed"
+            }))).unwrap();
+            assert!(connection.writer.is_empty(), "{method}");
+            let held = connection
+                .next_analysis()
+                .expect("source work leaves the connection");
+            connection
+                .request(Request::new(
+                    2.into(),
+                    request::FoldingRangeRequest::METHOD.into(),
+                    json!({"textDocument":{"uri":uri.as_str()}}),
+                ))
+                .unwrap();
+            assert_eq!(response(&mut connection).id, 2.into());
+            let _ = connection
+                .notification(Notification::new(
+                    notification::Cancel::METHOD.into(),
+                    json!({"id":1}),
+                ))
+                .unwrap();
+            assert_eq!(
+                response(&mut connection).response_result.unwrap_err().code,
+                ErrorCode::RequestCanceled as i32
+            );
+            connection
+                .completed(crate::compiler::analyze(
+                    &mut crate::analysis::DiskSources::default(),
+                    &mut crate::analysis::GraphCache::default(),
+                    held,
+                ))
+                .unwrap();
+            assert!(connection.writer.is_empty(), "{method}");
+            assert!(connection.tokens.is_empty());
+            assert_eq!(connection.tokens_serial, 0);
+            assert!(connection.next_job(Instant::now()).is_none());
+        }
+    }
+
+    #[test]
+    fn stale_tokens_preserve_delta_base() {
+        for reopen in [false, true] {
+            let mut connection = ready(Vec::new());
+            let uri = open_draft(&mut connection, "#let count = 1\n#count");
+            let previous = full_tokens(&mut connection, &uri, 1);
+            let serial = connection.tokens_serial;
+            connection.request(Request::new(2.into(), request::SemanticTokensFullDeltaRequest::METHOD.into(), json!({"textDocument":{"uri":uri.as_str()},"previousResultId":previous.result_id}))).unwrap();
+            let pending = connection.next_analysis().unwrap();
+            let completed = crate::compiler::analyze(
+                &mut crate::analysis::DiskSources::default(),
+                &mut crate::analysis::GraphCache::default(),
+                pending,
+            );
+            if reopen {
+                let _ = connection
+                    .notification(Notification::new(
+                        notification::DidCloseTextDocument::METHOD.into(),
+                        json!({"textDocument":{"uri":uri.as_str()}}),
+                    ))
+                    .unwrap();
+                open_draft(&mut connection, "#let count = 1\n#count");
+            } else {
+                let _ = connection.notification(Notification::new(notification::DidChangeTextDocument::METHOD.into(), json!({"textDocument":{"uri":uri.as_str(),"version":2},"contentChanges":[{"text":"#let count = (1,2)\n#count"}]}))).unwrap();
+            }
+            assert!(response(&mut connection).response_result.is_err());
+            connection.completed(completed).unwrap();
+            assert!(connection.writer.is_empty());
+            assert_eq!(connection.tokens_serial, serial);
+            if reopen {
+                assert!(!connection.tokens.contains_key(&uri));
+            } else {
+                assert_eq!(connection.tokens[&uri].as_ref(), Some(&previous));
+            }
+        }
+    }
+
+    #[test]
+    fn range_reply_has_no_delta_base() {
+        let mut connection = ready(Vec::new());
+        let uri = open_draft(&mut connection, "#let count = 1\n#count");
+        connection.request(Request::new(1.into(), request::SemanticTokensRangeRequest::METHOD.into(), json!({"textDocument":{"uri":uri.as_str()},"range":{"start":{"line":0,"character":0},"end":{"line":1,"character":6}}}))).unwrap();
+        finish_analysis(&mut connection);
+        let ranged: lsp_types::SemanticTokens =
+            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
+        assert_eq!(ranged.result_id, None);
+        assert_eq!(connection.tokens.get(&uri), Some(&None));
+        assert_eq!(connection.tokens_serial, 0);
+        connection
+            .request(Request::new(
+                2.into(),
+                request::SemanticTokensFullDeltaRequest::METHOD.into(),
+                json!({"textDocument":{"uri":uri.as_str()},"previousResultId":"1"}),
+            ))
+            .unwrap();
+        finish_analysis(&mut connection);
+        let reply: SemanticTokensFullDeltaResult =
+            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
+        let SemanticTokensFullDeltaResult::Tokens(full) = reply else {
+            panic!("range replies establish no delta base");
+        };
+        assert_eq!(full.data, ranged.data);
+        assert_eq!(connection.tokens[&uri].as_ref(), Some(&full));
+        assert_eq!(connection.tokens_serial, 1);
+    }
+
+    #[test]
+    fn range_tokens_keep_full_baseline() {
+        let mut connection = ready(Vec::new());
+        let uri = open_draft(&mut connection, "#let count = 1\n#count");
+        let full = full_tokens(&mut connection, &uri, 1);
+        connection.request(Request::new(2.into(), request::SemanticTokensRangeRequest::METHOD.into(), json!({"textDocument":{"uri":uri.as_str()},"range":{"start":{"line":0,"character":0},"end":{"line":1,"character":6}}}))).unwrap();
+        finish_analysis(&mut connection);
+        let ranged: lsp_types::SemanticTokens =
+            serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
+        assert_eq!(ranged.data, full.data);
+        assert_eq!(ranged.result_id, None);
+        assert_eq!(connection.tokens[&uri].as_ref(), Some(&full));
+        assert_eq!(connection.tokens_serial, 1);
+    }
+
+    #[test]
     fn missing_delta_base_returns_full_tokens() {
         let mut connection = ready(Vec::new());
         let uri = open_draft(&mut connection, "#let count = 1\n#count");
@@ -539,6 +664,7 @@ mod tests {
                 json!({"textDocument":{"uri":uri.as_str()},"previousResultId":first.result_id}),
             ))
             .unwrap();
+        finish_analysis(&mut connection);
         let tokens: SemanticTokensFullDeltaResult =
             serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
         let SemanticTokensFullDeltaResult::Tokens(tokens) = tokens else {
@@ -567,6 +693,7 @@ mod tests {
                 json!({"textDocument":{"uri":uri.as_str()},"previousResultId":previous.result_id}),
             ))
             .unwrap();
+        finish_analysis(&mut connection);
         let tokens: SemanticTokensFullDeltaResult =
             serde_json::from_value(response(&mut connection).response_result.unwrap()).unwrap();
         assert!(matches!(tokens, SemanticTokensFullDeltaResult::Tokens(_)));
@@ -585,7 +712,7 @@ mod tests {
         let mut invalid = crate::position::utf16_range(source.lines(), text.len()..text.len())
             .unwrap()
             .end;
-        invalid.character += 1;
+        invalid.line += 1;
         connection
             .request(Request::new(
                 1.into(),

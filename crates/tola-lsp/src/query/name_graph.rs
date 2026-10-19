@@ -109,7 +109,8 @@ pub(super) fn graph_reply(
         source,
         cursor,
         query,
-        &client_root.spell(client_root.resolved()),
+        root,
+        client_root,
         locations,
         &package_access.boundary,
     )

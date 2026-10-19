@@ -11,40 +11,55 @@ pub(crate) fn analyze(
     graphs: &mut crate::analysis::GraphCache,
     request: AnalysisRequest,
 ) -> SourceCompilation {
+    let super::jobs::AnalysisTask::Query { query, cursor } = &request.task else {
+        return analyze_tokens(disk, graphs, request);
+    };
+    let cursor = *cursor;
     let response = (|| -> Result<Option<SourceReply>> {
-        request.cancellation.ensure_active()?;
-        let names = crate::analysis::source_only_graph(
-            &request.root,
-            &request.view,
-            &request.source,
-            request.package_locations.as_ref(),
-            &request.boundary,
-            true,
-            disk,
-            Some(crate::analysis::CachedGraph {
-                cache: graphs,
-                revision: request.source_revision,
-            }),
-            &request.cancellation,
-        )?;
-        if !crate::analysis::unproven(&names, &request.source, request.cursor, &request.query)
-            .is_empty()
+        request.sources.cancellation.ensure_active()?;
+        let response = if matches!(query, crate::protocol::SourceQuery::Completion(_)) {
+            source_completion(disk, graphs, &request, query, cursor)?
+        } else {
+            let include_dependents = matches!(
+                query,
+                crate::protocol::SourceQuery::References(_)
+                    | crate::protocol::SourceQuery::Rename(_)
+            );
+            let names = source_graph(disk, graphs, &request, include_dependents)?;
+            if !crate::analysis::unproven(&names, &request.source, cursor, query).is_empty() {
+                None
+            } else {
+                crate::analysis::respond(
+                    &names,
+                    &request.source,
+                    cursor,
+                    query,
+                    &request.source_root,
+                    &crate::uri::ClientRoot::new(&request.sources.root),
+                    request.package_locations.as_ref(),
+                    &request.boundary,
+                )?
+            }
+        };
+        request.sources.cancellation.ensure_active()?;
+        let mut response = response.or_else(|| {
+            request
+                .view
+                .is_unnamed(request.source.id())
+                .then(|| crate::query::unavailable(query))
+        });
+        if let (Some(SourceReply::Definition(Some(definition))), Some(directory)) =
+            (&mut response, &request.package_sources)
         {
-            return Ok(None);
+            crate::query::package_source_definition(
+                definition,
+                directory,
+                &crate::uri::ClientRoot::new(&request.sources.root),
+                &request.sources.cancellation,
+            )?;
         }
-        let response = crate::analysis::respond(
-            &names,
-            &request.source,
-            request.cursor,
-            &request.query,
-            &request.root,
-            request.package_locations.as_ref(),
-            &request.boundary,
-        )?;
-        request.cancellation.ensure_active()?;
-        Ok(Some(response.unwrap_or_else(|| {
-            crate::query::unavailable(&request.query)
-        })))
+        request.sources.cancellation.ensure_active()?;
+        Ok(response)
     })()
     .map_err(SourceFailure::of);
     match response {
@@ -53,20 +68,160 @@ pub(crate) fn analyze(
             serial: request.serial,
             response: Ok(response),
         },
-        Ok(None) => SourceCompilation::Continued(AnalysisContinuation {
-            id: request.id,
-            serial: request.serial,
-            root: request.root,
-            view: request.view,
-            query: request.query,
-            cancellation: request.cancellation,
-        }),
+        Ok(None) => {
+            let super::jobs::AnalysisTask::Query { query, .. } = request.task else {
+                unreachable!()
+            };
+            SourceCompilation::Continued(AnalysisContinuation {
+                id: request.id,
+                serial: request.serial,
+                sources: request.sources,
+                view: request.view,
+                query,
+            })
+        }
         Err(failure) => SourceCompilation::Answered {
             id: request.id,
             serial: request.serial,
             response: Err(failure),
         },
     }
+}
+
+fn source_graph(
+    disk: &mut crate::analysis::DiskSources,
+    graphs: &mut crate::analysis::GraphCache,
+    request: &AnalysisRequest,
+    include_dependents: bool,
+) -> Result<std::sync::Arc<tola_typst_syntax::imports::NameGraph>> {
+    crate::analysis::source_only_graph(
+        &request.source_root,
+        &request.view,
+        &request.source,
+        request.package_locations.as_ref(),
+        &request.boundary,
+        include_dependents,
+        disk,
+        Some(crate::analysis::CachedGraph {
+            cache: graphs,
+            revision: request.sources.source_revision,
+        }),
+        &request.sources.cancellation,
+    )
+}
+
+fn analyze_tokens(
+    disk: &mut crate::analysis::DiskSources,
+    graphs: &mut crate::analysis::GraphCache,
+    request: AnalysisRequest,
+) -> SourceCompilation {
+    let response = (|| -> Result<lsp_types::SemanticTokens> {
+        request.sources.cancellation.ensure_active()?;
+        let graph = source_graph(disk, graphs, &request, false)?;
+        let super::jobs::AnalysisTask::Tokens(read) = &request.task else {
+            unreachable!()
+        };
+        let tokens = crate::tokens::tokens(
+            &request.source,
+            &graph,
+            match read.kind {
+                super::jobs::TokensKind::Range(range) => Some(range),
+                _ => None,
+            },
+            &request.sources.cancellation,
+        )?;
+        request.sources.cancellation.ensure_active()?;
+        Ok(tokens)
+    })()
+    .map_err(SourceFailure::of);
+    let super::jobs::AnalysisTask::Tokens(read) = request.task else {
+        unreachable!()
+    };
+    SourceCompilation::Tokens {
+        id: request.id,
+        serial: request.serial,
+        read,
+        response,
+    }
+}
+
+fn source_completion(
+    disk: &mut crate::analysis::DiskSources,
+    graphs: &mut crate::analysis::GraphCache,
+    request: &AnalysisRequest,
+    query: &crate::protocol::SourceQuery,
+    cursor: usize,
+) -> Result<Option<SourceReply>> {
+    let source = &request.source;
+    let cancellation = &request.sources.cancellation;
+    let names = request
+        .view
+        .get(query.document().0)
+        .filter(|snapshot| {
+            snapshot.source.id() == source.id() && snapshot.source.text() == source.text()
+        })
+        .map(|snapshot| snapshot.names())
+        .unwrap_or_else(|| {
+            std::sync::Arc::new(tola_typst_syntax::names::SourceNames::new(source.clone()))
+        });
+    cancellation.ensure_active()?;
+    let import = tola_typst_syntax::syntax::import(source, cursor).is_some();
+    let name = crate::query::source_name_position(&names, source, cursor);
+    let needs_graph = import
+        || if name {
+            crate::query::source_name_graph_needed(&names, cursor, cancellation)?
+        } else {
+            crate::query::source_member_graph_needed(&names, source, cursor, cancellation)?
+        };
+    let graph = if needs_graph {
+        Some(crate::analysis::source_only_graph(
+            &request.source_root,
+            &request.view,
+            source,
+            request.package_locations.as_ref(),
+            &request.boundary,
+            false,
+            disk,
+            Some(crate::analysis::CachedGraph {
+                cache: graphs,
+                revision: request.sources.source_revision,
+            }),
+            cancellation,
+        )?)
+    } else {
+        None
+    };
+    let mut items = if import {
+        crate::query::source_import_completion(
+            graph.as_deref().expect("an import reads its graph"),
+            &names,
+            source,
+            cursor,
+            cancellation,
+        )?
+    } else {
+        None
+    };
+    if items.is_none() && name {
+        items = crate::query::source_name_completion(
+            graph.as_deref(),
+            &names,
+            source,
+            cursor,
+            cancellation,
+        )?;
+    }
+    if items.is_none() {
+        items = crate::query::source_member_completion(
+            graph.as_deref(),
+            &names,
+            source,
+            cursor,
+            cancellation,
+        )?;
+    }
+    cancellation.ensure_active()?;
+    Ok(items.map(|items| SourceReply::Completion(lsp_types::CompletionResponse::Array(items))))
 }
 
 #[cfg(test)]
@@ -85,7 +240,7 @@ mod tests {
         let (mut request, _) = references_analysis(&root, "#let marker = 1\n#mar|ker\n");
         let canceller = BuildCanceller::new();
         canceller.cancel();
-        request.cancellation = canceller.token();
+        request.sources.cancellation = canceller.token();
         assert_cancelled(analyze(
             &mut crate::analysis::DiskSources::default(),
             &mut crate::analysis::GraphCache::default(),
@@ -109,24 +264,31 @@ mod tests {
             id: 1.into(),
             serial: 1,
             boundary: tola_typst::SourceBoundary::new(root, true),
-            root: root.to_path_buf(),
+            sources: crate::compiler::SourceInputs {
+                root: root.to_path_buf(),
+                overrides: std::sync::Arc::default(),
+                source_revision: 0,
+                cancellation: BuildCancellation::new(),
+            },
+            source_root: root.to_path_buf(),
             view: SourceView::default(),
             source,
-            cursor,
             package_locations: None,
-            query: crate::protocol::SourceQuery::References(lsp_types::ReferenceParams {
-                text_document_position: lsp_types::TextDocumentPositionParams {
-                    text_document: lsp_types::TextDocumentIdentifier::new(uri),
-                    position,
-                },
-                context: lsp_types::ReferenceContext {
-                    include_declaration: true,
-                },
-                work_done_progress_params: Default::default(),
-                partial_result_params: Default::default(),
-            }),
-            cancellation: BuildCancellation::new(),
-            source_revision: 0,
+            package_sources: None,
+            task: super::super::jobs::AnalysisTask::Query {
+                cursor,
+                query: crate::protocol::SourceQuery::References(lsp_types::ReferenceParams {
+                    text_document_position: lsp_types::TextDocumentPositionParams {
+                        text_document: lsp_types::TextDocumentIdentifier::new(uri),
+                        position,
+                    },
+                    context: lsp_types::ReferenceContext {
+                        include_declaration: true,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                }),
+            },
         };
         (request, text)
     }

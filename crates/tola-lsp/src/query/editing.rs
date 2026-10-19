@@ -109,13 +109,28 @@ pub(super) fn completion(
     let (from, completions) =
         typst_ide::autocomplete(&view, None::<&dyn Output>, source, cursor, false)?;
     let range = position::utf16_range(source.lines(), from..cursor)?;
+    let prefix = super::completion::typed_prefix(source, cursor);
     Some((
         range,
         completions
             .into_iter()
+            .filter(|completion| matches_prefix(completion, prefix))
             .map(|completion| protocol_completion(completion, &range))
             .collect(),
     ))
+}
+
+/// Whether the reader's completion can still match what the author typed. A name has to start with
+/// the typed prefix; a snippet, path, label, font, or package is matched on its own text.
+fn matches_prefix(completion: &Completion, prefix: &str) -> bool {
+    match completion.kind {
+        CompletionKind::Func
+        | CompletionKind::Type
+        | CompletionKind::Param
+        | CompletionKind::Constant
+        | CompletionKind::Symbol(_) => super::completion::name_matches(&completion.label, prefix),
+        _ => true,
+    }
 }
 
 /// The tooltip Typst's own reader answers at one cursor, with its own section shapes left to the

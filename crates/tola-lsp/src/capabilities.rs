@@ -37,6 +37,7 @@ pub(super) struct ClientFeatures {
     /// Whether the client registers file watchers dynamically, so a file it never opened still
     /// starts a check.
     pub(super) watched_files_dynamic: bool,
+    pub(super) watched_files_relative: bool,
     /// Whether the client accepts `workspace/diagnostic/refresh`.
     pub(super) diagnostic_refresh: bool,
     /// Whether the client receives `window/workDoneProgress` and the `$/progress` reports behind
@@ -121,6 +122,10 @@ impl ClientFeatures {
             watched_files_dynamic: workspace
                 .and_then(|workspace| workspace.did_change_watched_files.as_ref())
                 .and_then(|watched| watched.dynamic_registration)
+                .unwrap_or(false),
+            watched_files_relative: workspace
+                .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+                .and_then(|watched| watched.relative_pattern_support)
                 .unwrap_or(false),
             diagnostic_refresh: workspace
                 .and_then(|workspace| workspace.diagnostic.as_ref())
@@ -232,6 +237,14 @@ impl ClientFeatures {
     }
 
     fn signature(&self, help: &mut SignatureHelp) {
+        if !self.signature_active_parameter {
+            help.active_parameter = help
+                .signatures
+                .get(help.active_signature.unwrap_or(0) as usize)
+                .or_else(|| help.signatures.first())
+                .and_then(|signature| signature.active_parameter)
+                .or(help.active_parameter);
+        }
         for signature in &mut help.signatures {
             project_documentation(&mut signature.documentation, &self.signature_markup);
             if !self.signature_active_parameter {
@@ -629,5 +642,30 @@ mod tests {
                 value: "A color.".into(),
             }))
         );
+    }
+
+    #[test]
+    fn signatures_preserve_parameter_selection() {
+        for (active, parameter) in [(None, 1), (Some(0), 1), (Some(1), 2), (Some(99), 1)] {
+            for supported in [false, true] {
+                let client = features(json!({"textDocument":{"signatureHelp":{
+                    "signatureInformation":{"activeParameterSupport":supported}
+                }}}));
+                let mut help: SignatureHelp = serde_json::from_value(json!({
+                    "signatures":[
+                        {"label":"f(a, b, c)","parameters":[{"label":"a"},{"label":"b"},{"label":"c"}],"activeParameter":1},
+                        {"label":"f(a, b, c)","parameters":[{"label":"a"},{"label":"b"},{"label":"c"}],"activeParameter":2}
+                    ],
+                    "activeSignature":active,"activeParameter":0
+                })).unwrap();
+                client.signature(&mut help);
+                assert_eq!(
+                    help.active_parameter,
+                    Some(if supported { 0 } else { parameter })
+                );
+                assert_eq!(help.signatures[0].active_parameter, supported.then_some(1));
+                assert_eq!(help.signatures[1].active_parameter, supported.then_some(2));
+            }
+        }
     }
 }

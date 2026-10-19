@@ -7,7 +7,7 @@ use anyhow::Result;
 use lsp_types::{TextEdit, Uri, WorkspaceEdit};
 use tola_build::config::ResolvedSiteConfig;
 use tola_typst::typst::foundations::Repr;
-use tola_typst::typst::syntax::{FileId, Source};
+use tola_typst::typst::syntax::{FileId, Source, ast};
 
 use crate::links;
 
@@ -50,7 +50,9 @@ pub(super) fn imports(
         };
         let source = Source::new(id, text);
         let mut edits = Vec::new();
-        for link in links::paths(&source, &root).unwrap_or_default() {
+        for link in
+            links::paths(&source, &root, &crate::uri::ClientRoot::new(&root)).unwrap_or_default()
+        {
             let Some(target) = link.target.as_ref() else {
                 continue;
             };
@@ -89,6 +91,11 @@ pub(super) fn imports(
                 range: link.range,
                 new_text: literal[1..literal.len() - 1].to_owned(),
             });
+            if let Ok(end) = crate::position::byte_offset(source.lines(), link.range.end)
+                && let Some(alias) = module_alias(&source, start..end, &new_path)
+            {
+                edits.push(alias);
+            }
         }
         if edits.is_empty() {
             continue;
@@ -102,6 +109,33 @@ pub(super) fn imports(
         changes: Some(changes),
         ..WorkspaceEdit::default()
     }))
+}
+
+fn module_alias(
+    source: &Source,
+    path: std::ops::Range<usize>,
+    replacement: &str,
+) -> Option<TextEdit> {
+    let literal = tola_typst_syntax::syntax::node_at_range(
+        source,
+        &(path.start.checked_sub(1)?..path.end + 1),
+    )?;
+    let import = literal.parent()?.cast::<ast::ModuleImport>()?;
+    if import.new_name().is_some() || import.imports().is_some() {
+        return None;
+    }
+    let name = import.bare_name().ok()?;
+    if Path::new(replacement)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        == Some(name.as_str())
+    {
+        return None;
+    }
+    Some(TextEdit {
+        range: crate::position::utf16_range(source.lines(), path.end + 1..path.end + 1)?,
+        new_text: format!(" as {name}"),
+    })
 }
 
 /// The path that reaches `to` from the directory of `from`, with `/` separators.
@@ -203,6 +237,72 @@ mod tests {
         )
         .expect("moving the importer changes its relative link");
         assert_eq!(document_edits(edit, &root)[0].new_text, "content/head.typ");
+    }
+
+    #[test]
+    fn renamed_modules_keep_bound_names() {
+        for (document, expected_alias) in [
+            ("#import \"head.typ\"\n#head.name\n", Some(" as head")),
+            ("#import \"head.typ\" as chosen\n#chosen.name\n", None),
+            ("#import \"head.typ\": name\n#name\n", None),
+        ] {
+            let (_directory, root) = temp_site();
+            let config = site_config(&root, document, &[("content/head.typ", "#let name = 1\n")]);
+            let mut edits = document_edits(
+                rename(
+                    &config,
+                    &root,
+                    &[(root.join("content/head.typ"), root.join("content/part.typ"))],
+                )
+                .unwrap(),
+                &root,
+            );
+            edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
+            let source = Source::detached(document);
+            let mut changed = document.to_owned();
+            for edit in edits {
+                let start = crate::position::byte_offset(source.lines(), edit.range.start).unwrap();
+                let end = crate::position::byte_offset(source.lines(), edit.range.end).unwrap();
+                changed.replace_range(start..end, &edit.new_text);
+            }
+            let replacement = format!("\"part.typ\"{}", expected_alias.unwrap_or_default());
+            assert_eq!(changed, document.replace("\"head.typ\"", &replacement));
+        }
+    }
+
+    #[test]
+    fn moved_importers_preserve_style_names() {
+        let (_directory, root) = temp_site();
+        let config = site_config(
+            &root,
+            "#bibliography(\"refs.bib\", style: \"ieee\")\n",
+            &[("content/refs.bib", "@book{key,title={Book}}\n")],
+        );
+        let edits = document_edits(
+            rename(
+                &config,
+                &root,
+                &[(root.join("content/document.typ"), root.join("document.typ"))],
+            )
+            .unwrap(),
+            &root,
+        );
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        assert_eq!(edits[0].new_text, "content/refs.bib");
+    }
+
+    #[test]
+    fn moved_importers_preserve_shadowed_arguments() {
+        let (_directory, root) = temp_site();
+        let config = site_config(&root, "#let read(text) = text\n#read(\"caption\")\n", &[]);
+        assert!(
+            rename(
+                &config,
+                &root,
+                &[(root.join("content/document.typ"), root.join("document.typ"))]
+            )
+            .is_none()
+        );
     }
 
     #[test]

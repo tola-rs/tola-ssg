@@ -69,6 +69,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                             }
                             self.announce(&checked)?;
                             self.publish(checked, checked_revision)?;
+                            self.watch_sources()?;
                             // The check built this revision's index itself, so a correction waiting
                             // for one reads it now instead of paying for a second walk.
                             if self
@@ -92,11 +93,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 response,
             } => {
                 // Client IDs may be reused while an older cancelled job finishes.
-                if self
-                    .requests
-                    .get(&id)
-                    .is_some_and(|request| request.serial == serial)
-                {
+                if self.accepts_reply(&id, serial)? {
                     let request = self.requests.remove(&id).expect("matching source request");
                     let Phase::Ready(_) = &self.phase else {
                         return Ok(());
@@ -120,22 +117,41 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                     }
                 }
             }
+            SourceCompilation::Tokens {
+                id,
+                serial,
+                read,
+                response,
+            } => {
+                if self.accepts_reply(&id, serial)? {
+                    let pending = self.requests.remove(&id).expect("matching tokens request");
+                    if pending.canceller.token().is_cancelled() {
+                        self.reply(error_response(id, CANCELLED_ERROR))?;
+                    } else {
+                        match response {
+                            Ok(tokens) => self.commit_tokens(id, read, tokens)?,
+                            Err(SourceFailure::Cancelled) => {
+                                self.reply(error_response(id, CANCELLED_ERROR))?
+                            }
+                            Err(SourceFailure::Failed(error)) => {
+                                self.reply(failed_response(id, error))?
+                            }
+                        }
+                    }
+                }
+            }
             SourceCompilation::Continued(continued) => {
                 // The request keeps its id, serial, cancellation, and view: the compiler lane
                 // answers it exactly once, while a superseded or cancelled analysis enqueues
                 // nothing and replies nothing.
-                if self
-                    .requests
-                    .get(&continued.id)
-                    .is_some_and(|request| request.serial == continued.serial)
-                {
+                if self.accepts_reply(&continued.id, continued.serial)? {
                     let Phase::Ready(workspace) = &self.phase else {
                         return Ok(());
                     };
                     self.queries.push_back(SourceJob::Query(QueryRequest {
                         id: continued.id,
                         serial: continued.serial,
-                        sources: self.source_inputs(continued.root, continued.cancellation),
+                        sources: continued.sources,
                         view: continued.view,
                         package_sources: workspace.package_sources.clone(),
                         routes_as_hints: workspace.routes_as_hints,
@@ -183,6 +199,39 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         Ok(())
     }
 
+    fn accepts_reply(&mut self, id: &lsp_server::RequestId, serial: u64) -> Result<bool> {
+        let Some(request) = self
+            .requests
+            .get(id)
+            .filter(|request| request.serial == serial)
+        else {
+            return Ok(false);
+        };
+        let current = request
+            .document_revision
+            .as_ref()
+            .is_none_or(|(uri, revision)| {
+                self.open
+                    .view()
+                    .get(uri)
+                    .is_some_and(|snapshot| snapshot.revision == *revision)
+            });
+        if current {
+            return Ok(true);
+        }
+        self.requests
+            .remove(id)
+            .expect("matching source request")
+            .canceller
+            .cancel();
+        self.discard_cancelled_jobs();
+        self.reply(error_response(
+            id.clone(),
+            super::replies::REVISION_CHANGED_ERROR,
+        ))?;
+        Ok(false)
+    }
+
     fn publish(&mut self, checked: CheckedSources, checked_revision: u64) -> Result<()> {
         let Phase::Ready(workspace) = &mut self.phase else {
             return Ok(());
@@ -196,6 +245,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         }
         if let Some(config) = &checked.configuration {
             self.configuration = Some(Arc::clone(config));
+            self.open.rebase(config.get_root());
             // A file-change notification refuses what this configuration's own writing produces;
             // Tola's own state directory and the build lock are the connection's own set, applied
             // whether or not a check has resolved a configuration. A vendor candidate is refused
@@ -298,6 +348,50 @@ mod tests {
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
     use tola_typst_syntax::names::SelectedInterfaces;
+
+    #[test]
+    fn continuations_keep_the_source_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
+        let (uri, position) = dynamic_import_position(&mut connection, directory.path());
+        connection
+            .request(references_request(&uri, position))
+            .unwrap();
+        let pending = connection.next_analysis().unwrap();
+        let revision = pending.sources.source_revision;
+        let overrides = pending.sources.overrides.clone();
+        let source = pending.source.text().to_owned();
+        let cancellation = pending.sources.cancellation.clone();
+        let continued = crate::compiler::analyze(
+            &mut crate::analysis::DiskSources::default(),
+            &mut crate::analysis::GraphCache::default(),
+            pending,
+        );
+        assert!(matches!(continued, SourceCompilation::Continued(_)));
+        crate::connection::tests::open_draft(&mut connection, "An unrelated draft");
+        assert!(connection.open.revision() > revision);
+        connection.completed(continued).unwrap();
+        let Some(SourceJob::Query(query)) = connection.next_job(Instant::now()) else {
+            panic!("the source request continues in the compiler lane");
+        };
+        assert_eq!(query.sources.source_revision, revision);
+        assert_eq!(query.sources.overrides.as_ref(), overrides.as_ref());
+        assert_eq!(query.view.get(&uri).unwrap().source.text(), source);
+        let _ = connection
+            .notification(Notification::new("$/cancelRequest".into(), json!({"id":8})))
+            .unwrap();
+        assert!(cancellation.is_cancelled());
+        assert!(query.sources.cancellation.is_cancelled());
+        response(&mut connection);
+        connection
+            .completed(SourceCompilation::Answered {
+                id: query.id,
+                serial: query.serial,
+                response: Err(SourceFailure::Cancelled),
+            })
+            .unwrap();
+        assert!(connection.writer.is_empty());
+    }
 
     #[test]
     fn reused_id_rejects_stale_analysis() {
@@ -544,6 +638,11 @@ mod tests {
             "rootUri":crate::uri::from_file_path(directory.path()).unwrap(),
             "capabilities":{"textDocument":{"diagnostic":{}},"workspace":{"diagnostics":{"refreshSupport":true}}}
         }))).unwrap();
+        let initialized = response(&mut connection).response_result.unwrap();
+        assert_eq!(
+            initialized["capabilities"]["diagnosticProvider"]["interFileDependencies"],
+            true
+        );
         let _ = connection
             .notification(Notification::new(
                 notification::Initialized::METHOD.into(),

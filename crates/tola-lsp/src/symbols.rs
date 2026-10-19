@@ -19,11 +19,12 @@ use crate::position;
 /// it is not listed.
 pub(super) fn pages(
     realized: &[crate::routes::Page],
+    source_root: &std::path::Path,
     client_root: &crate::uri::ClientRoot,
     query: &str,
 ) -> Vec<WorkspaceSymbol> {
     let query = query.to_lowercase();
-    let root = client_root.resolved();
+    let root = source_root;
     realized
         .iter()
         .filter(|page| {
@@ -56,10 +57,11 @@ pub(super) fn matching(
     source: &Source,
     query: &str,
 ) -> Vec<(String, SymbolKind, lsp_types::Range)> {
+    let first_break = position::first_break(source.text());
     outline_of::matching(source, query)
         .into_iter()
         .filter_map(|(name, kind, range)| {
-            let range = position::utf16_range(source.lines(), range)?;
+            let range = position::utf16_range_indexed(source.lines(), range, first_break)?;
             Some((name, symbol_kind(kind), range))
         })
         .collect()
@@ -72,6 +74,7 @@ pub(super) fn matching(
 pub(super) fn labels(source: &Source, query: &str) -> Vec<(String, lsp_types::Range)> {
     let query = query.to_lowercase();
     let mut found = Vec::new();
+    let first_break = position::first_break(source.text());
     let mut stack = vec![LinkedNode::new(source.root())];
     while let Some(node) = stack.pop() {
         if node.kind() == SyntaxKind::Label {
@@ -79,8 +82,11 @@ pub(super) fn labels(source: &Source, query: &str) -> Vec<(String, lsp_types::Ra
             let name = &source.text()[range.start + 1..range.end - 1];
             if !name.is_empty()
                 && name.to_lowercase().contains(&query)
-                && let Some(range) =
-                    position::utf16_range(source.lines(), range.start + 1..range.end - 1)
+                && let Some(range) = position::utf16_range_indexed(
+                    source.lines(),
+                    range.start + 1..range.end - 1,
+                    first_break,
+                )
             {
                 found.push((name.to_owned(), range));
             }
@@ -98,16 +104,17 @@ pub(super) fn outline(
     hierarchical: bool,
 ) -> Option<DocumentSymbolResponse> {
     let symbols = outline_of::outline(source)?;
+    let first_break = position::first_break(source.text());
     if hierarchical {
         Some(DocumentSymbolResponse::Nested(
             symbols
                 .into_iter()
-                .filter_map(|symbol| document_symbol(symbol, source.lines()))
+                .filter_map(|symbol| document_symbol(symbol, source.lines(), first_break))
                 .collect(),
         ))
     } else {
         let mut flat = Vec::new();
-        flatten(symbols, source.lines(), uri, None, &mut flat);
+        flatten(symbols, source.lines(), uri, None, &mut flat, first_break);
         Some(DocumentSymbolResponse::Flat(flat))
     }
 }
@@ -122,9 +129,11 @@ fn flatten(
     uri: &Uri,
     container: Option<&str>,
     flat: &mut Vec<SymbolInformation>,
+    first_break: Option<usize>,
 ) {
     for symbol in symbols {
-        let Some(range) = position::utf16_range(lines, symbol.name_range) else {
+        let Some(range) = position::utf16_range_indexed(lines, symbol.name_range, first_break)
+        else {
             continue;
         };
         let parent = (!symbol.children.is_empty()).then(|| symbol.name.clone());
@@ -136,7 +145,14 @@ fn flatten(
             location: Location::new(uri.clone(), range),
             container_name: container.map(str::to_owned),
         });
-        flatten(symbol.children, lines, uri, parent.as_deref(), flat);
+        flatten(
+            symbol.children,
+            lines,
+            uri,
+            parent.as_deref(),
+            flat,
+            first_break,
+        );
     }
 }
 
@@ -144,20 +160,24 @@ fn flatten(
     deprecated,
     reason = "the protocol keeps `deprecated` for clients that predate symbol tags"
 )]
-fn document_symbol(declaration: Declaration, lines: &Lines<String>) -> Option<DocumentSymbol> {
+fn document_symbol(
+    declaration: Declaration,
+    lines: &Lines<String>,
+    first_break: Option<usize>,
+) -> Option<DocumentSymbol> {
     Some(DocumentSymbol {
         name: declaration.name,
         detail: declaration.detail,
         kind: symbol_kind(declaration.kind),
         tags: None,
         deprecated: None,
-        range: position::utf16_range(lines, declaration.range)?,
-        selection_range: position::utf16_range(lines, declaration.name_range)?,
+        range: position::utf16_range_indexed(lines, declaration.range, first_break)?,
+        selection_range: position::utf16_range_indexed(lines, declaration.name_range, first_break)?,
         children: Some(
             declaration
                 .children
                 .into_iter()
-                .filter_map(|child| document_symbol(child, lines))
+                .filter_map(|child| document_symbol(child, lines, first_break))
                 .collect(),
         ),
     })
@@ -204,6 +224,7 @@ mod tests {
 
         let found = pages(
             &[served],
+            &resolved,
             &crate::uri::ClientRoot::with_resolved(&spelled, &resolved),
             "/document/",
         );
@@ -224,7 +245,12 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let served = page(&root, "content/café.typ", "/caf%C3%A9/");
 
-        let found = pages(&[served], &crate::uri::ClientRoot::new(&root), "café");
+        let found = pages(
+            &[served],
+            &root,
+            &crate::uri::ClientRoot::new(&root),
+            "café",
+        );
 
         assert_eq!(found.len(), 1, "{found:?}");
     }
@@ -236,5 +262,35 @@ mod tests {
         let found = labels(&source, "fig");
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].0, "fig-one");
+    }
+
+    #[test]
+    fn symbol_ranges_follow_protocol_lines() {
+        let text = "#let first = 1\u{2028}#let greet(name) = {\n  [Hi #name]\n}\n";
+        let source = Source::detached(text);
+        let uri = "untitled:Symbols".parse().unwrap();
+        let Some(DocumentSymbolResponse::Nested(symbols)) = outline(&source, &uri, true) else {
+            panic!("hierarchical document symbols");
+        };
+        let greet = symbols
+            .iter()
+            .find(|symbol| symbol.name == "greet")
+            .unwrap();
+        assert_eq!(greet.selection_range.start.line, 0);
+        assert_eq!(greet.range.end.line, 2);
+        let start = position::byte_offset(source.lines(), greet.selection_range.start).unwrap();
+        let end = position::byte_offset(source.lines(), greet.selection_range.end).unwrap();
+        assert_eq!(&text[start..end], "greet");
+        let Some(DocumentSymbolResponse::Flat(flat)) = outline(&source, &uri, false) else {
+            panic!("flat document symbols");
+        };
+        assert_eq!(
+            flat.iter()
+                .find(|symbol| symbol.name == "greet")
+                .unwrap()
+                .location
+                .range,
+            greet.selection_range
+        );
     }
 }

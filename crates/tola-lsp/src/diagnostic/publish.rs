@@ -64,7 +64,7 @@ impl ClientDiagnostics {
                 self.report(output, features, uri, version, diagnostics.clone())?;
             }
         }
-        for path in self.held_documents(open) {
+        for path in self.held_documents(root, open) {
             for (uri, version) in self.recipients(&path, open)? {
                 if current.insert(uri.as_str().to_owned()) {
                     self.report(output, features, uri, version, Vec::new())?;
@@ -139,18 +139,15 @@ impl ClientDiagnostics {
     /// The site's own files the client holds open.
     ///
     /// The file id has the site-relative path, and the root the id was built against is the
-    /// workspace root this projection already keys its URIs by, so joining the two names the
+    /// site root this check resolved, so joining the two names the
     /// document exactly as the open-source table does. A document of another root — a builtin
     /// package's own file — is not this site's to report on.
-    fn held_documents(&self, open: &OpenSources) -> Vec<PathBuf> {
+    fn held_documents(&self, root: &Path, open: &OpenSources) -> Vec<PathBuf> {
+        let root = tola_build::filesystem::normalize_existing_prefix(root);
         open.view()
             .iter()
             .filter(|snapshot| matches!(snapshot.source.id().root(), VirtualRoot::Project))
-            .map(|snapshot| {
-                self.root
-                    .resolved()
-                    .join(snapshot.source.id().vpath().get_without_slash())
-            })
+            .map(|snapshot| root.join(snapshot.source.id().vpath().get_without_slash()))
             .collect()
     }
 }

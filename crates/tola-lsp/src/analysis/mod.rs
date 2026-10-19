@@ -47,12 +47,17 @@ impl std::fmt::Display for RenameError {
 }
 impl std::error::Error for RenameError {}
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "source identities and client URI spelling have distinct roots"
+)]
 pub(crate) fn respond(
     graph: &NameGraph,
     source: &Source,
     cursor: usize,
     query: &SourceQuery,
-    client_root: &Path,
+    source_root: &Path,
+    client_root: &crate::uri::ClientRoot,
     locations: Option<&tola_typst::PackageLocations>,
     boundary: &tola_typst::SourceBoundary,
 ) -> Result<Option<SourceReply>> {
@@ -70,9 +75,6 @@ pub(crate) fn respond(
         PackageStore::new(locations.clone(), PackageFetchPolicy::LocalOnly)
             .with_source_boundary(boundary.clone())
     });
-    // The callers pass the root in the spelling the client named; a file is addressed by that
-    // spelling rejoined, never the resolved form the compiler reads it through.
-    let client_root = crate::uri::ClientRoot::new(client_root);
     let mut uris: HashMap<FileId, lsp_types::Uri> = HashMap::new();
     let mut location = |file, range| -> Option<Location> {
         let uri = if let Some(uri) = uris.get(&file) {
@@ -84,7 +86,7 @@ pub(crate) fn respond(
             let uri = if file == source.id() && !matches!(file.root(), VirtualRoot::Package(_)) {
                 query.document().0.clone()
             } else {
-                package_directory_uri(file, &client_root, packages.as_ref())?
+                package_directory_uri(file, source_root, client_root, packages.as_ref())?
             };
             uris.insert(file, uri.clone());
             uri
@@ -214,6 +216,7 @@ pub(crate) fn unproven(
 /// definition into it opens; every other file answers through [`crate::identity::client_uri`].
 fn package_directory_uri(
     file: FileId,
+    source_root: &Path,
     client_root: &crate::uri::ClientRoot,
     packages: Option<&PackageStore>,
 ) -> Option<lsp_types::Uri> {
@@ -226,5 +229,5 @@ fn package_directory_uri(
         )
         .ok();
     }
-    crate::identity::client_uri(file, client_root)
+    crate::identity::client_uri(file, source_root, client_root)
 }

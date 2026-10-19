@@ -129,6 +129,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             PendingRequest {
                 serial: self.serial,
                 canceller,
+                document_revision: None,
                 narrowing: None,
                 waiting: None,
             },
@@ -197,15 +198,26 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             .and_then(serde_json::Value::as_str)
             .and_then(|uri| uri.parse::<Uri>().ok());
         let unnamed = uri.as_ref().is_some_and(is_untitled);
+        let opened = message.method == notification::DidOpenTextDocument::METHOD;
         let closed = message.method == notification::DidCloseTextDocument::METHOD;
         let typing = message.method == notification::DidChangeTextDocument::METHOD;
         match self.open.apply(message) {
             Ok(changed) => {
-                if closed && let Some(uri) = uri {
-                    self.tokens.remove(&uri);
+                if let Some(uri) = &uri {
+                    if closed {
+                        self.tokens.remove(uri);
+                    }
+                    if opened
+                        && changed
+                        && let Phase::Ready(workspace) = &mut self.phase
+                    {
+                        workspace.diagnostics.invalidate_version(uri);
+                    }
                 }
                 if changed && !unnamed {
                     self.sources_changed(typing)?;
+                } else if changed && let Some(uri) = &uri {
+                    self.cancel_document_requests(uri)?;
                 }
             }
             Err(_) => self.log_invalid_notification(InvalidNotification::FileChange)?,
@@ -230,6 +242,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
             {
                 self.cancel_selection();
             }
+            self.discard_cancelled_jobs();
             self.reply(error_response(id, CANCELLED_ERROR))?;
         }
         Ok(())
@@ -241,10 +254,46 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         for request in self.requests.values() {
             request.canceller.cancel();
         }
+        self.discard_cancelled_jobs();
         for (id, _) in std::mem::take(&mut self.requests) {
             self.reject(id, code, message)?;
         }
         Ok(())
+    }
+
+    fn cancel_document_requests(&mut self, uri: &Uri) -> Result<()> {
+        let ids = self
+            .requests
+            .iter()
+            .filter_map(|(id, request)| {
+                request
+                    .document_revision
+                    .as_ref()
+                    .filter(|(document, _)| document == uri)
+                    .map(|_| id.clone())
+            })
+            .collect::<Vec<_>>();
+        for id in &ids {
+            self.requests
+                .remove(id)
+                .expect("owned document request")
+                .canceller
+                .cancel();
+        }
+        self.discard_cancelled_jobs();
+        for id in ids {
+            self.reply(super::replies::error_response(
+                id,
+                super::replies::REVISION_CHANGED_ERROR,
+            ))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn discard_cancelled_jobs(&mut self) {
+        self.analyses
+            .retain(|request| !request.sources.cancellation.is_cancelled());
+        self.queries.retain(|job| !job.is_cancelled());
     }
 
     /// Report one notification Tola could not apply to the author, through the editor's log.
@@ -274,6 +323,257 @@ mod tests {
     use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
     use std::time::Instant;
+
+    fn completion_request(id: i32, uri: &Uri, marked: &str) -> Request {
+        let source = tola_typst::typst::syntax::Source::detached(marked.replace('|', ""));
+        let cursor = marked.find('|').unwrap();
+        let position = crate::position::utf16_range(source.lines(), cursor..cursor)
+            .unwrap()
+            .start;
+        Request::new(
+            id.into(),
+            request::Completion::METHOD.into(),
+            json!({"textDocument":{"uri":uri.as_str()},"position":position}),
+        )
+    }
+
+    #[test]
+    fn completion_leaves_control_requests_free() {
+        use crate::connection::tests::{open_document, response};
+        let mut connection = ready(Vec::new());
+        let uri =
+            crate::uri::from_file_path(&std::env::current_dir().unwrap().join("completion.typ"))
+                .unwrap();
+        let marked = "#let value = (available: 1)\n#value.|";
+        open_document(&mut connection, &uri, 1, &marked.replace('|', ""));
+        connection
+            .request(completion_request(8, &uri, marked))
+            .unwrap();
+        let previous = connection.next_analysis().unwrap();
+        let cancellation = previous.sources.cancellation.clone();
+        assert!(connection.writer.is_empty());
+        connection
+            .request(Request::new(
+                9.into(),
+                "textDocument/foldingRange".into(),
+                json!({"textDocument":{"uri":uri.as_str()}}),
+            ))
+            .unwrap();
+        let folding = response(&mut connection);
+        assert_eq!(folding.id, 9.into());
+        assert!(folding.response_result.is_ok());
+        let _ = connection
+            .notification(Notification::new("$/cancelRequest".into(), json!({"id":8})))
+            .unwrap();
+        assert_eq!(
+            response(&mut connection).response_result.unwrap_err().code,
+            ErrorCode::RequestCanceled as i32
+        );
+        assert!(cancellation.is_cancelled());
+        connection
+            .request(completion_request(8, &uri, marked))
+            .unwrap();
+        let current = connection.next_analysis().unwrap();
+        let mut disk = crate::analysis::DiskSources::default();
+        let mut graphs = crate::analysis::GraphCache::default();
+        connection
+            .completed(crate::compiler::analyze(&mut disk, &mut graphs, previous))
+            .unwrap();
+        assert!(connection.writer.is_empty());
+        connection
+            .completed(crate::compiler::analyze(&mut disk, &mut graphs, current))
+            .unwrap();
+        let completion = response(&mut connection).response_result.unwrap();
+        assert!(
+            completion
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["label"] == "available")
+        );
+    }
+
+    #[test]
+    fn draft_changes_preserve_site_requests() {
+        use crate::connection::tests::{open_document, open_draft, response};
+        for reopen in [false, true] {
+            let mut connection = ready(Vec::new());
+            connection.checked = Some((connection.revision, true));
+            connection.query(99.into(), hover_query()).unwrap();
+            let site_cancellation = connection.requests[&RequestId::from(99)].canceller.token();
+            let marked = "#let value = (stale: 1)\n#value.|";
+            let uri = open_draft(&mut connection, &marked.replace('|', ""));
+            connection
+                .request(completion_request(8, &uri, marked))
+                .unwrap();
+            let previous = connection.next_analysis().unwrap();
+            let mut disk = crate::analysis::DiskSources::default();
+            let mut graphs = crate::analysis::GraphCache::default();
+            let previous = crate::compiler::analyze(&mut disk, &mut graphs, previous);
+            let current = "#let value = (fresh: 1)\n#value.|";
+            if reopen {
+                let _ = connection
+                    .notification(Notification::new(
+                        "textDocument/didClose".into(),
+                        json!({"textDocument":{"uri":uri.as_str()}}),
+                    ))
+                    .unwrap();
+                open_document(&mut connection, &uri, 1, &current.replace('|', ""));
+                assert_eq!(connection.open.version(uri.as_str()), Some(1));
+            } else {
+                let _ = connection.notification(Notification::new("textDocument/didChange".into(), json!({"textDocument":{"uri":uri.as_str(),"version":2},"contentChanges":[{"text":current.replace('|', "")}]}))).unwrap();
+            }
+            assert_eq!(
+                response(&mut connection).response_result.unwrap_err().code,
+                ErrorCode::ContentModified as i32
+            );
+            assert!(connection.requests.contains_key(&99.into()));
+            assert!(!site_cancellation.is_cancelled());
+            connection
+                .request(completion_request(8, &uri, current))
+                .unwrap();
+            let current = connection.next_analysis().unwrap();
+            connection.completed(previous).unwrap();
+            assert!(connection.writer.is_empty());
+            connection
+                .completed(crate::compiler::analyze(&mut disk, &mut graphs, current))
+                .unwrap();
+            let completion = response(&mut connection).response_result.unwrap();
+            let items = completion.as_array().unwrap();
+            assert!(items.iter().any(|item| item["label"] == "fresh"));
+            assert!(!items.iter().any(|item| item["label"] == "stale"));
+        }
+    }
+
+    #[test]
+    fn cancelled_requests_release_queued_jobs() {
+        use crate::connection::tests::{open_draft, response};
+        let mut connection = ready(Vec::new());
+        let marked = "#let value = (available: 1)\n#value.|";
+        let uri = open_draft(&mut connection, &marked.replace('|', ""));
+        connection
+            .request(completion_request(1, &uri, marked))
+            .unwrap();
+        let active = connection.next_analysis().unwrap();
+        for id in 2..2 * MAX_SOURCE_REQUESTS as i32 {
+            connection
+                .request(completion_request(id, &uri, marked))
+                .unwrap();
+            let _ = connection
+                .notification(Notification::new(
+                    "$/cancelRequest".into(),
+                    json!({"id":id}),
+                ))
+                .unwrap();
+            assert_eq!(
+                response(&mut connection).response_result.unwrap_err().code,
+                ErrorCode::RequestCanceled as i32
+            );
+            assert!(connection.analyses.is_empty());
+            assert_eq!(connection.requests.len(), 1);
+        }
+        connection.query(1000.into(), hover_query()).unwrap();
+        let _ = connection
+            .notification(Notification::new(
+                "$/cancelRequest".into(),
+                json!({"id":1000}),
+            ))
+            .unwrap();
+        response(&mut connection);
+        assert!(connection.queries.is_empty());
+        connection
+            .request(completion_request(2, &uri, marked))
+            .unwrap();
+        connection.query(3.into(), hover_query()).unwrap();
+        connection
+            .cancel_requests(ErrorCode::RequestCanceled, "closing")
+            .unwrap();
+        assert!(connection.requests.is_empty());
+        assert!(connection.analyses.is_empty());
+        assert!(connection.queries.is_empty());
+        assert!(active.sources.cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn reopened_document_refuses_previous_diagnostics() {
+        use crate::compiler::{CheckedSources, SourceCompilation};
+        use crate::connection::tests::{open_document, ready_at, response};
+        use std::sync::Arc;
+        use tola_build::diagnostic::{DiagnosticCause, Severity};
+        use tola_typst_syntax::names::SelectedInterfaces;
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("page.typ"), "#missing").unwrap();
+        let uri = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
+        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
+        open_document(&mut connection, &uri, 1, "#missing");
+        let checked = |revision, diagnostics| SourceCompilation::Checked {
+            checked_revision: revision,
+            checked: Ok(CheckedSources {
+                configuration: None,
+                compiled: false,
+                diagnostics,
+                read_paths: None,
+                selected: Arc::new(SelectedInterfaces::default()),
+            }),
+        };
+        connection
+            .completed(checked(
+                connection.revision,
+                vec![
+                    Diagnostic::at_path(
+                        tola_build::codes::typst::COMPILE,
+                        Severity::Error,
+                        "page.typ",
+                        "unknown variable: missing",
+                    )
+                    .with_cause(DiagnosticCause::UnknownVariable {
+                        name: "missing".into(),
+                    }),
+                ],
+            ))
+            .unwrap();
+        assert_eq!(connection.published_diagnostics(&uri).unwrap().len(), 1);
+        let pull = |id, previous| {
+            Request::new(
+                id,
+                request::DocumentDiagnosticRequest::METHOD.into(),
+                json!({"textDocument":{"uri":uri.as_str()},"previousResultId":previous}),
+            )
+        };
+        connection.request(pull(1.into(), None::<&str>)).unwrap();
+        let first = response(&mut connection).response_result.unwrap();
+        let previous = first["resultId"].as_str().unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        let _ = connection
+            .notification(Notification::new(
+                notification::DidCloseTextDocument::METHOD.into(),
+                json!({"textDocument":{"uri":uri.as_str()}}),
+            ))
+            .unwrap();
+        connection.request(pull(2.into(), Some(previous))).unwrap();
+        assert_eq!(
+            response(&mut connection).response_result.unwrap()["kind"],
+            "unchanged",
+            "closing a site source keeps its disk diagnostics"
+        );
+
+        open_document(&mut connection, &uri, 1, "Hello");
+        assert!(connection.published_diagnostics(&uri).is_none());
+        connection.request(pull(3.into(), Some(previous))).unwrap();
+        let stale = response(&mut connection).response_result.unwrap_err();
+        assert_eq!(stale.code, ErrorCode::ServerCancelled as i32);
+        assert_eq!(stale.data.unwrap()["retriggerRequest"], true);
+
+        connection
+            .completed(checked(connection.revision, Vec::new()))
+            .unwrap();
+        connection.request(pull(4.into(), Some(previous))).unwrap();
+        let current = response(&mut connection).response_result.unwrap();
+        assert_eq!(current["kind"], "full");
+        assert_ne!(current["resultId"], previous);
+        assert!(current["items"].as_array().unwrap().is_empty());
+    }
 
     /// A second request reusing an identifier whose request is still pending would give the client
     /// two replies for one id, so the dispatch boundary refuses it before any lane answers.
@@ -312,6 +612,7 @@ mod tests {
                 PendingRequest {
                     serial,
                     canceller: BuildCanceller::new(),
+                    document_revision: None,
                     narrowing: None,
                     waiting: None,
                 },

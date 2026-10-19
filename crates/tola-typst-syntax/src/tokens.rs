@@ -95,6 +95,17 @@ pub struct Token {
 
 /// Produces tokens in source order; `names` must describe the same source version.
 pub fn tokens(source: &Source, names: &NameGraph) -> Vec<Token> {
+    tokens_with_check(source, names, || Ok::<(), std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+/// Cancellation is checked while traversing syntax, before name classification can continue.
+pub fn tokens_with_check<E>(
+    source: &Source,
+    names: &NameGraph,
+    check: impl Fn() -> Result<(), E>,
+) -> Result<Vec<Token>, E> {
+    check()?;
     let classify = |range: &Range<usize>| {
         names.class_at(source.id(), range).map(|class| match class {
             NameClass::Function => TokenClass::Function,
@@ -109,18 +120,22 @@ pub fn tokens(source: &Source, names: &NameGraph) -> Vec<Token> {
         None,
         &classify,
         &mut tokens,
-    );
-    tokens
+        &check,
+    )?;
+    check()?;
+    Ok(tokens)
 }
 
 /// Walk one node, with `text` naming the class plain text takes inside the enclosing construct.
-fn walk_text(
+fn walk_text<E>(
     node: &LinkedNode<'_>,
     modifiers: Modifiers,
     text: Option<TokenClass>,
     classify: &impl Fn(&Range<usize>) -> Option<TokenClass>,
     tokens: &mut Vec<Token>,
-) {
+    check: &impl Fn() -> Result<(), E>,
+) -> Result<(), E> {
+    check()?;
     let inherited = modifiers.or(style(node.kind()));
     if let Some(group) = node.cast::<MathDelimited>() {
         for child in node.children() {
@@ -131,10 +146,10 @@ fn walk_text(
                     modifiers: inherited,
                 });
             } else {
-                walk_text(&child, inherited, text, classify, tokens);
+                walk_text(&child, inherited, text, classify, tokens, check)?;
             }
         }
-        return;
+        return Ok(());
     }
     if node.kind() == SyntaxKind::TermItem {
         // The term of `/ term: details` is the text between the marker and the colon.
@@ -154,9 +169,10 @@ fn walk_text(
                 is_term.then_some(TokenClass::Term),
                 classify,
                 tokens,
-            );
+                check,
+            )?;
         }
-        return;
+        return Ok(());
     }
     match token_class(node, classify) {
         Some(TokenClass::Text) => {
@@ -174,10 +190,12 @@ fn walk_text(
         }),
         None => {
             for child in node.children() {
-                walk_text(&child, inherited, text, classify, tokens);
+                walk_text(&child, inherited, text, classify, tokens, check)?;
             }
         }
     }
+    check()?;
+    Ok(())
 }
 
 fn style(kind: SyntaxKind) -> Modifiers {
@@ -284,6 +302,32 @@ mod tests {
             .into_iter()
             .map(|token| (text[token.range].to_owned(), token.class, token.modifiers))
             .collect()
+    }
+
+    #[test]
+    fn cancelled_scan_returns_no_tokens() {
+        let source = Source::detached("#let count = 1\n#count + count");
+        let names = NameGraph::new(
+            [std::sync::Arc::new(crate::names::SourceNames::new(
+                source.clone(),
+            ))],
+            |_| None,
+            None,
+            || Ok::<(), std::convert::Infallible>(()),
+        )
+        .unwrap();
+        let visits = std::cell::Cell::new(0);
+        let cancelled = tokens_with_check(&source, &names, || {
+            visits.set(visits.get() + 1);
+            if visits.get() == 5 {
+                Err("cancelled")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(cancelled, Err("cancelled")));
+        assert_eq!(visits.get(), 5);
+        assert!(!tokens(&source, &names).is_empty());
     }
 
     #[test]

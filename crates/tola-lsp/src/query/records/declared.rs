@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::super::semantic::{self, Semantic};
+use super::super::semantic::Semantic;
 use super::super::site_schema::{declared_schema, descriptor_line, descriptor_type};
 use super::origin::{
     ProjectedField, ProjectedRecords, ProjectedValue, RecordOrigin, SourceDescriptors,
@@ -167,9 +167,9 @@ impl ProjectedField {
             return Ok(None);
         };
         Ok(semantics
-            .values(&node)?
+            .types(&node)?
             .first()
-            .map(|(value, _)| semantic::type_spelling(&value.ty())))
+            .map(|(value, _)| value.type_name()))
     }
 }
 
