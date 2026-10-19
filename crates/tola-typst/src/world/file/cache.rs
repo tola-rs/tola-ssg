@@ -156,12 +156,6 @@ enum SlotFingerprint {
     Failed(FileError),
 }
 
-impl<T: Clone> Default for SlotCell<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<T: Clone> SlotCell<T> {
     const fn new() -> Self {
         Self {
@@ -172,10 +166,9 @@ impl<T: Clone> SlotCell<T> {
 
     fn get_or_init(
         &mut self,
-        load: impl FnOnce() -> ReadAttempt<Bytes>,
+        attempt: ReadAttempt<Bytes>,
         process: impl FnOnce(Bytes, Option<T>) -> FileResult<T>,
     ) -> ReadAttempt<Loaded<T>> {
-        let attempt = load();
         let fingerprint = match &attempt.result {
             Ok(_) => SlotFingerprint::Successful(
                 attempt
@@ -224,26 +217,23 @@ impl FileSlot {
         &mut self,
         observation: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
-        self.source.get_or_init(
-            || observation,
-            |data, prev| {
-                let text = decode_utf8(&data)?;
-                match prev {
-                    Some(mut source) => {
-                        source.replace(text);
-                        Ok(source)
-                    }
-                    None => Ok(Source::new(self.id, text.into())),
+        self.source.get_or_init(observation, |data, prev| {
+            let text = decode_utf8(&data)?;
+            match prev {
+                Some(mut source) => {
+                    source.replace(text);
+                    Ok(source)
                 }
-            },
-        )
+                None => Ok(Source::new(self.id, text.into())),
+            }
+        })
     }
 
     fn file_from_observation(
         &mut self,
         observation: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
-        self.file.get_or_init(|| observation, |bytes, _| Ok(bytes))
+        self.file.get_or_init(observation, |bytes, _| Ok(bytes))
     }
 }
 
@@ -272,19 +262,17 @@ mod tests {
         let mut slot: SlotCell<String> = SlotCell::new();
 
         let first = slot
-            .get_or_init(
-                || loaded_bytes(b"hello"),
-                |data, _| Ok(String::from_utf8(data.as_ref().to_vec()).unwrap()),
-            )
+            .get_or_init(loaded_bytes(b"hello"), |data, _| {
+                Ok(String::from_utf8(data.as_ref().to_vec()).unwrap())
+            })
             .result
             .unwrap();
         assert_eq!(first.value, "hello");
 
         let repeated = slot
-            .get_or_init(
-                || loaded_bytes(b"hello"),
-                |_, _| panic!("an unchanged read must reuse its processed value"),
-            )
+            .get_or_init(loaded_bytes(b"hello"), |_, _| {
+                panic!("an unchanged read must reuse its processed value")
+            })
             .result
             .unwrap();
         assert_eq!(repeated.value, "hello");
@@ -294,16 +282,15 @@ mod tests {
         let error = FileError::NotFound(PathBuf::from("missing.typ"));
         let first = failed
             .get_or_init(
-                || ReadAttempt::without_inputs(Err(error.clone())),
+                ReadAttempt::without_inputs(Err(error.clone())),
                 |bytes, _| Ok(bytes),
             )
             .result
             .unwrap_err();
         let repeated = failed
-            .get_or_init(
-                || ReadAttempt::without_inputs(Err(error.clone())),
-                |_, _| panic!("an unchanged failed read must reuse its cached failure"),
-            )
+            .get_or_init(ReadAttempt::without_inputs(Err(error.clone())), |_, _| {
+                panic!("an unchanged failed read must reuse its cached failure")
+            })
             .result
             .unwrap_err();
         assert_eq!(first, error);
@@ -319,7 +306,7 @@ mod tests {
             let id = crate::world::file::file_id(format!("generated/{index}.typ"));
             drop(cache.slot(root, id));
             cache.evict(3);
-            assert!(cached_slots(&cache) <= 3);
+            assert!(cached_slot_count(&cache) <= 3);
         }
 
         let id = crate::world::file::file_id("template.typ");
@@ -328,21 +315,21 @@ mod tests {
         for round in 0..2 {
             drop(cache.slot(root, id));
             cache.evict(2);
-            assert!(caches(root, id, &cache), "round {round}");
+            assert!(is_cached(root, id, &cache), "round {round}");
         }
         cache.evict(2);
-        assert!(caches(root, id, &cache));
+        assert!(is_cached(root, id, &cache));
         cache.evict(2);
-        assert!(!caches(root, id, &cache));
+        assert!(!is_cached(root, id, &cache));
     }
 
     /// Number of file slots the cache currently owns for every root.
-    fn cached_slots(cache: &SharedFileCache) -> usize {
+    fn cached_slot_count(cache: &SharedFileCache) -> usize {
         cache.roots.read().values().map(FxHashMap::len).sum()
     }
 
     /// Whether the cache holds a slot for `id` under `root`.
-    fn caches(root: &Path, id: FileId, cache: &SharedFileCache) -> bool {
+    fn is_cached(root: &Path, id: FileId, cache: &SharedFileCache) -> bool {
         cache
             .roots
             .read()

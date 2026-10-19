@@ -72,6 +72,7 @@ impl Default for BundleCancellation {
 mod tests {
     use super::*;
     use crate::diagnostic::CompileError;
+
     #[test]
     fn cloned_cancellation_shares_the_flag() {
         let cancellation = BundleCancellation::new();

@@ -145,12 +145,14 @@ impl SvgSource {
     }
 }
 
+fn svg_document(bytes: &[u8]) -> Option<roxmltree::Document<'_>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    roxmltree::Document::parse(text).ok()
+}
+
 /// Whether `bytes` is an SVG document, judged by its root element rather than its name.
 pub fn looks_like_svg(bytes: &[u8]) -> bool {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return false;
-    };
-    let Ok(document) = roxmltree::Document::parse(text) else {
+    let Some(document) = svg_document(bytes) else {
         return false;
     };
     let root = document.root_element();
@@ -172,10 +174,7 @@ fn default_families(world: Tracked<dyn World + '_>) -> Vec<String> {
 
 /// Refuse linked images that would be read outside the derivative request's evidence.
 fn refuse_linked_images(bytes: &[u8]) -> Result<(), SvgError> {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return Ok(());
-    };
-    let Ok(document) = roxmltree::Document::parse(text) else {
+    let Some(document) = svg_document(bytes) else {
         return Ok(());
     };
     for node in document.descendants().filter(|node| node.is_element()) {
@@ -274,9 +273,8 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#ff0000"/></svg>"##,
         )
         .unwrap();
-        assert_eq!(
-            source.render(4, 4, None).unwrap(),
-            source.render(4, 4, None).unwrap()
-        );
+        let pixels = source.render(4, 4, None).unwrap();
+        assert_eq!(pixels.len(), 4 * 4 * 4);
+        assert_eq!(pixels, source.render(4, 4, None).unwrap());
     }
 }

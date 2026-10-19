@@ -347,8 +347,10 @@ impl PreparedPackage {
 }
 
 /// Package selection failed after these availability checks.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
 pub struct PackagePreparationFailure {
+    #[source]
     error: FileError,
     checks: Vec<PackageCheck>,
 }
@@ -362,18 +364,6 @@ impl PackagePreparationFailure {
     /// Consume the failure into its unchanged file error and checks.
     pub fn into_error_and_checks(self) -> (FileError, Vec<PackageCheck>) {
         (self.error, self.checks)
-    }
-}
-
-impl std::fmt::Display for PackagePreparationFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(formatter)
-    }
-}
-
-impl std::error::Error for PackagePreparationFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
     }
 }
 
@@ -474,20 +464,11 @@ impl PackageStore {
         let mut checks = Vec::new();
 
         for (tier, location) in locations.tiers() {
-            match check_package_directory(package, tier, location.root(), &self.boundary) {
-                PackageDirectoryCheck::Present {
-                    mut check,
-                    directory,
-                } => {
-                    check.selected = true;
-                    checks.push(check);
-                    return Ok(PreparedPackage { directory, checks });
-                }
-                PackageDirectoryCheck::Missing(check) => checks.push(check),
-                PackageDirectoryCheck::Failed { check, error } => {
-                    checks.push(check);
-                    return Err(PackagePreparationFailure { error, checks });
-                }
+            if let Some(prepared) = settle(
+                check_package_directory(package, tier, location.root(), &self.boundary),
+                &mut checks,
+            )? {
+                return Ok(prepared);
             }
 
             #[cfg(feature = "network")]
@@ -513,29 +494,19 @@ impl PackageStore {
                         checks: checks.clone(),
                     })?;
 
-                match check_package_directory(
+                let check = check_package_directory(
                     package,
                     PackageTier::Cache,
                     location.root(),
                     &self.boundary,
-                ) {
-                    PackageDirectoryCheck::Present {
-                        mut check,
-                        directory,
-                    } => {
-                        checks.retain(|observed| {
-                            observed.tier != PackageTier::Cache
-                                || observed.candidate != check.candidate
-                        });
-                        check.selected = true;
-                        checks.push(check);
-                        return Ok(PreparedPackage { directory, checks });
-                    }
-                    PackageDirectoryCheck::Missing(check) => checks.push(check),
-                    PackageDirectoryCheck::Failed { check, error } => {
-                        checks.push(check);
-                        return Err(PackagePreparationFailure { error, checks });
-                    }
+                );
+                if let PackageDirectoryCheck::Present { check, .. } = &check {
+                    checks.retain(|observed| {
+                        observed.tier != PackageTier::Cache || observed.candidate != check.candidate
+                    });
+                }
+                if let Some(prepared) = settle(check, &mut checks)? {
+                    return Ok(prepared);
                 }
             }
         }
@@ -585,6 +556,54 @@ enum PackageDirectoryCheck {
     },
 }
 
+/// The package when this tier supplied it; otherwise every check so far is appended to `checks`.
+fn settle(
+    check: PackageDirectoryCheck,
+    checks: &mut Vec<PackageCheck>,
+) -> Result<Option<PreparedPackage>, PackagePreparationFailure> {
+    match check {
+        PackageDirectoryCheck::Present {
+            mut check,
+            directory,
+        } => {
+            check.selected = true;
+            checks.push(check);
+            Ok(Some(PreparedPackage {
+                directory,
+                checks: std::mem::take(checks),
+            }))
+        }
+        PackageDirectoryCheck::Missing(check) => {
+            checks.push(check);
+            Ok(None)
+        }
+        PackageDirectoryCheck::Failed { check, error } => {
+            checks.push(check);
+            Err(PackagePreparationFailure {
+                error,
+                checks: std::mem::take(checks),
+            })
+        }
+    }
+}
+
+fn candidate_check(
+    package: &PackageSpec,
+    tier: PackageTier,
+    root: &Path,
+    candidate: PathBuf,
+) -> PackageCheck {
+    PackageCheck {
+        package: package.clone(),
+        tier,
+        root: root.to_path_buf(),
+        candidate,
+        availability: PackageAvailability::Missing,
+        canonical_target: None,
+        selected: false,
+    }
+}
+
 fn check_package_directory(
     package: &PackageSpec,
     tier: PackageTier,
@@ -596,95 +615,47 @@ fn check_package_directory(
         .join(package.name.as_str())
         .join(package.version.to_string());
     if let Err(error) = boundary.check(&candidate) {
-        return PackageDirectoryCheck::Failed {
-            check: PackageCheck {
-                package: package.clone(),
-                tier,
-                root: root.to_path_buf(),
-                candidate,
-                availability: PackageAvailability::Unreadable,
-                canonical_target: None,
-                selected: false,
-            },
-            error,
-        };
+        let mut check = candidate_check(package, tier, root, candidate);
+        check.availability = PackageAvailability::Unreadable;
+        return PackageDirectoryCheck::Failed { check, error };
     }
-    // A failed check names the package the author imported; its host directory
-    // never reaches a rendered diagnostic.
+    // A failed check names the package the author imported; its host directory never reaches a
     let reported = PathBuf::from(package.to_string());
+    let unreadable = |candidate: PathBuf, error: std::io::Error| {
+        let mut check = candidate_check(package, tier, root, candidate);
+        check.availability = PackageAvailability::Unreadable;
+        PackageDirectoryCheck::Failed {
+            check,
+            error: FileError::from_io(error, &reported),
+        }
+    };
     match std::fs::metadata(&candidate) {
         Ok(metadata) if metadata.is_dir() => match std::fs::canonicalize(&candidate) {
-            Ok(directory) => PackageDirectoryCheck::Present {
-                check: PackageCheck {
-                    package: package.clone(),
-                    tier,
-                    root: root.to_path_buf(),
-                    candidate,
-                    availability: PackageAvailability::Present,
-                    canonical_target: Some(directory.clone()),
-                    selected: false,
-                },
-                directory,
-            },
-            Err(error) => {
-                let check = PackageCheck {
-                    package: package.clone(),
-                    tier,
-                    root: root.to_path_buf(),
-                    candidate: candidate.clone(),
-                    availability: PackageAvailability::Unreadable,
-                    canonical_target: None,
-                    selected: false,
-                };
-                PackageDirectoryCheck::Failed {
-                    check,
-                    error: FileError::from_io(error, &reported),
-                }
+            Ok(directory) => {
+                let mut check = candidate_check(package, tier, root, candidate);
+                check.availability = PackageAvailability::Present;
+                check.canonical_target = Some(directory.clone());
+                PackageDirectoryCheck::Present { check, directory }
             }
+            Err(error) => unreadable(candidate, error),
         },
         Ok(_) => {
-            let check = PackageCheck {
-                package: package.clone(),
-                tier,
-                root: root.to_path_buf(),
-                candidate: candidate.clone(),
-                availability: PackageAvailability::NotDirectory,
-                canonical_target: None,
-                selected: false,
-            };
+            let mut check = candidate_check(package, tier, root, candidate);
+            check.availability = PackageAvailability::NotDirectory;
             PackageDirectoryCheck::Failed {
                 check,
                 error: FileError::Other(Some(
-                    format!("could not read package `{package}`: its cache location holds a file, not a directory").into(),
+                    format!(
+                        "Tola could not read package `{package}`: the copy it saved is a file, not a directory"
+                    )
+                    .into(),
                 )),
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            PackageDirectoryCheck::Missing(PackageCheck {
-                package: package.clone(),
-                tier,
-                root: root.to_path_buf(),
-                candidate,
-                availability: PackageAvailability::Missing,
-                canonical_target: None,
-                selected: false,
-            })
+            PackageDirectoryCheck::Missing(candidate_check(package, tier, root, candidate))
         }
-        Err(error) => {
-            let check = PackageCheck {
-                package: package.clone(),
-                tier,
-                root: root.to_path_buf(),
-                candidate: candidate.clone(),
-                availability: PackageAvailability::Unreadable,
-                canonical_target: None,
-                selected: false,
-            };
-            PackageDirectoryCheck::Failed {
-                check,
-                error: FileError::from_io(error, &reported),
-            }
-        }
+        Err(error) => unreadable(candidate, error),
     }
 }
 

@@ -23,7 +23,7 @@ struct SourceLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GeneratedSourceBoundary {
     directory: PathBuf,
-    candidate: Option<PathBuf>,
+    candidates: Vec<PathBuf>,
 }
 
 /// Why a physical path is not a source this boundary reads.
@@ -53,19 +53,28 @@ impl SourceBoundary {
             .excluded
             .push(GeneratedSourceBoundary {
                 directory: path,
-                candidate: None,
+                candidates: Vec::new(),
             });
         self
     }
 
     /// Permit one candidate subtree of generated storage, without relaxing other exclusions
     /// or physical root containment. A sibling or parent cannot be granted by this exception.
-    pub fn excluding_except(mut self, directory: PathBuf, candidate: PathBuf) -> Self {
+    pub fn excluding_except(self, directory: PathBuf, candidate: PathBuf) -> Self {
+        self.excluding_except_many(directory, [candidate])
+    }
+
+    /// Permit selected subtrees without relaxing physical root containment.
+    pub fn excluding_except_many(
+        mut self,
+        directory: PathBuf,
+        candidates: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
         Arc::make_mut(self.limits.get_or_insert_default())
             .excluded
             .push(GeneratedSourceBoundary {
                 directory,
-                candidate: Some(candidate),
+                candidates: candidates.into_iter().collect(),
             });
         self
     }
@@ -99,7 +108,7 @@ impl SourceBoundary {
             if !inside {
                 return false;
             }
-            let permitted = excluded.candidate.as_ref().is_some_and(|candidate| {
+            let permitted = excluded.candidates.iter().any(|candidate| {
                 let Ok(source) = physical_path(candidate, 128) else {
                     return false;
                 };

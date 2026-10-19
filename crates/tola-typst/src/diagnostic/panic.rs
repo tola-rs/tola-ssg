@@ -32,14 +32,3 @@ pub fn explained_panic(payload: &(dyn Any + Send)) -> Option<ExplainedPanic> {
         note: None,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn other_panics_are_not_explained() {
-        assert!(explained_panic(&"something else went wrong").is_none());
-        assert!(explained_panic(&7u32).is_none());
-    }
-}

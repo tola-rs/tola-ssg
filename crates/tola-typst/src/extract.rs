@@ -76,14 +76,20 @@ macro_rules! impl_extractor_for_tuple {
         impl<$first: Extractor $(, $rest: Extractor)*> Extractor for ($first, $($rest,)*) {
             type Output = ($first::Output, $($rest::Output,)*);
 
-            #[allow(non_snake_case)]
+            #[expect(
+                non_snake_case,
+                reason = "the tuple's type parameters name the bindings"
+            )]
             fn visit(&mut self, elem: &Content) {
                 let ($first, $($rest,)*) = self;
                 $first.visit(elem);
                 $($rest.visit(elem);)*
             }
 
-            #[allow(non_snake_case)]
+            #[expect(
+                non_snake_case,
+                reason = "the tuple's type parameters name the bindings"
+            )]
             fn finish(self) -> Self::Output {
                 let ($first, $($rest,)*) = self;
                 ($first.finish(), $($rest.finish(),)*)

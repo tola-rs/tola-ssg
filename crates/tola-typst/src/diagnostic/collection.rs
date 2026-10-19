@@ -105,8 +105,7 @@ impl Diagnostics {
     /// Append diagnostics from another compilation phase while preserving
     /// both resolved display information and original Typst diagnostics.
     pub fn extend(&mut self, other: &Self) {
-        let raw_is_aligned =
-            self.raw.len() == self.messages.len() && other.raw.len() == other.messages.len();
+        let raw_is_aligned = self.raw_is_aligned() && other.raw_is_aligned();
         self.messages.extend(other.messages.iter().cloned());
         if raw_is_aligned {
             self.raw.extend(other.raw.iter().cloned());
@@ -120,8 +119,7 @@ impl Diagnostics {
     /// Repeated native diagnostics keep their first context and combine package navigation.
     /// Without aligned native spans, only equal resolved diagnostics can be identified as repeats.
     pub fn extend_distinct(&mut self, other: &Self) {
-        let raw_is_aligned =
-            self.raw.len() == self.messages.len() && other.raw.len() == other.messages.len();
+        let raw_is_aligned = self.raw_is_aligned() && other.raw_is_aligned();
         for (index, diagnostic) in other.messages.iter().enumerate() {
             let repeated = if raw_is_aligned {
                 let incoming = &other.raw[index];
@@ -284,7 +282,7 @@ impl Diagnostics {
         &mut self,
         resolve: impl Fn(&NativeDiagnostic) -> Option<super::ResolvedPackageFailure>,
     ) {
-        if self.raw.len() != self.messages.len() {
+        if !self.raw_is_aligned() {
             return;
         }
         for (index, raw) in self.raw.iter().enumerate() {
@@ -341,7 +339,7 @@ impl Diagnostics {
         &self,
         predicate: impl Fn(&Diagnostic, Option<&NativeDiagnostic>) -> bool,
     ) -> Self {
-        let raw_is_aligned = self.raw.len() == self.messages.len();
+        let raw_is_aligned = self.raw_is_aligned();
         let mut selected = Self::new();
         for (index, diagnostic) in self.messages.iter().enumerate() {
             let raw = raw_is_aligned.then(|| &self.raw[index]);
@@ -353,6 +351,11 @@ impl Diagnostics {
             }
         }
         selected
+    }
+
+    /// Whether every message carries its original native diagnostic at the same index.
+    fn raw_is_aligned(&self) -> bool {
+        self.raw.len() == self.messages.len()
     }
 }
 
@@ -473,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn filtering_keeps_matched_messages() {
+    fn mixed_collection_filters_by_resolved_message() {
         let info = |message: &str| Diagnostic {
             origin: crate::diagnostic::DiagnosticOrigin::Typst,
             severity: Severity::Warning,

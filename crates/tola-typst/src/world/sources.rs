@@ -82,8 +82,10 @@ impl SourceLoad {
 }
 
 /// A failed source load and every read completed before failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
 pub struct SourceLoadFailure {
+    #[source]
     error: SourceLoadError,
     accessed: Box<AccessedDeps>,
 }
@@ -102,18 +104,6 @@ impl SourceLoadFailure {
     /// Consume the failure into its error and observed reads.
     pub fn into_error_and_accessed(self) -> (SourceLoadError, AccessedDeps) {
         (self.error, *self.accessed)
-    }
-}
-
-impl std::fmt::Display for SourceLoadFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(formatter)
-    }
-}
-
-impl std::error::Error for SourceLoadFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
     }
 }
 

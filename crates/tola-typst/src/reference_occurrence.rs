@@ -55,6 +55,8 @@ use typst::introspection::{History, Introspect, Introspection, Introspector, Loc
 use typst::layout::{Frame, FrameItem};
 use typst::model::{LinkElem, LinkMarker, LinkTarget, RefElem};
 use typst::syntax::Span;
+use typst_bundle::{BundleDocument, BundleFile};
+use typst_html::HtmlNode;
 
 /// Marks the wrapped compilation whose introspector carries reference occurrences.
 ///
@@ -285,10 +287,7 @@ impl FrameOccurrences for typst_bundle::Bundle {
         let mut seen = HashSet::new();
         for file in self.files.values() {
             match file {
-                typst_bundle::BundleFile::Document(typst_bundle::BundleDocument::Paged(
-                    document,
-                    _,
-                )) => {
+                BundleFile::Document(BundleDocument::Paged(document, _)) => {
                     // A tag can span a page break, so one tag scope covers every page of its
                     // document.
                     let mut scope = Vec::new();
@@ -296,12 +295,10 @@ impl FrameOccurrences for typst_bundle::Bundle {
                         frame_occurrences(&page.frame, &mut scope, &mut seen, &mut occurrences);
                     }
                 }
-                typst_bundle::BundleFile::Document(typst_bundle::BundleDocument::Html(
-                    document,
-                )) => {
+                BundleFile::Document(BundleDocument::Html(document)) => {
                     html_frame_occurrences(document.root(), &mut seen, &mut occurrences);
                 }
-                typst_bundle::BundleFile::Asset(_) => {}
+                BundleFile::Asset(_) => {}
             }
         }
         occurrences
@@ -324,10 +321,10 @@ fn html_frame_occurrences(
 ) {
     for node in &element.children {
         match node {
-            typst_html::HtmlNode::Element(child) => {
+            HtmlNode::Element(child) => {
                 html_frame_occurrences(child, seen, occurrences);
             }
-            typst_html::HtmlNode::Frame(frame) => {
+            HtmlNode::Frame(frame) => {
                 frame_occurrences(&frame.inner, &mut Vec::new(), seen, occurrences);
             }
             _ => {}

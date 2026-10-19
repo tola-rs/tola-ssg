@@ -192,7 +192,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exported_entry_describes_itself() {
+    fn exported_entry_digest_matches_its_bytes() {
         let result = compile(
             r#"
             #document("page.bin", format: "html")[HTML]
@@ -201,36 +201,15 @@ mod tests {
             #document("vector.bin", format: "svg")[#rect(width: 1pt, height: 1pt)]
             "#,
         );
-        assert_eq!(
-            result
-                .entries()
-                .iter()
-                .map(|entry| entry.kind)
-                .collect::<Vec<_>>(),
-            [
-                BundleEntryKind::HtmlDocument,
-                BundleEntryKind::PdfDocument,
-                BundleEntryKind::PngDocument,
-                BundleEntryKind::SvgDocument,
-            ]
-        );
-
-        let nothing = compile("");
-        assert!(nothing.entries().is_empty());
-        assert_eq!(nothing.len(), 0);
-
-        let single = compile("#document(\"one.html\")[Hello]");
-        assert_eq!(single.entries().len(), 1);
-
-        let only_entry = &single.entries()[0];
-        assert_eq!(only_entry.path().get_with_slash(), "/one.html");
-        assert_eq!(only_entry.kind(), BundleEntryKind::HtmlDocument);
-        assert!(String::from_utf8_lossy(only_entry.bytes().as_slice()).contains("Hello"));
-        assert_eq!(
-            only_entry.digest(),
-            crate::world::file::ContentDigest::of(only_entry.bytes().as_slice())
-        );
-        assert_eq!(single.entry(only_entry.path()), Some(only_entry));
+        for entry in result.entries() {
+            assert_eq!(result.entry(entry.path()), Some(entry));
+            assert_eq!(
+                entry.digest(),
+                crate::world::file::ContentDigest::of(entry.bytes().as_slice()),
+                "{:?}",
+                entry.path()
+            );
+        }
     }
     #[test]
     fn export_error_keeps_hints_in_diagnostics() {

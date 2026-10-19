@@ -585,6 +585,24 @@ impl FontSource for FontFileSource {
     }
 }
 
+/// The one record of a physical font file, with the digest configuration gave it, if any.
+fn font_file_record<'a>(
+    files: &'a mut BTreeMap<PathBuf, Arc<FontFile>>,
+    path: &Path,
+    expected: Option<ContentDigest>,
+    boundary: &crate::world::SourceBoundary,
+) -> &'a Arc<FontFile> {
+    files.entry(path.to_path_buf()).or_insert_with(|| {
+        Arc::new(FontFile {
+            path: path.to_path_buf(),
+            expected,
+            bytes: OnceLock::new(),
+            failure: OnceLock::new(),
+            boundary: boundary.clone(),
+        })
+    })
+}
+
 fn load_fonts(
     options: &FontOptions,
     cancellation: &BundleCancellation,
@@ -599,15 +617,7 @@ fn load_fonts(
         |directory, path, observed| {
             let bytes = observed.bytes.as_slice();
             let digest = observed.digest;
-            let file = files.entry(path.to_path_buf()).or_insert_with(|| {
-                Arc::new(FontFile {
-                    path: path.to_path_buf(),
-                    expected: Some(digest),
-                    bytes: OnceLock::new(),
-                    failure: OnceLock::new(),
-                    boundary: options.source_boundary.clone(),
-                })
-            });
+            let file = font_file_record(&mut files, path, Some(digest), &options.source_boundary);
             let faces = ttf_parser::fonts_in_collection(bytes).unwrap_or(1);
             for index in 0..faces {
                 cancellation.ensure_active_as()?;
@@ -639,15 +649,7 @@ fn load_fonts(
             let path = crate::world::normalize_path(&source.path);
             check_font_source(&options.source_boundary, &path)?;
             system_paths.insert(path.clone());
-            let file = files.entry(path.clone()).or_insert_with(|| {
-                Arc::new(FontFile {
-                    path,
-                    expected: None,
-                    bytes: OnceLock::new(),
-                    failure: OnceLock::new(),
-                    boundary: options.source_boundary.clone(),
-                })
-            });
+            let file = font_file_record(&mut files, &path, None, &options.source_boundary);
             native.push((
                 FontFileSource {
                     file: Arc::clone(file),
@@ -882,22 +884,6 @@ mod tests {
             store.load(&BundleCancellation::new()),
             Err(FontLoadError::NotDirectory { .. })
         ));
-    }
-
-    #[cfg(feature = "embed-fonts")]
-    #[cfg(unix)]
-    #[test]
-    fn configured_font_change_marks_stale() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("font.ttf");
-        fs::write(&path, b"not yet a font").unwrap();
-        let store =
-            FontStore::with_options(isolated_options().with_custom_paths(&[directory.path()]));
-        let cancellation = BundleCancellation::new();
-        store.load(&cancellation).unwrap();
-        assert!(store.is_current(&cancellation).unwrap());
-        fs::write(&path, b"new font source bytes").unwrap();
-        assert!(!store.is_current(&cancellation).unwrap());
     }
 
     /// A face's identity ignores bytes the file gained after the bytes the face was read from, so

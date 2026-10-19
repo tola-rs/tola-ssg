@@ -1,7 +1,7 @@
 //! Native metadata declarations and first, all, or unique value selection.
 
-use typst::foundations::{Content, Label, Value};
-use typst::introspection::{Location, MetadataElem};
+use typst::foundations::{Content, Label, Selector, Value};
+use typst::introspection::{Introspector, Location, MetadataElem};
 use typst::syntax::Span;
 use typst::utils::PicoStr;
 
@@ -90,6 +90,20 @@ pub(crate) fn metadata_declaration(content: &Content) -> Option<MetadataDeclarat
 /// Selector matching one metadata label, or `None` when the label is invalid.
 pub(crate) fn label_selector(label: &str) -> Option<Label> {
     Label::new(PicoStr::intern(label))
+}
+
+pub(crate) fn labeled_declarations(
+    introspector: &dyn Introspector,
+    label: &str,
+) -> Vec<MetadataDeclaration> {
+    let Some(label) = label_selector(label) else {
+        return Vec::new();
+    };
+    introspector
+        .query(&Selector::Label(label))
+        .iter()
+        .filter_map(metadata_declaration)
+        .collect()
 }
 
 /// The first declaration value in native order.

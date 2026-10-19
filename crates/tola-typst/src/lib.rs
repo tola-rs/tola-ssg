@@ -5,7 +5,6 @@
 // map deeper than the default recursion limit, which rustc reports as
 // `recursion_depth_exceeding_limit`.
 #![recursion_limit = "256"]
-
 pub mod bundle;
 pub mod compile;
 pub mod diagnostic;

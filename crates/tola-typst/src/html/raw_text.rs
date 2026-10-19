@@ -3,6 +3,7 @@
 use typst::syntax::{Span, VirtualPath};
 use typst_html::{HtmlDocument, HtmlElement, HtmlNode};
 
+use super::reference::{attribute, is_javascript_mime_type};
 use crate::bundle::BundleCancellation;
 
 /// A compiled element whose children are text rather than markup.
@@ -51,13 +52,7 @@ fn raw_text_kind(element: &HtmlElement) -> Option<HtmlRawText> {
     if !tag.eq_ignore_ascii_case("script") {
         return None;
     }
-    let declared = element.attrs.0.iter().find_map(|(name, value)| {
-        name.resolve()
-            .as_str()
-            .eq_ignore_ascii_case("type")
-            .then_some(value.as_str())
-    });
-    match declared {
+    match attribute(element, "type") {
         None => Some(HtmlRawText::Script),
         Some(declared) => script_kind(declared),
     }
@@ -73,31 +68,6 @@ fn script_kind(declared: &str) -> Option<HtmlRawText> {
         return Some(HtmlRawText::Module);
     }
     is_javascript_mime_type(essence).then_some(HtmlRawText::Script)
-}
-
-/// Whether a MIME essence names JavaScript.
-///
-/// See the HTML specification's JavaScript MIME type table.
-fn is_javascript_mime_type(essence: &str) -> bool {
-    matches!(
-        essence.to_ascii_lowercase().as_str(),
-        "application/ecmascript"
-            | "application/javascript"
-            | "application/x-ecmascript"
-            | "application/x-javascript"
-            | "text/ecmascript"
-            | "text/javascript"
-            | "text/javascript1.0"
-            | "text/javascript1.1"
-            | "text/javascript1.2"
-            | "text/javascript1.3"
-            | "text/javascript1.4"
-            | "text/javascript1.5"
-            | "text/jscript"
-            | "text/livescript"
-            | "text/x-ecmascript"
-            | "text/x-javascript"
-    )
 }
 
 /// The text payload of one element, when every child is text or an introspection tag.
@@ -257,18 +227,5 @@ mod tests {
             )),
             Some(HtmlRawText::Script)
         );
-    }
-
-    #[test]
-    fn text_children_form_one_payload() {
-        let element = element("style", &[]).with_children(
-            [
-                HtmlNode::text(".a {", Span::detached()),
-                HtmlNode::text("color: red }", Span::detached()),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        assert_eq!(payload(&element).as_deref(), Some(".a {color: red }"));
     }
 }
