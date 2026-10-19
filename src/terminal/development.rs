@@ -6,7 +6,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anstyle_parse::{DefaultCharAccumulator, Params, Parser, Perform};
 use chrono::{DateTime, Local, NaiveDate};
@@ -27,6 +27,8 @@ use super::ui::{Action, Screen, hints, keymap};
 const HISTORY_ROUNDS: usize = 64;
 const HOOK_LINES: usize = 200;
 const FRAME_INTERVAL: Duration = Duration::from_millis(50);
+/// How long a copy confirmation stays above the hints.
+const NOTICE_LIFETIME: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 pub(crate) enum Completion<'a> {
@@ -344,9 +346,22 @@ impl Rounds {
                 .is_some_and(|(selected, latest)| !Arc::ptr_eq(selected, latest)),
             Action::Copy => self
                 .current()
-                .is_some_and(|round| !round.diagnostics.is_empty()),
+                .is_some_and(|round| !round.transcript.trim().is_empty()),
             _ => true,
         }
+    }
+}
+
+/// What the reader's last copy took, and when it was made.
+struct Notice {
+    text: String,
+    shown_at: Instant,
+}
+
+impl Notice {
+    /// Whether the confirmation has had its time on screen.
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.shown_at) >= NOTICE_LIFETIME
     }
 }
 
@@ -362,6 +377,7 @@ pub(crate) struct DevScreen {
     rounds: Rounds,
     jobs: Vec<Job>,
     message: Option<String>,
+    notice: Option<Notice>,
     dirty: bool,
 }
 
@@ -391,6 +407,7 @@ impl DevScreen {
             rounds: Rounds::default(),
             jobs: Vec::new(),
             message: None,
+            notice: None,
             dirty: true,
         })
     }
@@ -398,6 +415,7 @@ impl DevScreen {
     pub(crate) fn round(&mut self, round: Round) {
         self.rounds.push(round);
         self.message = None;
+        self.notice = None;
         self.dirty = true;
     }
 
@@ -503,7 +521,6 @@ impl DevScreen {
         let _ = self
             .writer
             .write_all(super::clipboard::escape(text).as_bytes());
-        let count = round.diagnostics.len();
         let copied = match crate::sys::clipboard_command() {
             Some(program) => {
                 let mut command = std::process::Command::new(program);
@@ -516,16 +533,17 @@ impl DevScreen {
             }
             None => true,
         };
-        self.message = Some(if copied {
-            format!(
-                "copied {}",
-                super::progress::plural_count(count, "diagnostic")
-            )
-        } else {
-            format!(
-                "could not copy {}",
-                super::progress::plural_count(count, "diagnostic")
-            )
+        let what = match round.diagnostics.len() {
+            0 => "build output".to_owned(),
+            count => super::progress::plural_count(count, "diagnostic"),
+        };
+        self.notice = Some(Notice {
+            text: if copied {
+                format!("copied {what}")
+            } else {
+                format!("could not copy {what}")
+            },
+            shown_at: Instant::now(),
         });
     }
 
@@ -543,6 +561,14 @@ impl DevScreen {
     }
 
     pub(crate) fn draw(&mut self) -> io::Result<()> {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.expired(Instant::now()))
+        {
+            self.notice = None;
+            self.dirty = true;
+        }
         if !self.dirty {
             return Ok(());
         }
@@ -575,6 +601,7 @@ impl DevScreen {
             Rect::new(0, 0, self.size.width, self.size.height),
             header_lines,
             job_lines,
+            self.notice.is_some(),
         );
         let counter = match self.rounds.current() {
             Some(round) => {
@@ -611,12 +638,11 @@ impl DevScreen {
             frame.render_widget(Paragraph::new(counter), counter_area);
             frame.render_widget(body, body_area);
             draw_jobs(frame, jobs_area, jobs);
-            hints::draw(
+            draw_footer(
                 frame,
                 footer_area,
-                "",
-                &live_actions(&self.rounds),
-                &keymap::DEV,
+                self.notice.as_ref().map(|notice| notice.text.as_str()),
+                &self.rounds,
                 palette,
             );
         });
@@ -636,8 +662,10 @@ impl DevScreen {
     }
 }
 
-fn frame_areas(area: Rect, header_lines: usize, job_lines: usize) -> [Rect; 5] {
-    let footer = u16::from(area.height > 1);
+fn frame_areas(area: Rect, header_lines: usize, job_lines: usize, notice: bool) -> [Rect; 5] {
+    let hint_rows = u16::from(area.height > 1);
+    // The notice takes a row above the hints only when the body keeps one as well.
+    let footer = hint_rows + u16::from(notice && area.height > 3);
     let counter = u16::from(area.height > 2);
     let available = area.height.saturating_sub(footer + counter);
     // Header and running hooks each leave room to read the build result.
@@ -652,6 +680,23 @@ fn frame_areas(area: Rect, header_lines: usize, job_lines: usize) -> [Rect; 5] {
         Constraint::Length(footer),
     ])
     .areas(area)
+}
+
+fn draw_footer(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    notice: Option<&str>,
+    rounds: &Rounds,
+    palette: Palette,
+) {
+    hints::draw(
+        frame,
+        area,
+        notice.unwrap_or(""),
+        &live_actions(rounds),
+        &keymap::DEV,
+        palette,
+    );
 }
 
 fn draw_jobs(frame: &mut ratatui::Frame<'_>, area: Rect, jobs: &[Job]) {
@@ -959,13 +1004,15 @@ mod tests {
     }
 
     #[test]
-    fn copy_follows_diagnostics() {
+    fn copy_follows_the_visible_round() {
         let mut rounds = Rounds::default();
         assert!(!rounds.live(Action::Copy), "nothing to copy yet");
         rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
         assert!(rounds.live(Action::Copy));
         rounds.push(round(Vec::new(), 2, "Built site"));
-        assert!(!rounds.live(Action::Copy), "a clean round copies nothing");
+        assert!(rounds.live(Action::Copy), "a clean round copies its output");
+        rounds.push(round(Vec::new(), 3, ""));
+        assert!(!rounds.live(Action::Copy), "an empty round copies nothing");
     }
 
     #[test]
@@ -1044,18 +1091,58 @@ mod tests {
     fn short_frames_preserve_body() {
         for width in [1, 20, 40, 80, 160] {
             for height in [1, 2, 3, 8, 24, 50] {
-                let area = Rect::new(0, 0, width, height);
-                let areas = frame_areas(area, 200, 200);
-                assert!(areas[2].height > 0);
-                assert_eq!(areas[4].height, u16::from(height > 1));
-                assert_eq!(areas.iter().map(|part| part.height).sum::<u16>(), height);
-                assert!(
-                    areas
-                        .iter()
-                        .all(|part| area.contains(part.as_position()) || part.is_empty())
-                );
+                for notice in [false, true] {
+                    let area = Rect::new(0, 0, width, height);
+                    let areas = frame_areas(area, 200, 200, notice);
+                    assert!(areas[2].height > 0);
+                    let footer = u16::from(height > 1) + u16::from(notice && height > 3);
+                    assert_eq!(areas[4].height, footer);
+                    assert_eq!(areas.iter().map(|part| part.height).sum::<u16>(), height);
+                    assert!(
+                        areas
+                            .iter()
+                            .all(|part| area.contains(part.as_position()) || part.is_empty())
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    fn copy_notice_sits_above_the_hints() {
+        let mut rounds = Rounds::default();
+        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
+        let area = Rect::new(0, 0, 80, 2);
+        let palette = Palette::new(true);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
+                .unwrap();
+        terminal
+            .draw(|frame| draw_footer(frame, area, Some("copied 1 diagnostic"), &rounds, palette))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row = |y: u16| {
+            (area.x..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        };
+        assert_eq!(row(0), "copied 1 diagnostic");
+        assert!(row(1).contains("c copy"), "{}", row(1));
+        assert_eq!(buffer[(0, 0)].fg, palette.notice_style().fg.unwrap());
+    }
+
+    #[test]
+    fn copy_notice_leaves_after_its_time() {
+        let shown_at = Instant::now();
+        let notice = Notice {
+            text: "copied 1 diagnostic".to_owned(),
+            shown_at,
+        };
+        let almost = shown_at + NOTICE_LIFETIME - std::time::Duration::from_millis(1);
+        assert!(!notice.expired(almost));
+        assert!(notice.expired(shown_at + NOTICE_LIFETIME));
     }
 
     #[test]

@@ -151,7 +151,7 @@ pub(crate) enum Action {
     PreviousRound,
     /// Show the round after the one on screen.
     NextRound,
-    /// Put the visible round's diagnostics on the reader's clipboard.
+    /// Put the visible round's text on the reader's clipboard.
     Copy,
 }
 
