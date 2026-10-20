@@ -464,16 +464,18 @@ Complete options: `tola help "@tola/image"` and `tola help "@tola/icon"`.
 
 ### Mathematics
 
-HTML equations use MathML by default. Keep that structure unless unsupported notation needs
-deliberate SVG rendering in the page template:
+HTML equations use MathML by default. Keep it unless notation is unsupported.
+
+For deliberate SVG, wrap `html.frame` in a site component:
 
 ```typst
-#import "@tola/web:0.0.0": math-svg
+#let math-svg(equation) = html.frame(equation)
 #show math.equation: math-svg
 ```
 
 Numbering and references survive. SVG keeps compiled colors; repaint black fill and stroke
-selectively so intentional colors remain:
+selectively so intentional colors remain. If the component uses `tola-math-inline` and
+`tola-math-block`, these rules apply:
 
 ```css
 .tola-math-inline [fill="#000000"], .tola-math-block [fill="#000000"] { fill: currentColor; }
@@ -482,10 +484,9 @@ selectively so intentional colors remain:
 .tola-math-block > svg { margin-inline: auto; }
 ```
 
-SVG loses MathML's mathematical structure; explain essential formulas in prose or pass an explicit
-`alt` to `math-svg`. `figure(alt:)` and `math.equation(alt:)` do not supply HTML alternatives in
-the current exporter. Inspect notation, baseline, colors, and narrow-width overflow. Contract:
-`tola help "@tola/web" math-svg`.
+SVG loses MathML's structure. Explain essential formulas in prose, or add `aria-label` in the
+component. `figure(alt:)` and `math.equation(alt:)` do not supply HTML alternatives in the current
+exporter. Check notation, baseline, colors, and narrow-width overflow.
 
 Check it: `tola check` builds the declared assets, and the rendered route shows fonts, image
 alternatives, icon labels, and equation layout at narrow widths.

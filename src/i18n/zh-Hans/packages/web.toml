@@ -1,7 +1,7 @@
 # Simplified-Chinese documentation of `@tola/web`. English stays authoritative in the package's
 # own Typst sources; a unit here overrides one of them.
 
-overview = "纯文本、head 条目、以 SVG 渲染的数学、社交卡片、feed 与 sitemap"
+overview = "纯文本、head 条目、社交卡片、feed 与 sitemap"
 
 [exports.plain-text]
 
@@ -12,6 +12,8 @@ summary = [
 文本字符、符号字符、空格、raw 代码和弯引号自带文本。其他元素都取自己内容的文本，所以容器、格式、链接和数学都是透明的。metadata 不产生任何文本。文本取自你写下的内容：不运行 show rule，也不做排版。
 
 读取字符串或内容总是成功。元素自身既没有文本也没有内容时，它不产生任何文本，并有一条警告指出你写下它的位置。
+
+这是通用文本工具。标题、metadata 和模板用它生成标题、描述和标签。这里保留导出是为了兼容；需要纯文本投影而不是 HTML 输出时，优先直接导入 `plain-text`。
 
 Example - 从字符串与内容中读取文本：
 ''',
@@ -121,30 +123,6 @@ description = "页面的描述；设置后才写入。"
 handle = "站点的 handle；设置后才写入。"
 
 creator = "创作者的 handle；设置后才写入。"
-
-[exports.math-svg]
-
-summary = [
-  '''
-在 HTML 导出期间把公式渲染为 SVG。
-
-用 `#show math.equation: math-svg` 把它应用到每个公式上。行内公式留在行内，行间公式独立成块，由公式自身的 `block` 决定。helper 在每个导出目标里都会检查选项；HTML 导出之外，公式原样返回。
-行内公式自动与周围文字的基线对齐。
-
-包装元素就是你的样式表要选中的那个元素：它带有 `role="math"`，以及 `tola-math-inline` 或 `tola-math-block` 类。SVG 用编译公式时的颜色绘制；把包装元素内部图形的 `fill` 与 `stroke` 设为 `currentColor`，它就会跟随周围文字颜色。
-
-Example - 渲染每个公式，并为其中一个指定替代文本：
-''',
-  '',
-]
-
-[exports.math-svg.parameters]
-
-equation = "要渲染的公式。"
-
-alt = "为辅助技术描述公式：`auto` 取公式自身的 `alt`，`none` 不给包装元素命名，字符串则直接命名。它会成为包装元素的 `aria-label`。"
-
-attrs = "传给包装元素的、取字符串值的 HTML 属性，例如 `class` 和 `style`。`role` 与 `aria-label` 属于 helper；你传入的 `class` 会保留原值，并加上包装元素自身的类名。"
 
 [exports.feed]
 

@@ -584,10 +584,8 @@ path = "icons/brand"
 
     #[test]
     fn example_site_renders_math_frames() {
-        let (_directory, world) = world_from_example_site(
-            r#"#import "@tola/web:0.0.0": math-svg
-#document("math.html")[#math-svg($a^2$)]"#,
-        );
+        let (_directory, world) =
+            world_from_example_site(r#"#document("math.html")[#html.frame($a^2$)]"#);
         let compilation =
             tola_typst::compile_bundle_world(&world, &tola_typst::BundleCancellation::default())
                 .unwrap();
@@ -1337,88 +1335,12 @@ path = "icons/brand"
         );
     }
 
-    #[test]
-    fn math_svg_wrappers_have_class_role_and_alt() {
-        let (_directory, world) = world_with_fonts(
-            r#"#import "@tola/web:0.0.0": math-svg
-#document("math.html")[
-  Unnamed: #math-svg($x^2$)
-  Named: #math-svg($y^2$, alt: "y squared")
-  Display: #math-svg($ z^2 $)
-  Styled: #math-svg($a$, attrs: (class: "custom-math"))
-]"#,
-            SourceRecords::default(),
-        );
-        let compilation =
-            tola_typst::compile_bundle_world(&world, &tola_typst::BundleCancellation::default())
-                .unwrap();
-        let html = exported_html(&compilation, "/math.html");
-
-        assert_eq!(html.matches(r#"role="math""#).count(), 4, "{html}");
-        assert_eq!(
-            html.matches(r#"class="tola-math-inline""#).count(),
-            2,
-            "{html}"
-        );
-        assert_eq!(
-            html.matches(r#"class="tola-math-block""#).count(),
-            1,
-            "{html}"
-        );
-        assert_eq!(
-            html.matches(r#"class="tola-math-inline custom-math""#)
-                .count(),
-            1,
-            "{html}"
-        );
-        assert!(html.contains(r#"aria-label="y squared""#), "{html}");
-        assert_eq!(html.matches("aria-label=").count(), 1, "{html}");
-        assert!(html.contains("<svg"), "{html}");
-    }
-
-    #[test]
-    fn math_svg_respects_equation_settings() {
-        let (_directory, world) = world_with_fonts(
-            r#"#import "@tola/web:0.0.0": math-svg
-#document("math.html")[
-  #set math.equation(block: true, alt: "Inherited")
-  #math-svg(math.equation([x]), attrs: (id: "inherited"))
-  #math-svg(math.equation(block: false, alt: "Explicit", [x]), attrs: (id: "explicit"))
-  #math-svg($x$, alt: none, attrs: (id: "unnamed"))
-]"#,
-            SourceRecords::default(),
-        );
-        let cancellation = tola_typst::BundleCancellation::default();
-        let compilation = tola_typst::compile_bundle_world(&world, &cancellation).unwrap();
-        let path = typst::syntax::VirtualPath::new("math.html").unwrap();
-        let document = compilation.document(&path).unwrap();
-        for (id, tag, class, alt) in [
-            ("inherited", "div", "tola-math-block", Some("Inherited")),
-            ("explicit", "span", "tola-math-inline", Some("Explicit")),
-            ("unnamed", "span", "tola-math-inline", None),
-        ] {
-            let fragment = document
-                .html_fragment(
-                    &tola_typst::HtmlFragmentSelection::Id(id.into()),
-                    &Default::default(),
-                    &cancellation,
-                )
-                .unwrap();
-            let xml = roxmltree::Document::parse(&fragment.html).unwrap();
-            let wrapper = xml.root_element();
-            assert_eq!(wrapper.tag_name().name(), tag, "{id}");
-            assert_eq!(wrapper.attribute("class"), Some(class), "{id}");
-            assert_eq!(wrapper.attribute("aria-label"), alt, "{id}");
-        }
-    }
-
     /// The docs' CSS repaints the literal colors `typst-svg` writes; a release that changes them
     /// shows up here.
     #[test]
     fn framed_math_paints_with_literal_colors() {
         let (_directory, world) = world_with_fonts(
-            r#"#import "@tola/web:0.0.0": math-svg
-#document("math.html")[Inline #math-svg($x^2$).]"#,
+            r#"#document("math.html")[Inline #html.frame($x^2$).]"#,
             SourceRecords::default(),
         );
         let compilation =
@@ -1427,68 +1349,6 @@ path = "icons/brand"
         let html = exported_html(&compilation, "/math.html");
 
         assert!(html.contains("fill=\"#000000\""), "{html}");
-    }
-
-    #[test]
-    fn math_wrappers_refuse_invalid_options() {
-        for (call, expected) in [
-            ("math-svg(42)", "expects a math.equation"),
-            ("math-svg($x$, alt: 1)", "`alt` must be"),
-            ("math-svg($ x $, attrs: ())", "`attrs` must be a dictionary"),
-            (
-                "math-svg($ x $, attrs: (class: 1))",
-                "`attrs` values must be strings",
-            ),
-            (
-                "math-svg($x$, attrs: (role: \"img\"))",
-                "belongs to the math wrapper",
-            ),
-            (
-                "math-svg($ x $, attrs: (aria-label: \"wrong\"))",
-                "belongs to the math wrapper",
-            ),
-            (
-                "math-svg($x$, attrs: (ROLE: \"img\"))",
-                "belongs to the math wrapper",
-            ),
-            (
-                "math-svg($ x $, attrs: (ARIA-LABEL: \"wrong\"))",
-                "set the alternative with `alt`",
-            ),
-        ] {
-            let source = format!(
-                "#import \"@tola/web:0.0.0\": math-svg\n\
-                 #document(\"index.html\")[#{call}]"
-            );
-            let (_directory, world) = world_from_default_config(&source, SourceRecords::default());
-            let failure = tola_typst::compile_bundle_world(&world, &Default::default())
-                .expect_err("invalid math options must report their contract");
-            let messages = failure_messages(&failure).join("\n");
-            assert!(messages.contains(expected), "{call}: {messages}");
-        }
-    }
-
-    #[test]
-    fn math_show_rules_keep_paged_fallback() {
-        let (_directory, world) = world_with_fonts(
-            r#"#import "@tola/web:0.0.0": math-svg
-#let math-template(body) = {
-  show math.equation: math-svg
-  body
-}
-#document("math.html")[#show: math-template
-  Inline $x^2$ and display $ y^2 $.
-]
-#document("math.pdf", format: "pdf")[#show: math-template
-  Inline $x^2$ and display $ y^2 $.
-]"#,
-            SourceRecords::default(),
-        );
-        let compilation = tola_typst::compile_bundle_world(&world, &Default::default())
-            .expect("one math template supports both document targets");
-        let html = exported_html(&compilation, "/math.html");
-        assert_eq!(html.matches(r#"role="math""#).count(), 2, "{html}");
-        assert!(exported_bytes(&compilation, "/math.pdf").starts_with(b"%PDF-"));
     }
 
     #[test]
@@ -3494,6 +3354,49 @@ path = "icons/brand"
 ]
 #document("other.html")[= Other document]
 #document("empty.html")[#context assert.eq(headings(), ())]
+"#,
+                true,
+            );
+        }
+
+        #[test]
+        fn heading_body_preserves_source_content() {
+            let site = QuerySite::new("/");
+            site.compile(
+                r#"
+#import "@tola/document:0.0.0": headings
+#document("index.html")[
+  #show heading: it => [Replaced]
+  = Introduction
+  == *Bold* and _em_
+  #context {
+    assert.eq(
+      headings().map(section => section.body),
+      ([Introduction], [*Bold* and _em_]),
+    )
+  }
+]
+"#,
+                true,
+            );
+        }
+
+        #[test]
+        fn heading_outlined_matches_nesting() {
+            let site = QuerySite::new("/");
+            site.compile(
+                r#"
+#import "@tola/document:0.0.0": headings
+#document("index.html")[
+  = One
+  #heading(outlined: false)[Hidden]
+  == Two
+  #context {
+    let sections = headings()
+    assert.eq(sections.map(section => section.outlined), (true, false, true))
+    assert.eq(sections.map(section => section.nesting != none), (true, false, true))
+  }
+]
 "#,
                 true,
             );
