@@ -150,8 +150,8 @@
 
 /// The Open Graph entries for a page, as an array to join into a head.
 ///
-/// `title`, `kind`, `url`, and `images` are required, and `images` holds at least one
-/// `(url:, alt:, …)` dictionary.
+/// `title` and `url` are required. `kind` defaults to `website`; `images: none` writes a
+/// text-only card without `og:image`, so the result is not a complete Open Graph object.
 ///
 /// An optional text value writes an entry only when it is non-blank.
 ///
@@ -166,16 +166,28 @@
 /// #assert.eq(entries.len(), 5)
 /// ```
 ///
+/// Example - declare a text-only card:
+///
+/// ```typst
+/// #import "@tola/web:0.0.0": open-graph
+/// #let entries = open-graph(
+///   title: "Guide", url: "https://example.test/guide/",
+/// )
+/// #assert.eq(entries.len(), 3)
+/// ```
+///
 /// Related: head-metadata, twitter-card
 ///
 /// - title (string): the page's title.
-/// - kind (string): the page's Open Graph type, such as `website` or `article`.
+/// - kind (string): the page's Open Graph type, such as `website` or `article`; defaults to
+///   `website`.
 /// - url (string): the page's absolute URL.
-/// - images (array): a nonempty array of image dictionaries. Each requires an absolute HTTP(S)
-///   `url` and a non-blank `alt`. Optional fields are `secure-url` (an absolute HTTPS URL),
-///   `media-type` (a string such as `image/png`), and `width` and `height` (positive integer pixel
-///   counts). Optional fields accept `none`; blank text omits the entry. Each image's entries stay
-///   together, in the order you give the images.
+/// - images (none | array): `none` for a text-only card, or a nonempty array of image
+///   dictionaries. Each image requires an absolute HTTP(S) `url` and a non-blank `alt`.
+///   Optional fields are `secure-url` (an absolute HTTPS URL), `media-type` (a string such as
+///   `image/png`), and `width` and `height` (positive integer pixel counts). Optional fields
+///   accept `none`; blank text omits the entry. Each image's entries stay together, in the order
+///   you give the images.
 /// - description (none | string): the page's description; written only when set.
 /// - site-name (none | string): the site's name; written only when set.
 /// - locale (none | string): the page's locale; written only when set.
@@ -188,9 +200,9 @@
 
   (
     title: auto,
-    kind: auto,
+    kind: "website",
     url: auto,
-    images: auto,
+    images: none,
     description: none,
     site-name: none,
     locale: none,
@@ -223,7 +235,7 @@
         title: non-empty(trim(str)),
         kind: non-empty(trim(str)),
         url: http-url,
-        images: non-empty(array-of(og-image)),
+        images: nullable(non-empty(array-of(og-image))),
         description: optional-text,
         site-name: optional-text,
         locale: optional-text,
@@ -242,21 +254,23 @@
     ) {
       if value != none { entries.push(property-meta(property, value)) }
     }
-    for image in options.images {
-      entries.push(property-meta("og:image", image.url))
-      if image.secure-url != none {
-        entries.push(property-meta("og:image:secure_url", image.secure-url))
+    if options.images != none {
+      for image in options.images {
+        entries.push(property-meta("og:image", image.url))
+        if image.secure-url != none {
+          entries.push(property-meta("og:image:secure_url", image.secure-url))
+        }
+        if image.media-type != none {
+          entries.push(property-meta("og:image:type", image.media-type))
+        }
+        if image.width != none {
+          entries.push(property-meta("og:image:width", str(image.width)))
+        }
+        if image.height != none {
+          entries.push(property-meta("og:image:height", str(image.height)))
+        }
+        entries.push(property-meta("og:image:alt", image.alt))
       }
-      if image.media-type != none {
-        entries.push(property-meta("og:image:type", image.media-type))
-      }
-      if image.width != none {
-        entries.push(property-meta("og:image:width", str(image.width)))
-      }
-      if image.height != none {
-        entries.push(property-meta("og:image:height", str(image.height)))
-      }
-      entries.push(property-meta("og:image:alt", image.alt))
     }
     entries
   }

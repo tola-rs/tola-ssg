@@ -661,7 +661,7 @@ Draft body."#
     }
 
     #[test]
-    fn absent_social_image_omits_cards() {
+    fn absent_social_image_emits_text_cards() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let selected = FeatureSet::new([Feature::OpenGraph, Feature::TwitterCard]);
@@ -672,6 +672,16 @@ Draft body."#
         let html = std::str::from_utf8(built_output(&build, "index.html")).unwrap();
         assert!(!html.contains("og:image"), "{html}");
         assert!(!html.contains("twitter:image"), "{html}");
+        assert!(html.contains(r#"property="og:title""#), "{html}");
+        assert!(
+            html.contains(r#"property="og:type" content="website""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"name="twitter:card" content="summary""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"name="twitter:title""#), "{html}");
     }
 
     #[test]

@@ -72,11 +72,14 @@ summary = [
   '''
 页面的 Open Graph 条目，作为数组拼进 head。
 
-`title`、`kind`、`url` 和 `images` 必填，其中 `images` 至少包含一个 `(url:, alt:, …)` 字典。
+`title` 和 `url` 必填。`kind` 默认 `website`；`images` 可为 `none`，此时输出纯文本卡片，但不含协议要求的 `og:image`，不是完整的 Open Graph 对象。
 
 可选文本非空时才会写入条目。
 
 Example - 声明页面的 Open Graph 条目：
+''',
+  '''
+Example - 声明纯文本卡片：
 ''',
   '',
 ]
@@ -85,11 +88,11 @@ Example - 声明页面的 Open Graph 条目：
 
 title = "页面的标题。"
 
-kind = "页面的 Open Graph 类型，例如 `website` 或 `article`。"
+kind = "页面的 Open Graph 类型，例如 `website` 或 `article`；默认为 `website`。"
 
 url = "页面的绝对 URL。"
 
-images = "非空的图片字典数组。每项必填绝对 HTTP(S) `url` 与非空白的 `alt`。可选字段为 `secure-url`（绝对 HTTPS URL）、`media-type`（例如 `image/png` 的字符串）、`width` 与 `height`（正的整数像素数）。可选字段接受 `none`；空白文本不写入条目。每张图片的条目保持在一起，图片按你给出的顺序排列。"
+images = "`none` 或非空的图片字典数组。`none` 不写入 `og:image`，输出纯文本卡片。每项必填绝对 HTTP(S) `url` 与非空白的 `alt`。可选字段为 `secure-url`（绝对 HTTPS URL）、`media-type`（例如 `image/png` 的字符串）、`width` 与 `height`（正的整数像素数）。可选字段接受 `none`；空白文本不写入条目。每张图片的条目保持在一起，图片按你给出的顺序排列。"
 
 description = "页面的描述；设置后才写入。"
 

@@ -2,7 +2,7 @@
   "name": "tola",
   "displayName": "Tola",
   "description": "Language support and live preview for Tola sites and Typst sources.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "tola",
   "license": "MIT",
   "icon": "icon.png",

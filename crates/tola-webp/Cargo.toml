@@ -6,7 +6,6 @@ rust-version.workspace = true
 description = "Pure-Rust, deterministic still-image WebP encoder for tola-image"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
-publish = false
 
 [dependencies]
 fearless_simd = "=1.0.0"
