@@ -576,8 +576,8 @@ impl BlockQuantizer<'_> {
             }
             let mut rates = [0; 3];
             let mut can_improve = false;
-            for context in 0..3 {
-                rates[context] = self.lambda
+            for (context, rate) in rates.iter_mut().enumerate() {
+                *rate = self.lambda
                     * u64::from(self.costs.token(
                         self.plane,
                         position,
@@ -585,7 +585,7 @@ impl BlockQuantizer<'_> {
                         false,
                         token as u8,
                     ));
-                can_improve |= bound + rates[context] < edges.scores[context];
+                can_improve |= bound + *rate < edges.scores[context];
             }
             if !can_improve {
                 continue;
@@ -603,8 +603,8 @@ impl BlockQuantizer<'_> {
                     closest,
                 )
             };
-            for context in 0..3 {
-                let score = score + rates[context];
+            for (context, &rate) in rates.iter().enumerate() {
+                let score = score + rate;
                 if score < edges.scores[context] {
                     edges.scores[context] = score;
                     edges.levels[context] = magnitude;

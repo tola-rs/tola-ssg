@@ -58,6 +58,7 @@ tola-slugify = { version = "0.8.0", path = "crates/tola-slugify" }
 tola-subprocess = { version = "0.8.0", path = "crates/tola-subprocess" }
 tola-typst = { version = "0.8.0", path = "crates/tola-typst" }
 tola-typst-syntax = { version = "0.8.0", path = "crates/tola-typst-syntax" }
+tola-webp = { version = "0.8.0", path = "crates/tola-webp" }
 
 [package]
 name = "tola"
