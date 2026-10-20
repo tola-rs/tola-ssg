@@ -35,7 +35,7 @@ mod tests {
     }
 
     #[test]
-    fn a_digest_is_thirty_two_bytes() {
+    fn digest_is_thirty_two_bytes() {
         assert_eq!(
             tola_blake3(Bytes::new(b"abc".to_vec())).as_slice().len(),
             32

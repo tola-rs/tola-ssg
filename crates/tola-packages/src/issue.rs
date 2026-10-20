@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn normalization_folds_a_default_into_origin() {
+    fn normalization_folds_default_into_origin() {
         let cause = issue(
             "schema.type",
             vec![key("count")],
@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn normalization_keeps_nested_generations_in_the_outer_field() {
+    fn normalization_keeps_nested_generations_in_outer_field() {
         let cause = issue("schema.type", vec![], "expected `int`, found `str`");
         let inner = wrapper("schema.default", vec![key("count")], vec![cause]);
         let outer = wrapper("schema.default", vec![key("value")], vec![inner]);
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_issues_keep_a_tree() {
+    fn ordinary_issues_keep_tree() {
         let mut parent = issue("custom", vec![], "outer");
         parent.children.push(issue(
             "schema.type",

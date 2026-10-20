@@ -16,9 +16,9 @@ pub(super) enum Feature {
     Feed,
     /// Sitemap declarations that honor each page's metadata.
     Sitemap,
-    /// Open Graph head entries naming the page and the site's social image.
+    /// Open Graph head entries for the page, with an optional social image.
     OpenGraph,
-    /// Twitter card head entries naming the page and the site's social image.
+    /// Twitter card head entries for the page, with an optional social image.
     TwitterCard,
     /// A Pagefind search index built by a generate-outputs hook.
     Pagefind,
@@ -235,12 +235,12 @@ const FEATURE_VALUES: &[FeatureValue] = &[
     FeatureValue {
         feature: Feature::OpenGraph,
         name: "open-graph",
-        summary: "Open Graph entries for each page and the site's social image",
+        summary: "Open Graph entries for each page and an optional social image",
     },
     FeatureValue {
         feature: Feature::TwitterCard,
         name: "twitter-card",
-        summary: "a Twitter card for each page and the site's social image",
+        summary: "a Twitter card for each page and an optional social image",
     },
     FeatureValue {
         feature: Feature::Pagefind,
@@ -550,28 +550,27 @@ const CANONICAL_ENTRIES: &str = r#"
       entries += canonical(url)
     }"#;
 
-/// The Open Graph entries one page has, silent without a social image or a page title.
+/// Open Graph entries for one page; omitted without an absolute URL or title.
 const OPEN_GRAPH_ENTRIES: &str = r#"
-    if url != none and image != none and title != "" {
+    if url != none and title != "" {
       entries += open-graph(
         title: title,
-        kind: "website",
         url: url,
         description: description,
         site-name: site.title,
         locale: site.language.tag,
-        images: ((url: image, alt: title),),
+        images: if image != none { ((url: image, alt: title),) } else { none },
       )
     }"#;
 
-/// The Twitter card entries one page has, silent under the same conditions as Open Graph.
+/// Twitter card entries for one page; a summary card without a social image.
 const TWITTER_CARD_ENTRIES: &str = r#"
-    if url != none and image != none and title != "" {
+    if url != none and title != "" {
       entries += twitter-card(
-        card: "summary_large_image",
+        card: if image != none { "summary_large_image" } else { "summary" },
         title: title,
         description: description,
-        image: (url: image, alt: title),
+        image: if image != none { (url: image, alt: title) } else { none },
       )
     }"#;
 
@@ -791,7 +790,7 @@ const OPEN_GRAPH: Effect = Effect {
         ..NO_SEO
     },
     next_steps: &[
-        "Set `site.origin` in `tola.toml` and `social-image` in `site/seo.typ` for the cards.",
+        "Set `site.origin` in `tola.toml`; set `social-image` in `site/seo.typ` for an image.",
     ],
     ..NO_EFFECT
 };
@@ -804,7 +803,7 @@ const TWITTER_CARD: Effect = Effect {
         ..NO_SEO
     },
     next_steps: &[
-        "Set `site.origin` in `tola.toml` and `social-image` in `site/seo.typ` for the cards.",
+        "Set `site.origin` in `tola.toml`; set `social-image` in `site/seo.typ` for an image.",
     ],
     ..NO_EFFECT
 };

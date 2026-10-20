@@ -320,6 +320,19 @@ mod tests {
             .unwrap();
     }
 
+    /// The client's aliased root, where the platform has symlinks to make one.
+    #[cfg(unix)]
+    fn client_alias(root: &std::path::Path, content: &std::path::Path) -> Option<PathBuf> {
+        let alias = root.join("client");
+        std::os::unix::fs::symlink(content, &alias).unwrap();
+        Some(alias)
+    }
+
+    #[cfg(not(unix))]
+    fn client_alias(_: &std::path::Path, _: &std::path::Path) -> Option<PathBuf> {
+        None
+    }
+
     #[test]
     fn configured_root_preserves_client_locations() {
         let directory = tempfile::tempdir().unwrap();
@@ -337,13 +350,8 @@ mod tests {
             "#document(\"index.html\", format: \"html\")[#include \"content/page.typ\"]",
         )
         .unwrap();
-        let mut workspaces = vec![content];
-        #[cfg(unix)]
-        {
-            let alias = root.join("client");
-            std::os::unix::fs::symlink(&workspaces[0], &alias).unwrap();
-            workspaces.push(alias);
-        }
+        let alias = client_alias(&root, &content);
+        let workspaces = std::iter::once(content).chain(alias).collect::<Vec<_>>();
         for workspace in workspaces {
             let mut connection = Connection::new(
                 Vec::new(),

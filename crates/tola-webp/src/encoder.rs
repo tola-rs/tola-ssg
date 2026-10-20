@@ -1702,8 +1702,8 @@ mod tests {
         assert_eq!(decoded.dimensions(), (32, 32));
         let mut total = 0u64;
         for (source, output) in rgba.as_chunks::<4>().0.iter().zip(decoded.pixels()) {
-            for channel in 0..3 {
-                total += u64::from(source[channel].abs_diff(output.0[channel]));
+            for (&value, &channel) in source.iter().take(3).zip(output.0.iter().take(3)) {
+                total += u64::from(value.abs_diff(channel));
             }
         }
         let mean = total / (32 * 32 * 3) as u64;
@@ -1956,15 +1956,15 @@ mod tests {
                                 &quantizer, &samples, &edges, mode, neighbors, method,
                             );
                             assert_eq!(prediction.pixels, expected.pixels);
-                            for plane in 0..2 {
+                            for (plane, actual_plane) in actual.iter().enumerate() {
                                 assert_eq!(
                                     transform::block_coefficients(&prediction.coefficients[plane]),
                                     expected.coefficients[plane],
                                     "trial {trial} origin {origin:?} mode {mode} q{index} {method:?} plane {plane}"
                                 );
-                                assert_eq!(actual[plane].levels, expected.candidates[plane].levels);
-                                assert_eq!(actual[plane].pixels, expected.candidates[plane].pixels);
-                                assert_eq!(actual[plane].sse, expected.candidates[plane].sse);
+                                assert_eq!(actual_plane.levels, expected.candidates[plane].levels);
+                                assert_eq!(actual_plane.pixels, expected.candidates[plane].pixels);
+                                assert_eq!(actual_plane.sse, expected.candidates[plane].sse);
                             }
                         }
                     }

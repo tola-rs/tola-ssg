@@ -18,7 +18,7 @@ rayon = "1.12.0"
 roxmltree = "0.21.1"
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 thiserror = "2.0.20"
-tola-webp = { path = "../tola-webp", optional = true }
+tola-webp = { workspace = true, optional = true }
 webp = { version = "=0.3.1", default-features = false, optional = true }
 zune-core = { version = "=0.5.3", default-features = false }
 zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }

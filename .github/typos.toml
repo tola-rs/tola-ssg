@@ -58,3 +58,6 @@ ues = "ues"
 underlaying = "underlaying"
 # The OpenType width-axis tag, which the dictionary reads as "width".
 wdth = "wdth"
+# WebP's ALPH chunk and the Walsh–Hadamard transform (WHT): domain names, not misspellings.
+ALPH = "ALPH"
+WHT = "WHT"

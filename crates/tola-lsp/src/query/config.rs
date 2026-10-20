@@ -866,10 +866,14 @@ na|
 
     #[test]
     fn hook_dev_completes_finite_values() {
-        for stage in ["before-build", "generate-outputs", "after-publish"] {
+        for (stage, expected) in [
+            ("before-build", vec!["\"run\"", "\"skip\""]),
+            ("generate-outputs", vec!["\"run\"", "\"skip\"", "\"reuse\""]),
+            ("after-publish", vec!["\"run\"", "\"skip\""]),
+        ] {
             assert_eq!(
                 labels(&format!("[[build.hooks.{stage}]]\ndev = |")),
-                ["\"run\"", "\"skip\""],
+                expected,
             );
         }
     }

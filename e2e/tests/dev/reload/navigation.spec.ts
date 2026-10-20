@@ -672,8 +672,7 @@ test('scripted reload restores reader-selected options', async ({ page, sites })
 })
 
 test('scripted reload keeps script-initialized controls', async ({ page, sites }) => {
-  const script =
-    "document.getElementById('search').value = sessionStorage.getItem('script-value');"
+  const script = "document.getElementById('search').value = sessionStorage.getItem('script-value');"
   const program = (text: string) =>
     htmlProgram(
       `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("p", attrs: (id: "text"))[${text}]`,

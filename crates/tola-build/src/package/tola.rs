@@ -1563,6 +1563,45 @@ path = "icons/brand"
     }
 
     #[test]
+    fn open_graph_without_images_renders_text_card() {
+        let html = html_document(
+            r#"
+#import "@tola/web:0.0.0": open-graph
+#document("index.html")[
+  #html.html[
+    #html.head[
+      #open-graph(
+        title: "Guide",
+        url: "https://example.test/guide/",
+        description: "Read this",
+      ).join()
+    ]
+    #html.body[]
+  ]
+]
+"#,
+            "/index.html",
+        );
+        assert!(
+            html.contains(r#"<meta property="og:title" content="Guide">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<meta property="og:type" content="website">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<meta property="og:url" content="https://example.test/guide/">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<meta property="og:description" content="Read this">"#),
+            "{html}"
+        );
+        assert!(!html.contains("og:image"), "{html}");
+    }
+
+    #[test]
     fn head_metadata_rejects_invalid_values() {
         for call in [
             r#"head-metadata("not a dictionary")"#,
@@ -5110,7 +5149,7 @@ path = "icons/brand"
         }
 
         #[test]
-        fn authored_default_causes_name_an_inner_path() {
+        fn authored_default_names_inner_path() {
             assert_schema(
                 r#"
 #let inner = check(schema((end: int)), _ => (issue("End precedes start", path: ("end",)),))
@@ -6183,7 +6222,7 @@ path = "icons/brand"
         }
 
         #[test]
-        fn generated_default_names_an_inner_failure() {
+        fn generated_default_names_inner_failure() {
             let errors = source_errors(
                 r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
@@ -6203,7 +6242,7 @@ path = "icons/brand"
         }
 
         #[test]
-        fn generated_default_names_an_authored_inner_failure() {
+        fn generated_default_names_authored_inner_failure() {
             let errors = source_errors(
                 r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
@@ -6269,7 +6308,7 @@ path = "icons/brand"
         }
 
         #[test]
-        fn ordinary_issue_renders_a_generated_child_as_a_sentence() {
+        fn ordinary_issue_renders_generated_child_as_sentence() {
             let errors = source_errors(
                 r#"
 #import "@tola/source:0.0.0": all-sources, parse-sources
