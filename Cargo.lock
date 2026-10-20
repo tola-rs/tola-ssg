@@ -7351,6 +7351,7 @@ dependencies = [
  "roxmltree 0.21.2",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "tola-address",
  "tola-datalog",
  "tola-icons",
