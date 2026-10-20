@@ -5,16 +5,11 @@ import { commandRunner, expectExited } from '../../support/process.ts'
 import { test } from '../../support/server.ts'
 
 const STYLED_PAGE = `#import "@tola/source:0.0.0": tola-meta
-#import "@tola/web:0.0.0": math-svg
 #tola-meta((title: [Starter styles]))
 
 = Starter styles
 
 - Semantic list
-
-Inline #math-svg($x$).
-
-#math-svg($ x + y_2 $)
 
 \`\`\`rust
 fn main() { let answer = 42; }
@@ -57,22 +52,15 @@ for (const preset of ['medium', 'rich']) {
           document.querySelectorAll('.tola-code span'),
           (span) => getComputedStyle(span).color,
         ),
-        math: Array.from(
-          document.querySelectorAll('.tola-math-inline [fill], .tola-math-block [fill]'),
-          (glyph) => getComputedStyle(glyph).fill,
-        ),
       }))
     const light = await colors()
     expect(light.code.length).toBeGreaterThan(0)
-    expect(light.math.length).toBeGreaterThan(0)
-    for (const fill of light.math) expect(fill).toBe(light.text)
 
     await page.emulateMedia({ colorScheme: 'dark' })
     const dark = await colors()
     expect(dark.text).not.toBe(light.text)
     expect(dark.background).not.toBe(light.background)
     expect(dark.code).not.toEqual(light.code)
-    for (const fill of dark.math) expect(fill).toBe(dark.text)
 
     await page.locator('html').evaluate((node) => node.setAttribute('data-theme', 'light'))
     expect(await colors()).toEqual(light)

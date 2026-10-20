@@ -4,7 +4,14 @@ import { join } from 'node:path'
 import { ONE_PIXEL_PNG } from '../../support/media.ts'
 import { test } from '../../support/server.ts'
 
-const MATH_PAGE = String.raw`#import "@tola/web:0.0.0": math-svg
+const MATH_PAGE = String.raw`#let math-svg(equation) = {
+  let block = equation.at("block", default: math.equation.block)
+  if block {
+    html.elem("div", attrs: (class: "tola-math-block"), html.frame(equation))
+  } else {
+    html.elem("span", attrs: (class: "tola-math-inline"), html.frame(equation))
+  }
+}
 #html.style(".baseline { display: inline-block; width: 0; height: 0; } .sample { margin: 1em; } .sample, .pair { white-space: nowrap; }")
 #for size in (9pt, 18pt, 36pt) {
   for leading in (0em, 0.65em, 3em) {

@@ -1504,12 +1504,12 @@ mod tests {
             .expect("the web package");
         let mut site = QuerySession::with_program(FAILED_PROGRAM);
         for marked in [
-            "#import \"@tola/web:0.0.0\": m|",
-            "#import \"@tola/web:0.0.0\": ma|",
+            "#import \"@tola/web:0.0.0\": p|",
+            "#import \"@tola/web:0.0.0\": pl|",
         ] {
             let items = site.completion(marked);
             let labels = completion_labels(&items);
-            assert!(labels.contains(&"math-svg"), "{marked:?}: {labels:?}");
+            assert!(labels.contains(&"plain-text"), "{marked:?}: {labels:?}");
             assert!(
                 labels
                     .iter()
@@ -1517,22 +1517,21 @@ mod tests {
                 "{marked:?}: {labels:?}"
             );
         }
-        let items = site.completion("#import \"@tola/web:0.0.0\": math-s|");
-        assert_eq!(completion_labels(&items), ["math-svg"]);
+        let items = site.completion("#import \"@tola/web:0.0.0\": plain-t|");
+        assert_eq!(completion_labels(&items), ["plain-text"]);
         for marked in [
             "#import \"@tola/web:0.0.0\":|",
             "#import \"@tola/web:0.0.0\": |",
-            "#import \"@tola/web:0.0.0\": math |",
-            "#import \"@tola/web:0.0.0\": math, |",
+            "#import \"@tola/web:0.0.0\": pl |",
+            "#import \"@tola/web:0.0.0\": pl, |",
         ] {
             let items = site.completion(marked);
             let labels = completion_labels(&items);
-            assert!(labels.contains(&"math-svg"), "{marked:?}: {labels:?}");
+            assert!(labels.contains(&"plain-text"), "{marked:?}: {labels:?}");
             assert!(
                 !labels.contains(&"map") && !labels.contains(&"mark"),
                 "{marked:?}: {labels:?}"
             );
-            assert!(!labels.contains(&"math"), "{marked:?}: {labels:?}");
         }
     }
 

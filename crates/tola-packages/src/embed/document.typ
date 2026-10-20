@@ -236,10 +236,14 @@
 /// | `level` | The heading level declared in the source |
 /// | `nesting` | Depth in the outline tree; `none` when not outlined |
 /// | `number` | Rendered number: a string from a pattern, a callback's result, or `none` |
+/// | `body` | The heading's source content before show rules |
 /// | `text` | Plain heading text before show rules |
 /// | `label` | The label you wrote, or `none` |
 /// | `location` | The native location to pass to `link` |
 /// | `outlined` | Whether the heading participates in the outline |
+///
+/// `outlined` is the native heading flag. `nesting` is the outline-tree depth. They agree:
+/// `nesting` is `none` exactly when `outlined` is `false`.
 ///
 /// The query is scoped to this document, so the result never mixes in another page's headings.
 /// `location` is the value to pass to `link()`, and linking makes Typst generate an anchor for
@@ -336,6 +340,7 @@
         number: if heading.numbering == none { none } else {
           numbering(heading.numbering, ..heading-counter.at(heading.location()))
         },
+        body: heading.body,
         text: plain-text(heading.body),
         label: heading.at("label", default: none),
         location: heading.location(),

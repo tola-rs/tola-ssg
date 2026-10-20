@@ -125,10 +125,9 @@ mod tests {
     }
 
     #[test]
-    fn aligned_math_keeps_equation_references() {
+    fn framed_math_keeps_equation_references() {
         let site = r#"
-#import "@tola/web:0.0.0": math-svg
-#show math.equation: math-svg
+#show math.equation: it => html.frame(it)
 #set text(size: 18pt)
 #document("index.html")[
   Inline $1 / x_2$ and $y^2$.
@@ -158,9 +157,7 @@ mod tests {
             .export_entries(&tola_typst::BundleOptions::default(), &cancellation, None)
             .unwrap();
         let html = std::str::from_utf8(outputs.get(&path).unwrap().bytes().as_slice()).unwrap();
-        assert!(html.contains("vertical-align: -"), "{html}");
         assert!(html.contains("href=\"#numbered\""), "{html}");
         assert!(html.contains("Count: 1"), "{html}");
-        assert!(html.contains("aria-label=\"Squared x\""), "{html}");
     }
 }

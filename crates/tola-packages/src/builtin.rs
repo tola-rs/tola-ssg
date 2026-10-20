@@ -692,7 +692,6 @@ mod tests {
                     "canonical",
                     "open-graph",
                     "twitter-card",
-                    "math-svg",
                     "feed",
                     "sitemap",
                 ],

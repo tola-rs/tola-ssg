@@ -1,4 +1,4 @@
-// @tola/web:0.0.0 - plain text, head entries, math as SVG, social cards, feeds, and sitemaps
+// @tola/web:0.0.0 - plain text, head entries, social cards, feeds, and sitemaps
 
 /// Read the text of a string or of your content.
 ///
@@ -9,6 +9,10 @@
 ///
 /// Reading a string or content always succeeds. An element that carries neither text nor content
 /// of its own contributes nothing, and a warning names it where you wrote it.
+///
+/// This is a general text utility. Headings, metadata, and templates use it for titles,
+/// descriptions, and labels. The export lives here for compatibility; prefer importing
+/// `plain-text` directly when you need text projection rather than HTML output.
 ///
 /// Example - read text from a string and from content:
 ///
@@ -342,58 +346,6 @@
       entries.push(html.meta(name: "twitter:image:alt", content: options.image.alt))
     }
     entries
-  }
-}
-
-/// Render an equation as SVG during HTML export.
-///
-/// Use `#show math.equation: math-svg` to apply it to every equation. An inline equation stays in
-/// its line, a display equation stays a block of its own: the equation's own `block` setting
-/// decides. Options are checked for every export target, and outside HTML export the equation is
-/// returned unchanged.
-/// Inline equations align with surrounding text automatically.
-///
-/// The wrapper is the element your stylesheet selects: it carries `role="math"` and the class
-/// `tola-math-inline` or `tola-math-block`. SVG paints with the colors the equation was compiled
-/// with; set `fill` and `stroke` to `currentColor` on the shapes inside the wrapper to make it
-/// follow the surrounding text color instead.
-///
-/// Example - render every equation, naming one alternative:
-///
-/// ```typst site
-/// #import "@tola/web:0.0.0": math-svg
-/// #show math.equation: math-svg
-/// #document("index.html")[
-///   #let wrapper = math-svg($x^2$, alt: "x squared")
-///   #assert.eq(type(wrapper), content)
-///   #wrapper
-/// ]
-/// ```
-///
-/// - equation (content): the equation to render.
-/// - alt (auto | none | string): describes the equation for assistive technology: `auto` takes
-///   the equation's own `alt`, `none` leaves the wrapper unnamed, and a string names it. It
-///   becomes the wrapper's `aria-label`.
-/// - attrs (dictionary): string-valued HTML attributes for the wrapper, such as `class` and
-///   `style`. `role` and `aria-label` belong to the helper, and a `class` you pass keeps its
-///   value and gains the wrapper's own token.
-/// -> content
-#let math-svg(equation, alt: auto, attrs: (:)) = context {
-  import "web-fields.typ": math-attributes
-
-  if type(equation) != content or equation.func() != math.equation {
-    panic("math-svg expects a math.equation")
-  }
-  let block = equation.at("block", default: math.equation.block)
-  let wrapper-class = if block { "tola-math-block" } else { "tola-math-inline" }
-  let attributes = math-attributes(equation, alt, attrs, wrapper-class, "math-svg")
-  if target() != "html" {
-    return equation
-  }
-  if block {
-    html.elem("div", attrs: attributes, html.frame(equation))
-  } else {
-    html.elem("span", attrs: attributes, box(html.frame(equation)))
   }
 }
 
