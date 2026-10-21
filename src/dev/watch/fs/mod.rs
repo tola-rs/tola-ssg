@@ -1728,6 +1728,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tokio::sync::mpsc;
 
+    #[cfg(feature = "fsevents-tests")]
     static REAL_WATCH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     impl EventEpoch {
@@ -1942,6 +1943,7 @@ mod tests {
             .add_path(path.into())
     }
 
+    #[cfg(feature = "fsevents-tests")]
     fn batch_rechecks_input_after(
         changes: &FileChangeSource,
         batch: &FileChangeBatch,
@@ -3481,6 +3483,7 @@ mod tests {
         changes.shutdown().await.unwrap();
     }
 
+    #[cfg(feature = "fsevents-tests")]
     #[tokio::test]
     async fn failed_candidate_keeps_hook_inputs() {
         let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
@@ -3519,6 +3522,7 @@ mod tests {
     }
 
     /// The failed chain re-runs for its own declared output only while the recorded bytes hold.
+    #[cfg(feature = "fsevents-tests")]
     #[tokio::test]
     async fn failed_chain_retry_follows_recorded_hook_output() {
         let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
@@ -3620,6 +3624,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "fsevents-tests")]
     #[tokio::test]
     async fn failed_hook_outputs_never_suppress() {
         let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
@@ -3725,6 +3730,7 @@ mod tests {
         changes.shutdown().await.unwrap();
     }
 
+    #[cfg(feature = "fsevents-tests")]
     #[tokio::test]
     async fn repaired_package_input_rechecks_once() {
         let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
@@ -3804,6 +3810,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fsevents-tests")]
     #[tokio::test]
     async fn missing_candidate_inputs_wake_recovery() {
         let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
