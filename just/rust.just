@@ -10,9 +10,14 @@ fmt-write:
 test:
     cargo test --locked --workspace --all-features
 
+# Run every workspace test with nextest, then the doctests nextest does not cover.
+test-nextest:
+    cargo nextest run --locked --workspace --all-features
+    cargo test --doc --locked --workspace --all-features
+
 # Lint every workspace target, including tests and examples.
 [env('RUSTFLAGS', '-D warnings')]
-clippy: build-library
+clippy:
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
 # Compile the debug binary.
