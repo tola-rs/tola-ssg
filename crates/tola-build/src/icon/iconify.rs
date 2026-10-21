@@ -10,13 +10,13 @@ use crate::config::section::Sha256Digest;
 
 /// One release of an indexed Iconify collection, and the digest of the bytes that serve it.
 pub(crate) struct PinnedRelease {
-    pub(super) version: &'static str,
-    pub(super) sha256: Sha256Digest,
+    pub(crate) version: &'static str,
+    pub(crate) sha256: Sha256Digest,
 }
 
 /// One Iconify collection Tola indexes, with its releases in ascending order.
 pub(crate) struct IndexedCollection {
-    pub(super) name: &'static str,
+    pub(crate) name: &'static str,
     pub(super) releases: &'static [PinnedRelease],
 }
 
@@ -51,9 +51,38 @@ pub(crate) struct ResolvedPreset {
 
 /// The collection one author-written name refers to, when Tola indexes it.
 pub(crate) fn indexed(name: &str) -> Option<&'static IndexedCollection> {
-    releases::INDEXED_COLLECTIONS
+    collections()
         .iter()
         .find(|collection| collection.name == name)
+}
+
+/// Every collection Tola indexes, in ascending name order.
+pub(crate) fn collections() -> &'static [IndexedCollection] {
+    &releases::INDEXED_COLLECTIONS
+}
+
+/// The names of every collection Tola indexes, in ascending order.
+pub(crate) fn names() -> impl Iterator<Item = &'static str> {
+    collections().iter().map(|collection| collection.name)
+}
+
+/// The indexed collection a written name most plausibly meant.
+///
+/// A name within typo distance wins first. Beyond that, a shared prefix still names the family:
+/// `material-symbols-outlined` means `material-symbols`.
+pub(crate) fn nearest(written: &str) -> Option<&'static str> {
+    if let Some(closest) = tola_typst::spelling::closest(written, names()) {
+        return Some(closest);
+    }
+    // Both sides must be at least this long, or `bi` would claim `bitcoin-icons`.
+    const SHARED: usize = 4;
+    if written.len() < SHARED {
+        return None;
+    }
+    names()
+        .filter(|name| name.len() >= SHARED)
+        .filter(|name| name.starts_with(written) || written.starts_with(name))
+        .min_by(|left, right| left.len().cmp(&right.len()).then_with(|| left.cmp(right)))
 }
 
 /// Resolve one preset to the release Tola pins, or `None` when the index has neither.
@@ -149,5 +178,15 @@ mod tests {
         assert!(resolve("not-a-real-collection", None).is_none());
         let collection = first_collection();
         assert!(resolve(collection.name, Some("0.0.1")).is_none());
+    }
+
+    #[test]
+    fn a_near_miss_names_the_collection_meant() {
+        assert_eq!(nearest("lucid"), Some("lucide"));
+        // Beyond typo distance, the shared prefix still answers the question.
+        assert_eq!(nearest("material-symbols-outlined"), Some("material-symbols"));
+        assert_eq!(nearest("not-a-real-collection"), None);
+        // A shared prefix with a too-short name proves nothing.
+        assert_eq!(nearest("bixyz"), None);
     }
 }

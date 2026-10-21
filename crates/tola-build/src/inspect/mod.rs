@@ -11,7 +11,7 @@ use anyhow::Result;
 use crate::config::ResolvedSiteConfig;
 use crate::metadata::SourceMetadata;
 
-pub use icons::icons;
+pub use icons::{icons, presets};
 pub use site::{documents, outputs, references, routes};
 
 /// A selected source path and its optional discovered metadata.

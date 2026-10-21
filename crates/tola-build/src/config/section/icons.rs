@@ -223,6 +223,8 @@ and that file's `sha256`, which verifies the bytes it downloads. Add `version = 
 the preset to pin the release it downloads; that version is Iconify's packaging number for the
 collection, not the icon set's own release.
 
+Run `tola inspect icons --presets` to list every preset this release supports.
+
 Write `url` yourself, with the `sha256` of its bytes, when no preset covers the collection or
 version you want:
 
@@ -363,12 +365,16 @@ fn validate_remote_json(
                 return;
             }
             let Some(indexed) = iconify::indexed(preset) else {
+                let help = match iconify::nearest(preset) {
+                    Some(suggestion) => format!("Did you mean `{suggestion}`?"),
+                    None => "Run `tola inspect icons --presets`, or declare the collection's `url` with the `sha256` of its bytes".to_owned(),
+                };
                 diagnostics.error_with_help(
                     field,
                     format!(
                         "icon collection `{namespace}`: Tola does not index an Iconify collection named `{preset}`"
                     ),
-                    "check the name, or declare the collection's `url` with the `sha256` of its bytes",
+                    help,
                 );
                 return;
             };
@@ -436,11 +442,20 @@ fn validate_remote_json(
             format!("icon collection `{namespace}`: `sha256` needs the `url` it verifies"),
             "remove `sha256`, or write the `url` it belongs to",
         ),
-        (None, None) => diagnostics.error_with_help(
-            field,
-            format!("icon collection `{namespace}` declares no source"),
-            "write `preset = \"…\"` for a collection Tola indexes, or `url` with `sha256`",
-        ),
+        (None, None) => {
+            // A namespace that is itself an indexed collection name is almost always an author
+            // who wrote the section header and stopped there.
+            let help = if iconify::indexed(namespace).is_some() {
+                format!("write `preset = \"{namespace}\"`")
+            } else {
+                "write `preset = \"…\"` for a collection Tola indexes, or `url` with `sha256`".to_owned()
+            };
+            diagnostics.error_with_help(
+                field,
+                format!("icon collection `{namespace}` declares no source"),
+                help,
+            );
+        }
     }
 }
 
@@ -575,7 +590,12 @@ mod tests {
             (
                 "preset = \"not-a-real-collection\"",
                 "does not index an Iconify collection named `not-a-real-collection`",
-                "check the name",
+                "tola inspect icons --presets",
+            ),
+            (
+                "preset = \"lucid\"",
+                "does not index an Iconify collection named `lucid`",
+                "Did you mean `lucide`?",
             ),
             (
                 "preset = \"lucide\"\nversion = \"0.0.1\"",
@@ -603,6 +623,24 @@ mod tests {
                 .expect("the refusal names what to write instead");
             assert!(help.contains(help_fragment), "{help}");
         }
+    }
+
+    #[test]
+    fn empty_collection_named_after_a_preset_writes_that_preset() {
+        let config: IconsConfig = toml::from_str(
+            r#"
+            [collections.lucide]
+            source-type = "remote-json"
+            "#,
+        )
+        .unwrap();
+        let mut diagnostics = ConfigDiagnostics::new();
+        config.validate(&mut diagnostics);
+        let [error] = diagnostics.errors() else {
+            panic!("expected one error, got {:?}", diagnostics.errors())
+        };
+        assert!(error.message.contains("declares no source"));
+        assert_eq!(error.help.as_deref(), Some("write `preset = \"lucide\"`"));
     }
 
     #[test]

@@ -26,6 +26,13 @@ pub(in crate::cli) fn run(
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
+    // The preset index belongs to the executable, so this projection reads no configuration and
+    // works where no site exists.
+    if let InspectCommand::Icons(args) = &command
+        && args.presets
+    {
+        return presets(args, output, cancellation);
+    }
     let loaded = crate::cli::config::load_site(
         &config_file,
         &packages,
@@ -145,6 +152,22 @@ fn browse(
 /// Encodes rows the way the site projections print them.
 fn pretty(rows: &[Value]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&Value::Array(rows.to_vec()))?)
+}
+
+/// List the Iconify collections this release indexes.
+fn presets(
+    args: &IconInspectArgs,
+    output: &CommandOutput,
+    cancellation: &Cancellation,
+) -> Result<()> {
+    cancellation.token().ensure_active()?;
+    let rows = rows(tola_build::inspect::presets());
+    let encoded = pretty(&rows)?;
+    if args.interactive && browse(rows, "presets", false, None, output, cancellation, &pretty)? {
+        return Ok(());
+    }
+    output.write_stdout_line(encoded)?;
+    Ok(())
 }
 
 /// List configured icon namespaces, or one namespace's icon names.

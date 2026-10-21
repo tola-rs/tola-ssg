@@ -88,6 +88,25 @@ fn source_json(source: &IconCollectionSource, root: &Path) -> Value {
     }
 }
 
+/// Every Iconify collection this Tola release indexes, and the releases it pins.
+///
+/// The index is part of the executable, so this projection reads no configuration and needs no
+/// site. Rows are in ascending preset order, and each one's `releases` start with its `newest`.
+pub fn presets() -> Value {
+    Value::Array(
+        crate::icon::iconify::collections()
+            .iter()
+            .map(|collection| {
+                json!({
+                    "preset": collection.name,
+                    "newest": collection.newest().version,
+                    "releases": collection.versions().collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +175,26 @@ mod tests {
             icons(&config, &resources, &cancellation, Some("missing")).unwrap(),
             json!([])
         );
+    }
+
+    #[test]
+    fn presets_project_the_index_in_name_order() {
+        let Value::Array(rows) = presets() else {
+            panic!("the preset projection is a row array")
+        };
+        assert!(!rows.is_empty(), "the index pins at least one collection");
+
+        let mut names = Vec::new();
+        for row in &rows {
+            let name = row["preset"].as_str().expect("every row names a preset");
+            let newest = row["newest"].as_str().expect("every row names a release");
+            let releases = row["releases"].as_array().expect("every row lists releases");
+            assert_eq!(releases.first().and_then(Value::as_str), Some(newest));
+            assert!(releases.iter().all(|release| release.is_string()));
+            names.push(name);
+        }
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted, "presets are in ascending name order");
     }
 }

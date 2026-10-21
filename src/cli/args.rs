@@ -468,6 +468,7 @@ pub enum InspectCommand {
     /// Show configured icon namespaces as JSON, and one namespace's icon names.
     ///
     /// Remote collections are downloaded and cached exactly as a build downloads them.
+    /// `--presets` lists the supported presets instead, and needs no site.
     Icons(IconInspectArgs),
     /// Build without publishing and show HTML document paths and properties as JSON.
     Documents(InspectProjectionArgs),
@@ -492,8 +493,14 @@ pub struct InspectProjectionArgs {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct IconInspectArgs {
     /// Icon namespace to list icon names for; omit to list every configured namespace.
-    #[arg(value_name = "NAMESPACE")]
+    #[arg(value_name = "NAMESPACE", conflicts_with = "presets")]
     pub namespace: Option<String>,
+
+    /// List the presets this release supports instead of the site's namespaces.
+    ///
+    /// This form works without a site.
+    #[arg(long)]
+    pub presets: bool,
 
     /// Browse the rows in a terminal table with filtering, row detail, and export.
     #[arg(short = 'i', long)]
