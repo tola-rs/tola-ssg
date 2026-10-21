@@ -1,5 +1,5 @@
 {
-  description = "Static site generator for typst-based blog";
+  description = "Typst-based static site generator";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
