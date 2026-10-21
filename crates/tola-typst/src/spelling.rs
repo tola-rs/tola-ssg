@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn transposition_outranks_a_substitution() {
+    fn transposition_outranks_substitution() {
         assert_eq!(closest_of("teh", &["tea", "the"]), Some("the"));
         assert_eq!(
             closest_of("teh", &["the", "tea"]),
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_name_suppresses_its_neighbour() {
+    fn declared_name_suppresses_neighbour() {
         assert_eq!(closest_of("title", &["title", "titles"]), None);
         assert_eq!(closest_of("build", &["builds", "build"]), None);
     }

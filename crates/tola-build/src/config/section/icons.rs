@@ -654,7 +654,7 @@ mod tests {
     fn bad_mirror_addresses_are_refused() {
         for (mirror, expected) in [
             (
-                "https://mirror.test/{nmae}/{version}/icons.json",
+                "https://mirror.test/{unknown}/{version}/icons.json",
                 "unknown placeholder",
             ),
             ("ftp://mirror.test/icons.json", "is not a usable URL"),
@@ -811,7 +811,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_collection_named_after_a_preset_writes_that_preset() {
+    fn empty_collection_suggests_its_preset() {
         let config: IconsConfig = toml::from_str(
             r#"
             [collections.lucide]

@@ -19,8 +19,9 @@ members = [
 ]
 resolver = "3"
 
+# The Rust workspace version; editor extensions under extensions/ are versioned independently.
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 rust-version = "1.96"
 
 [workspace.dependencies]
@@ -44,21 +45,21 @@ typstyle-core = { version = "=0.15.1", default-features = false }
 
 # Internal crates stay path dependencies of the workspace and are released in
 # lockstep, so published packages resolve through crates.io.
-tola-address = { version = "0.8.0", path = "crates/tola-address" }
-tola-build = { version = "0.8.0", path = "crates/tola-build" }
-tola-config = { version = "0.8.0", path = "crates/tola-config" }
-tola-config-macros = { version = "0.8.0", path = "crates/tola-config-macros" }
-tola-icons = { version = "0.8.0", path = "crates/tola-icons" }
-tola-image = { version = "0.8.0", path = "crates/tola-image" }
-tola-lsp = { version = "0.8.0", path = "crates/tola-lsp" }
-tola-minify = { version = "0.8.0", path = "crates/tola-minify" }
-tola-packages = { version = "0.8.0", path = "crates/tola-packages" }
-tola-pronunciations = { version = "0.8.0", path = "crates/tola-pronunciations" }
-tola-slugify = { version = "0.8.0", path = "crates/tola-slugify" }
-tola-subprocess = { version = "0.8.0", path = "crates/tola-subprocess" }
-tola-typst = { version = "0.8.0", path = "crates/tola-typst" }
-tola-typst-syntax = { version = "0.8.0", path = "crates/tola-typst-syntax" }
-tola-webp = { version = "0.8.0", path = "crates/tola-webp" }
+tola-address = { version = "0.8.1", path = "crates/tola-address" }
+tola-build = { version = "0.8.1", path = "crates/tola-build" }
+tola-config = { version = "0.8.1", path = "crates/tola-config" }
+tola-config-macros = { version = "0.8.1", path = "crates/tola-config-macros" }
+tola-icons = { version = "0.8.1", path = "crates/tola-icons" }
+tola-image = { version = "0.8.1", path = "crates/tola-image" }
+tola-lsp = { version = "0.8.1", path = "crates/tola-lsp" }
+tola-minify = { version = "0.8.1", path = "crates/tola-minify" }
+tola-packages = { version = "0.8.1", path = "crates/tola-packages" }
+tola-pronunciations = { version = "0.8.1", path = "crates/tola-pronunciations" }
+tola-slugify = { version = "0.8.1", path = "crates/tola-slugify" }
+tola-subprocess = { version = "0.8.1", path = "crates/tola-subprocess" }
+tola-typst = { version = "0.8.1", path = "crates/tola-typst" }
+tola-typst-syntax = { version = "0.8.1", path = "crates/tola-typst-syntax" }
+tola-webp = { version = "0.8.1", path = "crates/tola-webp" }
 
 [package]
 name = "tola"

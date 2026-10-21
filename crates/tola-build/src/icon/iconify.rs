@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn a_near_miss_names_the_collection_meant() {
+    fn near_miss_names_the_collection() {
         assert_eq!(nearest("lucid"), Some("lucide"));
         // Beyond typo distance, the shared prefix still answers the question.
         assert_eq!(
