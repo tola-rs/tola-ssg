@@ -367,7 +367,9 @@ fn validate_remote_json(
             let Some(indexed) = iconify::indexed(preset) else {
                 let help = match iconify::nearest(preset) {
                     Some(suggestion) => format!("Did you mean `{suggestion}`?"),
-                    None => "Run `tola inspect icons --presets`, or declare the collection's `url` with the `sha256` of its bytes".to_owned(),
+                    None => {
+                        "Run `tola inspect icons --presets`, or declare the collection's `url` with its `sha256`".to_owned()
+                    }
                 };
                 diagnostics.error_with_help(
                     field,
@@ -448,7 +450,8 @@ fn validate_remote_json(
             let help = if iconify::indexed(namespace).is_some() {
                 format!("write `preset = \"{namespace}\"`")
             } else {
-                "write `preset = \"…\"` for a collection Tola indexes, or `url` with `sha256`".to_owned()
+                "write `preset = \"…\"` for a collection Tola indexes, or `url` with `sha256`"
+                    .to_owned()
             };
             diagnostics.error_with_help(
                 field,

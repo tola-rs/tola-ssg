@@ -188,7 +188,9 @@ mod tests {
         for row in &rows {
             let name = row["preset"].as_str().expect("every row names a preset");
             let newest = row["newest"].as_str().expect("every row names a release");
-            let releases = row["releases"].as_array().expect("every row lists releases");
+            let releases = row["releases"]
+                .as_array()
+                .expect("every row lists releases");
             assert_eq!(releases.first().and_then(Value::as_str), Some(newest));
             assert!(releases.iter().all(|release| release.is_string()));
             names.push(name);

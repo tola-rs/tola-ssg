@@ -49,13 +49,16 @@ nam = "nam"
 nd = "nd"
 pronounciation = "pronounciation"
 pronounciations = "pronounciations"
+recieve = "recieve"
 # The TUI library's name, which the dictionary reads as Ratatouille.
 Ratatui = "Ratatui"
 stauts = "stauts"
+teh = "teh"
 titel = "titel"
 ue = "ue"
 ues = "ues"
 underlaying = "underlaying"
+widht = "widht"
 # The OpenType width-axis tag, which the dictionary reads as "width".
 wdth = "wdth"
 # WebP's ALPH chunk and the Walsh–Hadamard transform (WHT): domain names, not misspellings.

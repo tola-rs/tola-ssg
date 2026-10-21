@@ -58,7 +58,7 @@ pub(crate) fn indexed(name: &str) -> Option<&'static IndexedCollection> {
 
 /// Every collection Tola indexes, in ascending name order.
 pub(crate) fn collections() -> &'static [IndexedCollection] {
-    &releases::INDEXED_COLLECTIONS
+    releases::INDEXED_COLLECTIONS
 }
 
 /// The names of every collection Tola indexes, in ascending order.
@@ -184,7 +184,10 @@ mod tests {
     fn a_near_miss_names_the_collection_meant() {
         assert_eq!(nearest("lucid"), Some("lucide"));
         // Beyond typo distance, the shared prefix still answers the question.
-        assert_eq!(nearest("material-symbols-outlined"), Some("material-symbols"));
+        assert_eq!(
+            nearest("material-symbols-outlined"),
+            Some("material-symbols")
+        );
         assert_eq!(nearest("not-a-real-collection"), None);
         // A shared prefix with a too-short name proves nothing.
         assert_eq!(nearest("bixyz"), None);
