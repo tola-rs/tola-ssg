@@ -26,6 +26,9 @@
 
 /// Build an immutable database from ground atoms and rules.
 ///
+/// Database equality uses stored rows, rules, and scalar representations;
+/// source locations do not participate.
+///
 /// Example - compute reachability through a recursive rule:
 ///
 /// ```typst
