@@ -1292,6 +1292,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "fsevents-tests")]
     #[tokio::test]
     async fn rejected_config_frees_generator_events() {
         for replacement in [
@@ -1633,7 +1634,7 @@ mod tests {
         format!("/site/read-{id}.typ").into()
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "fsevents-tests"))]
     #[tokio::test]
     async fn failed_font_reads_remain_watched() {
         let directory = tempfile::TempDir::new().unwrap();
