@@ -1,8 +1,8 @@
 //! The Iconify collections Tola indexes, and the releases it pins their bytes to.
 //!
 //! A preset names a collection release instead of a URL; the index in `releases` supplies the npm
-//! URL that serves it and the SHA-256 digest of its bytes. `just scripts::icons-index` regenerates
-//! that table.
+//! mirrors that serve it and the SHA-256 digest of its bytes. `just scripts::icons-index`
+//! regenerates that table.
 
 mod releases;
 
@@ -41,11 +41,11 @@ impl IndexedCollection {
     }
 }
 
-/// One resolved preset: the pinned release and where to fetch it.
+/// One resolved preset: the pinned release and the mirrors that serve it.
 pub(crate) struct ResolvedPreset {
     pub(crate) name: &'static str,
     pub(crate) version: &'static str,
-    pub(crate) url: String,
+    pub(crate) urls: Vec<String>,
     pub(crate) sha256: Sha256Digest,
 }
 
@@ -95,17 +95,23 @@ pub(crate) fn resolve(name: &str, version: Option<&str>) -> Option<ResolvedPrese
     Some(ResolvedPreset {
         name: collection.name,
         version: release.version,
-        url: release_url(collection.name, release.version),
+        urls: release_urls(collection.name, release.version),
         sha256: release.sha256,
     })
 }
 
-/// The npm URL serving one indexed release's IconifyJSON.
+/// The npm mirrors serving one indexed release's IconifyJSON, in the order Tola tries them.
 ///
 /// Every indexed collection is published as an `@iconify-json` package, and a versioned CDN path
-/// is immutable.
-fn release_url(name: &str, version: &str) -> String {
-    format!("https://cdn.jsdelivr.net/npm/@iconify-json/{name}@{version}/icons.json")
+/// is immutable. Both mirrors serve the same package bytes, and the pinned digest decides which
+/// bytes count, so the second is never a second source of truth: it only answers when the first
+/// cannot deliver them.
+fn release_urls(name: &str, version: &str) -> Vec<String> {
+    [
+        format!("https://cdn.jsdelivr.net/npm/@iconify-json/{name}@{version}/icons.json"),
+        format!("https://unpkg.com/@iconify-json/{name}@{version}/icons.json"),
+    ]
+    .into()
 }
 
 #[cfg(test)]
@@ -161,11 +167,17 @@ mod tests {
         assert_eq!(resolved.name, name);
         assert_eq!(resolved.version, newest.version);
         assert_eq!(
-            resolved.url,
-            format!(
-                "https://cdn.jsdelivr.net/npm/@iconify-json/{name}@{}/icons.json",
-                newest.version
-            )
+            resolved.urls,
+            [
+                format!(
+                    "https://cdn.jsdelivr.net/npm/@iconify-json/{name}@{}/icons.json",
+                    newest.version
+                ),
+                format!(
+                    "https://unpkg.com/@iconify-json/{name}@{}/icons.json",
+                    newest.version
+                ),
+            ]
         );
         assert_eq!(resolved.sha256, newest.sha256);
 

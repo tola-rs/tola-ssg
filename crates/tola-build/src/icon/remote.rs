@@ -17,7 +17,7 @@ use super::input::MAX_COLLECTION_BYTES;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn load_collection(
     namespace: &str,
-    url: &str,
+    urls: &[String],
     sha256: Sha256Digest,
     vendored: Option<&Path>,
     cache_root: &Path,
@@ -30,7 +30,7 @@ pub(super) fn load_collection(
 )> {
     let verified = collection_bytes(
         namespace,
-        url,
+        urls,
         sha256,
         vendored,
         cache_root,
@@ -67,13 +67,13 @@ pub(super) fn store_downloaded(namespace: &str, verified: &CollectionBytes) {
 
 /// The bytes one remote collection resolves to, checked against the digest it must have.
 ///
-/// The site's vendored copy is read first, then the collection cache, then the collection itself.
-/// Every source answers with the same bytes, because the digest decides which bytes count, so
-/// reusing one is never a second semantic path.
+/// The site's vendored copy is read first, then the collection cache, then the collection itself,
+/// trying each mirror in turn when one cannot deliver. Every source answers with the same bytes,
+/// because the digest decides which bytes count, so reusing one is never a second semantic path.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn collection_bytes(
     namespace: &str,
-    url: &str,
+    urls: &[String],
     sha256: Sha256Digest,
     vendored: Option<&Path>,
     cache_root: &Path,
@@ -82,6 +82,10 @@ pub(super) fn collection_bytes(
     boundary: &tola_typst::SourceBoundary,
 ) -> anyhow::Result<CollectionBytes> {
     cancellation.ensure_active()?;
+    let primary = urls
+        .first()
+        .map(String::as_str)
+        .expect("configuration names at least one address");
     // A copy the site has is authoritative: the site asks for exactly these bytes, so a
     // missing one falls back to the cache and the network, and a wrong one fails the build.
     if let Some(vendored) = vendored {
@@ -91,7 +95,7 @@ pub(super) fn collection_bytes(
                 format!("could not read the vendored copy of icon collection `{namespace}`")
             })?;
         if let Some((bytes, source)) = bytes {
-            verify_integrity(namespace, url, sha256, &bytes, Some(vendored))?;
+            verify_integrity(namespace, primary, sha256, &bytes, Some(vendored))?;
             return Ok(CollectionBytes {
                 bytes,
                 read_from: Some(vendored.to_path_buf()),
@@ -105,7 +109,7 @@ pub(super) fn collection_bytes(
     if resources.input_scope() != crate::InputScope::Pure {
         match read_collection_file(&cache_path, cancellation, None) {
             Ok(Some((bytes, _))) => {
-                match verify_integrity(namespace, url, sha256, &bytes, Some(&cache_path)) {
+                match verify_integrity(namespace, primary, sha256, &bytes, Some(&cache_path)) {
                     Ok(()) => {
                         return Ok(CollectionBytes {
                             bytes,
@@ -127,15 +131,28 @@ pub(super) fn collection_bytes(
         }
     }
 
-    let bytes = download(namespace, url, cancellation, resources)?;
-    verify_integrity(namespace, url, sha256, &bytes, None)?;
-    cancellation.ensure_active()?;
-    Ok(CollectionBytes {
-        bytes,
-        read_from: None,
-        pending_cache: Some(cache_path),
-        source: None,
-    })
+    let mut tried: Vec<String> = Vec::new();
+    let mut unreachable = None;
+    for url in urls {
+        cancellation.ensure_active()?;
+        tried.push(url.clone());
+        match download(namespace, url, cancellation, resources) {
+            Ok(bytes) => {
+                verify_integrity(namespace, url, sha256, &bytes, None)?;
+                cancellation.ensure_active()?;
+                return Ok(CollectionBytes {
+                    bytes,
+                    read_from: None,
+                    pending_cache: Some(cache_path),
+                    source: None,
+                });
+            }
+            // A mirror that cannot deliver the bytes says nothing about the next one.
+            Err(error) if refused(&error) => unreachable = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(all_mirrors_failed(namespace, tried, unreachable).into())
 }
 
 /// The cache entry one digest is stored in.
@@ -203,6 +220,36 @@ fn write_cache(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Whether a failed download says the address could not deliver, rather than the build cannot ask.
+///
+/// Only a transport or status failure is worth handing to the next mirror: a denied network, an
+/// oversized collection, and a cancelled build answer the same way at every address.
+fn refused(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<IconError>(),
+        Some(IconError::Remote { .. })
+    )
+}
+
+/// The failure every mirror shares, carrying the last transport error.
+fn all_mirrors_failed(
+    namespace: &str,
+    urls: Vec<String>,
+    last: Option<anyhow::Error>,
+) -> IconError {
+    let source = last
+        .and_then(|error| match error.downcast::<IconError>() {
+            Ok(IconError::Remote { source, .. }) => Some(source),
+            _ => None,
+        })
+        .expect("a refused download carries its transport error");
+    IconError::Remote {
+        namespace: namespace.into(),
+        urls,
+        source,
+    }
+}
+
 fn download(
     namespace: &str,
     url: &str,
@@ -221,6 +268,7 @@ fn download(
             HttpDownloadError::Runtime(error) => IconError::NetworkRuntime(error).into(),
             HttpDownloadError::Request(source) => IconError::Remote {
                 namespace: namespace.into(),
+                urls: vec![url.into()],
                 source,
             }
             .into(),
@@ -256,7 +304,7 @@ mod tests {
     ) -> anyhow::Result<tola_icons::IconCollection> {
         load_collection(
             "ui",
-            "http://127.0.0.1:1/icons.json",
+            &["http://127.0.0.1:1/icons.json".to_owned()],
             sha256,
             vendored,
             cache_root,
@@ -272,9 +320,17 @@ mod tests {
         url: &str,
         sha256: Sha256Digest,
     ) -> anyhow::Result<tola_icons::IconCollection> {
+        load_mirrors(cache_root, &[url.to_owned()], sha256)
+    }
+
+    fn load_mirrors(
+        cache_root: &Path,
+        urls: &[String],
+        sha256: Sha256Digest,
+    ) -> anyhow::Result<tola_icons::IconCollection> {
         load_collection(
             "ui",
-            url,
+            urls,
             sha256,
             None,
             cache_root,
@@ -386,6 +442,56 @@ mod tests {
             stream.write_all(bytes).unwrap();
         });
         (url, server)
+    }
+
+    /// A server that answers every request with one status, and no bytes.
+    fn serve_status(status: u16) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/icons.json", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request_headers(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 {status} Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        (url, server)
+    }
+
+    #[test]
+    fn refused_download_tries_the_next_mirror() {
+        let directory = tempfile::tempdir().unwrap();
+        let (refused, refused_server) = serve_status(503);
+        let (served, served_server) = serve_collection(COLLECTION);
+        let collection =
+            load_mirrors(directory.path(), &[refused, served], digest(COLLECTION)).unwrap();
+        assert!(collection.get("mark").is_some());
+        refused_server.join().unwrap();
+        served_server.join().unwrap();
+    }
+
+    #[test]
+    fn every_mirror_refusing_names_all_of_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let (first, first_server) = serve_status(503);
+        let (second, second_server) = serve_status(404);
+        let error = load_mirrors(
+            directory.path(),
+            &[first.clone(), second.clone()],
+            digest(COLLECTION),
+        )
+        .unwrap_err();
+        let IconError::Remote { urls, .. } = error
+            .downcast_ref::<IconError>()
+            .expect("a refused download is a download failure")
+        else {
+            panic!("expected a download failure")
+        };
+        assert_eq!(urls, &[first, second]);
+        first_server.join().unwrap();
+        second_server.join().unwrap();
     }
 
     #[test]

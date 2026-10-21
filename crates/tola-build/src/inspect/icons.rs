@@ -68,16 +68,21 @@ fn source_json(source: &IconCollectionSource, root: &Path) -> Value {
             version,
             url,
             sha256,
+            mirrors,
         } => match preset {
             Some(preset) => {
                 let resolved = crate::icon::iconify::resolve(preset, version.as_deref())
                     .expect("a loaded configuration indexes every preset");
-                json!({
+                let mut row = json!({
                     "type": "remote-json",
                     "preset": preset,
                     "version": resolved.version,
                     "sha256": resolved.sha256.to_string(),
-                })
+                });
+                if let Some(mirrors) = mirrors {
+                    row["mirrors"] = json!(mirrors);
+                }
+                row
             }
             None => json!({
                 "type": "remote-json",

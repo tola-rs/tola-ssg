@@ -149,6 +149,8 @@ pub(crate) enum IconError {
     #[error("Tola could not download icon collection `{namespace}`")]
     Remote {
         namespace: String,
+        /// Every address the collection was fetched from, in the order tried.
+        urls: Vec<String>,
         #[source]
         source: reqwest::Error,
     },
@@ -211,6 +213,25 @@ fn collection_error(
     }
 }
 
+/// The distinct hosts a failed download tried, for one readable line.
+fn tried_hosts(urls: &[String]) -> String {
+    let mut hosts: Vec<String> = Vec::new();
+    for url in urls {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+            .unwrap_or_else(|| url.clone());
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+        .iter()
+        .map(|host| format!("`{host}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The first line of a collection parser's own reason for rejecting its input.
 fn collection_failure_reason(source: &(dyn std::error::Error + Send + Sync)) -> Option<String> {
     source
@@ -252,8 +273,13 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
             Some(reason) => diagnostic.with_note(reason),
             None => diagnostic,
         },
-        IconError::Remote { .. } => diagnostic
-            .with_help("Check the connection and the collection URL"),
+        IconError::Remote { urls, .. } => {
+            let diagnostic = match urls.len() {
+                2.. => diagnostic.with_note(format!("tried {}", tried_hosts(urls))),
+                _ => diagnostic,
+            };
+            diagnostic.with_help("check the connection and the address")
+        }
         IconError::RemoteTooLarge { .. } => diagnostic.with_help(
             "Use a smaller collection, or declare the icons as a local file in `icons.collections`",
         ),
@@ -378,21 +404,23 @@ pub fn remote_collection_bytes(
         version,
         url,
         sha256,
+        mirrors,
     }) = config.icons.collections.get(namespace)
     else {
         anyhow::bail!("`{namespace}` is not a configured remote icon collection");
     };
-    let (url, sha256) = remote_endpoint(
+    let (urls, sha256) = remote_endpoint(
         namespace,
         preset.as_deref(),
         version.as_deref(),
         url.as_deref(),
         *sha256,
+        mirrors.as_deref(),
     );
     let vendored = config.vendor.icon_collection(namespace);
     let verified = remote::collection_bytes(
         namespace,
-        &url,
+        &urls,
         sha256,
         vendored.as_deref(),
         &crate::BuildResources::icon_cache_directory(config.get_root()),
@@ -405,16 +433,36 @@ pub fn remote_collection_bytes(
     Ok(verified.bytes)
 }
 
-/// The URL and digest one remote namespace fetches.
+/// The addresses in the order first written, so a mirror repeated by hand is visited once.
+fn distinct(urls: Vec<String>) -> Vec<String> {
+    let mut ordered: Vec<String> = Vec::new();
+    for url in urls {
+        if !ordered.contains(&url) {
+            ordered.push(url);
+        }
+    }
+    ordered
+}
+
+/// The address one authored mirror template names for this release.
+fn fill_mirror(template: &str, name: &str, version: &str) -> String {
+    template
+        .replace("{name}", name)
+        .replace("{version}", version)
+}
+
+/// The addresses and digest one remote namespace fetches, in the order tried.
 ///
-/// Configuration validation accepts exactly one declaration, and only indexed presets.
+/// Configuration validation accepts exactly one declaration, and only indexed presets. A preset
+/// names every mirror that serves its release; a declared `url` names exactly one address.
 fn remote_endpoint(
     namespace: &str,
     preset: Option<&str>,
     version: Option<&str>,
     url: Option<&str>,
     sha256: Option<Sha256Digest>,
-) -> (String, Sha256Digest) {
+    mirrors: Option<&[String]>,
+) -> (Vec<String>, Sha256Digest) {
     let endpoint = match preset.and_then(|preset| iconify::resolve(preset, version)) {
         Some(resolved) => {
             tracing::debug!(
@@ -423,9 +471,21 @@ fn remote_endpoint(
                 resolved.name,
                 resolved.version,
             );
-            Some((resolved.url, resolved.sha256))
+            let mut urls: Vec<String> = mirrors
+                .unwrap_or_default()
+                .iter()
+                .map(|template| fill_mirror(template, resolved.name, resolved.version))
+                .collect();
+            urls.extend(resolved.urls);
+            Some((distinct(urls), resolved.sha256))
         }
-        None => url.map(str::to_owned).zip(sha256),
+        None => url
+            .map(|url| {
+                let mut urls: Vec<String> = mirrors.unwrap_or_default().to_vec();
+                urls.push(url.to_owned());
+                distinct(urls)
+            })
+            .zip(sha256),
     };
     endpoint
         .expect("configuration validation accepts exactly one declaration for a remote collection")
@@ -448,13 +508,15 @@ fn prepare_collection(
             version,
             url,
             sha256,
+            mirrors,
         } => {
-            let (url, sha256) = remote_endpoint(
+            let (urls, sha256) = remote_endpoint(
                 namespace,
                 preset.as_deref(),
                 version.as_deref(),
                 url.as_deref(),
                 *sha256,
+                mirrors.as_deref(),
             );
             if let Some(previous) = previous {
                 let reusable = match &previous.reads {
@@ -469,7 +531,7 @@ fn prepare_collection(
             let vendored = config.vendor.icon_collection(namespace);
             let (collection, read) = remote::load_collection(
                 namespace,
-                &url,
+                &urls,
                 sha256,
                 vendored.as_deref(),
                 &crate::BuildResources::icon_cache_directory(config.get_root()),
@@ -967,29 +1029,70 @@ mod tests {
     }
 
     #[test]
-    fn remote_source_resolves_to_one_endpoint() {
+    fn remote_source_resolves_to_its_endpoints() {
         let indexed = crate::icon::iconify::indexed("lucide").expect("the index has `lucide`");
-        let (url, sha256) = remote_endpoint("brand", Some("lucide"), None, None, None);
+        let version = indexed.newest().version;
+        let (urls, sha256) = remote_endpoint("brand", Some("lucide"), None, None, None, None);
         assert_eq!(
-            url,
-            format!(
-                "https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{}/icons.json",
-                indexed.newest().version
-            )
+            urls,
+            [
+                format!("https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{version}/icons.json"),
+                format!("https://unpkg.com/@iconify-json/lucide@{version}/icons.json"),
+            ]
         );
         assert_eq!(sha256, indexed.newest().sha256);
 
+        let mirrors = vec![
+            "https://mirror.test/@iconify-json/{name}/{version}/icons.json".to_owned(),
+            "https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{version}/icons.json".to_owned(),
+        ];
+        let (mirrored, sha256) =
+            remote_endpoint("brand", Some("lucide"), None, None, None, Some(&mirrors));
+        // Mirrors are tried first, filled from the release, and a repeated address is visited once.
+        assert_eq!(
+            mirrored,
+            [
+                format!("https://mirror.test/@iconify-json/lucide/{version}/icons.json"),
+                format!("https://cdn.jsdelivr.net/npm/@iconify-json/lucide@{version}/icons.json"),
+                format!("https://unpkg.com/@iconify-json/lucide@{version}/icons.json"),
+            ]
+        );
+        assert_eq!(sha256, indexed.newest().sha256);
+
+        // A declared URL keeps its literal mirrors and names the declared address last.
+        let literal = vec!["https://mirror.test/brand.json".to_owned()];
         let digest = Sha256Digest::from_hex(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         );
-        let (url, sha256) = remote_endpoint(
+        let (urls, _) = remote_endpoint(
             "brand",
             None,
             None,
             Some("https://example.test/brand.json"),
             Some(digest),
+            Some(&literal),
         );
-        assert_eq!(url, "https://example.test/brand.json");
+        assert_eq!(
+            urls,
+            [
+                "https://mirror.test/brand.json",
+                "https://example.test/brand.json"
+            ]
+        );
+
+        let digest = Sha256Digest::from_hex(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let (urls, sha256) = remote_endpoint(
+            "brand",
+            None,
+            None,
+            Some("https://example.test/brand.json"),
+            Some(digest),
+            None,
+        );
+        // A declared URL names one address; only a preset knows mirrors.
+        assert_eq!(urls, ["https://example.test/brand.json"]);
         assert_eq!(sha256, digest);
     }
 

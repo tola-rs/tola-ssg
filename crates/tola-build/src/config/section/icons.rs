@@ -43,6 +43,10 @@ pub enum IconCollectionSource {
         /// The SHA-256 digest of the bytes `url` serves.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sha256: Option<Sha256Digest>,
+        /// Addresses tried before the declared one, in the order written. Only a `preset` fills
+        /// `{name}` and `{version}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mirrors: Option<Vec<String>>,
     },
 }
 
@@ -62,6 +66,7 @@ impl fmt::Debug for IconCollectionSource {
                 version,
                 url,
                 sha256,
+                mirrors,
             } => {
                 // A URL's query may hold credentials or a token, so it never reaches a log.
                 let mut entry = formatter.debug_struct("RemoteJson");
@@ -73,6 +78,9 @@ impl fmt::Debug for IconCollectionSource {
                 }
                 if url.is_some() {
                     entry.field("url", &"<redacted>");
+                }
+                if mirrors.is_some() {
+                    entry.field("mirrors", &"<redacted>");
                 }
                 if let Some(sha256) = sha256 {
                     entry.field("sha256", sha256);
@@ -183,6 +191,7 @@ impl IconsConfig {
                 version,
                 url,
                 sha256,
+                mirrors,
             } = source
             {
                 validate_remote_json(
@@ -191,6 +200,7 @@ impl IconsConfig {
                     version.as_deref(),
                     url.as_deref(),
                     *sha256,
+                    mirrors.as_deref(),
                     diagnostics,
                 );
             }
@@ -218,10 +228,25 @@ preset = \"lucide\"                  # newest release Tola indexes
 ```
 
 A preset names a collection Tola already indexes, such as `lucide`, `mdi`, `tabler`, or
-`simple-icons`, so you only write `preset = \"lucide\"`: Tola fills in the default download address
-and that file's `sha256`, which verifies the bytes it downloads. Add `version = \"1.2.144\"` beside
-the preset to pin the release it downloads; that version is Iconify's packaging number for the
-collection, not the icon set's own release.
+`simple-icons`, so you only write `preset = \"lucide\"`: Tola fills in the download address and that
+file's `sha256`, which verifies the bytes it downloads. Add `version = \"1.2.144\"` beside the preset
+to pin the release it downloads; that version is Iconify's packaging number for the collection, not
+the icon set's own release.
+
+A preset downloads from `cdn.jsdelivr.net` and falls back to `unpkg.com` when that mirror cannot
+deliver. The pinned `sha256` decides the bytes, so either mirror is equally good.
+
+`mirrors` lists other addresses to try first, in the order written:
+
+```toml
+[icons.collections.lucide]
+source-type = \"remote-json\"
+preset = \"lucide\"
+mirrors = [\"https://registry.npmmirror.com/@iconify-json/{name}/{version}/files/icons.json\"]
+```
+
+`{name}` and `{version}` come from the preset. Beside a `url`, write each address out. The bytes
+must still match `sha256`; a mirror that serves different bytes fails the build.
 
 Run `tola inspect icons --presets` to list every preset this release supports.
 
@@ -351,6 +376,7 @@ fn validate_remote_json(
     version: Option<&str>,
     url: Option<&str>,
     sha256: Option<Sha256Digest>,
+    mirrors: Option<&[String]>,
     diagnostics: &mut ConfigDiagnostics,
 ) {
     let field = IconsConfig::FIELDS.collections;
@@ -367,9 +393,8 @@ fn validate_remote_json(
             let Some(indexed) = iconify::indexed(preset) else {
                 let help = match iconify::nearest(preset) {
                     Some(suggestion) => format!("Did you mean `{suggestion}`?"),
-                    None => {
-                        "Run `tola inspect icons --presets`, or declare the collection's `url` with its `sha256`".to_owned()
-                    }
+                    None => "run `tola inspect icons --presets`, or declare `url` and `sha256`"
+                        .to_owned(),
                 };
                 diagnostics.error_with_help(
                     field,
@@ -394,6 +419,9 @@ fn validate_remote_json(
                     ),
                 );
             }
+            if let Some(mirrors) = mirrors {
+                validate_mirrors(namespace, mirrors, true, diagnostics);
+            }
         }
         (None, Some(url)) => {
             if version.is_some() {
@@ -414,19 +442,15 @@ fn validate_remote_json(
                 );
                 return;
             }
-            let valid = url::Url::parse(url).is_ok_and(|url| {
-                matches!(url.scheme(), "https" | "http")
-                    && url.host_str().is_some()
-                    && url.fragment().is_none()
-                    && url.username().is_empty()
-                    && url.password().is_none()
-            });
-            if !valid {
+            if !usable_url(url) {
                 diagnostics.error_with_help(
                     field,
                     format!("icon collection `{namespace}`: `url` `{url}` is not a usable URL"),
                     "Use an absolute `http` or `https` URL with no credentials or fragment",
                 );
+            }
+            if let Some(mirrors) = mirrors {
+                validate_mirrors(namespace, mirrors, false, diagnostics);
             }
         }
         (Some(_), Some(_)) => diagnostics.error_with_help(
@@ -457,6 +481,82 @@ fn validate_remote_json(
                 field,
                 format!("icon collection `{namespace}` declares no source"),
                 help,
+            );
+        }
+    }
+}
+
+/// Whether one address names an absolute `http` or `https` URL Tola may fetch.
+fn usable_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| {
+        matches!(url.scheme(), "https" | "http")
+            && url.host_str().is_some()
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
+}
+
+/// The placeholders a `mirror` address may carry, and nothing else.
+const MIRROR_PLACEHOLDERS: [&str; 2] = ["name", "version"];
+
+/// Whether every `{...}` in a mirror address names a placeholder Tola fills.
+fn mirror_placeholders_are_known(mirror: &str) -> bool {
+    let mut rest = mirror;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            return false;
+        };
+        if !MIRROR_PLACEHOLDERS.contains(&&rest[open + 1..open + close]) {
+            return false;
+        }
+        rest = &rest[open + close + 1..];
+    }
+    !rest.contains('}')
+}
+
+/// Accept every mirror address of one remote collection.
+///
+/// A preset fills `{name}` and `{version}`; a declared `url` has nothing to fill, so its mirrors
+/// must already be complete addresses.
+fn validate_mirrors(
+    namespace: &str,
+    mirrors: &[String],
+    placeholders: bool,
+    diagnostics: &mut ConfigDiagnostics,
+) {
+    let field = IconsConfig::FIELDS.collections;
+    for mirror in mirrors {
+        if !placeholders {
+            if mirror.contains('{') || mirror.contains('}') {
+                diagnostics.error_with_help(
+                    field,
+                    format!(
+                        "icon collection `{namespace}`: `mirrors` needs a `preset` to fill `{mirror}`"
+                    ),
+                    "write the address out, or declare a `preset`",
+                );
+                continue;
+            }
+        } else if !mirror_placeholders_are_known(mirror) {
+            diagnostics.error_with_help(
+                field,
+                format!(
+                    "icon collection `{namespace}`: `mirrors` has an unknown placeholder in `{mirror}`"
+                ),
+                "use `{name}` or `{version}`",
+            );
+            continue;
+        }
+        // The preset fills the placeholders after this check, so a stand-in answers for them here.
+        let sample = mirror
+            .replace("{name}", "icons")
+            .replace("{version}", "1.0.0");
+        if !usable_url(&sample) {
+            diagnostics.error_with_help(
+                field,
+                format!("icon collection `{namespace}`: `mirrors` `{mirror}` is not a usable URL"),
+                "use an absolute `http` or `https` URL without credentials or a fragment",
             );
         }
     }
@@ -511,6 +611,88 @@ mod tests {
             config.local_paths().collect::<Vec<_>>(),
             [Path::new("assets/brand"), Path::new("icons/ui.json")]
         );
+    }
+
+    #[test]
+    fn url_accepts_literal_mirrors() {
+        let config: IconsConfig = toml::from_str(
+            r#"
+            [collections.ui]
+            source-type = "remote-json"
+            url = "https://example.test/icons.json"
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            mirrors = ["https://mirror.test/icons.json", "https://other.test/icons.json"]
+            "#,
+        )
+        .unwrap();
+        let mut diagnostics = ConfigDiagnostics::new();
+        config.validate(&mut diagnostics);
+        assert!(diagnostics.into_result().is_ok());
+    }
+
+    #[test]
+    fn url_mirrors_cannot_carry_placeholders() {
+        let config: IconsConfig = toml::from_str(
+            r#"
+            [collections.ui]
+            source-type = "remote-json"
+            url = "https://example.test/icons.json"
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            mirrors = ["https://mirror.test/{version}/icons.json"]
+            "#,
+        )
+        .unwrap();
+        let mut diagnostics = ConfigDiagnostics::new();
+        config.validate(&mut diagnostics);
+        let [error] = diagnostics.errors() else {
+            panic!("expected one error, got {:?}", diagnostics.errors())
+        };
+        assert!(error.message.contains("needs a `preset` to fill"));
+    }
+
+    #[test]
+    fn bad_mirror_addresses_are_refused() {
+        for (mirror, expected) in [
+            (
+                "https://mirror.test/{nmae}/{version}/icons.json",
+                "unknown placeholder",
+            ),
+            ("ftp://mirror.test/icons.json", "is not a usable URL"),
+            ("", "is not a usable URL"),
+        ] {
+            let config: IconsConfig = toml::from_str(&format!(
+                "[collections.ui]\nsource-type = \"remote-json\"\npreset = \"lucide\"\nmirrors = [\"{mirror}\"]\n"
+            ))
+            .unwrap();
+            let mut diagnostics = ConfigDiagnostics::new();
+            config.validate(&mut diagnostics);
+            let [error] = diagnostics.errors() else {
+                panic!(
+                    "expected one error for `{mirror}`, got {:?}",
+                    diagnostics.errors()
+                )
+            };
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+    }
+
+    #[test]
+    fn preset_accepts_mirrors() {
+        let config: IconsConfig = toml::from_str(
+            r#"
+            [collections.ui]
+            source-type = "remote-json"
+            preset = "lucide"
+            mirrors = [
+                "https://registry.npmmirror.com/@iconify-json/{name}/{version}/files/icons.json",
+                "https://mirror.test/@iconify-json/{name}/{version}/icons.json",
+            ]
+            "#,
+        )
+        .unwrap();
+        let mut diagnostics = ConfigDiagnostics::new();
+        config.validate(&mut diagnostics);
+        assert!(diagnostics.into_result().is_ok());
     }
 
     #[test]
@@ -709,6 +891,7 @@ mod tests {
             version: None,
             url: Some("https://example.test/icons.json?token=private".into()),
             sha256: Some(Sha256Digest([0; 32])),
+            mirrors: None,
         };
         let debug = format!("{source:?}");
         assert!(debug.contains("<redacted>"));
