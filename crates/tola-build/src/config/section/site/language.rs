@@ -193,6 +193,8 @@ impl std::fmt::Display for UnusableLanguage {
     }
 }
 
+impl std::error::Error for UnusableLanguage {}
+
 /// Split one language tag into its canonical subtags.
 fn parse_tag(tag: &str) -> Result<(String, Option<String>, Option<String>), UnusableLanguage> {
     let invalid = || UnusableLanguage::Tag {

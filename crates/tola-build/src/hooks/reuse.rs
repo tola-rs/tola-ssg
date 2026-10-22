@@ -1,11 +1,5 @@
 //! Development reuse of hook work: one `generate-outputs` hook's previous outputs, and the
 //! outcome of the latest after-publish run.
-//!
-//! Tola already identifies file contents with [`ContentDigest`], so reuse compares a
-//! structured observation directly instead of inventing a second digest: the built site's
-//! output identities, the declared `rerun-on` contents, the command, and the declared
-//! outputs. A command that reads time, the network, or another unobservable input must
-//! not opt into reuse.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
@@ -15,7 +9,7 @@ use anyhow::{Context, Result};
 
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::hooks::{
-    AfterPublishHookConfig, CommandOutput, OutputCommandConfig,
+    AfterPublishHookConfig, CommandOutput, ModuleHookOrigin, OutputCommandConfig,
 };
 use crate::mode::BuildMode;
 use crate::output::graph::{OutputFile, OutputKind};
@@ -28,6 +22,7 @@ use tola_typst::ContentDigest;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookInputs {
     command: Vec<String>,
+    origin: Option<ModuleHookOrigin>,
     outputs: Vec<CommandOutput>,
     upstream: Vec<UpstreamOutput>,
     rerun_on: Vec<RerunOnPath>,
@@ -43,11 +38,11 @@ struct UpstreamOutput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RerunOnPath {
     path: PathBuf,
-    state: RerunOnState,
+    state: RerunOnObservation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum RerunOnState {
+enum RerunOnObservation {
     Missing,
     File(ContentDigest),
     Directory(Vec<RerunOnPath>),
@@ -61,6 +56,7 @@ pub(crate) struct ReusableHookOutput {
     pub(crate) inputs: HookInputs,
     pub(crate) outputs: Vec<OutputFile>,
     pub(crate) roots: Vec<OutputRootOwnership>,
+    pub(crate) report: Option<Vec<tola_diagnostic::Diagnostic>>,
 }
 
 /// Previous development revision's reusable outputs, one entry per hook name.
@@ -110,6 +106,7 @@ pub(crate) fn observe(
 
     Ok(HookInputs {
         command: command.command.clone(),
+        origin: command.origin.clone(),
         outputs,
         upstream,
         rerun_on,
@@ -154,8 +151,6 @@ pub(crate) fn observe_after_publish(
 }
 
 /// Observe one declared `rerun-on` path without following symlinks or ignore files.
-///
-/// A missing path is a state of its own: adding or removing it invalidates reuse.
 fn observe_rerun_path(site_root: &Path, relative: &Path) -> Result<RerunOnPath> {
     let path = site_root.join(relative);
     let metadata = match std::fs::symlink_metadata(&path) {
@@ -163,7 +158,7 @@ fn observe_rerun_path(site_root: &Path, relative: &Path) -> Result<RerunOnPath> 
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(RerunOnPath {
                 path: relative.to_path_buf(),
-                state: RerunOnState::Missing,
+                state: RerunOnObservation::Missing,
             });
         }
         Err(error) => {
@@ -183,16 +178,10 @@ fn observe_rerun_path(site_root: &Path, relative: &Path) -> Result<RerunOnPath> 
                 relative.display()
             )
         })?;
-        RerunOnState::Symlink(target)
+        RerunOnObservation::Symlink(target)
     } else if metadata.is_dir() {
         let mut entries = std::fs::read_dir(&path)
-            .with_context(|| {
-                format!(
-                    "Tola could not read the `rerun-on` directory `{}`",
-                    relative.display()
-                )
-            })?
-            .collect::<std::io::Result<Vec<_>>>()
+            .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>())
             .with_context(|| {
                 format!(
                     "Tola could not read the `rerun-on` directory `{}`",
@@ -207,7 +196,7 @@ fn observe_rerun_path(site_root: &Path, relative: &Path) -> Result<RerunOnPath> 
                 &relative.join(entry.file_name()),
             )?);
         }
-        RerunOnState::Directory(children)
+        RerunOnObservation::Directory(children)
     } else if metadata.is_file() {
         let bytes = std::fs::read(&path).with_context(|| {
             format!(
@@ -215,13 +204,36 @@ fn observe_rerun_path(site_root: &Path, relative: &Path) -> Result<RerunOnPath> 
                 relative.display()
             )
         })?;
-        RerunOnState::File(ContentDigest::of(&bytes))
+        RerunOnObservation::File(ContentDigest::of(&bytes))
     } else {
-        RerunOnState::Other
+        RerunOnObservation::Other
     };
 
     Ok(RerunOnPath {
         path: relative.to_path_buf(),
         state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn option_changes_invalidate_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut hook = OutputCommandConfig {
+            origin: Some(ModuleHookOrigin {
+                name: "notes".into(),
+                root: root.path().join("module"),
+                manifest: root.path().join("module/tola-module.toml"),
+                options_json: br#"{"search":true}"#.to_vec(),
+            }),
+            ..Default::default()
+        };
+        let before = observe(root.path(), &hook, &[]).unwrap();
+        hook.origin.as_mut().unwrap().options_json = br#"{"search":false}"#.to_vec();
+        let after = observe(root.path(), &hook, &[]).unwrap();
+        assert_ne!(before, after);
+    }
 }

@@ -57,15 +57,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_help_example() {
-        let config = FormatterConfig::default();
-
-        assert_eq!(config.indent, 2);
-        assert_eq!(config.print_width, 120);
-        assert_eq!(config.prose_wrap, ProseWrap::None);
-    }
-
-    #[test]
     fn site_schema_decodes_the_formatter_table() {
         let source = "[formatter]\nindent = 4\nprint-width = 100\nprose-wrap = \"sentence\"\n";
         let schema: crate::config::SiteConfigSchema = toml::from_str(source).unwrap();

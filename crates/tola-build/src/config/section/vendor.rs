@@ -31,8 +31,8 @@ path = \"vendor\"
 `path` must be a real directory below the site root and outside `.tola`.
 
 Preparation keeps the previous copy until the new one verifies, then replaces it; an interrupted
-replacement is restored by the next run, and a build refuses uncommitted inputs. Working files
-live in a sibling directory ending in `-vendor`.
+replacement is completed by the next run, and a build refuses to run until then. Working files
+live in a sibling directory whose name starts with `.` and ends with `-swap`.
 
 Vendoring runs no hook stage and publishes nothing. Its verification build proves the frozen
 inputs resolve and compile under `--pure`, not that the site is valid: `before-build` files must
@@ -83,15 +83,6 @@ build elsewhere, pin each hook's toolchain or commit the files it generates.";
     pub fn icon_collection(&self, namespace: &str) -> Option<PathBuf> {
         self.icons()
             .map(|icons| icons.join(format!("{namespace}.json")))
-    }
-
-    /// Recovery stays beside the frozen inputs, independent of disposable `.tola` state.
-    pub fn workspace_path(&self) -> Option<PathBuf> {
-        let path = self.path.as_ref()?;
-        let mut name = std::ffi::OsString::from(".");
-        name.push(path.file_name()?);
-        name.push("-vendor");
-        Some(path.with_file_name(name))
     }
 
     /// Validate the path before site-root normalization.
@@ -187,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn internal_directory_is_reserved_in_any_spelling() {
+    fn internal_directory_reserved_any_spelling() {
         let site = tempfile::TempDir::new().unwrap();
         for declared in [".tola/vendor", ".TOLA/vendor", ".Tola/vendor"] {
             let config = VendorConfig {

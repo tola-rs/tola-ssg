@@ -7,6 +7,27 @@ use super::{BuildSectionConfig, ConfigDiagnostic};
 use crate::resources::BuildResources;
 use tola_address::{SiteOrigin, SiteUrlMount, UrlPath, browser_url};
 
+/// What selected the current compilation entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EntryOrigin {
+    Project,
+    Theme,
+    Query,
+}
+
+/// Why a vendor root cannot be selected.
+#[derive(Debug, thiserror::Error)]
+pub enum VendorRootError {
+    #[error("the vendor directory path must be absolute")]
+    NotAbsolute,
+    #[error(transparent)]
+    Boundary(#[from] typst::diag::FileError),
+    #[error(transparent)]
+    Packages(typst::diag::FileError),
+    #[error(transparent)]
+    Output(#[from] crate::filesystem::OutputBoundaryError),
+}
+
 /// Site configuration after invocation overrides, validation, and path resolution.
 ///
 /// Construct this through [`super::loading::load_site_config`],
@@ -45,6 +66,15 @@ pub struct ResolvedSiteConfig {
 
     pub(crate) formatter: crate::config::section::FormatterConfig,
 
+    pub(crate) modules: std::collections::BTreeMap<String, crate::modules::ModuleDeclaration>,
+    pub(crate) theme: crate::modules::ThemeConfig,
+    pub(crate) module_inputs: std::sync::Arc<crate::modules::prepared::ModuleInputs>,
+    pub(crate) entry_file: Option<typst::syntax::FileId>,
+    pub(crate) entry_origin: EntryOrigin,
+    // Logical paths are kept so later boundary checks can detect symlink retargets.
+    pub(crate) module_roots: Vec<PathBuf>,
+    pub(crate) module_asset_sources: Vec<PathBuf>,
+
     // Refresh and candidate configs retain the declared workspace, not a path derived from their selection.
     pub(crate) vendor_workspace: Option<PathBuf>,
     // Only with_vendor_root grants a candidate; changing a section cannot broaden that grant.
@@ -80,11 +110,39 @@ impl ResolvedSiteConfig {
             &self.vendor,
             &self.package_locations,
         )
+        .into_iter()
+        .chain(
+            self.module_roots
+                .iter()
+                .map(|path| ("module root", path.as_path())),
+        )
+        .chain(
+            self.module_asset_sources
+                .iter()
+                .map(|path| ("module asset replacement", path.as_path())),
+        )
+        .collect()
     }
 
     /// Absolute logical path identifying the configuration source.
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// The native source identity selected for this attempt, when one is explicit.
+    pub fn entry_file(&self) -> Option<typst::syntax::FileId> {
+        self.entry_file
+    }
+
+    /// Only project entries belong to the project's explicit source set.
+    pub fn project_entry_path(&self) -> Option<PathBuf> {
+        match self.entry_file {
+            Some(id) if matches!(id.root(), typst::syntax::VirtualRoot::Project) => {
+                Some(self.root.join(id.vpath().get_without_slash()))
+            }
+            Some(_) => None,
+            None => Some(self.build.entry.clone()),
+        }
     }
 
     /// Validated site identity and template values.
@@ -142,6 +200,31 @@ impl ResolvedSiteConfig {
         &self.formatter
     }
 
+    /// Declared local modules; manifests are loaded separately under the caller’s input scope.
+    pub fn modules(
+        &self,
+    ) -> &std::collections::BTreeMap<String, crate::modules::ModuleDeclaration> {
+        &self.modules
+    }
+
+    /// Module manifests captured by `modules::prepare`, empty before preparation.
+    pub fn loaded_modules(&self) -> impl Iterator<Item = (&str, &crate::modules::ResolvedModule)> {
+        self.module_inputs
+            .configured
+            .iter()
+            .map(|(alias, configured)| (alias.as_str(), &configured.module))
+    }
+
+    /// Native package bindings captured by `modules::prepare`, empty before preparation.
+    pub fn local_packages(&self) -> &std::sync::Arc<tola_typst::LocalPackages> {
+        &self.module_inputs.packages
+    }
+
+    /// The selected theme module, if any.
+    pub fn theme(&self) -> &crate::modules::ThemeConfig {
+        &self.theme
+    }
+
     /// Site root directory.
     pub fn get_root(&self) -> &Path {
         &self.root
@@ -162,15 +245,14 @@ impl ResolvedSiteConfig {
 
     /// Validate a complete vendor candidate without reading the previously selected vendor.
     /// `None` resolves a refresh from the site's other declared and host roots.
-    pub fn with_vendor_root(&self, path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn with_vendor_root(&self, path: Option<PathBuf>) -> Result<Self, VendorRootError> {
         let mut config = self.clone();
         config.vendor.path = path;
         config.vendor_candidate.clone_from(&config.vendor.path);
         if let Some(path) = &config.vendor.path {
-            anyhow::ensure!(
-                path.is_absolute(),
-                "the vendor directory path must be absolute"
-            );
+            if !path.is_absolute() {
+                return Err(VendorRootError::NotAbsolute);
+            }
             crate::resources::source_boundary(&config, crate::InputScope::Pure).check(path)?;
         }
         let mut roots = self
@@ -185,7 +267,11 @@ impl ResolvedSiteConfig {
             roots.remove(index);
         }
         roots.extend(config.vendor.typst_packages());
-        config.package_locations = self.package_locations.clone().with_declared_roots(roots)?;
+        config.package_locations = self
+            .package_locations
+            .clone()
+            .with_declared_roots(roots)
+            .map_err(VendorRootError::Packages)?;
         let boundary = crate::filesystem::OutputBoundary::resolve(
             config.get_root(),
             &config.build.publish_dir,
@@ -287,7 +373,7 @@ pub(super) fn generated_exclusions(
         directory: output.to_owned(),
         candidate: None,
     }];
-    if let Some(workspace) = crate::filesystem::publication_workspace(output) {
+    if let Some(workspace) = crate::filesystem::swap_workspace(output) {
         exclusions.push(GeneratedExclusion {
             directory: workspace,
             candidate: None,
@@ -328,23 +414,25 @@ mod tests {
         assert_eq!(exclusions[0].candidate, None);
         assert_eq!(
             exclusions[1].directory,
-            crate::filesystem::publication_workspace(&config.build().publish_dir)
+            crate::filesystem::swap_workspace(&config.build().publish_dir)
                 .expect("an output tree has a publication workspace beside it")
         );
         assert_eq!(exclusions[1].candidate, None);
+        let vendor = config
+            .vendor
+            .path
+            .as_deref()
+            .expect("a declared vendor path");
         assert_eq!(
             exclusions[2].directory,
-            config
-                .vendor
-                .workspace_path()
-                .expect("a declared vendor path")
+            crate::filesystem::swap_workspace(vendor).expect("a vendor path has a workspace")
         );
         assert_eq!(exclusions[2].candidate, None);
     }
 
     /// Invocation directories come first, and a vendored copy joins the site's own paths.
     #[test]
-    fn invocation_font_directories_precede_the_site_paths() {
+    fn invocation_directories_precede_site_paths() {
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
         std::fs::write(

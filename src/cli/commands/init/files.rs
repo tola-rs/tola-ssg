@@ -4,12 +4,11 @@ use std::path::Path;
 
 use anyhow::Result;
 use tola_build::config::section::VendorConfig;
+use tola_build::filesystem::swap_workspace;
 
-use crate::editor::Editor;
 use crate::writes::FileWrites;
 
 use super::config::{self, CONFIG_PATH};
-use super::features::Effects;
 use super::program;
 
 /// The vendored-package root every scaffold has.
@@ -34,51 +33,31 @@ const STARTER_PAGE_PATH: &str = "content/index.typ";
 const STARTER_PAGE_SOURCE: &str = include_str!("templates/index-page.typ");
 
 /// Every file and directory `tola init` creates at `root`.
-pub(super) fn file_writes(
-    root: &Path,
-    editors: &[Editor],
-    packages: &tola_typst::PackageLocations,
-    effects: &Effects,
-) -> Result<FileWrites> {
-    let schema = config::schema(effects);
+pub(super) fn file_writes(root: &Path) -> Result<FileWrites> {
+    let schema = config::schema();
     let mut writes = FileWrites::new(root)?;
     for directory in SITE_DIRECTORIES {
         writes.add_directory(directory)?;
     }
     writes.create_file(CONFIG_PATH, config::config_file(&schema))?;
-    writes.create_file(
-        program::SITE_PATH,
-        program::site_program(&effects.outputs()),
-    )?;
-    writes.create_file(program::SCHEMA_PATH, program::SCHEMA_SOURCE)?;
-    writes.create_file(program::PAGE_PATH, program::page_source(&effects.head))?;
-    writes.create_file(
-        program::NOT_FOUND_PATH,
-        program::not_found_source(&effects.head),
-    )?;
-    writes.create_file(program::SELECTION_PATH, program::SELECTION_SOURCE)?;
-    writes.create_file(program::SEO_PATH, program::seo_source(&effects.seo))?;
-    writes.create_file(STARTER_PAGE_PATH, STARTER_PAGE_SOURCE)?;
-    for (path, contents) in &effects.files {
-        let contents = if *path == "static/tailwind-sources/site.css" {
-            contents.replacen(
-                "{{stylesheet}}",
-                include_str!("templates/stylesheet.css"),
-                1,
-            )
-        } else {
-            contents.to_string()
-        };
-        writes.create_file(path, contents)?;
+    writes.create_file(program::SITE_PATH, program::site_program())?;
+    for (path, source) in [
+        (program::SCHEMA_PATH, program::SCHEMA_SOURCE),
+        (program::PAGE_PATH, program::PAGE_SOURCE),
+        (program::NOT_FOUND_PATH, program::NOT_FOUND_SOURCE),
+        (program::SELECTION_PATH, program::SELECTION_SOURCE),
+        (program::SEO_PATH, program::SEO_SOURCE),
+        (STARTER_PAGE_PATH, STARTER_PAGE_SOURCE),
+    ] {
+        writes.create_file(path, source)?;
     }
-    let ignore = ignore_file(&schema.build.publish_dir, &schema.vendor, &effects.ignore);
+    let ignore = ignore_file(&schema.build.publish_dir, &schema.vendor);
     writes.create_file(".gitignore", ignore.clone())?;
     writes.create_file(".ignore", ignore)?;
-    crate::editor::add_initial_files(&mut writes, editors, packages)?;
     Ok(writes)
 }
 
-fn ignore_file(output_dir: &Path, vendor: &VendorConfig, feature_lines: &[&str]) -> String {
+fn ignore_file(output_dir: &Path, vendor: &VendorConfig) -> String {
     let mut content = String::new();
     let mut append_directory = |path: &Path| {
         content.push('/');
@@ -91,15 +70,11 @@ fn ignore_file(output_dir: &Path, vendor: &VendorConfig, feature_lines: &[&str])
         content.push_str("/\n");
     };
     append_directory(output_dir);
-    if let Some(workspace) = tola_build::filesystem::publication_workspace(output_dir) {
+    if let Some(workspace) = swap_workspace(output_dir) {
         append_directory(&workspace);
     }
-    if let Some(workspace) = vendor.workspace_path() {
+    if let Some(workspace) = vendor.path.as_deref().and_then(swap_workspace) {
         append_directory(&workspace);
-    }
-    for line in feature_lines {
-        content.push_str(line);
-        content.push('\n');
     }
     content.push_str("/.tola/\n/");
     content.push_str(tola_build::filesystem::SITE_BUILD_LOCK_FILE);
@@ -125,8 +100,7 @@ mod tests {
 
     /// The default scaffold `tola init` validates and writes at `root`.
     fn scaffold(root: &Path) {
-        let writes =
-            super::file_writes(root, &[], &Default::default(), &Effects::default()).unwrap();
+        let writes = super::file_writes(root).unwrap();
         super::super::validate_configuration(&writes, tola_build::InputScope::Online).unwrap();
         writes
             .apply(&tola_build::cancellation::BuildCancellation::default())
@@ -151,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn starter_page_publishes_at_the_site_root() {
+    fn starter_page_publishes_site_root() {
         let directory = tempfile::tempdir().unwrap();
         scaffold(directory.path());
         let build = build_generated_site(directory.path());

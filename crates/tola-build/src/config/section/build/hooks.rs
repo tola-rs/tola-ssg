@@ -26,6 +26,15 @@ pub struct HooksConfig {
     pub after_publish: Vec<AfterPublishHookConfig>,
 }
 
+/// The module whose manifest supplied a hook, retained by the execution plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleHookOrigin {
+    pub name: String,
+    pub root: PathBuf,
+    pub manifest: PathBuf,
+    pub options_json: Vec<u8>,
+}
+
 impl HooksConfig {
     /// What `tola help "[build.hooks]"` adds under its child tables.
     pub const HELP: &'static str = "\
@@ -73,13 +82,25 @@ conditions in the site's own runner, for example `command = [\"just\", \"css\"]`
 require `just`. Output generators each read the same upstream snapshot and write to a private
 directory: a later generator cannot read an earlier generator's new outputs.
 
+Any hook can submit an unlocated diagnostic batch through `TOLA_REPORT_PATH`, including from Nu
+with `use tola diagnostic` and `diagnostic submit`. Warnings do not fail a successful command;
+errors do. An after-publish error cannot undo publication. A reused development `generate-outputs`
+result retains its report. No report and an empty batch are distinct. Independent checks and
+unsaved editor snapshots are not supported by this report interface.
+
 Every invocation receives these environment variables:
 
 | Variable | Purpose | Stages |
 | --- | --- | --- |
+| `TOLA_REPORT_PATH` | optional complete diagnostic report | every stage |
+| `TOLA_PROJECT_ROOT` | absolute resolved project root | every stage |
+| `TOLA_CONFIG_PATH` | absolute resolved path to the configuration file | every stage |
+| `TOLA_CONTENT_ROOT` | absolute resolved content directory | every stage |
+| `TOLA_EXECUTABLE` | the current Tola executable | every stage |
+| `TOLA_INPUT_SCOPE` | the caller's input policy: `online`, `offline`, or `pure` | every stage |
 | `TOLA_HOOK_STAGE` | the stage: `before-build`, `generate-outputs`, or `after-publish` | every stage |
 | `TOLA_BUILD_MODE` | the build mode: `prod` or `dev` | every stage |
-| `TOLA_HOOK_CACHE_DIR` | `.tola/hook-cache/<stage>/<entry name>`, persisting across runs, such as `.tola/hook-cache/generate-outputs/search` | every stage |
+| `TOLA_HOOK_CACHE_DIR` | `.tola/hooks/<stage>/<entry name>`, persisting across runs, such as `.tola/hooks/generate-outputs/search` | every stage |
 | `TOLA_HOOK_TEMP_DIR` | this invocation's own temporary directory, removed afterwards | every stage |
 | `TOLA_HOOK_INPUT_DIR` | the command's input: a read-only snapshot of everything built upstream, laid out like the published directory | `generate-outputs`, `after-publish` |
 | `TOLA_HOOK_OUTPUT_DIR` | empty on every run; a relative path written there is that path under `build.publish-dir` | `generate-outputs` |
@@ -289,6 +310,9 @@ fn message_key(field: FieldPath, index: usize) -> String {
 #[serde(default, deny_unknown_fields)]
 #[config(section = "build.hooks.before-build", collection = array_table)]
 pub struct BeforeBuildHookConfig {
+    #[serde(skip)]
+    #[config(skip)]
+    pub origin: Option<ModuleHookOrigin>,
     /// Whether this hook runs.
     pub enable: bool,
     /// The hook's name, so status lines and diagnostics can point at it: one word without
@@ -395,7 +419,7 @@ then references are checked and the site is published.
 The command environment for this stage:
 - `TOLA_HOOK_STAGE`: this stage, `before-build`.
 - `TOLA_BUILD_MODE`: `prod` (`build`, `check`, `preview`, `vendor`) or `dev` (`tola dev`).
-- `TOLA_HOOK_CACHE_DIR`: persists across runs below `.tola/hook-cache/before-build/<entry name>`;
+- `TOLA_HOOK_CACHE_DIR`: persists across runs below `.tola/hooks/before-build/<entry name>`;
   the command owns its contents and Tola only creates the directory — keep incremental products
   there, for example `\"$TOLA_HOOK_CACHE_DIR\"/tailwind`.
 - `TOLA_HOOK_TEMP_DIR`: this invocation's own temporary directory, removed afterwards; `TMPDIR`,
@@ -413,6 +437,9 @@ files directly.";
 #[serde(default, deny_unknown_fields)]
 #[config(section = "build.hooks.generate-outputs", collection = array_table)]
 pub struct OutputCommandConfig {
+    #[serde(skip)]
+    #[config(skip)]
+    pub origin: Option<ModuleHookOrigin>,
     /// Whether this hook runs.
     pub enable: bool,
     /// The hook's name, so status lines and diagnostics can point at it: one word without
@@ -531,6 +558,9 @@ The command environment for this stage:
 #[serde(default, deny_unknown_fields)]
 #[config(section = "build.hooks.after-publish", collection = array_table)]
 pub struct AfterPublishHookConfig {
+    #[serde(skip)]
+    #[config(skip)]
+    pub origin: Option<ModuleHookOrigin>,
     /// Whether this hook runs.
     pub enable: bool,
     /// The hook's name, so status lines and diagnostics can point at it: one word without
@@ -627,6 +657,7 @@ impl CommandOutput {
 impl Default for BeforeBuildHookConfig {
     fn default() -> Self {
         Self {
+            origin: None,
             enable: true,
             name: String::new(),
             command: Vec::new(),
@@ -640,6 +671,7 @@ impl Default for BeforeBuildHookConfig {
 impl Default for OutputCommandConfig {
     fn default() -> Self {
         Self {
+            origin: None,
             enable: true,
             name: String::new(),
             command: Vec::new(),
@@ -653,6 +685,7 @@ impl Default for OutputCommandConfig {
 impl Default for AfterPublishHookConfig {
     fn default() -> Self {
         Self {
+            origin: None,
             enable: true,
             name: String::new(),
             command: Vec::new(),
@@ -1179,7 +1212,7 @@ rerun-on = ["/src", "../templates"]
             .unwrap_err();
 
         let diagnostic = diagnostic_mentioning(&error, declared);
-        assert_eq!(diagnostic.code, crate::codes::config::INVALID);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::INVALID);
         assert_eq!(
             diagnostic.notes,
             [BeforeBuildHookConfig::FIELDS.generates.as_str()]
@@ -1193,8 +1226,8 @@ rerun-on = ["/src", "../templates"]
         for declared in [
             "public/assets",
             ".tola/cache",
-            ".vendor-vendor",
-            ".vendor-vendor/marker.txt",
+            ".vendor-swap",
+            ".vendor-swap/marker.txt",
         ] {
             assert_hook_output_refused(root, declared);
         }
@@ -1203,7 +1236,7 @@ rerun-on = ["/src", "../templates"]
         {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path();
-            let workspace = root.join(".vendor-vendor");
+            let workspace = root.join(".vendor-swap");
             std::fs::create_dir(&workspace).unwrap();
             std::os::unix::fs::symlink(&workspace, root.join("vendored")).unwrap();
             assert_hook_output_refused(root, "vendored/marker.txt");

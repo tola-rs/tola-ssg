@@ -27,16 +27,21 @@ mod image;
 pub mod inspect;
 pub mod metadata;
 mod mode;
+pub mod modules;
 mod observation;
 pub mod output;
 pub mod package;
+pub mod report;
 mod resources;
 mod seo;
 pub mod site;
 
 pub use asset::{AssetOrigin, AssetUrls, PublishedAsset};
 pub use build::BuildSession;
-pub use content::{SourceDescriptorField, SourceDescriptorFieldKind, has_typ_extension};
+pub use compiler::diagnostic::font_failure;
+pub use content::{
+    ContentDiscoveryError, SourceDescriptorField, SourceDescriptorFieldKind, has_typ_extension,
+};
 pub use filesystem::INTERNAL_DIR;
 pub use icon::remote_collection_bytes;
 pub use resources::{BuildResources, HttpDownloadError, InputScope, NetworkAccess};

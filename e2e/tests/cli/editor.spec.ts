@@ -11,11 +11,11 @@ const SETTINGS = `{
 }
 `
 
-const MIRRORED_VERSION = '.tola/builtin-packages/tola/source/0.0.0'
-const OBSOLETE_VERSION = '.tola/builtin-packages/tola/source/9.9.9'
-const PACKAGE_LINK = '.tola/editor-packages/tola/source/0.0.0'
-const PACKAGE_VIEW = '.tola/editor-packages'
-const THEME_DIRECTORY = '.tola/builtin-packages/tola/code/0.0.0/code-themes'
+const MIRRORED_VERSION = '.tola/mirrors/builtin-packages/tola/source/0.0.0'
+const OBSOLETE_VERSION = '.tola/mirrors/builtin-packages/tola/source/9.9.9'
+const PACKAGE_LINK = '.tola/mirrors/editor-packages/tola/source/0.0.0'
+const PACKAGE_VIEW = '.tola/mirrors/editor-packages'
+const THEME_DIRECTORY = '.tola/mirrors/builtin-packages/tola/code/0.0.0/code-themes'
 
 async function writeEditorSite(root: string): Promise<void> {
   await writeMinimalSite(root)

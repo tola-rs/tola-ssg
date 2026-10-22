@@ -5,8 +5,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use crate::config::source::{ConfigPositions, SourceExcerpt, source_excerpt};
-use crate::config::{ConfigDiagnostic, ConfigDiagnosticTag, ConfigError};
-use crate::diagnostic::{Diagnostic, DiagnosticCause, DiagnosticError, Severity, UnknownField};
+use crate::config::{ConfigDiagnostic, ConfigDiagnosticTag, ConfigDiagnostics, ConfigError};
+use tola_diagnostic::{Diagnostic, DiagnosticCause, DiagnosticError, Severity, UnknownField};
 
 /// The site root of a configuration file is the directory that contains it, so its
 /// site-relative spelling is the file name.
@@ -73,7 +73,7 @@ fn document_error(
     span: Option<Range<usize>>,
 ) -> Diagnostic {
     let mut diagnostic = Diagnostic::at_path(
-        crate::codes::config::TOML,
+        tola_diagnostic::codes::config::TOML,
         Severity::Error,
         config_display_path(path),
         message,
@@ -245,7 +245,7 @@ pub(crate) fn attach_load(
     path: Option<&Path>,
     positions: Option<&ConfigPositions>,
 ) -> anyhow::Error {
-    attach(error, crate::codes::config::LOAD, path, positions)
+    attach(error, tola_diagnostic::codes::config::LOAD, path, positions)
 }
 
 pub(crate) fn attach_reload(
@@ -253,16 +253,26 @@ pub(crate) fn attach_reload(
     path: &Path,
     positions: Option<&ConfigPositions>,
 ) -> anyhow::Error {
-    attach(error, crate::codes::config::RELOAD, Some(path), positions)
+    attach(
+        error,
+        tola_diagnostic::codes::config::RELOAD,
+        Some(path),
+        positions,
+    )
+}
+
+/// The failure a configuration step reports the diagnostics it collected with.
+pub(crate) fn config_error(diagnostics: ConfigDiagnostics) -> anyhow::Error {
+    ConfigError::Diagnostics(diagnostics).into()
 }
 
 fn attach(
     error: anyhow::Error,
-    fallback_code: crate::diagnostic::DiagnosticCode,
+    fallback_code: tola_diagnostic::DiagnosticCode,
     path: Option<&Path>,
     positions: Option<&ConfigPositions>,
 ) -> anyhow::Error {
-    if crate::diagnostic::attached(&error).is_some() {
+    if tola_diagnostic::attached(&error).is_some() {
         return error;
     }
     let display = path.map(config_display_path);
@@ -271,7 +281,7 @@ fn attach(
         .find_map(|cause| cause.downcast_ref::<ConfigError>());
     let mut diagnostics = match config {
         Some(config) => error_diagnostics(config, display.as_deref(), positions),
-        None => vec![crate::diagnostic::fallback(fallback_code, &error)],
+        None => vec![tola_diagnostic::fallback(fallback_code, &error)],
     }
     .into_iter()
     .map(
@@ -282,7 +292,7 @@ fn attach(
     )
     .collect::<Vec<_>>();
     if diagnostics.is_empty() {
-        let diagnostic = crate::diagnostic::fallback(fallback_code, &error);
+        let diagnostic = tola_diagnostic::fallback(fallback_code, &error);
         diagnostics.push(match &display {
             Some(display) => diagnostic.with_path(&**display),
             None => diagnostic,
@@ -302,7 +312,7 @@ pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Di
     let mut diagnostics = Vec::new();
     if !experimental.is_empty() {
         let mut diagnostic = Diagnostic::at_path(
-            crate::codes::config::EXPERIMENTAL,
+            tola_diagnostic::codes::config::EXPERIMENTAL,
             Severity::Warning,
             &display,
             "experimental configuration is enabled",
@@ -310,41 +320,48 @@ pub fn warning_diagnostics(config: &crate::config::ResolvedSiteConfig) -> Vec<Di
         for warning in &experimental {
             diagnostic = diagnostic.with_note(warning.field.as_str());
         }
-        if let Some(excerpt) =
-            positions.and_then(|positions| positions.excerpt(experimental[0].field.as_str()))
-        {
-            diagnostic = diagnostic.with_source_excerpt(
-                excerpt.line,
-                excerpt.column,
-                excerpt.text,
-                Some(excerpt.highlight),
-            );
-        }
+        diagnostic = attach_excerpt(
+            diagnostic,
+            positions.and_then(|positions| positions.excerpt(experimental[0].field.as_str())),
+        );
         diagnostic = diagnostic.with_help("Remove these fields");
         diagnostics.push(diagnostic);
     }
     diagnostics.extend(other.into_iter().map(|warning| {
         let mut diagnostic = Diagnostic::at_path(
-            crate::codes::config::WARNING,
+            tola_diagnostic::codes::config::WARNING,
             Severity::Warning,
             &display,
             &warning.message,
         )
         .with_note(warning.field.as_str());
-        if let Some(excerpt) = positions.and_then(|positions| written_excerpt(positions, warning)) {
-            diagnostic = diagnostic.with_source_excerpt(
-                excerpt.line,
-                excerpt.column,
-                excerpt.text,
-                Some(excerpt.highlight),
-            );
-        }
+        diagnostic = attach_excerpt(
+            diagnostic,
+            positions.and_then(|positions| written_excerpt(positions, warning)),
+        );
         if let Some(help) = &warning.help {
             diagnostic = diagnostic.with_help(help);
         }
         diagnostic
     }));
     diagnostics
+}
+
+/// One configuration error, located at the configuration file when its path is known.
+fn configuration_error(display: Option<&str>, message: &str) -> Diagnostic {
+    match display {
+        Some(display) => Diagnostic::at_path(
+            tola_diagnostic::codes::config::INVALID,
+            Severity::Error,
+            display,
+            message,
+        ),
+        None => Diagnostic::new(
+            tola_diagnostic::codes::config::INVALID,
+            Severity::Error,
+            message,
+        ),
+    }
 }
 
 fn error_diagnostics(
@@ -356,7 +373,7 @@ fn error_diagnostics(
         ConfigError::Diagnostics(diagnostics) => diagnostics
             .errors()
             .iter()
-            .map(|item| validation_diagnostic(item, display, positions))
+            .map(|config_diagnostic| validation_diagnostic(config_diagnostic, display, positions))
             .collect(),
         ConfigError::Toml {
             path,
@@ -370,32 +387,26 @@ fn error_diagnostics(
                 _ => "Tola could not read the configuration file",
             };
             vec![Diagnostic::at_path(
-                crate::codes::config::IO,
+                tola_diagnostic::codes::config::IO,
                 Severity::Error,
                 &*config_display_path(path),
                 message,
             )]
         }
         ConfigError::Refused { path, reason } => {
-            let message = match reason {
-                crate::config::ConfigSourceRefusal::GeneratedState => {
-                    "the configuration file is Tola's own generated state"
-                }
-                crate::config::ConfigSourceRefusal::OutsideSite => {
-                    "the configuration file resolves outside the site"
-                }
-            };
-            let help = match reason {
-                crate::config::ConfigSourceRefusal::GeneratedState => {
-                    "Move it outside `.tola`, or point `--config` at the site's own `tola.toml`"
-                }
-                crate::config::ConfigSourceRefusal::OutsideSite => {
-                    "Replace it with a file inside the site, or with a link that stays inside"
-                }
+            let (message, help) = match reason {
+                crate::config::ConfigSourceRefusal::GeneratedState => (
+                    "the configuration file is Tola's own generated state",
+                    "Move it outside `.tola`, or point `--config` at the site's own `tola.toml`",
+                ),
+                crate::config::ConfigSourceRefusal::OutsideSite => (
+                    "the configuration file resolves outside the site",
+                    "Replace it with a file inside the site, or with a link that stays inside",
+                ),
             };
             vec![
                 Diagnostic::at_path(
-                    crate::codes::config::IO,
+                    tola_diagnostic::codes::config::IO,
                     Severity::Error,
                     &*config_display_path(path),
                     message,
@@ -410,27 +421,13 @@ fn error_diagnostics(
                 .collect::<Vec<_>>()
                 .join(", ");
             let message = format!("unknown configuration fields: {named}");
-            let mut diagnostic = match display {
-                Some(display) => Diagnostic::at_path(
-                    crate::codes::config::INVALID,
-                    Severity::Error,
-                    display,
-                    message,
-                ),
-                None => Diagnostic::new(crate::codes::config::INVALID, Severity::Error, message),
-            };
             // The first key the document wrote is where the author corrects the spelling.
-            if let Some(excerpt) = fields
-                .first()
-                .and_then(|field| positions.and_then(|positions| positions.excerpt(field)))
-            {
-                diagnostic = diagnostic.with_source_excerpt(
-                    excerpt.line,
-                    excerpt.column,
-                    excerpt.text,
-                    Some(excerpt.highlight),
-                );
-            }
+            let diagnostic = attach_excerpt(
+                configuration_error(display, &message),
+                fields
+                    .first()
+                    .and_then(|field| positions.and_then(|positions| positions.excerpt(field))),
+            );
             // Each key has both its line and the exact span that writes it, so a correction
             // needs no search of the document for its spelling.
             let written: Vec<UnknownField> = fields
@@ -449,11 +446,11 @@ fn error_diagnostics(
                     .with_help(UNKNOWN_FIELD_HELP),
             ]
         }
-        ConfigError::Validation(message) => {
+        ConfigError::PathNotAFile { .. } => {
             vec![Diagnostic::new(
-                crate::codes::config::INVALID,
+                tola_diagnostic::codes::config::INVALID,
                 Severity::Error,
-                message,
+                error.to_string(),
             )]
         }
     }
@@ -461,36 +458,31 @@ fn error_diagnostics(
 
 /// One validation failure, pointed at the key it names when the source still holds it.
 fn validation_diagnostic(
-    item: &ConfigDiagnostic,
+    config_diagnostic: &ConfigDiagnostic,
     display: Option<&str>,
     positions: Option<&ConfigPositions>,
 ) -> Diagnostic {
-    let mut diagnostic = match display {
-        Some(display) => Diagnostic::at_path(
-            crate::codes::config::INVALID,
-            Severity::Error,
-            display,
-            &item.message,
-        ),
-        None => Diagnostic::new(
-            crate::codes::config::INVALID,
-            Severity::Error,
-            &item.message,
-        ),
+    let mut diagnostic = attach_excerpt(
+        configuration_error(display, &config_diagnostic.message),
+        positions.and_then(|positions| written_excerpt(positions, config_diagnostic)),
+    )
+    .with_note(config_diagnostic.field.as_str());
+    if let Some(help) = &config_diagnostic.help {
+        diagnostic = diagnostic.with_help(help);
     }
-    .with_note(item.field.as_str());
-    if let Some(excerpt) = positions.and_then(|positions| written_excerpt(positions, item)) {
-        diagnostic = diagnostic.with_source_excerpt(
+    diagnostic
+}
+
+fn attach_excerpt(diagnostic: Diagnostic, excerpt: Option<SourceExcerpt>) -> Diagnostic {
+    match excerpt {
+        Some(excerpt) => diagnostic.with_source_excerpt(
             excerpt.line,
             excerpt.column,
             excerpt.text,
             Some(excerpt.highlight),
-        );
+        ),
+        None => diagnostic,
     }
-    if let Some(help) = &item.help {
-        diagnostic = diagnostic.with_help(help);
-    }
-    diagnostic
 }
 
 /// The excerpt of the narrowest written key a configuration diagnostic names.
@@ -498,8 +490,12 @@ fn validation_diagnostic(
 /// A diagnostic raised inside an array-table entry asks for the field within that entry first and
 /// the entry's own key next, so a field its author left out still points at the entry to edit
 /// rather than at the first entry of the array.
-fn written_excerpt(positions: &ConfigPositions, item: &ConfigDiagnostic) -> Option<SourceExcerpt> {
-    item.key_paths()
+fn written_excerpt(
+    positions: &ConfigPositions,
+    config_diagnostic: &ConfigDiagnostic,
+) -> Option<SourceExcerpt> {
+    config_diagnostic
+        .key_paths()
         .find_map(|key| positions.excerpt(key.as_ref()))
 }
 
@@ -549,7 +545,7 @@ mod tests {
 
         let diagnostics = error_diagnostics(&error, Some("tola.toml"), None);
 
-        assert_eq!(diagnostics[0].code, crate::codes::config::TOML);
+        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::config::TOML);
         assert_eq!(diagnostics[0].message, reason);
         let location = diagnostics[0].location.as_ref().unwrap();
         assert_eq!(location.path, "tola.toml");
@@ -565,7 +561,7 @@ mod tests {
 
         let diagnostics = error_diagnostics(&error, Some("tola.toml"), None);
 
-        assert_eq!(diagnostics[0].code, crate::codes::config::IO);
+        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::config::IO);
         assert_eq!(diagnostics[0].location.as_ref().unwrap().path, "tola.toml");
         assert_eq!(
             diagnostics[0].message,
@@ -575,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_diagnostics_fall_back_to_one_error() {
+    fn empty_diagnostics_fall_back() {
         let path = std::path::Path::new("/site/tola.toml");
         let error = anyhow::Error::new(ConfigError::Diagnostics(
             crate::config::ConfigDiagnostics::new(),
@@ -585,7 +581,7 @@ mod tests {
         let diagnostics = crate::config::tests::attached_diagnostics(&error);
 
         assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::config::LOAD);
+        assert_eq!(diagnostics[0].code, tola_diagnostic::codes::config::LOAD);
         assert_eq!(diagnostics[0].location.as_ref().unwrap().path, "tola.toml");
     }
 

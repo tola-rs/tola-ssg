@@ -4,18 +4,15 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 use crate::writes::{ExistingFile, FileWrites};
-
-use super::features::Effects;
 
 /// The scaffold files and directories `writes` cannot create, aggregated into one failure.
 pub(super) fn scaffold(writes: &FileWrites, force: bool) -> Result<()> {
     let root = writes.root();
     checks([
         target(root, force),
-        crate::editor::check_initial_files(root),
         writes
             .check()
             .map_err(|error| match error.downcast_ref::<ExistingFile>() {
@@ -28,14 +25,10 @@ pub(super) fn scaffold(writes: &FileWrites, force: bool) -> Result<()> {
 /// The conflict a real run reports before it asks anything: the target policy alone, then the
 /// first scaffold file that already exists.
 ///
-/// The staged set is the minimal scaffold, a subset of every preset.
-pub(super) fn preflight(
-    root: &Path,
-    force: bool,
-    packages: &tola_typst::PackageLocations,
-) -> Result<()> {
+/// The staged set is the built-in starter.
+pub(super) fn preflight(root: &Path, force: bool) -> Result<()> {
     let directory_refused = refuses(root, force)?;
-    let existing = first_existing_file(root, packages)?;
+    let existing = first_existing_file(root)?;
     let conflict = match (directory_refused, existing.as_deref()) {
         (false, None) => return Ok(()),
         (false, Some(existing)) => file_conflict(existing, root),
@@ -50,7 +43,7 @@ fn refuses(root: &Path, force: bool) -> Result<bool> {
     Ok(!force && occupied)
 }
 
-fn target(root: &Path, force: bool) -> Result<()> {
+pub(super) fn target(root: &Path, force: bool) -> Result<()> {
     if refuses(root, force)? {
         return Err(DiagnosticError::new(
             "cannot create the site",
@@ -110,18 +103,15 @@ fn not_a_directory_error(root: &Path) -> anyhow::Error {
                     crate::terminal::display_path(root)
                 ),
             )
-            .with_help("choose a different path"),
+            .with_help("Choose a different path"),
         ],
     )
     .into()
 }
 
 /// The first scaffold file `root` already holds, if any.
-fn first_existing_file(
-    root: &Path,
-    packages: &tola_typst::PackageLocations,
-) -> Result<Option<PathBuf>> {
-    let writes = super::files::file_writes(root, &[], packages, &Effects::default())?;
+fn first_existing_file(root: &Path) -> Result<Option<PathBuf>> {
+    let writes = super::files::file_writes(root)?;
     Ok(writes
         .check()
         .err()
@@ -140,7 +130,7 @@ fn directory_conflict(root: &Path, existing: Option<&Path>) -> Diagnostic {
             crate::terminal::display_path(root)
         ),
     )
-    .with_help("pass `--force` to add only the missing files");
+    .with_help("Pass `--force` to add only the missing files");
     if let Some(existing) = existing {
         diagnostic = diagnostic.with_note(format!(
             "`{}` already exists; existing files are never overwritten",
@@ -160,7 +150,7 @@ fn file_conflict(existing: &Path, root: &Path) -> Diagnostic {
             crate::terminal::display_path_within(existing, root)
         ),
     )
-    .with_help("remove it or choose another directory")
+    .with_help("Remove it or choose another directory")
 }
 
 fn file_conflict_error(existing: &Path, root: &Path) -> anyhow::Error {
@@ -185,10 +175,7 @@ pub(super) fn checks(checks: impl IntoIterator<Item = Result<()>>) -> Result<()>
     if diagnostics.is_empty() {
         Ok(())
     } else {
-        Err(
-            tola_build::diagnostic::DiagnosticError::new("cannot create the site", diagnostics)
-                .into(),
-        )
+        Err(tola_diagnostic::DiagnosticError::new("cannot create the site", diagnostics).into())
     }
 }
 
@@ -231,31 +218,29 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("site");
         fs::write(&file, "content").unwrap();
-        let packages = tola_typst::PackageLocations::default();
 
-        let diagnostics = preflight_diagnostics(&file, false, &packages);
+        let diagnostics = preflight_diagnostics(&file, false);
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].code, crate::codes::init::CONFLICT);
         assert!(
             diagnostics[0].message.contains("is not a directory"),
             "{diagnostics:?}"
         );
-        assert_eq!(diagnostics[0].help[0].message, "choose a different path");
+        assert_eq!(diagnostics[0].help[0].message, "Choose a different path");
     }
 
     #[test]
     fn preflight_reports_the_target_conflict() {
         let temp = TempDir::new().unwrap();
-        let packages = tola_typst::PackageLocations::default();
 
         let empty = temp.path().join("empty");
         fs::create_dir(&empty).unwrap();
-        assert!(preflight(&empty, false, &packages).is_ok());
+        assert!(preflight(&empty, false).is_ok());
 
         let unrelated = temp.path().join("unrelated");
         fs::create_dir(&unrelated).unwrap();
         fs::write(unrelated.join("notes.txt"), "notes").unwrap();
-        let diagnostics = preflight_diagnostics(&unrelated, false, &packages);
+        let diagnostics = preflight_diagnostics(&unrelated, false);
         assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0].message.contains("is not empty"),
@@ -264,13 +249,13 @@ mod tests {
         assert!(diagnostics[0].notes.is_empty(), "{diagnostics:?}");
         assert_eq!(
             diagnostics[0].help[0].message,
-            "pass `--force` to add only the missing files"
+            "Pass `--force` to add only the missing files"
         );
 
         let existing = temp.path().join("existing");
         fs::create_dir(&existing).unwrap();
         fs::write(existing.join("site.typ"), "program").unwrap();
-        let diagnostics = preflight_diagnostics(&existing, false, &packages);
+        let diagnostics = preflight_diagnostics(&existing, false);
         assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0].message.contains("is not empty"),
@@ -284,7 +269,7 @@ mod tests {
             "{diagnostics:?}"
         );
 
-        let diagnostics = preflight_diagnostics(&existing, true, &packages);
+        let diagnostics = preflight_diagnostics(&existing, true);
         assert_eq!(diagnostics.len(), 1);
         assert!(
             diagnostics[0].message.contains("site.typ")
@@ -294,7 +279,7 @@ mod tests {
         assert!(diagnostics[0].notes.is_empty(), "{diagnostics:?}");
         assert_eq!(
             diagnostics[0].help[0].message,
-            "remove it or choose another directory"
+            "Remove it or choose another directory"
         );
         assert!(
             !diagnostics[0].message.contains("--force")
@@ -305,17 +290,13 @@ mod tests {
             "{diagnostics:?}"
         );
 
-        assert!(preflight(&unrelated, true, &packages).is_ok());
+        assert!(preflight(&unrelated, true).is_ok());
     }
 
     /// The diagnostics a refused preflight has.
-    fn preflight_diagnostics(
-        root: &Path,
-        force: bool,
-        packages: &tola_typst::PackageLocations,
-    ) -> Vec<Diagnostic> {
-        let error = preflight(root, force, packages).unwrap_err();
-        tola_build::diagnostic::attached(&error)
+    fn preflight_diagnostics(root: &Path, force: bool) -> Vec<Diagnostic> {
+        let error = preflight(root, force).unwrap_err();
+        tola_diagnostic::attached(&error)
             .expect("the preflight has its diagnostics")
             .to_vec()
     }

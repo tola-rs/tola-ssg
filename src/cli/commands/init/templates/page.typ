@@ -1,4 +1,3 @@
-{{imports}}
 #import "@tola/code:0.0.0": code-stylesheet, code-themes, render-code
 #import "@tola/site:0.0.0": site
 #import "seo.typ": head-entries
@@ -28,7 +27,6 @@
       #html.head[
         #for entry in head-entries(meta.title, description: meta.description, page: page) { entry }
         #code-stylesheet()
-        {{head}}
       ]
       #html.body[
         #html.elem("main")[

@@ -122,13 +122,21 @@ help = '''按命令产出什么来选择阶段：`before-build` 在发现源文�
 
 命令从站点根运行，是会退出的 argv 数组，不经过隐式 shell。同阶段条目按配置顺序执行，一条失败就停止剩余条目。相互依赖的步骤与条件放在站点自己的执行器里，例如 `command = ["just", "css"]`；Tola 不要求使用 `just`。每个 output 生成命令读取同一份上游快照、写入私有目录：后面的生成命令看不到前一个刚写出的 output。
 
+任何阶段的 hook 都可以通过 `TOLA_REPORT_PATH` 提交不带位置的完整诊断批次；Nu 脚本可用 `use tola diagnostic` 和 `diagnostic submit`。warning 不改变成功命令的结果；error 会使其失败。after-publish 的错误不能撤销发布。开发时复用 `generate-outputs` 的结果也会复用对应报告。未提交与提交空批次不同；此报告接口尚不支持独立检查或未保存的编辑器快照。
+
 每次调用都会收到这些环境变量：
 
 | 变量 | 用途 | 提供的阶段 |
 | --- | --- | --- |
+| `TOLA_REPORT_PATH` | 可选的完整诊断报告 | 全部 |
+| `TOLA_PROJECT_ROOT` | 解析后的项目根目录绝对路径 | 全部 |
+| `TOLA_CONFIG_PATH` | 解析后的配置文件绝对路径 | 全部 |
+| `TOLA_CONTENT_ROOT` | 解析后的内容目录绝对路径 | 全部 |
+| `TOLA_EXECUTABLE` | 当前 Tola 可执行文件 | 全部 |
+| `TOLA_INPUT_SCOPE` | 调用方输入策略：`online`、`offline` 或 `pure` | 全部 |
 | `TOLA_HOOK_STAGE` | 当前阶段：`before-build`、`generate-outputs` 或 `after-publish` | 全部 |
 | `TOLA_BUILD_MODE` | 本次构建模式：`prod` 或 `dev` | 全部 |
-| `TOLA_HOOK_CACHE_DIR` | `.tola/hook-cache/<阶段>/<条目名>`，跨次运行保留，例如 `.tola/hook-cache/generate-outputs/search` | 全部 |
+| `TOLA_HOOK_CACHE_DIR` | `.tola/hooks/<阶段>/<条目名>`，跨次运行保留，例如 `.tola/hooks/generate-outputs/search` | 全部 |
 | `TOLA_HOOK_TEMP_DIR` | 本次调用独有的临时目录，结束即删 | 全部 |
 | `TOLA_HOOK_INPUT_DIR` | 命令的输入：上游已产出的整站的只读快照，布局与发布后的目录一致 | `generate-outputs`、`after-publish` |
 | `TOLA_HOOK_OUTPUT_DIR` | 每次运行都是空目录；写进去的相对路径就是 `build.publish-dir` 下的相对路径 | `generate-outputs` |
@@ -200,7 +208,7 @@ Tailwind 的输入 CSS 要写明扫描哪些内容与模板文件。hooks 面向
 本阶段的命令环境：
 - `TOLA_HOOK_STAGE`：每次调用都是 `before-build`。
 - `TOLA_BUILD_MODE`：`prod`（`build`、`check`、`preview`、`vendor`）或 `dev`（`tola dev`）。
-- `TOLA_HOOK_CACHE_DIR`：跨次运行保留在 `.tola/hook-cache/before-build/<条目名>`；内容归命令、Tola 只创建目录——增量产物放这里，例如 `"$TOLA_HOOK_CACHE_DIR"/tailwind`。
+- `TOLA_HOOK_CACHE_DIR`：跨次运行保留在 `.tola/hooks/before-build/<条目名>`；内容归命令、Tola 只创建目录——增量产物放这里，例如 `"$TOLA_HOOK_CACHE_DIR"/tailwind`。
 - `TOLA_HOOK_TEMP_DIR`：本次调用独有的临时目录，结束即删；`TMPDIR`、`TMP`、`TEMP` 也指向它。
 
 没有 `TOLA_HOOK_INPUT_DIR` 与 `TOLA_HOOK_OUTPUT_DIR`：命令直接写站点根下的输入文件。'''
@@ -421,13 +429,193 @@ sha256 = "<64 hexadecimal digits>"
 
 ```sh
 tola inspect icons                       # every namespace, its source, and its icon count
-tola inspect icons lucide                # adds that namespace's icon names
+tola inspect icons lucide                # one namespace/name row per icon or alias
 tola inspect icons lucide --interactive  # browse those names in a table
 ```
 
-命令打印一个 JSON 数组，每个 namespace 一行：解析后的来源、collection 自己的图标前缀，以及图标数量；点名一个 namespace 会额外带上该 collection 的 `names`。
+不指定 namespace 时，JSON 数组每个 collection 一行，包含 namespace、解析后的来源、collection 自己的图标前缀和图标数量。指定 namespace 后，图标与别名按词法顺序逐行返回 `namespace`/`name`；交互选择返回所选行。
 
 远程 collection 下载与缓存的时机和构建完全一样。`tola vendor` 会把站点的远程 collection 冻结进它自己的 `icons/<namespace>.json`，另一台机器就能离线构建。'''
+
+[sections.theme]
+documentation = "选择提供整站入口的模块。"
+help = '''选择一个已声明模块，由其 `[site].entry` 生成站点：
+
+```toml
+[theme]
+module = "notes"
+
+[modules.notes]
+path = "theme"
+```
+
+项目不需要复制主题入口。显式填写的 `[build].entry` 与主题入口互斥；其他模块仍可提供库、查询和命令。清单、选项、路径和公开导入见 `[modules]`。'''
+
+[sections.modules]
+documentation = "按命名空间选择的模块。"
+help = '''模块命名空间选择一个包含 `tola-module.toml` 的目录：
+
+```toml
+[modules.notes]
+path = "theme"
+```
+
+路径相对于站点根目录，也可以写绝对路径。使用模块时，Tola 按本次调用的输入范围读取清单；`--pure` 要求模块的物理目录位于站点内。模块目录是构建输入，发布目录和 before-build 生成器不能覆盖它。只加载项目明确声明的模块，不自动合并多份站点配置。
+
+使用 HTTPS Git 仓库时，将 `path` 换成远程来源：
+
+```toml
+[modules.notes]
+repository = "https://github.com/example/notebook"
+tag = "v1.0.0"
+subdir = "theme"
+```
+
+`tag`、`branch`、`rev` 选一个；`rev` 是完整提交 ID。`subdir` 默认为仓库根。运行 `tola module fetch notes`，由 gix 获取并写入 `tola.lock`，不调用系统 Git。省略别名则获取所有声明的远程模块。`tola.lock` 随站点提交，源码保存在 `.tola/modules`。
+
+构建、查询和帮助只读已锁定源码，不隐式联网。显式 fetch 才更新分支或标签；已准备的固定提交直接复用。`--offline` 可以读取已有源码，fetch 要求在线模式；`--pure` 使用本地 `path` 声明。远程初始化尚未实现，初始化仍接收本地模块目录。
+
+用 `[theme] module = "notes"` 选择模块提供整站入口，此时不要再显式设置 `[build].entry`。作者从 `@tola-modules/notes:0.0.0` 导入公开写作 API；`0.0.0` 是宿主别名版本，不是主题的发行版本。主题清单声明：
+
+```toml
+schema-version = 1
+name = "notebook"
+version = "1.0.0"
+[typst]
+entry = "lib.typ"
+[site]
+entry = "site.typ"
+[options]
+schema = "options.typ"
+export = "schema"
+[assets]
+directory = "assets"
+[slots]
+footer = "components/footer.typ"
+```
+
+清单中的路径相对于模块目录。项目的 `[modules.notes.options]` 由导出的 `@tola/schema` schema 校验；显式 false 与空数组保留原值。`[modules.notes.overrides] footer = "site/footer.typ"` 用项目文件替换公开插槽，文件自己的相对导入保持原义；未知插槽会报错。模块资产发布到 `/_modules/notes/`，再统一加上站点部署前缀。
+
+选择器是相对发布名的字面文件或目录前缀，不是 glob。省略 `include` 表示全选，空数组表示不选，`exclude` 优先。`enabled = false` 只关闭默认静态资源发布，不影响模块库的导入；保留的筛选和替换配置在重新启用后生效。替换项的目标必须是被选中的现存模块文件，来源是项目相对路径：
+
+```toml
+[modules.notes.assets]
+enabled = true
+include = ["style.css", "scripts"]
+exclude = ["scripts/legacy.js"]
+[modules.notes.assets.replace]
+"style.css" = "static/custom.css"
+```
+
+`get-module().assets.files` 将所选相对路径映射到原生输入路径，项目替换项保持项目根；`assets.urls` 使用同一组键，值已包含部署前缀与配置的缓存标识。这两组只描述模块所选的静态发布资源，不包含任意 Bundle 或 hook 产物。URL 可直接使用，不要重复添加 base-path。
+
+包内调用 `@tola/module` 的 `get-module()` 取得选项、原生插槽路径、版本和资产前缀。包内绝对路径仍指向包根。需要读取用户文件时，传入项目原生路径，或用 `@tola/site` 的 `project-path()` 明确构造。
+
+模块清单可使用 `[[hooks]]` 声明有限构建命令：`stage` 为 `before-build`、`generate-outputs` 或 `after-publish`，并提供 `name` 和 `command`。可选的 `enabled-by = "search"` 引用已校验的顶层布尔选项，缺失或非布尔值会报错；`dev` 沿用项目 hook 的阶段规则。`rerun-on = [{ module = "tools/search.mjs" }, { project = "content" }]` 明确区分模块和项目相对路径。`before-build` 可用 `generates` 声明项目相对输入；`generate-outputs` 使用 `outputs = [{ tree = "search" }]` 声明发布相对路径。每阶段按模块别名和清单顺序运行模块 hook，再运行项目 hook。模块 hook 还接收 `TOLA_MODULE_NAME`（别名）、`TOLA_MODULE_ROOT` 和 `TOLA_MODULE_MANIFEST`。
+
+```toml
+[[hooks]]
+stage = "generate-outputs"
+name = "search"
+command = ["node", "{module}/tools/search.mjs"]
+enabled-by = "search"
+options = ["search"]
+rerun-on = [{ module = "tools/search.mjs" }, { project = "content" }]
+outputs = [{ tree = "search" }]
+```
+
+查询不会执行 hook；查询结果把模块声明的生成输入标为未验证，包含条件 hook 声明的输入。这只表示可能的生产者，不表示 hook 已执行或条件已满足。
+
+`options = ["search"]` 显式选择要传给命令的已校验顶层选项。选中的键缺失或其值不能表示为 JSON 时会报错，未选中的选项可以使用其他 Typst 值。`TOLA_MODULE_OPTIONS` 指向本次调用临时目录中的 JSON 文件；未选择选项时文件内容为 `{}`，调用结束后文件被移除。
+
+命令参数中的 `{name}`、`{module}`、`{project}`、`{tola}` 分别逐字替换为别名、模块根目录、项目根目录和当前可执行文件。`generates`、`outputs` 和项目 `rerun-on` 路径支持 `{name}`，替换后仍执行路径校验；`{module}`、`{project}` 只用于命令参数。
+
+清单包含 `schema-version = 1`、可选的 `summary`，以及命名查询和命令：
+
+```toml
+schema-version = 1
+summary = "Notebook tools"
+
+[queries.nodes]
+entry = "model.typ"
+label = "notebook-nodes"
+schema-version = 1
+
+[commands.list]
+help = "List notebook entries."
+kind = "query"
+query = "nodes"
+projection = ["id", "title"]
+
+[commands.edit]
+help = "Open a notebook entry."
+kind = "argv"
+argv = ["{module}/tools/edit"]
+```
+
+运行 `tola notes --help`、`tola notes list --help` 或 `tola query notes.nodes`。内置命令名不能用作模块名；多个别名可以选择同一个模块。帮助只读取声明，不求值查询或运行工具。清单中未知字段会报错。
+
+帮助、初始化入口和 argv 工具不要求无关的查询入口、插槽或资产文件存在；执行查询和构建站点时仍校验相应输入。对于 `{tola} nu` 命令，在脚本的 `main` 签名和注释中定义参数、类型、默认值与说明。根帮助、模块帮助和命令帮助读取这份签名，不执行脚本；运行时由 Nu 绑定参数。清单中的 `help` 可省略，也可用来覆盖说明；其他 argv 工具可用它描述用法。
+
+查询入口相对于模块目录，支持声明在站点根之外的模块。查询沿用站点的源文件发现与包解析，保持站点根不变，只替换查询入口。label 必须对应恰好一个 metadata 值；默认 `json` 格式只接受 JSON 标量、数组和字典，项目内容、路径及函数需要显式投影。
+
+`format = "entities"` 且 `schema-version = 1` 时，值为实体数组：每项有唯一字符串 `id`、字符串 `label`，可选字符串 `detail`、`url` 和原生 Typst `source` 路径。源文件与外来 URL 分开表示；命令输出的源路径包含虚拟根和路径。清单可用 `[[semantics]]`、`export = "local"`、`parameter = { positional = 0 }`、`role = "reference"`、`query = "nodes"` 声明公开入口的语义角色；点分路径如 `content.local` 按公开成员查找，不指定私有文件。具名参数使用 `{ named = "address" }`，定义角色使用 `"definition"`。角色必须引用实体查询。
+
+```toml
+[[semantics]]
+export = "local"
+parameter = { positional = 0 }
+role = "reference"
+query = "nodes"
+```
+
+查询不运行 hook、不导出页面，也不发布站点；缺失的生成输入仍会报错，需要先显式准备。默认只返回模型值；`--report` 返回版本化结果 envelope，标明输入模式和跳过 hook 的策略，将声明的生成输入标为未验证并提供诊断。`resultDigest` 是返回数据的摘要，不是输入版本，不能作为编辑文件的前置条件。
+
+查询命令支持 `--pretty`、`--output`、`--interactive` 和 `--report`。声明的 `projection` 是固定字段投影，在交互选择后应用。用 Nu 的 `where` 和 `select` 过滤或选择字段。`tola query ./tools/model.typ --label model` 可直接求值显式 Typst 查询文件，不要求先声明模块。
+
+argv 命令仅在调用时执行，以站点根为工作目录并继承标准流。参数中的 `{module}`、`{project}` 和 `{tola}` 做字面替换，用户追加的参数原样传递，不经过 shell 插值。工具收到 `TOLA_PROJECT_ROOT`、`TOLA_MODULE_ROOT`、`TOLA_MODULE_NAME`、`TOLA_CONTENT_ROOT`、`TOLA_CONFIG_PATH`、`TOLA_EXECUTABLE` 和 `TOLA_INPUT_SCOPE`；后两者让工具以调用方的输入策略调用同一个 Tola，但不会限制工具自身的权限。内容目录已经由 Tola 解析，工具不必猜测默认值。Tola 传递退出状态和取消操作，交互命令结束后恢复控制终端；此接口不管理 Ctrl-Z 引起的 shell 作业挂起。
+
+使用 `["{tola}", "nu", "tools/new.nu"]` 运行模块脚本，无须另外安装Nu。脚本入口相对模块目录，工作目录保持站点根；普通 `tola nu file.nu` 相对调用者目录。`tola nu --lsp` 服务Nu文件，`tola lsp` 服务Typst。
+
+模块 argv 命令和 hook 可以通过 `TOLA_REPORT_PATH` 提交不带位置的诊断批次，例如在 Nu 中用 `use tola diagnostic` 和 `diagnostic submit`。warning 不改变成功结果；error 使其失败。after-publish 的错误不会撤销发布。开发时复用的 `generate-outputs` 结果保留对应报告；未提交不同于提交空批次。此报告接口尚不支持独立检查或未保存的编辑器快照。
+
+模块可同时公开可复用的Nu库：
+
+```toml
+[nu]
+entry = "tools/mod.nu"
+```
+
+在Nu里通过 `use tola-modules notes` 导入所选别名，使用标准 `export` 定义公开函数。导入不会选择当前模块配置；站点选项由调用者显式传入。模块资源使用 `path self`，用户路径按调用工作目录解释。
+
+`tola nu @tola-modules/notes` 直接运行公共入口，要求 `export def main`；`tola nu @tola/image` 运行内置图片入口。这些定位符不是Nu文件路径或下载请求，未知名称不会回退到磁盘。普通以 `@` 开头的文件用 `./@file.nu`。Nu导入采用原生根模块，例如 `use tola image`；`tola nu --help` 静态列出内置和配置的Nu库。
+
+根命令 `query` 调用已有站点查询：`use tola` 后使用 `tola query`；`use tola query` 则直接导入 `query`。`use tola cli` 提供用于有限命令的 `cli capture`，返回 `stdout`、`stderr` 和 `exit_code`；需要时在参数列表中显式传入 `--config`。持续开发事件使用原生外部命令运行 `tola dev --json`，逐行读取 JSON，而不捕获整个进程。
+
+`use tola image` 提供字节和文件操作，例如：
+
+```nu
+use tola image
+let source = (image metadata-file photo.png)
+image resize-file photo.png preview.webp --width 640 --op fit-width --format webp
+```
+
+`resize-file` 返回元数据，目标文件必须不存在且所在目录必须已存在。
+
+模块还可声明站点初始化入口：
+
+```toml
+[init]
+argv = ["{tola}", "nu", "tools/init.nu"]
+```
+
+站点创建前运行 `tola init notes --from path/to/module -- --title "My notes"`。`--alias forest` 选择别名，省略时使用清单名称；已有站点可运行 `tola forest init notes`。`[init]` 与 `[commands.init]` 不能同时声明。
+
+初始化器在空的候选目录运行，`TOLA_INIT_OUTPUT_DIR` 是写入目录，`TOLA_INIT_TARGET_DIR` 是最终目录，`TOLA_INIT_INTERACTIVE` 表示是否请求交互。模块和可执行文件上下文可用，项目、内容和配置环境变量暂缺。生成配置的模块路径须从最终目录解析，并以 `TOLA_MODULE_NAME` 注册当前模块。
+
+Tola先校验候选配置和模块选项，再创建目标文件。`--dry-run` 执行生成和校验但不写目标目录；`--force` 允许非空目录但不会覆盖已有文件。初始化器是可信外部程序，应自行把输出写在 `TOLA_INIT_OUTPUT_DIR`，该接口不是沙箱。
+
+选择其他配置可用 `tola notes --config other.toml COMMAND ...`；COMMAND 之后的参数归该命令。声明的工具不会静默回退到全局插件。'''
 
 [sections.vendor]
 documentation = "把 packages、字体与图标随站点一起保留，以便在其他机器上离线构建。"
@@ -440,17 +628,16 @@ path = "vendor"
 
 `path` 必须是站点根下、`.tola` 之外的真实目录。
 
-Tola 准备依赖，检查准备好的副本能否在 `--pure` 下构建，然后才替换已安装副本。准备失败会保留上次输入；替换中途中断时，下一次 `tola vendor` 会恢复上次输入，在那之前构建会拒绝读取 vendored 输入，`--dry-run` 也会拒绝运行。Tola 的工作文件放在 `path` 旁的兄弟目录里，其名字以 `.` 开头、以 `-vendor` 结尾：上面的 `vendor` 对应 `.vendor-vendor`。
+Tola 准备依赖，检查准备好的副本能否在 `--pure` 下构建，然后才替换已安装副本。准备失败会保留上次输入；替换中途中断时，下一次 `tola vendor` 会完成替换，在那之前构建会拒绝运行，`--dry-run` 也会拒绝运行。Tola 的工作文件放在 `path` 旁的兄弟目录里，其名字以 `.` 开头、以 `-swap` 结尾：上面的 `vendor` 对应 `.vendor-swap`。
 
 `tola vendor` 不运行任何 hook 阶段——`before-build`、`generate-outputs`、`after-publish` 都不跑——也不发布站点 output。`before-build` hook 生成的文件必须已经存在：先用一次正常构建把它们生成出来。`generate-outputs` hook 的文件也不在冻结范围内：每次构建都会重新生成，本机如此，用 vendored 输入构建的机器也如此。
 
-Tola 整体替换这三个子目录，`path` 下的其他文件不动：
+Tola 整体替换这两个子目录，`path` 下的其他文件不动：
 
 - `typst-packages/` —— 按 `{namespace}/{name}/{version}/` 存放解析到的 package，包括从宿主根目录或 `--package-path` 选中的 package
 - `icons/` —— 每个配置的 `remote-json` collection 对应一个 `<namespace>.json`
-- `fonts/` —— 构建读取过、且没有 `typst.fonts.paths` 目录提供的编译器字体
 
-站点自己的源文件要放在这三个目录之外。所有 namespace 的 package，包括 `@preview`，都先从 vendor 解析，再查宿主根目录；远程图标 collection 优先读取 vendored 副本——这也是 `--pure` 构建读取它的唯一来源。把这些输入随站点提交：
+站点自己的源文件要放在这两个目录之外。所有 namespace 的 package，包括 `@preview`，都先从 vendor 解析，再查宿主根目录；远程图标 collection 优先读取 vendored 副本——这也是 `--pure` 构建读取它的唯一来源。把这些输入随站点提交：
 
 ```sh
 tola vendor --dry-run   # prepare and verify without replacing vendor
@@ -588,6 +775,8 @@ max_warnings = 3
 "typst.fonts.system" = "是否把宿主机自己的字体也算上。开启后，换一台机器构建可能得到不同的结果。"
 
 "icons.collections" = "每个 namespace 说明它的图标从哪来：本地 SVG 目录或 IconifyJSON 文件，或按 Tola 已索引的 preset、或按 URL 与摘要指名的远程 collection。"
+
+"theme.module" = "提供整站入口的模块别名。"
 
 "vendor.path" = "`tola vendor` 把这次构建选中的输入冻结到哪个目录，相对站点根。"
 

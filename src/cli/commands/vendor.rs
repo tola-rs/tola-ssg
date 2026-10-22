@@ -8,8 +8,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use tola_build::cancellation::BuildCancellation;
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_build::config::ResolvedSiteConfig;
+use tola_build::filesystem::{SwapError, SwapMember, TreeSwap};
 use tola_build::{BuildResources, InputScope};
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
@@ -46,34 +48,35 @@ pub(in crate::cli) fn run(
         .path
         .as_deref()
         .unwrap_or_else(|| Path::new("tola.toml"));
-    ensure!(
-        config.vendor().path.is_some(),
-        "this site does not declare a `[vendor] path`; add `path = \"vendor\"` to `{}`",
-        config_name.display()
-    );
+    let Some(vendor_path) = config.vendor().path.as_deref() else {
+        anyhow::bail!(
+            "this site does not declare a `[vendor] path`; add `path = \"vendor\"` to `{}`",
+            config_name.display()
+        );
+    };
     let _lock = tola_build::build::SiteBuildLock::acquire(&config, &cancellation, || {
         let _ = output.waiting_for_build();
     })?;
+    let replacement = VendorReplacement::locate(&config, vendor_path)?;
     if vendor.dry_run {
-        VendorReplacement::reject_interrupted_install(&config)?;
+        replacement.refuse_unfinished_install()?;
     }
     // Earlier releases froze host fonts under `fonts/`; Tola reads no vendored fonts now.
-    if let Some(root) = config.vendor().path.as_ref() {
-        let legacy = root.join("fonts");
-        if legacy.is_dir() {
-            let display = tola_build::filesystem::display_path(&legacy, config.get_root());
-            if vendor.dry_run {
-                output.status(format!("Would remove the obsolete `{display}`"))?;
-            } else {
-                fs::remove_dir_all(&legacy)
-                    .with_context(|| format!("could not remove the obsolete `{display}`"))?;
-                output.status(format!(
-                    "Removed the obsolete `{display}`; fonts are site inputs under `[typst.fonts] paths`"
-                ))?;
-            }
+    let legacy = vendor_path.join("fonts");
+    if legacy.is_dir() {
+        let display = tola_build::filesystem::display_path(&legacy, config.get_root());
+        if vendor.dry_run {
+            output.status(format!("Would remove the obsolete `{display}`"))?;
+        } else {
+            fs::remove_dir_all(&legacy)
+                .with_context(|| format!("could not remove the obsolete `{display}`"))?;
+            output.status(format!(
+                "Removed the obsolete `{display}`; fonts are site inputs under `[typst.fonts] paths`"
+            ))?;
         }
     }
-    let replacement = VendorReplacement::open(&config)?;
+    // Settle what an earlier run left before any build reads the vendored inputs.
+    replacement.recover()?;
     let resources = resources.with_input_scope(scope);
     let prepared: Result<()> = (|| {
         cancellation.ensure_active()?;
@@ -91,7 +94,8 @@ pub(in crate::cli) fn run(
             reject_previous_inputs(&selection.site, &replacement)?;
         }
         let icons = selected_icon_collections(&selection_config, &resources, &cancellation)?;
-        let candidate = replacement.candidate();
+        replacement.open()?;
+        let candidate = replacement.candidate_root();
         let mut copy = VendorCopy {
             boundary: resources.source_boundary(&selection_config),
             replacement: &replacement,
@@ -119,12 +123,12 @@ pub(in crate::cli) fn run(
         verified.ensure_fresh(&cancellation)?;
         cancellation.ensure_active()?;
         if !vendor.dry_run {
-            replacement.install(&cancellation)?;
+            replacement.commit(&cancellation)?;
         }
         Ok(())
     })();
     if let Err(error) = prepared {
-        if let Err(recovery) = replacement.discard() {
+        if let Err(recovery) = replacement.recover() {
             // The recovery failure is not part of the returned chain, so the file log keeps it.
             tracing::warn!(
                 target: "tola::vendor",
@@ -132,21 +136,18 @@ pub(in crate::cli) fn run(
                 "vendor recovery did not finish"
             );
             if !is_cancellation(&error) {
-                let note =
-                    "Tola could not undo its work, so an unfinished replacement is left behind";
+                let note = "an unfinished replacement is left behind, so the next build refuses the vendored inputs";
                 let diagnostics =
                     crate::cli::output::attached_or_fallback(&error, crate::codes::command::FAILED)
                         .into_iter()
                         .map(|diagnostic| diagnostic.with_note(note))
                         .collect();
-                return Err(
-                    tola_build::diagnostic::DiagnosticError::attach(error, diagnostics).into(),
-                );
+                return Err(tola_diagnostic::DiagnosticError::attach(error, diagnostics).into());
             }
         }
         return Err(error);
     }
-    if let Err(error) = replacement.cleanup() {
+    if let Err(error) = replacement.finish() {
         // The replacement is committed; the working files it left behind stay for the next run.
         tracing::warn!(
             target: "tola::vendor",
@@ -292,7 +293,7 @@ fn reject_previous_inputs(
         ensure!(
             !previous.iter().any(|root| physical.starts_with(root)),
             "the build still reads `{}` from the previous vendor inputs; keep site-owned sources outside `typst-packages` and `icons`",
-            replacement.display_destination(path)
+            replacement.destination(path)
         );
     }
     Ok(())
@@ -321,7 +322,7 @@ fn show_selection(
         output.status(format!(
             "{action} `{}` into `{}`",
             package.package,
-            replacement.display_destination(&destination)
+            replacement.destination(&destination)
         ))?;
     }
     for collection in icons {
@@ -352,7 +353,8 @@ impl VendorCopy<'_> {
                 )
             })
             .map_err(|error| self.failure(VendorStep::ReadingSource, destination, error))?;
-        if physical.starts_with(&self.replacement.workspace) || destination.starts_with(&physical) {
+        if physical.starts_with(self.replacement.workspace()) || destination.starts_with(&physical)
+        {
             return Err(self.refusal(
                 destination,
                 "its source and the vendored replacement overlap",
@@ -463,7 +465,7 @@ impl VendorCopy<'_> {
             self.cancellation.ensure_active()?;
             let destination = self
                 .replacement
-                .candidate()
+                .candidate_root()
                 .join("icons")
                 .join(format!("{}.json", collection.namespace));
             fs::write(&destination, &collection.bytes)
@@ -485,57 +487,22 @@ impl VendorCopy<'_> {
         destination: &Path,
         source: anyhow::Error,
     ) -> anyhow::Error {
-        let vendored = self.vendored_destination(destination);
-        vendor_failure(
-            &vendored,
-            step.message(&vendored),
-            step.advice(),
-            Some(source),
-        )
+        self.replacement.step_failure(step, destination, source)
     }
 
     /// Report a refusal Tola states itself about one copy step.
     fn refusal(&self, destination: &Path, reason: &str, advice: &str) -> anyhow::Error {
-        let vendored = self.vendored_destination(destination);
-        vendor_failure(
-            &vendored,
-            format!("Tola cannot prepare `{vendored}`: {reason}"),
-            advice,
-            None,
-        )
-    }
-
-    /// The vendored destination a prepared path becomes, as the site author names it.
-    fn vendored_destination(&self, destination: &Path) -> String {
-        let staged = destination
-            .strip_prefix(self.replacement.candidate())
-            .or_else(|_| destination.strip_prefix(self.replacement.workspace.join("previous")));
-        match staged {
-            Ok(relative) => display_path_within(
-                &self.replacement.root.join(relative),
-                &self.replacement.site,
-            ),
-            Err(_) if destination.starts_with(&self.replacement.workspace) => {
-                display_path_within(&self.replacement.root, &self.replacement.site)
-            }
-            Err(_) => display_path_within(destination, &self.replacement.site),
-        }
+        self.replacement.refusal(destination, reason, advice)
     }
 }
 
 /// One step of the vendor operation, stated for the site author who must act on its failure.
 #[derive(Clone, Copy)]
 enum VendorStep {
-    /// Creating and inspecting the working directory that holds the prepared replacement.
+    /// Claiming the workspace and creating the trees the replacement is prepared in.
     Preparing,
-    /// Reading Tola's own working files, including the record of an unfinished replacement.
-    Reading,
     /// Replacing the vendored trees with the prepared ones.
     Installing,
-    /// Undoing a replacement that stopped before it committed.
-    Undoing,
-    /// Removing the working files of a finished replacement.
-    Cleaning,
     /// Reading one selected input from its source.
     ReadingSource,
     /// Writing one selected input into the prepared replacement.
@@ -547,10 +514,7 @@ impl VendorStep {
     fn operation(self) -> &'static str {
         match self {
             Self::Preparing => "prepare the working files it needs for",
-            Self::Reading => "read the working files it keeps for",
             Self::Installing => "replace the vendored inputs in",
-            Self::Undoing => "undo the replacement of",
-            Self::Cleaning => "remove the working files it used for",
             Self::ReadingSource => "read the source of",
             Self::WritingCopy => "prepare",
         }
@@ -559,17 +523,11 @@ impl VendorStep {
     /// The reader's next step.
     fn advice(self) -> &'static str {
         match self {
-            Self::Preparing | Self::Cleaning => {
+            Self::Preparing => {
                 "Check that Tola can create and remove directories beside the vendored inputs, then rerun `tola vendor`"
-            }
-            Self::Reading => {
-                "Check that Tola can read the working files it keeps beside the vendored inputs, then rerun `tola vendor`"
             }
             Self::Installing => {
                 "Check that Tola can write inside the vendored directory and the site directory, then rerun `tola vendor`"
-            }
-            Self::Undoing => {
-                "Check that Tola can write inside the vendored directory, then rerun `tola vendor`"
             }
             Self::ReadingSource => {
                 "Check that the vendored sources are readable, then rerun `tola vendor --refresh`"
@@ -617,180 +575,121 @@ fn is_cancellation(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The vendored trees one run replaces, prepared in a swap workspace beside them.
 struct VendorReplacement {
     site: PathBuf,
     root: PathBuf,
-    workspace: PathBuf,
-    owner: Vec<u8>,
+    swap: TreeSwap,
 }
 
 impl VendorReplacement {
     /// Resolves the site's vendor destinations without touching them.
-    fn locate(config: &tola_build::config::ResolvedSiteConfig) -> Result<Self> {
+    fn locate(config: &ResolvedSiteConfig, vendor_path: &Path) -> Result<Self> {
         let site = fs::canonicalize(config.get_root()).with_context(|| {
             format!(
                 "could not resolve the site directory `{}`",
                 crate::terminal::display_path(config.get_root())
             )
         })?;
-        let declared = config
-            .vendor()
-            .path
-            .as_deref()
-            .context("vendor path is missing")?;
-        let relative = declared
-            .strip_prefix(config.get_root())
-            .context("vendor path must stay below the site root")?;
-        ensure!(
-            relative
-                .components()
-                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir)),
-            "vendor path must stay below the site root"
-        );
-        let root = site.join(relative);
-        let workspace = config
-            .vendor()
-            .workspace_path()
-            .context("vendor path must name a directory below the site root")?;
-        let workspace = site.join(
-            workspace
-                .strip_prefix(config.get_root())
-                .context("vendor path must name a directory below the site root")?,
-        );
-        let mut owner = b"tola-vendor-root\nvendor=".to_vec();
-        for part in relative.components() {
-            if let Component::Normal(name) = part {
-                owner.extend_from_slice(name.as_encoded_bytes());
-                owner.push(b'/');
-            }
-        }
-        owner.push(b'\n');
+        let root = site.join(config.root_relative(vendor_path));
         let replacement = Self {
+            swap: TreeSwap::beside(&site, &root)?,
             site,
             root,
-            workspace,
-            owner,
         };
         replacement.validate_destinations()?;
         Ok(replacement)
     }
 
-    /// Refuses a dry run over an installation interrupted before it committed: recovering it
-    /// restores the previous vendor trees, which the dry run must leave alone.
-    fn reject_interrupted_install(config: &tola_build::config::ResolvedSiteConfig) -> Result<()> {
-        let replacement = Self::locate(config)?;
-        if !replacement.workspace_occupied()? {
-            return Ok(());
-        }
-        // A foreign or malformed workspace keeps its own refusal instead of the recovery hint.
-        replacement.validate_workspace()?;
+    /// Refuse a dry run while an earlier replacement still needs `tola vendor` to finish it.
+    fn refuse_unfinished_install(&self) -> Result<()> {
         ensure!(
-            !replacement.install_interrupted()?,
-            "an interrupted vendor installation needs recovery; run `tola vendor` to restore the previous inputs"
+            !self
+                .swap
+                .is_claimed()
+                .map_err(|error| self.swap_failure(error))?,
+            "an interrupted vendor installation needs recovery; run `tola vendor` to finish it"
         );
         Ok(())
     }
 
-    fn open(config: &tola_build::config::ResolvedSiteConfig) -> Result<Self> {
-        let replacement = Self::locate(config)?;
-        if replacement.workspace_occupied()? {
-            replacement.discard()?;
-        } else if replacement.directory_exists(&replacement.workspace)? {
-            replacement.remove_workspace(VendorStep::Preparing)?;
-        }
-        replacement.create_workspace()?;
-        replacement.claim_workspace()?;
-        let candidate = replacement.candidate();
-        replacement.create_prepared_directory(&candidate)?;
-        replacement.create_prepared_directory(&replacement.workspace.join("previous"))?;
+    /// Claim the workspace and create the trees the verification build reads.
+    fn open(&self) -> Result<()> {
+        self.swap
+            .claim()
+            .map_err(|error| self.swap_failure(error))?;
         for name in VENDOR_TREES {
-            replacement.create_prepared_directory(&candidate.join(name))?;
+            let tree = self.candidate_root().join(name);
+            fs::create_dir_all(&tree)
+                .with_context(|| format!("could not create `{}`", tree.display()))
+                .map_err(|error| self.step_failure(VendorStep::Preparing, &tree, error))?;
         }
-        Ok(replacement)
+        Ok(())
     }
 
-    /// Whether the workspace holds anything; an empty directory carries no installation state.
-    fn workspace_occupied(&self) -> Result<bool> {
-        if !self.directory_exists(&self.workspace)? {
-            return Ok(false);
+    /// Complete a replacement an earlier run committed, or discard one it never did.
+    fn recover(&self) -> Result<()> {
+        self.swap
+            .recover()
+            .map_err(|error| self.swap_failure(error))?;
+        self.swap.finish().map_err(|error| self.swap_failure(error))
+    }
+
+    /// Replace both vendored trees with the verified ones.
+    fn commit(&self, cancellation: &BuildCancellation) -> Result<()> {
+        cancellation.ensure_active()?;
+        let staged = self.swap.staged(0);
+        let staged_directory = staged
+            .parent()
+            .expect("a staged tree lives below the workspace");
+        fs::create_dir_all(staged_directory)
+            .with_context(|| format!("could not prepare `{}`", staged_directory.display()))
+            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
+        let mut members = Vec::with_capacity(VENDOR_TREES.len());
+        for (index, name) in VENDOR_TREES.iter().enumerate() {
+            let prepared = self.candidate_root().join(name);
+            fs::rename(&prepared, self.swap.staged(index))
+                .with_context(|| format!("could not prepare `{}`", prepared.display()))
+                .map_err(|error| self.step_failure(VendorStep::Installing, &prepared, error))?;
+            members.push(SwapMember {
+                staged: self.swap.staged(index),
+                destination: self.root.join(name),
+            });
         }
-        Ok(fs::read_dir(&self.workspace)
-            .with_context(|| format!("could not read `{}`", self.workspace.display()))
-            .map_err(|error| self.step_failure(VendorStep::Reading, &self.workspace, error))?
-            .next()
-            .is_some())
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("could not create `{}`", self.root.display()))
+            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
+        self.swap
+            .commit(&members)
+            .map_err(|error| self.swap_failure(error))
     }
 
-    /// Whether the workspace journal records an installation interrupted before it committed.
-    fn install_interrupted(&self) -> Result<bool> {
-        if self.directory_exists(&self.workspace.join("committed"))? {
-            return Ok(false);
+    /// Remove the workspace a completed replacement leaves behind.
+    fn finish(&self) -> Result<()> {
+        self.swap.finish()?;
+        Ok(())
+    }
+
+    /// The vendor root the verification build reads, holding both prepared trees by name.
+    fn candidate_root(&self) -> PathBuf {
+        self.swap.workspace().join("candidate")
+    }
+
+    fn workspace(&self) -> &Path {
+        self.swap.workspace()
+    }
+
+    /// The site author's spelling of a path Tola uses while it prepares the replacement.
+    fn destination(&self, path: &Path) -> String {
+        match path.strip_prefix(self.candidate_root()) {
+            Ok(relative) => display_path_within(&self.root.join(relative), &self.site),
+            Err(_) => display_path_within(path, &self.site),
         }
-        let journal = self.workspace.join("replacing");
-        journal
-            .try_exists()
-            .with_context(|| format!("could not inspect `{}`", journal.display()))
-            .map_err(|error| self.step_failure(VendorStep::Reading, &self.workspace, error))
-    }
-
-    fn candidate(&self) -> PathBuf {
-        self.workspace.join("candidate")
-    }
-
-    /// Create the working directory Tola prepares the replacement in.
-    fn create_workspace(&self) -> Result<()> {
-        fs::create_dir_all(&self.workspace)
-            .with_context(|| format!("could not create `{}`", self.workspace.display()))
-            .map_err(|error| self.step_failure(VendorStep::Preparing, &self.workspace, error))
-    }
-
-    /// Remove the working directory Tola prepared the replacement in.
-    fn remove_workspace(&self, step: VendorStep) -> Result<()> {
-        fs::remove_dir(&self.workspace)
-            .with_context(|| format!("could not remove `{}`", self.workspace.display()))
-            .map_err(|error| self.step_failure(step, &self.workspace, error))
-    }
-
-    /// Claim the working directory for this site's vendor path.
-    fn claim_workspace(&self) -> Result<()> {
-        let owner = self.workspace.join("owner");
-        let mut marker = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&owner)
-            .with_context(|| format!("could not create `{}`", owner.display()))
-            .map_err(|error| self.step_failure(VendorStep::Preparing, &self.workspace, error))?;
-        marker
-            .write_all(&self.owner)
-            .with_context(|| format!("could not write `{}`", owner.display()))
-            .map_err(|error| self.step_failure(VendorStep::Preparing, &self.workspace, error))?;
-        marker
-            .sync_all()
-            .with_context(|| format!("could not write `{}`", owner.display()))
-            .map_err(|error| self.step_failure(VendorStep::Preparing, &self.workspace, error))
-    }
-
-    /// Create one directory below the working directory Tola prepares the replacement in.
-    fn create_prepared_directory(&self, path: &Path) -> Result<()> {
-        fs::create_dir(path)
-            .with_context(|| format!("could not create `{}`", path.display()))
-            .map_err(|error| self.step_failure(VendorStep::Preparing, &self.workspace, error))
-    }
-
-    /// The site author's spelling of a vendor path.
-    ///
-    /// A path Tola only uses while preparing the replacement is reported as the vendored
-    /// destination, whose exact spelling stays in the raw chain.
-    fn display_destination(&self, path: &Path) -> String {
-        if path.starts_with(&self.workspace) {
-            return display_path_within(&self.root, &self.site);
-        }
-        display_path_within(path, &self.site)
     }
 
     /// Report the failure of one vendor step on `path`.
     fn step_failure(&self, step: VendorStep, path: &Path, source: anyhow::Error) -> anyhow::Error {
-        let destination = self.display_destination(path);
+        let destination = self.destination(path);
         vendor_failure(
             &destination,
             step.message(&destination),
@@ -801,7 +700,7 @@ impl VendorReplacement {
 
     /// Report a refusal Tola states itself about `path`.
     fn refusal(&self, path: &Path, reason: &str, advice: &str) -> anyhow::Error {
-        let destination = self.display_destination(path);
+        let destination = self.destination(path);
         vendor_failure(
             &destination,
             format!("Tola cannot prepare `{destination}`: {reason}"),
@@ -810,208 +709,26 @@ impl VendorReplacement {
         )
     }
 
+    /// Report a failed replacement step, refusing another site's workspace in Tola's words.
+    fn swap_failure(&self, error: SwapError) -> anyhow::Error {
+        match error {
+            SwapError::ForeignWorkspace { .. } => self.refusal(
+                &self.root,
+                "the working files beside the vendored inputs belong to another site",
+                VENDOR_PATH_CONFLICT_ADVICE,
+            ),
+            error => anyhow::Error::new(error),
+        }
+    }
+
+    /// Refuse a vendored tree a replacement would write through: a link or a plain file at any
+    /// name below the vendor path.
     fn validate_destinations(&self) -> Result<()> {
-        ensure!(
-            self.root != self.site,
-            "vendor path must name a directory below the site root"
-        );
         self.validate_directory_chain(&self.root)?;
-        self.validate_directory_chain(&self.workspace)?;
         for name in VENDOR_TREES {
             self.validate_directory_chain(&self.root.join(name))?;
         }
         Ok(())
-    }
-
-    fn validate_workspace(&self) -> Result<()> {
-        self.validate_directory_chain(&self.workspace)?;
-        let marker = self.workspace.join("owner");
-        let metadata = fs::symlink_metadata(&marker).map_err(|error| {
-            let destination = self.display_destination(&self.root);
-            vendor_failure(
-                &destination,
-                format!(
-                    "Tola cannot prepare `{destination}`: the working files beside the vendored inputs are not Tola's own"
-                ),
-                VENDOR_PATH_CONFLICT_ADVICE,
-                Some(
-                    anyhow::Error::new(error)
-                        .context(format!("could not read `{}`", marker.display())),
-                ),
-            )
-        })?;
-        let owned = metadata.is_file()
-            && !metadata.is_symlink()
-            && fs::read(&marker)
-                .with_context(|| format!("could not read `{}`", marker.display()))
-                .map_err(|error| self.step_failure(VendorStep::Reading, &self.workspace, error))?
-                == self.owner;
-        if !owned {
-            return Err(self.refusal(
-                &self.root,
-                "the working files beside the vendored inputs belong to another site",
-                VENDOR_PATH_CONFLICT_ADVICE,
-            ));
-        }
-        let entries = fs::read_dir(&self.workspace)
-            .with_context(|| format!("could not read `{}`", self.workspace.display()))
-            .map_err(|error| self.step_failure(VendorStep::Reading, &self.workspace, error))?;
-        for child in entries {
-            let child = child
-                .with_context(|| format!("could not read `{}`", self.workspace.display()))
-                .map_err(|error| self.step_failure(VendorStep::Reading, &self.workspace, error))?;
-            let name = child.file_name();
-            let path = child.path();
-            let metadata = child
-                .file_type()
-                .with_context(|| format!("could not read `{}`", path.display()))
-                .map_err(|error| self.step_failure(VendorStep::Reading, &self.workspace, error))?;
-            let directory = ["candidate", "previous", "committed"]
-                .iter()
-                .any(|known| name == *known);
-            let file = ["owner", "replacing", "replacing.pending"]
-                .iter()
-                .any(|known| name == *known);
-            if !((directory && metadata.is_dir()) || (file && metadata.is_file())) {
-                return Err(self.refusal(
-                    &self.root,
-                    "the working files beside the vendored inputs hold a path Tola does not own",
-                    VENDOR_PATH_CONFLICT_ADVICE,
-                ));
-            }
-        }
-        for base in [self.candidate(), self.workspace.join("previous")] {
-            for name in VENDOR_TREES {
-                self.validate_directory_chain(&base.join(name))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn install(&self, cancellation: &BuildCancellation) -> Result<()> {
-        cancellation.ensure_active()?;
-        self.validate_destinations()?;
-        self.validate_workspace()?;
-        let mut previous = [b'0'; VENDOR_TREES.len()];
-        for (index, name) in VENDOR_TREES.iter().enumerate() {
-            if self.directory_exists(&self.root.join(name))? {
-                previous[index] = b'1';
-            }
-        }
-        let pending = self.workspace.join("replacing.pending");
-        let mut journal = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&pending)
-            .with_context(|| format!("could not create `{}`", pending.display()))
-            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
-        journal
-            .write_all(&previous)
-            .with_context(|| format!("could not write `{}`", pending.display()))
-            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
-        journal
-            .sync_all()
-            .with_context(|| format!("could not write `{}`", pending.display()))
-            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
-        drop(journal);
-        fs::rename(&pending, self.workspace.join("replacing"))
-            .with_context(|| format!("could not move `{}` into place", pending.display()))
-            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
-        fs::create_dir_all(&self.root)
-            .with_context(|| format!("could not create `{}`", self.root.display()))
-            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
-        // The journal precedes every rename. Until `committed` exists, recovery restores all
-        // previous trees, including those installed before an interruption between subtrees.
-        for (index, name) in VENDOR_TREES.iter().enumerate() {
-            cancellation.ensure_active()?;
-            self.validate_destinations()?;
-            let tree = self.root.join(name);
-            if previous[index] == b'1' {
-                fs::rename(&tree, self.workspace.join("previous").join(name))
-                    .with_context(|| format!("could not retain previous vendor `{name}`"))
-                    .map_err(|error| self.step_failure(VendorStep::Installing, &tree, error))?;
-            }
-            fs::rename(self.candidate().join(name), &tree)
-                .with_context(|| format!("could not install prepared vendor `{name}`"))
-                .map_err(|error| self.step_failure(VendorStep::Installing, &tree, error))?;
-        }
-        cancellation.ensure_active()?;
-        let committed = self.workspace.join("committed");
-        fs::create_dir(&committed)
-            .with_context(|| format!("could not create `{}`", committed.display()))
-            .map_err(|error| self.step_failure(VendorStep::Installing, &self.root, error))?;
-        Ok(())
-    }
-
-    fn discard(&self) -> Result<()> {
-        self.validate_destinations()?;
-        self.validate_workspace()?;
-        let journal = self.workspace.join("replacing");
-        if self.install_interrupted()? {
-            let previous = fs::read(&journal)
-                .with_context(|| format!("could not read `{}`", journal.display()))
-                .map_err(|error| self.step_failure(VendorStep::Undoing, &self.root, error))?;
-            if previous.len() != VENDOR_TREES.len()
-                || !previous
-                    .iter()
-                    .all(|present| matches!(*present, b'0' | b'1'))
-            {
-                let destination = self.display_destination(&self.root);
-                return Err(vendor_failure(
-                    &destination,
-                    format!(
-                        "Tola cannot undo the replacement of `{destination}`: the record of the unfinished replacement is damaged"
-                    ),
-                    VENDOR_PATH_CONFLICT_ADVICE,
-                    None,
-                ));
-            }
-            // Cancellation must not interrupt rollback between input trees.
-            for (index, name) in VENDOR_TREES.iter().enumerate() {
-                let backup = self.workspace.join("previous").join(name);
-                let current = self.root.join(name);
-                if self.directory_exists(&backup)? {
-                    self.remove_directory(&current, VendorStep::Undoing)?;
-                    fs::rename(&backup, &current)
-                        .with_context(|| format!("could not restore previous vendor `{name}`"))
-                        .map_err(|error| self.step_failure(VendorStep::Undoing, &current, error))?;
-                } else if previous[index] == b'0' {
-                    self.remove_directory(&current, VendorStep::Undoing)?;
-                }
-            }
-        }
-        self.cleanup()
-    }
-
-    fn cleanup(&self) -> Result<()> {
-        self.validate_workspace()?;
-        self.remove_directory(&self.candidate(), VendorStep::Cleaning)?;
-        self.remove_directory(&self.workspace.join("previous"), VendorStep::Cleaning)?;
-        for name in ["replacing", "replacing.pending"] {
-            let path = self.workspace.join(name);
-            if path
-                .try_exists()
-                .with_context(|| format!("could not inspect `{}`", path.display()))
-                .map_err(|error| self.step_failure(VendorStep::Cleaning, &self.workspace, error))?
-            {
-                fs::remove_file(&path)
-                    .with_context(|| format!("could not remove `{}`", path.display()))
-                    .map_err(|error| {
-                        self.step_failure(VendorStep::Cleaning, &self.workspace, error)
-                    })?;
-            }
-        }
-        let committed = self.workspace.join("committed");
-        if self.directory_exists(&committed)? {
-            fs::remove_dir(&committed)
-                .with_context(|| format!("could not remove `{}`", committed.display()))
-                .map_err(|error| self.step_failure(VendorStep::Cleaning, &self.workspace, error))?;
-        }
-        let owner = self.workspace.join("owner");
-        fs::remove_file(&owner)
-            .with_context(|| format!("could not remove `{}`", owner.display()))
-            .map_err(|error| self.step_failure(VendorStep::Cleaning, &self.workspace, error))?;
-        self.remove_workspace(VendorStep::Cleaning)
     }
 
     /// Whether `path` is a real directory, refusing a link or a file at that name.
@@ -1020,23 +737,17 @@ impl VendorReplacement {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
-                return Err(self.step_failure(
-                    VendorStep::Reading,
-                    path,
-                    anyhow::Error::new(error)
-                        .context(format!("could not inspect `{}`", path.display())),
+                let destination = self.destination(path);
+                return Err(vendor_failure(
+                    &destination,
+                    format!("Tola could not inspect `{destination}`"),
+                    "Check that Tola can read the vendored directory, then rerun `tola vendor`",
+                    Some(anyhow::Error::new(error)),
                 ));
             }
         };
         if metadata.is_dir() && !metadata.is_symlink() {
             return Ok(true);
-        }
-        if path.starts_with(&self.workspace) {
-            return Err(self.refusal(
-                &self.root,
-                "the working files Tola keeps beside the vendored inputs are not a directory it can use",
-                VENDOR_PATH_CONFLICT_ADVICE,
-            ));
         }
         Err(self.refusal(
             path,
@@ -1063,42 +774,24 @@ impl VendorReplacement {
         }
         Ok(())
     }
-
-    /// Remove one vendor directory tree, reporting it as `step`.
-    fn remove_directory(&self, path: &Path, step: VendorStep) -> Result<()> {
-        if !self.directory_exists(path)? {
-            return Ok(());
-        }
-        fs::remove_dir_all(path)
-            .with_context(|| format!("could not remove vendor tree `{}`", path.display()))
-            .map_err(|error| self.step_failure(step, path, error))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The vendor replacement of this site's declared `vendor` directory, workspace claimed.
     fn replacement(site: &Path) -> VendorReplacement {
-        let root = site.join("vendor");
-        let workspace = site.join(".vendor-vendor");
-        fs::create_dir_all(workspace.join("candidate")).unwrap();
-        fs::create_dir(workspace.join("previous")).unwrap();
-        let owner = b"vendor owner".to_vec();
-        fs::write(workspace.join("owner"), &owner).unwrap();
-        for name in VENDOR_TREES {
-            fs::create_dir(workspace.join("candidate").join(name)).unwrap();
-        }
-        VendorReplacement {
-            site: site.to_path_buf(),
-            root,
-            workspace,
-            owner,
-        }
+        // The resolved site root is canonical, so the test spells the target the same way.
+        let site = site.canonicalize().unwrap();
+        let replacement =
+            VendorReplacement::locate(&site_config(&site), &site.join("vendor")).unwrap();
+        replacement.open().unwrap();
+        replacement
     }
 
     /// A site configuration whose `[vendor] path` names this root's `vendor` directory.
-    fn site_config(root: &Path) -> tola_build::config::ResolvedSiteConfig {
+    fn site_config(root: &Path) -> ResolvedSiteConfig {
         tola_build::config::loading::resolve_site_config(
             &root.join("tola.toml"),
             "[vendor]\npath = \"vendor\"\n",
@@ -1123,119 +816,129 @@ mod tests {
         }
     }
 
-    /// The superseded `typst-packages` tree a replacement must restore on discard.
-    fn seed_old_package(replacement: &VendorReplacement) {
-        fs::create_dir_all(replacement.root.join("typst-packages")).unwrap();
-        fs::write(
-            replacement.root.join("typst-packages/lib.typ"),
-            b"old package",
-        )
-        .unwrap();
+    /// A tree the verification build would accept, written at `path`.
+    fn write_tree(path: &Path, file: &str, contents: &str) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(path.join(file), contents).unwrap();
     }
 
     #[test]
-    fn interrupted_replace_restores_inputs() {
+    fn foreign_swap_workspace_is_refused() {
+        let site = tempfile::TempDir::new().unwrap();
+        let workspace = site.path().join(".vendor-swap");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("owner"), b"another site").unwrap();
+        fs::write(workspace.join("author.txt"), b"author bytes").unwrap();
+
+        let site_root = site.path().canonicalize().unwrap();
+        let replacement =
+            VendorReplacement::locate(&site_config(&site_root), &site_root.join("vendor")).unwrap();
+        assert!(replacement.open().is_err());
+
+        assert_eq!(
+            fs::read(workspace.join("author.txt")).unwrap(),
+            b"author bytes"
+        );
+    }
+
+    /// A replacement the last run committed is completed by the next run, not undone.
+    #[test]
+    fn pending_commit_is_completed() {
         let site = tempfile::TempDir::new().unwrap();
         let replacement = replacement(site.path());
-        seed_old_package(&replacement);
-        fs::write(replacement.root.join("notes.txt"), b"author notes").unwrap();
-        fs::write(replacement.workspace.join("replacing"), b"10").unwrap();
-        fs::rename(
-            replacement.root.join("typst-packages"),
-            replacement.workspace.join("previous/typst-packages"),
-        )
-        .unwrap();
-        fs::rename(
-            replacement.candidate().join("typst-packages"),
-            replacement.root.join("typst-packages"),
-        )
-        .unwrap();
-        fs::write(
-            replacement.root.join("typst-packages/lib.typ"),
-            b"incomplete replacement",
-        )
-        .unwrap();
-        replacement.discard().unwrap();
+        write_tree(
+            &replacement.root.join("typst-packages"),
+            "lib.typ",
+            "old package",
+        );
+        write_tree(
+            &replacement.candidate_root().join("typst-packages"),
+            "lib.typ",
+            "verified",
+        );
+        write_tree(
+            &replacement.candidate_root().join("icons"),
+            "ui.json",
+            "verified icons",
+        );
+
+        replacement.commit(&BuildCancellation::default()).unwrap();
+        replacement.recover().unwrap();
+
         assert_eq!(
             fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
-            b"old package"
+            b"verified"
         );
+        assert_eq!(
+            fs::read(replacement.root.join("icons/ui.json")).unwrap(),
+            b"verified icons"
+        );
+        assert!(!replacement.workspace().exists());
+    }
+
+    /// Both vendored trees are installed as one set; a site file beside them stays.
+    #[test]
+    fn install_replaces_both_trees_siblings() {
+        let site = tempfile::TempDir::new().unwrap();
+        let replacement = replacement(site.path());
+        write_tree(
+            &replacement.root.join("typst-packages"),
+            "lib.typ",
+            "old package",
+        );
+        write_tree(&replacement.root.join("icons"), "old.json", "old icons");
+        fs::write(replacement.root.join("notes.txt"), b"author notes").unwrap();
+        write_tree(
+            &replacement.candidate_root().join("typst-packages"),
+            "lib.typ",
+            "verified",
+        );
+        write_tree(
+            &replacement.candidate_root().join("icons"),
+            "ui.json",
+            "verified icons",
+        );
+
+        replacement.commit(&BuildCancellation::default()).unwrap();
+        replacement.finish().unwrap();
+
+        assert_eq!(
+            fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
+            b"verified"
+        );
+        assert_eq!(
+            fs::read(replacement.root.join("icons/ui.json")).unwrap(),
+            b"verified icons"
+        );
+        assert!(!replacement.root.join("icons/old.json").exists());
         assert_eq!(
             fs::read(replacement.root.join("notes.txt")).unwrap(),
             b"author notes"
         );
+        assert!(!replacement.workspace().exists());
     }
 
+    /// A cancelled run keeps the installed trees and removes its workspace.
     #[test]
-    fn cancelled_replace_keeps_previous() {
+    fn cancelled_run_keeps_installed_trees() {
         let site = tempfile::TempDir::new().unwrap();
         let replacement = replacement(site.path());
-        seed_old_package(&replacement);
+        write_tree(
+            &replacement.root.join("typst-packages"),
+            "lib.typ",
+            "old package",
+        );
         let canceller = tola_build::cancellation::BuildCanceller::new();
         canceller.cancel();
-        assert!(replacement.install(&canceller.token()).is_err());
-        replacement.discard().unwrap();
+
+        assert!(replacement.commit(&canceller.token()).is_err());
+        replacement.recover().unwrap();
+
         assert_eq!(
             fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
             b"old package"
         );
-    }
-
-    #[test]
-    fn committed_replace_keeps_new_inputs() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-        seed_old_package(&replacement);
-        fs::write(
-            replacement.candidate().join("typst-packages/lib.typ"),
-            b"new package",
-        )
-        .unwrap();
-
-        replacement.install(&BuildCancellation::default()).unwrap();
-        replacement.discard().unwrap();
-
-        assert_eq!(
-            fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
-            b"new package"
-        );
-    }
-
-    #[test]
-    fn interrupted_first_install_is_removed() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-        fs::create_dir(&replacement.root).unwrap();
-        fs::write(replacement.workspace.join("replacing"), b"00").unwrap();
-        fs::rename(
-            replacement.candidate().join("typst-packages"),
-            replacement.root.join("typst-packages"),
-        )
-        .unwrap();
-        fs::write(
-            replacement.root.join("typst-packages/typst.toml"),
-            b"partial",
-        )
-        .unwrap();
-
-        replacement.discard().unwrap();
-
-        assert!(!replacement.root.join("typst-packages").exists());
-    }
-
-    #[test]
-    fn foreign_workspace_is_preserved() {
-        let site = tempfile::TempDir::new().unwrap();
-        let replacement = replacement(site.path());
-        fs::write(replacement.workspace.join("owner"), b"another owner").unwrap();
-        fs::write(replacement.candidate().join("notes.txt"), b"author notes").unwrap();
-
-        assert!(replacement.discard().is_err());
-
-        assert_eq!(
-            fs::read(replacement.candidate().join("notes.txt")).unwrap(),
-            b"author notes"
-        );
+        assert!(!replacement.workspace().exists());
     }
 
     #[test]
@@ -1312,57 +1015,17 @@ mod tests {
     }
 
     #[test]
-    fn prepared_paths_are_reported_as_vendored_destinations() {
+    fn prepared_paths_reported_vendored_destinations() {
         let site = tempfile::TempDir::new().unwrap();
         let replacement = replacement(site.path());
-        let cancellation = BuildCancellation::default();
-        let copy = vendor_copy(
-            tola_typst::SourceBoundary::new(site.path(), false),
-            &replacement,
-            &cancellation,
-        );
 
         assert_eq!(
-            copy.vendored_destination(&replacement.candidate().join("icons/lucide.json")),
+            replacement.destination(&replacement.candidate_root().join("icons/lucide.json")),
             "vendor/icons/lucide.json"
         );
         assert_eq!(
-            copy.vendored_destination(&replacement.workspace.join("previous/icons/lucide.json")),
-            "vendor/icons/lucide.json"
-        );
-        assert_eq!(
-            copy.vendored_destination(&replacement.workspace.join("replacing")),
-            "vendor"
-        );
-        assert_eq!(
-            replacement.display_destination(&replacement.workspace.join("replacing")),
-            "vendor"
-        );
-        assert_eq!(
-            replacement.display_destination(&replacement.root.join("typst-packages")),
+            replacement.destination(&replacement.root.join("typst-packages")),
             "vendor/typst-packages"
-        );
-    }
-
-    #[test]
-    fn committed_install_needs_no_recovery() {
-        let site = tempfile::TempDir::new().unwrap();
-        let config = site_config(site.path());
-        let replacement = VendorReplacement::open(&config).unwrap();
-        fs::create_dir_all(replacement.root.join("typst-packages")).unwrap();
-        fs::write(
-            replacement.root.join("typst-packages/lib.typ"),
-            b"committed inputs",
-        )
-        .unwrap();
-        fs::write(replacement.workspace.join("replacing"), b"10").unwrap();
-        fs::create_dir(replacement.workspace.join("committed")).unwrap();
-
-        assert!(VendorReplacement::reject_interrupted_install(&config).is_ok());
-        VendorReplacement::open(&config).unwrap();
-        assert_eq!(
-            fs::read(replacement.root.join("typst-packages/lib.typ")).unwrap(),
-            b"committed inputs"
         );
     }
 }

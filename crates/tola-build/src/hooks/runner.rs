@@ -7,7 +7,7 @@ use super::evidence::{
 };
 use super::report::{hook_command_error, run_hook_entry};
 
-use crate::cancellation::OptionalCancellation;
+use crate::cancellation::{BuildCancellation, OptionalCancellation};
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::BeforeBuildHookConfig;
 use crate::config::section::build::hooks::HookStage;
@@ -52,7 +52,7 @@ impl SourceHookFailure {
         mut error: anyhow::Error,
         completed: SourceHookOutputs,
         paths: &BTreeSet<PathBuf>,
-        cancellation: Option<&crate::cancellation::BuildCancellation>,
+        cancellation: Option<&BuildCancellation>,
     ) -> Self {
         let partial = if error.is::<crate::cancellation::BuildCancelled>() {
             None
@@ -82,8 +82,7 @@ impl SourceHookFailure {
 }
 
 impl std::fmt::Display for SourceHookFailure {
-    /// The failing stage already wrote the sentence its reader needs, including the
-    /// bounded command output; a failure boundary renders only this outermost text.
+    /// The failing stage wrote the sentence its reader needs; a boundary renders only it.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.error)
     }
@@ -99,10 +98,12 @@ fn run_before_build_hook(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
     mode: BuildMode,
-    cancellation: Option<&crate::cancellation::BuildCancellation>,
+    cancellation: Option<&BuildCancellation>,
     executed_outputs: &mut BTreeSet<PathBuf>,
+    diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<Vec<HookOutputEvidence>> {
     cancellation.ensure_active_if_present()?;
+    let identity = super::hook_identity(HookStage::BeforeBuild, &hook.name);
     run_hook_entry(HookStage::BeforeBuild, &hook.name, || {
         let before = validate_declared_output_boundaries(hook, config, &config.build.publish_dir)?;
         executed_outputs.extend(
@@ -113,21 +114,18 @@ fn run_before_build_hook(
         let invocation = HookInvocation::new(
             &hook.command,
             HookCall {
-                site_root: config.get_root(),
+                site: config.into(),
                 name: &hook.name,
+                origin: hook.origin.as_ref(),
                 mode,
                 directories: HookDirectories::BeforeBuild,
             },
         )?;
         let completion = invocation.run(cancellation);
         cancellation.ensure_active_if_present()?;
-        completion.map_err(|error| {
-            hook_command_error(
-                HookStage::BeforeBuild,
-                &super::hook_identity(HookStage::BeforeBuild, &hook.name),
-                error,
-            )
-        })?;
+        invocation
+            .finish(completion, cancellation, diagnostics)
+            .map_err(|error| hook_command_error(HookStage::BeforeBuild, &identity, error))?;
         let after = declared_output_files(hook, config, cancellation)?;
         for files in &after {
             if files.entries.is_empty() {
@@ -136,10 +134,7 @@ fn run_before_build_hook(
                     config.get_root(),
                 );
                 return Err(super::hook_contract_error(
-                    format!(
-                        "{} declares `{declared}`, but the hook wrote nothing",
-                        super::hook_identity(HookStage::BeforeBuild, &hook.name)
-                    ),
+                    format!("{identity} declares `{declared}`, but the hook wrote nothing"),
                     "write it, or remove it from `outputs`",
                 ));
             }
@@ -155,7 +150,8 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
     hook_execution: crate::hooks::HookExecution,
-    cancellation: Option<&crate::cancellation::BuildCancellation>,
+    cancellation: Option<&BuildCancellation>,
+    diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<BeforeBuildExecution, SourceHookFailure> {
     if !hook_execution.runs() {
         return Ok(BeforeBuildExecution::empty());
@@ -175,9 +171,15 @@ pub(crate) fn run_before_build_hooks_with_cancellation(
             continue;
         }
         let mut started_outputs = BTreeSet::new();
-        let outputs = run_before_build_hook(hook, config, mode, cancellation, &mut started_outputs);
-        // A hook contributes successful evidence atomically; failure observations
-        // remain separate even when earlier declarations were readable.
+        let outputs = run_before_build_hook(
+            hook,
+            config,
+            mode,
+            cancellation,
+            &mut started_outputs,
+            diagnostics,
+        );
+        // A hook contributes successful evidence atomically; failure observations stay separate.
         match outputs {
             Ok(outputs) => completed.outputs.extend(outputs),
             Err(error) => {
@@ -215,42 +217,70 @@ pub fn has_after_publish_hooks(config: &ResolvedSiteConfig, mode: BuildMode) -> 
 }
 
 /// Consume one committed output view using every participating hook.
-///
-/// Cancellation stops the command chain without undoing its external effects.
-/// Hosts supply their consumer-lifetime observer, independently of cancellation
-/// for superseded build attempts.
 pub fn run_after_publish_hooks(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
     output_root: &Path,
-    cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<()> {
+    cancellation: &BuildCancellation,
+) -> Result<Vec<tola_diagnostic::Diagnostic>> {
+    run_after_publish_hooks_observed(config, mode, output_root, cancellation, |_, _| Ok(()))
+}
+
+/// Run after-publish hooks and return the diagnostics from successful reports.
+pub fn run_after_publish_hooks_observed(
+    config: &ResolvedSiteConfig,
+    mode: BuildMode,
+    output_root: &Path,
+    cancellation: &BuildCancellation,
+    mut completed: impl FnMut(&str, &Result<Vec<tola_diagnostic::Diagnostic>>) -> Result<()>,
+) -> Result<Vec<tola_diagnostic::Diagnostic>> {
+    let mut diagnostics = Vec::new();
     for hook in config.build.hooks.after_publish.iter() {
         cancellation.ensure_active()?;
         if super::hook_participates(hook.enable, hook.dev, mode) {
-            run_hook_entry(HookStage::AfterPublish, &hook.name, || {
+            let identity = super::hook_identity(HookStage::AfterPublish, &hook.name);
+            let fail = |error| hook_command_error(HookStage::AfterPublish, &identity, error);
+            let outcome = run_hook_entry(HookStage::AfterPublish, &hook.name, || {
                 let invocation = HookInvocation::new(
                     &hook.command,
                     HookCall {
-                        site_root: config.get_root(),
+                        site: config.into(),
                         name: &hook.name,
+                        origin: hook.origin.as_ref(),
                         mode,
                         directories: HookDirectories::AfterPublish { input: output_root },
                     },
-                )?;
+                )
+                .map_err(fail)?;
                 let completion = invocation.run(Some(cancellation));
-                completion.map(|_output| ()).map_err(|error| {
-                    hook_command_error(
-                        HookStage::AfterPublish,
-                        &super::hook_identity(HookStage::AfterPublish, &hook.name),
-                        error,
-                    )
-                })
-            })?;
+                let mut reported = Vec::new();
+                invocation
+                    .finish(completion, Some(cancellation), &mut reported)
+                    .map_err(fail)?;
+                Ok(reported)
+            });
+            completed(&hook.name, &outcome)?;
+            match outcome {
+                Ok(reported) => diagnostics.extend(reported),
+                Err(error)
+                    if crate::cancellation::is_cancelled(&error) || diagnostics.is_empty() =>
+                {
+                    return Err(error);
+                }
+                Err(error) => {
+                    diagnostics.extend(
+                        tola_diagnostic::attached(&error)
+                            .unwrap_or_default()
+                            .iter()
+                            .cloned(),
+                    );
+                    return Err(tola_diagnostic::DiagnosticError::attach(error, diagnostics).into());
+                }
+            }
         }
     }
     cancellation.ensure_active()?;
-    Ok(())
+    Ok(diagnostics)
 }
 
 #[cfg(test)]
@@ -329,7 +359,7 @@ mod tests {
     /// path: the check before each run refuses it, so the child command never writes.
     #[cfg(unix)]
     #[test]
-    fn retargeted_outputs_stop_before_reserved_paths() {
+    fn retargeted_outputs_stop() {
         struct Case {
             /// The hook declaration loading accepts, as written in the configuration document.
             source: &'static str,
@@ -351,7 +381,8 @@ mod tests {
                 prepare: |root| fs::create_dir(root.join("alias")).unwrap(),
                 retarget: |root| {
                     fs::remove_dir(root.join("alias")).unwrap();
-                    let workspace = root.join(".vendor-vendor");
+                    let workspace =
+                        crate::filesystem::swap_workspace(&root.join("vendor")).unwrap();
                     fs::create_dir(&workspace).unwrap();
                     std::os::unix::fs::symlink(workspace, root.join("alias")).unwrap();
                 },
@@ -390,13 +421,14 @@ mod tests {
                 BuildMode::Production,
                 HookExecution::Run,
                 None,
+                &mut Vec::new(),
             )
             .unwrap_err();
 
             (case.assert_preserved)(root, case.source);
             let diagnostics =
-                crate::diagnostic::attached(&error.error).expect("the refused output is reported");
-            assert_eq!(diagnostics[0].code, crate::codes::build::HOOKS);
+                tola_diagnostic::attached(&error.error).expect("the refused output is reported");
+            assert_eq!(diagnostics[0].code, tola_diagnostic::codes::build::HOOKS);
             assert!(
                 diagnostics[0].message.contains(case.refused_as),
                 "{diagnostics:?}"
@@ -413,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn child_writes_partial_output_then_fails() {
+    fn child_writes_partial_then_fails() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -480,6 +512,7 @@ mod tests {
                 BuildMode::Development,
                 HookExecution::Run,
                 None,
+                &mut Vec::new(),
             )
             .unwrap();
             assert!(execution.hooks_executed());
@@ -495,6 +528,7 @@ mod tests {
             BuildMode::Production,
             HookExecution::Run,
             None,
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(
@@ -508,7 +542,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_chain_restarts_from_the_start() {
+    fn failed_chain_restarts() {
         let directory = TempDir::new().unwrap();
         let mut config = config(&directory);
         let mut first = hook("child_counts_successful_runs");
@@ -525,6 +559,7 @@ mod tests {
             BuildMode::Development,
             HookExecution::Run,
             None,
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(
@@ -537,6 +572,7 @@ mod tests {
             BuildMode::Development,
             HookExecution::Run,
             None,
+            &mut Vec::new(),
         )
         .unwrap_err();
         assert_eq!(
@@ -567,6 +603,7 @@ mod tests {
             BuildMode::Development,
             HookExecution::Run,
             None,
+            &mut Vec::new(),
         )
         .unwrap()
         .into_source_hooks();
@@ -622,8 +659,14 @@ mod tests {
             (BuildMode::Development, "dev"),
             (BuildMode::Production, "prod"),
         ] {
-            run_before_build_hooks_with_cancellation(&config, mode, HookExecution::Run, None)
-                .unwrap();
+            run_before_build_hooks_with_cancellation(
+                &config,
+                mode,
+                HookExecution::Run,
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap();
             assert_eq!(
                 crate::build::tests::recorded_build_mode(&root),
                 expected,
@@ -633,7 +676,7 @@ mod tests {
                 &config,
                 mode,
                 &config.build.publish_dir,
-                &crate::cancellation::BuildCancellation::new(),
+                &BuildCancellation::new(),
             )
             .unwrap();
             assert_eq!(
@@ -666,6 +709,7 @@ mod tests {
                 BuildMode::Production,
                 HookExecution::Run,
                 None,
+                &mut Vec::new(),
             )
             .unwrap();
             let marker =
@@ -676,17 +720,18 @@ mod tests {
                 Ending::Failed => {
                     config.build.hooks.before_build = vec![hook_named(
                         "images",
-                        "hooks::runner::tests::child_writes_partial_output_then_fails",
+                        "hooks::runner::tests::child_writes_partial_then_fails",
                     )];
                     let error = run_before_build_hooks_with_cancellation(
                         &config,
                         BuildMode::Production,
                         HookExecution::Run,
                         None,
+                        &mut Vec::new(),
                     )
                     .unwrap_err();
                     assert!(
-                        crate::diagnostic::attached(&error.error).is_some(),
+                        tola_diagnostic::attached(&error.error).is_some(),
                         "{ending:?}"
                     );
                 }
@@ -704,6 +749,7 @@ mod tests {
                                 BuildMode::Development,
                                 HookExecution::Run,
                                 Some(&cancellation),
+                                &mut Vec::new(),
                             )
                         });
                         let ready = root.join("hook-ready.txt");
