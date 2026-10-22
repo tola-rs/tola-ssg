@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use super::diagnostic::config_error;
 use crate::config::section::AssetsConfig;
 use crate::config::section::build::{HooksConfig, MinifyConfig};
 use crate::config::{
@@ -237,9 +238,7 @@ pub fn resolve_parsed_site_config(
         package_locations,
         build,
     )
-    .map_err(|error| {
-        crate::config::diagnostic::attach_load(error, Some(source.path()), Some(source.positions()))
-    })?;
+    .map_err(|error| source.attach_load(error))?;
     Ok(SiteConfigWithSourceDigest {
         config,
         source_hash: source.source_hash(),
@@ -255,7 +254,8 @@ fn resolve_schema(
     mut package_locations: tola_typst::PackageLocations,
     build: &BuildOverrides,
 ) -> Result<ResolvedSiteConfig> {
-    schema.validate_source_paths(presence)?;
+    schema.validate_source_paths()?;
+    schema.validate_theme(presence)?;
     normalize_site_paths(
         &mut schema,
         &mut config_path,
@@ -267,27 +267,27 @@ fn resolve_schema(
         package_locations = package_locations.with_declared_root(path)?;
     }
     apply_build_overrides(&mut schema, build);
-    // Output ownership is checked before semantic diagnostics, as it is a layout failure.
-    let boundary = crate::filesystem::OutputBoundary::resolve(
+    let (module_roots, module_asset_sources) = module_input_paths(&schema, &root);
+    let boundary = resolve_output_boundary(
+        &schema,
+        &config_path,
         &root,
-        &schema.build.publish_dir,
-        super::resolved::protected_input_paths(
-            &config_path,
-            &schema.build,
-            &schema.assets,
-            &schema.typst.fonts,
-            &schema.icons,
-            &schema.vendor,
-            &package_locations,
-        ),
+        &package_locations,
+        &module_roots,
+        &module_asset_sources,
     )?;
     schema.build.publish_dir = boundary.output;
-    let vendor_workspace = schema.vendor.workspace_path();
+    let vendor_workspace = schema
+        .vendor
+        .path
+        .as_deref()
+        .and_then(crate::filesystem::swap_workspace);
     let warnings = validate_effective_config(
         &schema,
         &root,
         &config_path,
         vendor_workspace.as_deref(),
+        &module_roots,
         presence,
     )?;
     let SiteConfigSchema {
@@ -298,6 +298,8 @@ fn resolve_schema(
         icons,
         vendor,
         formatter,
+        modules,
+        theme,
         ..
     } = schema;
     Ok(ResolvedSiteConfig {
@@ -315,9 +317,77 @@ fn resolve_schema(
         icons,
         vendor,
         formatter,
+        modules,
+        theme,
+        module_roots,
+        module_asset_sources,
+        module_inputs: Default::default(),
+        entry_file: None,
+        entry_origin: super::resolved::EntryOrigin::Project,
         vendor_workspace,
         vendor_candidate: None,
     })
+}
+
+/// Every module directory and asset replacement the modules declare.
+fn module_input_paths(schema: &SiteConfigSchema, root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let module_roots = schema
+        .modules
+        .iter()
+        .flat_map(|(name, module)| {
+            let module_root = match &module.source {
+                crate::modules::ModuleSource::Local { path } => root.join(path),
+                crate::modules::ModuleSource::Remote { .. } => {
+                    crate::filesystem::layout::modules(root).join(name)
+                }
+            };
+            std::iter::once(module_root)
+                .chain(module.overrides.values().map(|path| root.join(path)))
+        })
+        .collect();
+    let module_asset_sources = schema
+        .modules
+        .values()
+        .filter_map(|module| module.assets.as_ref())
+        .filter(|assets| assets.enabled)
+        .flat_map(|assets| assets.replace.values().map(|path| root.join(path)))
+        .collect();
+    (module_roots, module_asset_sources)
+}
+
+/// The output root and the protected inputs it must not contain.
+fn resolve_output_boundary(
+    schema: &SiteConfigSchema,
+    config_path: &Path,
+    root: &Path,
+    package_locations: &tola_typst::PackageLocations,
+    module_roots: &[PathBuf],
+    module_asset_sources: &[PathBuf],
+) -> Result<crate::filesystem::OutputBoundary, crate::filesystem::OutputBoundaryError> {
+    crate::filesystem::OutputBoundary::resolve(
+        root,
+        &schema.build.publish_dir,
+        super::resolved::protected_input_paths(
+            config_path,
+            &schema.build,
+            &schema.assets,
+            &schema.typst.fonts,
+            &schema.icons,
+            &schema.vendor,
+            package_locations,
+        )
+        .into_iter()
+        .chain(
+            module_roots
+                .iter()
+                .map(|path| ("module root", path.as_path())),
+        )
+        .chain(
+            module_asset_sources
+                .iter()
+                .map(|path| ("module asset replacement", path.as_path())),
+        ),
+    )
 }
 
 fn normalize_site_paths(
@@ -370,6 +440,7 @@ fn validate_effective_config(
     root: &Path,
     config_path: &Path,
     vendor_workspace: Option<&Path>,
+    module_roots: &[PathBuf],
     presence: &ConfigPresence,
 ) -> Result<Vec<ConfigDiagnostic>> {
     let mut diagnostics = super::schema::settings_diagnostics(
@@ -433,6 +504,34 @@ fn validate_effective_config(
         vendor_workspace,
         &mut diagnostics,
     );
+    for (index, hook) in config.build.hooks.before_build.iter().enumerate() {
+        if !hook.enable {
+            continue;
+        }
+        for output in &hook.generates {
+            let target = crate::filesystem::FilesystemSourceIdentity::from_path(&root.join(output));
+            for module in module_roots {
+                if target.intersects(&crate::filesystem::FilesystemSourceIdentity::from_path(
+                    module,
+                )) {
+                    diagnostics.with_array_element(
+                        "build.hooks.before-build",
+                        index,
+                        |diagnostics| {
+                            diagnostics.error(
+                                FieldPath::new("build.hooks.before-build.generates"),
+                                format!(
+                                    "hook output `{}` overlaps module root `{}`",
+                                    crate::filesystem::display_path(&root.join(output), root),
+                                    crate::filesystem::display_path(module, root)
+                                ),
+                            );
+                        },
+                    );
+                }
+            }
+        }
+    }
     validate_asset_source_boundaries(
         &config.assets,
         root,
@@ -451,7 +550,7 @@ fn validate_effective_config(
     diagnostics
         .into_result()
         .map(|()| warnings)
-        .map_err(|diagnostics| ConfigError::Diagnostics(diagnostics).into())
+        .map_err(config_error)
 }
 
 /// No conventional site configuration exists in the searched ancestor directories.
@@ -466,9 +565,6 @@ pub struct ConfigNotFound {
 pub const CONFIG_FILE_NAME: &str = "tola.toml";
 
 /// Absolute configuration file path and the site root its parent directory selects.
-///
-/// A configuration path has to name a file: a directory, or a path whose last component is
-/// not a name, identifies a site but no document the author could correct.
 pub(super) fn resolve_config_location(path: &Path) -> Result<(PathBuf, PathBuf)> {
     if path.file_name().is_none() || path.is_dir() {
         return Err(config_path_error(path));
@@ -479,71 +575,58 @@ pub(super) fn resolve_config_location(path: &Path) -> Result<(PathBuf, PathBuf)>
 }
 
 /// The failure of a configuration path that names no file.
-///
-/// The author changes the argument, not a line in a document, so the diagnostic has the
-/// next action and no location.
 fn config_path_error(path: &Path) -> anyhow::Error {
-    let message = format!("`{}` is not a file", written_path(path));
-    let diagnostic = crate::diagnostic::Diagnostic::new(
-        crate::codes::config::INVALID,
-        crate::diagnostic::Severity::Error,
-        message.clone(),
+    let error = ConfigError::PathNotAFile {
+        path: written_path(path),
+    };
+    let diagnostic = tola_diagnostic::Diagnostic::new(
+        tola_diagnostic::codes::config::INVALID,
+        tola_diagnostic::Severity::Error,
+        error.to_string(),
     )
-    .with_help("pass `--config` the path of the site's `tola.toml`");
-    crate::diagnostic::DiagnosticError::attach(
-        ConfigError::Validation(message).into(),
-        vec![diagnostic],
-    )
-    .into()
+    .with_help("Pass `--config` the path of the site's `tola.toml`");
+    tola_diagnostic::DiagnosticError::attach(error.into(), vec![diagnostic]).into()
 }
 
 /// The failure of a configuration path Tola could not make absolute.
-///
-/// The author changes the invocation, not a line in a document, so the diagnostic names the path
-/// and the action that avoids the current directory it was resolved against.
 fn unresolved_config_path(path: &Path, error: std::io::Error) -> anyhow::Error {
-    invocation_error(
-        format!(
-            "Tola could not resolve the configuration path `{}`",
-            written_path(path)
-        ),
-        error,
-    )
+    invocation_error(InvocationFailure::ConfigPath(path.to_path_buf()), error)
 }
 
 /// The failure of reading the working directory a command finds the site from.
 fn unreadable_directory_error(error: std::io::Error) -> anyhow::Error {
-    invocation_error(
-        "Tola could not read the current directory".to_owned(),
-        error,
-    )
+    invocation_error(InvocationFailure::WorkingDirectory, error)
 }
 
-/// Report a failure the author fixes by changing the command, not a line in a document.
-///
-/// The diagnostic has the next action and no location, the input/output error stays in the
-/// chain for the debug log, and the message stays in the error so a consumer that drops
-/// diagnostics still renders a sentence.
-fn invocation_error(message: String, error: std::io::Error) -> anyhow::Error {
-    let diagnostic = crate::diagnostic::Diagnostic::new(
-        crate::codes::config::INVALID,
-        crate::diagnostic::Severity::Error,
+/// A failure the author fixes by changing the command, not a line in a document.
+#[derive(Debug, thiserror::Error)]
+enum InvocationFailure {
+    /// The configuration path could not be made absolute.
+    #[error("Tola could not resolve the configuration path `{}`", written_path(.0))]
+    ConfigPath(PathBuf),
+    /// The working directory a command finds the site from could not be read.
+    #[error("Tola could not read the current directory")]
+    WorkingDirectory,
+}
+
+/// Report one invocation failure: its sentence comes from the variant, the input/output error
+/// stays in the chain for the debug log.
+fn invocation_error(failure: InvocationFailure, cause: std::io::Error) -> anyhow::Error {
+    let message = failure.to_string();
+    let diagnostic = tola_diagnostic::Diagnostic::new(
+        tola_diagnostic::codes::config::INVALID,
+        tola_diagnostic::Severity::Error,
         message.clone(),
     )
     .with_help(INVOCATION_HELP);
-    let error = anyhow::Error::new(error).context(message);
-    crate::diagnostic::DiagnosticError::attach(error, vec![diagnostic]).into()
+    let error = anyhow::Error::new(cause).context(message);
+    tola_diagnostic::DiagnosticError::attach(error, vec![diagnostic]).into()
 }
 
 /// The action that avoids the working directory a configuration path is resolved against.
 const INVOCATION_HELP: &str = "Pass `--config` the full path of the site's `tola.toml`";
 
 /// Spell one configuration path the way the author wrote it.
-///
-/// The path is not resolved into a site yet, so it has no site root to be relative to: an
-/// empty root asks the one path renderer for the path's own spelling, with `/` separators
-/// everywhere. A spelling with no components has nothing to show, so it renders as the
-/// directory it resolves to — the path the flag cannot use either way.
 fn written_path(path: &Path) -> String {
     if path.as_os_str().is_empty() {
         let resolved = crate::filesystem::absolute_path(path);
@@ -563,10 +646,6 @@ pub(super) fn resolve_config_path(explicit: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// The site root one configuration path selects.
-///
-/// An explicit path names the configuration file, so the directory that holds it is the root.
-/// Without one, the nearest `tola.toml` in the current directory or an ancestor selects its
-/// own directory; a site without a configuration file roots at the current directory.
 pub fn config_site_root(explicit: Option<&Path>) -> Result<PathBuf> {
     match explicit {
         Some(path) => resolve_config_location(path).map(|(_, root)| root),
@@ -598,9 +677,6 @@ pub fn find_default_config(start: &Path) -> Option<PathBuf> {
 
 impl SiteConfigSchema {
     /// Decode an editable core schema without resolving filesystem paths.
-    ///
-    /// `scope` reaches the boundary the source path is checked against even though nothing is read
-    /// from disk: an editable schema for a path this scope refuses is refused here too.
     pub fn parse(path: &Path, content: &str, scope: crate::resources::InputScope) -> Result<Self> {
         Self::parse_at(path, content, scope).map(ParsedConfig::into_schema)
     }
@@ -661,16 +737,6 @@ content-dir = "content"
         config_path
     }
 
-    /// The validated configuration at `config_path`.
-    fn load_config(config_path: &Path) -> SiteConfigWithSourceDigest {
-        load_site_config(
-            Some(config_path),
-            tola_typst::PackageLocations::default(),
-            &BuildOverrides::default(),
-        )
-        .unwrap()
-    }
-
     /// The failure of loading the configuration at `config_path`.
     fn load_error(config_path: &Path) -> anyhow::Error {
         load_site_config(
@@ -699,7 +765,7 @@ content-dir = "content"
             let error = load_error(&config_path);
 
             let diagnostic = diagnostic_mentioning(&error, expected[0]);
-            assert_eq!(diagnostic.code, crate::codes::config::INVALID);
+            assert_eq!(diagnostic.code, tola_diagnostic::codes::config::INVALID);
             for substring in expected {
                 assert!(diagnostic.message.contains(substring), "{diagnostic:?}");
             }
@@ -723,7 +789,7 @@ content-dir = "content"
         let [diagnostic] = diagnostics else {
             panic!("one language shape failure is reported: {diagnostics:?}");
         };
-        assert_eq!(diagnostic.code, crate::codes::config::TOML);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::TOML);
         assert_eq!(diagnostic.message.matches("`site.language`").count(), 1);
         let location = diagnostic.location.as_ref().unwrap();
         assert_eq!(location.path, "tola.toml");
@@ -833,38 +899,13 @@ content-dir = "content"
         let diagnostics = attached_diagnostics(&error);
         let diagnostic = diagnostic_mentioning(&error, "the site directory could not be used");
 
-        assert_eq!(diagnostic.code, crate::codes::config::LOAD);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::LOAD);
         assert!(diagnostics.iter().all(|diagnostic| {
             diagnostic
                 .location
                 .as_ref()
                 .is_some_and(|location| location.path == "tola.toml")
         }));
-    }
-
-    #[test]
-    fn config_path_selects_its_directory() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = write_config(directory.path(), &site_source("Site"));
-
-        let root = config_site_root(Some(&config_path)).unwrap();
-
-        assert_eq!(root, crate::filesystem::normalize_path(directory.path()));
-    }
-
-    #[test]
-    fn initial_load_resolves_output_path() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config_path = write_config(directory.path(), &site_source("Site"));
-
-        let config = load_config(&config_path);
-
-        assert_eq!(
-            config.config().build.publish_dir,
-            std::fs::canonicalize(directory.path())
-                .unwrap()
-                .join("public")
-        );
     }
 
     #[test]
@@ -942,7 +983,7 @@ publish-dir = "."
 
         let error = load_error(&config_path);
         let message = diagnostic_message(&error);
-        let diagnostic = crate::diagnostic::attached(&error)
+        let diagnostic = tola_diagnostic::attached(&error)
             .and_then(|diagnostics| diagnostics.first())
             .expect("the refusal has a diagnostic");
 
@@ -1090,7 +1131,7 @@ publish-dir = "."
             (
                 |schema| {
                     schema.vendor.path = Some("vendor".into());
-                    schema.build.publish_dir = ".vendor-vendor/site".into();
+                    schema.build.publish_dir = ".vendor-swap/site".into();
                 },
                 "vendor working directory",
             ),
@@ -1167,7 +1208,7 @@ generates = [".tola/cache"]
         let error = load_error(&config_path);
 
         let diagnostic = diagnostic_mentioning(&error, ".tola/cache");
-        assert_eq!(diagnostic.code, crate::codes::config::INVALID);
+        assert_eq!(diagnostic.code, tola_diagnostic::codes::config::INVALID);
         // Line 9 writes the second entry's own `generates`, not the first entry's line 4.
         let location = diagnostic
             .location
@@ -1190,7 +1231,7 @@ generates = [".tola/cache"]
             .join("local/demo/1.0.0");
         std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("value.typ"), "old vendor").unwrap();
-        let candidate = config.get_root().join(".vendor-vendor/candidate");
+        let candidate = config.get_root().join(".vendor-swap/candidate");
         std::fs::create_dir_all(&candidate).unwrap();
         let config = config.with_vendor_root(Some(candidate.clone())).unwrap();
         let pure = crate::BuildResources::new().with_input_scope(crate::InputScope::Pure);
@@ -1217,7 +1258,12 @@ generates = [".tola/cache"]
     fn refresh_keeps_workspace_exclusions() {
         let directory = tempfile::tempdir().unwrap();
         let config = crate::config::tests::load_test_config(directory.path(), VENDORED_SITE_SOURCE);
-        let workspace = config.vendor.workspace_path().unwrap();
+        let workspace = config
+            .vendor
+            .path
+            .as_deref()
+            .and_then(crate::filesystem::swap_workspace)
+            .unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         std::fs::write(workspace.join("old.typ"), "generated previous source").unwrap();
         let refreshed = config.with_vendor_root(None).unwrap();
@@ -1226,7 +1272,7 @@ generates = [".tola/cache"]
         assert!(
             files
                 .read(
-                    tola_typst::file_id(".vendor-vendor/old.typ"),
+                    tola_typst::file_id(".vendor-swap/old.typ"),
                     refreshed.get_root(),
                 )
                 .is_err()

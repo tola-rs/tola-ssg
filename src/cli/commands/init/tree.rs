@@ -1,28 +1,27 @@
 //! Rendering for the files and directories created by initialization.
 
-use std::path::Path;
-
 use crate::tree::{EntryKind, Tree};
 use crate::writes::FileWrites;
 
-use tola_build::filesystem::PACKAGE_MIRROR_DIRECTORY;
+use tola_build::filesystem::layout;
 
 pub(super) fn render(writes: &FileWrites) -> String {
     let mut tree = Tree::default();
     for directory in writes.directory_paths() {
         tree.insert(writes.relative_path(directory), EntryKind::Directory);
     }
+    let mirror = layout::builtin_packages_relative();
     let mut has_package_files = false;
     for file in writes.file_paths() {
         let relative = writes.relative_path(file);
-        if relative.starts_with(PACKAGE_MIRROR_DIRECTORY) {
+        if relative.starts_with(&mirror) {
             has_package_files = true;
         } else {
             tree.insert(relative, EntryKind::File);
         }
     }
     if has_package_files {
-        tree.insert(Path::new(PACKAGE_MIRROR_DIRECTORY), EntryKind::Directory);
+        tree.insert(&mirror, EntryKind::Directory);
     }
 
     let name = writes

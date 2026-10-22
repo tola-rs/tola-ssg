@@ -1,3 +1,7 @@
+//! `tola editor`: site-local editor setup, the clients detected here, and explicit package inputs.
+//!
+//! Setup and its dry run share one checked preparation of the merged files, package links, and
+//! obsolete-path removals; only a run without `--dry-run` writes any of them.
 use std::path::Path;
 
 use anyhow::Result;
@@ -40,7 +44,7 @@ pub(in crate::cli) fn run(
                 return Ok(());
             }
             let editors = if editors.is_empty() {
-                select_editors(output, cancellation)?
+                select_editors(scope, cancellation)?
             } else {
                 editors
             };
@@ -180,22 +184,38 @@ fn start_session_log(
     }
 }
 
-fn select_editors(output: &CommandOutput, cancellation: &Cancellation) -> Result<Vec<Editor>> {
-    if !output.is_interactive() {
+fn select_editors(scope: InputScope, cancellation: &Cancellation) -> Result<Vec<Editor>> {
+    if !crate::cli::interaction::available() {
         anyhow::bail!(
             "no editor specified; run `tola editor setup <EDITOR>...` with {}",
             crate::editor::names(),
         );
     }
-    let choices = crate::editor::selection_choices();
-    let choices = choices.iter().map(String::as_str).collect::<Vec<_>>();
-    let selected =
-        output.select_many("Select editors", &choices, &|| cancellation.is_requested())?;
+    let choices = crate::editor::selection_choices()
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| serde_json::json!({"index": index, "editor": label}))
+        .collect::<Vec<_>>();
+    let selected: Option<Vec<usize>> = crate::cli::interaction::run(
+        include_str!("editor_select.nu"),
+        &choices,
+        scope,
+        cancellation,
+    )?;
+    let selected = selected.ok_or(crate::terminal::InputCancelled)?;
     if selected.is_empty() {
         anyhow::bail!(
             "no editor selected; run `tola editor setup` again and choose at least one editor"
         );
     }
     let editors = <Editor as clap::ValueEnum>::value_variants();
-    Ok(selected.into_iter().map(|index| editors[index]).collect())
+    selected
+        .into_iter()
+        .map(|index| {
+            editors
+                .get(index)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("editor selection returned an invalid choice"))
+        })
+        .collect()
 }

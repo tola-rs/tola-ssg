@@ -4,25 +4,28 @@ use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::cancellation::OptionalCancellation;
+use crate::cancellation::{BuildCancellation, BuildCancelled, OptionalCancellation};
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::BeforeBuildHookConfig;
 use crate::config::section::build::hooks::HookStage;
+use crate::filesystem::{
+    DeclaredOutputViolation, FilesystemSourceIdentity, FilesystemSourceKind, PathFingerprint,
+    display_path, lexical_path_identity,
+};
 
-/// Type- and content-sensitive evidence for one declared input produced by a
-/// successful before-build hook chain.
+/// Type- and content-sensitive evidence for one declared hook output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookOutputEvidence {
-    kind: crate::filesystem::FilesystemSourceKind,
-    source_identity: crate::filesystem::FilesystemSourceIdentity,
-    physical_content: crate::filesystem::PathFingerprint,
+    kind: FilesystemSourceKind,
+    source_identity: FilesystemSourceIdentity,
+    physical_content: PathFingerprint,
 }
 
 impl HookOutputEvidence {
     /// Promote declared output files only after the hook and all declared-output checks succeed.
     pub(super) fn from_successful_output(
         files: DeclaredOutputFiles,
-        cancellation: Option<&crate::cancellation::BuildCancellation>,
+        cancellation: Option<&BuildCancellation>,
     ) -> Result<Self> {
         cancellation.ensure_active_if_present()?;
         let kind = files.kind.ok_or_else(|| {
@@ -50,14 +53,12 @@ impl HookOutputEvidence {
     }
 
     pub fn covers_path(&self, path: &Path) -> bool {
-        let path = crate::filesystem::lexical_path_identity(path);
+        let path = lexical_path_identity(path);
         [self.logical_path(), self.physical_path()]
             .into_iter()
             .any(|boundary| match self.kind {
-                crate::filesystem::FilesystemSourceKind::File => path == boundary,
-                crate::filesystem::FilesystemSourceKind::Tree => {
-                    path == boundary || path.starts_with(boundary)
-                }
+                FilesystemSourceKind::File => path == boundary,
+                FilesystemSourceKind::Tree => path == boundary || path.starts_with(boundary),
             })
     }
 
@@ -73,25 +74,21 @@ impl HookOutputEvidence {
         self.observe_current(None).unwrap_or(false)
     }
 
-    pub fn is_current_with_cancellation(
-        &self,
-        cancellation: &crate::cancellation::BuildCancellation,
-    ) -> Result<bool> {
-        self.observe_current(Some(cancellation))
-            .map_err(anyhow::Error::new)
+    pub fn is_current_with_cancellation(&self, cancellation: &BuildCancellation) -> Result<bool> {
+        Ok(self.observe_current(Some(cancellation))?)
     }
 
     fn observe_current(
         &self,
-        cancellation: Option<&crate::cancellation::BuildCancellation>,
-    ) -> Result<bool, crate::cancellation::BuildCancelled> {
+        cancellation: Option<&BuildCancellation>,
+    ) -> Result<bool, BuildCancelled> {
         cancellation.ensure_active_if_present()?;
-        let identity = crate::filesystem::FilesystemSourceIdentity::from_path(self.logical_path());
+        let identity = FilesystemSourceIdentity::from_path(self.logical_path());
         let current = identity == self.source_identity
             && crate::filesystem::path_fingerprint(self.physical_path(), cancellation)
                 .is_ok_and(|fingerprint| fingerprint == self.physical_content)
-            && crate::filesystem::FilesystemSourceIdentity::from_path(self.logical_path())
-                == identity;
+            // A retarget during the fingerprint read leaves the evidence stale.
+            && FilesystemSourceIdentity::from_path(self.logical_path()) == identity;
         cancellation.ensure_active_if_present()?;
         Ok(current)
     }
@@ -113,7 +110,7 @@ pub(super) fn validate_declared_output_boundaries(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
     published_root: &Path,
-) -> Result<Vec<crate::filesystem::FilesystemSourceIdentity>> {
+) -> Result<Vec<FilesystemSourceIdentity>> {
     let named_hook = super::hook_identity(HookStage::BeforeBuild, &hook.name);
     let root = config.get_root();
     let boundaries = crate::filesystem::DeclaredOutputBoundaries::for_site(
@@ -126,44 +123,51 @@ pub(super) fn validate_declared_output_boundaries(
     for declared in &hook.generates {
         let identity = boundaries.resolve(declared);
         // Symlinks may have moved declared outputs across boundaries since config loading.
-        match boundaries.violation(&identity, &identities) {
-            None => {}
-            Some(crate::filesystem::DeclaredOutputViolation::OutsideSite) => {
-                return Err(super::hook_contract_error(
+        if let Some(violation) = boundaries.violation(&identity, &identities) {
+            let (message, help) = match violation {
+                DeclaredOutputViolation::OutsideSite => (
                     format!(
                         "{named_hook} declares `outputs` path `{}` outside the site root",
                         declared.display()
                     ),
                     "declare a path inside the site",
-                ));
-            }
-            Some(crate::filesystem::DeclaredOutputViolation::InsideReserved { kind, path }) => {
-                return Err(super::hook_contract_error(
+                ),
+                DeclaredOutputViolation::InsideReserved { kind, path } => (
                     format!(
                         "{named_hook} declares `outputs` path `{}` that intersects {kind} `{}`",
                         declared.display(),
-                        crate::filesystem::display_path(&path, root),
+                        display_path(&path, root),
                     ),
                     "declare a path elsewhere in the site",
-                ));
-            }
-            Some(crate::filesystem::DeclaredOutputViolation::InsidePublished) => {
-                return Err(super::hook_contract_error(
+                ),
+                DeclaredOutputViolation::InsidePublished => (
                     format!(
                         "{named_hook} declares `outputs` path `{}` that intersects `build.publish-dir` `{}`",
                         declared.display(),
-                        crate::filesystem::display_path(published_root, root),
+                        display_path(published_root, root),
                     ),
                     "declare a path elsewhere in the site",
-                ));
-            }
-            Some(crate::filesystem::DeclaredOutputViolation::OwnedElsewhere(_)) => {
-                return Err(super::hook_contract_error(
+                ),
+                DeclaredOutputViolation::OwnedElsewhere(_) => (
                     format!(
                         "{named_hook} declares `outputs` path `{}` that overlaps another entry",
                         declared.display()
                     ),
                     "keep one of the two",
+                ),
+            };
+            return Err(super::hook_contract_error(message, help));
+        }
+        for module in &config.module_roots {
+            let module_identity = FilesystemSourceIdentity::from_path(module);
+            if identity.intersects(&module_identity) {
+                return Err(super::hook_contract_error(
+                    format!(
+                        "{named_hook} declares `outputs` path `{}` that intersects module root `{}`",
+                        declared.display(),
+                        display_path(module, root)
+                    ),
+                    "declare a path elsewhere in the site",
                 ));
             }
         }
@@ -198,20 +202,19 @@ pub(super) fn validate_declared_output_boundaries(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DeclaredOutputFiles {
-    kind: Option<crate::filesystem::FilesystemSourceKind>,
-    pub(super) source_identity: crate::filesystem::FilesystemSourceIdentity,
-    pub(super) entries: BTreeMap<PathBuf, crate::filesystem::PathFingerprint>,
+    kind: Option<FilesystemSourceKind>,
+    pub(super) source_identity: FilesystemSourceIdentity,
+    pub(super) entries: BTreeMap<PathBuf, PathFingerprint>,
 }
 
 impl DeclaredOutputFiles {
     fn capture(
-        source_identity: crate::filesystem::FilesystemSourceIdentity,
-        cancellation: Option<&crate::cancellation::BuildCancellation>,
+        source_identity: FilesystemSourceIdentity,
+        cancellation: Option<&BuildCancellation>,
     ) -> Result<Self> {
         let crate::filesystem::PathContents { kind, entries } =
             crate::filesystem::path_contents(source_identity.physical_path(), cancellation)?;
-        let current_identity =
-            crate::filesystem::FilesystemSourceIdentity::from_path(source_identity.logical_path());
+        let current_identity = FilesystemSourceIdentity::from_path(source_identity.logical_path());
         if current_identity != source_identity {
             let declared = source_identity.logical_path().display();
             return Err(super::hook_contract_error(
@@ -228,12 +231,10 @@ impl DeclaredOutputFiles {
 
     fn observe_current(
         &self,
-        cancellation: Option<&crate::cancellation::BuildCancellation>,
-    ) -> Result<bool, crate::cancellation::BuildCancelled> {
+        cancellation: Option<&BuildCancellation>,
+    ) -> Result<bool, BuildCancelled> {
         cancellation.ensure_active_if_present()?;
-        let identity = crate::filesystem::FilesystemSourceIdentity::from_path(
-            self.source_identity.logical_path(),
-        );
+        let identity = FilesystemSourceIdentity::from_path(self.source_identity.logical_path());
         let current = Self::capture(identity, cancellation);
         cancellation.ensure_active_if_present()?;
         Ok(current.is_ok_and(|current| current == *self))
@@ -252,7 +253,7 @@ impl DeclaredOutputFiles {
 pub(super) fn declared_output_files(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
-    cancellation: Option<&crate::cancellation::BuildCancellation>,
+    cancellation: Option<&BuildCancellation>,
 ) -> Result<Vec<DeclaredOutputFiles>> {
     validate_declared_output_boundaries(hook, config, &config.build.publish_dir)?
         .into_iter()
@@ -261,9 +262,6 @@ pub(super) fn declared_output_files(
 }
 
 /// Observations of declared inputs left by a failed before-build chain.
-///
-/// These observations only identify filesystem events already represented by
-/// the failure. They do not establish successful generation or permit reuse.
 #[derive(Clone, Debug)]
 pub struct FailedHookOutputs {
     outputs: Vec<DeclaredOutputFiles>,
@@ -272,14 +270,13 @@ pub struct FailedHookOutputs {
 impl FailedHookOutputs {
     pub(super) fn capture(
         paths: &BTreeSet<PathBuf>,
-        cancellation: Option<&crate::cancellation::BuildCancellation>,
+        cancellation: Option<&BuildCancellation>,
     ) -> Result<Option<Self>> {
         let mut outputs = Vec::with_capacity(paths.len());
         for path in paths {
             cancellation.ensure_active_if_present()?;
-            let identity = crate::filesystem::FilesystemSourceIdentity::from_path(path);
-            // An unreadable boundary supplies no evidence for event suppression.
-            // The command failure remains the diagnostic for this attempt.
+            let identity = FilesystemSourceIdentity::from_path(path);
+            // An unreadable boundary supplies no evidence; the command failure is the diagnostic.
             if let Ok(output) = DeclaredOutputFiles::capture(identity, cancellation) {
                 outputs.push(output);
             }
@@ -298,12 +295,12 @@ impl FailedHookOutputs {
     pub fn current_for_paths(
         &self,
         paths: &[PathBuf],
-        cancellation: &crate::cancellation::BuildCancellation,
-    ) -> Result<Option<Self>, crate::cancellation::BuildCancelled> {
+        cancellation: &BuildCancellation,
+    ) -> Result<Option<Self>, BuildCancelled> {
         cancellation.ensure_active()?;
         let paths = paths
             .iter()
-            .map(|path| crate::filesystem::lexical_path_identity(path))
+            .map(|path| lexical_path_identity(path))
             .collect::<Vec<_>>();
         let mut outputs = Vec::new();
         for output in &self.outputs {
@@ -319,7 +316,7 @@ impl FailedHookOutputs {
     }
 
     pub fn covers_path(&self, path: &Path) -> bool {
-        let path = crate::filesystem::lexical_path_identity(path);
+        let path = lexical_path_identity(path);
         self.outputs.iter().any(|output| output.covers_path(&path))
     }
 }
@@ -331,7 +328,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn file_evidence(path: PathBuf) -> HookOutputEvidence {
-        let identity = crate::filesystem::FilesystemSourceIdentity::from_path(&path);
+        let identity = FilesystemSourceIdentity::from_path(&path);
         let files = DeclaredOutputFiles::capture(identity, None).unwrap();
         HookOutputEvidence::from_successful_output(files, None).unwrap()
     }
@@ -350,17 +347,13 @@ mod tests {
             .is_current_with_cancellation(&cancellation)
             .unwrap_err();
 
-        assert!(
-            error
-                .downcast_ref::<crate::cancellation::BuildCancelled>()
-                .is_some()
-        );
+        assert!(error.downcast_ref::<BuildCancelled>().is_some());
         assert!(evidence.is_current());
     }
     /// Evidence stays current while the captured output is unchanged and goes stale
     /// on any change, whether the output is one file or a tree.
     #[test]
-    fn evidence_goes_stale_when_output_changes() {
+    fn evidence_goes_stale() {
         struct Case {
             name: &'static str,
             /// Create the output under `root` and return it.
@@ -404,6 +397,29 @@ mod tests {
             assert!(!evidence.is_current(), "{}", case.name);
         }
     }
+    #[cfg(unix)]
+    #[test]
+    fn retarget_rechecks_module_root() {
+        use std::os::unix::fs::symlink;
+        let site = TempDir::new().unwrap();
+        fs::create_dir(site.path().join("original")).unwrap();
+        fs::create_dir(site.path().join("generated")).unwrap();
+        symlink("original", site.path().join("theme")).unwrap();
+        let config = crate::config::tests::load_test_config(
+            site.path(),
+            "[modules.forest]\npath = \"theme\"\n[[build.hooks.before-build]]\nenable = true\nname = \"generator\"\ncommand = [\"tool\"]\ngenerates = [\"generated\"]\n",
+        );
+        let hook = &config.build.hooks.before_build[0];
+        assert!(
+            validate_declared_output_boundaries(hook, &config, &config.build.publish_dir).is_ok()
+        );
+        fs::remove_file(site.path().join("theme")).unwrap();
+        symlink("generated", site.path().join("theme")).unwrap();
+        let error = validate_declared_output_boundaries(hook, &config, &config.build.publish_dir)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("module root"), "{error:#}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn evidence_rejects_symlink_retarget() {

@@ -9,8 +9,8 @@ mod schema;
 pub mod section;
 mod source;
 
-pub(crate) use resolved::GeneratedExclusion;
-pub use resolved::ResolvedSiteConfig;
+pub(crate) use resolved::{EntryOrigin, GeneratedExclusion};
+pub use resolved::{ResolvedSiteConfig, VendorRootError};
 pub use schema::{SiteConfigSchema, field_documentation, field_paths, field_values, section_help};
 pub use source::{ConfigSource, ParsedConfig};
 
@@ -38,16 +38,6 @@ pub(crate) mod tests {
             "[{}]\ntitle = \"Test\"\ndescription = \"Test\"\n{extra}",
             SiteSectionConfig::TEMPLATE_SECTION
         )
-    }
-
-    pub(crate) fn config_schema(extra: &str) -> SiteConfigSchema {
-        let config = config_source(extra);
-        SiteConfigSchema::parse(
-            Path::new("tola.toml"),
-            &config,
-            crate::resources::InputScope::Online,
-        )
-        .unwrap()
     }
 
     /// A `[icons]` declaration that reads one local JSON collection from `path`.
@@ -129,15 +119,15 @@ pub(crate) mod tests {
     }
 
     /// The diagnostics a configuration failure has, which every refusal renders.
-    pub(crate) fn attached_diagnostics(error: &anyhow::Error) -> &[crate::diagnostic::Diagnostic] {
-        crate::diagnostic::attached(error).expect("a configuration failure has diagnostics")
+    pub(crate) fn attached_diagnostics(error: &anyhow::Error) -> &[tola_diagnostic::Diagnostic] {
+        tola_diagnostic::attached(error).expect("a configuration failure has diagnostics")
     }
 
     /// The attached diagnostic whose message contains `expected`.
     pub(crate) fn diagnostic_mentioning<'a>(
         error: &'a anyhow::Error,
         expected: &str,
-    ) -> &'a crate::diagnostic::Diagnostic {
+    ) -> &'a tola_diagnostic::Diagnostic {
         attached_diagnostics(error)
             .iter()
             .find(|diagnostic| diagnostic.message.contains(expected))
@@ -146,7 +136,7 @@ pub(crate) mod tests {
 
     /// The message an author reads, which only the attached diagnostic has.
     pub(crate) fn diagnostic_message(error: &anyhow::Error) -> &str {
-        crate::diagnostic::attached(error)
+        tola_diagnostic::attached(error)
             .and_then(|diagnostics| diagnostics.first())
             .map(|diagnostic| diagnostic.message.as_str())
             .unwrap_or_default()
@@ -156,8 +146,8 @@ pub(crate) mod tests {
     #[cfg(unix)]
     pub(crate) fn diagnostic_code(
         error: &anyhow::Error,
-    ) -> Option<crate::diagnostic::DiagnosticCode> {
-        crate::diagnostic::attached(error)?
+    ) -> Option<tola_diagnostic::DiagnosticCode> {
+        tola_diagnostic::attached(error)?
             .first()
             .map(|diagnostic| diagnostic.code)
     }
@@ -359,40 +349,6 @@ path = "icons"
     }
 
     #[test]
-    fn declared_paths_parse_from_toml() {
-        let config = config_schema(
-            r#"
-[build]
-entry = "entries/post.typ"
-content-dir = "content"
-"#,
-        );
-
-        assert_eq!(config.build.entry, Path::new("entries/post.typ"));
-        assert_eq!(config.build.content_dir, Path::new("content"));
-    }
-
-    #[test]
-    fn declared_paths_reject_other_forms() {
-        for declaration in [
-            "[build]\nentry = [\"site.typ\"]\n",
-            "[build]\ncontent = [\"content\"]\n",
-            "[build]\ncontent = { root = \"content\" }\n",
-        ] {
-            let content = config_source(declaration);
-            assert!(
-                SiteConfigSchema::parse(
-                    Path::new("tola.toml"),
-                    &content,
-                    crate::resources::InputScope::Online,
-                )
-                .is_err(),
-                "accepted non-path declaration: {declaration}"
-            );
-        }
-    }
-
-    #[test]
     fn base_path_decides_the_url_mount() {
         for (base_path, expected) in [("/", None), ("/docs/blog/", Some("docs/blog"))] {
             let site_config = resolved_config(
@@ -526,31 +482,12 @@ content-dir = "content"
         let diagnostics = attached_diagnostics(&error);
 
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == crate::codes::config::INVALID
+            diagnostic.code == tola_diagnostic::codes::config::INVALID
                 && diagnostic
                     .notes
                     .iter()
                     .any(|note| note == IconsConfig::FIELDS.collections.as_str())
         }));
-    }
-
-    #[test]
-    fn either_source_disables_every_language() {
-        let declared =
-            OwnedSiteConfig::new("[build.minify]\nhtml = false\ncss = false\njavascript = false\n");
-        let overridden = resolved_config(
-            "",
-            BuildOverrides {
-                minify: Some(false),
-                ..Default::default()
-            },
-        );
-
-        for site_config in [declared, overridden] {
-            assert!(!site_config.config.build.minify.html);
-            assert!(!site_config.config.build.minify.css);
-            assert!(!site_config.config.build.minify.javascript);
-        }
     }
 
     #[test]

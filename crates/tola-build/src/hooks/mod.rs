@@ -14,9 +14,7 @@ pub use reuse::AfterPublishDependencies;
 pub(crate) use reuse::{ReusableHookOutputs, observe_after_publish};
 pub use runner::*;
 
-use crate::config::section::build::DevParticipation;
-use crate::config::section::build::HooksConfig;
-use crate::config::section::build::hooks::HookStage;
+use crate::config::section::build::{DevParticipation, HooksConfig, hooks::HookStage};
 use crate::mode::BuildMode;
 
 /// An enabled hook command announced by the host.
@@ -30,6 +28,7 @@ pub struct ConfiguredHook<'a> {
 }
 
 impl ConfiguredHook<'_> {
+    /// Whether this announced hook runs in `mode`; announcements hold enabled hooks only.
     pub fn participates(&self, mode: BuildMode) -> bool {
         hook_participates(true, self.dev, mode)
     }
@@ -41,44 +40,48 @@ pub fn configured_hooks(hooks: &HooksConfig) -> impl Iterator<Item = ConfiguredH
         .before_build
         .iter()
         .filter(|hook| hook.enable)
-        .map(|hook| ConfiguredHook {
-            stage: HookStage::BeforeBuild,
-            label: &hook.name,
-            command: &hook.command,
-            dev: hook.dev,
-        });
+        .map(|hook| announcement(HookStage::BeforeBuild, &hook.name, &hook.command, hook.dev));
     let generate_outputs = hooks
         .generate_outputs
         .iter()
         .filter(|command| command.enable)
-        .map(|command| ConfiguredHook {
-            stage: HookStage::GenerateOutputs,
-            label: &command.name,
-            command: &command.command,
-            dev: command.dev,
+        .map(|command| {
+            announcement(
+                HookStage::GenerateOutputs,
+                &command.name,
+                &command.command,
+                command.dev,
+            )
         });
     let after_publish = hooks
         .after_publish
         .iter()
         .filter(|hook| hook.enable)
-        .map(|hook| ConfiguredHook {
-            stage: HookStage::AfterPublish,
-            label: &hook.name,
-            command: &hook.command,
-            dev: hook.dev,
-        });
+        .map(|hook| announcement(HookStage::AfterPublish, &hook.name, &hook.command, hook.dev));
     before_build.chain(generate_outputs).chain(after_publish)
 }
 
-pub(super) fn hook_participates(
-    enable: bool,
+/// One enabled hook of any stage, as the host announces it.
+fn announcement<'a>(
+    stage: HookStage,
+    label: &'a str,
+    command: &'a [String],
     dev: DevParticipation,
-    mode: crate::mode::BuildMode,
-) -> bool {
+) -> ConfiguredHook<'a> {
+    ConfiguredHook {
+        stage,
+        label,
+        command,
+        dev,
+    }
+}
+
+/// Whether one declared hook contributes to this mode.
+pub(super) fn hook_participates(enable: bool, dev: DevParticipation, mode: BuildMode) -> bool {
     enable
         && match mode {
-            crate::mode::BuildMode::Production => true,
-            crate::mode::BuildMode::Development => dev.participates_in_development(),
+            BuildMode::Production => true,
+            BuildMode::Development => dev.participates_in_development(),
         }
 }
 
@@ -87,21 +90,19 @@ pub(super) fn hook_contract_error(
     help: impl Into<String>,
 ) -> anyhow::Error {
     let message = message.into();
-    let diagnostic = crate::diagnostic::Diagnostic::new(
-        crate::codes::build::HOOKS,
-        crate::diagnostic::Severity::Error,
+    let diagnostic = tola_diagnostic::Diagnostic::new(
+        tola_diagnostic::codes::build::HOOKS,
+        tola_diagnostic::Severity::Error,
         message.clone(),
     )
     .with_help(help);
-    anyhow::Error::new(crate::diagnostic::DiagnosticError::new(
+    anyhow::Error::new(tola_diagnostic::DiagnosticError::new(
         message,
         vec![diagnostic],
     ))
 }
 
 /// Whether candidate construction runs its selected pre-publication commands.
-///
-/// Publication consumers execute separately against a committed output view.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HookExecution {
     #[default]

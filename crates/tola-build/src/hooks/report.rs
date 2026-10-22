@@ -5,7 +5,7 @@ use tola_subprocess::{Captured, Observer, Stream, terminating_signal};
 
 use crate::cancellation::is_cancelled;
 use crate::config::section::build::hooks::HookStage;
-use crate::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 use std::io;
 use std::process::{ExitStatus, Output};
@@ -136,10 +136,7 @@ impl HookOutputEmitter {
     }
 }
 
-/// How one hook entry ended.
-///
-/// A cancelled entry is neither a success nor a failure, so the endings travel as separate
-/// variants rather than as booleans a caller could set to contradict each other.
+/// How one hook entry ended; cancellation is neither success nor failure.
 #[derive(Clone, Copy)]
 pub(super) enum HookOutcome {
     Finished,
@@ -196,8 +193,6 @@ impl HookEntryReport {
     }
 }
 
-/// Declared-output checks run inside `run`, so missing promised files report the
-/// entry as failed rather than finished.
 /// Report that an entry reused its previous outputs instead of running.
 pub(super) fn report_reused(stage: HookStage, hook: &str) {
     tracing::info!(
@@ -211,6 +206,7 @@ pub(super) fn report_reused(stage: HookStage, hook: &str) {
     );
 }
 
+/// Declared-output checks run inside `run`, so missing files fail the entry.
 pub(super) fn run_hook_entry<T>(
     stage: HookStage,
     hook: &str,
@@ -222,43 +218,35 @@ pub(super) fn run_hook_entry<T>(
     outcome
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(super) enum CommandFailure {
     /// The command ran and exited unsuccessfully, with its bounded captured streams.
+    #[error("{}", exit_description(.status))]
     Exited {
         status: ExitStatus,
         stdout: Vec<u8>,
         stderr: Vec<u8>,
     },
+    #[error("`{program}` could not be started")]
     NotStarted {
         program: String,
         reason: StartFailure,
     },
     /// Tola could not complete its own handling of the command.
+    #[error("{}", .step.describe())]
     Interrupted { step: InterruptionStep },
 }
 
-impl std::fmt::Display for CommandFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Exited { status, .. } => match status.code() {
-                Some(code) => write!(formatter, "the command exited with status {code}"),
-                None => {
-                    if let Some(signal) = terminating_signal(status) {
-                        return write!(formatter, "the command was terminated by signal {signal}");
-                    }
-                    formatter.write_str("the command terminated without an exit code")
-                }
-            },
-            Self::NotStarted { program, .. } => {
-                write!(formatter, "`{program}` could not be started")
-            }
-            Self::Interrupted { step } => formatter.write_str(step.describe()),
-        }
+/// How one exited command reads: its status code, its terminating signal, or neither.
+fn exit_description(status: &ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("the command exited with status {code}");
+    }
+    match terminating_signal(status) {
+        Some(signal) => format!("the command was terminated by signal {signal}"),
+        None => "the command terminated without an exit code".to_owned(),
     }
 }
-
-impl std::error::Error for CommandFailure {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StartFailure {
@@ -310,8 +298,7 @@ pub(super) fn check_exit(output: Output) -> Result<Output> {
     }))
 }
 
-/// Bounded command streams travel as notes, preserving the command's line breaks
-/// instead of folding them into the diagnostic header.
+/// Bounded command streams travel as notes, preserving the command's line breaks.
 pub(super) fn hook_command_error(
     stage: HookStage,
     identity: &str,
@@ -320,26 +307,29 @@ pub(super) fn hook_command_error(
     let failure = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<CommandFailure>());
+    if failure.is_none() && tola_diagnostic::attached(&error).is_some() {
+        return error;
+    }
+    let mut diagnostics = tola_diagnostic::attached(&error)
+        .unwrap_or_default()
+        .to_vec();
     let message = failure_message(identity, failure);
     let mut diagnostic = Diagnostic::new(diagnostic_code(stage), Severity::Error, message.clone());
     for note in failure_notes(failure) {
         diagnostic = diagnostic.with_note(note);
     }
     let diagnostic = diagnostic.with_help(failure_help(stage, failure));
-    anyhow::Error::new(DiagnosticError::attach(
-        error.context(message),
-        vec![diagnostic],
-    ))
+    diagnostics.push(diagnostic);
+    anyhow::Error::new(DiagnosticError::attach(error.context(message), diagnostics))
 }
 
-/// Tola could not create the cache directory one hook identity owns, so its command never
-/// starts; the author reads the affected hook, never the site's absolute paths.
+/// Tola could not create the cache directory one hook identity owns.
 pub(super) fn cache_directory_error(
     stage: HookStage,
     identity: &str,
     cause: std::io::Error,
 ) -> anyhow::Error {
-    let message = format!("Tola could not create the cache directory for {identity}");
+    let message = format!("Tola could not start {identity}");
     let diagnostic = Diagnostic::new(diagnostic_code(stage), Severity::Error, message.clone())
         .with_help("Check that `.tola` is writable");
     anyhow::Error::new(DiagnosticError::attach(
@@ -348,11 +338,11 @@ pub(super) fn cache_directory_error(
     ))
 }
 
-fn diagnostic_code(stage: HookStage) -> crate::diagnostic::DiagnosticCode {
+fn diagnostic_code(stage: HookStage) -> tola_diagnostic::DiagnosticCode {
     match stage {
         // Consumer failure cannot undo the revision already committed.
-        HookStage::AfterPublish => crate::codes::hook::AFTER_PUBLISH,
-        _ => crate::codes::hook::COMMAND,
+        HookStage::AfterPublish => tola_diagnostic::codes::hook::AFTER_PUBLISH,
+        _ => tola_diagnostic::codes::hook::COMMAND,
     }
 }
 
@@ -445,7 +435,7 @@ fn bounded_child_output(output: &str) -> String {
 mod tests {
     use super::*;
     #[cfg(unix)]
-    use crate::hooks::command::{HookCall, HookDirectories, HookInvocation};
+    use crate::hooks::command::{HookCall, HookDirectories, HookInvocation, HookSitePaths};
     use std::sync::mpsc;
 
     type ReportedOutput = (String, String, String);
@@ -458,8 +448,14 @@ mod tests {
         HookInvocation::new(
             arguments,
             HookCall {
-                site_root,
+                site: HookSitePaths {
+                    root: site_root,
+                    config: site_root,
+                    content: site_root,
+                    scope: crate::InputScope::Online,
+                },
                 name: "styles",
+                origin: None,
                 mode: crate::mode::BuildMode::Production,
                 directories: HookDirectories::BeforeBuild,
             },
@@ -474,7 +470,7 @@ mod tests {
         let error = invocation.run(None).unwrap_err();
         let stage = HookStage::BeforeBuild;
         let error = hook_command_error(stage, &crate::hooks::hook_identity(stage, "styles"), error);
-        crate::diagnostic::attached(&error)
+        tola_diagnostic::attached(&error)
             .expect("a failed command has its diagnostic")
             .first()
             .expect("a failed command reports one diagnostic")
@@ -484,7 +480,7 @@ mod tests {
     /// A failed command's notes hold each stream's own text, bounded to the note cap.
     #[cfg(unix)]
     #[test]
-    fn failed_command_notes_bound_stream_text() {
+    fn failed_command_notes_stream() {
         enum Expected {
             /// Both streams exceed the cap: each note keeps its head and tail.
             Bounded,
@@ -528,7 +524,7 @@ mod tests {
     /// A command killed by a signal names the terminating signal in its diagnostic.
     #[cfg(unix)]
     #[test]
-    fn failed_command_names_the_terminating_signal() {
+    fn failed_command_names_signal() {
         let diagnostic = failed_command(&["sh", "-c", "kill -KILL $$"]);
 
         assert!(
@@ -549,8 +545,14 @@ mod tests {
             let invocation = HookInvocation::new(
                 &["sh", "-c", "printf 'ready\\n' >&2"],
                 HookCall {
-                    site_root: directory.path(),
+                    site: HookSitePaths {
+                        root: directory.path(),
+                        config: directory.path(),
+                        content: directory.path(),
+                        scope: crate::InputScope::Online,
+                    },
                     name: "assets",
+                    origin: None,
                     mode: crate::mode::BuildMode::Production,
                     directories: HookDirectories::BeforeBuild,
                 },

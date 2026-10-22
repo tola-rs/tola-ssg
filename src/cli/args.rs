@@ -84,62 +84,16 @@ fn parse_help_language(value: &str) -> Result<HelpLanguage, String> {
     })
 }
 
-/// Parses `--preset`: the preset names the scaffold model declares, each carrying its terse
-/// composition as the value's help.
-#[derive(Clone)]
-struct PresetValueParser;
-
-impl clap::builder::TypedValueParser for PresetValueParser {
-    type Value = String;
-
-    fn parse_ref(
-        &self,
-        cmd: &clap::Command,
-        arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<Self::Value, clap::Error> {
-        clap::builder::PossibleValuesParser::new(preset_values().map(|(name, _)| name))
-            .parse_ref(cmd, arg, value)
-    }
-
-    fn possible_values(
-        &self,
-    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
-        Some(Box::new(preset_values().map(|(name, composition)| {
-            clap::builder::PossibleValue::new(name).help(composition)
-        })))
-    }
-}
-
-/// Parses `--features`: the feature names the scaffold model declares, each carrying its summary
-/// as the value's help.
-#[derive(Clone)]
-struct FeatureValueParser;
-
-impl clap::builder::TypedValueParser for FeatureValueParser {
-    type Value = String;
-
-    fn parse_ref(
-        &self,
-        cmd: &clap::Command,
-        arg: Option<&clap::Arg>,
-        value: &std::ffi::OsStr,
-    ) -> Result<Self::Value, clap::Error> {
-        clap::builder::PossibleValuesParser::new(feature_values().map(|(name, _)| name))
-            .parse_ref(cmd, arg, value)
-    }
-
-    fn possible_values(
-        &self,
-    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
-        Some(Box::new(feature_values().map(|(name, summary)| {
-            clap::builder::PossibleValue::new(name).help(summary)
-        })))
-    }
-}
-
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
+    /// Fetch remote modules declared by the site.
+    Module {
+        #[command(flatten)]
+        config: ConfigFileArgs,
+        #[command(subcommand)]
+        command: ModuleCommand,
+    },
+
     /// Create a new Tola site.
     Init(InitArgs),
 
@@ -372,31 +326,21 @@ pub struct InitArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Scaffold preset: minimal, medium, or rich.
-    ///
-    /// Defaults to minimal; `--interactive` recommends rich.
-    #[arg(long, value_name = "NAME", value_parser = PresetValueParser)]
-    pub preset: Option<String>,
+    /// Use the initializer declared by a local module.
+    #[arg(long, value_name = "MODULE", value_hint = clap::ValueHint::DirPath)]
+    pub from: Option<PathBuf>,
 
-    /// Select individual features instead of a preset; repeat or separate with commas.
-    ///
-    /// With `--interactive`, the screen selects these features and their dependencies.
-    #[arg(
-        long,
-        value_name = "NAMES",
-        value_delimiter = ',',
-        value_parser = FeatureValueParser,
-        conflicts_with = "preset"
-    )]
-    pub features: Vec<String>,
+    /// Name the module in the new site; defaults to its manifest name.
+    #[arg(long, value_name = "NAME", requires = "from")]
+    pub alias: Option<String>,
 
-    /// Choose the site directory, features, and editors in a terminal.
+    /// Confirm the starter or enable the module's interactive setup.
     #[arg(short = 'i', long)]
     pub interactive: bool,
 
-    /// Write editor settings (Neovim prints instructions); repeat or separate with commas.
-    #[arg(long, value_enum, value_delimiter = ',')]
-    pub editor: Vec<Editor>,
+    /// Arguments for the module initializer, following `--`.
+    #[arg(last = true, value_name = "ARGS", requires = "from")]
+    pub args: Vec<OsString>,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -667,6 +611,7 @@ impl Cli {
 impl Commands {
     pub(crate) fn name(&self) -> &'static str {
         match self {
+            Self::Module { .. } => "module",
             Self::Init(_) => "init",
             Self::Build { .. } => "build",
             Self::Dev { .. } => "dev",
@@ -751,6 +696,82 @@ fn requested_color(arguments: &[OsString]) -> ColorChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_selection_font_directories_independent() {
+        for arguments in [
+            &["tola", "inspect", "sources", "content/QHXS.typ"][..],
+            &[
+                "tola",
+                "inspect",
+                "--font-path",
+                "fonts",
+                "sources",
+                "content/QHXS.typ",
+            ][..],
+            &[
+                "tola",
+                "inspect",
+                "sources",
+                "content/QHXS.typ",
+                "--font-path",
+                "fonts",
+            ][..],
+        ] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let Commands::Inspect {
+                command: InspectCommand::Sources(sources),
+                fonts,
+                ..
+            } = cli.command
+            else {
+                panic!("expected source inspection");
+            };
+            assert_eq!(sources.paths, [PathBuf::from("content/QHXS.typ")]);
+            let expected_fonts = if arguments.contains(&"--font-path") {
+                vec![PathBuf::from("fonts")]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(fonts.paths, expected_fonts);
+        }
+    }
+
+    #[test]
+    fn extension_arguments_opaque_builtin_parsing() {
+        let cli = Cli::try_parse_from([
+            "tola",
+            "forest",
+            "edit",
+            "a title with spaces",
+            "--",
+            "--quiet",
+            "$(literal)",
+        ])
+        .unwrap();
+        let Commands::Extension(arguments) = cli.command else {
+            panic!("expected declared extension dispatch");
+        };
+        assert_eq!(
+            arguments,
+            [
+                "forest",
+                "edit",
+                "a title with spaces",
+                "--",
+                "--quiet",
+                "$(literal)"
+            ]
+            .map(OsString::from),
+        );
+        assert!(!cli.quiet);
+        for arguments in [
+            vec!["tola", "build", "--not-a-build-option"],
+            vec!["tola", "inspect", "not-a-projection"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+    }
 
     #[test]
     fn help_language_follows_explicit_flag() {
@@ -996,49 +1017,23 @@ mod tests {
             (
                 &[
                     "tola",
-                    "doctor",
-                    "--package-path",
-                    "host-packages",
-                    "--json",
-                ],
-                |cli| match &cli.command {
-                    Commands::Doctor(args) => {
-                        format!("{}/{}", path_text(&args.packages.package_path), args.json)
-                    }
-                    _ => panic!("expected doctor command"),
-                },
-                "host-packages/true",
-            ),
-            (
-                &["tola", "init", "--preset", "rich"],
-                |cli| match &cli.command {
-                    Commands::Init(args) => args.preset.clone().unwrap_or_default(),
-                    _ => panic!("expected init command"),
-                },
-                "rich",
-            ),
-            (
-                &["tola", "init", "--features", "feed,sitemap"],
-                |cli| match &cli.command {
-                    Commands::Init(args) => args.features.join(","),
-                    _ => panic!("expected init command"),
-                },
-                "feed,sitemap",
-            ),
-            (
-                &[
-                    "tola",
                     "init",
-                    "--features",
-                    "feed",
-                    "--features",
-                    "sitemap",
+                    "author site",
+                    "--from",
+                    "theme",
+                    "--alias",
+                    "forest",
                 ],
                 |cli| match &cli.command {
-                    Commands::Init(args) => args.features.join(","),
+                    Commands::Init(args) => format!(
+                        "{}/{}/{}",
+                        path_text(&args.path),
+                        path_text(&args.from),
+                        args.alias.as_deref().unwrap_or("")
+                    ),
                     _ => panic!("expected init command"),
                 },
-                "feed,sitemap",
+                "author site/theme/forest",
             ),
         ];
 
@@ -1047,77 +1042,67 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{arguments:?} must parse: {error}"));
             assert_eq!(shown(&cli), *expected, "{arguments:?}");
         }
-        assert!(Cli::try_parse_from(["tola", "preview", "--watch=false"]).is_err());
     }
 
+    /// Site options reach the commands that declare them, and no other.
+    ///
+    /// The commands whose decode the table above does not cover, plus the scope refusals: the
+    /// shared option structs are flattened per command, so a missing flatten (or a stray
+    /// `global`) changes which command accepts which option.
     #[test]
-    fn unknown_preset_names_are_refused() {
-        let error = Cli::try_parse_from(["tola", "init", "--preset", "bogus"]).unwrap_err();
-        let rendered = error.to_string();
-        assert!(rendered.contains("--preset <NAME>"), "{rendered}");
-        assert!(
-            rendered.contains("[possible values: minimal, medium, rich]"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn preset_help_spells_each_composition() {
-        let mut command = Cli::command();
-        let init = command
-            .find_subcommand_mut("init")
-            .expect("init is a subcommand")
-            .render_long_help()
-            .to_string();
-        for (name, composition) in preset_values() {
-            assert!(init.contains(name), "{name} missing:\n{init}");
-            assert!(init.contains(composition), "{composition} missing:\n{init}");
+    fn site_options_stay_scoped_commands() {
+        fn parses(argv: &[&str]) -> bool {
+            Cli::try_parse_from(argv.iter().copied()).is_ok()
+        }
+        for argv in [
+            &["tola", "fmt", "--config", "x.toml", "--check"][..],
+            &["tola", "query", "--package-path", "p", "site.index"][..],
+            &["tola", "edit", "--config", "x.toml", "read", "a.typ"][..],
+            &["tola", "vendor", "--refresh", "--font-path", "f"][..],
+            &["tola", "doctor", "--package-path", "p", "--json"][..],
+            &["tola", "lsp", "--config", "x.toml", "--font-path", "f"][..],
+            &["tola", "editor", "setup", "--package-path", "p", "vscode"][..],
+            &["tola", "nu", "--config", "x.toml", "script.nu"][..],
+        ] {
+            assert!(parses(argv), "{argv:?} must parse");
+        }
+        for argv in [
+            &["tola", "preview", "--watch=false"][..],
+            &["tola", "fmt", "--font-path", "f"][..],
+            &["tola", "lsp", "--watch=false"][..],
+            &["tola", "edit", "--package-path", "p"][..],
+            &["tola", "build", "--interface", "127.0.0.1"][..],
+        ] {
+            assert!(!parses(argv), "{argv:?} must be refused");
         }
     }
 
     #[test]
-    fn unknown_feature_names_are_refused() {
-        let error = Cli::try_parse_from(["tola", "init", "--features", "feeds"]).unwrap_err();
-        let rendered = error.to_string();
-        assert!(rendered.contains("--features <NAMES>"), "{rendered}");
-        assert!(
-            rendered.contains(
-                "[possible values: starter-stylesheet, canonical, feed, sitemap, open-graph, \
-                 twitter-card, pagefind, deno-toolchain, tailwind-css, justfile]"
-            ),
-            "{rendered}"
+    fn init_arguments_only_after_separator() {
+        let cli = Cli::try_parse_from([
+            "tola",
+            "init",
+            "site",
+            "--from",
+            "theme",
+            "--interactive",
+            "--",
+            "--title",
+            "A title",
+            "--force",
+        ])
+        .unwrap();
+        let Commands::Init(args) = cli.command else {
+            panic!("expected init");
+        };
+        assert!(args.interactive);
+        assert!(!args.force);
+        assert_eq!(
+            args.args,
+            ["--title", "A title", "--force"].map(OsString::from)
         );
-    }
-
-    #[test]
-    fn feature_selection_conflicts_with_the_preset() {
-        assert!(
-            Cli::try_parse_from(["tola", "init", "--features", "feed", "--preset", "medium"])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn feature_selection_combines_with_the_interactive_screen() {
-        assert!(
-            Cli::try_parse_from(["tola", "init", "--features", "feed", "--interactive"]).is_ok()
-        );
-    }
-
-    #[test]
-    fn feature_help_spells_each_summary() {
-        let mut command = Cli::command();
-        let help = command
-            .find_subcommand_mut("init")
-            .expect("init is a subcommand")
-            .render_long_help()
-            .to_string();
-        // The renderer wraps long lines; collapse its layout before matching a summary.
-        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
-        for (name, summary) in feature_values() {
-            assert!(help.contains(name), "{name} missing:\n{help}");
-            assert!(help.contains(summary), "{summary} missing:\n{help}");
-        }
+        assert!(Cli::try_parse_from(["tola", "init", "--alias", "forest"]).is_err());
+        assert!(Cli::try_parse_from(["tola", "init", "--", "author-argument"]).is_err());
     }
 
     #[test]

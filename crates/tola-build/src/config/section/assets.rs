@@ -58,11 +58,6 @@ impl AssetUrlPrefix {
         &self.url
     }
 
-    /// The output path every member of this tree is published below, absent for the root prefix.
-    pub(crate) fn output_root(&self) -> Option<&OutputPath> {
-        self.output.as_ref()
-    }
-
     pub(crate) fn output_for(&self, member: &OutputPath) -> Result<OutputPath, AssetUrlError> {
         match &self.output {
             Some(prefix) => Ok(prefix.join(member)),
@@ -153,6 +148,51 @@ fn require_asset_output(output: &OutputPath) -> Result<(), AssetUrlError> {
         })
     } else {
         Ok(())
+    }
+}
+
+/// Internal per-module filtering of one asset tree; paths are literal output-relative names.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AssetSelection {
+    pub include: Option<Vec<String>>,
+    pub exclude: Vec<String>,
+    pub replaced: Vec<String>,
+}
+
+impl AssetSelection {
+    pub(crate) fn selects(&self, path: &str) -> bool {
+        self.selects_path(Path::new(path))
+    }
+
+    fn selects_path(&self, path: &Path) -> bool {
+        self.include
+            .as_ref()
+            .is_none_or(|items| items.iter().any(|item| path.starts_with(Path::new(item))))
+            && !self
+                .exclude
+                .iter()
+                .any(|item| path.starts_with(Path::new(item)))
+    }
+
+    /// Whether a directory may contain a selected descendant.
+    pub(crate) fn may_descend(&self, path: &Path) -> bool {
+        if self
+            .exclude
+            .iter()
+            .any(|item| path.starts_with(Path::new(item)))
+        {
+            return false;
+        }
+        self.include.as_ref().is_none_or(|items| {
+            items.iter().any(|item| {
+                let item = Path::new(item);
+                path.starts_with(item) || item.starts_with(path)
+            })
+        })
+    }
+
+    pub(crate) fn publishes(&self, path: &Path) -> bool {
+        self.selects_path(path) && !self.replaced.iter().any(|item| path == Path::new(item))
     }
 }
 
@@ -368,15 +408,7 @@ publishing, Tola checks these rules across `[assets]`, the Bundle, and hook outp
             let url_prefix = tree.url_prefix().url_path();
             for (other_index, other) in self.trees.iter().enumerate().skip(index + 1) {
                 let other_url_prefix = other.url_prefix().url_path();
-                report_url_prefix_overlap(
-                    url_prefix,
-                    Self::FIELDS.trees,
-                    index,
-                    other_url_prefix,
-                    Self::FIELDS.trees,
-                    other_index,
-                    diag,
-                );
+                report_url_prefix_overlap(url_prefix, index, other_url_prefix, other_index, diag);
             }
         }
 
@@ -441,65 +473,47 @@ fn validate_source_path(path: &Path, idx: usize, field: FieldPath, diag: &mut Co
 
 fn report_url_prefix_overlap(
     left: &UrlPath,
-    left_field: FieldPath,
     left_idx: usize,
     right: &UrlPath,
-    right_field: FieldPath,
     right_idx: usize,
     diag: &mut ConfigDiagnostics,
 ) {
+    let field = AssetsConfig::FIELDS.trees;
     let left_key = left.url_collision_key();
     let right_key = right.url_collision_key();
     if left_key == right_key {
         diag.error(
-            right_field,
+            field,
             format!(
                 "`{}[{right_idx}]` URL `{}` duplicates `{}[{left_idx}]` URL `{}`",
-                right_field.as_str(),
+                field.as_str(),
                 right,
-                left_field.as_str(),
+                field.as_str(),
                 left
             ),
         );
     } else if tola_address::portable_key_is_below(&left_key, &right_key) {
-        report_contained_url(
-            right,
-            right_field,
-            right_idx,
-            left,
-            left_field,
-            left_idx,
-            diag,
-        );
+        report_contained_url(right, right_idx, left, left_idx, diag);
     } else if tola_address::portable_key_is_below(&right_key, &left_key) {
-        report_contained_url(
-            left,
-            left_field,
-            left_idx,
-            right,
-            right_field,
-            right_idx,
-            diag,
-        );
+        report_contained_url(left, left_idx, right, right_idx, diag);
     }
 }
 
 fn report_contained_url(
     parent: &UrlPath,
-    parent_field: FieldPath,
     parent_idx: usize,
     child: &UrlPath,
-    child_field: FieldPath,
     child_idx: usize,
     diag: &mut ConfigDiagnostics,
 ) {
+    let field = AssetsConfig::FIELDS.trees;
     diag.error_with_help(
-        child_field,
+        field,
         format!(
             "`{}[{child_idx}]` URL `{}` is inside `{}[{parent_idx}]` URL `{}`",
-            child_field.as_str(),
+            field.as_str(),
             child,
-            parent_field.as_str(),
+            field.as_str(),
             parent
         ),
         "Choose URL prefixes that do not contain one another",
@@ -515,16 +529,13 @@ fn logical_path_is_inside(path: &Path, parent: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::asset::tests::file_declaration;
 
     fn tree_declaration(
         source: impl Into<PathBuf>,
         prefix: impl AsRef<str>,
     ) -> AssetTreeDeclaration {
         AssetTreeDeclaration::new(source, AssetUrlPrefix::parse(prefix.as_ref()).unwrap())
-    }
-
-    fn file_declaration(source: impl Into<PathBuf>, url: impl AsRef<str>) -> AssetFileDeclaration {
-        AssetFileDeclaration::new(source, AssetUrl::parse(url.as_ref()).unwrap())
     }
 
     #[test]

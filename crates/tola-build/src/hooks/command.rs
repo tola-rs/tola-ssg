@@ -1,9 +1,4 @@
 //! Hook command policy: what a configured command receives, and how it is run.
-//!
-//! Process execution, process containment, bounded capture, and termination belong
-//! to `tola-subprocess`. This module decides which environment a configured hook
-//! runs with and turns a command that did not complete into the failure its stage
-//! reports to the site author.
 
 use anyhow::{Context, Result};
 use tola_subprocess::{Command, Stop};
@@ -15,7 +10,9 @@ use super::report::{
 };
 
 use crate::cancellation::BuildCancellation;
-use crate::config::section::build::hooks::HookStage;
+use crate::config::ResolvedSiteConfig;
+use crate::config::section::build::hooks::{HookStage, ModuleHookOrigin};
+use crate::filesystem::layout;
 use crate::mode::BuildMode;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,11 +35,30 @@ impl HookDirectories<'_> {
     }
 }
 
-/// One configured hook command's call: the site it runs in, its stage, its configured name,
-/// the build mode, and the directories the stage provides.
+/// The host-resolved paths supplied to every hook.
+pub(super) struct HookSitePaths<'a> {
+    pub(super) root: &'a Path,
+    pub(super) config: &'a Path,
+    pub(super) content: &'a Path,
+    pub(super) scope: crate::InputScope,
+}
+
+impl<'a> From<&'a ResolvedSiteConfig> for HookSitePaths<'a> {
+    fn from(config: &'a ResolvedSiteConfig) -> Self {
+        Self {
+            root: config.get_root(),
+            config: config.config_path(),
+            content: &config.build().content_dir,
+            scope: config.module_inputs.scope,
+        }
+    }
+}
+
+/// One hook command's call: site, stage, name, mode, and stage directories.
 pub(super) struct HookCall<'a> {
-    pub(super) site_root: &'a Path,
+    pub(super) site: HookSitePaths<'a>,
     pub(super) name: &'a str,
+    pub(super) origin: Option<&'a ModuleHookOrigin>,
     pub(super) mode: BuildMode,
     pub(super) directories: HookDirectories<'a>,
 }
@@ -50,6 +66,7 @@ pub(super) struct HookCall<'a> {
 pub(super) struct HookInvocation<'a> {
     command: Command,
     name: &'a str,
+    reports: crate::report::ReportChannel,
     // Output inspection may still need scratch files after the child exits.
     _temporary: crate::filesystem::TemporaryDirectory,
 }
@@ -57,21 +74,46 @@ pub(super) struct HookInvocation<'a> {
 impl<'a> HookInvocation<'a> {
     pub(super) fn new<S: AsRef<OsStr>>(arguments: &[S], call: HookCall<'a>) -> Result<Self> {
         let temporary = crate::filesystem::TemporaryDirectory::create(
-            &call
-                .site_root
-                .join(crate::filesystem::INTERNAL_DIR)
-                .join("hook-tmp"),
+            &layout::hook_scratch(call.site.root),
             "invocation",
         )?;
         let stage = call.directories.stage();
-        let cache = hook_cache_directory(call.site_root, stage, call.name);
-        // The cache outlives this invocation, so it is created here and never removed by
-        // the temporary directory's owner.
+        let reports = crate::report::ReportChannel::new_in(
+            temporary.path(),
+            format!("hook:{}.{}", stage.as_str(), call.name),
+            crate::report::ReportSources::new(),
+        )?;
+        let cache = hook_cache_directory(call.site.root, stage, call.name);
+        // The cache outlives this invocation, so the temporary directory never removes it.
         fs::create_dir_all(&cache).map_err(|cause| {
             cache_directory_error(stage, &hook_identity(stage, call.name), cause)
         })?;
-        let command = Command::from_args(arguments.iter().map(AsRef::as_ref))
-            .cwd(call.site_root)
+        let executable = std::env::current_exe().context("locate the running Tola executable")?;
+        let mut bindings = vec![
+            ("{tola}", executable.as_os_str()),
+            ("{project}", call.site.root.as_os_str()),
+        ];
+        if let Some(origin) = call.origin {
+            bindings.extend([
+                ("{module}", origin.root.as_os_str()),
+                ("{name}", OsStr::new(&origin.name)),
+            ]);
+        }
+        let arguments = arguments.iter().map(|argument| {
+            let argument = argument.as_ref();
+            match argument.to_str() {
+                Some(argument) => crate::modules::expand_argument(argument, &bindings),
+                None => argument.to_os_string(),
+            }
+        });
+        let command = Command::from_args(arguments)
+            .cwd(call.site.root)
+            .env("TOLA_EXECUTABLE", &executable)
+            .env(crate::report::REPORT_PATH_ENV, reports.path())
+            .env("TOLA_INPUT_SCOPE", call.site.scope.as_str())
+            .env("TOLA_PROJECT_ROOT", call.site.root)
+            .env("TOLA_CONFIG_PATH", call.site.config)
+            .env("TOLA_CONTENT_ROOT", call.site.content)
             .env("TMPDIR", temporary.path())
             .env("TMP", temporary.path())
             .env("TEMP", temporary.path())
@@ -79,6 +121,22 @@ impl<'a> HookInvocation<'a> {
             .env("TOLA_HOOK_STAGE", stage.as_str())
             .env("TOLA_BUILD_MODE", call.mode.as_str())
             .env("TOLA_HOOK_CACHE_DIR", &cache);
+        let command = match call.origin {
+            Some(origin) => {
+                let options = temporary.path().join("options.json");
+                fs::write(&options, &origin.options_json).context("write module hook options")?;
+                command
+                    .env("TOLA_MODULE_NAME", &origin.name)
+                    .env("TOLA_MODULE_ROOT", &origin.root)
+                    .env("TOLA_MODULE_MANIFEST", &origin.manifest)
+                    .env("TOLA_MODULE_OPTIONS", options)
+            }
+            None => command
+                .env_remove("TOLA_MODULE_NAME")
+                .env_remove("TOLA_MODULE_ROOT")
+                .env_remove("TOLA_MODULE_MANIFEST")
+                .env_remove("TOLA_MODULE_OPTIONS"),
+        };
         let command = match call.directories {
             HookDirectories::BeforeBuild => command
                 .env_remove("TOLA_HOOK_INPUT_DIR")
@@ -93,8 +151,59 @@ impl<'a> HookInvocation<'a> {
         Ok(Self {
             command,
             name: call.name,
+            reports,
             _temporary: temporary,
         })
+    }
+
+    pub(super) fn finish(
+        self,
+        completion: Result<Output>,
+        cancellation: Option<&BuildCancellation>,
+        diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    ) -> Result<bool> {
+        use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
+        if let Some(cancellation) = cancellation {
+            cancellation.ensure_active()?;
+        }
+        let report = self.reports.read().map_err(|error| {
+            let message = "invalid hook diagnostic report";
+            let diagnostic = Diagnostic::new(
+                tola_diagnostic::codes::build::HOOKS,
+                Severity::Error,
+                message,
+            )
+            .with_help("Check the report format and use only source locations supplied by Tola");
+            let error = anyhow::Error::new(error).context(message);
+            anyhow::Error::new(DiagnosticError::attach(error, vec![diagnostic]))
+        });
+        let report = match report {
+            Ok(report) => report,
+            Err(error) => {
+                return match completion {
+                    Ok(_) => Err(error),
+                    Err(process_error) => {
+                        let diagnostics = tola_diagnostic::attached(&error).unwrap().to_vec();
+                        Err(
+                            DiagnosticError::attach(process_error.context(error), diagnostics)
+                                .into(),
+                        )
+                    }
+                };
+            }
+        };
+        let submitted = report.is_some();
+        let reported = report.unwrap_or_default();
+        if let Err(error) = completion {
+            return if reported.is_empty() {
+                Err(error)
+            } else {
+                Err(DiagnosticError::attach(error, reported).into())
+            };
+        }
+        tola_diagnostic::ensure_reports_succeed(&reported)?;
+        diagnostics.extend(reported);
+        Ok(submitted)
     }
 
     pub(super) fn run(&self, cancellation: Option<&BuildCancellation>) -> Result<Output> {
@@ -104,15 +213,9 @@ impl<'a> HookInvocation<'a> {
     }
 }
 
-/// The persistent cache directory one hook identity owns, below the site's internal directory.
-///
-/// A configured name is one user-written word that may still contain path separators, `..`, or
-/// non-ASCII characters, so it is hex-encoded into a single component: distinct names never
-/// collide, and no name can reach outside the site root.
+/// The persistent cache directory one hook identity owns.
 fn hook_cache_directory(site_root: &Path, stage: HookStage, name: &str) -> PathBuf {
-    site_root
-        .join(crate::filesystem::INTERNAL_DIR)
-        .join("hook-cache")
+    layout::hook_cache(site_root)
         .join(stage.as_str())
         .join(crate::filesystem::encode_path_identity(Path::new(name)))
 }
@@ -167,7 +270,16 @@ mod tests {
 
     /// The interface names Tola sets for a hook command; a scene inherits wrong values under
     /// exactly these names, so every value its child reads must be one Tola wrote.
-    const INTERFACE_VARIABLES: [&str; 9] = [
+    const INTERFACE_VARIABLES: [&str; 18] = [
+        "TOLA_EXECUTABLE",
+        "TOLA_INPUT_SCOPE",
+        "TOLA_MODULE_NAME",
+        "TOLA_MODULE_ROOT",
+        "TOLA_MODULE_MANIFEST",
+        "TOLA_MODULE_OPTIONS",
+        "TOLA_PROJECT_ROOT",
+        "TOLA_CONFIG_PATH",
+        "TOLA_CONTENT_ROOT",
         "TOLA_HOOK_STAGE",
         "TOLA_BUILD_MODE",
         "TOLA_HOOK_CACHE_DIR",
@@ -187,8 +299,14 @@ mod tests {
         let invocation = HookInvocation::new(
             &["tola-hook-missing-program"],
             HookCall {
-                site_root: directory.path(),
+                site: HookSitePaths {
+                    root: directory.path(),
+                    config: directory.path(),
+                    content: directory.path(),
+                    scope: crate::InputScope::Online,
+                },
                 name: "search",
+                origin: None,
                 mode: BuildMode::Production,
                 directories: HookDirectories::BeforeBuild,
             },
@@ -213,26 +331,29 @@ mod tests {
             ("after-publish", "dev"),
             ("after-publish", "prod"),
         ] {
-            let mut command = ProcessCommand::new(std::env::current_exe().unwrap());
-            command
-                .args([
-                    "--exact",
-                    "hooks::command::tests::hook_environment_scene",
-                    "--nocapture",
-                ])
-                .env("TOLA_HOOK_SCENE_ROOT", directory.path())
-                .env("TOLA_HOOK_SCENE_STAGE", stage)
-                .env("TOLA_HOOK_SCENE_MODE", mode);
-            for variable in INTERFACE_VARIABLES {
-                command.env(variable, wrong.join(variable));
+            for module in [false, true] {
+                let mut command = ProcessCommand::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "hooks::command::tests::hook_environment_scene",
+                        "--nocapture",
+                    ])
+                    .env("TOLA_HOOK_SCENE_ROOT", directory.path())
+                    .env("TOLA_HOOK_SCENE_STAGE", stage)
+                    .env("TOLA_HOOK_SCENE_MODE", mode)
+                    .env("TOLA_HOOK_SCENE_MODULE", if module { "yes" } else { "no" });
+                for variable in INTERFACE_VARIABLES {
+                    command.env(variable, wrong.join(variable));
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{stage} in {mode}:\n{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{stage} in {mode}:\n{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
         }
     }
 
@@ -244,6 +365,15 @@ mod tests {
             return;
         };
         let root = PathBuf::from(root);
+        let config = root.join("custom/config.toml");
+        let content = root.join("custom/content");
+        let origin = ModuleHookOrigin {
+            name: "notes".into(),
+            root: root.join("module"),
+            manifest: root.join("module/tola-module.toml"),
+            options_json: br#"{"search":true}"#.to_vec(),
+        };
+        let is_module = std::env::var("TOLA_HOOK_SCENE_MODULE").unwrap() == "yes";
         let stage = std::env::var("TOLA_HOOK_SCENE_STAGE").unwrap();
         let mode = std::env::var("TOLA_HOOK_SCENE_MODE").unwrap();
         let input = root.join("input");
@@ -270,8 +400,14 @@ mod tests {
                 "hooks::command::tests::child_hook_environment",
             ),
             HookCall {
-                site_root: &root,
+                site: HookSitePaths {
+                    root: &root,
+                    config: &config,
+                    content: &content,
+                    scope: crate::InputScope::Pure,
+                },
                 name: "environment",
+                origin: is_module.then_some(&origin),
                 mode,
                 directories,
             },
@@ -289,6 +425,37 @@ mod tests {
             return;
         };
         let mode = std::env::var("TOLA_HOOK_SCENE_MODE").unwrap();
+        let root = PathBuf::from(std::env::var_os("TOLA_HOOK_SCENE_ROOT").unwrap());
+        assert_eq!(std::env::var("TOLA_INPUT_SCOPE").unwrap(), "pure");
+        assert_eq!(
+            std::env::var_os("TOLA_EXECUTABLE"),
+            Some(std::env::current_exe().unwrap().into_os_string())
+        );
+        for (variable, expected) in [
+            ("TOLA_PROJECT_ROOT", root.clone()),
+            ("TOLA_CONFIG_PATH", root.join("custom/config.toml")),
+            ("TOLA_CONTENT_ROOT", root.join("custom/content")),
+        ] {
+            assert_eq!(std::env::var_os(variable), Some(expected.into_os_string()));
+        }
+        let module = std::env::var("TOLA_HOOK_SCENE_MODULE").unwrap() == "yes";
+        for (variable, expected) in [
+            ("TOLA_MODULE_NAME", std::ffi::OsString::from("notes")),
+            ("TOLA_MODULE_ROOT", root.join("module").into_os_string()),
+            (
+                "TOLA_MODULE_MANIFEST",
+                root.join("module/tola-module.toml").into_os_string(),
+            ),
+        ] {
+            assert_eq!(std::env::var_os(variable), module.then_some(expected));
+        }
+        match std::env::var_os("TOLA_MODULE_OPTIONS") {
+            Some(path) if module => {
+                assert_eq!(std::fs::read(path).unwrap(), br#"{"search":true}"#);
+            }
+            None if !module => {}
+            value => panic!("unexpected module options path: {value:?}"),
+        }
 
         assert_eq!(
             std::env::var_os("TOLA_BUILD_MODE").as_deref(),

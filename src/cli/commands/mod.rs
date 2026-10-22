@@ -1,10 +1,17 @@
+//! One module per command, and the request every site command receives.
+//!
+//! A command resolves intent, calls the library that owns the work, and reports the outcome
+//! through `output::CommandOutput`; build semantics stay in `tola-build`, and policy only a
+//! command can decide stays here.
 pub(super) mod build;
 pub(super) mod check;
 pub(super) mod completions;
 pub(super) mod config;
 pub(super) mod dev;
 pub(super) mod doctor;
+pub(super) mod edit;
 pub(super) mod editor;
+pub(super) mod extensions;
 pub(super) mod fmt;
 pub(super) mod fonts;
 pub(super) mod help;

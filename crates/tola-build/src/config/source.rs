@@ -12,10 +12,6 @@ use super::{ConfigError, ConfigPresence};
 use crate::resources::InputScope;
 
 /// Where every key of one parsed configuration document is written, by dotted path.
-///
-/// A diagnostic that names a configuration field asks for that key's excerpt, so the author reads
-/// the line they must change instead of only the field's name. Paths use the spelling field paths
-/// use, including an array element's decimal index.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigPositions {
     source: Arc<str>,
@@ -45,7 +41,7 @@ impl ConfigPositions {
     }
 
     /// The exact span the document writes one dotted configuration path in.
-    pub(crate) fn written(&self, path: &str) -> Option<crate::diagnostic::SourceRange> {
+    pub(crate) fn written(&self, path: &str) -> Option<tola_diagnostic::SourceRange> {
         source_range(&self.source, self.keys.get(path)?.clone())
     }
 }
@@ -189,15 +185,15 @@ pub(crate) struct SourceExcerpt {
 pub(super) fn source_range(
     content: &str,
     span: std::ops::Range<usize>,
-) -> Option<crate::diagnostic::SourceRange> {
-    Some(crate::diagnostic::SourceRange {
+) -> Option<tola_diagnostic::SourceRange> {
+    Some(tola_diagnostic::SourceRange {
         start: source_position(content, span.start)?,
         end: source_position(content, span.end)?,
     })
 }
 
 /// The zero-based UTF-16 position one byte offset names.
-fn source_position(content: &str, offset: usize) -> Option<crate::diagnostic::SourcePosition> {
+fn source_position(content: &str, offset: usize) -> Option<tola_diagnostic::SourcePosition> {
     let offset = offset.min(content.len());
     let offset = (0..=offset)
         .rev()
@@ -205,7 +201,7 @@ fn source_position(content: &str, offset: usize) -> Option<crate::diagnostic::So
     let line_start = content[..offset]
         .rfind('\n')
         .map_or(0, |newline| newline + 1);
-    Some(crate::diagnostic::SourcePosition {
+    Some(tola_diagnostic::SourcePosition {
         line: content[..line_start]
             .bytes()
             .filter(|byte| *byte == b'\n')
@@ -308,10 +304,6 @@ impl ConfigSource {
     }
 
     /// Construct from bytes already in hand, after one boundary check.
-    ///
-    /// Every construction path passes here, so this is the single gate: [`Self::parse`] and
-    /// [`Self::changed_text`] have no earlier check. [`Self::load`] and [`Self::read_changed`]
-    /// check first only to avoid reading bytes from a path this gate would refuse.
     fn parse_at_root(
         path: PathBuf,
         root: PathBuf,
@@ -364,13 +356,7 @@ impl ConfigSource {
         self.decode_reporting_unknown_fields(|_| true)
     }
 
-    /// Decode the core sections together with a host schema that declares only the sections
-    /// the core schema does not own.
-    ///
-    /// A host composes the two without repeating the core section list. Both halves reject an
-    /// unknown field, and they cannot share one pass: a flattened section hides its unknown
-    /// keys from the field-path report, so the core sections are decoded once and the host's own
-    /// sections are decoded again.
+    /// Decode the core sections beside a host schema that declares only the rest.
     pub fn decode_with_host<T: DeserializeOwned>(
         &self,
     ) -> Result<(ParsedConfig<super::SiteConfigSchema>, ParsedConfig<T>)> {
@@ -447,10 +433,16 @@ impl ConfigSource {
         &self.positions
     }
 
+    /// The load diagnostic an error from this document carries, located in this source.
+    pub(super) fn attach_load(&self, error: anyhow::Error) -> anyhow::Error {
+        super::diagnostic::attach_load(
+            error,
+            Some(self.path.as_path()),
+            Some(self.positions.as_ref()),
+        )
+    }
+
     /// Read the same source, parsing only changed bytes and retaining its original root and scope.
-    ///
-    /// The path is re-checked against the boundary because a configuration file can be replaced by
-    /// a link after the initial load; a reload must refuse exactly what the first read refused.
     pub fn read_changed(&self) -> Result<Option<Self>> {
         if let Some(reason) = source_refusal(&self.root, &self.path, self.scope)? {
             return Err(super::diagnostic::attach_reload(
@@ -487,9 +479,6 @@ impl ConfigSource {
 }
 
 /// The boundary's refusal for one configuration path, in this crate's vocabulary.
-///
-/// Configuration is read before any resolved configuration exists, so it shares the base boundary
-/// every other site read uses and translates the reason at the one place that knows both types.
 fn source_refusal(
     root: &Path,
     path: &Path,
@@ -497,13 +486,11 @@ fn source_refusal(
 ) -> Result<Option<ConfigSourceRefusal>> {
     let boundary =
         crate::resources::base_source_boundary(&crate::filesystem::normalize_path(root), scope);
-    Ok(boundary
-        .refusal(path)
-        .map_err(|error| anyhow::anyhow!("{error}"))?
-        .map(|refusal| match refusal {
-            tola_typst::SourceRefusal::GeneratedState => ConfigSourceRefusal::GeneratedState,
-            tola_typst::SourceRefusal::OutsideSite => ConfigSourceRefusal::OutsideSite,
-        }))
+    let refusal = boundary.refusal(path)?;
+    Ok(refusal.map(|refusal| match refusal {
+        tola_typst::SourceRefusal::GeneratedState => ConfigSourceRefusal::GeneratedState,
+        tola_typst::SourceRefusal::OutsideSite => ConfigSourceRefusal::OutsideSite,
+    }))
 }
 
 /// Whether `field` names a top-level key the core schema reads: one of its sections.
@@ -512,9 +499,6 @@ fn is_core_key(field: &str) -> bool {
 }
 
 /// Name an ignored configuration path in TOML key vocabulary.
-///
-/// `serde_ignored` marks optional wrappers and newtypes with `?`; the key that
-/// names the offending field drops it.
 fn config_field_name(path: &str) -> String {
     path.chars().filter(|character| *character != '?').collect()
 }
@@ -613,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn host_sections_do_not_hide_core_typos() {
+    fn host_sections_not_hide_typos() {
         let directory = tempfile::tempdir().unwrap();
         let source = ConfigSource::parse(
             &directory.path().join("tola.toml"),
@@ -740,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_schema_errors_keep_key_and_value() {
+    fn numeric_schema_errors_key_value() {
         for (field, value, maximum) in [
             ("port", "70000", u16::MAX.to_string()),
             ("port", "-1", u16::MAX.to_string()),
@@ -758,7 +742,7 @@ mod tests {
             .unwrap();
             let error = source.decode::<NumericSettings>().unwrap_err();
             let diagnostic = &attached_diagnostics(&error)[0];
-            assert_eq!(diagnostic.code, crate::codes::config::TOML);
+            assert_eq!(diagnostic.code, tola_diagnostic::codes::config::TOML);
             assert!(
                 diagnostic.message.contains(&format!("`server.{field}`")),
                 "{}",
@@ -814,7 +798,7 @@ mod tests {
             .unwrap();
             let error = source.decode::<NumericSettings>().unwrap_err();
             let diagnostic = &attached_diagnostics(&error)[0];
-            assert_eq!(diagnostic.code, crate::codes::config::TOML);
+            assert_eq!(diagnostic.code, tola_diagnostic::codes::config::TOML);
             assert!(
                 diagnostic.message.contains(&format!("`{key}`")),
                 "{}",
@@ -842,7 +826,10 @@ mod tests {
         std::os::unix::fs::symlink(outside.path().join("tola.toml"), &escaping).unwrap();
 
         let refused = ConfigSource::load(Some(&escaping), InputScope::Pure).unwrap_err();
-        assert_eq!(diagnostic_code(&refused), Some(crate::codes::config::IO));
+        assert_eq!(
+            diagnostic_code(&refused),
+            Some(tola_diagnostic::codes::config::IO)
+        );
         assert!(
             diagnostic_message(&refused).contains("resolves outside the site"),
             "{}",
@@ -855,7 +842,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn pure_refuses_configuration_resolving_into_internal_state() {
+    fn pure_refuses_internal_state() {
         let directory = tempfile::tempdir().unwrap();
         let site = directory.path().join("site");
         let internal = site.join(crate::filesystem::INTERNAL_DIR);

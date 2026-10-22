@@ -296,12 +296,13 @@ See what a site can use:
 
 ```sh
 tola inspect icons                       # every namespace, its source, and its icon count
-tola inspect icons lucide                # adds that namespace's icon names
+tola inspect icons lucide                # one namespace/name row per icon or alias
 tola inspect icons lucide --interactive  # browse those names in a table
 ```
 
-The command prints a JSON array with one row per namespace: its resolved source, the collection's
-own icon prefix, and its icon count; naming a namespace adds that collection's `names`.
+Without a namespace, the JSON array has one row per collection: its namespace, resolved source,
+own icon prefix, and icon count. Naming a namespace returns one `namespace`/`name` row per icon
+or alias, in lexical order. Interactive selection returns the selected row.
 
 A remote collection downloads and caches exactly as a build downloads it. `tola vendor` freezes a
 site's remote collections into its own `icons/<namespace>.json`, so another machine builds offline.";
@@ -383,11 +384,7 @@ fn validate_remote_json(
     match (preset, url) {
         (Some(preset), None) => {
             if sha256.is_some() {
-                diagnostics.error_with_help(
-                    field,
-                    format!("icon collection `{namespace}`: `sha256` needs the `url` it verifies"),
-                    "remove `sha256`, or write the `url` it belongs to",
-                );
+                sha256_needs_url(namespace, diagnostics);
                 return;
             }
             let Some(indexed) = iconify::indexed(preset) else {
@@ -425,11 +422,7 @@ fn validate_remote_json(
         }
         (None, Some(url)) => {
             if version.is_some() {
-                diagnostics.error_with_help(
-                    field,
-                    format!("icon collection `{namespace}`: `version` needs the `preset` it names"),
-                    "remove `version`, or write the `preset` whose release it is",
-                );
+                version_needs_preset(namespace, diagnostics);
                 return;
             }
             if sha256.is_none() {
@@ -458,16 +451,8 @@ fn validate_remote_json(
             format!("icon collection `{namespace}`: declare either `preset` or `url`, not both"),
             "remove the declaration this namespace does not need",
         ),
-        (None, None) if version.is_some() => diagnostics.error_with_help(
-            field,
-            format!("icon collection `{namespace}`: `version` needs the `preset` it names"),
-            "remove `version`, or write the `preset` whose release it is",
-        ),
-        (None, None) if sha256.is_some() => diagnostics.error_with_help(
-            field,
-            format!("icon collection `{namespace}`: `sha256` needs the `url` it verifies"),
-            "remove `sha256`, or write the `url` it belongs to",
-        ),
+        (None, None) if version.is_some() => version_needs_preset(namespace, diagnostics),
+        (None, None) if sha256.is_some() => sha256_needs_url(namespace, diagnostics),
         (None, None) => {
             // A namespace that is itself an indexed collection name is almost always an author
             // who wrote the section header and stopped there.
@@ -484,6 +469,24 @@ fn validate_remote_json(
             );
         }
     }
+}
+
+/// `sha256` verifies the bytes a `url` serves, so it needs one.
+fn sha256_needs_url(namespace: &str, diagnostics: &mut ConfigDiagnostics) {
+    diagnostics.error_with_help(
+        IconsConfig::FIELDS.collections,
+        format!("icon collection `{namespace}`: `sha256` needs the `url` it verifies"),
+        "remove `sha256`, or write the `url` it belongs to",
+    );
+}
+
+/// `version` pins the release of a `preset`, so it needs one.
+fn version_needs_preset(namespace: &str, diagnostics: &mut ConfigDiagnostics) {
+    diagnostics.error_with_help(
+        IconsConfig::FIELDS.collections,
+        format!("icon collection `{namespace}`: `version` needs the `preset` it names"),
+        "remove `version`, or write the `preset` whose release it is",
+    );
 }
 
 /// Whether one address names an absolute `http` or `https` URL Tola may fetch.

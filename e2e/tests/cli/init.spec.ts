@@ -1,390 +1,163 @@
 import { expect } from '@playwright/test'
 import { mkdir, readdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { stripVTControlCharacters } from 'node:util'
-import { readLogRecords } from '../../support/log.ts'
-import {
-  captureOutput,
-  COMMAND_TIMEOUT_MS,
-  commandRunner,
-  expectExited,
-  runCommand,
-  RunningProcess,
-  startCommand,
-  test,
-} from '../../support/process.ts'
-import { screenText, sizedTerminalArgs } from '../../support/terminal.ts'
+import { COMMAND_TIMEOUT_MS, commandRunner, expectExited, test } from '../../support/process.ts'
 
-test('init writes one scaffold everywhere', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  const scaffolds: { configuration: string; program: string }[] = []
-  for (const directory of ['current', 'dot', 'named']) {
-    const root = join(temporary, directory)
-    await mkdir(root)
-    const args = directory === 'current' ? [] : directory === 'dot' ? ['.'] : [directory]
-    const cwd = directory === 'named' ? temporary : root
-    const completed = await runInit(['init', ...args], cwd, COMMAND_TIMEOUT_MS.short)
+const INITIALIZE = `def main [title: string = 'A new site', --invalid, --cancel] {
+  if $cancel { exit 130 }
+  let alias = $env.TOLA_MODULE_NAME
+  let enabled = if $invalid { 'wrong type' } else { true }
+  {site: {title: $title},
+   modules: {($alias): {path: $env.TOLA_MODULE_ROOT, options: {enabled: $enabled}}},
+   theme: {module: $alias}}
+  | to toml | save tola.toml
+  mkdir content
+  '= Welcome' | save content/index.typ
+}
+`
 
-    expectExited(completed)
-    expect(completed.stdout).toBe('')
-    expect(await readdir(join(root, 'content'))).toEqual(['index.typ'])
-    scaffolds.push({
-      configuration: await readFile(join(root, 'tola.toml'), 'utf8'),
-      program: await readFile(join(root, 'site.typ'), 'utf8'),
-    })
-  }
-  expect(scaffolds[1]).toEqual(scaffolds[0])
-  expect(scaffolds[2]).toEqual(scaffolds[0])
-})
-
-test('pure init builds with embedded packages', async ({ binary, directory: temporary }) => {
-  const root = join(temporary, 'site')
-  const initialized = startCommand(binary, ['init', root, '--pure'], temporary, {
-    TYPST_PACKAGE_PATH: 'relative-host-packages',
-    TYPST_PACKAGE_CACHE_PATH: 'relative-host-cache',
-  })
-  try {
-    const completed = await initialized.command.waitForClose(COMMAND_TIMEOUT_MS.short)
-    expectExited({ ...completed, stderr: initialized.stderr() })
-  } finally {
-    await initialized.command.terminate()
-  }
-  const built = await runCommand(binary, ['build', '--offline', '--pure'], root, COMMAND_TIMEOUT_MS.build)
-  expectExited(built)
-  expect(await readFile(join(root, 'public/404.html'), 'utf8')).toContain('Page not found')
-})
-
-test('internal log records the scaffold', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  const root = join(await realpath(temporary), "Ada's notes")
-  const log = join(root, '.tola/logs/init.jsonl')
-  const completed = await runInit(
-    ['init', root, '--log-file', log],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
+async function writeModule(root: string): Promise<void> {
+  await mkdir(join(root, 'tools'), { recursive: true })
+  await writeFile(
+    join(root, 'tola-module.toml'),
+    `schema-version = 1
+name = "starter"
+version = "1.0.0"
+[site]
+entry = "site.typ"
+[options]
+schema = "options.typ"
+export = "schema"
+[init]
+argv = ["{tola}", "nu", "tools/init.nu"]
+`,
   )
-
-  expectExited(completed)
-  expect(completed.stdout).toBe('')
-  const directoryStep = completed.stderr.indexOf(`Switch to \`${root}\`.`)
-  expect(directoryStep).toBeGreaterThan(-1)
-  const contentStep = completed.stderr.indexOf('content/index.typ', directoryStep)
-  const developmentStep = completed.stderr.indexOf('tola dev', contentStep)
-  expect(contentStep).toBeGreaterThan(directoryStep)
-  expect(developmentStep).toBeGreaterThan(contentStep)
-  expect(completed.stderr).toContain('tola help "[site]"')
-  expect(completed.stderr).toContain('tola help "@tola/address" slugify output-url')
-  expect(await readdir(join(root, 'content'))).toEqual(['index.typ'])
-  expect(await readFile(join(root, 'tola.toml'), 'utf8')).toContain('[build]')
-  const records = await readLogRecords(log)
-  expect(records[0]!.fields).toMatchObject({ kind: 'command_started', command: 'init' })
-  expect(records.at(-1)!.fields).toMatchObject({ kind: 'command_finished', success: true })
-})
-
-test('conflicting init keeps existing files', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  const root = join(temporary, 'site')
-  const log = join(temporary, 'init.jsonl')
-  await mkdir(root)
-  await writeFile(join(root, 'site.typ'), 'Existing site program.\n')
-  await writeFile(join(root, 'keep.txt'), 'Keep this file.\n')
-  const completed = await runInit(
-    ['init', root, '--force', '--log-file', log],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
+  await writeFile(join(root, 'site.typ'), '#document("index.html", format: "html")[Hello]\n')
+  await writeFile(
+    join(root, 'options.typ'),
+    '#import "@tola/schema:0.0.0" as s\n#let schema = s.schema((enabled: s.optional(bool, default: true),))\n',
   )
+  await writeFile(join(root, 'tools/init.nu'), INITIALIZE)
+}
 
-  expectExited(completed, 1)
-  expect(completed.stdout).toBe('')
-  expect(completed.stderr).toContain('site.typ')
-  expect((await readdir(root)).sort()).toEqual(['keep.txt', 'site.typ'])
-  expect(await readFile(join(root, 'site.typ'), 'utf8')).toBe('Existing site program.\n')
-  expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('Keep this file.\n')
-  const records = await readLogRecords(log)
-  expect(records.some((record) =>
-    record.fields?.kind === 'diagnostic' &&
-    record.fields.code === 'init.conflict'
-  )).toBe(true)
-  expect(records.at(-1)!.fields).toMatchObject({ kind: 'command_finished', success: false })
+test('starter builds without host packages', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  const site = join(root, 'new site')
+  expectExited(await run(['init', site, '--pure'], root))
+  expectExited(await run(['build', '--pure'], site, COMMAND_TIMEOUT_MS.build))
+  expect(await readFile(join(site, 'public/index.html'), 'utf8')).toContain('Welcome')
+  expect(await readFile(join(site, 'public/404.html'), 'utf8')).toContain('Page not found')
 })
 
-test('dry-run writes no site files', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  await writeFile(join(temporary, 'site.typ'), 'Keep the existing program.\n')
-  const completed = await runInit(
-    [
-      'init',
-      '.',
-      '--dry-run',
-      '--log-file',
-      '.tola/logs/init.jsonl',
-    ],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
-  )
-
-  expectExited(completed, 1)
-  expect(completed.stdout).toContain('[build]')
-  expect(completed.stdout).toContain('entry = "site.typ"')
-  expect(completed.stdout).toContain('[site]')
-  expect(completed.stdout).not.toContain('error[')
-  expect(completed.stderr).toContain('error[init.conflict]')
-  expect(completed.stderr).not.toContain('[build]')
-  expect(await readdir(temporary)).toEqual(['site.typ'])
-  expect(await readFile(join(temporary, 'site.typ'), 'utf8')).toBe('Keep the existing program.\n')
+test('forced init preserves existing files', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  await writeFile(join(root, 'notes.txt'), 'Keep my notes')
+  expectExited(await run(['init'], root), 1)
+  expectExited(await run(['init', '--force'], root))
+  const configuration = await readFile(join(root, 'tola.toml'), 'utf8')
+  expectExited(await run(['init', '--force'], root), 1)
+  expect(await readFile(join(root, 'tola.toml'), 'utf8')).toBe(configuration)
+  expect(await readFile(join(root, 'notes.txt'), 'utf8')).toBe('Keep my notes')
 })
 
-test('init survives a small descriptor budget', async ({ binary, directory: temporary }) => {
-  test.skip(process.platform === 'win32', 'ulimit is a POSIX shell builtin')
-  const root = join(temporary, 'limited')
-  // The scaffold materializes every embedded package, so a writer that holds one
-  // directory handle per file exhausts the default limit on macOS and Linux.
-  const completed = await runCommand(
-    '/bin/sh',
-    ['-c', `ulimit -n 32; exec '${binary}' init '${root}' --color never`],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
-  )
-
-  expectExited(completed)
-  expect(await readFile(join(root, 'tola.toml'), 'utf8')).toContain('entry = "site.typ"')
-  expect(await readFile(join(root, 'site.typ'), 'utf8')).toContain('#let pages')
+test('init dry-run leaves the target absent', async ({ binary, directory: root }) => {
+  expectExited(await commandRunner(binary)(['init', 'preview', '--dry-run'], root))
+  expect(await readdir(root)).toEqual([])
 })
 
-test('features match the medium preset', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  const preset = join(temporary, 'preset')
-  const features = join(temporary, 'features')
+test('module init resolves paths from the final site', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  const module = join(root, 'source module')
+  await writeModule(module)
+  const script = INITIALIZE.replace('$env.TOLA_MODULE_ROOT, options:', "'../source module', options:")
+  await writeFile(join(module, 'tools/init.nu'), script)
   expectExited(
-    await runInit(
-      ['init', preset, '--preset', 'medium', '--pure'],
-      temporary,
-      COMMAND_TIMEOUT_MS.standard,
-    ),
+    await run(['init', 'author site', '--from', module, '--alias', 'forest', '--', 'Author title'], root),
   )
-  expectExited(
-    await runInit(
-      ['init', features, '--features', 'starter-stylesheet,feed,sitemap', '--pure'],
-      temporary,
-      COMMAND_TIMEOUT_MS.standard,
-    ),
-  )
-
-  const scaffold = async (root: string) => ({
-    listing: (await readdir(root, { recursive: true })).sort(),
-    configuration: await readFile(join(root, 'tola.toml'), 'utf8'),
-    program: await readFile(join(root, 'site.typ'), 'utf8'),
-    page: await readFile(join(root, 'site/page.typ'), 'utf8'),
-    stylesheet: await readFile(join(root, 'static/web-assets/css/site.css'), 'utf8'),
-  })
-  expect(await scaffold(features)).toEqual(await scaffold(preset))
+  const site = join(root, 'author site')
+  expect(await readFile(join(site, 'tola.toml'), 'utf8')).toContain('Author title')
+  const configuration = await run(['inspect', 'config'], site)
+  expectExited(configuration)
+  const settings = JSON.parse(configuration.stdout)
+  expect(settings.theme).toBe('forest')
+  expect(await realpath(settings.modules.forest.root)).toBe(await realpath(module))
+  expectExited(await run(['build', '--offline'], site, COMMAND_TIMEOUT_MS.build))
+  expect(await readFile(join(site, 'public/index.html'), 'utf8')).toContain('Hello')
+  expect(await readdir(site)).not.toContain('tools')
 })
 
-test('feature selection builds offline', async ({ binary, directory: temporary }) => {
-  const root = join(temporary, 'site')
-  const runInit = commandRunner(binary)
-  expectExited(
-    await runInit(['init', root, '--features', 'feed', '--pure'], temporary, COMMAND_TIMEOUT_MS.standard),
-  )
-
-  const built = await runCommand(binary, ['build', '--offline', '--pure'], root, COMMAND_TIMEOUT_MS.build)
-  expectExited(built)
-  expect(await readFile(join(root, 'public/404.html'), 'utf8')).toContain('Page not found')
-  expect(await readdir(join(root, 'public'))).not.toContain('feed.xml')
-})
-
-test('feature selection without a runner reports a diagnostic', async ({ binary, directory: temporary }) => {
-  const root = join(temporary, 'site')
-  const runInit = commandRunner(binary)
-  const completed = await runInit(
-    ['init', root, '--features', 'tailwind-css', '--pure'],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
-  )
-
-  expectExited(completed, 1)
-  expect(completed.stderr).toContain('error[init.selection]')
-  expect(completed.stderr).toContain('add `deno-toolchain` to `--features`')
-  expect(await readdir(temporary)).toEqual([])
-})
-
-test('unknown feature names are refused', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  const completed = await runInit(
-    ['init', 'site', '--features', 'feeds', '--pure'],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
-  )
-
-  expectExited(completed, 2)
-  expect(completed.stderr).toContain('--features <NAMES>')
-  expect(completed.stderr).toContain('deno-toolchain')
-  expect(await readdir(temporary)).toEqual([])
-})
-
-test('feature dry run writes nothing', async ({ binary, directory: temporary }) => {
-  const runInit = commandRunner(binary)
-  const completed = await runInit(
-    ['init', 'site', '--features', 'starter-stylesheet', '--dry-run', '--pure'],
-    temporary,
-    COMMAND_TIMEOUT_MS.short,
-  )
-
-  expectExited(completed)
-  expect(completed.stdout).toContain('entry = "site.typ"')
-  expect(await readdir(temporary)).toEqual([])
-})
-
-type InteractiveInit = {
-  site: string
-  running: RunningProcess
-  output: ReturnType<typeof captureOutput>
-}
-
-async function withInteractiveInit(
-  binary: string,
-  root: string,
-  args: string[],
-  interact: (init: InteractiveInit) => Promise<void>,
-  term = 'xterm-256color',
-): Promise<void> {
-  const site = join(root, 'site')
-  const running = new RunningProcess(
-    'script',
-    sizedTerminalArgs(binary, [
-      'init',
-      site,
-      '--interactive',
-      '--editor',
-      'vscode',
-      '--pure',
-      '--color',
-      'never',
-      ...args,
-    ]),
-    root,
-    { TERM: term },
-  )
-  const output = captureOutput(running.child)
-  try {
-    await interact({ site, running, output })
-  } finally {
-    await running.terminate()
-  }
-}
-
-async function confirmInteractiveInit(init: InteractiveInit, screen = true): Promise<void> {
-  if (screen) init.running.child.stdin.write('y')
-  await expect.poll(() => stripVTControlCharacters(init.output.stdout())).toContain('Create this site?')
-  init.running.child.stdin.write('y\r')
-  expect((await init.running.waitForClose(COMMAND_TIMEOUT_MS.standard)).code).toBe(0)
-}
-
-async function filterInit(init: InteractiveInit, query: string, previous = ''): Promise<void> {
-  init.running.child.stdin.write('/')
-  init.running.child.stdin.write('\x7f'.repeat(previous.length) + query)
-  await expect.poll(() => screenText(init.output.stdout())).toContain(`filter: ${query}`)
-  init.running.child.stdin.write('\r')
-  await expect.poll(() => screenText(init.output.stdout())).toContain(`/${query}`)
-}
-
-test('interactive init writes the selected preset', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await withInteractiveInit(binary, root, [], async (init) => {
-    await expect.poll(() => screenText(init.output.stdout())).toContain('preset  [1] rich')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] feed')
-    init.running.child.stdin.write('3')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[ ] feed')
-    await confirmInteractiveInit(init)
-    expect(stripVTControlCharacters(init.output.stdout())).toContain('Features: minimal')
-    expect(await readdir(join(init.site, 'static/web-assets/css'))).toEqual([])
-    expect(await readdir(init.site)).not.toContain('justfile')
-  })
-})
-
-test('interactive justfile feature decides the derived file', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await withInteractiveInit(binary, root, ['--preset', 'rich'], async (init) => {
-    await expect.poll(() => screenText(init.output.stdout())).toContain('preset  [1] rich')
-    await filterInit(init, 'justfile')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] justfile')
-    init.running.child.stdin.write(' ')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[ ] justfile')
-    await confirmInteractiveInit(init)
-    expect(await readdir(join(init.site, 'static/tailwind-sources'))).toEqual(['site.css'])
-    expect(await readdir(init.site)).not.toContain('justfile')
-  })
-})
-
-test('interactive feature selection completes the toolchain', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await withInteractiveInit(binary, root, ['--preset', 'minimal'], async (init) => {
-    await expect.poll(() => screenText(init.output.stdout())).toContain('preset  [1] rich')
-    await filterInit(init, 'tailwind-css')
-    init.running.child.stdin.write(' ')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] tailwind-css')
-    await filterInit(init, 'deno-toolchain', 'tailwind-css')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] deno-toolchain')
-    await filterInit(init, 'justfile', 'deno-toolchain')
-    init.running.child.stdin.write(' ')
-    await expect.poll(() => screenText(init.output.stdout())).toContain('[■] justfile')
-    await confirmInteractiveInit(init)
-    const configuration = JSON.parse(await readFile(join(init.site, 'deno.json'), 'utf8'))
-    expect(configuration.tasks.css).toContain('tailwindcss')
-    expect(await readFile(join(init.site, 'justfile'), 'utf8')).toContain('deno task css')
-    const stylesheet = await readFile(join(init.site, 'static/tailwind-sources/site.css'), 'utf8')
-    expect(stylesheet).toContain('tailwindcss/utilities.css')
-    expect(stylesheet).toContain('color-scheme: light dark')
-    expect(stylesheet).not.toContain('{{stylesheet}}')
-  })
-})
-
-for (const term of ['xterm-256color', 'dumb']) {
-  test(`interactive seed normalizes stylesheet providers on ${term}`, async ({ binary, directory: root }) => {
-    test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-    await withInteractiveInit(
-      binary,
-      root,
-      ['--features', 'starter-stylesheet,tailwind-css'],
-      async (init) => {
-        if (term !== 'dumb') {
-          await expect.poll(() => screenText(init.output.stdout())).toContain('[ ] starter-stylesheet')
-          await expect.poll(() => screenText(init.output.stdout())).toContain('[■] deno-toolchain')
-          await expect.poll(() => screenText(init.output.stdout())).toContain('[■] tailwind-css')
-        }
-        await confirmInteractiveInit(init, term !== 'dumb')
-        expect(await readdir(join(init.site, 'static/web-assets/css'))).toEqual([])
-        expect(await readdir(init.site)).toContain('deno.json')
-        expect(await readFile(join(init.site, 'static/tailwind-sources/site.css'), 'utf8')).not.toContain(
-          '{{stylesheet}}',
-        )
-        if (term === 'dumb') expect(init.output.stdout()).not.toContain('\x1b[?1049h')
-      },
-      term,
-    )
+for (const [option, code] of [['--invalid', 1], ['--cancel', 130]] as const) {
+  test('module init ' + option + ' leaves the target absent', async ({ binary, directory: root }) => {
+    await writeModule(join(root, 'module'))
+    const result = await commandRunner(binary)(['init', 'site', '--from', 'module', '--', option], root)
+    expectExited(result, code)
+    expect(await readdir(root)).toEqual(['module'])
   })
 }
 
-test('interactive init cancels on interrupt', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await withInteractiveInit(binary, root, [], async (init) => {
-    await expect.poll(() => screenText(init.output.stdout())).toContain('preset  [1] rich')
-    init.running.child.stdin.write('\x03')
-    expect((await init.running.waitForClose(COMMAND_TIMEOUT_MS.standard)).code).toBe(130)
-    expect(init.output.stdout()).toContain('\x1b[?1049l')
-    expect(await readdir(root)).toEqual([])
-  })
+test('module dry-run leaves the target absent', async ({ binary, directory: root }) => {
+  await writeModule(join(root, 'module'))
+  expectExited(await commandRunner(binary)(['init', 'site', '--from', 'module', '--dry-run'], root))
+  expect(await readdir(root)).toEqual(['module'])
 })
 
-test('interactive init falls back to the preset question', async ({ binary, directory: root }) => {
-  test.skip(process.platform === 'win32', 'requires a POSIX pseudo-terminal')
-  await withInteractiveInit(binary, root, ['--preset', 'minimal'], async (init) => {
-    await expect.poll(() => stripVTControlCharacters(init.output.stdout())).toContain(
-      'Choose a scaffold preset',
-    )
-    init.running.child.stdin.write('\r')
-    await confirmInteractiveInit(init, false)
-    expect(init.output.stdout()).not.toContain('\x1b[?1049h')
-    expect(await readdir(init.site)).not.toContain('justfile')
-  }, 'dumb')
+test('pure init uses the final site boundary', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  await writeModule(join(root, 'external'))
+  await writeFile(
+    join(root, 'external/tools/init.nu'),
+    "'ran' | save ($env.TOLA_MODULE_ROOT | path join invoked)\n" + INITIALIZE,
+  )
+  expectExited(await run(['init', 'site', '--from', 'external', '--pure'], root), 1)
+  await expect(readFile(join(root, 'external/invoked'))).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(readdir(join(root, 'site'))).rejects.toMatchObject({ code: 'ENOENT' })
+  await writeModule(join(root, 'existing/theme'))
+  expectExited(await run(['init', 'existing', '--force', '--from', 'existing/theme', '--pure'], root))
+  expectExited(await run(['build', '--pure'], join(root, 'existing'), COMMAND_TIMEOUT_MS.build))
+})
+
+test('configured module alias initializes a new site', async ({ binary, directory: root }) => {
+  const run = commandRunner(binary)
+  await writeModule(join(root, 'module'))
+  await writeFile(join(root, 'tola.toml'), "[modules.forest]\npath = 'module'\n")
+  expectExited(await run(['forest', 'init', 'site', '--', 'Through alias'], root))
+  const configuration = await readFile(join(root, 'site/tola.toml'), 'utf8')
+  expect(configuration).toContain('Through alias')
+  expectExited(await run(['forest', 'init', 'site', '--force'], root), 1)
+  expect(await readFile(join(root, 'site/tola.toml'), 'utf8')).toBe(configuration)
+})
+
+test('initializer schema errors retain the module source', async ({ binary, directory: root }) => {
+  await writeModule(join(root, 'module'))
+  await writeFile(
+    join(root, 'module/options.typ'),
+    '#import "@tola/schema:0.0.0" as s\n#let schema = s.schema((enabled: s.refine(bool, value => panic("initializer schema callback"), message: "invalid"),))\n',
+  )
+  const result = await commandRunner(binary)(['init', 'site', '--from', 'module'], root)
+  expectExited(result, 1)
+  expect(result.stderr).toContain('initializer schema callback')
+  expect(result.stderr).toContain('options.typ')
+  expect(await readdir(root)).toEqual(['module'])
+})
+
+test('initializer must produce a configuration', async ({ binary, directory: root }) => {
+  await writeModule(join(root, 'module'))
+  await writeFile(join(root, 'module/tools/init.nu'), 'def main [] {}\n')
+  expectExited(await commandRunner(binary)(['init', 'site', '--from', 'module'], root), 1)
+  expect(await readdir(root)).toEqual(['module'])
+})
+
+test('generated modules resolve before initialization commits', async ({ binary, directory: root }) => {
+  await writeModule(join(root, 'module'))
+  const script = INITIALIZE.replace(
+    'options: {enabled: $enabled}}}',
+    "options: {enabled: $enabled}}, generated: {path: 'generated'}}",
+  )
+  await writeFile(
+    join(root, 'module/tools/init.nu'),
+    "mkdir generated\n'schema-version = 1' | save generated/tola-module.toml\n" + script,
+  )
+  const run = commandRunner(binary)
+  expectExited(await run(['init', 'site', '--from', 'module'], root))
+  expectExited(await run(['generated', '--help'], join(root, 'site')))
 })

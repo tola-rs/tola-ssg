@@ -175,20 +175,15 @@ test('dry run refuses an interrupted installation', async ({ binary, directory: 
   const run = commandRunner(binary)
   const host = await vendorThemeSite(root, run)
 
-  // What an interrupted installation leaves: the prepared tree already replaced the vendor tree,
-  // and the previous tree stays in the workspace with its journal until `committed` is written.
-  const workspace = join(root, '.vendor-vendor')
-  await mkdir(join(workspace, 'candidate/fonts'), { recursive: true })
-  await mkdir(join(workspace, 'candidate/icons'), { recursive: true })
+  // What an interrupted installation leaves: the journal is written, the replaced tree is in the
+  // workspace, and the verified tree is still staged because the install never ran.
+  const workspace = join(root, '.vendor-swap')
+  await mkdir(join(workspace, 'staged/0'), { recursive: true })
   await mkdir(join(workspace, 'previous'), { recursive: true })
-  await writeFile(join(workspace, 'owner'), 'tola-vendor-root\nvendor=vendor/\n')
-  await writeFile(join(workspace, 'replacing'), '111')
-  await rename(join(root, 'vendor/typst-packages'), join(workspace, 'previous/typst-packages'))
-  await mkdir(join(root, 'vendor/typst-packages/preview/theme/1.0.0'), { recursive: true })
-  await writeFile(
-    join(root, 'vendor/typst-packages/preview/theme/1.0.0/lib.typ'),
-    '#let accent = "uncommitted"\n',
-  )
+  await writeFile(join(workspace, 'owner'), 'tola-swap\ntarget=vendor\n')
+  await writeFile(join(workspace, 'commit'), 'vendor/typst-packages\n')
+  await writeFile(join(workspace, 'staged/0/lib.typ'), '#let accent = "verified"\n')
+  await rename(join(root, 'vendor/typst-packages'), join(workspace, 'previous/0'))
 
   const vendorContents = await treeContents(join(root, 'vendor'))
   const recoveryContents = await treeContents(workspace)

@@ -1,103 +1,29 @@
-//! Composition of the generated `tola.toml`.
-
-use std::path::{Path, PathBuf};
+//! Configuration for the single built-in starter.
 
 use crate::writes::FileWrites;
+use std::path::{Path, PathBuf};
 use tola_build::config::SiteConfigSchema;
-use tola_build::config::section::build::hooks::{
-    BeforeBuildHookConfig, CommandOutput, HooksConfig, OutputCommandConfig,
-};
+use tola_build::config::section::build::hooks::HooksConfig;
 use tola_build::config::section::{
-    AssetTreeDeclaration, AssetUrlPrefix, AssetsConfig, BuildSectionConfig, FormatterConfig,
-    IconsConfig, SiteSectionConfig, TypstSectionConfig, VendorConfig,
+    AssetTreeDeclaration, AssetUrlPrefix, AssetsConfig, BuildSectionConfig, SiteSectionConfig,
+    VendorConfig,
 };
-
-use super::features::{Effects, Hook, HookStage};
 
 pub(super) const CONFIG_PATH: &str = "tola.toml";
 
-/// The configuration the scaffold's effects require: default site settings, the browser-delivered
-/// asset subtree mapped, and vendoring pointed at `vendor`.
-pub(super) fn schema(effects: &Effects) -> SiteConfigSchema {
-    // Only the browser-delivered subtree is mapped: compiler fonts and processing inputs
-    // elsewhere under `static` stay unpublished unless another producer selects them.
-    let assets = AssetsConfig {
-        trees: vec![AssetTreeDeclaration::new(
-            super::files::WEB_ASSETS_DIR,
-            AssetUrlPrefix::parse("/assets").expect("the scaffold asset prefix is valid"),
-        )],
-        cache_busting: effects.cache_busting,
-        ..AssetsConfig::default()
-    };
-    let build = BuildSectionConfig {
-        hooks: HooksConfig {
-            before_build: before_build_hooks(effects),
-            generate_outputs: output_commands(effects),
-            ..HooksConfig::default()
-        },
-        ..BuildSectionConfig::default()
-    };
+pub(super) fn schema() -> SiteConfigSchema {
     SiteConfigSchema {
-        site: SiteSectionConfig::default(),
-        build,
-        assets,
-        typst: TypstSectionConfig::default(),
-        icons: IconsConfig::default(),
+        assets: AssetsConfig {
+            trees: vec![AssetTreeDeclaration::new(
+                super::files::WEB_ASSETS_DIR,
+                AssetUrlPrefix::parse("/assets").expect("valid starter asset prefix"),
+            )],
+            ..Default::default()
+        },
         vendor: VendorConfig {
             path: Some(PathBuf::from("vendor")),
         },
-        formatter: FormatterConfig::default(),
-    }
-}
-
-/// The `before-build` configuration entries the effects declare.
-fn before_build_hooks(effects: &Effects) -> Vec<BeforeBuildHookConfig> {
-    effects
-        .hooks
-        .iter()
-        .filter(|hook| hook.stage == HookStage::BeforeBuild)
-        .map(before_build_hook)
-        .collect()
-}
-
-/// The `generate-outputs` configuration entries the effects declare.
-fn output_commands(effects: &Effects) -> Vec<OutputCommandConfig> {
-    effects
-        .hooks
-        .iter()
-        .filter(|hook| hook.stage == HookStage::GenerateOutputs)
-        .map(output_command)
-        .collect()
-}
-
-/// The configuration entry one `before-build` hook declares.
-fn before_build_hook(hook: &Hook) -> BeforeBuildHookConfig {
-    BeforeBuildHookConfig {
-        name: hook.name.to_owned(),
-        command: hook.command.iter().map(|word| (*word).to_owned()).collect(),
-        rerun_on: hook.rerun_on.iter().map(PathBuf::from).collect(),
-        generates: hook.outputs.iter().map(PathBuf::from).collect(),
-        ..BeforeBuildHookConfig::default()
-    }
-}
-
-/// The configuration entry one `generate-outputs` hook declares: the trees it owns.
-fn output_command(hook: &Hook) -> OutputCommandConfig {
-    OutputCommandConfig {
-        name: hook.name.to_owned(),
-        command: hook.command.iter().map(|word| (*word).to_owned()).collect(),
-        rerun_on: hook.rerun_on.iter().map(PathBuf::from).collect(),
-        outputs: hook
-            .outputs
-            .iter()
-            .map(|tree| {
-                CommandOutput::Tree(
-                    tola_address::OutputPath::parse(tree)
-                        .expect("the scaffold output tree is a valid path"),
-                )
-            })
-            .collect(),
-        ..OutputCommandConfig::default()
+        ..Default::default()
     }
 }
 
@@ -181,95 +107,44 @@ fn build_section(build: &BuildSectionConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::commands::init::features;
-    use crate::cli::commands::init::files;
-
-    /// The writes one preset stages at `root`.
-    fn staged_writes(root: &Path, name: &str) -> FileWrites {
-        let effects = features::Effects::combine(&features::features(name));
-        files::file_writes(root, &[], &Default::default(), &effects).unwrap()
-    }
 
     #[test]
-    fn configuration_has_only_the_starter_sections() {
-        for name in ["minimal", "medium", "rich"] {
-            let effects = features::Effects::combine(&features::features(name));
-            let config = config_file(&schema(&effects));
-            for omitted in [
-                "[build.minify]",
-                "[build.references]",
-                "[typst",
-                "[icons]",
-                "[diagnostics]",
-                "# [[build.hooks",
-                "# To use a hook",
-            ] {
-                assert!(
-                    !config.contains(omitted),
-                    "{name} must omit {omitted}:\n{config}"
-                );
-            }
-            assert_eq!(
-                config.contains("[[build.hooks.before-build]]"),
-                name == "rich",
-                "{name} hook presence:\n{config}"
+    fn starter_config_has_no_optional_sections() {
+        let config = config_file(&schema());
+        for omitted in [
+            "[build.minify]",
+            "[build.references]",
+            "[typst",
+            "[icons]",
+            "[diagnostics]",
+            "[[build.hooks",
+            "deno",
+            "tailwind",
+        ] {
+            assert!(
+                !config.contains(omitted),
+                "starter must omit {omitted}: {config}"
             );
         }
     }
 
     #[test]
     fn starter_help_targets_resolve() {
-        use crate::help::pages::{CrossRefs, page_of, request};
+        use crate::help::pages::{page_of, request};
         use crate::i18n::HelpLanguage;
-
-        let effects = features::Effects::combine(&features::features("minimal"));
-        let config = config_file(&schema(&effects));
+        let config = config_file(&schema());
         let commands = config
             .lines()
             .filter_map(|line| line.strip_prefix("# tola help "))
             .collect::<Vec<_>>();
         assert!(!commands.is_empty());
         for command in commands {
-            // The scaffold writes a shell line, so each argument carries the quoting a shell strips.
             let arguments = command
                 .split_whitespace()
                 .map(|argument| argument.trim_matches('"').to_owned())
                 .collect::<Vec<_>>();
             let target = request(&arguments).unwrap();
-            page_of(
-                target.page().unwrap(),
-                HelpLanguage::English,
-                CrossRefs::Emit,
-            )
-            .unwrap();
-        }
-    }
-
-    #[test]
-    fn rich_configuration_wires_the_tailwind_build() {
-        let directory = tempfile::tempdir().unwrap();
-        let writes = staged_writes(directory.path(), "rich");
-        let schema =
-            super::super::validate_configuration(&writes, tola_build::InputScope::Online).unwrap();
-
-        let hook = &schema.build.hooks.before_build[0];
-        assert_eq!(hook.name, "tailwind");
-        assert_eq!(hook.command, ["deno", "task", "css"]);
-        assert_eq!(
-            hook.generates,
-            [PathBuf::from("static/web-assets/tailwind-output/site.css")]
-        );
-        assert!(schema.assets.cache_busting);
-        assert!(schema.assets.files.is_empty());
-    }
-
-    #[test]
-    fn generated_configuration_validates_for_every_preset() {
-        for name in ["minimal", "medium", "rich"] {
-            let directory = tempfile::tempdir().unwrap();
-            let writes = staged_writes(directory.path(), name);
-            super::super::validate_configuration(&writes, tola_build::InputScope::Online)
-                .unwrap_or_else(|error| panic!("{name} must validate: {error}"));
+            page_of(target.page().unwrap(), HelpLanguage::English).unwrap();
         }
     }
 }

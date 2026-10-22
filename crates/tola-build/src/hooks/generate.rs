@@ -10,6 +10,7 @@ use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
 use crate::config::section::build::hooks::{CommandOutput, HookStage, OutputCommandConfig};
 use crate::filesystem::TemporaryDirectory;
+use crate::filesystem::layout;
 use crate::mode::BuildMode;
 use crate::output::files::HookOutputFiles;
 use crate::output::graph::OutputFile;
@@ -30,17 +31,15 @@ pub(crate) struct GeneratedOutputs {
 }
 
 /// Run each participating producer against the same immutable upstream files.
-///
-/// A `dev = "reuse"` command runs only when its observed inputs differ from the previous
-/// successful development revision; otherwise its outputs are reused unchanged.
 pub(crate) fn generate_outputs(
     config: &ResolvedSiteConfig,
     upstream: &[OutputFile],
     mode: BuildMode,
     previous: Option<&ReusableHookOutputs>,
     cancellation: &BuildCancellation,
+    diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
 ) -> Result<GeneratedOutputs> {
-    cancellation.ensure_active().map_err(anyhow::Error::new)?;
+    cancellation.ensure_active()?;
     let mut participating = config
         .build
         .hooks
@@ -52,12 +51,11 @@ pub(crate) fn generate_outputs(
     if participating.peek().is_none() {
         return Ok(GeneratedOutputs::default());
     }
-    // Materialize the input view only when a command actually needs to run: a round whose
-    // generators all reuse their outputs must not copy the built site into a temporary tree.
+    // Materialize the input view only when a command actually runs.
     let mut candidate = None;
     let mut generated_outputs = GeneratedOutputs::default();
     for (index, command) in participating {
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
         let reuses_outputs = mode == BuildMode::Development && command.dev.reuses_outputs();
         let inputs = if reuses_outputs {
             Some(observe(config.get_root(), command, upstream)?)
@@ -78,12 +76,16 @@ pub(crate) fn generate_outputs(
                     .root_ownerships
                     .push(OutputRootOwnership::new(root.root().clone(), owner.clone()));
             }
+            if let Some(report) = &previous.report {
+                diagnostics.extend(report.iter().cloned());
+            }
             generated_outputs.reuse.insert(
                 &command.name,
                 ReusableHookOutput {
                     inputs: inputs.clone(),
                     outputs: previous.outputs.clone(),
                     roots: previous.roots.clone(),
+                    report: previous.report.clone(),
                 },
             );
             report_reused(HookStage::GenerateOutputs, &command.name);
@@ -100,7 +102,8 @@ pub(crate) fn generate_outputs(
         let candidate = candidate.as_ref().expect("materialized above");
         let output_start = generated_outputs.outputs.len();
         let root_start = generated_outputs.root_ownerships.len();
-        run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
+        let diagnostic_start = diagnostics.len();
+        let submitted = run_hook_entry(HookStage::GenerateOutputs, &command.name, || {
             generate_entry(
                 &mut generated_outputs,
                 command,
@@ -109,6 +112,7 @@ pub(crate) fn generate_outputs(
                 config,
                 mode,
                 cancellation,
+                diagnostics,
             )
         })?;
         if let Some(inputs) = inputs {
@@ -118,16 +122,20 @@ pub(crate) fn generate_outputs(
                     inputs,
                     outputs: generated_outputs.outputs[output_start..].to_vec(),
                     roots: generated_outputs.root_ownerships[root_start..].to_vec(),
+                    report: submitted.then(|| diagnostics[diagnostic_start..].to_vec()),
                 },
             );
         }
     }
-    cancellation.ensure_active().map_err(anyhow::Error::new)?;
+    cancellation.ensure_active()?;
     Ok(generated_outputs)
 }
 
-/// The declaration is a contract: a generated file no declaration owns, and a declared
-/// file the command never wrote, both fail this entry.
+/// The declaration is a contract: no unowned file and no missing declared file.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one entry's inputs are all distinct build state"
+)]
 fn generate_entry(
     generated_outputs: &mut GeneratedOutputs,
     command: &OutputCommandConfig,
@@ -136,25 +144,22 @@ fn generate_entry(
     config: &ResolvedSiteConfig,
     mode: BuildMode,
     cancellation: &BuildCancellation,
-) -> Result<()> {
+    diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+) -> Result<bool> {
     if command.outputs.is_empty() {
         return Err(super::hook_contract_error(
             format!("`build.hooks.generate-outputs[{index}].outputs` is empty"),
             "declare each output with `{ file = … }` or `{ tree = … }`",
         ));
     }
-    let generated = TemporaryDirectory::create(
-        &config
-            .get_root()
-            .join(crate::filesystem::INTERNAL_DIR)
-            .join("hook-generated"),
-        "outputs",
-    )?;
+    let generated =
+        TemporaryDirectory::create(&layout::hook_outputs(config.get_root()), "outputs")?;
     let invocation = HookInvocation::new(
         &command.command,
         HookCall {
-            site_root: config.get_root(),
+            site: config.into(),
             name: &command.name,
+            origin: command.origin.as_ref(),
             mode,
             directories: HookDirectories::GenerateOutputs {
                 input: candidate.root(),
@@ -165,9 +170,9 @@ fn generate_entry(
     let identity = super::hook_identity(HookStage::GenerateOutputs, &command.name);
     let completion = invocation.run(Some(cancellation));
 
-    cancellation.ensure_active().map_err(anyhow::Error::new)?;
-    completion
-        .map(|_output| ())
+    cancellation.ensure_active()?;
+    let submitted = invocation
+        .finish(completion, Some(cancellation), diagnostics)
         .map_err(|error| hook_command_error(HookStage::GenerateOutputs, &identity, error))?;
     let files = read_generated_files(generated.path(), cancellation)
         .with_context(|| format!("Tola could not read the files written by {identity}"))?;
@@ -227,12 +232,10 @@ fn generate_entry(
             bytes,
         ));
     }
-    Ok(())
+    Ok(submitted)
 }
 
-/// Exact spelling remains significant here; portable collisions are rejected by
-/// the output graph. Tree prefixes are sorted and disjoint, so only the nearest
-/// predecessor can contain a file, even when declarations themselves overlap.
+/// Exact spelling stays significant; the output graph rejects portable collisions.
 struct DeclaredOutputs<'a> {
     files: BTreeSet<&'a OutputPath>,
     trees: Vec<String>,
@@ -282,14 +285,14 @@ fn read_generated_files(
     let mut files = BTreeMap::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        cancellation.ensure_active().map_err(anyhow::Error::new)?;
+        cancellation.ensure_active()?;
         let mut children = fs::read_dir(&directory)
             .with_context(|| "Tola could not read what the command generated")?
             .collect::<std::io::Result<Vec<_>>>()
             .with_context(|| "Tola could not read what the command generated")?;
         children.sort_unstable_by_key(|child| child.file_name());
         for child in children {
-            cancellation.ensure_active().map_err(anyhow::Error::new)?;
+            cancellation.ensure_active()?;
             let absolute = child.path();
             let relative = absolute
                 .strip_prefix(root)
@@ -512,6 +515,7 @@ mod tests {
             BuildMode::Production,
             None,
             &BuildCancellation::new(),
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(outputs.outputs.len(), 1);
@@ -552,9 +556,10 @@ mod tests {
                 BuildMode::Production,
                 None,
                 &BuildCancellation::new(),
+                &mut Vec::new(),
             )
             .unwrap_err();
-            assert!(crate::diagnostic::attached(&error).is_some());
+            assert!(tola_diagnostic::attached(&error).is_some());
             assert_eq!(upstream.outputs()[0].bytes(), b"<h1>Home</h1>");
         }
     }
@@ -570,6 +575,7 @@ mod tests {
             BuildMode::Production,
             None,
             &BuildCancellation::new(),
+            &mut Vec::new(),
         )
         .unwrap_err();
         assert_eq!(upstream.outputs()[0].bytes(), b"<h1>Home</h1>");
@@ -603,6 +609,7 @@ mod tests {
                 BuildMode::Production,
                 None,
                 &worker_cancellation,
+                &mut Vec::new(),
             )
         });
         let ready = ready_receiver.recv_timeout(std::time::Duration::from_secs(5));
@@ -642,6 +649,7 @@ mod tests {
                 mode,
                 None,
                 &BuildCancellation::new(),
+                &mut Vec::new(),
             )
             .unwrap();
             assert_eq!(
@@ -662,7 +670,7 @@ mod tests {
     /// a reuse-policy command in development skips an unchanged input, and every other
     /// (mode, policy, changed-input) combination runs it again.
     #[test]
-    fn reuse_policy_decides_whether_command_runs() {
+    fn reuse_policy_decides_run() {
         struct Case {
             mode: BuildMode,
             dev: DevParticipation,
@@ -699,9 +707,15 @@ mod tests {
                 output_command_config("child_counts_runs", &["search.json"]);
             config.build.hooks.generate_outputs[0].dev = case.dev;
             let cancellation = BuildCancellation::new();
-            let first =
-                generate_outputs(&config, upstream.outputs(), case.mode, None, &cancellation)
-                    .unwrap();
+            let first = generate_outputs(
+                &config,
+                upstream.outputs(),
+                case.mode,
+                None,
+                &cancellation,
+                &mut Vec::new(),
+            )
+            .unwrap();
             assert_eq!(run_count(&directory), 1);
 
             let next = if case.changes_upstream {
@@ -732,6 +746,7 @@ mod tests {
                 case.mode,
                 Some(&first.reuse),
                 &cancellation,
+                &mut Vec::new(),
             )
             .unwrap();
 

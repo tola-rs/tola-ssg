@@ -1,4 +1,3 @@
-{{imports}}
 #import "@tola/site:0.0.0": site
 #import "seo.typ": head-entries
 
@@ -9,7 +8,6 @@
     #html.html(lang: site.language.tag)[
       #html.head[
         #for entry in head-entries("Page not found") { entry }
-        {{head}}
       ]
       #html.body[
         #html.elem("main")[
