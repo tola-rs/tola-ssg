@@ -193,6 +193,26 @@ pub enum Commands {
         command: InspectCommand,
     },
 
+    /// Evaluate a model query declared by a module or an explicit Typst file.
+    Query {
+        #[command(flatten)]
+        config: ConfigFileArgs,
+        #[command(flatten)]
+        packages: TypstPackageArgs,
+        #[command(flatten)]
+        fonts: CompilerFontArgs,
+        #[command(flatten)]
+        query: QueryArgs,
+    },
+
+    /// Read project text and check or apply changes with explicit input digests.
+    Edit {
+        #[command(flatten)]
+        config: ConfigFileArgs,
+        #[command(subcommand)]
+        command: super::commands::edit::EditCommand,
+    },
+
     /// Freeze the packages this site's build used into its own vendor directory.
     Vendor {
         #[command(flatten)]
@@ -414,85 +434,79 @@ pub struct DevelopmentArgs {
     /// Run every reusable generator on each rebuild; disable `dev = "reuse"` for this session.
     #[arg(long)]
     pub no_reuse: bool,
+
+    /// Print development events as JSON lines.
+    ///
+    /// Writes one event per line to stdout; logs and hook output go to stderr.
+    /// Events report server readiness, builds, after-publish hooks, and shutdown.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum InspectCommand {
-    /// Show declared source metadata as JSON without building the site.
-    ///
-    /// Sources without metadata are omitted, so a selection with none prints an empty array.
+    /// List discovered content source files without evaluating their metadata.
     Sources(SourceInspectArgs),
-    /// Show configured icon namespaces as JSON, and one namespace's icon names.
-    ///
-    /// Remote collections are downloaded and cached exactly as a build downloads them.
-    /// `--presets` lists the supported presets instead, and needs no site.
+    /// List configured icon collections or the names in one collection.
     Icons(IconInspectArgs),
-    /// Build without publishing and show HTML document paths and properties as JSON.
-    Documents(InspectProjectionArgs),
-    /// Build without publishing and show document and asset URLs as JSON.
-    Routes(InspectProjectionArgs),
-    /// Build without publishing and show every output and its producer as JSON.
-    Outputs(InspectProjectionArgs),
-    /// Build without publishing and show link and resource resolution as JSON.
-    References(InspectProjectionArgs),
+    /// List the fonts available to the Typst compiler, independently of browser CSS fonts.
+    Fonts(JsonOutputArgs),
+    /// Show resolved configuration, module choices, and site paths.
+    Config(InspectConfigArgs),
+}
+
+#[derive(clap::Args, Debug, Clone)]
+pub struct QueryArgs {
+    /// Module-qualified query name or an explicit ./path.typ with --label.
+    #[arg(value_name = "TARGET")]
+    pub target: String,
+    /// Metadata label to read from an explicit Typst query file.
+    #[arg(long, value_name = "LABEL")]
+    pub label: Option<String>,
+    #[command(flatten)]
+    pub options: super::commands::query::QueryOptions,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
-pub struct InspectProjectionArgs {
-    #[command(flatten)]
-    pub build: BuildOverrideArgs,
-
-    /// Browse the rows in a terminal table with filtering, row detail, and export.
+pub struct JsonOutputArgs {
+    /// Indent the JSON output.
+    #[arg(long)]
+    pub pretty: bool,
+    /// Write the ordinary JSON result without opening an interactive browser.
+    #[arg(long, value_hint = clap::ValueHint::FilePath)]
+    pub output: Option<PathBuf>,
+    /// Browse the result in a terminal; Enter returns the selected value, q closes.
     #[arg(short = 'i', long)]
     pub interactive: bool,
+}
+
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct InspectConfigArgs {
+    #[command(flatten)]
+    pub build: BuildOverrideArgs,
+    #[command(flatten)]
+    pub display: JsonOutputArgs,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct IconInspectArgs {
-    /// Icon namespace to list icon names for; omit to list every configured namespace.
+    /// Configured namespace whose icon names should be listed.
     #[arg(value_name = "NAMESPACE", conflicts_with = "presets")]
     pub namespace: Option<String>,
-
-    /// List the presets this release supports instead of the site's namespaces.
-    ///
-    /// This form works without a site.
+    /// List supported preset collections without loading a site.
     #[arg(long)]
     pub presets: bool,
-
-    /// Browse the rows in a terminal table with filtering, row detail, and export.
-    #[arg(short = 'i', long)]
-    pub interactive: bool,
+    #[command(flatten)]
+    pub display: JsonOutputArgs,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct SourceInspectArgs {
-    /// Source files or directories; omit for all sources.
+    /// Content source files or directories; use - to read paths from stdin.
     #[arg(value_hint = clap::ValueHint::AnyPath)]
     pub paths: Vec<PathBuf>,
-
-    /// Keep serialized Typst content instead of converting it to plain text.
-    #[arg(long)]
-    pub raw: bool,
-
-    /// Pretty-print JSON output.
-    #[arg(long)]
-    pub pretty: bool,
-
-    /// Omit metadata fields containing null, an empty string, or an empty array.
-    #[arg(short = 'E', long)]
-    pub filter_empty: bool,
-
-    /// Select metadata fields, separated by commas or spaces; the source path is always included.
-    #[arg(short, long, value_delimiter = ',', num_args = 1..)]
-    pub fields: Option<Vec<String>>,
-
-    /// Write JSON to a file instead of stdout.
-    #[arg(short, long, value_hint = clap::ValueHint::FilePath)]
-    pub output: Option<PathBuf>,
-
-    /// Browse the rows in a terminal table with filtering, row detail, and export.
-    #[arg(short = 'i', long)]
-    pub interactive: bool,
+    #[command(flatten)]
+    pub display: JsonOutputArgs,
 }
 
 #[derive(clap::Args, Debug, Clone, Default)]
@@ -657,10 +671,14 @@ impl Commands {
     pub(crate) fn written_output(&self) -> Option<&Path> {
         match self {
             Self::Manpage(args) => args.output.as_deref(),
-            Self::Inspect {
-                command: InspectCommand::Sources(args),
-                ..
-            } => args.output.as_deref(),
+            Self::Skill(args) => args.output.as_deref(),
+            Self::Inspect { command, .. } => match command {
+                InspectCommand::Sources(args) => args.display.output.as_deref(),
+                InspectCommand::Icons(args) => args.display.output.as_deref(),
+                InspectCommand::Fonts(args) => args.output.as_deref(),
+                InspectCommand::Config(args) => args.display.output.as_deref(),
+            },
+            Self::Query { query, .. } => query.options.display.output.as_deref(),
             _ => None,
         }
     }
