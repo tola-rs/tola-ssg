@@ -106,19 +106,41 @@ pub(crate) fn dispatch(
             command,
             fonts,
         } => commands::inspect::run(
-            config,
-            packages,
-            scope,
+            commands::SiteRequest::new(
+                config,
+                packages,
+                scope,
+                BuildOverrideArgs::default(),
+                fonts,
+                output,
+                cancellation,
+            )?,
             command,
-            crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
-            output,
-            cancellation,
         ),
-        Commands::Config {
+        Commands::Query {
             config,
             packages,
-            build,
-        } => commands::config::run(config, packages, scope, build, output, cancellation),
+            fonts,
+            query,
+        } => {
+            let request = commands::SiteRequest::new(
+                config,
+                packages,
+                scope,
+                BuildOverrideArgs::default(),
+                fonts,
+                output,
+                cancellation,
+            )?;
+            let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
+            commands::query::run(
+                std::sync::Arc::new(loaded.into_config()),
+                &query,
+                request.resources,
+                output,
+                cancellation,
+            )
+        }
         Commands::Vendor {
             config,
             packages,
