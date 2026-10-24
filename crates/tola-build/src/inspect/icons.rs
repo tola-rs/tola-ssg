@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::cancellation::BuildCancellation;
 use crate::config::ResolvedSiteConfig;
@@ -10,11 +10,10 @@ use crate::config::section::IconCollectionSource;
 use crate::filesystem::display_path;
 use crate::resources::BuildResources;
 
-/// Project every configured icon namespace, and one namespace's icon names when `namespace` selects it.
+/// Project configured icon namespaces, or each name in the selected namespace.
 ///
 /// Collections are prepared through the same cache a build uses, so remote bytes are fetched only
-/// when they are not cached yet. A selected namespace adds `names`, in lexical order; each name is
-/// an icon or one of its aliases.
+/// when they are not cached yet. Selected names include aliases and are in lexical order.
 pub fn icons(
     config: &ResolvedSiteConfig,
     resources: &BuildResources,
@@ -38,18 +37,21 @@ pub fn icons(
         let collection = collections
             .collection(name)
             .expect("every configured icon namespace prepared a collection");
-        let mut row = Map::new();
-        row.insert("namespace".to_owned(), json!(name));
-        row.insert("source".to_owned(), source_json(source, root));
-        row.insert("prefix".to_owned(), json!(collection.source_prefix()));
-        row.insert("icons".to_owned(), json!(collection.len()));
         if namespace.is_some() {
-            row.insert(
-                "names".to_owned(),
-                json!(collection.names().collect::<Vec<_>>()),
-            );
+            rows.extend(collection.names().map(|icon| {
+                json!({
+                    "namespace": name,
+                    "name": icon,
+                })
+            }));
+        } else {
+            rows.push(json!({
+                "namespace": name,
+                "source": source_json(source, root),
+                "prefix": collection.source_prefix(),
+                "icons": collection.len(),
+            }));
         }
-        rows.push(Value::Object(row));
     }
     Ok(Value::Array(rows))
 }
@@ -128,7 +130,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             root.join("ui.json"),
-            br#"{"prefix":"upstream","icons":{"home":{"body":"<path fill='currentColor' d='M0 0h16v16H0z'/>"}}}"#,
+            br#"{"prefix":"upstream","icons":{"home":{"body":"<path fill='currentColor' d='M0 0h16v16H0z'/>"}},"aliases":{"abode":{"parent":"home"}}}"#,
         )
         .unwrap();
         let config = crate::config::tests::load_test_config(
@@ -158,7 +160,7 @@ mod tests {
                     "namespace": "ui",
                     "source": { "type": "local-json", "path": "ui.json" },
                     "prefix": "upstream",
-                    "icons": 1,
+                    "icons": 2,
                 },
             ])
         );
@@ -166,13 +168,8 @@ mod tests {
         assert_eq!(
             icons(&config, &resources, &cancellation, Some("ui")).unwrap(),
             json!([
-                {
-                    "namespace": "ui",
-                    "source": { "type": "local-json", "path": "ui.json" },
-                    "prefix": "upstream",
-                    "icons": 1,
-                    "names": ["home"],
-                },
+                { "namespace": "ui", "name": "abode" },
+                { "namespace": "ui", "name": "home" },
             ])
         );
 
@@ -183,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn presets_project_the_index_in_name_order() {
+    fn presets_project_index_name_order() {
         let Value::Array(rows) = presets() else {
             panic!("the preset projection is a row array")
         };

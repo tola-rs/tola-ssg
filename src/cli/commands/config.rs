@@ -1,36 +1,43 @@
-use crate::cancellation::Cancellation;
+//! The resolved configuration and the paths it selects, as one JSON document for
+//! `tola inspect config`.
+//!
+//! Preparing modules resolves their declared paths without executing a driver, so the document
+//! states what a build would use while running none of the site's code.
 use anyhow::Result;
 
-use crate::cli::output::CommandOutput;
-use crate::cli::{BuildOverrideArgs, ConfigFileArgs, TypstPackageArgs};
-use crate::config::ConfigOverrides;
-use tola_build::InputScope;
+use crate::cli::BuildOverrideArgs;
 
-pub(in crate::cli) fn run(
-    config_file: ConfigFileArgs,
-    packages: TypstPackageArgs,
-    scope: InputScope,
-    build: BuildOverrideArgs,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
-    let overrides = ConfigOverrides {
-        build: crate::cli::config::build_overrides(&build),
-        ..ConfigOverrides::default()
-    };
-    let loaded = crate::cli::config::load_site(
-        &config_file,
-        &packages,
-        scope,
-        &overrides,
-        output,
-        cancellation,
-    )?;
-    let config = loaded.config();
-    let resources = crate::cli::config::build_resources(scope);
+pub(super) fn value(
+    request: &super::SiteRequest<'_>,
+    build: &BuildOverrideArgs,
+) -> Result<serde_json::Value> {
+    let overrides = crate::cli::config::config_overrides(build);
+    let loaded = request.load_config(&overrides)?;
+    let prepared = tola_build::modules::prepare(loaded.config(), request.scope)?;
+    let config = &prepared;
+    let modules = config
+        .loaded_modules()
+        .map(|(alias, module)| {
+            (
+                alias.to_owned(),
+                serde_json::json!({
+                    "root": module.root,
+                    "manifest": module.manifest,
+                    "package": module.package_name,
+                    "version": module.version.map(|version| version.to_string()),
+                    "library": module.typst.as_ref().map(|entry| module.root.join(&entry.entry)),
+                    "site_entry": module.site.as_ref().map(|entry| module.root.join(&entry.entry)),
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
     let value = serde_json::json!({
         "config": config.config_path(),
         "root": config.get_root(),
+        "content": config.build().content_dir,
+        "entry": config.build().entry,
+        "theme": config.theme().module,
+        "modules": modules,
         "output": config.build().publish_dir,
         "minify": {
             "html": config.build().minify.html,
@@ -51,7 +58,7 @@ pub(in crate::cli) fn run(
         "package_cache_path": config.package_locations().cache().map(|location| location.root()),
         "vendored_package_path": config.vendor().typst_packages(),
         "icon_cache_directory": tola_build::BuildResources::icon_cache_directory(config.get_root()),
-        "system_fonts": config.system_fonts_allowed(&resources),
+        "system_fonts": config.system_fonts_allowed(&request.resources),
         "server": {
             "interface": loaded.server().interface,
             "port": loaded.server().port,
@@ -60,13 +67,67 @@ pub(in crate::cli) fn run(
             "watch": loaded.dev().watch,
         },
     });
-    output.write_stdout_line(serde_json::to_string_pretty(&value)?)?;
-    Ok(())
+    Ok(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancellation::Cancellation;
+    use crate::cli::{ConfigFileArgs, TypstPackageArgs};
+    use tola_build::InputScope;
+
+    #[test]
+    fn theme_resolved_without_executing_driver() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        let theme = directory.path().join("theme");
+        std::fs::create_dir_all(project.join("content")).unwrap();
+        std::fs::create_dir(&theme).unwrap();
+        std::fs::write(theme.join("lib.typ"), "").unwrap();
+        std::fs::write(theme.join("site.typ"), "#panic(\"must not run\")").unwrap();
+        std::fs::write(theme.join("tola-module.toml"),
+            "schema-version=1\nname='notebook'\nversion='1.2.3'\n[typst]\nentry='lib.typ'\n[site]\nentry='site.typ'\n"
+        ).unwrap();
+        std::fs::write(
+            project.join("tola.toml"),
+            "[modules.notes]\npath='../theme'\n[theme]\nmodule='notes'\n",
+        )
+        .unwrap();
+        let output = super::super::testing::buffered_output();
+        let cancellation = Cancellation::default();
+        let request = super::super::SiteRequest::new(
+            ConfigFileArgs {
+                path: Some(project.join("tola.toml")),
+            },
+            TypstPackageArgs::default(),
+            InputScope::Offline,
+            BuildOverrideArgs::default(),
+            crate::cli::CompilerFontArgs::default(),
+            &output,
+            &cancellation,
+        )
+        .unwrap();
+        let shown = value(&request, &BuildOverrideArgs::default()).unwrap();
+        let module = &shown["modules"]["notes"];
+        assert_eq!(shown["theme"], "notes");
+        assert_eq!(module["package"], "notebook");
+        assert_eq!(module["version"], "1.2.3");
+        assert_eq!(
+            shown["entry"],
+            serde_json::json!(theme.canonicalize().unwrap().join("site.typ"))
+        );
+        assert_eq!(
+            module["library"],
+            serde_json::json!(theme.canonicalize().unwrap().join("lib.typ"))
+        );
+        assert_eq!(
+            shown["content"],
+            serde_json::json!(project.canonicalize().unwrap().join("content"))
+        );
+        assert!(!project.join("site.typ").exists());
+        assert!(!project.join("public").exists());
+    }
 
     #[test]
     fn build_overrides_reach_config_json() {
@@ -79,30 +140,29 @@ mod tests {
             "[site]\norigin = \"https://example.com\"\nbase-path = \"/docs/\"\n",
         )
         .unwrap();
-        let (sink, captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
-
-        run(
+        let output = super::super::testing::buffered_output();
+        let cancellation = Cancellation::default();
+        let request = super::super::SiteRequest::new(
             ConfigFileArgs {
                 path: Some(root.join("tola.toml")),
             },
             TypstPackageArgs::default(),
             InputScope::Online,
-            BuildOverrideArgs {
-                minify: Some(false),
-                origin: Some("https://override.example".to_owned()),
-                base_path: Some("/preview/".to_owned()),
-                ..BuildOverrideArgs::default()
-            },
+            BuildOverrideArgs::default(),
+            crate::cli::CompilerFontArgs::default(),
             &output,
-            &Cancellation::default(),
+            &cancellation,
         )
         .unwrap();
+        let overrides = BuildOverrideArgs {
+            minify: Some(false),
+            origin: Some("https://override.example".to_owned()),
+            base_path: Some("/preview/".to_owned()),
+            ..BuildOverrideArgs::default()
+        };
 
-        let shown: serde_json::Value = serde_json::from_slice(&captured.bytes()).unwrap();
+        let shown = value(&request, &overrides).unwrap();
+
         assert_eq!(shown["site"]["origin"], "https://override.example");
         assert_eq!(shown["site"]["base_path"], "/preview/");
         assert_eq!(shown["site"]["url"], "https://override.example/preview/");

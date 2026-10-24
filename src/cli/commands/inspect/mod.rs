@@ -1,180 +1,96 @@
+//! `tola inspect`: read-only views of the inputs, resources, and configuration Tola resolved.
+//!
+//! A view loads and prepares configuration but compiles no Bundle and writes no site output, so it
+//! reports declarations, discovered files, and selected paths rather than anything rendered.
+//! Results are written through `super::read`, which owns JSON and file output.
 use crate::cancellation::Cancellation;
-mod format;
-mod view;
 
 use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use serde_json::{Value, json};
+use tola_build::InputScope;
 
 use crate::cli::output::CommandOutput;
-use crate::cli::{
-    ConfigFileArgs, IconInspectArgs, InspectCommand, SourceInspectArgs, TypstPackageArgs,
-};
-use crate::terminal::session::{self, Shown};
-use serde_json::Value;
-use tola_build::InputScope;
+use crate::cli::{IconInspectArgs, InspectCommand, SourceInspectArgs};
 
 const SOURCE_LIST_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-pub(in crate::cli) fn run(
-    config_file: ConfigFileArgs,
-    packages: TypstPackageArgs,
-    scope: InputScope,
-    command: InspectCommand,
-    resources: tola_build::BuildResources,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
-    // The preset index belongs to the executable, so this projection reads no configuration and
-    // works where no site exists.
-    if let InspectCommand::Icons(args) = &command
-        && args.presets
-    {
-        return presets(args, output, cancellation);
-    }
-    let loaded = crate::cli::config::load_site(
-        &config_file,
-        &packages,
-        scope,
-        &candidate_overrides(&command),
-        output,
-        cancellation,
-    )?;
-    let config = std::sync::Arc::new(loaded.into_config());
+pub(in crate::cli) fn run(request: super::SiteRequest<'_>, command: InspectCommand) -> Result<()> {
     match command {
-        InspectCommand::Sources(args) => sources(args, &config, &resources, output, cancellation),
-        InspectCommand::Icons(args) => icons(args, &config, &resources, output, cancellation),
-        command => site(command, config, resources, output, cancellation),
-    }
-}
-
-/// Invocation overrides the command applies when it builds a candidate.
-///
-/// Source and icon inspection build no candidate, so they load with no overrides.
-fn candidate_overrides(command: &InspectCommand) -> crate::config::ConfigOverrides {
-    match command {
-        InspectCommand::Documents(args)
-        | InspectCommand::Routes(args)
-        | InspectCommand::Outputs(args)
-        | InspectCommand::References(args) => crate::config::ConfigOverrides {
-            build: crate::cli::config::build_overrides(&args.build),
-            ..crate::config::ConfigOverrides::default()
-        },
-        InspectCommand::Sources(_) | InspectCommand::Icons(_) => {
-            crate::config::ConfigOverrides::default()
-        }
-    }
-}
-
-/// Whether one inspection asks for the interactive table.
-fn interactive(command: &InspectCommand) -> bool {
-    match command {
-        InspectCommand::Sources(args) => args.interactive,
-        InspectCommand::Icons(args) => args.interactive,
-        InspectCommand::Documents(args)
-        | InspectCommand::Routes(args)
-        | InspectCommand::Outputs(args)
-        | InspectCommand::References(args) => args.interactive,
-    }
-}
-
-/// The name one site projection is browsed under.
-fn projection_name(command: &InspectCommand) -> &'static str {
-    match command {
-        InspectCommand::Documents(_) => "documents",
-        InspectCommand::Routes(_) => "routes",
-        InspectCommand::Outputs(_) => "outputs",
-        InspectCommand::References(_) => "references",
-        InspectCommand::Sources(_) => "sources",
-        InspectCommand::Icons(_) => "icons",
-    }
-}
-
-/// The rows of one projection value, in projection order.
-fn rows(value: Value) -> Vec<Value> {
-    match value {
-        Value::Array(rows) => rows,
-        other => vec![other],
-    }
-}
-
-/// Browses one projection's rows; `false` when the terminal cannot draw the table.
-fn browse(
-    rows: Vec<Value>,
-    projection: &str,
-    raw: bool,
-    target: Option<&std::path::Path>,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-    encode: &dyn Fn(&[Value]) -> Result<String>,
-) -> Result<bool> {
-    let save = |path: &std::path::Path, encoded: &str, rows: usize| -> Result<()> {
-        let mut bytes = encoded.as_bytes().to_vec();
-        bytes.push(b'\n');
-        tola_build::filesystem::atomic_write(path, &bytes).with_context(|| {
-            format!(
-                "Tola could not write the inspection rows to `{}`",
-                path.display()
+        InspectCommand::Fonts(display) => {
+            let value = super::fonts::value(
+                &request.config_file,
+                &request.packages,
+                request.scope,
+                &request.resources,
+                request.output,
+                request.cancellation,
+            )?;
+            super::read::write(
+                &value,
+                "fonts",
+                &display,
+                request.scope,
+                request.output,
+                request.cancellation,
             )
-        })?;
-        // The log records that the export happened, never the encoded rows themselves.
-        if let Some(log) = output.log() {
-            log.record(
-                "INFO",
-                "inspect",
-                serde_json::json!({ "target": path.display().to_string(), "rows": rows }),
-            );
         }
-        Ok(())
-    };
-    let token = cancellation.token();
-    let cancelled = || token.is_cancelled();
-    let sink = output.terminal().sink();
-    let mut view = view::View::new(rows, encode, &save);
-    view.set_projection(projection);
-    view.set_raw(raw);
-    if let Some(target) = target {
-        view.set_target(target);
-    }
-    match session::show(&sink, output.terminal().palette(), &cancelled, &mut view)? {
-        Shown::Plain => Ok(false),
-        Shown::Interactive => {
-            // The terminal is restored before the rows reach stdout.
-            if let Some(encoded) = view.stdout_export() {
-                output.write_stdout_line(encoded)?;
+        InspectCommand::Config(args) => {
+            let value = super::config::value(&request, &args.build)?;
+            super::read::write(
+                &value,
+                "config",
+                &args.display,
+                request.scope,
+                request.output,
+                request.cancellation,
+            )
+        }
+        InspectCommand::Icons(args) if args.presets => {
+            request.cancellation.token().ensure_active()?;
+            let value = tola_build::inspect::presets();
+            super::read::write(
+                &value,
+                "icon presets",
+                &args.display,
+                request.scope,
+                request.output,
+                request.cancellation,
+            )
+        }
+        command => {
+            let loaded = request.load_config(&crate::config::ConfigOverrides::default())?;
+            let config = loaded.config();
+            match command {
+                InspectCommand::Sources(args) => sources(
+                    args,
+                    config,
+                    &request.resources,
+                    request.scope,
+                    request.output,
+                    request.cancellation,
+                ),
+                InspectCommand::Icons(args) => icons(
+                    args,
+                    config,
+                    &request.resources,
+                    request.scope,
+                    request.output,
+                    request.cancellation,
+                ),
+                _ => unreachable!("font, config, and preset inspection return above"),
             }
-            Ok(true)
         }
     }
 }
 
-/// Encodes rows the way the site projections print them.
-fn pretty(rows: &[Value]) -> Result<String> {
-    Ok(serde_json::to_string_pretty(&Value::Array(rows.to_vec()))?)
-}
-
-/// List the Iconify collections this release indexes.
-fn presets(
-    args: &IconInspectArgs,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
-    cancellation.token().ensure_active()?;
-    let rows = rows(tola_build::inspect::presets());
-    let encoded = pretty(&rows)?;
-    if args.interactive && browse(rows, "presets", false, None, output, cancellation, &pretty)? {
-        return Ok(());
-    }
-    output.write_stdout_line(encoded)?;
-    Ok(())
-}
-
-/// List configured icon namespaces, or one namespace's icon names.
 fn icons(
     args: IconInspectArgs,
     config: &tola_build::config::ResolvedSiteConfig,
     resources: &tola_build::BuildResources,
+    scope: InputScope,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
@@ -190,16 +106,9 @@ fn icons(
         &cancellation.token(),
         args.namespace.as_deref(),
     )?;
-    let rows = rows(value);
-    let encoded = pretty(&rows)?;
-    if args.interactive && browse(rows, "icons", false, None, output, cancellation, &pretty)? {
-        return Ok(());
-    }
-    output.write_stdout_line(encoded)?;
-    Ok(())
+    super::read::write(&value, "icons", &args.display, scope, output, cancellation)
 }
 
-/// A selection that names no configured namespace, bounded so one message stays readable.
 fn unknown_icon_namespace(
     namespace: &str,
     icons: &tola_build::config::IconsConfig,
@@ -227,119 +136,32 @@ fn sources(
     args: SourceInspectArgs,
     config: &tola_build::config::ResolvedSiteConfig,
     resources: &tola_build::BuildResources,
+    scope: InputScope,
     output: &CommandOutput,
     cancellation: &Cancellation,
 ) -> Result<()> {
-    cancellation.token().ensure_active()?;
     let paths = source_paths(args.paths, cancellation)?;
-    output.secondary("Inspecting sources…")?;
     let sources =
-        tola_build::inspect::inspect_sources(&paths, config, resources, &cancellation.token())?;
-    cancellation.token().ensure_active()?;
-    output.status(format!(
-        "Inspected {}; {} with metadata",
-        crate::terminal::plural_count(sources.selected(), "source"),
-        sources.matched()
-    ))?;
-    output.diagnostics(sources.diagnostics())?;
-    let options = format::SourceFormat {
-        raw: args.raw,
-        pretty: args.pretty,
-        filter_empty: args.filter_empty,
-        fields: args.fields,
-    };
-    if args.interactive {
-        let rows = format::source_rows(&sources, &options)?;
-        let encode = |rows: &[Value]| format::encode(rows, &options);
-        if browse(
-            rows,
-            "sources",
-            args.raw,
-            args.output.as_deref(),
-            output,
-            cancellation,
-            &encode,
-        )? {
-            return Ok(());
-        }
-    }
-    let encoded = format::sources(&sources, &options)?;
-    if let Some(path) = args.output {
-        let mut bytes = encoded.into_bytes();
-        bytes.push(b'\n');
-        tola_build::filesystem::atomic_write(&path, &bytes).with_context(|| {
-            format!(
-                "Tola could not write the source metadata to `{}`",
-                path.display()
-            )
-        })?;
-    } else {
-        output.write_stdout_line(encoded)?;
-    }
-    Ok(())
-}
-
-fn site(
-    command: InspectCommand,
-    config: std::sync::Arc<tola_build::config::ResolvedSiteConfig>,
-    resources: tola_build::BuildResources,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
-    let skipped = enabled_hook_count(&config);
-    output.status("Building site for inspection…")?;
-    if skipped > 0 {
-        output.status(format!(
-            "Skipping {}; run `tola check` to run hooks",
-            crate::terminal::plural_count(skipped, "enabled build hook command")
-        ))?;
-    }
-    let token = cancellation.token();
-    let locked = super::build_candidate(
-        config,
-        cancellation,
-        tola_build::build::HookExecution::Skip,
-        resources,
-        output,
-    )?;
-    locked.ensure_fresh(&token)?;
-    let site = locked.release();
-    cancellation.token().ensure_active()?;
-    output.diagnostics(site.diagnostics())?;
-    let interactive = interactive(&command);
-    let projection = projection_name(&command);
-    let value = match command {
-        InspectCommand::Documents(_) => tola_build::inspect::documents(&site),
-        InspectCommand::Routes(_) => tola_build::inspect::routes(&site),
-        InspectCommand::Outputs(_) => tola_build::inspect::outputs(&site),
-        InspectCommand::References(_) => tola_build::inspect::references(&site),
-        InspectCommand::Sources(_) => unreachable!("sources use the source inspection path"),
-        InspectCommand::Icons(_) => unreachable!("icons use the icon inspection path"),
-    };
-    let rows = rows(value);
-    let encoded = pretty(&rows)?;
-    if interactive && browse(rows, projection, false, None, output, cancellation, &pretty)? {
-        return Ok(());
-    }
-    output.write_stdout_line(encoded)?;
-    Ok(())
-}
-
-/// Enabled hook commands that a complete production candidate would run.
-///
-/// Every enabled command counts, except the `after-publish` consumers, which consume a committed
-/// revision that inspection never produces.
-fn enabled_hook_count(config: &tola_build::config::ResolvedSiteConfig) -> usize {
-    let hooks = &config.build().hooks;
-    let after_publish = hooks
-        .after_publish
+        tola_build::inspect::content_sources(&paths, config, resources, &cancellation.token())?;
+    let rows = sources
         .iter()
-        .filter(|hook| hook.enable)
-        .count();
-    hooks.enabled_commands().count() - after_publish
+        .map(|source| {
+            json!({
+                "path": tola_build::filesystem::display_path(&source.source, config.get_root()),
+                "contentPath": source.id.to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    super::read::write(
+        &Value::Array(rows),
+        "sources",
+        &args.display,
+        scope,
+        output,
+        cancellation,
+    )
 }
 
-/// Read source paths from stdin when the sole argument is `-`.
 fn source_paths(paths: Vec<PathBuf>, cancellation: &Cancellation) -> Result<Vec<PathBuf>> {
     if paths.len() != 1 || paths[0].as_os_str() != "-" {
         return Ok(paths);
@@ -368,7 +190,7 @@ fn collect_source_paths(
         cancellation.ensure_active()?;
         match incoming.recv_timeout(SOURCE_LIST_POLL_INTERVAL) {
             Ok(line) => {
-                let line = line.context("failed to read a source path from stdin")?;
+                let line = line.context("Tola could not read a source path from stdin")?;
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
                     paths.push(PathBuf::from(trimmed));

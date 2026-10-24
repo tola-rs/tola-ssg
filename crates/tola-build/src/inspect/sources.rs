@@ -16,7 +16,7 @@ pub(super) fn inspect(
     host: &crate::compiler::TypstHost,
     resources: &crate::resources::BuildResources,
     cancellation: &crate::cancellation::BuildCancellation,
-) -> Result<(Vec<InspectedSource>, Vec<crate::diagnostic::Diagnostic>)> {
+) -> Result<(Vec<InspectedSource>, Vec<tola_diagnostic::Diagnostic>)> {
     let mut inputs = crate::compiler::BuildInputs::default();
     let packages = crate::package::prepare_package_inputs(
         config,
@@ -26,6 +26,21 @@ pub(super) fn inspect(
         &Default::default(),
     )?;
     let host = host.with_icons(packages.icons.collections());
+    let mut warnings = tola_typst::Diagnostics::new();
+    let bindings = crate::package::SiteBindings::from_config(
+        config,
+        crate::asset::AssetUrls::for_check(config, cancellation)?,
+    )
+    .prepare_modules(config, &host, cancellation)
+    .map_err(|error| {
+        if let Some(failure) = error.downcast_ref::<crate::modules::options::OptionsFailure>()
+            && let Some(diagnostics) = &failure.diagnostics
+        {
+            warnings.extend_distinct(diagnostics);
+        }
+        with_prior_diagnostics(error, config, &mut warnings)
+    })?;
+    warnings.extend_distinct(bindings.module_diagnostics());
     let scan = crate::compiler::analysis::analyze(
         config,
         &host,
@@ -33,16 +48,12 @@ pub(super) fn inspect(
         // Inspection renders no configured assets, so every declaration resolves
         // to its configured name and a tree member enumerates from its source
         // directory without being rendered.
-        crate::package::SiteBindings::from_config(
-            config,
-            crate::asset::AssetUrls::for_check(config, cancellation)?,
-        ),
+        bindings,
         crate::compiler::analysis::SourceAnalysisReuse::None,
         &cancellation.bundle_cancellation(),
         &mut inputs,
     )
-    .map_err(crate::compiler::analysis::SourceAnalysisFailure::into_error)?;
-    let mut warnings = tola_typst::Diagnostics::new();
+    .map_err(|failure| with_prior_diagnostics(failure.into_error(), config, &mut warnings))?;
     warnings.extend_distinct(&scan.diagnostics);
     let selected = files
         .iter()
@@ -67,4 +78,31 @@ pub(super) fn inspect(
     let diagnostics = crate::compiler::warning_diagnostics(config, &mut warnings);
 
     Ok((sources, diagnostics))
+}
+
+/// A later source failure must not discard the option schema's diagnostics.
+fn with_prior_diagnostics(
+    error: anyhow::Error,
+    config: &ResolvedSiteConfig,
+    warnings: &mut tola_typst::Diagnostics,
+) -> anyhow::Error {
+    let prior = crate::compiler::warning_diagnostics(config, warnings);
+    if prior.is_empty() {
+        return error;
+    }
+    let mut diagnostics = tola_diagnostic::attached(&error)
+        .map(<[tola_diagnostic::Diagnostic]>::to_vec)
+        .or_else(|| crate::compiler::error_diagnostics(&error, config.get_root()))
+        .unwrap_or_else(|| {
+            vec![tola_diagnostic::fallback(
+                tola_diagnostic::codes::typst::SOURCE_ANALYSIS,
+                &error,
+            )]
+        });
+    for diagnostic in prior {
+        if !diagnostics.contains(&diagnostic) {
+            diagnostics.push(diagnostic);
+        }
+    }
+    tola_diagnostic::DiagnosticError::attach(error, diagnostics).into()
 }
