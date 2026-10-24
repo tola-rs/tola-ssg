@@ -6,6 +6,13 @@
 //! the exporter's own anchor rather than a spelling this module invents, and a URL target reports
 //! the fragment as written — whether an output answers it is the build's question, not the query's.
 //! All graph and selector reads remain tracked by Typst introspection.
+//!
+//! # Label scope
+//!
+//! A Bundle holds one label namespace, not one per document. Two documents may each declare
+//! `<intro>`, and nothing reports it: a bare `query(<intro>)` returns both matches. The duplicate
+//! surfaces only when a link or ref resolves the label, and then [`labelled_location`] finds two
+//! matches and answers `ambiguous-label`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -763,6 +770,10 @@ impl UnresolvedReason {
     }
 }
 
+/// The element a label names, which a Bundle holds once.
+///
+/// The namespace spans the whole Bundle, so the same label in two documents is ambiguous even
+/// when each document links its own. The caller reports `AmbiguousLabel` rather than picking one.
 fn labelled_location(
     label: Label,
     introspector: Tracked<dyn Introspector + '_>,

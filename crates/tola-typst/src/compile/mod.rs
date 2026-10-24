@@ -19,6 +19,6 @@ pub use html::{
 
 #[cfg(feature = "scan")]
 pub use scan::{
-    CapturedValues, ObservedScan, ScanFailure, ScanResult, scan_world, scan_world_observed,
-    scan_world_with_evidence,
+    CapturedValues, ObservedScan, ScanFailure, ScanResult, observation_is_complete, scan_world,
+    scan_world_observed, scan_world_with_evidence,
 };

@@ -971,11 +971,7 @@ fn analyze_source(
         .map_err(anyhow::Error::new)?;
     // This round's declaration is what the scan's channel has: the host writes its header
     // before evaluation, and every declaration is an event the source's own call wrote.
-    let header = tola_packages::CaptureHeader::new(
-        world.main(),
-        ANALYSIS_INPUT_IDENTITY,
-        tola_packages::CaptureMode::Collect,
-    );
+    let header = tola_packages::CaptureHeader::new(world.main(), ANALYSIS_INPUT_IDENTITY);
     let observed = tola_typst::scan_world_observed(&world, [header.value()]);
     let (captured, analyzed) = observed.into_parts();
     match analyzed {
@@ -1133,11 +1129,29 @@ fn unreadable_declaration_error(
     scan: &tola_typst::ScanResult,
     error: tola_packages::CaptureError,
 ) -> tola_typst::CompileError {
-    let diagnostic = typst::diag::SourceDiagnostic::error(
-        typst::syntax::DiagSpan::from_range(scan.source().id(), 0..0),
-        "Tola could not read this source's metadata declarations",
+    // A full channel is the one refusal an author can cause: every declaration the source wrote
+    // beyond the channel's capacity was dropped, so the count is unknown but the cause is not.
+    // Every other refusal means the channel and the decoder disagree, which no source program can
+    // produce.
+    let (message, hint) = match &error {
+        tola_packages::CaptureError::Saturated => (
+            "this source writes more metadata declarations than Tola can read",
+            "Keep one `#tola-meta((...))` call; a source declares once",
+        ),
+        _ => (
+            "Tola could not read this source's metadata declarations",
+            "Rebuild the site; report this if it repeats",
+        ),
+    };
+    let diagnostic = tola_typst::diagnostic::producer_error_at(
+        scan.source().id(),
+        0..0,
+        tola_packages::DECLARATION_PROTOCOL_ORIGIN,
+        &[],
+        message,
+        tola_typst::diagnostic::DiagnosticProjection::default(),
     )
-    .with_hint("Rebuild the site; report this if it repeats")
+    .with_hint(hint)
     .with_hint(error.to_string());
     let mut diagnostics = tola_typst::Diagnostics::resolve(world, &[diagnostic.into()]);
     diagnostics.extend(scan.diagnostics());
@@ -2256,19 +2270,71 @@ Child body"#,
         assert_eq!(diagnostics[0].location.as_ref().unwrap().line, Some(3));
     }
 
+    /// A source that writes past the channel's capacity is told to declare once, not to report a
+    /// bug: unlike every other refusal, an overflow is the author's own.
     #[test]
-    fn saturated_declarations_fail_closed() {
+    fn full_channel_names_too_many_declarations() {
         let mut source = String::from("#import \"@tola/source:0.0.0\": tola-meta\n");
-        for index in 0..10 {
+        for index in 0..tola_typst::typst::engine::Sink::MAX_VALUES {
             source.push_str(&format!("#tola-meta((index: {index}))\n"));
         }
         let (_directory, scan) = scan_result(&[("post.typ", &source)]);
+        let error = scan.err().expect("a full channel fails the scan");
+        let diagnostics = crate::diagnostic::attached(&error).expect("the failure is located");
+        let diagnostic = &diagnostics[0];
 
-        let rendered = failure(scan);
+        assert_eq!(diagnostic.code, crate::codes::source::DECLARATION_PROTOCOL);
+        assert!(
+            diagnostic
+                .message
+                .contains("writes more metadata declarations"),
+            "the message names what the author wrote too much of: {}",
+            diagnostic.message
+        );
+        assert!(
+            diagnostic
+                .help
+                .iter()
+                .any(|help| help.message.contains("Keep one")),
+            "the help names the repair: {diagnostics:?}"
+        );
+        assert!(
+            !diagnostic
+                .help
+                .iter()
+                .any(|help| help.message.contains("report this")),
+            "an overflow is not reported as a Tola failure: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn only_eager_declarations_register() {
+        let declaring = |body: &str| {
+            let source = format!("#import \"@tola/source:0.0.0\": tola-meta\n{body}\n");
+            let (_directory, scan) = scan_result(&[("post.typ", &source)]);
+            scan.ok().and_then(|scan| {
+                scan.entries
+                    .entries()
+                    .next()
+                    .and_then(|entry| entry.declaration.clone())
+            })
+        };
 
         assert!(
-            rendered.contains("could not read this source's metadata declarations"),
-            "{rendered}"
+            declaring("#tola-meta((title: \"Top\"))").is_some(),
+            "a declaration at the top level registers"
+        );
+        assert!(
+            declaring("#let declare() = tola-meta((title: \"Fn\"))\n#declare()").is_some(),
+            "a declaration in the source's own function registers"
+        );
+        assert!(
+            declaring("#context [#tola-meta((title: \"Context\"))]").is_none(),
+            "a declaration deferred to realization registers nothing"
+        );
+        assert!(
+            declaring("#show heading: it => [#tola-meta((title: \"Show\"))\n#it]\n= H").is_none(),
+            "a declaration inside a show rule registers nothing"
         );
     }
 

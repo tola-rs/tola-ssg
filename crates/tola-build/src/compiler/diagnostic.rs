@@ -383,8 +383,15 @@ pub(super) fn resolved_diagnostic(
         tola_typst::diagnostic::DiagnosticOrigin::Producer(origin)
             if origin.name() == tola_packages::SOURCE_ISSUE_ORIGIN
     );
+    let declaration_protocol = matches!(
+        &diagnostic.origin,
+        tola_typst::diagnostic::DiagnosticOrigin::Producer(origin)
+            if origin.name() == tola_packages::DECLARATION_PROTOCOL_ORIGIN
+    );
     let code = if source_metadata {
         crate::codes::source::METADATA
+    } else if declaration_protocol {
+        crate::codes::source::DECLARATION_PROTOCOL
     } else if tola_packages::AssetUrlShadowed::from_origin(&diagnostic.origin).is_some() {
         crate::codes::reference::ASSET_URL_SHADOWED
     } else {

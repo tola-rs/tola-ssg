@@ -97,16 +97,6 @@ impl CapturedValues {
         &self.records
     }
 
-    /// How many records the sink kept.
-    pub fn len(&self) -> usize {
-        self.records.len()
-    }
-
-    /// Whether the sink kept no record at all.
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
     /// Whether the sink reached its capacity, discarding every write that followed.
     ///
     /// A saturated channel reads the same whether it was filled exactly or truncated, so a
@@ -115,6 +105,19 @@ impl CapturedValues {
     pub fn is_saturated(&self) -> bool {
         self.records.len() >= Sink::MAX_VALUES
     }
+}
+
+/// Whether a traced observation can be read as every value its span produced.
+///
+/// [`typst::trace`] returns the values the sink kept for one span. The sink stops at
+/// [`Sink::MAX_VALUES`] without recording that it did, so a span that reached the cap may have
+/// lost values and a span that observed none proves nothing. Both states read as incomplete: a
+/// caller that needs the whole observation has to treat them alike.
+///
+/// The cap is named only here and in [`CapturedValues::is_saturated`], so a reader that needs the
+/// whole observation asks this rather than comparing lengths itself.
+pub fn observation_is_complete(values: &[(Value, Option<Styles>)]) -> bool {
+    !values.is_empty() && values.len() < Sink::MAX_VALUES
 }
 
 /// One eager scan together with the values its sink received.

@@ -23,13 +23,13 @@ use typst::syntax::{FileId, Source, Span, SpanKind};
 use typst::utils::PicoStr;
 
 /// The protocol every declaration event carries.
-pub const DECLARATION_PROTOCOL: &str = "tola.source-declaration/1";
+const DECLARATION_PROTOCOL: &str = "tola.source-declaration/1";
 
 /// The protocol every capture header carries.
-pub const CAPTURE_PROTOCOL: &str = "tola.source-capture/1";
+const CAPTURE_PROTOCOL: &str = "tola.source-capture/1";
 
 /// The label a declaration marker carries, which is what `query(<tola-meta>)` reads it by.
-pub const DECLARATION_LABEL: &str = "tola-meta";
+const DECLARATION_LABEL: &str = "tola-meta";
 
 // The names the wire spells its fields with: one authority for what the native writes, what a
 // host writes, and what the decoder reads.
@@ -37,37 +37,9 @@ const PROTOCOL: &str = "protocol";
 const OWNER: &str = "owner";
 const SPAN: &str = "span";
 const VALUE: &str = "value";
-const MODE: &str = "mode";
 const INPUT_IDENTITY: &str = "input_identity";
 const START: &str = "start";
 const END: &str = "end";
-
-/// The mode one capture is taken in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureMode {
-    /// Record the declarations of the source being scanned.
-    Collect,
-    /// Compare a declaration against a closed source instead of recording it.
-    ///
-    /// Named by the protocol for the render phase; [`decode_capture`] implements collection only.
-    RenderClosed,
-    /// Inspect a source without recording or accepting anything.
-    ///
-    /// Named by the protocol for editor inspection; [`decode_capture`] implements collection
-    /// only.
-    Inspect,
-}
-
-impl CaptureMode {
-    /// The name this mode carries on the wire.
-    pub const fn wire(self) -> &'static str {
-        match self {
-            Self::Collect => "collect",
-            Self::RenderClosed => "render-closed",
-            Self::Inspect => "inspect",
-        }
-    }
-}
 
 /// Declare the metadata of the source that calls this.
 ///
@@ -75,6 +47,12 @@ impl CaptureMode {
 /// in the tracked sink of the scan this runs in, so a build reads it whether or not the rest of
 /// the source program succeeds. Only a call written in the file being scanned declares; a helper
 /// in another file names its own file, and the scan of that file is what reads it.
+///
+/// Only eager evaluation declares. A call that `context` or a show rule defers to realization
+/// reaches no scan sink, so it declares nothing, and the build reports nothing: the declaration a
+/// document carries is never compared with the one the build selected on. Comparing them would
+/// take a second capture during the render phase to catch a call written in a deferred position,
+/// where naming that call directly is the cheaper and more precise report.
 ///
 /// The returned marker is an invisible metadata element carrying the same dictionary at this call
 /// site, labelled `tola-meta` so `query(<tola-meta>)` still finds it. Placing the marker any
@@ -112,7 +90,6 @@ pub(super) fn tola_meta(
 pub struct CaptureHeader {
     owner: EcoString,
     input_identity: EcoString,
-    mode: CaptureMode,
 }
 
 impl CaptureHeader {
@@ -120,11 +97,10 @@ impl CaptureHeader {
     ///
     /// `input_identity` is the host's name for the input this scan is taken under; the decoder
     /// carries it back unchanged.
-    pub fn new(source: FileId, input_identity: &str, mode: CaptureMode) -> Self {
+    pub fn new(source: FileId, input_identity: &str) -> Self {
         Self {
             owner: owner_of(source),
             input_identity: input_identity.into(),
-            mode,
         }
     }
 
@@ -132,7 +108,6 @@ impl CaptureHeader {
     pub fn value(&self) -> Value {
         let mut header = Dict::new();
         header.insert(Str::from(PROTOCOL), Value::Str(CAPTURE_PROTOCOL.into()));
-        header.insert(Str::from(MODE), Value::Str(self.mode.wire().into()));
         header.insert(Str::from(OWNER), Value::Str(self.owner.clone().into()));
         header.insert(
             Str::from(INPUT_IDENTITY),
@@ -198,11 +173,6 @@ pub fn decode_capture(
     };
     if styles.is_some() || first != &header.value() {
         return Err(CaptureError::MissingHeader);
-    }
-    if header.mode != CaptureMode::Collect {
-        return Err(CaptureError::UnsupportedMode {
-            mode: header.mode.wire().into(),
-        });
     }
     if header.owner != owner {
         return Err(CaptureError::ForeignOwner {
@@ -302,11 +272,6 @@ pub enum CaptureError {
         /// The source the record named.
         found: EcoString,
     },
-    /// The capture was taken in a mode this decoder does not implement.
-    UnsupportedMode {
-        /// The mode the capture was taken in.
-        mode: EcoString,
-    },
     /// A declared position is not a byte range inside the source being decoded.
     SpanOutside {
         /// The first byte the record declared.
@@ -344,10 +309,6 @@ impl fmt::Display for CaptureError {
             Self::ForeignOwner { expected, found } => write!(
                 formatter,
                 "the capture belongs to `{found}`, not `{expected}`"
-            ),
-            Self::UnsupportedMode { mode } => write!(
-                formatter,
-                "the capture was taken in mode `{mode}`, which cannot collect declarations"
             ),
             Self::SpanOutside { start, end } => write!(
                 formatter,
@@ -422,6 +383,7 @@ mod tests {
         FileMap, FileProvider, FileResolver, FileTarget, ObservedScan, TypstWorld, file_id,
         scan_world_observed,
     };
+    use typst::engine::Sink;
     use typst::foundations::{Array, Func, NativeFunc, Styles};
     use typst::syntax::VirtualRoot;
     use typst::utils::LazyHash;
@@ -437,7 +399,7 @@ mod tests {
 
     /// The header one host writes before it evaluates `main.typ`.
     fn header() -> CaptureHeader {
-        CaptureHeader::new(file_id("main.typ"), "input-1", CaptureMode::Collect)
+        CaptureHeader::new(file_id("main.typ"), "input-1")
     }
 
     /// The observed scan of one site whose main is `main.typ`, header included.
@@ -670,7 +632,7 @@ mod tests {
             Err(CaptureError::ForeignOwner { .. })
         ));
 
-        let other = CaptureHeader::new(file_id("other.typ"), "input-1", CaptureMode::Collect);
+        let other = CaptureHeader::new(file_id("other.typ"), "input-1");
         let scan = scan_world_observed(&site(&[("main.typ", &text)]), [other.value()]);
         assert!(matches!(
             decode_with(&scan, &other),
@@ -690,6 +652,51 @@ mod tests {
             "eleven writes fill the channel"
         );
         assert!(matches!(decode(&scan), Err(CaptureError::Saturated)));
+    }
+
+    /// `decode_capture` reads the header as the first record and every later one as an event, so a
+    /// channel that kept its last records instead would read an event as the header.
+    #[test]
+    fn full_channel_keeps_earliest_records() {
+        let mut text = IMPORT.to_owned();
+        for index in 0..Sink::MAX_VALUES + 2 {
+            text.push_str(&format!("#tola-meta((index: {index}))\n"));
+        }
+        let scan = scan(&[("main.typ", &text)], Vec::new());
+        let records = scan.captured().records();
+        assert_eq!(records.len(), Sink::MAX_VALUES, "the sink stops at its cap");
+
+        let (first, styles) = &records[0];
+        assert_eq!(styles, &None, "the header carries no styles");
+        assert_eq!(
+            first,
+            &header().value(),
+            "the header keeps the first record"
+        );
+
+        let declared = records[1..]
+            .iter()
+            .map(|(value, styles)| {
+                assert_eq!(styles, &None, "a declaration carries no styles");
+                let Value::Dict(event) = value else {
+                    panic!("a declaration event is a dictionary");
+                };
+                let Ok(Value::Dict(metadata)) = event.get(VALUE) else {
+                    panic!("a declaration event holds its metadata");
+                };
+                let Ok(Value::Int(index)) = metadata.get("index") else {
+                    panic!("a declaration event holds the index it was written with");
+                };
+                *index
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            declared,
+            (0..Sink::MAX_VALUES - 1)
+                .map(|index| index as i64)
+                .collect::<Vec<_>>(),
+            "the records the channel keeps are the ones written first, in order"
+        );
     }
 
     #[test]

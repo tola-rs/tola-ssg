@@ -51,8 +51,7 @@ fn schema_binding_is_written(
 /// many times pins nothing.
 fn is_observed_array(node: &LinkedNode<'_>, semantics: &mut Semantic<'_>) -> Result<bool> {
     let values = semantics.known_values(node)?;
-    Ok(!values.is_empty()
-        && values.len() < tola_typst::typst::engine::Sink::MAX_VALUES
+    Ok(tola_typst::observation_is_complete(&values)
         && values
             .iter()
             .all(|(value, _)| matches!(value, Value::Array(_))))

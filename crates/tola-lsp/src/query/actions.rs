@@ -29,8 +29,7 @@ impl Selection<'_> {
             return Ok(None);
         };
         let receivers = semantics.trace(receiver.span())?;
-        if receivers.is_empty()
-            || receivers.len() >= tola_typst::typst::engine::Sink::MAX_VALUES
+        if !tola_typst::observation_is_complete(&receivers)
             || !receivers
                 .iter()
                 .all(|(value, _)| matches!(value, Value::Array(_)))

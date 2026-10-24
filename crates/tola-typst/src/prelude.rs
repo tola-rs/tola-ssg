@@ -22,7 +22,7 @@ pub use typst_bundle::BundleOptions;
 pub use crate::compile::scan::{
     CapturedValues, Extractor, Heading, HeadingExtractor, Link, LinkExtractor, LinkSource,
     MetadataFirstExtractor, MetadataValuesExtractor, ObservedScan, ScanFailure, ScanResult,
-    extract, scan_world, scan_world_observed, scan_world_with_evidence,
+    extract, observation_is_complete, scan_world, scan_world_observed, scan_world_with_evidence,
 };
 
 pub use crate::diagnostic::{

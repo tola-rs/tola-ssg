@@ -233,7 +233,7 @@
 ///
 /// | Field | Meaning |
 /// | --- | --- |
-/// | `level` | The heading level declared in the source |
+/// | `level` | The heading's resolved level: its declared depth plus the `offset` in effect |
 /// | `nesting` | Depth in the outline tree; `none` when not outlined |
 /// | `number` | Rendered number: a string from a pattern, a callback's result, or `none` |
 /// | `body` | The heading's source content before show rules |
@@ -245,10 +245,19 @@
 /// `outlined` is the native heading flag. `nesting` is the outline-tree depth. They agree:
 /// `nesting` is `none` exactly when `outlined` is `false`.
 ///
+/// `level` is resolved, not declared: under `set heading(offset: 2)`, a heading written `==`
+/// reports `level` 4. No field holds the declared depth.
+///
 /// The query is scoped to this document, so the result never mixes in another page's headings.
+/// A bare `query(selector(heading))` is not scoped: inside a Bundle it reaches every document in
+/// the build. Scope any other selector the same way with
+/// `query(selector(…).within(current-document().location))`.
+///
 /// `location` is the value to pass to `link()`, and linking makes Typst generate an anchor for
 /// the heading. A heading with a label uses that label as its anchor; otherwise Typst generates
-/// `loc-N`. Call it inside `context`; every location it returns belongs to this compilation.
+/// `loc-N`. Typst assigns anchors on demand, so a heading that nothing links to has no anchor id
+/// in the exported HTML. Call it inside `context`; every location it returns belongs to this
+/// compilation.
 ///
 /// Example - link the outlined headings down to level 2:
 ///
@@ -285,8 +294,9 @@
 /// ```
 ///
 /// Related: current-document
-/// - depth (none | int): `none` for every level, or a positive integer to keep only headings
-///   declared up to that level.
+/// - depth (none | int): `none` for every heading, or a positive integer to keep only headings
+///   whose resolved `level` is at most this value. This compares `level`, not the declared depth,
+///   so under `set heading(offset: …)` a heading written `==` may be excluded by `depth: 2`.
 /// -> array
 #let headings = {
   import "@tola/host:0.0.0": plain-text
