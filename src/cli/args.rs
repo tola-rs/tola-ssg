@@ -181,7 +181,7 @@ pub enum Commands {
         check: bool,
     },
 
-    /// Inspect site sources and build results.
+    /// Inspect source files, resources, and resolved configuration.
     Inspect {
         #[command(flatten)]
         config: ConfigFileArgs,
@@ -955,9 +955,20 @@ mod tests {
                 "https://example.com//docs/",
             ),
             (
-                &["tola", "config", "--publish-dir", "dist", "--minify=false"],
+                &[
+                    "tola",
+                    "inspect",
+                    "config",
+                    "--publish-dir",
+                    "dist",
+                    "--minify=false",
+                ],
                 |cli| match &cli.command {
-                    Commands::Config { build, .. } => {
+                    Commands::Inspect {
+                        command: InspectCommand::Config(args),
+                        ..
+                    } => {
+                        let build = &args.build;
                         format!(
                             "{}/{}",
                             path_text(&build.publish_dir),
