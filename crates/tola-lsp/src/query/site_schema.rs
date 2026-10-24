@@ -52,7 +52,7 @@ pub(super) fn declared_schema_at(
     semantics: &mut Semantic<'_>,
 ) -> Result<Option<schema::OutputDescription>> {
     let observed = semantics.trace(schema.span())?;
-    if observed.is_empty() || observed.len() >= tola_typst::typst::engine::Sink::MAX_VALUES {
+    if !tola_typst::observation_is_complete(&observed) {
         return Ok(None);
     }
     let mut declaration = None;

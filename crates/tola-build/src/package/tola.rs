@@ -256,11 +256,7 @@ path = "icons/brand"
             .with_shared_library(source_library())
             .build(&tola_typst::BundleCancellation::default())
             .expect("valid source world");
-        let header = tola_packages::CaptureHeader::new(
-            world.main(),
-            "metadata",
-            tola_packages::CaptureMode::Collect,
-        );
+        let header = tola_packages::CaptureHeader::new(world.main(), "metadata");
         let (captured, scanned) =
             tola_typst::scan_world_observed(&world, [header.value()]).into_parts();
         let scanned = scanned.unwrap();

@@ -94,7 +94,7 @@ summary = [
 
 | 字段 | 含义 |
 | --- | --- |
-| `level` | 标题在源中声明的层级 |
+| `level` | 标题解析后的层级：声明层级加上生效中的 `offset` |
 | `nesting` | 在 outline 树中的深度；未进入 outline 时为 `none` |
 | `number` | 渲染出的编号：模式生成的字符串、回调的结果，或 `none` |
 | `body` | show rule 生效前的标题源内容 |
@@ -105,7 +105,11 @@ summary = [
 
 `outlined` 是原生标题标志；`nesting` 是 outline 树深度。两者一致：`outlined` 为 `false` 时，`nesting` 必为 `none`。
 
-这条查询只针对当前文档，结果里不会混进其他页面的标题。`location` 就是传给 `link()` 的值；建立链接会让 Typst 为该标题生成 anchor。带 label 的标题用那个 label 作为 anchor；否则 Typst 生成 `loc-N`。请在 `context` 中调用；返回的每个 location 都属于本次编译。
+`level` 是解析值，不是声明值：在 `set heading(offset: 2)` 下，写成 `==` 的标题报告 `level` 4。没有任何字段保存声明层级。
+
+这条查询只针对当前文档，结果里不会混进其他页面的标题。裸写 `query(selector(heading))` 不受此限制：在 Bundle 中它会读到构建里的每一篇文档。其他 selector 也照此收窄：`query(selector(…).within(current-document().location))`。
+
+`location` 就是传给 `link()` 的值；建立链接会让 Typst 为该标题生成 anchor。带 label 的标题用那个 label 作为 anchor；否则 Typst 生成 `loc-N`。Typst 按需分配 anchor，所以没有任何链接指向的标题，在导出的 HTML 里没有 anchor id。请在 `context` 中调用；返回的每个 location 都属于本次编译。
 
 Example - 链接到第 2 层为止、进入 outline 的标题：
 ''',
@@ -115,4 +119,4 @@ Example - 链接到第 2 层为止、进入 outline 的标题：
 
 [exports.headings.parameters]
 
-depth = "`none` 列出所有层级，传正整数则只保留声明层级不超过该值的标题。"
+depth = "`none` 列出所有标题，传正整数则只保留解析后 `level` 不超过该值的标题。这里比较的是 `level`，不是声明层级，所以在 `set heading(offset: …)` 下写成 `==` 的标题可能被 `depth: 2` 排除。"

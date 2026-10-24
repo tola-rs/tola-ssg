@@ -270,10 +270,23 @@ head. The scaffold's `site/page.typ` shows the complete wrapper.
 ### Headings and labels
 
 `#title()` exports as `<h1>`; native section headings start at `<h2>`. Use native headings for the
-outline, numbering, and queries. A label gets an HTML anchor when a link, reference, or outline
-targets it. Prefer stable explicit labels for section URLs; use native locations for a table of
-contents. `link` navigates; an `@label` reference also requires a numbered target. `html.h2` does
-not create a native heading.
+outline, numbering, and queries. `link` navigates; an `@label` reference also requires a numbered
+target. Use native locations for a table of contents.
+
+Typst assigns an HTML anchor only to elements something links to. A heading with a label uses that
+label as the anchor, one without a label gets `loc-N`, and a heading that nothing links to has no
+id at all. A hand-written `/page/#section` to such a heading fails the fragment check. When a
+stable fragment must exist regardless of who links, write the id yourself:
+
+```typst
+#html.h2(id: "installation")[Installation]
+```
+
+`html.h2` does not create a native heading, so it stays out of the outline and `headings()`.
+
+Labels share one namespace across the whole Bundle. Two documents may both declare `<intro>`, and
+nothing reports it until a link or reference resolves that label — the build then fails and names
+the link. Keep labels unique site-wide.
 
 `html.script` and `html.style` take strings; an external script is
 `html.script("", src: "...", defer: true)`. Use CSS for browser layout: Typst page settings,
@@ -281,6 +294,28 @@ columns, and spacing do not become CSS. `html.frame` deliberately makes SVG artw
 contain `set page`. Upstream's default footnote placement is unavailable in a custom `html.html`
 shell; use a custom footnote show rule, or retain the default shell. Citations and bibliography
 work in a custom shell.
+
+### Several sources in one document
+
+A source may render into more than one document, and one document may hold several sources. Two
+sources in one document put their top-level headings on the same level, so demote all but the
+first:
+
+```typst
+#let demote(body) = context {
+  set heading(offset: heading.offset + 1)
+  body
+}
+
+#document("book/index.html")[
+  #include pick("a.typ").source.file
+  #demote[#include pick("b.typ").source.file]
+]
+```
+
+`headings()` reports the resolved level, so a table of contents follows the demotion without extra
+work. `counter(heading)` is shared across the whole Bundle, so a document that must number from 1
+starts with `#counter(heading).update(0)`; a document that continues one sequence omits it.
 
 ### Code blocks
 

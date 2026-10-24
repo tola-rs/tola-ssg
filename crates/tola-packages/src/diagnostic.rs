@@ -13,6 +13,12 @@ use crate::TolaPackage;
 /// so consumers can classify it without inspecting paths or wording.
 pub const SOURCE_ISSUE_ORIGIN: &str = "SourceIssue";
 
+/// The producer origin of a capture the declaration protocol refuses.
+///
+/// The failure belongs to the channel between a source's scan and the build, not to any call the
+/// author wrote, so consumers can report it without inspecting wording.
+pub const DECLARATION_PROTOCOL_ORIGIN: &str = "DeclarationProtocol";
+
 pub(crate) fn package_error(
     span: Span,
     package: TolaPackage,

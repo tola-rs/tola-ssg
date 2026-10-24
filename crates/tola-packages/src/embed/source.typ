@@ -61,7 +61,8 @@
 ///
 /// Call it in the content source itself, then pass the record to your templates. A call written in
 /// another file names that file instead. A call in a file that is not a content source, such as
-/// the site entry, is an error.
+/// the site entry, is an error. A source rendered into another document still reports itself; only
+/// the document containing it changes.
 ///
 /// Related: all-sources, tola-meta
 #import "@tola/host:0.0.0": current-source

@@ -167,7 +167,7 @@ fn proven_import(
         return Ok(None);
     };
     let values = Semantic::new(compilation, cancellation).trace(node.span())?;
-    if values.is_empty() || values.len() >= tola_typst::typst::engine::Sink::MAX_VALUES {
+    if !tola_typst::observation_is_complete(&values) {
         return Ok(None);
     }
     let resolver =

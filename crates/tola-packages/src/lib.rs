@@ -43,7 +43,7 @@ pub use code_themes::{
     CodeTheme, THEME_DIRECTORY, ThemeAppearance, ThemeSource, theme_file, theme_names, themes,
     themes_dict,
 };
-pub use diagnostic::SOURCE_ISSUE_ORIGIN;
+pub use diagnostic::{DECLARATION_PROTOCOL_ORIGIN, SOURCE_ISSUE_ORIGIN};
 pub use docs::{
     DocumentationSegment, ExportDeclaration, ExportDocumentation, Parameter, ParameterKind,
     RelatedTarget, Signature, cast_spelling, documentation_segments, type_spelling,
@@ -62,6 +62,5 @@ pub use protocol::{
     SOURCE_RECORDS_BY_FILE_MEMBER, SOURCE_RECORDS_MEMBER,
 };
 pub use source_meta::{
-    CAPTURE_PROTOCOL, CaptureError, CaptureHeader, CaptureMode, DECLARATION_LABEL,
-    DECLARATION_PROTOCOL, Declaration, DeclaredMeta, SourceCapture, decode_capture,
+    CaptureError, CaptureHeader, Declaration, DeclaredMeta, SourceCapture, decode_capture,
 };

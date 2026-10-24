@@ -152,6 +152,11 @@ pub enum UnresolvedReferenceReason {
         /// author likely meant that address.
         suggestion: Option<String>,
     },
+    /// A fragment the target page publishes no element id for.
+    ///
+    /// Typst assigns an id only to elements something links to, so a heading that no link, ref,
+    /// or outline targets has none. A hand-written URL fragment to such a heading fails here even
+    /// though the label exists; an explicit `html.h2(id: …)` always publishes the id.
     FragmentMissing {
         fragment: String,
         available: Arc<[String]>,
