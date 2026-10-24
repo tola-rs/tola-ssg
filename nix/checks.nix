@@ -45,7 +45,8 @@ in
 {
   default = packages.default;
   fmt = fmtCheck;
-  test = cargoCheck "test";
+  # A macOS sandbox cannot start an FSEvent stream, so this check leaves `fsevents-tests` off.
+  test = cargoCheck "test-sandboxed";
   clippy = cargoCheck "clippy";
   docs = cargoCheck "docs";
 }

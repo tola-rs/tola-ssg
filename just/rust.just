@@ -10,6 +10,10 @@ fmt-write:
 test:
     cargo test --locked --workspace --all-features
 
+# Run the tests a macOS sandbox can start, without `fsevents-tests`.
+test-sandboxed:
+    cargo test --locked --workspace
+
 # Run every workspace test with nextest, then the doctests nextest does not cover.
 test-nextest:
     cargo nextest run --locked --workspace --all-features
