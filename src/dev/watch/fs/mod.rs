@@ -1728,9 +1728,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tokio::sync::mpsc;
 
-    #[cfg(feature = "fsevents-tests")]
-    static REAL_WATCH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
     impl EventEpoch {
         fn advance_site_rebuild(&self, producers: ProducerSet) {
             self.lock().advance_site_rebuild(producers);
@@ -1941,24 +1938,6 @@ mod tests {
     fn removed_directory(path: impl Into<PathBuf>) -> notify::Event {
         notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Folder))
             .add_path(path.into())
-    }
-
-    #[cfg(feature = "fsevents-tests")]
-    fn batch_rechecks_input_after(
-        changes: &FileChangeSource,
-        batch: &FileChangeBatch,
-        input: &Path,
-        producer: ProducerKind,
-        observed_epoch: u64,
-    ) -> bool {
-        let input = tola_build::filesystem::normalize_existing_prefix(input);
-        batch.paths.iter().any(|path| {
-            let path = tola_build::filesystem::normalize_existing_prefix(path);
-            path.starts_with(&input) || input.starts_with(path)
-        }) || (batch.rebuild_scope == RebuildScope::FullSite
-            && changes
-                .event_epoch
-                .is_uncertain_after(producer, observed_epoch))
     }
 
     #[test]
@@ -3483,403 +3462,7 @@ mod tests {
         changes.shutdown().await.unwrap();
     }
 
-    #[cfg(feature = "fsevents-tests")]
-    #[tokio::test]
-    async fn failed_candidate_keeps_hook_inputs() {
-        let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let generated = root.join("generated");
-        std::fs::create_dir(&generated).unwrap();
-        std::fs::write(generated.join("site.css"), "published").unwrap();
-        let published = confirmed_hook_outputs(root, "generated");
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema
-            .build
-            .hooks
-            .before_build
-            .push(noop_before_build_hook(root, &generated));
-        let config = resolve_schema(root, schema, local_packages());
-        let mut changes =
-            FileChangeSource::start(&config, &WatchRequirements::default(), &published, None)
-                .await
-                .unwrap();
-        let claim = changes.begin_candidate(&config);
-        std::fs::write(generated.join("site.css"), "failed candidate").unwrap();
-        let failed_candidate = confirmed_hook_outputs(root, "generated");
-
-        assert!(
-            changes
-                .settle_failed_hook_candidate(&failed_candidate, None, &Default::default())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(changes.source_hooks.outputs(), failed_candidate.outputs());
-
-        drop(claim);
-        changes.shutdown().await.unwrap();
-    }
-
     /// The failed chain re-runs for its own declared output only while the recorded bytes hold.
-    #[cfg(feature = "fsevents-tests")]
-    #[tokio::test]
-    async fn failed_chain_retry_follows_recorded_hook_output() {
-        let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.build.hooks.before_build.push(
-            tola_build::config::section::build::BeforeBuildHookConfig {
-                name: "partial".into(),
-                command: hook_child_command("child_partial_before_build_hook"),
-                dev: tola_build::config::section::build::DevParticipation::Run,
-                generates: vec!["generated".into()],
-                ..tola_build::config::section::build::BeforeBuildHookConfig::default()
-            },
-        );
-        let config = Arc::new(resolve_schema(&root, schema, local_packages()));
-        let failure = tola_build::build::BuildSession::new()
-            .prepare(
-                Arc::clone(&config),
-                tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
-            )
-            .run()
-            .err()
-            .expect("partial generator must fail the attempt");
-        let failed_outputs = failure
-            .failed_hook_outputs()
-            .expect("failed build retains declared output observations")
-            .clone();
-        let generated = root.join("generated/site.css");
-
-        {
-            let mut changes = FileChangeSource::start(
-                &config,
-                &WatchRequirements::default(),
-                &tola_build::hooks::SourceHookOutputs::default(),
-                None,
-            )
-            .await
-            .unwrap();
-            let claim = changes.begin_candidate(&config);
-            let mut event = modified_event(generated.clone());
-            changes.event_epoch.advance([generated.clone()]);
-            assert!(changes.quarantine_hook_event(&mut event, ProducerSet::default()));
-            // The hook writes several events for one path; the settlement reads the output while
-            // its last event is still arriving.
-            let arriving = {
-                let epoch = changes.event_epoch.clone();
-                let generated = generated.clone();
-                tokio::spawn(async move {
-                    epoch.advance([generated]);
-                })
-            };
-            let retry = changes
-                .settle_failed_hook_candidate(
-                    &tola_build::hooks::SourceHookOutputs::default(),
-                    Some(&failed_outputs),
-                    &Default::default(),
-                )
-                .await
-                .unwrap();
-            assert!(
-                retry.is_none(),
-                "a declared output whose recorded bytes hold cannot retry the failed chain"
-            );
-            arriving.await.unwrap();
-            drop(claim);
-            changes.shutdown().await.unwrap();
-        }
-
-        {
-            std::fs::write(&generated, "corrected input").unwrap();
-            let mut changes = FileChangeSource::start(
-                &config,
-                &WatchRequirements::default(),
-                &tola_build::hooks::SourceHookOutputs::default(),
-                None,
-            )
-            .await
-            .unwrap();
-            let claim = changes.begin_candidate(&config);
-            let mut event = modified_event(generated.clone());
-            changes.event_epoch.advance([generated.clone()]);
-            assert!(changes.quarantine_hook_event(&mut event, ProducerSet::default()));
-            let retry = changes
-                .settle_failed_hook_candidate(
-                    &tola_build::hooks::SourceHookOutputs::default(),
-                    Some(&failed_outputs),
-                    &Default::default(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(
-                retry.map(|batch| batch.paths),
-                Some(vec![generated.clone()]),
-                "an output the failure does not record retries the chain"
-            );
-            drop(claim);
-            changes.shutdown().await.unwrap();
-        }
-    }
-
-    #[cfg(feature = "fsevents-tests")]
-    #[tokio::test]
-    async fn failed_hook_outputs_never_suppress() {
-        let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let root = root.as_path();
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.build.hooks.before_build.push(
-            tola_build::config::section::build::BeforeBuildHookConfig {
-                name: "partial".into(),
-                command: hook_child_command("child_partial_before_build_hook"),
-                dev: tola_build::config::section::build::DevParticipation::Run,
-                generates: vec!["generated".into()],
-                ..tola_build::config::section::build::BeforeBuildHookConfig::default()
-            },
-        );
-        let config = Arc::new(resolve_schema(root, schema, local_packages()));
-        let mut session = tola_build::build::BuildSession::new();
-        let failure = session
-            .prepare(
-                Arc::clone(&config),
-                tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
-            )
-            .run()
-            .err()
-            .expect("partial generator must fail the attempt");
-        let failed_outputs = failure
-            .failed_hook_outputs()
-            .expect("failed build retains declared output observations");
-        assert!(failure.hook_outputs().is_empty());
-        let mut changes = FileChangeSource::start(
-            &config,
-            &WatchRequirements::default(),
-            &tola_build::hooks::SourceHookOutputs::default(),
-            None,
-        )
-        .await
-        .unwrap();
-        let claim = changes.begin_candidate(&config);
-        let generated = root.join("generated/site.css");
-        let mut generated_event = modified_event(generated.clone());
-        changes.event_epoch.advance([generated.clone()]);
-        assert!(changes.quarantine_hook_event(&mut generated_event, ProducerSet::default()));
-        assert!(
-            changes
-                .settle_failed_hook_candidate(
-                    failure.source_hooks(),
-                    Some(failed_outputs),
-                    &Default::default()
-                )
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(changes.source_hooks.outputs().is_empty());
-        let mut generated_changes = FileChangeBatch {
-            paths: vec![generated.clone()],
-            rebuild_scope: RebuildScope::Paths,
-        };
-        assert!(
-            changes
-                .suppress_observed_hook_changes(&mut generated_changes)
-                .await
-                .unwrap()
-        );
-
-        let input = root.join("source.toml");
-        let mut input_changes = FileChangeBatch {
-            paths: vec![input.clone()],
-            rebuild_scope: RebuildScope::Paths,
-        };
-        assert!(
-            !changes
-                .suppress_observed_hook_changes(&mut input_changes)
-                .await
-                .unwrap()
-        );
-        assert_eq!(input_changes.paths.as_slice(), std::slice::from_ref(&input));
-        let mut request =
-            tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development);
-        request.trigger = tola_build::build::BuildTrigger::Paths(vec![input].into());
-        let retry = session
-            .prepare(Arc::clone(&config), request)
-            .run()
-            .err()
-            .expect("the incomplete source generator must run again");
-        assert!(retry.source_hooks_failed(), "{:#}", retry.error());
-        assert!(retry.failed_hook_outputs().is_some());
-
-        std::fs::write(&generated, "corrected input").unwrap();
-        let mut edited = FileChangeBatch {
-            paths: vec![generated.clone()],
-            rebuild_scope: RebuildScope::Paths,
-        };
-        assert!(
-            !changes
-                .suppress_observed_hook_changes(&mut edited)
-                .await
-                .unwrap()
-        );
-        assert_eq!(edited.paths, [generated]);
-        drop(claim);
-        changes.shutdown().await.unwrap();
-    }
-
-    #[cfg(feature = "fsevents-tests")]
-    #[tokio::test]
-    async fn repaired_package_input_rechecks_once() {
-        let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
-        let directory = tempfile::TempDir::new().unwrap();
-        let packages = tempfile::TempDir::new().unwrap();
-        let package = packages.path().join("local/demo/1.0.0");
-        std::fs::create_dir_all(&package).unwrap();
-        std::fs::write(package.join("lib.typ"), "#let value = [Data package]\n").unwrap();
-        let _ = watch_config(directory.path());
-        let packages = tola_typst::PackageLocations::from_absolute_roots(
-            Some(packages.path().to_path_buf()),
-            None,
-        )
-        .unwrap();
-        let config = resolve_schema(
-            directory.path(),
-            tola_build::config::SiteConfigSchema::default(),
-            packages,
-        );
-        let store = tola_typst::PackageStore::new(
-            config.package_locations().clone(),
-            tola_typst::PackageFetchPolicy::LocalOnly,
-        );
-        let selected = store
-            .prepare(&"@local/demo:1.0.0".parse().unwrap())
-            .unwrap();
-        let mut published = WatchRequirements::default();
-        published.package_checks(selected.checks().iter().cloned());
-        let mut changes = FileChangeSource::start(
-            &config,
-            &published,
-            &tola_build::hooks::SourceHookOutputs::default(),
-            None,
-        )
-        .await
-        .unwrap();
-        let manifest = package.join("typst.toml");
-        assert_eq!(
-            std::fs::read(&manifest).unwrap_err().kind(),
-            std::io::ErrorKind::NotFound
-        );
-        assert!(
-            changes
-                .roots
-                .current_selection()
-                .boundary()
-                .classify(&manifest)
-                .is_empty()
-        );
-
-        // The repair precedes the new subscription: its notification lies outside the published
-        // boundary, so retry selection cannot depend on delivery.
-        std::fs::write(
-            &manifest,
-            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n",
-        )
-        .unwrap();
-        let mut failed = published;
-        failed.package_files([manifest]);
-        let installed = changes
-            .reconfigure_configs([&config], &failed)
-            .await
-            .unwrap();
-        let retained = changes
-            .reconfigure_configs([&config], &failed)
-            .await
-            .unwrap();
-        changes.shutdown().await.unwrap();
-
-        assert!(
-            installed,
-            "the failed read must be rechecked inside its newly installed boundary"
-        );
-        assert!(
-            !retained,
-            "an unchanged failure boundary must not request another retry"
-        );
-    }
-
-    #[cfg(feature = "fsevents-tests")]
-    #[tokio::test]
-    async fn missing_candidate_inputs_wake_recovery() {
-        let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = tola_build::filesystem::normalize_path(directory.path());
-        let published_content = root.join("content");
-        let published_entry = root.join("site.typ");
-        std::fs::create_dir_all(&published_content).unwrap();
-        std::fs::write(&published_entry, "#document(\"index.html\")[Published]").unwrap();
-
-        let published = watch_config(&root);
-        let mut attempted_schema = tola_build::config::SiteConfigSchema::default();
-        let recovery_root = root.join("candidate");
-        let attempted_content = recovery_root.join("content");
-        let attempted_entry = recovery_root.join("site.typ");
-        attempted_schema.build.content_dir = PathBuf::from("candidate/content");
-        attempted_schema.build.entry = PathBuf::from("candidate/site.typ");
-
-        let attempted = resolve_schema(&root, attempted_schema, local_packages());
-        let mut changes = FileChangeSource::start(
-            &published,
-            &WatchRequirements::default(),
-            &tola_build::hooks::SourceHookOutputs::default(),
-            None,
-        )
-        .await
-        .unwrap();
-        changes
-            .reconfigure_configs([&published, &attempted], &WatchRequirements::default())
-            .await
-            .unwrap();
-
-        let boundary = changes.roots.current_selection().boundary();
-        assert!(
-            boundary
-                .classify(&attempted_content)
-                .producers()
-                .contains(ProducerKind::Content)
-        );
-        assert!(
-            boundary
-                .classify(&attempted_entry)
-                .producers()
-                .contains(ProducerKind::TypstReads)
-        );
-        let observed_epoch = changes.event_epoch();
-
-        std::fs::create_dir_all(&attempted_content).unwrap();
-        std::fs::write(&attempted_entry, "#document(\"index.html\")[Recovered]").unwrap();
-
-        let recovery = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                let batch = changes.next(&published).await.unwrap();
-                if batch_rechecks_input_after(
-                    &changes,
-                    &batch,
-                    &recovery_root,
-                    ProducerKind::Content,
-                    observed_epoch,
-                ) {
-                    break;
-                }
-            }
-        })
-        .await;
-        changes.shutdown().await.unwrap();
-        recovery.expect("creating failed-candidate inputs must wake their producer");
-    }
-
     fn settled_batch(
         config: &ResolvedSiteConfig,
         events: impl IntoIterator<Item = notify::Event>,
@@ -4154,5 +3737,421 @@ mod tests {
         assert_eq!(batch.paths, vec![output]);
         assert_eq!(batch.rebuild_scope, RebuildScope::Paths);
         changes.shutdown().await.unwrap();
+    }
+
+    /// Tests that open a real FSEvent stream, which a macOS sandbox cannot start.
+    #[cfg(feature = "fsevents-tests")]
+    mod fsevents_tests {
+        use super::*;
+
+        static REAL_WATCH_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        fn batch_rechecks_input_after(
+            changes: &FileChangeSource,
+            batch: &FileChangeBatch,
+            input: &Path,
+            producer: ProducerKind,
+            observed_epoch: u64,
+        ) -> bool {
+            let input = tola_build::filesystem::normalize_existing_prefix(input);
+            batch.paths.iter().any(|path| {
+                let path = tola_build::filesystem::normalize_existing_prefix(path);
+                path.starts_with(&input) || input.starts_with(path)
+            }) || (batch.rebuild_scope == RebuildScope::FullSite
+                && changes
+                    .event_epoch
+                    .is_uncertain_after(producer, observed_epoch))
+        }
+
+        #[tokio::test]
+        async fn failed_candidate_keeps_hook_inputs() {
+            let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path();
+            let generated = root.join("generated");
+            std::fs::create_dir(&generated).unwrap();
+            std::fs::write(generated.join("site.css"), "published").unwrap();
+            let published = confirmed_hook_outputs(root, "generated");
+            let mut schema = tola_build::config::SiteConfigSchema::default();
+            schema
+                .build
+                .hooks
+                .before_build
+                .push(noop_before_build_hook(root, &generated));
+            let config = resolve_schema(root, schema, local_packages());
+            let mut changes =
+                FileChangeSource::start(&config, &WatchRequirements::default(), &published, None)
+                    .await
+                    .unwrap();
+            let claim = changes.begin_candidate(&config);
+            std::fs::write(generated.join("site.css"), "failed candidate").unwrap();
+            let failed_candidate = confirmed_hook_outputs(root, "generated");
+
+            assert!(
+                changes
+                    .settle_failed_hook_candidate(&failed_candidate, None, &Default::default())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(changes.source_hooks.outputs(), failed_candidate.outputs());
+
+            drop(claim);
+            changes.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn failed_chain_retry_follows_recorded_hook_output() {
+            let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let mut schema = tola_build::config::SiteConfigSchema::default();
+            schema.build.hooks.before_build.push(
+                tola_build::config::section::build::BeforeBuildHookConfig {
+                    name: "partial".into(),
+                    command: hook_child_command("child_partial_before_build_hook"),
+                    dev: tola_build::config::section::build::DevParticipation::Run,
+                    generates: vec!["generated".into()],
+                    ..tola_build::config::section::build::BeforeBuildHookConfig::default()
+                },
+            );
+            let config = Arc::new(resolve_schema(&root, schema, local_packages()));
+            let failure = tola_build::build::BuildSession::new()
+                .prepare(
+                    Arc::clone(&config),
+                    tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
+                )
+                .run()
+                .err()
+                .expect("partial generator must fail the attempt");
+            let failed_outputs = failure
+                .failed_hook_outputs()
+                .expect("failed build retains declared output observations")
+                .clone();
+            let generated = root.join("generated/site.css");
+
+            {
+                let mut changes = FileChangeSource::start(
+                    &config,
+                    &WatchRequirements::default(),
+                    &tola_build::hooks::SourceHookOutputs::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let claim = changes.begin_candidate(&config);
+                let mut event = modified_event(generated.clone());
+                changes.event_epoch.advance([generated.clone()]);
+                assert!(changes.quarantine_hook_event(&mut event, ProducerSet::default()));
+                // The hook writes several events for one path; the settlement reads the output while
+                // its last event is still arriving.
+                let arriving = {
+                    let epoch = changes.event_epoch.clone();
+                    let generated = generated.clone();
+                    tokio::spawn(async move {
+                        epoch.advance([generated]);
+                    })
+                };
+                let retry = changes
+                    .settle_failed_hook_candidate(
+                        &tola_build::hooks::SourceHookOutputs::default(),
+                        Some(&failed_outputs),
+                        &Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    retry.is_none(),
+                    "a declared output whose recorded bytes hold cannot retry the failed chain"
+                );
+                arriving.await.unwrap();
+                drop(claim);
+                changes.shutdown().await.unwrap();
+            }
+
+            {
+                std::fs::write(&generated, "corrected input").unwrap();
+                let mut changes = FileChangeSource::start(
+                    &config,
+                    &WatchRequirements::default(),
+                    &tola_build::hooks::SourceHookOutputs::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let claim = changes.begin_candidate(&config);
+                let mut event = modified_event(generated.clone());
+                changes.event_epoch.advance([generated.clone()]);
+                assert!(changes.quarantine_hook_event(&mut event, ProducerSet::default()));
+                let retry = changes
+                    .settle_failed_hook_candidate(
+                        &tola_build::hooks::SourceHookOutputs::default(),
+                        Some(&failed_outputs),
+                        &Default::default(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    retry.map(|batch| batch.paths),
+                    Some(vec![generated.clone()]),
+                    "an output the failure does not record retries the chain"
+                );
+                drop(claim);
+                changes.shutdown().await.unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn failed_hook_outputs_never_suppress() {
+            let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let root = root.as_path();
+            let mut schema = tola_build::config::SiteConfigSchema::default();
+            schema.build.hooks.before_build.push(
+                tola_build::config::section::build::BeforeBuildHookConfig {
+                    name: "partial".into(),
+                    command: hook_child_command("child_partial_before_build_hook"),
+                    dev: tola_build::config::section::build::DevParticipation::Run,
+                    generates: vec!["generated".into()],
+                    ..tola_build::config::section::build::BeforeBuildHookConfig::default()
+                },
+            );
+            let config = Arc::new(resolve_schema(root, schema, local_packages()));
+            let mut session = tola_build::build::BuildSession::new();
+            let failure = session
+                .prepare(
+                    Arc::clone(&config),
+                    tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
+                )
+                .run()
+                .err()
+                .expect("partial generator must fail the attempt");
+            let failed_outputs = failure
+                .failed_hook_outputs()
+                .expect("failed build retains declared output observations");
+            assert!(failure.hook_outputs().is_empty());
+            let mut changes = FileChangeSource::start(
+                &config,
+                &WatchRequirements::default(),
+                &tola_build::hooks::SourceHookOutputs::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            let claim = changes.begin_candidate(&config);
+            let generated = root.join("generated/site.css");
+            let mut generated_event = modified_event(generated.clone());
+            changes.event_epoch.advance([generated.clone()]);
+            assert!(changes.quarantine_hook_event(&mut generated_event, ProducerSet::default()));
+            assert!(
+                changes
+                    .settle_failed_hook_candidate(
+                        failure.source_hooks(),
+                        Some(failed_outputs),
+                        &Default::default()
+                    )
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(changes.source_hooks.outputs().is_empty());
+            let mut generated_changes = FileChangeBatch {
+                paths: vec![generated.clone()],
+                rebuild_scope: RebuildScope::Paths,
+            };
+            assert!(
+                changes
+                    .suppress_observed_hook_changes(&mut generated_changes)
+                    .await
+                    .unwrap()
+            );
+
+            let input = root.join("source.toml");
+            let mut input_changes = FileChangeBatch {
+                paths: vec![input.clone()],
+                rebuild_scope: RebuildScope::Paths,
+            };
+            assert!(
+                !changes
+                    .suppress_observed_hook_changes(&mut input_changes)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(input_changes.paths.as_slice(), std::slice::from_ref(&input));
+            let mut request =
+                tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development);
+            request.trigger = tola_build::build::BuildTrigger::Paths(vec![input].into());
+            let retry = session
+                .prepare(Arc::clone(&config), request)
+                .run()
+                .err()
+                .expect("the incomplete source generator must run again");
+            assert!(retry.source_hooks_failed(), "{:#}", retry.error());
+            assert!(retry.failed_hook_outputs().is_some());
+
+            std::fs::write(&generated, "corrected input").unwrap();
+            let mut edited = FileChangeBatch {
+                paths: vec![generated.clone()],
+                rebuild_scope: RebuildScope::Paths,
+            };
+            assert!(
+                !changes
+                    .suppress_observed_hook_changes(&mut edited)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(edited.paths, [generated]);
+            drop(claim);
+            changes.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn repaired_package_input_rechecks_once() {
+            let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let packages = tempfile::TempDir::new().unwrap();
+            let package = packages.path().join("local/demo/1.0.0");
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(package.join("lib.typ"), "#let value = [Data package]\n").unwrap();
+            let _ = watch_config(directory.path());
+            let packages = tola_typst::PackageLocations::from_absolute_roots(
+                Some(packages.path().to_path_buf()),
+                None,
+            )
+            .unwrap();
+            let config = resolve_schema(
+                directory.path(),
+                tola_build::config::SiteConfigSchema::default(),
+                packages,
+            );
+            let store = tola_typst::PackageStore::new(
+                config.package_locations().clone(),
+                tola_typst::PackageFetchPolicy::LocalOnly,
+            );
+            let selected = store
+                .prepare(&"@local/demo:1.0.0".parse().unwrap())
+                .unwrap();
+            let mut published = WatchRequirements::default();
+            published.package_checks(selected.checks().iter().cloned());
+            let mut changes = FileChangeSource::start(
+                &config,
+                &published,
+                &tola_build::hooks::SourceHookOutputs::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            let manifest = package.join("typst.toml");
+            assert_eq!(
+                std::fs::read(&manifest).unwrap_err().kind(),
+                std::io::ErrorKind::NotFound
+            );
+            assert!(
+                changes
+                    .roots
+                    .current_selection()
+                    .boundary()
+                    .classify(&manifest)
+                    .is_empty()
+            );
+
+            // The repair precedes the new subscription: its notification lies outside the published
+            // boundary, so retry selection cannot depend on delivery.
+            std::fs::write(
+                &manifest,
+                "[package]\nname = \"demo\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n",
+            )
+            .unwrap();
+            let mut failed = published;
+            failed.package_files([manifest]);
+            let installed = changes
+                .reconfigure_configs([&config], &failed)
+                .await
+                .unwrap();
+            let retained = changes
+                .reconfigure_configs([&config], &failed)
+                .await
+                .unwrap();
+            changes.shutdown().await.unwrap();
+
+            assert!(
+                installed,
+                "the failed read must be rechecked inside its newly installed boundary"
+            );
+            assert!(
+                !retained,
+                "an unchanged failure boundary must not request another retry"
+            );
+        }
+
+        #[tokio::test]
+        async fn missing_candidate_inputs_wake_recovery() {
+            let _watch_test = REAL_WATCH_TEST_LOCK.lock().await;
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = tola_build::filesystem::normalize_path(directory.path());
+            let published_content = root.join("content");
+            let published_entry = root.join("site.typ");
+            std::fs::create_dir_all(&published_content).unwrap();
+            std::fs::write(&published_entry, "#document(\"index.html\")[Published]").unwrap();
+
+            let published = watch_config(&root);
+            let mut attempted_schema = tola_build::config::SiteConfigSchema::default();
+            let recovery_root = root.join("candidate");
+            let attempted_content = recovery_root.join("content");
+            let attempted_entry = recovery_root.join("site.typ");
+            attempted_schema.build.content_dir = PathBuf::from("candidate/content");
+            attempted_schema.build.entry = PathBuf::from("candidate/site.typ");
+
+            let attempted = resolve_schema(&root, attempted_schema, local_packages());
+            let mut changes = FileChangeSource::start(
+                &published,
+                &WatchRequirements::default(),
+                &tola_build::hooks::SourceHookOutputs::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            changes
+                .reconfigure_configs([&published, &attempted], &WatchRequirements::default())
+                .await
+                .unwrap();
+
+            let boundary = changes.roots.current_selection().boundary();
+            assert!(
+                boundary
+                    .classify(&attempted_content)
+                    .producers()
+                    .contains(ProducerKind::Content)
+            );
+            assert!(
+                boundary
+                    .classify(&attempted_entry)
+                    .producers()
+                    .contains(ProducerKind::TypstReads)
+            );
+            let observed_epoch = changes.event_epoch();
+
+            std::fs::create_dir_all(&attempted_content).unwrap();
+            std::fs::write(&attempted_entry, "#document(\"index.html\")[Recovered]").unwrap();
+
+            let recovery = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let batch = changes.next(&published).await.unwrap();
+                    if batch_rechecks_input_after(
+                        &changes,
+                        &batch,
+                        &recovery_root,
+                        ProducerKind::Content,
+                        observed_epoch,
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            changes.shutdown().await.unwrap();
+            recovery.expect("creating failed-candidate inputs must wake their producer");
+        }
     }
 }

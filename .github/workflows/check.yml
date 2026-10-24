@@ -28,16 +28,22 @@ defaults:
     shell: bash
 
 jobs:
-  # One place decides how far this run goes, so every heavy job reads the same answer. A
-  # release call always carries everything; a push asks for it with `[full-ci]` in the commit
-  # message, a pull request with the `full-ci` label, and a manual run with its `full` input.
-  # The checks a push always carries are the fast ones.
+  # One place decides which checks a run covers. A release takes everything; a push asks with
+  # `[full-ci]` in its message, a pull request with the `full-ci` label, and a manual run with
+  # its `full` input.
   scope:
     name: Decide which checks this run covers
     runs-on: ubuntu-latest
     outputs:
       full: ${{ steps.decide.outputs.full }}
+      watch: ${{ steps.decide.outputs.watch }}
     steps:
+      # The diff against the base decides whether the macOS leg runs.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - name: Read the request
         id: decide
         env:
@@ -45,16 +51,37 @@ jobs:
           REQUESTED: ${{ github.event.inputs.full || 'false' }}
           MESSAGE: ${{ github.event.head_commit.message || '' }}
           LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           full=false
+          watch=true
           case "$EVENT" in
             workflow_call) full=true ;;
             workflow_dispatch) if [ "$REQUESTED" = "true" ]; then full=true; fi ;;
             push) case "$MESSAGE" in *'[full-ci]'*) full=true ;; esac ;;
             pull_request) case ",$LABELS," in *,full-ci,*) full=true ;; esac ;;
           esac
+          # The macOS leg takes a full run, and otherwise only a change that reaches the
+          # FSEvents backend. A rewritten branch can lose the base commit; then the diff
+          # fails and the leg runs.
+          base=''
+          case "$EVENT" in
+            pull_request) base="$BASE" ;;
+            push) base="$BEFORE" ;;
+          esac
+          if [ -n "$base" ] && [ "$full" = false ]; then
+            if ! changed=$(git diff --name-only "${base}...HEAD" 2>/dev/null); then
+              watch=true
+            elif printf '%s\n' "$changed" | grep -Eq '^(src/dev/watch/|src/dev/rebuild\.rs$|Cargo\.(toml|lock)$|just/|\.github/(workflows/check\.yml|actions/)|nix/)'; then
+              watch=true
+            else
+              watch=false
+            fi
+          fi
           printf 'full=%s\n' "$full" >> "$GITHUB_OUTPUT"
+          printf 'watch=%s\n' "$watch" >> "$GITHUB_OUTPUT"
 
   static-check:
     name: Check formatting, lints, spelling, versions, and workflows
@@ -140,6 +167,25 @@ jobs:
           tool: nextest@0.9.149
           fallback: none
       - run: just ${{ matrix.checks }}
+
+  macos-watch:
+    name: Check the watcher on macOS
+    runs-on: macos-latest
+    timeout-minutes: 45
+    needs: [scope]
+    # Only macOS compiles the FSEvents backend, and the Nix check cannot start its stream.
+    if: ${{ needs.scope.outputs.watch == 'true' }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: check-macos
+          cache-on-failure: true
+      - name: Run the gated fsevent tests
+        run: cargo test --locked -p tola --bin tola --all-features fsevents_tests
 
   minimum-rust:
     name: Check minimum Rust

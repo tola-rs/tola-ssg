@@ -164,6 +164,7 @@ anstyle-parse = "1.0.0"
 
 [features]
 default = []
+# Tests that open a real FSEvent stream, which a macOS sandbox cannot start.
 fsevents-tests = []
 
 [target.'cfg(unix)'.dependencies]

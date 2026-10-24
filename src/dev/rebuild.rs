@@ -1292,89 +1292,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "fsevents-tests")]
-    #[tokio::test]
-    async fn rejected_config_frees_generator_events() {
-        for replacement in [
-            "[build",
-            "[site]\norigin = \"https://example.test\"\nbase-path = \"/moved/\"\n",
-        ] {
-            let directory = tempfile::TempDir::new().unwrap();
-            let root = directory.path().canonicalize().unwrap();
-            std::fs::create_dir(root.join("content")).unwrap();
-            std::fs::create_dir(root.join("generated")).unwrap();
-            std::fs::write(root.join("site.typ"), "#document(\"index.html\")[Site]").unwrap();
-            let generated = root.join("generated/input.txt");
-            std::fs::write(&generated, "first").unwrap();
-            let config_path = root.join("tola.toml");
-            std::fs::write(&config_path,
-                "[[build.hooks.before-build]]\nname = \"unused\"\ncommand = [\"unused-before-config-rejection\"]\ngenerates = [\"generated\"]\n",
-            ).unwrap();
-            let loaded = crate::config::load(
-                Some(&config_path),
-                tola_build::InputScope::Pure,
-                tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
-                &crate::config::ConfigOverrides::default(),
-            )
-            .unwrap();
-            let (config, server, dev, config_loader) = loaded.into_parts();
-            let cancellation = crate::cancellation::Cancellation::default();
-            let output = crate::cli::output::CommandOutput::new(
-                crate::terminal::Terminal::new(clap::ColorChoice::Never, false, None),
-                None,
-            );
-            let hooks =
-                crate::dev::hooks::HookQueue::start(output.clone(), None, cancellation.token())
-                    .unwrap();
-            let mut rebuilding = super::RebuildLoop::start(super::RebuildStartup {
-                initial_config: std::sync::Arc::clone(&config),
-                server,
-                dev,
-                disable_hook_reuse: false,
-                config_loader,
-                resources: tola_build::BuildResources::new()
-                    .with_input_scope(tola_build::InputScope::Pure),
-                sites: crate::dev::site::CurrentSite::new(),
-                reload: None,
-                shutdown: cancellation,
-                output,
-                hooks: hooks.sender(),
-            })
-            .await
-            .unwrap();
-            std::fs::write(&config_path, replacement).unwrap();
-            let rejected = rebuilding
-                .settle_build(
-                    super::RebuildRequest {
-                        paths: vec![config_path],
-                        rebuild_scope: crate::dev::watch::RebuildScope::FullSite,
-                    },
-                    super::DevBuildTrigger::FilesChanged,
-                )
-                .await;
-
-            std::fs::write(&generated, "edited after config rejection").unwrap();
-            let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    let (paths, _) = rebuilding.changes.next(&config).await?.into_parts();
-                    if paths.iter().any(|path| generated.starts_with(path)) {
-                        return Ok::<_, crate::dev::watch::WatchError>(());
-                    }
-                }
-            })
-            .await;
-            let stopped = rebuilding.changes.shutdown().await;
-            let hooks_stopped = hooks.finish();
-
-            rejected.unwrap();
-            observed
-                .expect("generated input edits remained quarantined after config rejection")
-                .unwrap();
-            stopped.unwrap();
-            hooks_stopped.unwrap();
-        }
-    }
-
     fn resolve_schema(
         root: &std::path::Path,
         schema: tola_build::config::SiteConfigSchema,
@@ -1634,94 +1551,6 @@ mod tests {
         format!("/site/read-{id}.typ").into()
     }
 
-    #[cfg(all(unix, feature = "fsevents-tests"))]
-    #[tokio::test]
-    async fn failed_font_reads_remain_watched() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let site = root.join("site");
-        std::fs::create_dir_all(site.join("content")).unwrap();
-        std::fs::create_dir_all(site.join("fonts")).unwrap();
-        let fonts = tola_typst::FontStore::with_options(
-            tola_typst::FontOptions::new().with_system_fonts(false),
-        );
-        let font = fonts
-            .load(&tola_typst::BundleCancellation::new())
-            .unwrap()
-            .font(0)
-            .unwrap();
-        let physical_font = root.join("outside.ttf");
-        std::fs::write(&physical_font, font.data().as_slice()).unwrap();
-        std::os::unix::fs::symlink(&physical_font, site.join("fonts/linked.ttf")).unwrap();
-        std::fs::write(
-            site.join("site.typ"),
-            format!(
-                "#set text(font: {:?})\n#document(\"index.html\")[#context {{ measure([Font]); panic(\"Failure after reading font\") }}]",
-                font.info().family,
-            ),
-        )
-        .unwrap();
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.typst.fonts.paths = vec![std::path::PathBuf::from("fonts")];
-        let config = std::sync::Arc::new(resolve_schema(&site, schema));
-        let mut session =
-            tola_build::build::BuildSession::with_resources(tola_build::BuildResources::new());
-        let failure = session
-            .prepare(
-                std::sync::Arc::clone(&config),
-                tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
-            )
-            .run()
-            .err()
-            .expect("the source fails after measuring its text");
-        assert!(failure.input_observation().paths().iter().any(|path| {
-            path.input() == tola_build::build::InputKind::FontInventory
-                && path.path() == physical_font
-        }));
-        let mut watches = DevFailureWatches::default();
-        watches.observe_failure(&failure);
-        let dynamic = watches.requirements(&Default::default());
-        let mut changes = crate::dev::watch::FileChangeSource::start(
-            &config,
-            &dynamic,
-            &Default::default(),
-            None,
-        )
-        .await
-        .unwrap();
-        let _ = changes.begin_candidate(&config);
-        changes.reject_hook_candidate();
-        std::fs::write(&physical_font, b"repaired font bytes").unwrap();
-        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let (paths, _) = changes.next(&config).await?.into_parts();
-                if paths.contains(&physical_font) {
-                    return Ok::<_, crate::dev::watch::WatchError>(());
-                }
-            }
-        })
-        .await;
-        changes.shutdown().await.unwrap();
-        observed
-            .expect("a font read by the failed build lost its recovery watch")
-            .unwrap();
-
-        for transition in ["replaced failure", "lost attempt", "published revision"] {
-            watches.observe_failure(&failure);
-            assert!(!watches.latest_failed_observed_paths.is_empty());
-            match transition {
-                "replaced failure" => watches.build_failed(std::iter::empty(), Vec::new()),
-                "lost attempt" => watches.build_task_failed(&config),
-                "published revision" => watches.current_site_replaced(),
-                _ => unreachable!(),
-            }
-            assert!(
-                watches.latest_failed_observed_paths.is_empty(),
-                "{transition}"
-            );
-        }
-    }
-
     #[test]
     fn read_watch_paths_include_failures() {
         let mut state = DevFailureWatches::default();
@@ -1737,5 +1566,182 @@ mod tests {
 
         state.build_failed([path(4)], Vec::new());
         assert_eq!(state.all_paths([path(1), path(4)]), [path(1), path(4)]);
+    }
+
+    /// Tests that open a real FSEvent stream, which a macOS sandbox cannot start.
+    #[cfg(feature = "fsevents-tests")]
+    mod fsevents_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn rejected_config_frees_generator_events() {
+            for replacement in [
+                "[build",
+                "[site]\norigin = \"https://example.test\"\nbase-path = \"/moved/\"\n",
+            ] {
+                let directory = tempfile::TempDir::new().unwrap();
+                let root = directory.path().canonicalize().unwrap();
+                std::fs::create_dir(root.join("content")).unwrap();
+                std::fs::create_dir(root.join("generated")).unwrap();
+                std::fs::write(root.join("site.typ"), "#document(\"index.html\")[Site]").unwrap();
+                let generated = root.join("generated/input.txt");
+                std::fs::write(&generated, "first").unwrap();
+                let config_path = root.join("tola.toml");
+                std::fs::write(&config_path,
+                    "[[build.hooks.before-build]]\nname = \"unused\"\ncommand = [\"unused-before-config-rejection\"]\ngenerates = [\"generated\"]\n",
+                ).unwrap();
+                let loaded = crate::config::load(
+                    Some(&config_path),
+                    tola_build::InputScope::Pure,
+                    tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
+                    &crate::config::ConfigOverrides::default(),
+                )
+                .unwrap();
+                let (config, server, dev, config_loader) = loaded.into_parts();
+                let cancellation = crate::cancellation::Cancellation::default();
+                let output = crate::cli::output::CommandOutput::new(
+                    crate::terminal::Terminal::new(clap::ColorChoice::Never, false, None),
+                    None,
+                );
+                let hooks =
+                    crate::dev::hooks::HookQueue::start(output.clone(), None, cancellation.token())
+                        .unwrap();
+                let mut rebuilding =
+                    super::super::RebuildLoop::start(super::super::RebuildStartup {
+                        initial_config: std::sync::Arc::clone(&config),
+                        server,
+                        dev,
+                        disable_hook_reuse: false,
+                        config_loader,
+                        resources: tola_build::BuildResources::new()
+                            .with_input_scope(tola_build::InputScope::Pure),
+                        sites: crate::dev::site::CurrentSite::new(),
+                        reload: None,
+                        shutdown: cancellation,
+                        output,
+                        hooks: hooks.sender(),
+                    })
+                    .await
+                    .unwrap();
+                std::fs::write(&config_path, replacement).unwrap();
+                let rejected = rebuilding
+                    .settle_build(
+                        super::super::RebuildRequest {
+                            paths: vec![config_path],
+                            rebuild_scope: crate::dev::watch::RebuildScope::FullSite,
+                        },
+                        super::super::DevBuildTrigger::FilesChanged,
+                    )
+                    .await;
+
+                std::fs::write(&generated, "edited after config rejection").unwrap();
+                let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    loop {
+                        let (paths, _) = rebuilding.changes.next(&config).await?.into_parts();
+                        if paths.iter().any(|path| generated.starts_with(path)) {
+                            return Ok::<_, crate::dev::watch::WatchError>(());
+                        }
+                    }
+                })
+                .await;
+                let stopped = rebuilding.changes.shutdown().await;
+                let hooks_stopped = hooks.finish();
+
+                rejected.unwrap();
+                observed
+                    .expect("generated input edits remained quarantined after config rejection")
+                    .unwrap();
+                stopped.unwrap();
+                hooks_stopped.unwrap();
+            }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn failed_font_reads_remain_watched() {
+            let directory = tempfile::TempDir::new().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let site = root.join("site");
+            std::fs::create_dir_all(site.join("content")).unwrap();
+            std::fs::create_dir_all(site.join("fonts")).unwrap();
+            let fonts = tola_typst::FontStore::with_options(
+                tola_typst::FontOptions::new().with_system_fonts(false),
+            );
+            let font = fonts
+                .load(&tola_typst::BundleCancellation::new())
+                .unwrap()
+                .font(0)
+                .unwrap();
+            let physical_font = root.join("outside.ttf");
+            std::fs::write(&physical_font, font.data().as_slice()).unwrap();
+            std::os::unix::fs::symlink(&physical_font, site.join("fonts/linked.ttf")).unwrap();
+            std::fs::write(
+                site.join("site.typ"),
+                format!(
+                    "#set text(font: {:?})\n#document(\"index.html\")[#context {{ measure([Font]); panic(\"Failure after reading font\") }}]",
+                    font.info().family,
+                ),
+            )
+            .unwrap();
+            let mut schema = tola_build::config::SiteConfigSchema::default();
+            schema.typst.fonts.paths = vec![std::path::PathBuf::from("fonts")];
+            let config = std::sync::Arc::new(resolve_schema(&site, schema));
+            let mut session =
+                tola_build::build::BuildSession::with_resources(tola_build::BuildResources::new());
+            let failure = session
+                .prepare(
+                    std::sync::Arc::clone(&config),
+                    tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
+                )
+                .run()
+                .err()
+                .expect("the source fails after measuring its text");
+            assert!(failure.input_observation().paths().iter().any(|path| {
+                path.input() == tola_build::build::InputKind::FontInventory
+                    && path.path() == physical_font
+            }));
+            let mut watches = DevFailureWatches::default();
+            watches.observe_failure(&failure);
+            let dynamic = watches.requirements(&Default::default());
+            let mut changes = crate::dev::watch::FileChangeSource::start(
+                &config,
+                &dynamic,
+                &Default::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            let _ = changes.begin_candidate(&config);
+            changes.reject_hook_candidate();
+            std::fs::write(&physical_font, b"repaired font bytes").unwrap();
+            let observed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let (paths, _) = changes.next(&config).await?.into_parts();
+                    if paths.contains(&physical_font) {
+                        return Ok::<_, crate::dev::watch::WatchError>(());
+                    }
+                }
+            })
+            .await;
+            changes.shutdown().await.unwrap();
+            observed
+                .expect("a font read by the failed build lost its recovery watch")
+                .unwrap();
+
+            for transition in ["replaced failure", "lost attempt", "published revision"] {
+                watches.observe_failure(&failure);
+                assert!(!watches.latest_failed_observed_paths.is_empty());
+                match transition {
+                    "replaced failure" => watches.build_failed(std::iter::empty(), Vec::new()),
+                    "lost attempt" => watches.build_task_failed(&config),
+                    "published revision" => watches.current_site_replaced(),
+                    _ => unreachable!(),
+                }
+                assert!(
+                    watches.latest_failed_observed_paths.is_empty(),
+                    "{transition}"
+                );
+            }
+        }
     }
 }
