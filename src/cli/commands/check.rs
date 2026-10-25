@@ -1,54 +1,69 @@
-use crate::cancellation::Cancellation;
+//! `tola check`: build and validate the candidate without publishing it.
+//!
+//! The command never writes `build.publish-dir`, and hooks run unless the caller skips them.
+//! `--no-build` stops at parsing each source the site owns.
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
-use tola_build::diagnostic::{DiagnosticError, Severity};
 use tola_build::has_typ_extension;
+use tola_diagnostic::DiagnosticError;
 
-use crate::cli::output::CommandOutput;
-use crate::cli::{BuildOverrideArgs, ConfigFileArgs, TypstPackageArgs};
-use crate::config::ConfigOverrides;
-use tola_build::InputScope;
+pub(in crate::cli) fn run(
+    request: super::SiteRequest<'_>,
+    json: bool,
+    no_hooks: bool,
+) -> Result<()> {
+    let mut report = super::report::SiteReport::new("check", request.scope, "candidate", !no_hooks);
+    let output = request.output;
+    let cancellation = request.cancellation;
+    let completion = execute(request, json, no_hooks, &mut report)
+        .and_then(|()| cancellation.token().ensure_active().map_err(Into::into));
+    report.finish(completion, output, json)
+}
 
-pub(in crate::cli) fn run(request: super::SiteRequest<'_>) -> Result<()> {
-    let super::SiteRequest {
-        config_file,
-        packages,
-        scope,
-        build,
-        resources,
-        output,
-        cancellation,
-    } = request;
+fn execute(
+    request: super::SiteRequest<'_>,
+    json: bool,
+    no_hooks: bool,
+    report: &mut super::report::SiteReport,
+) -> Result<()> {
+    let output = request.output;
+    let cancellation = request.cancellation;
     cancellation.token().ensure_active()?;
-    let overrides = ConfigOverrides {
-        build: crate::cli::config::build_overrides(&build),
-        ..ConfigOverrides::default()
-    };
+    let overrides = crate::cli::config::config_overrides(&request.build);
     let started = Instant::now();
-    let loaded = crate::cli::config::load_site(
-        &config_file,
-        &packages,
-        scope,
-        &overrides,
-        output,
-        cancellation,
-    )?;
-    let config = Arc::new(loaded.into_config());
-    output.status("Checking site…")?;
-    output.hook_overview(
-        &config.build().hooks,
-        tola_build::build::BuildMode::Production,
-        crate::terminal::PRE_PUBLICATION_STAGES,
-    )?;
-    let locked = super::build_candidate(
-        config,
-        cancellation,
-        tola_build::build::HookExecution::Run,
-        resources,
-        output,
-    )?;
+    let config = Arc::new(request.load_config(&overrides)?.into_config());
+    report.configuration(&config);
+    output.status(if no_hooks {
+        "Checking site without hooks…"
+    } else {
+        "Checking site…"
+    })?;
+    if !no_hooks {
+        output.hook_overview(
+            &config.build().hooks,
+            tola_build::build::BuildMode::Production,
+            crate::terminal::PRE_PUBLICATION_STAGES,
+        )?;
+    }
+    let mut session = tola_build::BuildSession::with_resources(request.resources);
+    let mut build = tola_build::build::BuildRequest::default();
+    build.cancellation = cancellation.token();
+    build.capture_report = json;
+    build.hook_execution = if no_hooks {
+        tola_build::build::HookExecution::Skip
+    } else {
+        tola_build::build::HookExecution::Run
+    };
+    let locked = tola_build::build::SiteBuildGuard::build(&mut session, config, build, || {
+        let _ = output.waiting_for_build();
+    })
+    .map_err(|failure| {
+        report.failed_candidate(&failure);
+        failure.into_error()
+    })?;
+    report.candidate(locked.site());
     locked.ensure_fresh(&cancellation.token())?;
     let site = locked.release();
     output.diagnostics(site.diagnostics())?;
@@ -66,126 +81,96 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>) -> Result<()> {
 /// The walk is [`tola_build::filesystem::owned_files`], so this analysis reaches exactly the files
 /// `tola fmt` would rewrite. What a source *means* — values, routes, references, output — is the
 /// build's to establish, not this.
-pub(in crate::cli) fn sources(
-    config_file: ConfigFileArgs,
-    packages: TypstPackageArgs,
-    scope: InputScope,
-    build: BuildOverrideArgs,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
-    cancellation.token().ensure_active()?;
-    let overrides = ConfigOverrides {
-        build: crate::cli::config::build_overrides(&build),
-        ..ConfigOverrides::default()
-    };
-    let started = Instant::now();
-    let loaded = crate::cli::config::load_site(
-        &config_file,
-        &packages,
-        scope,
-        &overrides,
-        output,
-        cancellation,
-    )?;
-    let config = loaded.into_config();
-    output.status("Reading site sources…")?;
-    let root = config.get_root();
-    let files = tola_build::filesystem::owned_files(&config, &cancellation.token())?;
-    let mut diagnostics = Vec::new();
-    let mut examined = 0;
-    for source in files.iter().filter(|path| has_typ_extension(path)) {
-        cancellation.token().ensure_active()?;
-        let Ok(bytes) = std::fs::read(source) else {
-            continue;
-        };
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            diagnostics.push(
-                tola_build::diagnostic::unreadable_source(
-                    crate::codes::check::UNREADABLE,
+pub(in crate::cli) fn sources(request: &super::SiteRequest<'_>, json: bool) -> Result<()> {
+    let mut report = super::report::SiteReport::new("check", request.scope, "source", false);
+    let completion = (|| -> Result<()> {
+        request.cancellation.token().ensure_active()?;
+        let overrides = crate::cli::config::config_overrides(&request.build);
+        let started = Instant::now();
+        let config = request.load_config(&overrides)?.into_config();
+        report.configuration(&config);
+        request.output.status("Reading site sources…")?;
+        let root = config.get_root();
+        let files = tola_build::filesystem::owned_files(&config, &request.cancellation.token())?;
+        let mut diagnostics = Vec::new();
+        let mut examined = 0;
+        for source in files.iter().filter(|path| has_typ_extension(path)) {
+            request.cancellation.token().ensure_active()?;
+            let Ok(bytes) = std::fs::read(source) else {
+                continue;
+            };
+            let Ok(text) = std::str::from_utf8(&bytes) else {
+                diagnostics.push(
+                    tola_diagnostic::unreadable_source(
+                        crate::codes::check::UNREADABLE,
+                        &tola_build::filesystem::display_path(source, root),
+                    )
+                    .with_help("Save the file as UTF-8, then run `tola check` again"),
+                );
+                continue;
+            };
+            examined += 1;
+            if let Some(range) = tola_typst_syntax::errors::first_error_range(text) {
+                diagnostics.push(tola_diagnostic::unparsable_source(
+                    crate::codes::check::SYNTAX,
                     &tola_build::filesystem::display_path(source, root),
-                )
-                .with_help("Save the file as UTF-8, then run `tola check` again"),
-            );
-            continue;
-        };
-        examined += 1;
-        if let Some(range) = tola_typst_syntax::errors::first_error_range(text) {
-            diagnostics.push(tola_build::diagnostic::unparsable_source(
-                crate::codes::check::SYNTAX,
-                &tola_build::filesystem::display_path(source, root),
-                text,
-                Some(range.start),
-            ));
+                    text,
+                    Some(range.start),
+                ));
+            }
         }
-    }
-    if diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == Severity::Error)
-    {
-        return Err(DiagnosticError::new("source analysis failed", diagnostics).into());
-    }
-    output.summary(crate::terminal::site_summary(
-        "Checked",
-        started.elapsed(),
-        &crate::terminal::plural_count(examined, "source"),
-    ))?;
-    Ok(())
+        if super::holds_error(&diagnostics) {
+            return Err(DiagnosticError::new("source analysis failed", diagnostics).into());
+        }
+        request.output.summary(crate::terminal::site_summary(
+            "Checked",
+            started.elapsed(),
+            &crate::terminal::plural_count(examined, "source"),
+        ))?;
+        Ok(())
+    })()
+    .and_then(|()| {
+        request
+            .cancellation
+            .token()
+            .ensure_active()
+            .map_err(Into::into)
+    });
+    report.finish(completion, request.output, json)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::{buffered_output, site};
     use super::*;
-
-    fn site(sources: &[(&str, &str)]) -> (tempfile::TempDir, ConfigFileArgs) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::write(root.join("site.typ"), "= Home\n").unwrap();
-        std::fs::write(
-            root.join("tola.toml"),
-            "[site]\norigin = \"https://example.com\"\n",
-        )
-        .unwrap();
-        for (path, contents) in sources {
-            let path = root.join(path);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, contents).unwrap();
-        }
-        let config = ConfigFileArgs {
-            path: Some(root.join("tola.toml")),
-        };
-        (directory, config)
-    }
-
-    fn buffered_output() -> (CommandOutput, crate::terminal::BufferedOutput) {
-        let (sink, captured) = crate::terminal::OutputSink::buffered();
-        let output = CommandOutput::new(
-            crate::terminal::Terminal::with_sink(sink, false, false),
-            None,
-        );
-        (output, captured)
-    }
+    use crate::cancellation::Cancellation;
+    use crate::cli::output::CommandOutput;
+    use crate::cli::{BuildOverrideArgs, ConfigFileArgs, TypstPackageArgs};
+    use tola_build::InputScope;
 
     fn analyse(config_file: ConfigFileArgs, output: &CommandOutput) -> Result<()> {
-        sources(
+        let cancellation = Cancellation::default();
+        let request = super::super::SiteRequest::new(
             config_file,
             TypstPackageArgs::default(),
             InputScope::Online,
             BuildOverrideArgs::default(),
+            crate::cli::CompilerFontArgs::default(),
             output,
-            &Cancellation::default(),
+            &cancellation,
         )
+        .unwrap();
+        sources(&request, false)
     }
 
     #[test]
-    fn broken_source_is_reported_with_its_place() {
+    fn broken_source_reported_place() {
         let (directory, config) = site(&[("content/broken.typ", "= Title\n#let = \n")]);
-        let (output, _captured) = buffered_output();
+        let output = buffered_output();
 
         let error = analyse(config, &output).unwrap_err();
 
-        let diagnostics = tola_build::diagnostic::attached(&error).expect("the failure is stated");
+        let diagnostics = tola_diagnostic::attached(&error).expect("the failure is stated");
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].code, crate::codes::check::SYNTAX);
         let location = diagnostics[0].location.as_ref().expect("a location");
@@ -203,7 +188,7 @@ mod tests {
     #[test]
     fn readable_sources_pass_and_write_nothing() {
         let (directory, config) = site(&[("content/index.typ", "#let  x =  1\n")]);
-        let (output, _captured) = buffered_output();
+        let output = buffered_output();
 
         analyse(config, &output).unwrap();
 
@@ -218,12 +203,12 @@ mod tests {
     }
 
     #[test]
-    fn state_outside_the_site_sources_is_not_analysed() {
+    fn state_site_sources_not_analysed() {
         let (_directory, config) = site(&[
             ("public/broken.typ", "#let = \n"),
             (".tola/broken.typ", "#let = \n"),
         ]);
-        let (output, _captured) = buffered_output();
+        let output = buffered_output();
 
         analyse(config, &output).unwrap();
     }
@@ -232,11 +217,11 @@ mod tests {
     fn non_utf8_source_is_reported() {
         let (directory, config) = site(&[]);
         std::fs::write(directory.path().join("content/binary.typ"), [0xff, 0xfe]).unwrap();
-        let (output, _captured) = buffered_output();
+        let output = buffered_output();
 
         let error = analyse(config, &output).unwrap_err();
 
-        let diagnostics = tola_build::diagnostic::attached(&error).expect("the failure is stated");
+        let diagnostics = tola_diagnostic::attached(&error).expect("the failure is stated");
         assert_eq!(diagnostics[0].code, crate::codes::check::UNREADABLE);
         let location = diagnostics[0].location.as_ref().expect("a location");
         assert_eq!(location.path, "content/binary.typ");
