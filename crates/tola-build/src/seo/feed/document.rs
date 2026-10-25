@@ -156,7 +156,11 @@ impl<'a> DocumentContents<'a> {
             }
         })?;
         cancellation.ensure_active()?;
-        let mut html = fragment.styles.concat();
+        let capacity = fragment.styles.iter().map(String::len).sum::<usize>() + fragment.html.len();
+        let mut html = String::with_capacity(capacity);
+        for style in &fragment.styles {
+            html.push_str(style);
+        }
         html.push_str(&fragment.html);
         let html: Arc<str> = html.into();
         self.selections.insert(key, Arc::clone(&html));
