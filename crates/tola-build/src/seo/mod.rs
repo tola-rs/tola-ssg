@@ -125,9 +125,9 @@ pub(crate) fn render_outputs(
     cancellation.ensure_active()?;
     let rendered = (|| {
         let mut rendered = feed::render_outputs(config, compilation, cancellation)?;
-        rendered
-            .outputs
-            .extend(sitemap::render_outputs(config, compilation, cancellation)?);
+        let sitemaps = sitemap::render_outputs(config, compilation, cancellation)?;
+        rendered.outputs.extend(sitemaps.outputs);
+        rendered.warnings.extend(sitemaps.warnings);
         Ok(rendered)
     })();
     cancellation.ensure_active()?;
@@ -797,6 +797,7 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
 #sitemap(output: "second.xml", targets: ("c/index.html",))
 "#,
         );
+        assert!(outputs.warnings.is_empty());
         assert_eq!(outputs.outputs.len(), 2);
         let xml = std::str::from_utf8(output(&outputs, "/first.xml")).unwrap();
         let document = roxmltree::Document::parse(xml).unwrap();
@@ -814,6 +815,26 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         assert!(xml.contains("<lastmod>2026-09-01</lastmod>"));
         let second = std::str::from_utf8(output(&outputs, "/second.xml")).unwrap();
         assert!(second.contains("https://example.com/blog/c/"));
+    }
+
+    #[test]
+    fn sitemap_warns_about_the_not_found_page() {
+        let outputs = render(
+            r#"
+#document("index.html")[Home]
+#document("404.html")[Missing]
+#sitemap(targets: ("index.html", "404.html"))
+"#,
+        );
+        assert_eq!(outputs.warnings.len(), 1);
+        assert!(
+            outputs.warnings[0]
+                .source()
+                .message
+                .contains("not-found page")
+        );
+        let xml = std::str::from_utf8(output(&outputs, "/sitemap.xml")).unwrap();
+        assert!(xml.contains("https://example.com/blog/404.html"));
     }
 
     #[test]
@@ -944,6 +965,32 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         );
         let diagnostic = error.source_diagnostic();
         assert!(diagnostic.source().message.contains("/entries/0/published"));
+    }
+
+    #[test]
+    fn feed_format_and_output_extension_must_agree() {
+        let settings = "[site]\norigin = \"https://example.com\"\ntitle = \"Home\"";
+        let json_under_xml = declaration_error(
+            r#"
+#document("index.html", title: [Home])[Home]
+#feed(format: "json", output: "feed.xml", entries: ())
+"#,
+            settings,
+        );
+        let diagnostic = json_under_xml.source_diagnostic();
+        assert!(diagnostic.source().message.contains("/output"));
+        assert!(diagnostic.source().message.contains("`json`"));
+
+        let xml_under_json = declaration_error(
+            r#"
+#document("index.html", title: [Home])[Home]
+#feed(format: "rss", output: "feed.json", entries: ())
+"#,
+            settings,
+        );
+        let diagnostic = xml_under_json.source_diagnostic();
+        assert!(diagnostic.source().message.contains("/output"));
+        assert!(diagnostic.source().message.contains("`rss`"));
     }
 
     #[test]

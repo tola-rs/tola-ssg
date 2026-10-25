@@ -129,6 +129,7 @@ impl Feed {
             &declaration.string(declaration.required(fields, "format", "")?, "/format")?,
         )
         .ok_or_else(|| declaration.invalid("/format", "expected `rss`, `atom`, or `json`"))?;
+        check_format_matches_output(declaration, format, &output)?;
         let output_url = tola_address::asset_url_from_output(&output);
         let url = config.canonical_url(&output_url);
         let id = declaration.text(declaration.required(fields, "id", "")?, "/id")?;
@@ -292,6 +293,47 @@ impl Feed {
             entries,
         })
     }
+}
+
+/// A host derives the media type from the extension, so the format and the extension must agree
+/// on JSON versus XML. An output the host can serve either way is left alone.
+fn check_format_matches_output(
+    declaration: &SeoDeclaration,
+    format: FeedFormat,
+    output: &OutputPath,
+) -> Result<(), SeoDeclarationError> {
+    let file = output.as_str().rsplit('/').next().unwrap_or_default();
+    let extension = file
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    let xml_family = extension
+        .as_deref()
+        .is_some_and(|extension| matches!(extension, "xml" | "atom" | "rss"));
+    let json_family = extension.as_deref() == Some("json");
+    let mismatched = match format {
+        FeedFormat::Json => xml_family,
+        FeedFormat::Rss | FeedFormat::Atom => json_family,
+    };
+    if !mismatched {
+        return Ok(());
+    }
+    let extension = extension.as_deref().unwrap_or_default();
+    Err(declaration
+        .invalid(
+            "/output",
+            format!(
+                "a `{}` feed cannot be served from a `.{extension}` output",
+                format.as_str()
+            ),
+        )
+        .with_help(match format {
+            FeedFormat::Json => {
+                "Name the output `feed.json`, or declare this feed as `rss` or `atom`"
+            }
+            FeedFormat::Rss | FeedFormat::Atom => {
+                "Name the output `feed.xml`, or declare this feed as `json`"
+            }
+        }))
 }
 
 fn validate_atom_id(
