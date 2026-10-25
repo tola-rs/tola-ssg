@@ -263,7 +263,7 @@ fn explained_panic_diagnostic(
 /// Where a failure no author can act on is reported.
 pub(crate) const REPORT_URL: &str = "https://github.com/tola-rs/tola-ssg/issues";
 
-fn internal_error_diagnostic(log_path: Option<&std::path::Path>) -> diagnostic::Diagnostic {
+fn internal_error_diagnostic(log_path: Option<&std::path::Path>) -> tola_diagnostic::Diagnostic {
     let help = match log_path {
         Some(path) => format!(
             "Report this at {REPORT_URL} and attach the log written to `{}`",
@@ -271,10 +271,10 @@ fn internal_error_diagnostic(log_path: Option<&std::path::Path>) -> diagnostic::
         ),
         None => format!("Rerun with `--log-file tola.log` and report this at {REPORT_URL}"),
     };
-    diagnostic::Diagnostic::new(
+    tola_diagnostic::Diagnostic::new(
         crate::codes::internal::ERROR,
-        diagnostic::Severity::Error,
-        "Tola hit an internal error",
+        tola_diagnostic::Severity::Error,
+        "Tola could not finish this command",
     )
     .with_help(help)
 }
@@ -288,7 +288,7 @@ fn report_unavailable_log(terminal: &Terminal, path: &std::path::Path) {
 }
 
 /// Write one diagnostic directly to the terminal; the command output does not exist yet.
-fn report_diagnostic(terminal: &Terminal, diagnostic: &diagnostic::Diagnostic) {
+fn report_diagnostic(terminal: &Terminal, diagnostic: &tola_diagnostic::Diagnostic) {
     let mut rendered = crate::terminal::render_diagnostic(diagnostic, None, terminal.uses_color());
     rendered.push('\n');
     let _ = terminal.sink().write_stderr(rendered.as_bytes());
@@ -297,16 +297,16 @@ fn report_diagnostic(terminal: &Terminal, diagnostic: &diagnostic::Diagnostic) {
 fn report_log_failure(terminal: &Terminal, origin: LogOrigin, path: &std::path::Path) {
     // Recording is unavailable, so report directly: no recursion, no site display limits.
     // The io failure itself is not rendered; the reader needs the path and the consequence.
-    let diagnostic = diagnostic::Diagnostic::new(
+    let diagnostic = tola_diagnostic::Diagnostic::new(
         crate::codes::log::WRITE,
-        diagnostic::Severity::Warning,
+        tola_diagnostic::Severity::Warning,
         format!("cannot write log `{}`", display_path(path)),
     )
     .with_note("logging has stopped")
     .with_help(match origin {
         // The session log is Tola's choice, and a session is not rerun to regain it.
         LogOrigin::Automatic => {
-            "Make `.tola/logs` writable, or pass `--log-file` to record elsewhere"
+            "Make `.tola/state/logs` writable, or pass `--log-file` to record elsewhere"
         }
         LogOrigin::Explicit => {
             "Choose a writable location with free space for `--log-file`, then rerun"

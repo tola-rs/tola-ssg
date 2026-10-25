@@ -188,6 +188,52 @@ pub(crate) fn dispatch(
     }
 }
 
+/// The machine-readable report a failed invocation produces, for commands that answer in JSON.
+#[derive(Clone, Copy)]
+pub(super) struct FailureReport {
+    command: &'static str,
+    scope: InputScope,
+    stage: &'static str,
+    hooks: bool,
+}
+
+impl FailureReport {
+    pub(super) fn of(cli: &Cli) -> Option<Self> {
+        match &cli.command {
+            Commands::Build { json: true, .. } => Some(Self {
+                command: "build",
+                scope: cli.input_scope(),
+                stage: "candidate",
+                hooks: true,
+            }),
+            Commands::Check {
+                json: true,
+                no_build,
+                no_hooks,
+                ..
+            } => Some(Self {
+                command: "check",
+                scope: cli.input_scope(),
+                stage: if *no_build { "source" } else { "candidate" },
+                hooks: !*no_build && !*no_hooks,
+            }),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn report_failure(
+    failure: Option<FailureReport>,
+    output: &CommandOutput,
+    error: anyhow::Error,
+) -> Result<()> {
+    let Some(failure) = failure else {
+        return Err(error);
+    };
+    commands::report::SiteReport::new(failure.command, failure.scope, failure.stage, failure.hooks)
+        .finish(Err(error), output, true)
+}
+
 fn validate_log_outputs(command: &Commands, output: &CommandOutput) -> Result<()> {
     let Some(log_path) = output.log().map(LogFile::path) else {
         return Ok(());

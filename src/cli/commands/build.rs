@@ -1,34 +1,32 @@
+//! `tola build`: one production-mode build, published whole, then its after-publish commands.
+//!
+//! The build library validates the candidate; choosing to publish it, and reporting what happened
+//! afterwards, is this command's policy.
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::config::ConfigOverrides;
+pub(in crate::cli) fn run(request: super::SiteRequest<'_>, json: bool) -> Result<()> {
+    let mut report = super::report::SiteReport::new("build", request.scope, "candidate", true);
+    let output = request.output;
+    let cancellation = request.cancellation;
+    let completion = execute(request, json, &mut report)
+        .and_then(|()| cancellation.token().ensure_active().map_err(Into::into));
+    report.finish(completion, output, json)
+}
 
-pub(in crate::cli) fn run(request: super::SiteRequest<'_>) -> Result<()> {
-    let super::SiteRequest {
-        config_file,
-        packages,
-        scope,
-        build,
-        resources,
-        output,
-        cancellation,
-    } = request;
+fn execute(
+    request: super::SiteRequest<'_>,
+    json: bool,
+    report: &mut super::report::SiteReport,
+) -> Result<()> {
+    let output = request.output;
+    let cancellation = request.cancellation;
     cancellation.token().ensure_active()?;
-    let overrides = ConfigOverrides {
-        build: crate::cli::config::build_overrides(&build),
-        ..ConfigOverrides::default()
-    };
-    let loaded = crate::cli::config::load_site(
-        &config_file,
-        &packages,
-        scope,
-        &overrides,
-        output,
-        cancellation,
-    )?;
-    let config = Arc::new(loaded.into_config());
+    let overrides = crate::cli::config::config_overrides(&request.build);
+    let config = Arc::new(request.load_config(&overrides)?.into_config());
+    report.configuration(&config);
     output.status("Building site…")?;
     output.hook_overview(
         &config.build().hooks,
@@ -36,20 +34,26 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>) -> Result<()> {
         crate::terminal::EVERY_STAGE,
     )?;
     let started = Instant::now();
-    let mut session = tola_build::BuildSession::with_resources(resources);
-    let mut request =
-        tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production);
-    request.cancellation = cancellation.token();
+    let mut session = tola_build::BuildSession::with_resources(request.resources);
+    let mut build = tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production);
+    build.cancellation = cancellation.token();
+    build.capture_report = json;
     let locked = tola_build::build::SiteBuildGuard::build_for_publication(
         &mut session,
         config,
-        request,
+        build,
         || {
             let _ = output.waiting_for_build();
         },
     )
-    .map_err(|failure| failure.into_error())?;
+    .map_err(|failure| {
+        report.failed_candidate(&failure);
+        failure.into_error()
+    })?;
+    report.candidate_report(locked.site());
     let outcome = locked.write_site()?;
+    report.diagnostics(outcome.diagnostics());
+    report.published = true;
     drop(locked);
     output.diagnostics(outcome.diagnostics())?;
     let counts = outcome.counts();
@@ -58,23 +62,29 @@ pub(in crate::cli) fn run(request: super::SiteRequest<'_>) -> Result<()> {
         started.elapsed(),
         &crate::terminal::describe_outputs(counts),
     ))?;
-    if let Err(error) = outcome.run_after_publish(&cancellation.token()) {
-        let error =
-            error.context("site output was written, but an after-publish command did not finish");
-        if error
-            .chain()
-            .any(|cause| cause.is::<tola_build::cancellation::BuildCancelled>())
-        {
-            return Err(error);
+    match outcome.run_after_publish(&cancellation.token()) {
+        Ok(diagnostics) => {
+            output.diagnostics(&diagnostics)?;
+            report.diagnostics(&diagnostics);
         }
-        // The rendered diagnostic belongs to the failing hook; the committed output is
-        // stated here because only this boundary knows the write already happened.
-        let diagnostics =
-            crate::cli::output::attached_or_fallback(&error, crate::codes::hook::AFTER_PUBLISH)
-                .into_iter()
-                .map(|diagnostic| diagnostic.with_note("the site output was written"))
-                .collect();
-        return Err(tola_build::diagnostic::DiagnosticError::attach(error, diagnostics).into());
+        Err(error) => {
+            let error = error
+                .context("site output was written, but an after-publish command did not finish");
+            if error
+                .chain()
+                .any(|cause| cause.is::<tola_build::cancellation::BuildCancelled>())
+            {
+                return Err(error);
+            }
+            // The rendered diagnostic belongs to the failing hook; the committed output is
+            // stated here because only this boundary knows the write already happened.
+            let diagnostics =
+                crate::cli::output::attached_or_fallback(&error, crate::codes::hook::AFTER_PUBLISH)
+                    .into_iter()
+                    .map(|diagnostic| diagnostic.with_note("the site output was written"))
+                    .collect();
+            return Err(tola_diagnostic::DiagnosticError::attach(error, diagnostics).into());
+        }
     }
     Ok(())
 }

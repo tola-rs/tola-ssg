@@ -3,7 +3,7 @@
 use std::io;
 
 use serde_json::json;
-use tola_build::diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::{Diagnostic, Severity};
 
 use crate::cli::log::LogFile;
 use crate::config::DiagnosticsConfig;
@@ -366,6 +366,14 @@ fn failure_chain(error: &anyhow::Error) -> String {
 mod tests {
     use super::*;
     use crate::terminal::{EVERY_STAGE, OutputSink, Terminal};
+
+    fn log_records(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
     use tola_build::build::BuildMode;
     use tola_build::config::section::build::{BeforeBuildHookConfig, HooksConfig};
 
@@ -410,11 +418,7 @@ mod tests {
             .report_round(CompletedRound::failed(Some(5), "Build failed"), &[failure])
             .unwrap();
 
-        let source = std::fs::read_to_string(output.log().unwrap().path()).unwrap();
-        let records = source
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .collect::<Vec<_>>();
+        let records = log_records(output.log().unwrap().path());
         let round = |kind: &str, number: u64| {
             records
                 .iter()
