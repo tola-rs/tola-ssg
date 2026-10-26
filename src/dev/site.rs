@@ -3,10 +3,13 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use arc_swap::ArcSwapOption;
+use bytes::Bytes;
+use tola_build::build::{BuildSession, CheckedRevision};
+use tola_build::site::SiteRevision;
+
 use crate::dev::http::html::HtmlInjection;
 use crate::dev::http::response::ResponseBody;
-use crate::dev::reload::transport::ReloadEndpoint;
-use bytes::Bytes;
 
 #[derive(Default)]
 pub(super) struct RequestedHtml {
@@ -35,17 +38,10 @@ impl RequestedHtml {
     }
 }
 
-#[derive(Default)]
-struct PreparedHtml {
-    endpoint: Option<(ReloadEndpoint, tola_address::SiteUrlMount)>,
-    pages: BTreeMap<String, Arc<RequestedHtml>>,
-}
-
-/// At most one representation per requested output in the installed graph, plus its welcome
-/// page. Endpoint replacement releases every previous slot; responses own only byte fragments.
+/// Each installed revision owns the representations of its requested pages.
 #[derive(Default)]
 pub(super) struct HtmlResponses {
-    prepared: Mutex<PreparedHtml>,
+    pages: Mutex<BTreeMap<String, Arc<RequestedHtml>>>,
     welcome: OnceLock<Bytes>,
 }
 
@@ -54,38 +50,16 @@ impl HtmlResponses {
         self.welcome.get_or_init(content)
     }
 
-    pub(super) fn page(
-        &self,
-        output: Option<&tola_address::OutputPath>,
-        mount: &tola_address::SiteUrlMount,
-        endpoint: &ReloadEndpoint,
-    ) -> Arc<RequestedHtml> {
-        let mut prepared = self
-            .prepared
+    pub(super) fn page(&self, output: Option<&tola_address::OutputPath>) -> Arc<RequestedHtml> {
+        let mut pages = self
+            .pages
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if prepared
-            .endpoint
-            .as_ref()
-            .is_none_or(|(current, current_mount)| {
-                current.port() != endpoint.port()
-                    || current.session_token() != endpoint.session_token()
-                    || current.generation() != endpoint.generation()
-                    || current_mount != mount
-            })
-        {
-            prepared.pages.clear();
-            prepared.endpoint = Some((endpoint.clone(), mount.clone()));
-        }
         let key = output.map_or("", tola_address::OutputPath::as_str);
-        if let Some(page) = prepared.pages.get(key) {
-            Arc::clone(page)
-        } else {
-            let page = Arc::new(RequestedHtml::default());
-            prepared.pages.insert(key.to_owned(), Arc::clone(&page));
-            page
+        if let Some(page) = pages.get(key) {
+            return Arc::clone(page);
         }
-        // The slot leaves the map lock before either initialization can scan page bytes.
+        Arc::clone(pages.entry(key.to_owned()).or_default())
     }
 }
 
@@ -110,10 +84,6 @@ impl std::ops::Deref for InstalledRevision {
         &self.revision
     }
 }
-
-use arc_swap::ArcSwapOption;
-use tola_build::build::{BuildSession, CheckedRevision};
-use tola_build::site::SiteRevision;
 
 /// Readers retain one immutable revision while the runtime replaces the current value.
 #[derive(Clone)]
@@ -165,55 +135,45 @@ impl CurrentSite {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tola_build::config::ResolvedSiteConfig;
 
-    /// A site whose entry documents `index.html`, titled `title`, built through `session` so it
-    /// has the origin [`BuildSession::install_revision`] requires.
     fn candidate(
         session: &mut BuildSession,
         root: &std::path::Path,
         title: &str,
-    ) -> (CheckedRevision, Arc<ResolvedSiteConfig>) {
-        let source = format!(
-            "[site]\ntitle = {}\n",
-            serde_json::to_string(title).unwrap()
-        );
+    ) -> CheckedRevision {
+        let program = format!("#document(\"index.html\")[{title}]");
         crate::dev::tests::checked_candidate(
             session,
-            crate::dev::tests::write_site(root, "#document(\"index.html\")[Site]", &source),
+            crate::dev::tests::write_site(root, &program, ""),
             tola_build::build::BuildMode::Production,
         )
+        .0
     }
 
     #[test]
-    fn replacement_swaps_whole_visible_site() {
+    fn installed_readers_keep_previous_content() {
         let root = tempfile::tempdir().unwrap();
         let sites = CurrentSite::new();
         let mut session = BuildSession::new();
-        let (first, _) = candidate(&mut session, root.path(), "First");
-        let (previous, first) = sites.replace(&mut session, first).unwrap();
-        assert!(previous.is_none());
+        let first = candidate(&mut session, root.path(), "First");
+        sites.replace(&mut session, first).unwrap();
+        let reader = sites.installed().unwrap();
 
-        let (second, second_config) = candidate(&mut session, root.path(), "Second");
-        let (previous, second) = sites.replace(&mut session, second).unwrap();
-        assert!(Arc::ptr_eq(&previous.unwrap(), &first));
-        assert!(!Arc::ptr_eq(&sites.revision().unwrap(), &first));
-        assert!(Arc::ptr_eq(&sites.revision().unwrap(), &second));
-        assert!(Arc::ptr_eq(second.config(), &second_config));
-    }
+        let second = candidate(&mut session, root.path(), "Second");
+        sites.replace(&mut session, second).unwrap();
+        let current = sites.installed().unwrap();
 
-    #[test]
-    fn previous_revision_survives_readers() {
-        let root = tempfile::tempdir().unwrap();
-        let sites = CurrentSite::new();
-        let mut session = BuildSession::new();
-        let (first, _) = candidate(&mut session, root.path(), "First");
-        let (_, first) = sites.replace(&mut session, first).unwrap();
-        let first_id = first.manifest().revision().clone();
-        let (second, _) = candidate(&mut session, root.path(), "Second");
-        let (previous, _) = sites.replace(&mut session, second).unwrap();
-        let previous = previous.unwrap();
-        drop(first);
-        assert_eq!(previous.manifest().revision(), &first_id);
+        let old = reader
+            .outputs()
+            .output_by_path_text("index.html")
+            .unwrap()
+            .bytes();
+        let new = current
+            .outputs()
+            .output_by_path_text("index.html")
+            .unwrap()
+            .bytes();
+        assert!(String::from_utf8_lossy(old).contains("First"));
+        assert!(String::from_utf8_lossy(new).contains("Second"));
     }
 }

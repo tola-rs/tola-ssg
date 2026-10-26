@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use super::fs::WatchError;
-use tola_build::diagnostic::{Diagnostic, DiagnosticError, Severity};
+use tola_diagnostic::{Diagnostic, DiagnosticError, Severity};
 
 pub(crate) fn with_diagnostics(error: anyhow::Error, root: &Path) -> anyhow::Error {
     if error
         .chain()
         .any(|cause| cause.is::<tola_build::cancellation::BuildCancelled>())
-        || tola_build::diagnostic::attached(&error).is_some()
+        || tola_diagnostic::attached(&error).is_some()
     {
         return error;
     }
@@ -20,9 +20,9 @@ pub(crate) fn with_diagnostics(error: anyhow::Error, root: &Path) -> anyhow::Err
 fn error_diagnostic(
     error: &anyhow::Error,
     root: &Path,
-    fallback_code: tola_build::diagnostic::DiagnosticCode,
+    fallback_code: tola_diagnostic::DiagnosticCode,
 ) -> Diagnostic {
-    classify(error, root).unwrap_or_else(|| tola_build::diagnostic::fallback(fallback_code, error))
+    classify(error, root).unwrap_or_else(|| tola_diagnostic::fallback(fallback_code, error))
 }
 
 fn classify(error: &anyhow::Error, root: &Path) -> Option<Diagnostic> {
@@ -89,7 +89,7 @@ mod tests {
     fn backend_errors_keep_watch_codes() {
         let error = anyhow::Error::new(WatchError::Stopped);
         let error = with_diagnostics(error, Path::new("/site"));
-        let diagnostics = tola_build::diagnostic::attached(&error).unwrap();
+        let diagnostics = tola_diagnostic::attached(&error).unwrap();
         assert_eq!(diagnostics[0].code, crate::codes::watch::STOPPED);
     }
 
@@ -100,7 +100,7 @@ mod tests {
             source: notify::Error::generic("watch limit reached"),
         });
         let error = with_diagnostics(error, Path::new("/site"));
-        let diagnostic = &tola_build::diagnostic::attached(&error).unwrap()[0];
+        let diagnostic = &tola_diagnostic::attached(&error).unwrap()[0];
         assert_eq!(diagnostic.code, crate::codes::watch::ATTACH);
         assert_eq!(diagnostic.location.as_ref().unwrap().path, "content");
         assert!(diagnostic.notes.is_empty());

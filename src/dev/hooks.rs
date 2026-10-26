@@ -4,8 +4,8 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::{Context, Result, anyhow};
 use tola_build::cancellation::{BuildCancellation, BuildCancelled, BuildCanceller};
-use tola_build::diagnostic::Diagnostic;
 use tola_build::site::SiteRevision;
+use tola_diagnostic::Diagnostic;
 
 #[derive(Clone)]
 pub(crate) struct HookSender {
@@ -139,14 +139,15 @@ impl HookSender {
 pub(crate) struct HookQueue {
     sender: HookSender,
     shutdown: BuildCanceller,
-    worker: Option<std::thread::JoinHandle<()>>,
+    worker: Option<std::thread::JoinHandle<Result<()>>>,
 }
 
 impl HookQueue {
     pub(crate) fn start(
         output: crate::cli::output::CommandOutput,
         browser: Option<crate::dev::reload::transport::ReloadDiagnostics>,
-        cancellation: BuildCancellation,
+        cancellation: crate::cancellation::Cancellation,
+        events: super::events::Events,
     ) -> Result<Self> {
         let mailbox = Arc::new(HookMailbox {
             pending: Mutex::new(PendingHooks::Waiting),
@@ -158,13 +159,14 @@ impl HookQueue {
         let shutdown = BuildCanceller::new();
         let worker_shutdown = shutdown.token();
         let worker_cancellation = cancellation.clone();
+        let worker_token = worker_cancellation.token();
         let worker = std::thread::Builder::new()
             .name("tola-after-publish".into())
             .spawn(move || {
                 let mut completed: Option<CompletedRun> = None;
-                while let Some(pending) = pending.next(&worker_cancellation, &worker_shutdown) {
+                while let Some(pending) = pending.next(&worker_token, &worker_shutdown) {
                     let revision = pending.site.manifest().revision().as_str();
-                    let failure = match pending.site.after_publish_dependencies() {
+                    match pending.site.after_publish_dependencies() {
                         Ok(dependencies)
                             if completed
                                 .as_ref()
@@ -175,13 +177,35 @@ impl HookQueue {
                                 revision,
                                 "kept the previous after-publish outcome for unchanged dependencies"
                             );
-                            completed.as_ref().and_then(|run| run.failure.clone())
+                            if let Some(diagnostics) =
+                                completed.as_ref().and_then(|run| run.failure.as_ref())
+                            {
+                                let _ =
+                                    output.status("Site built; an after-publish command failed");
+                                let _ = output.diagnostics(diagnostics);
+                                if let (Some(browser), Some(diagnostic)) =
+                                    (&browser, diagnostics.first())
+                                {
+                                    browser.after_publish_failed(&pending.site, diagnostic);
+                                }
+                            }
                         }
                         Ok(dependencies) => {
-                            let failure = match consume_revision(&pending, &worker_shutdown) {
-                                Ok(()) => None,
+                            let outcome =
+                                match consume_revision(&pending, &worker_shutdown, events) {
+                                    Ok(outcome) => outcome,
+                                    Err(error) => {
+                                        worker_cancellation.request();
+                                        return Err(error);
+                                    }
+                                };
+                            let failure = match outcome {
+                                Ok(diagnostics) => {
+                                    let _ = output.diagnostics(&diagnostics);
+                                    None
+                                }
                                 Err(error) => {
-                                    if worker_cancellation.is_cancelled()
+                                    if worker_cancellation.is_requested()
                                         || worker_shutdown.is_cancelled()
                                         || error.chain().any(|cause| cause.is::<BuildCancelled>())
                                     {
@@ -193,34 +217,44 @@ impl HookQueue {
                                         %error,
                                         "after-publish command failed"
                                     );
-                                    Some(after_publish_failure(&error))
+                                    let diagnostic = after_publish_failure(&error);
+                                    let diagnostics = crate::cli::output::attached_or_fallback(
+                                        &error,
+                                        crate::codes::hook::AFTER_PUBLISH,
+                                    );
+                                    let _ =
+                                        output.status("Site built; an after-publish command failed");
+                                    let _ = output.diagnostics(&diagnostics);
+                                    if let Some(browser) = &browser {
+                                        browser.after_publish_failed(&pending.site, &diagnostic);
+                                    }
+                                    Some(diagnostics)
                                 }
                             };
-                            completed = Some(CompletedRun {
-                                dependencies,
-                                failure: failure.clone(),
-                            });
-                            failure
+                            completed = Some(CompletedRun { dependencies, failure });
                         }
                         Err(error) => {
                             completed = None;
-                            Some(after_publish_failure(&error))
-                        }
-                    };
-                    if let Some(diagnostic) = failure {
-                        let _ = output.status("Site built; an after-publish command failed");
-                        let _ = output.diagnostic(&diagnostic);
-                        if let Some(browser) = &browser {
-                            browser.after_publish_failed(&pending.site, &diagnostic);
+                            let diagnostic = after_publish_failure(&error);
+                            let diagnostics = crate::cli::output::attached_or_fallback(
+                                &error,
+                                crate::codes::hook::AFTER_PUBLISH,
+                            );
+                            let _ = output.status("Site built; an after-publish command failed");
+                            let _ = output.diagnostics(&diagnostics);
+                            if let Some(browser) = &browser {
+                                browser.after_publish_failed(&pending.site, &diagnostic);
+                            }
                         }
                     }
                 }
+                Ok(())
             })
             .context("Tola could not start its after-publish worker; restart `tola dev`")?;
         Ok(Self {
             sender: HookSender {
                 mailbox,
-                cancellation,
+                cancellation: cancellation.token(),
                 shutdown: shutdown.token(),
             },
             shutdown,
@@ -242,7 +276,7 @@ impl HookQueue {
         if let Some(worker) = self.worker.take() {
             worker
                 .join()
-                .map_err(|_| anyhow!("Tola could not stop its after-publish worker"))?;
+                .map_err(|_| anyhow!("Tola could not stop its after-publish worker"))??;
         }
         Ok(())
     }
@@ -264,14 +298,18 @@ impl Drop for HookQueue {
 /// rebuild would never settle.
 struct CompletedRun {
     dependencies: tola_build::hooks::AfterPublishDependencies,
-    failure: Option<Diagnostic>,
+    failure: Option<Vec<Diagnostic>>,
 }
 
 /// Run one revision's after-publish commands under its published identity.
 ///
 /// The span is entered for the synchronous command run, so a command's hook events name their
 /// round and revision even while a later round publishes.
-fn consume_revision(pending: &PendingRevision, cancellation: &BuildCancellation) -> Result<()> {
+fn consume_revision(
+    pending: &PendingRevision,
+    cancellation: &BuildCancellation,
+    events: super::events::Events,
+) -> Result<Result<Vec<Diagnostic>>> {
     let site = pending.site.as_ref();
     let span = tracing::info_span!(
         target: "tola::dev",
@@ -279,23 +317,77 @@ fn consume_revision(pending: &PendingRevision, cancellation: &BuildCancellation)
         round = pending.round,
         revision = site.manifest().revision().as_str(),
     );
-    span.in_scope(|| {
-        let files = site.hook_output(cancellation)?;
-        tola_build::hooks::run_after_publish_hooks(
+    let mut event_write_failed = false;
+    let outcome = span.in_scope(|| {
+        let files = match site.hook_output(cancellation) {
+            Ok(files) => files,
+            Err(error) => {
+                if !events.0 {
+                    return Err(error);
+                }
+                let (status, diagnostics) = hook_failure(&error);
+                if let Err(write_error) = events.hook_finished(
+                    None,
+                    site.manifest().revision().as_str(),
+                    status,
+                    &diagnostics,
+                ) {
+                    event_write_failed = true;
+                    return Err(write_error);
+                }
+                return Err(error);
+            }
+        };
+        tola_build::hooks::run_after_publish_hooks_observed(
             site.config(),
             site.mode(),
             files.root(),
             cancellation,
+            |hook, outcome| {
+                if !events.0 {
+                    return Ok(());
+                }
+                let (status, diagnostics) = match outcome {
+                    Ok(diagnostics) => ("succeeded", diagnostics.clone()),
+                    Err(error) => hook_failure(error),
+                };
+                let written = events.hook_finished(
+                    Some(hook),
+                    site.manifest().revision().as_str(),
+                    status,
+                    &diagnostics,
+                );
+                event_write_failed = written.is_err();
+                written
+            },
         )
-    })
+    });
+    if event_write_failed {
+        return Err(outcome.expect_err("event write failed"));
+    }
+    Ok(outcome)
+}
+
+fn hook_failure(error: &anyhow::Error) -> (&'static str, Vec<Diagnostic>) {
+    if tola_build::cancellation::is_cancelled(error) {
+        ("cancelled", Vec::new())
+    } else {
+        (
+            "failed",
+            crate::cli::output::attached_or_fallback(error, crate::codes::hook::AFTER_PUBLISH),
+        )
+    }
 }
 
 fn after_publish_failure(error: &anyhow::Error) -> Diagnostic {
-    tola_build::diagnostic::attached(error)
-        .and_then(|diagnostics| diagnostics.first().cloned())
-        .unwrap_or_else(|| {
-            tola_build::diagnostic::fallback(crate::codes::hook::AFTER_PUBLISH, error)
+    tola_diagnostic::attached(error)
+        .and_then(|diagnostics| {
+            diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.severity == tola_diagnostic::Severity::Error)
+                .cloned()
         })
+        .unwrap_or_else(|| tola_diagnostic::fallback(crate::codes::hook::AFTER_PUBLISH, error))
         .with_help(
             "Fix the failing command in `build.hooks.after-publish`, then change the site or one of its `rerun-on` paths to run it again",
         )
@@ -312,8 +404,14 @@ mod tests {
             crate::terminal::Terminal::new(clap::ColorChoice::Never, false, None),
             None,
         );
-        let cancellation = BuildCancellation::default();
-        let queue = HookQueue::start(output, None, cancellation.clone()).unwrap();
+        let cancellation = crate::cancellation::Cancellation::default();
+        let queue = HookQueue::start(
+            output,
+            None,
+            cancellation.clone(),
+            super::super::events::Events(false),
+        )
+        .unwrap();
         let sender = queue.sender();
         let (completed, completion) = mpsc::channel();
         let closing = std::thread::spawn(move || completed.send(queue.finish()).unwrap());
@@ -325,6 +423,6 @@ mod tests {
         closed
             .expect("closing waited for a retained sender")
             .unwrap();
-        assert!(!cancellation.is_cancelled());
+        assert!(!cancellation.is_requested());
     }
 }

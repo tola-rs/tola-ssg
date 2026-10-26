@@ -44,6 +44,7 @@ type WorkbenchAction = {
   pages?: string
   page?: string
   pagesMessage?: string
+  completion?: string
   capture?: boolean
 }
 
@@ -83,6 +84,16 @@ async function main(): Promise<void> {
       const page = browser.contexts().flatMap((context) => context.pages())
         .find((candidate) => candidate.url().includes('workbench.html'))
       if (!page) throw new Error('The VS Code workbench is not attached to the test driver')
+      if (action.completion !== undefined) {
+        const label = new RegExp(`^${action.completion.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`)
+        const suggestion = page.locator('.suggest-widget.visible .monaco-list-row')
+          .filter({ has: page.locator('.label-name').filter({ hasText: label }) }).last()
+        await suggestion.waitFor({ state: 'visible', timeout: 15_000 })
+        const text = await suggestion.innerText()
+        await suggestion.click()
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ text }))
+        return
+      }
       if (action.pages !== undefined || action.page !== undefined || action.pagesMessage !== undefined) {
         const target = action.page !== undefined
           ? page.getByRole('treeitem', { name: action.page }).last()

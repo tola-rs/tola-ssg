@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use hyper::{Request, body::Incoming};
 use tola_address::RESERVED_ROOT;
-use tola_build::diagnostic::{Diagnostic, Severity};
+use tola_diagnostic::{Diagnostic, Severity};
 
 use crate::dev::site::CurrentSite;
 
@@ -35,44 +35,41 @@ pub(super) fn bind_with_port_fallback(
     for offset in 0..MAX_PORT_RETRIES {
         let port = base_port.saturating_add(offset);
         let address = SocketAddr::new(interface, port);
-        let bound = TcpListener::bind(address).and_then(|listener| {
+        let Ok((listener, address)) = TcpListener::bind(address).and_then(|listener| {
             listener.set_nonblocking(true)?;
             let address = listener.local_addr()?;
             Ok((listener, address))
+        }) else {
+            continue;
+        };
+        let fallback = (offset > 0).then(|| {
+            Diagnostic::new(
+                crate::codes::server::PORT_IN_USE,
+                Severity::Warning,
+                format!("port `{base_port}` is already in use"),
+            )
+            .with_note(format!("serving http://{address} instead"))
+            .with_help(format!(
+                "Pass `--port {}` to use this port next time",
+                address.port()
+            ))
         });
-        match bound {
-            Ok((listener, address)) => {
-                let fallback = (offset > 0).then(|| {
-                    Diagnostic::new(
-                        crate::codes::server::PORT_IN_USE,
-                        Severity::Warning,
-                        format!("port `{base_port}` is already in use"),
-                    )
-                    .with_note(format!("serving http://{address} instead"))
-                    .with_help(format!("Use `--port {}` to keep this port", address.port()))
-                });
-                return Ok((listener, address, fallback));
-            }
-            Err(_) if offset + 1 < MAX_PORT_RETRIES => {}
-            Err(_) => {
-                let message = format!("Tola could not start the development server on {interface}");
-                let diagnostic = Diagnostic::new(
-                    crate::codes::command::FAILED,
-                    Severity::Error,
-                    message.clone(),
-                )
-                .with_help("Choose another address or port with `--interface`/`--port`");
-                return Err(tola_build::diagnostic::DiagnosticError::new(
-                    message,
-                    vec![diagnostic],
-                )
-                .into());
-            }
-        }
+        return Ok((listener, address, fallback));
     }
-    unreachable!()
+    let message = format!("Tola could not start the development server on {interface}");
+    let diagnostic = Diagnostic::new(
+        crate::codes::command::FAILED,
+        Severity::Error,
+        message.clone(),
+    )
+    .with_help("Choose another address or port with `--interface`/`--port`");
+    Err(tola_diagnostic::DiagnosticError::new(message, vec![diagnostic]).into())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the server owns each of these services for its lifetime"
+)]
 pub(super) async fn serve_http(
     listener: tokio::net::TcpListener,
     sites: CurrentSite,
@@ -80,7 +77,19 @@ pub(super) async fn serve_http(
     reload_endpoint: Option<crate::dev::reload::transport::ReloadEndpoint>,
     publications: Option<tokio::sync::mpsc::Sender<PublicationRequest>>,
     shutdown: crate::cancellation::Cancellation,
+    events: crate::dev::events::Events,
+    url: String,
 ) -> Result<()> {
+    if shutdown.is_requested() {
+        return Ok(());
+    }
+    let revision = sites.revision();
+    events.server_ready(
+        &url,
+        revision
+            .as_ref()
+            .map(|site| site.manifest().revision().as_str()),
+    )?;
     let mut connections = tokio::task::JoinSet::new();
     let connection_limit = Arc::new(tokio::sync::Semaphore::new(MAX_HTTP_CONNECTIONS));
     let serving = async {
@@ -184,7 +193,7 @@ async fn serve_connection(
         async move {
             let request = request.map(|_| ());
             let reply = if request.uri().path() == PREVIEW_ENDPOINT_PATH.as_str() {
-                preview::respond(request, peer, sites, &initial_config, publications).await
+                preview::respond(request, peer, sites, publications).await
             } else {
                 response::respond(
                     request,
@@ -374,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn taken_base_port_reports_port_in_use() {
+    fn taken_base_port_port_use() {
         let interface = "127.0.0.1".parse().unwrap();
         let held = TcpListener::bind((interface, 0)).unwrap();
         let taken = held.local_addr().unwrap().port();

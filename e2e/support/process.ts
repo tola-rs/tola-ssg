@@ -55,7 +55,7 @@ export type CommandRunner = (
 /** Runs Tola with `--color never` and the harness's default deadline. */
 export function commandRunner(binary: string): CommandRunner {
   return (args: string[], cwd: string, timeoutMs: number = COMMAND_TIMEOUT_MS.standard) =>
-    runCommand(binary, [...args, '--color', 'never'], cwd, timeoutMs)
+    runCommand(binary, ['--color', 'never', ...args], cwd, timeoutMs)
 }
 
 export function expectExited(

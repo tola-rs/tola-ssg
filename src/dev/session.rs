@@ -18,6 +18,10 @@ use tola_build::filesystem::DevServerAddress;
 
 const DEFAULT_WS_PORT: u16 = 35729;
 
+/// What the author reads when the first development build cannot finish.
+const INITIAL_BUILD_STOPPED: &str =
+    "the initial site build stopped unexpectedly; run `tola check` for the full error";
+
 enum ServerPurpose {
     Development {
         dev: DevConfig,
@@ -44,12 +48,6 @@ impl ServerPurpose {
     }
 }
 
-// TODO: Several development sessions can run against one site today (an
-// editor-spawned preview beside a terminal session): each rebuilds every
-// writer's changes and none knows the others. Think through later whether a
-// site should hold at most one session — a session lock, or an attach path —
-// and whether the view and its log should name the session they belong to.
-
 /// Start development with observation active before its first watched build.
 /// What a server session needs to start, before the purpose decides how it runs.
 pub(crate) struct ServerLaunch {
@@ -59,6 +57,7 @@ pub(crate) struct ServerLaunch {
     pub resources: tola_build::BuildResources,
     pub output: CommandOutput,
     pub shutdown: Cancellation,
+    pub events: super::events::Events,
 }
 
 pub(crate) fn run(launch: ServerLaunch, dev: DevConfig, disable_hook_reuse: bool) -> Result<()> {
@@ -84,26 +83,22 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
         resources,
         output,
         shutdown,
+        events,
     } = launch;
     shutdown.token().ensure_active()?;
-    let view = match &purpose {
-        ServerPurpose::Development { .. } => output
-            .begin_dev_view(shutdown.clone())
-            .context("could not open the development view; restart `tola dev`")?,
-        ServerPurpose::Preview => None,
-    };
-    output.hook_overview(
-        &config.build().hooks,
-        purpose.build_mode(),
+    let view =
         match &purpose {
-            ServerPurpose::Development { .. } => crate::terminal::EVERY_STAGE,
-            ServerPurpose::Preview => crate::terminal::PRE_PUBLICATION_STAGES,
-        },
-    )?;
-    output.activity(match &purpose {
-        ServerPurpose::Development { .. } => "Building site…",
-        ServerPurpose::Preview => "Building preview…",
-    })?;
+            ServerPurpose::Development { .. } if !events.0 => output
+                .begin_dev_view(shutdown.clone())
+                .context("could not open the development view; restart `tola dev`")?,
+            _ => None,
+        };
+    let (stages, activity) = match &purpose {
+        ServerPurpose::Development { .. } => (crate::terminal::EVERY_STAGE, "Building site…"),
+        ServerPurpose::Preview => (crate::terminal::PRE_PUBLICATION_STAGES, "Building preview…"),
+    };
+    output.hook_overview(&config.build().hooks, purpose.build_mode(), stages)?;
+    output.activity(activity)?;
     let command = purpose.command();
     // Response assembly is this runtime's only CPU work: one worker per core up to four keeps a
     // busy host parallel without multiplying the per-connection buffers a large machine would pay for.
@@ -146,13 +141,17 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
             ServerPurpose::Development { .. } => Some(HookQueue::start(
                 output.clone(),
                 browser_diagnostics,
-                shutdown.token(),
+                shutdown.clone(),
+                events,
             )?),
             ServerPurpose::Preview => None,
         };
         let serving = async {
             let (reload_endpoint, mut rebuild) = match purpose {
-                ServerPurpose::Development { dev, disable_hook_reuse } if dev.watch => {
+                ServerPurpose::Development {
+                    dev,
+                    disable_hook_reuse,
+                } if dev.watch => {
                     let reload_endpoint = reload.as_ref().map(ReloadTransport::endpoint);
                     let mut rebuild = RebuildLoop::start(RebuildStartup {
                         initial_config: Arc::clone(&config),
@@ -165,6 +164,7 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                         reload,
                         shutdown: shutdown.clone(),
                         output: output.clone(),
+                        events,
                         hooks: hooks
                             .as_ref()
                             .expect("development owns a hook queue")
@@ -197,6 +197,7 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                             build_cancellation,
                             hooks,
                             build_resources,
+                            events,
                         )
                     });
                     tokio::select! {
@@ -206,13 +207,13 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                             // Blocking work must finish before the hook queue and
                             // runtime are dropped; cancellation is cooperative.
                             let _ = building.await.context(
-                                "the initial site build stopped unexpectedly; run `tola check` for the full error",
+                                INITIAL_BUILD_STOPPED,
                             )?;
                             return Ok(());
                         }
                         completed = &mut building => {
                             completed.context(
-                                "the initial site build stopped unexpectedly; run `tola check` for the full error",
+                                INITIAL_BUILD_STOPPED,
                             )??;
                         }
                     }
@@ -230,20 +231,19 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                 } else {
                     format!("http://{address}{}", mount.base_path())
                 };
-                let _written = DevServerAddress::write(config.get_root(), &url).with_context(|| {
-                    format!("Tola could not write the address it serves; restart `{command}`")
-                })?;
+                let _dev_server_address = DevServerAddress::write(config.get_root(), &url)
+                    .with_context(|| {
+                        format!("Tola could not write the address it serves; restart `{command}`")
+                    })?;
                 output.serving(&url)?;
-                match (
-                    rebuild.is_some(),
-                    output.terminal().is_interactive() && view.is_none(),
-                ) {
-                    (true, true) => {
-                        output.status("Watching for changes, press Ctrl+C to stop")?
-                    }
-                    (true, false) => output.status("Watching for changes")?,
-                    (false, true) => output.status("Press Ctrl+C to stop")?,
-                    (false, false) => {}
+                let watching = rebuild.is_some();
+                let interactive = output.terminal().is_interactive() && view.is_none();
+                if watching || interactive {
+                    output.status(match (watching, interactive) {
+                        (true, true) => "Watching for changes, press Ctrl+C to stop",
+                        (true, false) => "Watching for changes",
+                        (false, _) => "Press Ctrl+C to stop",
+                    })?;
                 }
                 let http = super::http::serve_http(
                     listener,
@@ -252,6 +252,8 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
                     reload_endpoint,
                     rebuild.as_ref().map(RebuildLoop::publication_sender),
                     shutdown.clone(),
+                    events,
+                    url,
                 );
                 tokio::pin!(http);
                 if let Some(rebuild) = rebuild.take() {
@@ -286,7 +288,9 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
 
         shutdown.request();
         let view = match view {
-            Some(view) => view.finish().context("could not finish the development view; restart `tola dev`"),
+            Some(view) => view
+                .finish()
+                .context("could not finish the development view; restart `tola dev`"),
             None => Ok(()),
         };
         let hooks = match hooks {
@@ -302,6 +306,10 @@ fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
     serving
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one development attempt's services are all distinct state"
+)]
 fn build_site_once(
     config: Arc<ResolvedSiteConfig>,
     sites: CurrentSite,
@@ -310,6 +318,60 @@ fn build_site_once(
     cancellation: BuildCancellation,
     hooks: Option<HookSender>,
     resources: tola_build::BuildResources,
+    events: super::events::Events,
+) -> Result<()> {
+    events.build_started(1)?;
+    let root = config.get_root().to_path_buf();
+    let mut diagnostics = Vec::new();
+    let mut published = false;
+    let outcome = build_site_once_inner(
+        config,
+        sites.clone(),
+        output,
+        purpose,
+        cancellation,
+        hooks,
+        resources,
+        &mut diagnostics,
+        &mut published,
+        events,
+    );
+    if events.0 && !published {
+        let status = if outcome
+            .as_ref()
+            .err()
+            .is_some_and(tola_build::cancellation::is_cancelled)
+        {
+            diagnostics.clear();
+            "cancelled"
+        } else {
+            if diagnostics.is_empty()
+                && let Err(error) = &outcome
+            {
+                diagnostics = tola_build::build::error_diagnostics(error, &root);
+            }
+            "failed"
+        };
+        events.build_finished(1, status, false, None, &diagnostics)?;
+    }
+    outcome
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one development attempt's services are all distinct state"
+)]
+fn build_site_once_inner(
+    config: Arc<ResolvedSiteConfig>,
+    sites: CurrentSite,
+    output: &CommandOutput,
+    purpose: ServerPurpose,
+    cancellation: BuildCancellation,
+    hooks: Option<HookSender>,
+    resources: tola_build::BuildResources,
+    attempt_diagnostics: &mut Vec<tola_diagnostic::Diagnostic>,
+    published: &mut bool,
+    events: super::events::Events,
 ) -> Result<()> {
     cancellation.ensure_active()?;
     let started = std::time::Instant::now();
@@ -343,6 +405,9 @@ fn build_site_once(
                 &error,
                 config.get_root(),
             ));
+            if events.0 {
+                attempt_diagnostics.clone_from(&diagnostics);
+            }
             output.report_round(
                 crate::cli::output::CompletedRound::failed(
                     None,
@@ -354,6 +419,14 @@ fn build_site_once(
         }
     };
     let (_, current) = sites.replace(&mut session, checked)?;
+    *published = true;
+    events.build_finished(
+        1,
+        "succeeded",
+        true,
+        Some(current.manifest().revision().as_str()),
+        current.diagnostics(),
+    )?;
     drop(build_lock);
     if let Some(hooks) = hooks {
         hooks.enqueue(Arc::clone(&current), None)?;
@@ -378,13 +451,11 @@ fn build_site_once(
     Ok(())
 }
 
-fn network_exposure_diagnostic(
-    interface: std::net::IpAddr,
-) -> Option<tola_build::diagnostic::Diagnostic> {
+fn network_exposure_diagnostic(interface: std::net::IpAddr) -> Option<tola_diagnostic::Diagnostic> {
     (!interface.is_loopback()).then(|| {
-        tola_build::diagnostic::Diagnostic::new(
+        tola_diagnostic::Diagnostic::new(
             crate::codes::server::NETWORK_EXPOSED,
-            tola_build::diagnostic::Severity::Warning,
+            tola_diagnostic::Severity::Warning,
             "the local server is reachable from other machines",
         )
         .with_note(format!("bound to `{interface}` without authentication"))
@@ -393,11 +464,11 @@ fn network_exposure_diagnostic(
 }
 
 /// The warning for a reload listener that took a port other than the preferred one.
-fn reload_port_fallback_diagnostic(port: u16) -> Option<tola_build::diagnostic::Diagnostic> {
+fn reload_port_fallback_diagnostic(port: u16) -> Option<tola_diagnostic::Diagnostic> {
     (port != DEFAULT_WS_PORT).then(|| {
-        tola_build::diagnostic::Diagnostic::new(
+        tola_diagnostic::Diagnostic::new(
             crate::codes::reload::PORT_IN_USE,
-            tola_build::diagnostic::Severity::Warning,
+            tola_diagnostic::Severity::Warning,
             format!("port `{DEFAULT_WS_PORT}` is already in use"),
         )
         .with_note(format!("serving browser reload on port `{port}` instead"))
@@ -416,7 +487,14 @@ mod tests {
         purpose: ServerPurpose,
     ) -> Result<()> {
         let hooks = matches!(&purpose, ServerPurpose::Development { .. })
-            .then(|| HookQueue::start(output.clone(), None, BuildCancellation::default()))
+            .then(|| {
+                HookQueue::start(
+                    output.clone(),
+                    None,
+                    Cancellation::default(),
+                    super::super::events::Events(false),
+                )
+            })
             .transpose()
             .expect("start test hook consumer");
         let built = build_site_once(
@@ -427,6 +505,7 @@ mod tests {
             BuildCancellation::default(),
             hooks.as_ref().map(HookQueue::sender),
             tola_build::BuildResources::default(),
+            super::super::events::Events(false),
         );
         if let Some(hooks) = hooks {
             hooks.finish().expect("finish test hook consumer");

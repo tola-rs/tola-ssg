@@ -41,8 +41,12 @@ export class SiteTasks implements vscode.TaskProvider {
         ? candidate.folder.uri.toString() === scope.uri.toString()
         : scope === vscode.TaskScope.Workspace
     )
-    const [selection] = candidates
-    return selection && candidates.length === 1 ? this.task(selection, definition) : undefined
+    const selection = candidates.length === 1
+      ? candidates[0]
+      : typeof scope === 'object'
+      ? candidates.find((candidate) => candidate.folder.uri.toString() === scope.uri.toString())
+      : undefined
+    return selection ? this.task(selection, definition) : undefined
   }
 
   private task(selection: Selection, definition: TolaTaskDefinition): vscode.Task {

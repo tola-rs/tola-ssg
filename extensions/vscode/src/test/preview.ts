@@ -4,6 +4,8 @@ import type { ServerResponse } from 'node:http'
 import * as path from 'node:path'
 import * as vscode from 'vscode'
 import { startGate } from '../../../../e2e/support/gate.ts'
+import { SiteCli } from '../site-cli.ts'
+import { selectSite } from '../selection.ts'
 import {
   check,
   type EditorSite,
@@ -15,7 +17,26 @@ import {
   workbenchText,
 } from './site.ts'
 
-type HeldPublication = { html: string; devPid: number; hookPid: number; closed: Promise<void> }
+async function withNotices(assertion: (messages: string[]) => Promise<void>): Promise<void> {
+  const show = vscode.window.showInformationMessage
+  const messages: string[] = []
+  vscode.window.showInformationMessage = ((message: string, ...args: unknown[]) => {
+    messages.push(message)
+    return Reflect.apply(show, vscode.window, [message, ...args])
+  }) as typeof show
+  try {
+    await assertion(messages)
+  } finally {
+    vscode.window.showInformationMessage = show
+  }
+}
+
+type HeldPublication = {
+  html: string
+  devPid: number
+  hookPid: number
+  closed: Promise<void>
+}
 
 async function within<T>(promise: PromiseLike<T>, label: string): Promise<T> {
   let deadline: NodeJS.Timeout | undefined
@@ -104,6 +125,65 @@ function assertStopped(pid: number): void {
 }
 
 export async function runPreviewChecks(): Promise<void> {
+  await check('Preview starts from its own published address', async () => {
+    let foreignRequests = 0
+    const foreign = await startGate((_request, response) => {
+      foreignRequests += 1
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ revision: 'foreign', routes: [] }))
+    })
+    const gate = await publicationGate(() => true)
+    try {
+      await withSite(async (site) => {
+        const recorded = path.join(site.root, '.tola/state/dev-server.json')
+        await fs.mkdir(path.dirname(recorded), { recursive: true })
+        await fs.writeFile(recorded, JSON.stringify({ version: 1, origin: foreign.url }))
+        const starting = vscode.commands.executeCommand('tola.startPreview', site.source)
+        await gate.next()
+        gate.release()
+        await within(starting, 'Owned preview startup')
+        assert.equal(foreignRequests, 0, 'A prior server cannot answer this startup')
+      }, { prepare: gate.prepare })
+    } finally {
+      gate.release()
+      await gate.close()
+      await foreign.close()
+    }
+  })
+
+  await check('Output lookup leaves configuration JSON private', () =>
+    withSite(async (site) => {
+      const channel = vscode.window.createOutputChannel('Tola output lookup')
+      const output: string[] = []
+      const recorded = new Proxy(channel, {
+        get(target, property) {
+          if (property === 'append' || property === 'appendLine') {
+            return (text: string) => {
+              output.push(text)
+              target[property](text)
+            }
+          }
+          const value = Reflect.get(target, property)
+          return typeof value === 'function' ? value.bind(target) : value
+        },
+      })
+      const cli = new SiteCli(recorded, (error) => {
+        throw error
+      })
+      const lifetime = cli.register()
+      try {
+        const folder = vscode.workspace.getWorkspaceFolder(site.source)!
+        const selection = await selectSite(folder, site.configuration)
+        assert.ok(selection)
+        await cli.revealOutput(selection)
+        await workbenchText({ contains: 'has not built this site yet', dismiss: true })
+        assert.doesNotMatch(output.join(''), /"output"\s*:/)
+      } finally {
+        lifetime.dispose()
+        channel.dispose()
+      }
+    }))
+
   await check('Open Page opens the checked route', () =>
     withPreview((opened) =>
       withSite(async (site) => {
@@ -112,6 +192,29 @@ export async function runPreviewChecks(): Promise<void> {
         assert.equal(opened[0]!.url.pathname, '/preview/')
       })
     ))
+
+  await check(
+    'An explicit published fragment opens with its exact encoded ID',
+    () =>
+      withPreview((opened) =>
+        withSite(async (site) => {
+          const input = vscode.window.showInputBox
+          vscode.window.showInputBox = (async () => 'part%2F中文') as typeof input
+          try {
+            await vscode.window.showTextDocument(site.source)
+            await vscode.commands.executeCommand('tola.openPreviewFragment', site.source)
+            assert.equal(opened.length, 1)
+            assert.equal(opened[0]!.url.pathname, '/preview/')
+            assert.equal(decodeURIComponent(opened[0]!.url.hash.slice(1)), 'part%2F中文')
+          } finally {
+            vscode.window.showInputBox = input
+          }
+        }, {
+          program:
+            '#document("preview/index.html", format: "html")[\n#include "content/page.typ"\n#html.elem("span", attrs: (id: "part%2F中文"))[]\n]\n',
+        })
+      ),
+  )
 
   await check('A lens data route previews its page', () =>
     withPreview((opened) =>
@@ -222,16 +325,16 @@ export async function runPreviewChecks(): Promise<void> {
   await check(
     'Start Preview leaves navigation unchanged',
     () =>
-      withPreview((opened) =>
-        withSite(async (site) => {
-          await vscode.window.showTextDocument(site.source)
-          await vscode.commands.executeCommand('tola.startPreview', site.source)
-          assert.match(
-            await workbenchText({ contains: `Tola published ${site.name}`, dismiss: true }),
-            /http:/,
-          )
-          assert.deepEqual(opened, [])
-        })
+      withNotices((notices) =>
+        withPreview((opened) =>
+          withSite(async (site) => {
+            await vscode.window.showTextDocument(site.source)
+            await vscode.commands.executeCommand('tola.startPreview', site.source)
+            assert.match(await workbenchText({ status: '/preview/' }), /preview/)
+            assert.deepEqual(opened, [])
+            assert.deepEqual(notices, [])
+          })
+        )
       ),
   )
   await check(
@@ -297,6 +400,149 @@ export async function runPreviewChecks(): Promise<void> {
         })
       ),
   )
+
+  await check('Preview saves discovered package changes', async () => {
+    const previous = process.env.TYPST_PACKAGE_CACHE_PATH
+    let packageUri: vscode.Uri
+    try {
+      await withPreview((opened) =>
+        withSite(async (site) => {
+          const source = await vscode.workspace.openTextDocument(site.source)
+          const target = await vscode.commands.executeCommand<vscode.Location[]>(
+            'vscode.executeDefinitionProvider',
+            site.source,
+            source.positionAt(source.getText().lastIndexOf('message')),
+          )
+          assert.equal(target[0]?.uri.toString(), packageUri.toString(), 'the site reads this cache package')
+          const dependency = await vscode.workspace.openTextDocument(packageUri)
+          await replace(dependency, '#let message = [Unsaved package change.]\n')
+          await vscode.window.showTextDocument(site.source)
+          const preview = vscode.commands.executeCommand('tola.openPreview', site.source)
+          const prompt = await workbenchText({ button: 'Save and Preview' })
+          assert.match(prompt, /lib\.typ/)
+          await within(preview, 'Discovered package preview')
+          assert.equal(dependency.isDirty, false)
+          assert.match(opened.at(-1)!.html, /Unsaved package change\./)
+          await vscode.window.showTextDocument(dependency)
+          await within(
+            vscode.commands.executeCommand('tola.openPreview', dependency.uri),
+            'Package-source preview',
+          )
+          assert.equal(opened.length, 2, 'the package source has one site to preview it')
+          await within(
+            vscode.commands.executeCommand('tola.openPage', dependency.uri),
+            'Package-source page',
+          )
+          assert.equal(opened.length, 3)
+          const siteKey = vscode.workspace.getWorkspaceFolder(site.source)!.uri.toString()
+          await vscode.commands.executeCommand('tola.openPreview', dependency.uri, '/preview/', siteKey)
+          assert.equal(opened.length, 4)
+          assert.match(await workbenchText({ status: '/preview/' }), /preview/)
+          const clipboard = await vscode.env.clipboard.readText()
+          try {
+            await vscode.commands.executeCommand('tola.copyRoute')
+            assert.equal(await vscode.env.clipboard.readText(), '/preview/')
+          } finally {
+            await vscode.env.clipboard.writeText(clipboard)
+          }
+        }, {
+          content: '#import "@preview/preview-owned:0.1.0": message\n#message\n',
+          prepare: async (site) => {
+            const packageRoot = path.join(path.dirname(site.root), 'discovered-cache')
+            const library = path.join(packageRoot, 'preview/preview-owned/0.1.0')
+            await fs.mkdir(library, { recursive: true })
+            await fs.writeFile(
+              path.join(library, 'typst.toml'),
+              '[package]\nname = "preview-owned"\nversion = "0.1.0"\nentrypoint = "lib.typ"\n',
+            )
+            packageUri = vscode.Uri.file(path.join(library, 'lib.typ'))
+            await fs.writeFile(packageUri.fsPath, '#let message = [Saved package value.]\n')
+            process.env.TYPST_PACKAGE_CACHE_PATH = packageRoot
+          },
+        })
+      )
+    } finally {
+      if (previous === undefined) delete process.env.TYPST_PACKAGE_CACHE_PATH
+      else process.env.TYPST_PACKAGE_CACHE_PATH = previous
+    }
+  })
+
+  await check('Shared package cache has no preview owner', async () => {
+    const previous = process.env.TYPST_PACKAGE_CACHE_PATH
+    try {
+      await withSites(2, async (sites) => {
+        for (const site of sites) {
+          await vscode.window.showTextDocument(site.source)
+          await workbenchText({ status: '(?<!not )checked' })
+        }
+        const source = vscode.Uri.file(
+          path.join(process.env.TYPST_PACKAGE_CACHE_PATH!, 'preview/shared/0.1.0/lib.typ'),
+        )
+        await vscode.window.showTextDocument(source)
+        await vscode.commands.executeCommand('tola.openPreview', source)
+        assert.match(await workbenchText({ error: true, dismiss: true }), /no site answers/)
+      }, {
+        prepare: async (site) => {
+          const cache = path.join(path.dirname(site.root), 'shared-cache')
+          const library = path.join(cache, 'preview/shared/0.1.0')
+          await fs.mkdir(library, { recursive: true })
+          await fs.writeFile(path.join(library, 'lib.typ'), '#let value = 1\n')
+          process.env.TYPST_PACKAGE_CACHE_PATH = cache
+        },
+      })
+    } finally {
+      if (previous === undefined) delete process.env.TYPST_PACKAGE_CACHE_PATH
+      else process.env.TYPST_PACKAGE_CACHE_PATH = previous
+    }
+  })
+
+  await check('Preview includes a site-local package source', () =>
+    withPreview((opened) => {
+      let packageUri: vscode.Uri
+      return withSite(async (site) => {
+        const source = await vscode.workspace.openTextDocument(site.source)
+        const target = await vscode.commands.executeCommand<vscode.Location[]>(
+          'vscode.executeDefinitionProvider',
+          site.source,
+          source.positionAt(source.getText().lastIndexOf('message')),
+        )
+        assert.equal(target[0]?.uri.toString(), packageUri.toString(), 'the site reads its local package')
+        await vscode.window.showTextDocument(packageUri)
+        await vscode.commands.executeCommand('tola.openPreview', packageUri)
+        assert.equal(opened.length, 1)
+        assert.equal(opened[0]!.url.pathname, '/preview/')
+        const address = new URL('/_tola/preview', opened[0]!.url)
+        const routesFor = async (source: vscode.Uri) => {
+          address.searchParams.set('source', source.toString())
+          const reply = await fetch(address, { headers: { 'X-Tola-Preview': '1' } })
+          return { status: reply.status, routes: (await reply.json() as { routes: unknown[] }).routes }
+        }
+        const unused = vscode.Uri.file(path.join(site.root, 'unused.typ'))
+        await fs.writeFile(unused.fsPath, 'Unused.\n')
+        assert.deepEqual(await routesFor(unused), { status: 200, routes: [] })
+        assert.equal(
+          (await routesFor(vscode.Uri.file(path.join(path.dirname(site.root), 'foreign.typ')))).status,
+          400,
+        )
+      }, {
+        content: '#import "@local/local-preview:0.1.0": message\n#message\n',
+        prepare: async (site) => {
+          const packages = path.join(site.root, 'packages')
+          const library = path.join(packages, 'local/local-preview/0.1.0')
+          await fs.mkdir(library, { recursive: true })
+          await fs.writeFile(
+            path.join(library, 'typst.toml'),
+            '[package]\nname = "local-preview"\nversion = "0.1.0"\nentrypoint = "lib.typ"\n',
+          )
+          packageUri = vscode.Uri.file(path.join(library, 'lib.typ'))
+          await fs.writeFile(packageUri.fsPath, '#let message = [Local package content.]\n')
+          const settings = path.join(site.root, '.vscode/settings.json')
+          const configured = JSON.parse(await fs.readFile(settings, 'utf8'))
+          configured['tola.packagePath'] = packages
+          await fs.writeFile(settings, JSON.stringify(configured))
+        },
+      })
+    }))
 
   await check('Saved preview waits for publication', async () => {
     let holding = false
@@ -390,29 +636,35 @@ export async function runPreviewChecks(): Promise<void> {
       ),
   )
 
-  await check('Copied routes ignore unsaved edits', () =>
-    withPreview((opened) =>
-      withSite(async (site) => {
-        await openPublishedPage('tola.openPreview', site.source, opened)
-        const program = await vscode.workspace.openTextDocument(site.program)
-        const saved = program.getText()
-        await replace(
-          program,
-          '#document("unsaved/index.html", format: "html")[#include "content/page.typ"]\n',
+  await check(
+    'Copied routes ignore unsaved edits',
+    () =>
+      withNotices((notices) =>
+        withPreview((opened) =>
+          withSite(async (site) => {
+            await openPublishedPage('tola.openPreview', site.source, opened)
+            const program = await vscode.workspace.openTextDocument(site.program)
+            const saved = program.getText()
+            await replace(
+              program,
+              '#document("unsaved/index.html", format: "html")[#include "content/page.typ"]\n',
+            )
+            await vscode.window.showTextDocument(site.source)
+            const clipboard = await vscode.env.clipboard.readText()
+            try {
+              await vscode.commands.executeCommand('tola.copyRoute')
+              assert.equal(await vscode.env.clipboard.readText(), '/preview/')
+              assert.equal(program.isDirty, true)
+              assert.equal(await fs.readFile(site.program.fsPath, 'utf8'), saved)
+              assert.equal(opened.length, 1)
+              assert.deepEqual(notices, [])
+            } finally {
+              await vscode.env.clipboard.writeText(clipboard)
+            }
+          })
         )
-        await vscode.window.showTextDocument(site.source)
-        const clipboard = await vscode.env.clipboard.readText()
-        try {
-          await vscode.commands.executeCommand('tola.copyRoute')
-          assert.equal(await vscode.env.clipboard.readText(), '/preview/')
-          assert.equal(program.isDirty, true)
-          assert.equal(await fs.readFile(site.program.fsPath, 'utf8'), saved)
-          assert.equal(opened.length, 1)
-        } finally {
-          await vscode.env.clipboard.writeText(clipboard)
-        }
-      })
-    ))
+      ),
+  )
 
   await check('Config switches replace the preview', () =>
     withPreview((opened) =>

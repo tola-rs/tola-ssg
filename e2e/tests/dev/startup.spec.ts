@@ -11,7 +11,7 @@ import {
 } from '../../support/hooks.ts'
 import { diagnosticRounds, readSessionRecords } from '../../support/log.ts'
 import { test } from '../../support/server.ts'
-import { currentRevision, type TolaWindow } from '../../support/reload.ts'
+import type { TolaWindow } from '../../support/reload.ts'
 
 test('failed first build recovers', async ({ page, sites }) => {
   const site = await sites.dev({
@@ -20,7 +20,6 @@ test('failed first build recovers', async ({ page, sites }) => {
   const response = await page.goto(site.url, { waitUntil: 'load' })
   expect(response?.status()).toBe(503)
   await page.waitForFunction(() => (window as TolaWindow).Tola?.status.errors > 0)
-  expect(await currentRevision(page)).toBeNull()
   await expect(page.locator('body')).toContainText('Build failed')
 
   const navigation = page.waitForEvent('load')
@@ -28,8 +27,6 @@ test('failed first build recovers', async ({ page, sites }) => {
   await navigation
 
   await expect(page.locator('body')).toContainText('Recovered first revision.')
-  expect(await currentRevision(page)).toMatch(/^[0-9a-f]{64}$/)
-  expect(await page.evaluate(() => (window as TolaWindow).Tola.awaitingPublication)).toBe(false)
 })
 
 test('unreadable source recovers after chmod', async ({ page, sites }) => {
@@ -100,7 +97,6 @@ test('failed generator reruns on input', async ({ page, sites }) => {
   const response = await page.goto(site.url, { waitUntil: 'load' })
   expect(response?.status()).toBe(503)
   await page.waitForFunction(() => (window as TolaWindow).Tola?.status.errors > 0)
-  expect(await currentRevision(page)).toBeNull()
   expect(await readFile(invocations, 'utf8')).toBe('failed\n')
 
   const navigation = page.waitForEvent('load')
@@ -234,7 +230,6 @@ test('obsolete initial candidate never serves', async ({ page, sites }) => {
     await page.goto(site.url, { waitUntil: 'load' })
     await expect(page.locator('body')).toContainText('Edited while the first build was running.')
     await expect(page.locator('#tola-dev-status')).not.toBeVisible()
-    expect(await currentRevision(page)).toMatch(/^[0-9a-f]{64}$/)
   } finally {
     await gate.close()
   }

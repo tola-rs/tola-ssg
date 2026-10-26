@@ -18,8 +18,6 @@ export class SiteCli {
       dispose: () => {
         for (const child of this.children) {
           child.kill('SIGINT')
-          const timer = setTimeout(() => child.kill('SIGKILL'), 5_000)
-          timer.unref()
         }
       },
     }
@@ -36,7 +34,7 @@ export class SiteCli {
     const started = Date.now()
     const child = this.start(selection.command, args, selection.folder.uri.fsPath)
     this.building.set(key, child)
-    await new Promise<void>((resolve) => {
+    const completed = new Promise<void>((resolve) => {
       let failedToStart = false
       const finish = () => {
         this.building.delete(key)
@@ -54,7 +52,6 @@ export class SiteCli {
         const seconds = ((Date.now() - started) / 1000).toFixed(1)
         if (code === 0) {
           this.output.appendLine(`Tola built ${selection.folder.name} in ${seconds}s.`)
-          void vscode.window.showInformationMessage(`Tola built ${selection.folder.name}.`)
         } else {
           this.report(
             new Error(
@@ -67,6 +64,10 @@ export class SiteCli {
         finish()
       })
     })
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: `Tola: Building ${selection.folder.name}` },
+      () => completed,
+    )
   }
 
   async revealOutput(selection: Selection): Promise<void> {
@@ -82,13 +83,11 @@ export class SiteCli {
   }
 
   private async outputDirectory(selection: Selection): Promise<string> {
-    const args = ['config', ...selection.args.slice(1)]
-    const child = this.start(selection.command, args, selection.folder.uri.fsPath)
+    const args = ['inspect', 'config', ...selection.args.slice(1)]
     let printed = ''
-    child.stdout?.on('data', (chunk: Buffer) => {
+    const child = this.start(selection.command, args, selection.folder.uri.fsPath, (chunk) => {
       printed += chunk.toString()
     })
-    child.stderr?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
     const code = await new Promise<number | null>((resolve, reject) => {
       child.once('error', () => {
         reject(new Error(`Tola could not read the configuration of ${selection.folder.name}.`))
@@ -106,6 +105,7 @@ export class SiteCli {
     try {
       resolved = JSON.parse(printed)
     } catch {
+      this.output.append(printed)
       throw new Error("Tola's configuration did not print JSON; the Tola output channel holds its output")
     }
     const directory = (resolved as { output?: unknown }).output
@@ -141,7 +141,7 @@ export class SiteCli {
         'Set Up Integration',
       )
     ) return
-    const args = [...siteArguments(selection, 'editor'), 'setup', 'vscode']
+    const args = ['editor', ...siteArguments(selection, 'setup'), 'vscode']
     await this.run(selection.command, args, selection.folder.uri.fsPath, 'Set Up Editor Integration')
   }
 
@@ -171,15 +171,17 @@ export class SiteCli {
   private async run(command: string, args: string[], cwd: string, label: string): Promise<void> {
     this.output.appendLine(`Tola runs ${label} in ${cwd}`)
     const child = this.start(command, args, cwd)
-    const outcome = await new Promise<{ code: number | null; error?: Error }>((resolve) => {
+    const completed = new Promise<{ code: number | null; error?: Error }>((resolve) => {
       child.once('error', (error: Error) => resolve({ code: null, error }))
       child.once('close', (code: number | null) => resolve({ code }))
     })
+    const outcome = await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title: `Tola: ${label}` },
+      () => completed,
+    )
     if (outcome.error) {
       this.report(new Error(`Tola could not start ${label}. Open Tola output for details.`))
-    } else if (outcome.code === 0) {
-      void vscode.window.showInformationMessage(`Tola ran ${label} in ${cwd}.`)
-    } else {
+    } else if (outcome.code !== 0) {
       this.report(
         new Error(
           `Tola could not run ${label} in ${cwd} (exit ${
@@ -190,7 +192,12 @@ export class SiteCli {
     }
   }
 
-  private start(command: string, args: string[], cwd: string): ChildProcess {
+  private start(
+    command: string,
+    args: string[],
+    cwd: string,
+    stdout: (chunk: Buffer) => void = (chunk) => this.output.append(chunk.toString()),
+  ): ChildProcess {
     const child = spawn(command, args, {
       cwd,
       shell: false,
@@ -198,7 +205,7 @@ export class SiteCli {
     })
     this.children.add(child)
     child.once('error', (error: Error) => this.output.appendLine(error.message))
-    child.stdout?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
+    child.stdout?.on('data', stdout)
     child.stderr?.on('data', (chunk: Buffer) => this.output.append(chunk.toString()))
     child.once('close', () => this.children.delete(child))
     return child

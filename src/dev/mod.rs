@@ -1,5 +1,6 @@
 //! Development server, current revisions, and live reload.
 
+pub(crate) mod events;
 mod hooks;
 mod http;
 mod rebuild;

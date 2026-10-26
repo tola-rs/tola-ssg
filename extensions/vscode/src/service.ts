@@ -10,7 +10,6 @@ export class LanguageService {
   private input: Writable | undefined
   private phase: 'starting' | 'running' | 'stopping' = 'starting'
   private startup: vscode.Disposable | undefined
-  private killTimer: NodeJS.Timeout | undefined
   private exited: Promise<void> = Promise.resolve()
 
   constructor(
@@ -42,7 +41,6 @@ export class LanguageService {
     this.exited = new Promise<void>((resolve) => {
       child.once('close', (code, signal) => {
         this.startup?.dispose()
-        clearTimeout(this.killTimer)
         this.output.appendLine(
           `Language service for ${this.selected.folder.name} exited (${
             signal ?? `exit ${code ?? 'unknown'}`
@@ -76,14 +74,15 @@ export class LanguageService {
 
   stop(): void {
     if (this.stopRequested) return
+    const starting = this.phase === 'starting'
     this.phase = 'stopping'
     this.detachStartup()
     const child = this.child
     if (!child || child.exitCode !== null || child.signalCode !== null) return
     child.stdin?.destroy()
-    child.kill('SIGINT')
-    this.killTimer = setTimeout(() => child.kill('SIGKILL'), 5_000)
-    this.killTimer.unref()
+    // A command still awaiting initialization may be a wrapper that ignores SIGINT; it must not
+    // hold every later site transition. An initialized Tola service keeps its normal SIGINT exit.
+    child.kill(starting ? 'SIGTERM' : 'SIGINT')
   }
 
   async close(): Promise<void> {

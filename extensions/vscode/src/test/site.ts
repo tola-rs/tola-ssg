@@ -40,17 +40,21 @@ export function recordOutputChannels(): void {
 }
 
 /** Wait for the extension's next output line holding `text`, armed when the call is made. */
-export async function waitForOutput(text: string): Promise<void> {
+export async function waitForOutput(text: string | ((line: string) => boolean)): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const arrival = channelLines.event((line) => {
-      if (!line.includes(text)) return
+      if (!(typeof text === 'string' ? line.includes(text) : text(line))) return
       clearTimeout(deadline)
       arrival.dispose()
       resolve()
     })
     const deadline = setTimeout(() => {
       arrival.dispose()
-      reject(new Error(`The output channel never held ${text}`))
+      reject(
+        new Error(
+          `The output channel never held ${typeof text === 'string' ? text : 'the expected notification'}`,
+        ),
+      )
     }, 15_000)
   })
 }
@@ -443,7 +447,7 @@ export async function holdServerStart(site: EditorSite): Promise<HeldStart> {
 }
 
 /** A path as one shell word, so a generated script reads it literally. */
-function quoted(value: string): string {
+export function quoted(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`
 }
 
@@ -512,7 +516,6 @@ export type HeldRequest = {
 export async function blockRequest(
   site: EditorSite,
   method: string,
-  checkMode?: 'onSave',
 ): Promise<HeldRequest> {
   let response: ServerResponse | undefined
   let observe!: () => void
@@ -534,17 +537,6 @@ const service = spawn(${
     }, process.argv.slice(2), { stdio: ['pipe', 'inherit', 'inherit'] });
 let pending = Buffer.alloc(0);
 let held = false;
-const settings = ${
-      JSON.stringify(
-        checkMode
-          ? {
-            jsonrpc: '2.0',
-            method: 'workspace/didChangeConfiguration',
-            params: { settings: { checkMode } },
-          }
-          : null,
-      )
-    };
 process.stdin.on('data', chunk => {
   pending = Buffer.concat([pending, chunk]);
   while (true) {
@@ -561,10 +553,6 @@ process.stdin.on('data', chunk => {
       fetch(${JSON.stringify(gate.url)}, { method: 'POST' })
         .then(response => response.text()).then(() => service.stdin.write(frame));
     } else service.stdin.write(frame);
-    if (settings && message.method === 'initialized') {
-      const body = Buffer.from(JSON.stringify(settings));
-      service.stdin.write(Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]));
-    }
   }
 });
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => service.kill(signal));
@@ -664,6 +652,7 @@ export async function workbenchText(
     pages?: string
     page?: string
     pagesMessage?: string
+    completion?: string
     capture?: boolean
   },
 ): Promise<string> {

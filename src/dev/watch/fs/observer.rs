@@ -44,13 +44,15 @@ impl DirectoryObserver {
         let observer = Self { changes, worker };
         match startup.await {
             Ok(Ok(())) => Ok(observer),
-            startup => {
+            Ok(Err(error)) => {
                 observer.shutdown().await?;
-                Err(match startup {
-                    Ok(Err(error)) => error,
-                    Err(_) => notify::Error::generic("filesystem observation ended during startup"),
-                    Ok(Ok(())) => unreachable!(),
-                })
+                Err(error)
+            }
+            Err(_) => {
+                observer.shutdown().await?;
+                Err(notify::Error::generic(
+                    "filesystem observation ended during startup",
+                ))
             }
         }
     }

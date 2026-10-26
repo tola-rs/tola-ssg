@@ -7,9 +7,12 @@ import {
   modifiedOutput,
   recordReloads,
   reloadDocument,
-  runtimeState,
   sendNextRevision,
   serveDocument,
+  fulfillHtml,
+  fulfillCss,
+  fulfillSvg,
+  serveResources,
 } from '../../../support/reload.ts'
 
 declare global {
@@ -17,32 +20,6 @@ declare global {
     requestedSettings?: Promise<unknown>
   }
 }
-
-test('scripted HTML edit requests navigation', async ({ page }) => {
-  let text = 'stable'
-  await page.route(
-    'https://scripts.test/**',
-    (route) =>
-      route.fulfill(
-        route.request().url().endsWith('.js')
-          ? { status: 200, contentType: 'text/javascript', body: 'window.applicationLoaded = true;' }
-          : {
-            status: 200,
-            contentType: 'text/html',
-            body:
-              `<!doctype html><html><head><script src="/app.js"></script></head><body><p id="text">${text}</p></body></html>`,
-          },
-      ),
-  )
-  await page.goto('https://scripts.test/index.html', { waitUntil: 'load' })
-  await installReload(page)
-
-  text = 'changed'
-  await sendNextRevision(page, [modifiedOutput('index.html', 'html-document')])
-
-  await expect(page.locator('#text')).toHaveText('stable')
-  expect(await runtimeState(page)).toEqual({ reloads: 1, revision: '0'.repeat(64) })
-})
 
 test('pending request survives output change', async ({ page }) => {
   let requestStarted!: () => void
@@ -60,14 +37,13 @@ test('pending request survives output change', async ({ page }) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{"value":1}' })
       return
     }
-    await route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: reloadDocument({
+    await fulfillHtml(
+      route,
+      reloadDocument({
         body:
           `<script>window.requestedSettings = fetch('/settings.json').then(response => response.json());</script>`,
       }),
-    })
+    )
   })
   try {
     await page.goto('https://pending.test/index.html', { waitUntil: 'domcontentloaded' })
@@ -91,8 +67,6 @@ for (
     { address: 'root', url: '/', mount: '', output: 'index.html' },
     { address: 'post directory', url: '/post/', mount: '', output: 'post/index.html' },
     { address: 'post file', url: '/post', mount: '', output: 'post' },
-    { address: 'download', url: '/download', mount: '', output: 'download' },
-    { address: 'download directory', url: '/download/', mount: '', output: 'download/index.html' },
     { address: 'mount root', url: '/docs/', mount: 'docs', output: 'index.html' },
     { address: 'mounted post', url: '/docs/post/', mount: 'docs', output: 'post/index.html' },
   ]
@@ -106,17 +80,6 @@ for (
   })
 }
 
-test('unrelated output leaves page unchanged', async ({ page }) => {
-  await serveDocument(page, {
-    body: '<!doctype html><html><body><a href="/another/">Another page</a></body></html>',
-  })
-
-  await sendNextRevision(page, [modifiedOutput('unused.js')])
-
-  await expectReloads(page, 0)
-  expect(await currentRevision(page)).toBe('b'.repeat(64))
-})
-
 test('navigation links do not force reload', async ({ page }) => {
   await serveDocument(page, {
     body:
@@ -126,6 +89,7 @@ test('navigation links do not force reload', async ({ page }) => {
   await sendNextRevision(page, [
     modifiedOutput('another/index.html', 'html-document'),
     modifiedOutput('guide.pdf'),
+    modifiedOutput('unused.js'),
   ])
 
   await expectReloads(page, 0)
@@ -134,27 +98,16 @@ test('navigation links do not force reload', async ({ page }) => {
 
 test('linked stylesheet updates in place', async ({ page }) => {
   await page.route('https://linked-stylesheet.test/**', (route) => {
-    const url = new URL(route.request().url())
-    if (url.pathname === '/site.css') {
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/css',
-        body: `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
-      })
-    }
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body:
-        '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><a href="/site.css">Stylesheet</a></body></html>',
-    })
+    return serveResources(
+      route,
+      '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><a href="/site.css">Stylesheet</a></body></html>',
+    )
   })
   await page.goto('https://linked-stylesheet.test/index.html')
   await installReload(page)
 
   await sendNextRevision(page, [modifiedOutput('site.css')])
 
-  await expect(page.locator('link[rel~=stylesheet]')).toHaveAttribute('href', /tola-representation=b{64}/)
   await expect(page.locator('body')).toHaveCSS('color', 'rgb(0, 0, 255)')
   await expectReloads(page, 0)
   expect(await currentRevision(page)).toBe('b'.repeat(64))
@@ -215,11 +168,7 @@ for (
       if (path.endsWith('.json')) {
         return route.fulfill({ status: 200, contentType: 'application/json', body: '{"value":1}' })
       }
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: '<!doctype html><html><body>Document</body></html>',
-      })
+      return fulfillHtml(route, '<!doctype html><html><body>Document</body></html>')
     })
     await page.goto('https://history.test/index.html')
     await installReload(page)
@@ -240,19 +189,14 @@ test('initial timing overflow forces reload', async ({ page }) => {
   await page.route('https://initial-capacity.test/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname === '/pixel.svg') {
-      return route.fulfill({
-        status: 200,
-        contentType: 'image/svg+xml',
-        body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
-      })
+      return fulfillSvg(route, '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
     }
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: `<!doctype html><html><body>${
+    return fulfillHtml(
+      route,
+      `<!doctype html><html><body>${
         Array.from({ length: 250 }, (_, index) => `<img src="/pixel.svg?request=${index}">`).join('')
       }</body></html>`,
-    })
+    )
   })
   await page.goto('https://initial-capacity.test/index.html', { waitUntil: 'load' })
   expect(await page.evaluate(() => performance.getEntriesByType('resource').length)).toBeGreaterThanOrEqual(

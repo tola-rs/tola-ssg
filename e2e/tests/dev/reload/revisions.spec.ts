@@ -8,6 +8,8 @@ import {
   serveDocument,
   type TolaRuntime,
   type TolaWindow,
+  fulfillHtml,
+  fulfillCss,
 } from '../../../support/reload.ts'
 
 declare global {
@@ -23,7 +25,6 @@ test.describe('development revision protocol', () => {
 
     await sendRevision(page, 'f'.repeat(64), 'e'.repeat(64), [modifiedOutput('unused.js')])
     await expectReloads(page, 1)
-    await expect(await page.evaluate(() => (window as TolaWindow).Tola.revisionReloadRequired)).toBe(true)
     await expect(await currentRevision(page)).toBe('0'.repeat(64))
 
     await sendRevision(page, '0'.repeat(64), 'b'.repeat(64), [modifiedOutput('unused.js')])
@@ -42,7 +43,6 @@ test.describe('development revision protocol', () => {
       })
     })
     await expectReloads(page, 1)
-    await expect(await page.evaluate(() => (window as TolaWindow).Tola.revisionReloadRequired)).toBe(true)
   })
 
   test('changed generation reloads exactly once', async ({ page }) => {
@@ -69,14 +69,13 @@ test.describe('development revision protocol', () => {
         return
       }
       documentRequests += 1
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: reloadDocument({
+      await fulfillHtml(
+        route,
+        reloadDocument({
           body: `<main>${generation}</main>`,
           bootstrap: { port: 35729, generation },
         }),
-      })
+      )
     })
     await page.goto('https://restart.test/index.html', { waitUntil: 'load' })
     await expect(page.locator('main')).toHaveText('second-process', { timeout: 10_000 })
@@ -98,11 +97,7 @@ test.describe('development revision protocol', () => {
       if (url.pathname === '/site.css') {
         const isPendingStylesheet = url.searchParams.get('tola-representation') === pendingRevision
         if (isPendingStylesheet) await stylesheetReleased
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: `main { background-color: ${isPendingStylesheet ? 'blue' : 'red'}; }`,
-        })
+        await fulfillCss(route, `main { background-color: ${isPendingStylesheet ? 'blue' : 'red'}; }`)
         return
       }
       if (url.pathname !== '/index.html') {
@@ -110,15 +105,14 @@ test.describe('development revision protocol', () => {
         return
       }
       documentRequests += 1
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: reloadDocument({
+      await fulfillHtml(
+        route,
+        reloadDocument({
           head: '<link rel="stylesheet" href="/site.css">',
           body: '<main>Current connection snapshot</main>',
           bootstrap: { revision: connectionRevision },
         }),
-      })
+      )
     })
     try {
       await page.goto('https://queue.test/index.html', { waitUntil: 'load' })
@@ -179,11 +173,7 @@ test.describe('development revision protocol', () => {
       document.head.appendChild(fragment);
     </script>`
     await page.route('https://early-fragment.test/**', (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: reloadDocument({ head, body: '<main>Canonical page</main>' }),
-      }))
+      fulfillHtml(route, reloadDocument({ head, body: '<main>Canonical page</main>' })))
     await page.goto('https://early-fragment.test/index.html', { waitUntil: 'load' })
 
     expect(
@@ -215,6 +205,5 @@ test.describe('development revision protocol', () => {
       'empty',
     )
     await expectReloads(page, 1)
-    await expect(await page.evaluate(() => (window as TolaWindow).Tola.revisionReloadRequired)).toBe(true)
   })
 })

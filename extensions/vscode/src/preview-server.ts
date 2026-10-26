@@ -1,24 +1,19 @@
 import { type ChildProcess, spawn } from 'node:child_process'
-import * as fs from 'node:fs/promises'
-import * as path from 'node:path'
+import { createInterface } from 'node:readline'
 import * as vscode from 'vscode'
 
 import type { Selection } from './selection.ts'
 
-/**
- * The address file `tola dev` publishes for a site, and the shape it writes.
- *
- * The server owns both (`tola-build`'s `filesystem::dev_server`); the path is relative to the
- * site's own root, which is the directory holding the configuration.
- */
-const ADDRESS_FILE = '.tola/dev-server.json'
-const ADDRESS_VERSION = 1
+type BuildStatus = 'starting' | 'building' | 'succeeded' | 'failed' | 'cancelled'
 
-/** How often the published address is read while the server starts. */
-const ADDRESS_POLL_MS = 150
-
-/** Silence this long means the server is not coming back, so the wait fails instead of hanging. */
-const STARTUP_DEADLINE_MS = 300_000
+interface DevelopmentEvent {
+  readonly formatVersion: number
+  readonly event: string
+  readonly url?: string
+  readonly revision?: string | null
+  readonly status?: string
+  readonly hook?: string | null
+}
 
 export interface PublishedRoute {
   readonly output: string
@@ -37,13 +32,11 @@ export class PreviewServer {
   private readonly cancellation = new AbortController()
   private readonly lifetime: vscode.Disposable
   private address: URL | undefined
-  private stopped = false
-  private closed = false
   private rejectStartup!: (error: Error) => void
-  private startupTimer: NodeJS.Timeout | undefined
-  private addressTimer: NodeJS.Timeout | undefined
-  private killTimer: NodeJS.Timeout | undefined
   private publishing = 0
+  private build: BuildStatus = 'starting'
+  private revision: string | null = null
+  private failedHook: { hook: string | null; revision: string } | undefined
 
   constructor(
     selection: Selection,
@@ -56,46 +49,34 @@ export class PreviewServer {
       throw new Error(`Tola cannot derive the development command from \`${subcommand}\``)
     }
     if (lifetime.isCancellationRequested) throw new vscode.CancellationError()
-    this.child = spawn(selection.command, ['dev', ...args, '--watch=true', '--interface=127.0.0.1'], {
-      cwd: selection.folder.uri.fsPath,
-      shell: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    this.child = spawn(
+      selection.command,
+      ['dev', ...args, '--watch=true', '--interface=127.0.0.1', '--json'],
+      {
+        cwd: selection.folder.uri.fsPath,
+        shell: false,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    )
     output.appendLine(`Tola starts the development server for ${selection.configurationFile}`)
-    const report = (chunk: Buffer) => {
-      output.append(chunk.toString())
-      changed()
-    }
-    this.child.stdout?.on('data', report)
-    this.child.stderr?.on('data', report)
-    const published = path.join(path.dirname(selection.config.fsPath), ADDRESS_FILE)
-    const startedAt = Date.now()
+    this.child.stderr?.on('data', (chunk: Buffer) => output.append(chunk.toString()))
+    const events = createInterface({ input: this.child.stdout!, crlfDelay: Infinity })
     this.ready = new Promise<URL>((resolve, reject) => {
       this.rejectStartup = reject
-      // A server that never publishes leaves nothing to open, so the author is told and the child
-      // is ended here: the next Start Preview then starts a server rather than reusing this one.
-      this.startupTimer = setTimeout(() => {
-        reject(
-          new Error(
-            'Tola did not hear the development server publish its address; open Tola output, close any other `tola dev` for this site, and run Start Preview again',
-          ),
-        )
-        this.stop()
-      }, STARTUP_DEADLINE_MS)
-      this.startupTimer.unref()
-      const poll = async () => {
-        if (this.stopped || this.address) return
-        const address = await this.publishedAddress(published, startedAt)
-        if (address) {
-          clearTimeout(this.startupTimer)
-          this.address = address
-          resolve(address)
-          return
+      events.on('line', (line) => {
+        if (this.cancellation.signal.aborted) return
+        try {
+          this.receive(JSON.parse(line) as DevelopmentEvent)
+          if (this.address) resolve(this.address)
+          changed()
+        } catch (error) {
+          output.appendLine(`Development event could not be read: ${String(error)}`)
+          reject(
+            new Error('Tola could not read its development events. Update Tola and restart the preview'),
+          )
+          this.stop()
         }
-        this.addressTimer = setTimeout(() => void poll(), ADDRESS_POLL_MS)
-        this.addressTimer.unref()
-      }
-      void poll()
+      })
       this.child.once(
         'error',
         (error) => {
@@ -111,11 +92,9 @@ export class PreviewServer {
     this.exited = new Promise<void>((resolve) => {
       this.child.once('close', (code, signal) => {
         output.appendLine(`Development server exited (${signal ?? `exit ${code ?? 'unknown'}`})`)
-        this.closed = true
-        this.stopped = true
         this.cancellation.abort()
         this.lifetime.dispose()
-        clearTimeout(this.startupTimer)
+        events.close()
         this.rejectStartup(
           new Error(
             'Tola development server stopped before serving. Open Tola output for details and run Start Preview again',
@@ -126,44 +105,104 @@ export class PreviewServer {
       })
     })
     this.lifetime = lifetime.onCancellationRequested(() => this.stop())
+    if (lifetime.isCancellationRequested) this.stop()
   }
 
   get active(): boolean {
-    return !this.stopped
+    return !this.cancellation.signal.aborted
   }
 
   get running(): boolean {
-    return !this.stopped && this.address !== undefined
+    return !this.cancellation.signal.aborted && this.address !== undefined
   }
 
-  /**
-   * The address this child published, while it is the one that wrote the file.
-   *
-   * A file that is absent, written before this server started, unreadable, or of another shape
-   * names no address: the next poll reads it again rather than failing the start.
-   */
-  private async publishedAddress(published: string, startedAt: number): Promise<URL | undefined> {
-    try {
-      const written = await fs.stat(published)
-      if (written.mtimeMs < startedAt - 1000) return undefined
-      const state: unknown = JSON.parse(await fs.readFile(published, 'utf8'))
-      if (typeof state !== 'object' || state === null || !('version' in state) || !('origin' in state)) {
-        return undefined
-      }
-      const { version, origin } = state
-      if (version !== ADDRESS_VERSION || typeof origin !== 'string') return undefined
-      return new URL(origin)
-    } catch {
-      return undefined
+  private receive(event: DevelopmentEvent): void {
+    if (event?.formatVersion !== 1 || typeof event.event !== 'string') {
+      throw new Error('Unsupported development event format')
+    }
+    switch (event.event) {
+      case 'server-ready':
+        if (typeof event.url !== 'string') throw new Error('The server reported no preview URL')
+        this.address = new URL(event.url)
+        this.setRevision(event.revision)
+        break
+      case 'build-started':
+        this.build = 'building'
+        break
+      case 'build-finished':
+        if (!['succeeded', 'failed', 'cancelled'].includes(event.status ?? '')) {
+          throw new Error('The server reported an unknown build outcome')
+        }
+        this.build = event.status as BuildStatus
+        this.setRevision(event.revision)
+        break
+      case 'hook-finished':
+        if ((event.hook !== null && typeof event.hook !== 'string') || typeof event.revision !== 'string') {
+          throw new Error('The server did not identify the completed publication hook')
+        }
+        if (event.status === 'failed') {
+          if (event.revision === this.revision) {
+            this.failedHook = { hook: event.hook, revision: event.revision }
+          }
+          const action = event.hook === null ? 'After-publish preparation' : `Publication hook ${event.hook}`
+          this.output.appendLine(`${action} failed for ${event.revision}`)
+        } else if (
+          event.status === 'succeeded' && this.failedHook?.hook === event.hook &&
+          this.failedHook.revision === event.revision
+        ) {
+          this.failedHook = undefined
+        }
+        break
+      case 'stopped':
+        this.cancellation.abort()
+        this.rejectStartup(new Error('Tola stopped before its preview became available. Open Tola output for details'))
+        this.lifetime.dispose()
+        break
     }
   }
 
-  readPublication(source?: vscode.Uri, revision?: string): Promise<Publication> {
-    return this.request('GET', source, revision)
+  private setRevision(revision: string | null | undefined): void {
+    if (revision !== null && typeof revision !== 'string') {
+      throw new Error('The server reported an invalid publication revision')
+    }
+    if (revision !== this.revision) this.failedHook = undefined
+    this.revision = revision
+  }
+
+  get buildStatus(): BuildStatus {
+    return this.build
+  }
+
+  get buildDescription(): string {
+    switch (this.build) {
+      case 'failed':
+        return this.revision
+          ? 'Build failed; preview still shows the previous publication.'
+          : 'Build failed; no preview has been published.'
+      case 'cancelled':
+        return 'The latest build was cancelled.'
+      case 'building':
+        return 'Building saved inputs.'
+      case 'succeeded':
+        return 'Saved inputs built successfully.'
+      case 'starting':
+        return 'Waiting for the first build.'
+    }
+  }
+
+  get hookFailure(): string | undefined {
+    const failure = this.failedHook
+    return failure && failure.revision === this.revision
+      ? `${failure.hook === null ? 'After-publish preparation' : `Publication hook ${failure.hook}`} failed; the page remains published.`
+      : undefined
+  }
+
+  readPublication(source?: vscode.Uri, revision?: string, fragment?: string): Promise<Publication> {
+    return this.request('GET', source, revision, fragment)
   }
 
   get isPublishing(): boolean {
-    return this.publishing > 0
+    return this.publishing > 0 || this.build === 'building'
   }
 
   async publish(source?: vscode.Uri): Promise<Publication> {
@@ -181,12 +220,14 @@ export class PreviewServer {
     method: 'GET' | 'POST',
     source?: vscode.Uri,
     revision?: string,
+    fragment?: string,
   ): Promise<Publication> {
     const address = await this.ready
     this.ensureActive()
     const url = new URL('/_tola/preview', address)
     if (source) url.searchParams.set('source', source.toString())
     if (revision) url.searchParams.set('revision', revision)
+    if (fragment !== undefined) url.searchParams.set('fragment', fragment)
     let response: Response
     let publication: Publication & { error?: string }
     try {
@@ -211,23 +252,16 @@ export class PreviewServer {
   }
 
   ensureActive(): void {
-    if (this.stopped) throw new vscode.CancellationError()
+    if (this.cancellation.signal.aborted) throw new vscode.CancellationError()
   }
 
   stop(): void {
-    if (this.stopped) return
-    this.stopped = true
+    if (this.cancellation.signal.aborted) return
     this.cancellation.abort()
-    clearTimeout(this.addressTimer)
-    clearTimeout(this.startupTimer)
     this.rejectStartup(new vscode.CancellationError())
     this.lifetime.dispose()
-    if (this.closed) return
+    this.changed()
     // SIGINT lets Tola cancel its build and stop the generators it owns before exiting.
     this.child.kill('SIGINT')
-    this.killTimer = setTimeout(() => {
-      if (!this.closed) this.child.kill('SIGKILL')
-    }, 5000)
-    this.killTimer.unref()
   }
 }

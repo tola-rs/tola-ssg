@@ -117,7 +117,7 @@ async function stopServer(command: RunningProcess): Promise<void> {
   }
 }
 
-type Sites = {
+export type Sites = {
   dev: (options?: SiteOptions) => Promise<RunningSite>
   preview: (options?: SiteOptions) => Promise<RunningSite>
 }

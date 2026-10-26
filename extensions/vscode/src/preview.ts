@@ -10,6 +10,8 @@ import type { SourceCheckStatus } from './sites.ts'
 export interface PreviewSite {
   readonly selection: Selection
   readonly lifetime: vscode.CancellationToken
+  /** Effective source and package roots, including those the language service discovered. */
+  readonly inputRoots: () => readonly string[]
   /** The state of the language client that answers this site's own checks. */
   readonly state: () => 'starting' | 'ready' | 'stopped'
   readonly check: () => SourceCheckStatus['state']
@@ -57,6 +59,10 @@ export class Preview {
       vscode.commands.registerCommand(
         'tola.openPage',
         (uri?: vscode.Uri | string) => this.handle(() => this.openPage(uri)),
+      ),
+      vscode.commands.registerCommand(
+        'tola.openPreviewFragment',
+        (uri?: vscode.Uri | string) => this.handle(() => this.openFragment(uri)),
       ),
       vscode.window.onDidChangeActiveTextEditor(() => this.refreshStatus()),
       vscode.workspace.onDidSaveTextDocument(() => this.refreshStatus()),
@@ -110,8 +116,12 @@ export class Preview {
         ? `$(globe) ${first.route} · ${this.checkState(site)}`
         : `$(globe) ${this.checkState(site)} · No published page`
       if (server.isPublishing) this.status.text += ' · publishing'
+      else if (server.buildStatus === 'failed') this.status.text += ' · build failed'
+      else if (server.hookFailure) this.status.text += ' · hook failed'
       this.status.tooltip = [
         `Source check: ${this.checkState(site)}`,
+        server.buildDescription,
+        ...(server.hookFailure ? [server.hookFailure] : []),
         ...(server.isPublishing ? ['Preview: publishing saved inputs'] : []),
         first
           ? `Preview: last published ${publication.revision} at ${first.route}`
@@ -128,9 +138,14 @@ export class Preview {
           this.showStartAction(document.uri, site)
           return
         }
-        this.status.text = `$(globe) ${this.checkState(site)} · Preview unavailable`
-        this.status.tooltip =
-          `Tola could not read this site's publication. Run Open Preview or Show Output.\nSite: ${site.selection.folder.name}`
+        this.status.text = server.buildStatus === 'failed'
+          ? `$(warning) Tola · build failed · No published page`
+          : `$(globe) ${this.checkState(site)} · Preview unavailable`
+        this.status.tooltip = [
+          server.buildDescription,
+          'Run Open Preview or Show Output.',
+          `Site: ${site.selection.folder.name}`,
+        ].join('\n')
         this.status.command = { title: 'Tola: Show Output', command: 'tola.showLog' }
         this.status.show()
       }
@@ -171,11 +186,7 @@ export class Preview {
     await server.publish()
     this.ensureSaved(site)
     server.ensureActive()
-    const address = await server.ready
     this.refreshStatus()
-    void vscode.window.showInformationMessage(
-      `Tola published ${site.selection.folder.name} at ${address.href}`,
-    )
   }
 
   async open(
@@ -199,15 +210,16 @@ export class Preview {
     }
     const site = this.requireSite(source, siteKey)
     if (!await this.save(site)) return
+    const versions = this.documentVersions(site)
     const server = this.ensure(site)
     const publication = await server.publish(source)
-    this.ensureSaved(site)
+    this.ensureUnchanged(site, versions)
     // A component or a template publishes no page of its own, so there is nothing to open: the
     // author is told which file published nothing rather than shown the wrong page.
     if (publication.routes.length === 0 && preferred === undefined) {
       const label = source ? vscode.workspace.asRelativePath(source) : 'this file'
       void vscode.window.showInformationMessage(
-        `${label} publishes no page; open a page under \`content/\` to preview it`,
+        `${label} publishes no page; open a source that produces an HTML page in this site to preview it`,
       )
       return
     }
@@ -220,9 +232,9 @@ export class Preview {
         'Tola no longer publishes the selected route; run Preview again. No new preview was opened',
       )
     }
-    this.ensureSaved(site)
-    server.ensureActive()
     const address = await server.ready
+    this.ensureUnchanged(site, versions)
+    server.ensureActive()
     await this.openUrl(new URL(chosen, address), target)
     this.refreshStatus()
   }
@@ -238,9 +250,10 @@ export class Preview {
     const chosen = await this.chooseRoute(source, routes, undefined, 'checked')
     if (!chosen) return
     if (!await this.save(site)) return
+    const versions = this.documentVersions(site)
     const server = this.ensure(site)
     const publication = await server.publish(source)
-    this.ensureSaved(site)
+    this.ensureUnchanged(site, versions)
     // A checked route names the page; only the publication this call made may open it.
     if (!publication.routes.some((route) => route.route === chosen)) {
       throw new Error(
@@ -253,10 +266,51 @@ export class Preview {
         'Tola no longer publishes the selected route; run Open Page again. No new preview was opened',
       )
     }
-    this.ensureSaved(site)
-    server.ensureActive()
     const address = await server.ready
+    this.ensureUnchanged(site, versions)
+    server.ensureActive()
     await this.openUrl(new URL(chosen, address), 'simpleBrowser')
+    this.refreshStatus()
+  }
+
+  /** Open an explicitly named HTML fragment, only where this source occurs in the published site. */
+  async openFragment(uri?: vscode.Uri | string): Promise<void> {
+    const source = typeof uri === 'string'
+      ? vscode.Uri.parse(uri)
+      : uri ?? vscode.window.activeTextEditor?.document.uri
+    if (!source) throw new Error('Tola cannot tell which file to preview because no editor is active')
+    const site = this.requireSite(source)
+    const fragment = await vscode.window.showInputBox({
+      title: 'Tola: Open Published Fragment',
+      prompt:
+        'Enter an HTML ID without #; matching pages include this file, but the ID is not mapped to your cursor',
+      validateInput: (value) => value.length ? undefined : 'Enter a fragment ID',
+    })
+    if (fragment === undefined || fragment.length === 0) return
+    if (!await this.save(site)) return
+    const versions = this.documentVersions(site)
+    const server = this.ensure(site)
+    const publication = await server.publish(source)
+    this.ensureUnchanged(site, versions)
+    const matches = await server.readPublication(source, publication.revision, fragment)
+    if (!matches.routes.length) {
+      void vscode.window.showInformationMessage(
+        `No published page for this source contains fragment ${JSON.stringify(fragment)}.`,
+      )
+      return
+    }
+    const chosen = await this.chooseRoute(source, matches.routes)
+    if (!chosen) return
+    const current = await server.readPublication(source, publication.revision, fragment)
+    if (!current.routes.some((route) => route.route === chosen)) {
+      throw new Error('Tola no longer publishes this fragment for the source; run the command again.')
+    }
+    const url = new URL(chosen, await server.ready)
+    // Encode the ID itself, including literal percent signs, before assigning the URL fragment.
+    url.hash = encodeURIComponent(fragment)
+    this.ensureUnchanged(site, versions)
+    server.ensureActive()
+    await this.openUrl(url, 'simpleBrowser')
     this.refreshStatus()
   }
 
@@ -295,9 +349,6 @@ export class Preview {
     }
     server.ensureActive()
     await vscode.env.clipboard.writeText(route)
-    void vscode.window.showInformationMessage(
-      `Tola copied the published route ${route}; unsaved edits are not included`,
-    )
   }
 
   private async handle(action: () => Promise<void>): Promise<void> {
@@ -319,14 +370,37 @@ export class Preview {
     return site
   }
 
-  private dirty(site: PreviewSite): vscode.TextDocument[] {
+  private documents(site: PreviewSite): vscode.TextDocument[] {
     const selected = site.selection
+    const roots = site.inputRoots()
     return vscode.workspace.textDocuments.filter((document) => {
-      if (!document.isDirty || document.uri.scheme !== 'file') return false
+      if (document.uri.scheme !== 'file') return false
       return document.uri.fsPath === selected.config.fsPath ||
         document.uri.fsPath === selected.configurationFile ||
-        selected.inputRoots.some((root) => containsFile(root, document.uri.fsPath))
+        roots.some((root) => containsFile(root, document.uri.fsPath))
     })
+  }
+
+  private dirty(site: PreviewSite): vscode.TextDocument[] {
+    return this.documents(site).filter((document) => document.isDirty)
+  }
+
+  private documentVersions(site: PreviewSite): ReadonlyMap<vscode.TextDocument, number> {
+    return new Map(this.documents(site).map((document) => [document, document.version]))
+  }
+
+  private ensureUnchanged(site: PreviewSite, versions: ReadonlyMap<vscode.TextDocument, number>): void {
+    this.ensureSaved(site)
+    const documents = this.documents(site)
+    // Document identity also fences close/reopen, where the version may restart.
+    if (
+      documents.length !== versions.size ||
+      documents.some((document) => versions.get(document) !== document.version)
+    ) {
+      throw new Error(
+        'Tola source documents changed while preparing the preview; run Open Preview again. No new preview was opened',
+      )
+    }
   }
 
   private sourceName(site: PreviewSite, document: vscode.TextDocument): string {

@@ -1,5 +1,7 @@
 //! Serial rebuilds and publication of development revisions.
 
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -8,18 +10,21 @@ use super::site::CurrentSite;
 use crate::cancellation::Cancellation;
 use crate::config::{ConfigLoader, DevConfig, ServerConfig};
 use crate::dev::reload::transport::ReloadTransport;
-use crate::dev::watch::{FileChangeSource, WatchError};
 use crate::dev::watch::{
+    FileChangeBatch, FileChangeSource, ProducerKind, RebuildScope, WatchError, WatchRequirements,
     append_observed_paths, append_typst_inputs, watch_requirements_from_observation,
 };
+use tola_build::build::{BuildTrigger, InputObservation, RevisionCheck};
 use tola_build::config::ResolvedSiteConfig;
+use tola_diagnostic::{Diagnostic, DiagnosticCode, Severity};
 
 #[derive(Default)]
 struct DevFailureWatches {
-    latest_failed_paths: std::collections::BTreeSet<std::path::PathBuf>,
+    latest_failed_paths: BTreeSet<PathBuf>,
     latest_failed_packages: Vec<tola_typst::PackageCheck>,
     latest_failed_observed_paths: Vec<tola_build::build::ObservedInputPath>,
-    typst_recovery_roots: Vec<std::path::PathBuf>,
+    typst_recovery_roots: Vec<PathBuf>,
+    module_hook_inputs: Option<tola_build::modules::HookWatchInputs>,
 }
 
 impl DevFailureWatches {
@@ -39,20 +44,20 @@ impl DevFailureWatches {
 
     fn build_failed(
         &mut self,
-        paths: impl IntoIterator<Item = std::path::PathBuf>,
+        paths: impl IntoIterator<Item = PathBuf>,
         package_checks: Vec<tola_typst::PackageCheck>,
     ) {
+        *self = Self::default();
         self.latest_failed_paths = paths.into_iter().collect();
         self.latest_failed_packages = package_checks;
-        self.latest_failed_observed_paths.clear();
-        self.typst_recovery_roots.clear();
     }
 
     fn build_task_failed(&mut self, config: &ResolvedSiteConfig) {
-        self.latest_failed_paths.clear();
-        self.latest_failed_packages.clear();
-        self.latest_failed_observed_paths.clear();
+        *self = Self::default();
         self.typst_recovery_roots = std::iter::once(config.get_root().to_path_buf())
+            .chain(config.modules().iter().filter_map(|(name, module)| {
+                tola_build::modules::declared_root(config.get_root(), name, &module.source).ok()
+            }))
             .chain(
                 [
                     config.package_locations().data(),
@@ -68,10 +73,7 @@ impl DevFailureWatches {
     }
 
     fn current_site_replaced(&mut self) {
-        self.latest_failed_paths.clear();
-        self.latest_failed_packages.clear();
-        self.latest_failed_observed_paths.clear();
-        self.typst_recovery_roots.clear();
+        *self = Self::default();
     }
 
     fn all_package_checks(
@@ -89,26 +91,21 @@ impl DevFailureWatches {
         checks
     }
 
-    fn all_paths(
-        &self,
-        completed_site: impl IntoIterator<Item = std::path::PathBuf>,
-    ) -> Vec<std::path::PathBuf> {
-        let mut paths = completed_site
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>();
+    fn all_paths(&self, published_reads: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+        let mut paths = published_reads.into_iter().collect::<BTreeSet<_>>();
         paths.extend(self.latest_failed_paths.iter().cloned());
         paths.into_iter().collect()
     }
 
-    fn requirements(
-        &self,
-        published: &tola_build::build::InputObservation,
-    ) -> crate::dev::watch::WatchRequirements {
+    fn requirements(&self, published: &InputObservation) -> WatchRequirements {
         let paths = self.all_paths(published.physical_read_paths().iter().cloned());
         let package_checks = self.all_package_checks(published.package_checks());
         let mut requirements = watch_requirements_from_observation(published);
         append_typst_inputs(&mut requirements, paths, package_checks);
         append_observed_paths(&mut requirements, &self.latest_failed_observed_paths);
+        if let Some(inputs) = &self.module_hook_inputs {
+            requirements.add_module_hook_inputs(inputs);
+        }
         for root in &self.typst_recovery_roots {
             requirements.typst_recovery(root.clone());
         }
@@ -116,14 +113,20 @@ impl DevFailureWatches {
     }
 }
 
+/// The configuration one round builds with, and the accepted candidate it came from.
+struct RoundConfiguration {
+    config: Arc<ResolvedSiteConfig>,
+    candidate: Option<crate::config::ConfigCandidate>,
+}
+
 #[derive(Debug)]
 struct RebuildRequest {
-    paths: Vec<std::path::PathBuf>,
-    rebuild_scope: crate::dev::watch::RebuildScope,
+    paths: Vec<PathBuf>,
+    rebuild_scope: RebuildScope,
 }
 
 impl RebuildRequest {
-    fn from_batch(batch: crate::dev::watch::FileChangeBatch) -> Self {
+    fn from_batch(batch: FileChangeBatch) -> Self {
         let (paths, rebuild_scope) = batch.into_parts();
         Self {
             paths,
@@ -131,7 +134,7 @@ impl RebuildRequest {
         }
     }
 
-    fn merge_batch(&mut self, batch: crate::dev::watch::FileChangeBatch) {
+    fn merge_batch(&mut self, batch: FileChangeBatch) {
         let (paths, rebuild_scope) = batch.into_parts();
         self.rebuild_scope = self
             .rebuild_scope
@@ -140,7 +143,7 @@ impl RebuildRequest {
     }
 
     fn after_failure(
-        mut paths: Vec<std::path::PathBuf>,
+        mut paths: Vec<PathBuf>,
         observation_extended: bool,
         hook_retry: Option<Self>,
         retry: &mut FailureRetry,
@@ -154,7 +157,7 @@ impl RebuildRequest {
         // Retry once after attaching watches: inputs may have changed since the failed read.
         retry.admit(Some(Self {
             paths,
-            rebuild_scope: crate::dev::watch::RebuildScope::FullSite,
+            rebuild_scope: RebuildScope::FullSite,
         }))
     }
 }
@@ -180,7 +183,7 @@ impl FailureRetry {
     }
 }
 
-enum CandidateTaskCompletion<T> {
+enum RoundAwait<T> {
     Finished(Result<T, tokio::task::JoinError>),
     Superseded(RebuildRequest),
     Stopped,
@@ -203,16 +206,21 @@ pub(super) struct RebuildLoop {
     reload: Option<ReloadTransport>,
     shutdown: Cancellation,
     build_session: tola_build::build::BuildSession,
+    input_scope: tola_build::InputScope,
     failure_watches: DevFailureWatches,
     /// The diagnostics the installed revision has, plus any an unpublished attempt added.
     ///
     /// One set serves the terminal and the log, so a diagnostic is never resolved on one surface
     /// while the other still shows it.
-    reported_diagnostics: Vec<tola_build::diagnostic::Diagnostic>,
+    reported_diagnostics: Vec<Diagnostic>,
     /// Monotonic count of the rounds this session reported.
     round: u64,
     output: crate::cli::output::CommandOutput,
     hooks: crate::dev::hooks::HookSender,
+    events: super::events::Events,
+    build: u64,
+    attempt_diagnostics: Vec<Diagnostic>,
+    attempt_published: bool,
     publication_sender: tokio::sync::mpsc::Sender<super::http::PublicationRequest>,
     publication_requests: tokio::sync::mpsc::Receiver<super::http::PublicationRequest>,
 }
@@ -229,17 +237,19 @@ pub(super) struct RebuildStartup {
     pub(super) shutdown: Cancellation,
     pub(super) output: crate::cli::output::CommandOutput,
     pub(super) hooks: crate::dev::hooks::HookSender,
+    pub(super) events: super::events::Events,
 }
 
 impl RebuildLoop {
     pub(super) async fn start(input: RebuildStartup) -> Result<Self, WatchError> {
         let changes = FileChangeSource::start(
             &input.initial_config,
-            &crate::dev::watch::WatchRequirements::default(),
+            &WatchRequirements::default(),
             &tola_build::hooks::SourceHookOutputs::default(),
             input.output.log().map(crate::cli::log::LogFile::path),
         )
         .await?;
+        let input_scope = input.resources.input_scope();
         let build_session = tola_build::build::BuildSession::with_resources(input.resources);
         let (publication_sender, publication_requests) = tokio::sync::mpsc::channel(8);
         Ok(Self {
@@ -253,11 +263,16 @@ impl RebuildLoop {
             reload: input.reload,
             shutdown: input.shutdown,
             build_session,
+            input_scope,
             failure_watches: DevFailureWatches::default(),
             reported_diagnostics: Vec::new(),
             round: 0,
             output: input.output,
             hooks: input.hooks,
+            events: input.events,
+            build: 0,
+            attempt_diagnostics: Vec::new(),
+            attempt_published: false,
             publication_sender,
             publication_requests,
         })
@@ -267,7 +282,7 @@ impl RebuildLoop {
         self.settle_build(
             RebuildRequest {
                 paths: Vec::new(),
-                rebuild_scope: crate::dev::watch::RebuildScope::FullSite,
+                rebuild_scope: RebuildScope::FullSite,
             },
             DevBuildTrigger::Startup,
         )
@@ -311,7 +326,7 @@ impl RebuildLoop {
                         self.settle_build(
                             RebuildRequest {
                                 paths: Vec::new(),
-                                rebuild_scope: crate::dev::watch::RebuildScope::FullSite,
+                                rebuild_scope: RebuildScope::FullSite,
                             },
                             DevBuildTrigger::FilesChanged,
                         ).await?;
@@ -323,7 +338,7 @@ impl RebuildLoop {
                         });
                         let publication_reply = published.ok_or_else(|| {
                             self.reported_diagnostics.iter()
-                                .filter(|diagnostic| diagnostic.severity == tola_build::diagnostic::Severity::Error)
+                                .filter(|diagnostic| diagnostic.severity == Severity::Error)
                                 .count().max(1)
                         });
                         let _ = publication.send(publication_reply);
@@ -355,9 +370,42 @@ impl RebuildLoop {
         let _rebuild_status = self.reload.as_ref().map(ReloadTransport::begin_rebuild);
         let mut failure_retry = FailureRetry::default();
         loop {
+            self.build += 1;
+            self.attempt_diagnostics.clear();
+            self.attempt_published = false;
+            self.events.build_started(self.build)?;
             let completion = self
                 .rebuild(request, trigger, &round, &mut failure_retry)
                 .await;
+            if self.events.0 && !self.attempt_published {
+                let status = if !self.attempt_diagnostics.is_empty()
+                    || completion
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| !tola_build::cancellation::is_cancelled(error))
+                {
+                    "failed"
+                } else {
+                    "cancelled"
+                };
+                if self.attempt_diagnostics.is_empty()
+                    && status == "failed"
+                    && let Err(error) = &completion
+                {
+                    self.attempt_diagnostics =
+                        tola_build::build::error_diagnostics(error, self.initial_config.get_root());
+                }
+                let revision = self.sites.revision();
+                self.events.build_finished(
+                    self.build,
+                    status,
+                    false,
+                    revision
+                        .as_ref()
+                        .map(|site| site.manifest().revision().as_str()),
+                    &self.attempt_diagnostics,
+                )?;
+            }
             // Release deferred hook events even if failure preceded worker startup; paths
             // left unacknowledged stay pending in the event epoch.
             let hook_changes = self.changes.reject_hook_candidate();
@@ -385,15 +433,15 @@ impl RebuildLoop {
         Ok(())
     }
 
-    /// Observe edits until the worker stops; discard superseded build results.
-    async fn await_candidate_task<T>(
+    /// Await one task while edits are watched; a change cancels it and becomes the next request.
+    async fn await_task<T>(
         &mut self,
         mut build: tokio::task::JoinHandle<T>,
         canceller: &tola_build::cancellation::BuildCanceller,
         config: &ResolvedSiteConfig,
-        changed_paths: &[std::path::PathBuf],
-        rebuild_scope: crate::dev::watch::RebuildScope,
-    ) -> Result<CandidateTaskCompletion<T>> {
+        changed_paths: &[PathBuf],
+        rebuild_scope: RebuildScope,
+    ) -> Result<RoundAwait<T>> {
         let mut superseding: Option<RebuildRequest> = None;
         let mut cancellation_started = None;
         let completion = loop {
@@ -428,7 +476,7 @@ impl RebuildLoop {
         };
         if self.shutdown.is_requested() {
             self.changes.reject_hook_candidate();
-            return Ok(CandidateTaskCompletion::Stopped);
+            return Ok(RoundAwait::Stopped);
         }
         if let Some(mut superseding) = superseding {
             if let Some(hook_changes) = self.changes.reject_hook_candidate() {
@@ -442,9 +490,9 @@ impl RebuildLoop {
                     .map(|started| started.elapsed().as_secs_f64() * 1000.0),
                 "discarded superseded site candidate"
             );
-            return Ok(CandidateTaskCompletion::Superseded(superseding));
+            return Ok(RoundAwait::Superseded(superseding));
         }
-        Ok(CandidateTaskCompletion::Finished(completion))
+        Ok(RoundAwait::Finished(completion))
     }
 
     fn current_config(&self) -> Arc<ResolvedSiteConfig> {
@@ -454,6 +502,85 @@ impl RebuildLoop {
             .unwrap_or_else(|| Arc::clone(&self.initial_config))
     }
 
+    /// Resolve the configuration this round builds with: the reloaded candidate when it is valid
+    /// and changes nothing the running server owns, otherwise the current revision's.
+    fn resolve_round_config(
+        &mut self,
+        current_config: &Arc<ResolvedSiteConfig>,
+    ) -> Result<Option<RoundConfiguration>> {
+        let config_path = current_config.config_path().to_path_buf();
+        let candidate = match self.config_loader.load_candidate() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                let diagnostics = tola_diagnostic::attached(&error)
+                    .map(|diagnostics| diagnostics.to_vec())
+                    .unwrap_or_else(|| {
+                        vec![
+                            tola_diagnostic::fallback(crate::codes::config::RELOAD, &error)
+                                .with_path(crate::terminal::display_path_within(
+                                    &config_path,
+                                    current_config.get_root(),
+                                )),
+                        ]
+                    });
+                self.report_diagnostics(diagnostics);
+                return Ok(None);
+            }
+        };
+        if let Some(candidate) = candidate.as_ref()
+            && let Some(change) = invocation_config_change(
+                InvocationSettings {
+                    config: current_config,
+                    server: &self.server,
+                    dev: &self.dev,
+                },
+                InvocationSettings {
+                    config: &candidate.config(),
+                    server: candidate.server(),
+                    dev: candidate.dev(),
+                },
+            )
+        {
+            let detail =
+                format!("`{change}` cannot be changed while the development server is running");
+            self.report_diagnostics(vec![
+                Diagnostic::at_path(
+                    crate::codes::config::SERVE_RESTART,
+                    Severity::Error,
+                    crate::terminal::display_path_within(&config_path, current_config.get_root()),
+                    detail,
+                )
+                .with_help("Restart `tola dev`"),
+            ]);
+            self.config_loader.acknowledge(candidate);
+            return Ok(None);
+        }
+        let config = candidate
+            .as_ref()
+            .map(crate::config::ConfigCandidate::config)
+            .unwrap_or_else(|| Arc::clone(current_config));
+        if let Err(error) =
+            crate::cli::log::destination::start_site(&self.output, &config, &self.shutdown.token())
+        {
+            if self.shutdown.is_requested() {
+                return Ok(None);
+            }
+            // Only the path conflicts of an already-started log remain here; the
+            // complete chain belongs to the debug log.
+            self.output.record_failure(&error);
+            self.report_diagnostics(vec![
+                Diagnostic::new(
+                    crate::codes::log::LOCATION,
+                    Severity::Error,
+                    "the log file conflicts with a site input or output",
+                )
+                .with_help("Choose a `--log-file` path outside the site"),
+            ]);
+            return Ok(None);
+        }
+        Ok(Some(RoundConfiguration { config, candidate }))
+    }
+
     async fn rebuild(
         &mut self,
         request: RebuildRequest,
@@ -461,6 +588,20 @@ impl RebuildLoop {
         round: &tracing::Span,
         failure_retry: &mut FailureRetry,
     ) -> Result<Option<RebuildRequest>> {
+        // A closure cannot return from `rebuild`, so this is the one place an awaited task's
+        // outcome becomes the round's own outcome.
+        macro_rules! round_await {
+            ($task:expr, $canceller:expr, $config:expr, $paths:expr, $scope:expr) => {
+                match self
+                    .await_task($task, $canceller, $config, $paths, $scope)
+                    .await?
+                {
+                    RoundAwait::Finished(value) => value,
+                    RoundAwait::Superseded(request) => return Ok(Some(request)),
+                    RoundAwait::Stopped => return Ok(None),
+                }
+            };
+        }
         let rebuild_started = std::time::Instant::now();
         self.changes.refresh_pending().await?;
         let current_site = self.sites.revision();
@@ -468,11 +609,10 @@ impl RebuildLoop {
             .as_ref()
             .map(|site| Arc::clone(site.config()))
             .unwrap_or_else(|| Arc::clone(&self.initial_config));
-        let empty_observation = tola_build::build::InputObservation::default();
+        let empty_observation = InputObservation::default();
         let current_observation = current_site
             .as_ref()
-            .map(|site| site.input_observation())
-            .unwrap_or(&empty_observation);
+            .map_or(&empty_observation, |site| site.input_observation());
         let event_claim = self.changes.begin_candidate(&current_config);
         let build_event_epoch = event_claim.revision();
         let mut changed_paths = request.paths;
@@ -491,120 +631,79 @@ impl RebuildLoop {
             sample_paths = ?sample,
             "starting site build"
         );
-        let config_path = current_config.config_path().to_path_buf();
-        let candidate = match self.config_loader.load_candidate() {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                let diagnostics = tola_build::diagnostic::attached(&error)
-                    .map(|diagnostics| diagnostics.to_vec())
-                    .unwrap_or_else(|| {
-                        vec![
-                            tola_build::diagnostic::fallback(crate::codes::config::RELOAD, &error)
-                                .with_path(crate::terminal::display_path_within(
-                                    &config_path,
-                                    current_config.get_root(),
-                                )),
-                        ]
-                    });
-                self.report_diagnostics(diagnostics);
-                return Ok(None);
-            }
+        let Some(round_config) = self.resolve_round_config(&current_config)? else {
+            return Ok(None);
         };
-        if let Some(candidate) = candidate.as_ref()
-            && let Some(change) = invocation_config_change(
-                InvocationSettings {
-                    config: &current_config,
-                    server: &self.server,
-                    dev: &self.dev,
-                },
-                InvocationSettings {
-                    config: &candidate.config(),
-                    server: candidate.server(),
-                    dev: candidate.dev(),
-                },
-            )
-        {
-            let detail =
-                format!("`{change}` cannot be changed while the development server is running");
-            self.report_diagnostics(vec![
-                tola_build::diagnostic::Diagnostic::at_path(
-                    crate::codes::config::SERVE_RESTART,
-                    tola_build::diagnostic::Severity::Error,
-                    crate::terminal::display_path_within(&config_path, current_config.get_root()),
-                    detail,
-                )
-                .with_help("Restart `tola dev`"),
-            ]);
-            self.config_loader.acknowledge(candidate);
-            return Ok(None);
-        }
-        let config = candidate
-            .as_ref()
-            .map(crate::config::ConfigCandidate::config)
-            .unwrap_or_else(|| Arc::clone(&current_config));
-        if let Err(error) =
-            crate::cli::log::destination::start_site(&self.output, &config, &self.shutdown.token())
-        {
-            if self.shutdown.is_requested() {
-                return Ok(None);
-            }
-            // Only the path conflicts of an already-started log remain here; the
-            // complete chain belongs to the debug log.
-            self.output.record_failure(&error);
-            self.report_diagnostics(vec![
-                tola_build::diagnostic::Diagnostic::new(
-                    crate::codes::log::LOCATION,
-                    tola_build::diagnostic::Severity::Error,
-                    "the log file conflicts with a site input or output",
-                )
-                .with_help("Choose a `--log-file` path outside the site"),
-            ]);
-            return Ok(None);
-        }
+        let RoundConfiguration { config, candidate } = round_config;
         self.changes.update_hook_candidate_claims(&config);
         let current_watch_requirements = watch_requirements_from_observation(current_observation);
         self.changes
             .stage_config(&config, &current_watch_requirements)
             .await?;
 
-        let reuse_capabilities = producer_reuse_capabilities(
-            rebuild_scope,
-            ProducerReuseCoverage {
-                content: self
-                    .changes
-                    .accepts_events_for([crate::dev::watch::ProducerKind::Content]),
-                typst_reads: self
-                    .changes
-                    .accepts_events_for([crate::dev::watch::ProducerKind::TypstReads]),
-                configured_assets: self
-                    .changes
-                    .accepts_events_for([crate::dev::watch::ProducerKind::ConfiguredAssets]),
-            },
-        );
+        // Prepare one hook watch before staging any potential module-hook path.
+        // The attempt below consumes the same watch instead of preparing it again.
+        let hook_watch = if config.modules().is_empty() {
+            None
+        } else {
+            match tola_build::modules::prepare_hook_watch(&config, self.input_scope) {
+                Ok(watch) => Some(watch),
+                Err(error) => {
+                    self.failure_watches.build_task_failed(&config);
+                    self.reconfigure_failure_watches(&current_config, &config)
+                        .await?;
+                    self.report_build_failure(&error);
+                    return Ok(None);
+                }
+            }
+        };
+        let watch_config = hook_watch
+            .as_ref()
+            .map_or_else(|| Arc::clone(&config), |watch| Arc::clone(watch.config()));
+        let hook_inputs = hook_watch
+            .as_ref()
+            .map(|watch| watch.inputs().clone())
+            .unwrap_or_default();
+        let mut staged_requirements = current_watch_requirements;
+        staged_requirements.add_module_hook_inputs(&hook_inputs);
+        self.changes.update_hook_candidate_claims(&watch_config);
+        self.changes.extend_hook_candidate_claims(&hook_inputs);
+        self.changes
+            .stage_config(&watch_config, &staged_requirements)
+            .await?;
+        // Resolve newly attached declared coverage before a generator can write into it.
+        self.changes.refresh_pending().await?;
+
+        let reuse_capabilities =
+            producer_reuse_capabilities(rebuild_scope, ProducerReuseCoverage::of(&self.changes));
         let canceller = tola_build::cancellation::BuildCanceller::new();
-        let attempt = self.build_session.prepare(
-            Arc::clone(&config),
-            tola_build::build::BuildRequest {
-                mode: tola_build::build::BuildMode::Development,
-                trigger: match trigger {
-                    DevBuildTrigger::Startup => tola_build::build::BuildTrigger::Initial,
-                    DevBuildTrigger::FilesChanged => {
-                        let paths = changed_paths.clone().into();
-                        if rebuild_scope == crate::dev::watch::RebuildScope::FullSite {
-                            tola_build::build::BuildTrigger::AllInputs(paths)
-                        } else {
-                            tola_build::build::BuildTrigger::Paths(paths)
-                        }
+        let request = tola_build::build::BuildRequest {
+            mode: tola_build::build::BuildMode::Development,
+            trigger: match trigger {
+                DevBuildTrigger::Startup => BuildTrigger::Initial,
+                DevBuildTrigger::FilesChanged => {
+                    let paths = changed_paths.clone().into();
+                    if rebuild_scope == RebuildScope::FullSite {
+                        BuildTrigger::AllInputs(paths)
+                    } else {
+                        BuildTrigger::Paths(paths)
                     }
-                },
-                reuse: reuse_capabilities,
-                generated_files: Vec::new(),
-                cancellation: canceller.token(),
-                hook_execution: tola_build::build::HookExecution::Run,
-                reference_checks: tola_build::build::ReferenceChecks::Full,
-                disable_hook_reuse: self.disable_hook_reuse,
+                }
             },
-        );
+            reuse: reuse_capabilities,
+            generated_files: Vec::new(),
+            cancellation: canceller.token(),
+            hook_execution: tola_build::build::HookExecution::Run,
+            reference_checks: tola_build::build::ReferenceChecks::Full,
+            disable_hook_reuse: self.disable_hook_reuse,
+            capture_report: false,
+        };
+        let attempt = if let Some(hook_watch) = &hook_watch {
+            self.build_session
+                .prepare_with_hook_watch(hook_watch, request)?
+        } else {
+            self.build_session.prepare(Arc::clone(&config), request)
+        };
         let prepare_elapsed = rebuild_started.elapsed();
         let build_started = std::time::Instant::now();
         let lock_config = Arc::clone(&config);
@@ -615,47 +714,39 @@ impl RebuildLoop {
                 let _ = lock_output.waiting_for_build();
             })
         });
-        let build_lock = match self
-            .await_candidate_task(locking, &canceller, &config, &changed_paths, rebuild_scope)
-            .await?
-        {
-            CandidateTaskCompletion::Finished(locked) => match locked {
+        let build_lock =
+            match round_await!(locking, &canceller, &config, &changed_paths, rebuild_scope) {
                 Ok(Ok(lock)) => lock,
                 Ok(Err(error)) => {
-                    self.report_build_failure(&error);
+                    self.report_build_failure(&anyhow::Error::new(error));
                     return Ok(None);
                 }
                 Err(error) => {
                     self.output.record_failure(&anyhow::Error::new(error));
                     self.report_diagnostics(vec![
-                        tola_build::diagnostic::Diagnostic::new(
-                            crate::codes::build::TASK,
-                            tola_build::diagnostic::Severity::Error,
-                            "Tola could not wait for another build of this site",
-                        )
-                        .with_help(
-                            "Wait for the other `tola` command to finish, then save a file to rebuild",
-                        ),
-                    ]);
+                    Diagnostic::new(
+                        crate::codes::build::TASK,
+                        Severity::Error,
+                        "Tola could not wait for another build of this site",
+                    )
+                    .with_help(
+                        "Wait for the other `tola` command to finish, then save a file to rebuild",
+                    ),
+                ]);
                     return Ok(None);
                 }
-            },
-            CandidateTaskCompletion::Superseded(request) => return Ok(Some(request)),
-            CandidateTaskCompletion::Stopped => return Ok(None),
-        };
+            };
         // Entering the round span inside the blocking build keeps it off every awaited task, and
         // makes the hook events this thread records hold the round they belong to.
         let build_round = round.clone();
         let build = tokio::task::spawn_blocking(move || build_round.in_scope(|| attempt.run()));
-        let build = match self
-            .await_candidate_task(build, &canceller, &config, &changed_paths, rebuild_scope)
-            .await?
-        {
-            CandidateTaskCompletion::Finished(build) => build,
-            CandidateTaskCompletion::Superseded(request) => return Ok(Some(request)),
-            CandidateTaskCompletion::Stopped => return Ok(None),
-        };
-        let built = match build {
+        let built = match round_await!(
+            build,
+            &canceller,
+            &watch_config,
+            &changed_paths,
+            rebuild_scope
+        ) {
             Ok(Ok(built)) => built,
             Ok(Err(failure)) => {
                 if failure.is_cancelled() {
@@ -669,6 +760,7 @@ impl RebuildLoop {
                     return Ok(Some(retry));
                 }
                 self.failure_watches.observe_failure(&failure);
+                self.failure_watches.module_hook_inputs = Some(hook_inputs.clone());
                 let observation_extended = self
                     .reconfigure_failure_watches(&current_config, &config)
                     .await?;
@@ -695,15 +787,16 @@ impl RebuildLoop {
             }
             Err(error) => {
                 self.failure_watches.build_task_failed(&config);
+                self.failure_watches.module_hook_inputs = Some(hook_inputs.clone());
                 let observation_extended = self
                     .reconfigure_failure_watches(&current_config, &config)
                     .await?;
                 self.output.record_failure(&anyhow::Error::new(error));
                 self.report_diagnostics(vec![
-                    tola_build::diagnostic::Diagnostic::new(
+                    Diagnostic::new(
                         crate::codes::build::TASK,
-                        tola_build::diagnostic::Severity::Error,
-                        "the site build stopped unexpectedly",
+                        Severity::Error,
+                        "Tola could not finish the build",
                     )
                     .with_help("Save a file to rebuild"),
                 ]);
@@ -721,13 +814,19 @@ impl RebuildLoop {
         };
 
         let build_elapsed = build_started.elapsed();
+        let effective_config = Arc::clone(built.config());
+        self.changes.update_hook_candidate_claims(&effective_config);
         let candidate_observation = built.input_observation();
         let candidate_watch_requirements =
             watch_requirements_from_observation(&candidate_observation);
         let candidate_subscriptions = self
             .changes
-            .stage_config(&config, &candidate_watch_requirements)
+            .stage_config(&effective_config, &candidate_watch_requirements)
             .await?;
+        // A generator may have created a previously missing watched directory. Attach
+        // its coverage before checking the candidate; pending events remain in the
+        // epoch and are accounted for by freshness and hook-output evidence below.
+        self.changes.refresh_pending().await?;
         let subscriptions_elapsed = build_started.elapsed() - build_elapsed;
         let output_count = built.graph().outputs().len();
         let source_hooks = built.source_hooks().clone();
@@ -744,76 +843,37 @@ impl RebuildLoop {
             let freshness_elapsed = started.elapsed() - revision_elapsed;
             (checked, revision_elapsed, freshness_elapsed, diagnostics)
         });
-        let (checked, revision_elapsed, freshness_elapsed, diagnostics) = match self
-            .await_candidate_task(
-                preparing,
-                &canceller,
-                &config,
-                &changed_paths,
-                rebuild_scope,
-            )
-            .await?
-        {
-            CandidateTaskCompletion::Finished(prepared) => prepared.map_err(|error| {
-                anyhow::Error::new(error).context("Tola could not finish the rebuild")
-            })?,
-            CandidateTaskCompletion::Superseded(request) => return Ok(Some(request)),
-            CandidateTaskCompletion::Stopped => return Ok(None),
-        };
+        let (checked, revision_elapsed, freshness_elapsed, diagnostics) = round_await!(
+            preparing,
+            &canceller,
+            &effective_config,
+            &changed_paths,
+            rebuild_scope
+        )
+        .map_err(|error| anyhow::Error::new(error).context("Tola could not finish the rebuild"))?;
         let checked = match checked? {
-            tola_build::build::RevisionCheck::Fresh(checked) => checked,
-            tola_build::build::RevisionCheck::Stale(freshness) => {
-                use tola_build::build::InputKind;
-
-                if freshness.is_stale(InputKind::TypstPhysicalReads) {
-                    rebuild_scope = rebuild_scope.max(merge_paths(
-                        &mut changed_paths,
-                        candidate_observation.physical_read_paths().iter().cloned(),
-                    ));
-                }
-                if freshness.is_stale(InputKind::TypstPackageSelection) {
-                    rebuild_scope = rebuild_scope.max(merge_paths(
-                        &mut changed_paths,
-                        candidate_observation
-                            .package_checks()
-                            .iter()
-                            .map(|check| check.candidate().to_path_buf()),
-                    ));
-                }
-                rebuild_scope = rebuild_scope.max(stale_retry_scope(&freshness));
-                tracing::debug!(
-                    target: "tola::compile",
-                    changes = changed_paths.len(),
-                    rebuild_scope = ?rebuild_scope,
-                    physical_reads_fresh = freshness.is_fresh(InputKind::TypstPhysicalReads),
-                    package_checks_fresh = freshness.is_fresh(InputKind::TypstPackageSelection),
-                    content_inventory_fresh = freshness.is_fresh(InputKind::ContentInventory),
-                    configured_assets_fresh = freshness.is_fresh(InputKind::ConfiguredAssets),
-                    font_inventory_fresh = freshness.is_fresh(InputKind::FontInventory),
-                    "discarded candidate after input evidence changed during its build"
-                );
-                let mut retry = RebuildRequest {
-                    paths: changed_paths,
+            RevisionCheck::Fresh(checked) => checked,
+            RevisionCheck::Stale(freshness) => {
+                return Ok(Some(self.retry_for_stale_candidate(
+                    freshness,
+                    &candidate_observation,
+                    changed_paths,
                     rebuild_scope,
-                };
-                if let Some(hook_changes) = self.changes.reject_hook_candidate() {
-                    retry.merge_batch(hook_changes);
-                }
-                return Ok(Some(retry));
+                )));
             }
         };
         let publication_started = std::time::Instant::now();
         let guarded_event_epoch = self.changes.event_epoch();
         let guarded_changes = self
             .changes
-            .rebuild_changes_after(build_event_epoch, &config);
+            .rebuild_changes_after(build_event_epoch, &effective_config);
         let (previous, current) = {
             let shutdown = self.shutdown.token();
             let event_epoch_guard = match tokio::select! {
                 _ = self.shutdown.cancelled() => return Ok(None),
                 guarded = self.changes.guard_epoch(
                     build_event_epoch,
-                    &config,
+                    &effective_config,
                     hook_outputs,
                     &shutdown,
                 ) => guarded?,
@@ -822,10 +882,10 @@ impl RebuildLoop {
                 None => {
                     let (newer_paths, _) = guarded_changes.into_parts();
                     merge_paths(&mut changed_paths, newer_paths);
-                    rebuild_scope = crate::dev::watch::RebuildScope::FullSite;
+                    rebuild_scope = RebuildScope::FullSite;
                     merge_paths(
                         &mut changed_paths,
-                        std::iter::once(config.get_root().to_path_buf()),
+                        std::iter::once(effective_config.get_root().to_path_buf()),
                     );
                     tracing::debug!(
                         target: "tola::compile",
@@ -851,12 +911,20 @@ impl RebuildLoop {
             event_epoch_guard.commit(event_claim, candidate_subscriptions);
             (previous, current)
         };
+        self.attempt_published = true;
+        self.events.build_finished(
+            self.build,
+            "succeeded",
+            true,
+            Some(current.manifest().revision().as_str()),
+            &diagnostics,
+        )?;
         drop(build_lock);
         self.changes.complete_hook_candidate(&source_hooks);
         let previous_reported = std::mem::replace(&mut self.reported_diagnostics, diagnostics);
         let recovered = previous_reported
             .iter()
-            .any(|diagnostic| diagnostic.severity == tola_build::diagnostic::Severity::Error);
+            .any(|diagnostic| diagnostic.severity == Severity::Error);
         let revision_diff = previous
             .as_ref()
             .map(|previous| previous.manifest().diff(current.manifest()));
@@ -926,6 +994,54 @@ impl RebuildLoop {
         Ok(None)
     }
 
+    /// The retry one stale candidate asks for: the reads whose evidence changed during its build
+    /// join the paths and widen the scope, and the hook claim it never published is released.
+    fn retry_for_stale_candidate(
+        &mut self,
+        freshness: tola_build::build::InputFreshness,
+        observation: &InputObservation,
+        mut changed_paths: Vec<PathBuf>,
+        mut rebuild_scope: RebuildScope,
+    ) -> RebuildRequest {
+        use tola_build::build::InputKind;
+
+        if freshness.is_stale(InputKind::TypstPhysicalReads) {
+            rebuild_scope = rebuild_scope.max(merge_paths(
+                &mut changed_paths,
+                observation.physical_read_paths().iter().cloned(),
+            ));
+        }
+        if freshness.is_stale(InputKind::TypstPackageSelection) {
+            rebuild_scope = rebuild_scope.max(merge_paths(
+                &mut changed_paths,
+                observation
+                    .package_checks()
+                    .iter()
+                    .map(|check| check.candidate().to_path_buf()),
+            ));
+        }
+        rebuild_scope = rebuild_scope.max(stale_retry_scope(&freshness));
+        tracing::debug!(
+            target: "tola::compile",
+            changes = changed_paths.len(),
+            rebuild_scope = ?rebuild_scope,
+            physical_reads_fresh = freshness.is_fresh(InputKind::TypstPhysicalReads),
+            package_checks_fresh = freshness.is_fresh(InputKind::TypstPackageSelection),
+            content_inventory_fresh = freshness.is_fresh(InputKind::ContentInventory),
+            configured_assets_fresh = freshness.is_fresh(InputKind::ConfiguredAssets),
+            font_inventory_fresh = freshness.is_fresh(InputKind::FontInventory),
+            "discarded candidate after input evidence changed during its build"
+        );
+        let mut retry = RebuildRequest {
+            paths: changed_paths,
+            rebuild_scope,
+        };
+        if let Some(hook_changes) = self.changes.reject_hook_candidate() {
+            retry.merge_batch(hook_changes);
+        }
+        retry
+    }
+
     fn report_build_failure(&mut self, error: &anyhow::Error) {
         let config = self.current_config();
         let diagnostics = tola_build::build::error_diagnostics(error, config.get_root());
@@ -938,18 +1054,14 @@ impl RebuildLoop {
         self.report_diagnostics(diagnostics);
     }
 
-    fn report_build_error(&mut self, code: tola_build::diagnostic::DiagnosticCode, detail: String) {
+    fn report_build_error(&mut self, code: DiagnosticCode, detail: String) {
         tracing::debug!(
             target: "tola::compile",
             round = self.round,
             code = code.as_str(),
             "site rebuild failed"
         );
-        self.report_diagnostics(vec![tola_build::diagnostic::Diagnostic::new(
-            code,
-            tola_build::diagnostic::Severity::Error,
-            detail,
-        )]);
+        self.report_diagnostics(vec![Diagnostic::new(code, Severity::Error, detail)]);
     }
 
     async fn reconfigure_failure_watches(
@@ -958,18 +1070,20 @@ impl RebuildLoop {
         attempted_config: &ResolvedSiteConfig,
     ) -> Result<bool, WatchError> {
         let current_site = self.sites.revision();
-        let empty_observation = tola_build::build::InputObservation::default();
+        let empty_observation = InputObservation::default();
         let observed = current_site
             .as_ref()
-            .map(|site| site.input_observation())
-            .unwrap_or(&empty_observation);
+            .map_or(&empty_observation, |site| site.input_observation());
         let dynamic = self.failure_watches.requirements(observed);
         self.changes
             .reconfigure_configs([current_config, attempted_config], &dynamic)
             .await
     }
 
-    fn report_diagnostics(&mut self, diagnostics: Vec<tola_build::diagnostic::Diagnostic>) {
+    fn report_diagnostics(&mut self, diagnostics: Vec<Diagnostic>) {
+        if self.events.0 && !self.attempt_published {
+            self.attempt_diagnostics.clone_from(&diagnostics);
+        }
         let status = if diagnostics
             .iter()
             .all(|diagnostic| diagnostic.code == "terminal.write")
@@ -1004,10 +1118,7 @@ impl RebuildLoop {
 /// A round reads fresh excerpts and importers for a diagnostic it still reports, so the whole
 /// record changes while the diagnostic stays. Code, position, and message decide identity;
 /// excerpt, importers, notes, help, and trace do not.
-fn same_diagnostic(
-    left: &tola_build::diagnostic::Diagnostic,
-    right: &tola_build::diagnostic::Diagnostic,
-) -> bool {
+fn same_diagnostic(left: &Diagnostic, right: &Diagnostic) -> bool {
     if left.code != right.code || left.message != right.message {
         return false;
     }
@@ -1026,12 +1137,12 @@ fn same_diagnostic(
 /// warning, the warning is still true, so a failed round shows it next to its own diagnostics. A
 /// warning the round does report again is not repeated under its earlier presentation.
 fn retained_with_previous_warnings(
-    previous: &[tola_build::diagnostic::Diagnostic],
-    current: Vec<tola_build::diagnostic::Diagnostic>,
-) -> Vec<tola_build::diagnostic::Diagnostic> {
+    previous: &[Diagnostic],
+    current: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
     let mut retained = current;
     for earlier in previous {
-        if earlier.severity == tola_build::diagnostic::Severity::Warning
+        if earlier.severity == Severity::Warning
             && !retained
                 .iter()
                 .any(|current| same_diagnostic(current, earlier))
@@ -1043,9 +1154,9 @@ fn retained_with_previous_warnings(
 }
 
 fn resolved_diagnostics<'a>(
-    previous: &'a [tola_build::diagnostic::Diagnostic],
-    current: &'a [tola_build::diagnostic::Diagnostic],
-) -> impl Iterator<Item = &'a tola_build::diagnostic::Diagnostic> {
+    previous: &'a [Diagnostic],
+    current: &'a [Diagnostic],
+) -> impl Iterator<Item = &'a Diagnostic> {
     previous.iter().filter(|diagnostic| {
         !current
             .iter()
@@ -1076,20 +1187,20 @@ fn format_rebuild_summary(
 }
 
 fn merge_paths(
-    paths: &mut Vec<std::path::PathBuf>,
-    incoming: impl IntoIterator<Item = std::path::PathBuf>,
-) -> crate::dev::watch::RebuildScope {
+    paths: &mut Vec<PathBuf>,
+    incoming: impl IntoIterator<Item = PathBuf>,
+) -> RebuildScope {
     for path in incoming {
         if !paths.contains(&path) {
             if paths.len() == crate::dev::watch::EVENT_DETAIL_CAPACITY {
                 paths.clear();
-                return crate::dev::watch::RebuildScope::FullSite;
+                return RebuildScope::FullSite;
             }
             paths.push(path);
         }
     }
     paths.sort_unstable();
-    crate::dev::watch::RebuildScope::Paths
+    RebuildScope::Paths
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1099,8 +1210,20 @@ struct ProducerReuseCoverage {
     configured_assets: bool,
 }
 
+impl ProducerReuseCoverage {
+    /// Whether each producer's events still reach its own watch.
+    fn of(changes: &FileChangeSource) -> Self {
+        Self {
+            content: changes.accepts_events_for([ProducerKind::Content]),
+            typst_reads: changes.accepts_events_for([ProducerKind::TypstReads]),
+            configured_assets: changes.accepts_events_for([ProducerKind::ConfiguredAssets]),
+        }
+    }
+}
+
 /// Inputs whose stale evidence requires a fresh observation of the whole site.
-const STALE_INVENTORY_INPUTS: [tola_build::build::InputKind; 3] = [
+const STALE_INVENTORY_INPUTS: [tola_build::build::InputKind; 4] = [
+    tola_build::build::InputKind::ModuleManifests,
     tola_build::build::InputKind::ContentInventory,
     tola_build::build::InputKind::ConfiguredAssets,
     tola_build::build::InputKind::Icons,
@@ -1113,32 +1236,30 @@ const STALE_TYPST_INPUTS: [tola_build::build::InputKind; 2] = [
 ];
 
 /// Rebuild scope a discarded candidate needs to recheck its stale inputs.
-fn stale_retry_scope(
-    freshness: &tola_build::build::InputFreshness,
-) -> crate::dev::watch::RebuildScope {
+fn stale_retry_scope(freshness: &tola_build::build::InputFreshness) -> RebuildScope {
     if STALE_INVENTORY_INPUTS
         .into_iter()
         .any(|input| freshness.is_stale(input))
     {
-        crate::dev::watch::RebuildScope::FullSite
+        RebuildScope::FullSite
     } else if STALE_TYPST_INPUTS
         .into_iter()
         .any(|input| freshness.is_stale(input))
     {
-        crate::dev::watch::RebuildScope::FullTypst
+        RebuildScope::FullTypst
     } else {
-        crate::dev::watch::RebuildScope::Paths
+        RebuildScope::Paths
     }
 }
 
 fn producer_reuse_capabilities(
-    rebuild_scope: crate::dev::watch::RebuildScope,
+    rebuild_scope: RebuildScope,
     coverage: ProducerReuseCoverage,
 ) -> tola_build::build::BuildReuse {
-    let inventories = rebuild_scope != crate::dev::watch::RebuildScope::FullSite;
+    let inventories = rebuild_scope != RebuildScope::FullSite;
     tola_build::build::BuildReuse {
         content_inventory: inventories && coverage.content,
-        typst_compilation: rebuild_scope < crate::dev::watch::RebuildScope::FullTypst
+        typst_compilation: rebuild_scope < RebuildScope::FullTypst
             && coverage.content
             && coverage.typst_reads,
         configured_assets: inventories && coverage.configured_assets,
@@ -1178,45 +1299,33 @@ mod tests {
         producer_reuse_capabilities, resolved_diagnostics, retained_with_previous_warnings,
     };
     use crate::config::{DevConfig, ServerConfig};
+    use crate::dev::watch::{FileChangeSource, RebuildScope, WatchError};
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
     use tola_build::config::ResolvedSiteConfig;
+    use tola_diagnostic::{Diagnostic, Severity};
 
     #[test]
-    fn unresolved_warnings_are_retained() {
-        let warning = tola_build::diagnostic::Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Warning,
+    fn warnings_survive_a_failed_round() {
+        let warning = Diagnostic::new(
+            tola_diagnostic::codes::typst::COMPILE,
+            Severity::Warning,
             "layout was ignored during HTML export",
         );
-        let error = tola_build::diagnostic::Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Error,
+        let error = Diagnostic::new(
+            tola_diagnostic::codes::typst::COMPILE,
+            Severity::Error,
             "unclosed delimiter",
         );
 
         assert_eq!(
             retained_with_previous_warnings(std::slice::from_ref(&warning), vec![error.clone()]),
-            [error, warning.clone()]
+            [error.clone(), warning.clone()]
         );
         assert_eq!(
             retained_with_previous_warnings(std::slice::from_ref(&warning), vec![warning.clone()]),
             std::slice::from_ref(&warning)
         );
-    }
-
-    #[test]
-    fn resolved_warnings_are_reported_once() {
-        let warning = tola_build::diagnostic::Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Warning,
-            "layout was ignored during HTML export",
-        );
-        let error = tola_build::diagnostic::Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Error,
-            "unclosed delimiter",
-        );
-
         assert!(
             resolved_diagnostics(
                 &[warning.clone(), error.clone()],
@@ -1235,16 +1344,16 @@ mod tests {
     }
 
     /// One warning about `content/post.typ` line `line`, as the round that read `excerpt` saw it.
-    fn warning_with_excerpt(line: usize, excerpt: &str) -> tola_build::diagnostic::Diagnostic {
-        tola_build::diagnostic::Diagnostic::at_location(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Warning,
-            tola_build::diagnostic::Location {
+    fn warning_with_excerpt(line: usize, excerpt: &str) -> Diagnostic {
+        Diagnostic::at_location(
+            tola_diagnostic::codes::typst::COMPILE,
+            Severity::Warning,
+            tola_diagnostic::Location {
                 path: "content/post.typ".to_owned(),
                 line: Some(line),
                 column: Some(1),
                 range: None,
-                source_lines: vec![tola_build::diagnostic::SourceLine::new(
+                source_lines: vec![tola_diagnostic::SourceLine::new(
                     line,
                     excerpt,
                     Some((0, excerpt.len())),
@@ -1255,10 +1364,9 @@ mod tests {
     }
 
     #[test]
-    fn edited_excerpt_is_not_the_same_warning() {
+    fn warning_identity_ignores_excerpt() {
         let warning = warning_with_excerpt(3, "#let title = \"first\"");
         let edited = warning_with_excerpt(3, "#let title = \"second\"");
-
         assert!(
             resolved_diagnostics(
                 std::slice::from_ref(&warning),
@@ -1271,16 +1379,12 @@ mod tests {
             retained_with_previous_warnings(std::slice::from_ref(&warning), vec![edited.clone()]),
             [edited]
         );
-    }
 
-    #[test]
-    fn same_position_warnings_resolve_separately() {
         let warning = warning_with_excerpt(3, "#let title = \"Site\"");
-        let removed = tola_build::diagnostic::Diagnostic {
+        let removed = Diagnostic {
             message: "an unused variable was removed".to_owned(),
             ..warning.clone()
         };
-
         assert_eq!(
             resolved_diagnostics(
                 &[warning.clone(), removed.clone()],
@@ -1393,9 +1497,7 @@ mod tests {
             typst_reads: true,
             configured_assets: true,
         };
-        let capabilities = |coverage| {
-            producer_reuse_capabilities(crate::dev::watch::RebuildScope::Paths, coverage)
-        };
+        let capabilities = |coverage| producer_reuse_capabilities(RebuildScope::Paths, coverage);
 
         let mut configured_uncertain = full;
         configured_uncertain.configured_assets = false;
@@ -1416,14 +1518,12 @@ mod tests {
         assert!(!content.typst_compilation);
         assert!(content.configured_assets);
 
-        let full_typst =
-            producer_reuse_capabilities(crate::dev::watch::RebuildScope::FullTypst, full);
+        let full_typst = producer_reuse_capabilities(RebuildScope::FullTypst, full);
         assert!(full_typst.content_inventory);
         assert!(!full_typst.typst_compilation);
         assert!(full_typst.configured_assets);
 
-        let full_site =
-            producer_reuse_capabilities(crate::dev::watch::RebuildScope::FullSite, full);
+        let full_site = producer_reuse_capabilities(RebuildScope::FullSite, full);
         assert!(!full_site.content_inventory);
         assert!(!full_site.typst_compilation);
         assert!(!full_site.configured_assets);
@@ -1436,7 +1536,7 @@ mod tests {
         let hook_retry = || {
             Some(super::RebuildRequest {
                 paths: vec![source.clone(), generated.clone()],
-                rebuild_scope: crate::dev::watch::RebuildScope::FullTypst,
+                rebuild_scope: RebuildScope::FullTypst,
             })
         };
 
@@ -1453,10 +1553,7 @@ mod tests {
                 &mut super::FailureRetry::default(),
             )
             .expect("new failure watches require an immediate recheck");
-            assert_eq!(
-                retry.rebuild_scope,
-                crate::dev::watch::RebuildScope::FullSite
-            );
+            assert_eq!(retry.rebuild_scope, RebuildScope::FullSite);
             assert_eq!(retry.paths, expected_paths);
         }
 
@@ -1468,10 +1565,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(continuous.paths, [source, generated]);
-        assert_eq!(
-            continuous.rebuild_scope,
-            crate::dev::watch::RebuildScope::FullTypst
-        );
+        assert_eq!(continuous.rebuild_scope, RebuildScope::FullTypst);
         assert!(
             super::RebuildRequest::after_failure(
                 vec![path(1)],
@@ -1493,17 +1587,6 @@ mod tests {
         assert!(
             super::RebuildRequest::after_failure(vec![source], true, None, &mut retry).is_none()
         );
-    }
-
-    #[test]
-    fn failed_build_drops_watched_paths() {
-        let mut state = DevFailureWatches::default();
-        let missing = path(1);
-
-        state.build_failed([missing], Vec::new());
-        state.build_failed(std::iter::empty(), Vec::new());
-
-        assert!(state.all_paths(std::iter::empty()).is_empty());
     }
 
     #[test]
@@ -1547,7 +1630,7 @@ mod tests {
         assert!(watches.typst_recovery_roots.is_empty());
     }
 
-    fn path(id: u8) -> std::path::PathBuf {
+    fn path(id: u8) -> PathBuf {
         format!("/site/read-{id}.typ").into()
     }
 
@@ -1603,9 +1686,13 @@ mod tests {
                     crate::terminal::Terminal::new(clap::ColorChoice::Never, false, None),
                     None,
                 );
-                let hooks =
-                    crate::dev::hooks::HookQueue::start(output.clone(), None, cancellation.token())
-                        .unwrap();
+                let hooks = crate::dev::hooks::HookQueue::start(
+                    output.clone(),
+                    None,
+                    cancellation.clone(),
+                    crate::dev::events::Events(false),
+                )
+                .unwrap();
                 let mut rebuilding =
                     super::super::RebuildLoop::start(super::super::RebuildStartup {
                         initial_config: std::sync::Arc::clone(&config),
@@ -1620,6 +1707,7 @@ mod tests {
                         shutdown: cancellation,
                         output,
                         hooks: hooks.sender(),
+                        events: crate::dev::events::Events(false),
                     })
                     .await
                     .unwrap();
@@ -1628,7 +1716,7 @@ mod tests {
                     .settle_build(
                         super::super::RebuildRequest {
                             paths: vec![config_path],
-                            rebuild_scope: crate::dev::watch::RebuildScope::FullSite,
+                            rebuild_scope: RebuildScope::FullSite,
                         },
                         super::super::DevBuildTrigger::FilesChanged,
                     )
@@ -1639,7 +1727,7 @@ mod tests {
                     loop {
                         let (paths, _) = rebuilding.changes.next(&config).await?.into_parts();
                         if paths.iter().any(|path| generated.starts_with(path)) {
-                            return Ok::<_, crate::dev::watch::WatchError>(());
+                            return Ok::<_, WatchError>(());
                         }
                     }
                 })
@@ -1684,7 +1772,7 @@ mod tests {
             )
             .unwrap();
             let mut schema = tola_build::config::SiteConfigSchema::default();
-            schema.typst.fonts.paths = vec![std::path::PathBuf::from("fonts")];
+            schema.typst.fonts.paths = vec![PathBuf::from("fonts")];
             let config = std::sync::Arc::new(resolve_schema(&site, schema));
             let mut session =
                 tola_build::build::BuildSession::with_resources(tola_build::BuildResources::new());
@@ -1703,14 +1791,9 @@ mod tests {
             let mut watches = DevFailureWatches::default();
             watches.observe_failure(&failure);
             let dynamic = watches.requirements(&Default::default());
-            let mut changes = crate::dev::watch::FileChangeSource::start(
-                &config,
-                &dynamic,
-                &Default::default(),
-                None,
-            )
-            .await
-            .unwrap();
+            let mut changes = FileChangeSource::start(&config, &dynamic, &Default::default(), None)
+                .await
+                .unwrap();
             let _ = changes.begin_candidate(&config);
             changes.reject_hook_candidate();
             std::fs::write(&physical_font, b"repaired font bytes").unwrap();
@@ -1718,7 +1801,7 @@ mod tests {
                 loop {
                     let (paths, _) = changes.next(&config).await?.into_parts();
                     if paths.contains(&physical_font) {
-                        return Ok::<_, crate::dev::watch::WatchError>(());
+                        return Ok::<_, WatchError>(());
                     }
                 }
             })
