@@ -113,7 +113,10 @@ export class VirtualSources
 
   constructor(
     private readonly clientForSite: (key: string) => SiteClient | undefined,
-    private readonly clientWhenReady: (key: string) => Promise<SiteClient | undefined>,
+    private readonly clientWhenReady: (
+      key: string,
+      token: vscode.CancellationToken,
+    ) => Promise<SiteClient | undefined>,
   ) {}
 
   register(): vscode.Disposable {
@@ -259,7 +262,7 @@ export class VirtualSources
     const site = validatePackageUri(uri)
     // A document restored while its service is still starting reads from the client that comes up;
     // a site no transition selects answers nothing rather than another site's client.
-    const session = await this.clientWhenReady(site)
+    const session = await this.clientWhenReady(site, token)
     if (token.isCancellationRequested) throw new vscode.CancellationError()
     if (!session) throw new Error(unavailableSite(site))
     return this.request(session, token, (owner, requestToken) => this.source(uri, owner, requestToken))
@@ -271,7 +274,7 @@ export class VirtualSources
     action: (session: SiteClient, token: vscode.CancellationToken) => Promise<T | undefined>,
   ): Promise<T | undefined> {
     const version = document.version
-    const session = await this.clientWhenReady(validatePackageUri(document.uri))
+    const session = await this.clientWhenReady(validatePackageUri(document.uri), token)
     if (document.isClosed || document.version !== version || token.isCancellationRequested) {
       throw new vscode.CancellationError()
     }

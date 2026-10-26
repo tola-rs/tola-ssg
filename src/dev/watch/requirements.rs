@@ -1,7 +1,7 @@
 //! Watch requirements derived from observed build inputs.
 
 use super::fs::{ProducerKind, WatchRequirements};
-use tola_build::build::{InputKind, InputObservation, InputScope, ObservedInputPath};
+use tola_build::build::{InputKind, InputObservation, InputPathScope, ObservedInputPath};
 use tola_build::filesystem::path_is_within;
 
 pub(crate) fn watch_requirements_from_observation(
@@ -24,6 +24,7 @@ pub(crate) fn append_observed_paths<'a>(
     for path in paths {
         let producer = match path.input() {
             InputKind::TypstPhysicalReads => ProducerKind::TypstReads,
+            InputKind::ModuleManifests => ProducerKind::Modules,
             InputKind::TypstPackageSelection => ProducerKind::PackageResolution,
             InputKind::ContentInventory => ProducerKind::Content,
             InputKind::ConfiguredAssets => ProducerKind::ConfiguredAssets,
@@ -31,15 +32,12 @@ pub(crate) fn append_observed_paths<'a>(
             InputKind::FontInventory => ProducerKind::Fonts,
             InputKind::BeforeBuildHookOutputs => ProducerKind::Hooks,
         };
-        let paths = [path.path().to_path_buf()];
-        match (path.scope(), path.required()) {
-            (InputScope::Exact, true) => requirements.exact(producer, paths),
-            (InputScope::Exact, false) => requirements.optional_exact(producer, paths),
-            (InputScope::Children, true) => requirements.children(producer, paths),
-            (InputScope::Children, false) => requirements.optional_children(producer, paths),
-            (InputScope::Recursive, true) => requirements.recursive(producer, paths),
-            (InputScope::Recursive, false) => requirements.optional_recursive(producer, paths),
-        }
+        requirements.observe_paths(
+            producer,
+            path.scope(),
+            path.required(),
+            [path.path().to_path_buf()],
+        );
     }
 }
 
@@ -58,7 +56,12 @@ pub(crate) fn append_typst_inputs(
     let (package_files, root_files): (Vec<_>, Vec<_>) = physical_reads
         .into_iter()
         .partition(|path| package_roots.iter().any(|root| path_is_within(path, root)));
-    requirements.exact(ProducerKind::TypstReads, root_files);
+    requirements.observe_paths(
+        ProducerKind::TypstReads,
+        InputPathScope::Exact,
+        true,
+        root_files,
+    );
     requirements.package_files(package_files);
     requirements.package_checks(package_checks);
 }

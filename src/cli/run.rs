@@ -63,19 +63,47 @@ pub(crate) fn run() -> ExitCode {
     let cancellation = match Cancellation::install() {
         Ok(cancellation) => cancellation,
         Err(error) => {
-            let _ =
-                terminal.diagnostic(&diagnostic::fallback(crate::codes::command::SIGNAL, &error));
+            let fallback = tola_diagnostic::fallback(crate::codes::command::SIGNAL, &error);
+            let _ = terminal.diagnostic(&fallback);
+            let _ = events.stopped("error", &[fallback]);
             return ExitCode::FAILURE;
         }
     };
     terminal.sink().set_cancellation(cancellation.token());
-    let (output, outcome) = match prepare_output(&cli, terminal.clone()) {
+    let (output, mut outcome) = match prepare_output(&cli, terminal.clone()) {
         Ok(output) => {
             let outcome = super::dispatch::dispatch(cli, &output, &cancellation);
             (output, outcome)
         }
-        Err(error) => (CommandOutput::new(terminal, None), Err(error)),
+        Err(error) => {
+            let output = CommandOutput::new(terminal, None);
+            let outcome = super::dispatch::report_failure(
+                super::dispatch::FailureReport::of(&cli),
+                &output,
+                error,
+            );
+            (output, outcome)
+        }
     };
+    if events.0 {
+        let failure = outcome
+            .as_ref()
+            .err()
+            .filter(|error| !is_command_cancellation(error));
+        let stopped_reason = if failure.is_some() {
+            "error"
+        } else {
+            "requested"
+        };
+        let stopped_diagnostics = failure
+            .map(|error| attached_or_fallback(error, crate::codes::command::FAILED))
+            .unwrap_or_default();
+        if let Err(error) = events.stopped(stopped_reason, &stopped_diagnostics)
+            && outcome.is_ok()
+        {
+            outcome = Err(error);
+        }
+    }
     let code = match outcome {
         Ok(()) if !cancellation.was_interrupted() => 0,
         Err(error) if error.is::<StdoutClosed>() && !cancellation.was_interrupted() => 0,

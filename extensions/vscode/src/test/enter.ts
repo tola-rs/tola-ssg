@@ -62,6 +62,15 @@ export async function runEnterChecks(): Promise<void> {
       }
     }, { content: '' }))
 
+  await check('Enter replaces selected text', () =>
+    withSite(async (site) => {
+      const { document } = await openMarked(site.source, '- selected|\n')
+      const editor = await vscode.window.showTextDocument(document)
+      editor.selection = new vscode.Selection(0, 0, 0, 10)
+      await vscode.commands.executeCommand('tola.onEnter')
+      assert.equal(document.getText(), '\n\n')
+    }))
+
   await check(
     'Delayed Enter continues comments',
     () =>

@@ -1,8 +1,33 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { expect, type Page } from '@playwright/test'
+import { expect, type Page, type Route } from '@playwright/test'
+import { ONE_PIXEL_PNG } from './media.ts'
 
 const ROOT = resolve(__dirname, '../..')
+
+export const fulfillHtml = (route: Route, body: string): Promise<void> =>
+  route.fulfill({ status: 200, contentType: 'text/html', body })
+
+export const fulfillCss = (route: Route, body: string): Promise<void> =>
+  route.fulfill({ status: 200, contentType: 'text/css', body })
+
+export const fulfillSvg = (route: Route, body: string): Promise<void> =>
+  route.fulfill({ status: 200, contentType: 'image/svg+xml', body })
+
+export const fulfillPng = (route: Route): Promise<void> =>
+  route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+
+/** Serve the shared resource page: colored stylesheet, pixel image, and the given HTML. */
+export async function serveResources(route: Route, html: string): Promise<void> {
+  const url = new URL(route.request().url())
+  if (url.pathname === '/site.css') {
+    await fulfillCss(route, `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`)
+  } else if (url.pathname === '/cover.png') {
+    await fulfillPng(route)
+  } else {
+    await fulfillHtml(route, html)
+  }
+}
 
 export const RELOAD_SOURCE = readFileSync(resolve(ROOT, 'src/embed/dev/hotreload.js'), 'utf8')
   .replace('__TOLA_DEV_STATUS_CSS__', '')

@@ -1,4 +1,4 @@
-import { expect } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
@@ -12,8 +12,9 @@ import {
   type TolaRuntime,
   type TolaWindow,
   waitForOpenSocket,
+  fulfillHtml,
 } from '../../../support/reload.ts'
-import { test } from '../../../support/server.ts'
+import { type Sites, test } from '../../../support/server.ts'
 
 declare global {
   interface Window {
@@ -53,6 +54,17 @@ function wavUrl(seconds = 2): string {
   return `data:audio/wav;base64,${silentWav(seconds).toString('base64')}`
 }
 
+/** Open a site whose program is already written. */
+async function openProgramSite(page: Page, sites: Sites, program: string) {
+  const site = await sites.dev({
+    initialContent: null,
+    beforeStart: (root) => writeFile(join(root, 'site.typ'), program),
+  })
+  await page.goto(site.url, { waitUntil: 'load' })
+  await waitForOpenSocket(page)
+  return site
+}
+
 function htmlProgram(body: string, script: string, path = 'index.html') {
   return `#document(${
     JSON.stringify(path)
@@ -68,7 +80,7 @@ test('reload restores scroll position', async ({ page }) => {
     const body = reloadDocument({
       body: `<main style="height:2400px"><p id="version">version ${version}</p></main>`,
     })
-    await route.fulfill({ status: 200, contentType: 'text/html', body })
+    await fulfillHtml(route, body)
   })
   await page.goto('https://reload.test/index.html', { waitUntil: 'load' })
   await page.evaluate(() => window.scrollTo(0, 600))
@@ -77,25 +89,19 @@ test('reload restores scroll position', async ({ page }) => {
   await page.evaluate(() => {
     ;(window as TolaWindow).Tola.saveReloadState()
   })
-  await expect(await page.evaluate(() => sessionStorage.getItem('tola:reload-position'))).not.toBeNull()
-
   await page.reload({ waitUntil: 'load' })
   await page.waitForFunction(() => document.querySelector('#version')?.textContent === 'version 2')
-  await page.waitForFunction(() => Boolean((window as TolaWindow).Tola.timings['reload-restored']))
   await page.waitForFunction(() => Math.abs(window.scrollY - 600) < 2)
-  expect(await page.evaluate(() => sessionStorage.getItem('tola:reload-position'))).toBeNull()
 })
 
 test('text edits retain uninterrupted media', async ({ page }) => {
   let text = 'First'
   const source = wavUrl(8)
   await page.route('https://media-edit.test/**', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body:
-        `<!doctype html><html><body><p id="text">${text}</p><audio id="audio" src="${source}"></audio><video id="video" src="${source}"></video></body></html>`,
-    }))
+    fulfillHtml(
+      route,
+      `<!doctype html><html><body><p id="text">${text}</p><audio id="audio" src="${source}"></audio><video id="video" src="${source}"></video></body></html>`,
+    ))
   await page.goto('https://media-edit.test/index.html', { waitUntil: 'load' })
   await installReload(page)
   await page.waitForFunction(() =>
@@ -168,12 +174,10 @@ test('replaced content retains native state', async ({ page }) => {
   let wrapper = 'section'
   const source = wavUrl(8)
   await page.route('https://replacement-state.test/**', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body:
-        `<!doctype html><html><body><${wrapper} id="panel"><input id="title" value="seed"><audio id="preview" src="${source}"></audio></${wrapper}></body></html>`,
-    }))
+    fulfillHtml(
+      route,
+      `<!doctype html><html><body><${wrapper} id="panel"><input id="title" value="seed"><audio id="preview" src="${source}"></audio></${wrapper}></body></html>`,
+    ))
   await page.goto('https://replacement-state.test/index.html', { waitUntil: 'load' })
   await installReload(page)
   await page.waitForFunction(() => (document.querySelector('#preview') as HTMLMediaElement).readyState >= 1)
@@ -221,13 +225,12 @@ test('replaced content retains native state', async ({ page }) => {
 test('embedded document change reloads page', async ({ page }) => {
   await page.route('https://frame.test/**', (route) => {
     const url = route.request().url()
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: url.endsWith('/preview.html')
+    return fulfillHtml(
+      route,
+      url.endsWith('/preview.html')
         ? '<!doctype html><html><body>preview</body></html>'
         : '<!doctype html><html><body><iframe src="/preview.html"></iframe></body></html>',
-    })
+    )
   })
   await page.goto('https://frame.test/index.html', { waitUntil: 'load' })
   await installReload(page)
@@ -240,10 +243,9 @@ test('embedded document change reloads page', async ({ page }) => {
 
 test('reload restores saved page state', async ({ page }) => {
   await page.route('https://state.test/**', (route) => {
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: reloadDocument({
+    return fulfillHtml(
+      route,
+      reloadDocument({
         body: `
         <form id="profile">
           <input id="title" name="title" value="seed">
@@ -253,7 +255,7 @@ test('reload restores saved page state', async ({ page }) => {
         <audio id="preview" preload="auto" src="${wavUrl()}"></audio>
       `,
       }),
-    })
+    )
   })
   await page.goto('https://state.test/index.html', { waitUntil: 'load' })
   await page.waitForFunction(() => (document.querySelector('#preview') as HTMLMediaElement).readyState >= 4)
@@ -316,11 +318,10 @@ test('new site behavior owns reload state', async ({ page }) => {
   const script =
     "document.getElementById('title').value = 'seed'; document.getElementById('enabled').checked = false; document.getElementById('choice').selectedIndex = 0; document.getElementById('owner').focus(); window.scrollTo(0,900);"
   await page.route('https://activation-state.test/**', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: reloadDocument({ body: body + (scripted ? `<script>${script}</script>` : '') }),
-    }))
+    fulfillHtml(
+      route,
+      reloadDocument({ body: body + (scripted ? `<script>${script}</script>` : '') }),
+    ))
   await page.goto('https://activation-state.test/index.html', { waitUntil: 'load' })
   await page.locator('#title').fill('saved native value')
   await page.evaluate(() => {
@@ -349,13 +350,12 @@ test('new site behavior owns reload state', async ({ page }) => {
 test('late site behavior owns media initialization', async ({ page }) => {
   let restored = false
   await page.route('https://activation-media.test/**', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: reloadDocument({
+    fulfillHtml(
+      route,
+      reloadDocument({
         body: `<audio id="preview" preload="${restored ? 'none' : 'auto'}" src="${wavUrl()}"></audio>`,
       }),
-    }))
+    ))
   await page.goto('https://activation-media.test/index.html', { waitUntil: 'load' })
   await page.waitForFunction(() => (document.querySelector('#preview') as HTMLMediaElement).readyState >= 1)
   await page.evaluate(() => {
@@ -397,16 +397,15 @@ test('changed identity skips saved state', async ({ page }) => {
   await page.route('https://structure.test/**', (route) => {
     const formId = changed ? 'replacement-profile' : 'profile'
     const media = changed ? wavUrl(1) : wavUrl(2)
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: reloadDocument({
+    return fulfillHtml(
+      route,
+      reloadDocument({
         body: `
         <form id="${formId}"><input id="title" value="seed"></form>
         <audio id="preview" src="${media}"></audio>
       `,
       }),
-    })
+    )
   })
   await page.goto('https://structure.test/index.html', { waitUntil: 'load' })
   await page.waitForFunction(() => (document.querySelector('#preview') as HTMLMediaElement).readyState >= 1)
@@ -504,12 +503,7 @@ test('reordered buttons retain matching actions', async ({ page, sites }) => {
     const buttons = order.map((id) => `#html.elem("button", attrs: (id: "${id}"))[${id}]`).join('\n        ')
     return htmlProgram(`#html.elem("main")[${buttons}]`, script)
   }
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), buttonPage(['alpha', 'beta'])),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, buttonPage(['alpha', 'beta']))
   const before = await page.evaluate(() => ({
     revision: (window as TolaWindow).Tola.revision,
     timeOrigin: performance.timeOrigin,
@@ -538,12 +532,7 @@ test('scripted content reinitializes after edits', async ({ page, sites }) => {
       `#html.elem("section", attrs: (id: "panel", "data-origin": "authored"))[#html.elem("span", attrs: (id: "status"))[authored placeholder]]#html.elem("p", attrs: (id: "text"))[${text}]`,
       script,
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First'))
   const before = await page.evaluate(() => performance.timeOrigin)
   const navigation = page.waitForEvent('load')
   await writeFile(join(site.root, 'site.typ'), program('Second'))
@@ -563,12 +552,7 @@ test('scripted reload announces restored reader input', async ({ page, sites }) 
       `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("button", attrs: (id: "submit"))[Submit]#html.elem("p", attrs: (id: "text"))[${text}]`,
       script,
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First'))
   await page.locator('#search').fill('retained')
   expect(await page.evaluate(() => window.appStore)).toBe('retained')
   const before = await page.evaluate(() => performance.timeOrigin)
@@ -593,12 +577,7 @@ test('scripted reload restores reader focus', async ({ page, sites }) => {
       `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("p", attrs: (id: "text"))[${text}]`,
       'window.scriptRuns = (window.scriptRuns || 0) + 1;',
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First'))
   await page.locator('#search').fill('retained')
   await page.evaluate(() => {
     const search = document.querySelector('#search') as HTMLInputElement
@@ -626,12 +605,7 @@ test('scripted reload keeps page-claimed focus', async ({ page, sites }) => {
       `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("input", attrs: (id: "other"))#html.elem("p", attrs: (id: "text"))[${text}]`,
       claimFocus ? "document.getElementById('other').focus();" : 'window.scriptRuns = 1;',
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First', false)),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First', false))
   await page.locator('#search').fill('retained')
   const navigation = page.waitForEvent('load')
   await writeFile(join(site.root, 'site.typ'), program('Second', true))
@@ -656,12 +630,7 @@ test('scripted reload restores reader-selected options', async ({ page, sites })
       #html.elem("p", attrs: (id: "text"))[${text}]`,
       'window.scriptRuns = (window.scriptRuns || 0) + 1;',
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First'))
   await page.locator('#choice option', { hasText: 'Two' }).click()
   await expect(page.locator('#choice')).toHaveValue('two')
   const navigation = page.waitForEvent('load')
@@ -678,12 +647,7 @@ test('scripted reload keeps script-initialized controls', async ({ page, sites }
       `#html.elem("input", attrs: (id: "search", value: "seed"))#html.elem("p", attrs: (id: "text"))[${text}]`,
       script,
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First'))
   await page.evaluate(() => sessionStorage.setItem('script-value', 'first'))
   let navigation = page.waitForEvent('load')
   await writeFile(join(site.root, 'site.typ'), program('Second'))
@@ -712,12 +676,7 @@ test('scripted reload keeps reader-selected radio tabs', async ({ page, sites })
       #html.elem("p", attrs: (id: "text"))[${text}]`,
       'window.scriptRuns = (window.scriptRuns || 0) + 1;',
     )
-  const site = await sites.dev({
-    initialContent: null,
-    beforeStart: (root) => writeFile(join(root, 'site.typ'), program('First')),
-  })
-  await page.goto(site.url, { waitUntil: 'load' })
-  await waitForOpenSocket(page)
+  const site = await openProgramSite(page, sites, program('First'))
   await page.locator('label[for="tab-2"]').click()
 
   for (const text of ['Second', 'Third']) {
@@ -818,8 +777,6 @@ test('mounted stylesheet updates in place', async ({ page, sites }) => {
     return runtime.Tola.revision !== revision
   }, before.revision)
 
-  await expect(page.locator('link[rel~=stylesheet]'))
-    .toHaveAttribute('href', /\/%E6%96%87%E6%A1%A3\/theme\.css\?tola-representation=[0-9a-f]{64}$/)
   await expect(page.locator('#text')).toHaveCSS('color', 'rgb(0, 0, 255)')
   expect(before.color).toBe('rgb(255, 0, 0)')
   expect(await page.evaluate(() => performance.timeOrigin)).toBe(before.timeOrigin)

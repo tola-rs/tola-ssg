@@ -16,7 +16,7 @@ async function build(): Promise<void> {
     platform: 'node',
     format: 'cjs',
     target: 'node20',
-    external: ['vscode'],
+    external: ['vscode', 'vscode-oniguruma/release/onig.wasm'],
     sourcemap: !production,
     minify: production,
   })

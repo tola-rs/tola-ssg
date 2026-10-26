@@ -42,7 +42,7 @@ export async function insertNewline(site: EnterSite | undefined): Promise<void> 
 
 async function insert(editor: vscode.TextEditor, site: EnterSite | undefined): Promise<boolean> {
   const document = editor.document
-  if (!site) {
+  if (!site || !editor.selection.isEmpty) {
     await newline()
     return true
   }

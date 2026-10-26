@@ -1,5 +1,7 @@
 import { expect, type Page, test } from '@playwright/test'
-import { installReload, modifiedOutput, runtimeState, sendNextRevision } from '../../../support/reload.ts'
+import { installReload, modifiedOutput, runtimeState, sendNextRevision   fulfillCss,
+  fulfillHtml,
+} from '../../../support/reload.ts'
 
 declare global {
   interface Window {
@@ -82,23 +84,20 @@ if (mode !== 'none') window.addEventListener('tola:before-update', event => {
       })
     }
     if (url.pathname === '/theme.css') {
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/css',
-        body: url.searchParams.has('tola-representation')
+      return fulfillCss(
+        route,
+        url.searchParams.has('tola-representation')
           ? '.blue { background-color: rgb(0, 0, 255); }'
           : '.red { background-color: rgb(255, 0, 0); }',
-      })
+      )
     }
     const sourceUpdated = updatedClasses && request.headers()['x-tola-revision'] !== '0'.repeat(64)
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body:
-        `<!doctype html><html><head><link rel="stylesheet" href="/theme.css"></head><body><section id="panel" class="${
+    return fulfillHtml(
+      route,
+      `<!doctype html><html><head><link rel="stylesheet" href="/theme.css"></head><body><section id="panel" class="${
           sourceUpdated ? 'blue' : 'red'
         }"><input id="query" value="seed"><button id="search">Search</button><p id="result"></p></section><script>${script}</script></body></html>`,
-    })
+    )
   })
   await page.goto('https://consumer-updates.test/index.html', { waitUntil: 'load' })
   await page.waitForFunction(() => window.indexReady === true)

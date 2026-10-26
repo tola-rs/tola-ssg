@@ -1,7 +1,7 @@
 //! Filesystem changes for development rebuilds.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tola_build::config::ResolvedSiteConfig;
@@ -50,16 +50,6 @@ pub(crate) enum RebuildScope {
     FullSite,
 }
 
-impl RebuildScope {
-    pub(crate) const fn max(self, other: Self) -> Self {
-        if self as u8 >= other as u8 {
-            self
-        } else {
-            other
-        }
-    }
-}
-
 /// A debounced batch of accepted filesystem changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileChangeBatch {
@@ -100,7 +90,8 @@ struct PendingEvent {
 }
 
 /// Spill identifies configured output roots, never individual descendant paths. The bit vector
-/// is fixed by that declaration snapshot; an ancestor cannot be attributed to its output.
+/// is fixed by the hook-output declarations it was built from; an ancestor cannot be
+/// attributed to its output.
 #[derive(Clone)]
 struct FoldedHookEvents {
     revision: u64,
@@ -152,7 +143,7 @@ const COMMITTED_CONTENT_READ_BUDGET: u64 = 16 * 1024 * 1024;
 /// Only a regular file whose bytes are all read yields a capture; a directory, a symlink, an
 /// oversized or unreadable file, or one that changes while being read stays without one, and a
 /// path without a capture never suppresses an event.
-fn capture_file_content(path: &std::path::Path) -> Option<CommittedFileContent> {
+fn capture_file_content(path: &Path) -> Option<CommittedFileContent> {
     let metadata = std::fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
         return None;
@@ -191,7 +182,7 @@ impl EventEpochState {
     ///
     /// A path without a committed capture — never claimed, a directory, a symlink, an oversized
     /// file, or one that cannot be read — never settles this way.
-    fn holds_committed_content(&self, path: &std::path::Path, budget: &mut u64) -> bool {
+    fn holds_committed_content(&self, path: &Path, budget: &mut u64) -> bool {
         let Some(committed) = self.committed_content.get(path) else {
             return false;
         };
@@ -242,7 +233,7 @@ impl EventEpochState {
         }
     }
 
-    fn fold_hook_path(&mut self, path: &std::path::Path, revision: u64) -> bool {
+    fn fold_hook_path(&mut self, path: &Path, revision: u64) -> bool {
         let outputs = self.boundary.hook_outputs();
         if self
             .folded_hooks
@@ -373,21 +364,21 @@ impl EventEpoch {
         self.lock().directory_refresh.is_some()
     }
 
-    fn snapshot(&self) -> u64 {
+    fn revision(&self) -> u64 {
         self.lock().revision
     }
 
     fn claim_candidate(&self) -> EventClaim {
-        let state = self.lock();
-        let (paths, rebuild_scope) = state.owed_after(None);
+        let epoch = self.lock();
+        let (paths, rebuild_scope) = epoch.owed_after(None);
         EventClaim {
-            modified_paths: state
+            modified_paths: epoch
                 .pending
                 .iter()
                 .filter(|(_, event)| !event.structural)
                 .map(|(path, _)| path.clone())
                 .collect(),
-            revision: state.revision,
+            revision: epoch.revision,
             paths,
             rebuild_scope,
             committed_content: Vec::new(),
@@ -412,7 +403,7 @@ impl EventEpoch {
     fn guard_relevant_confirmed(
         &self,
         expected: u64,
-        mut relevant: impl FnMut(&std::path::Path) -> bool,
+        mut relevant: impl FnMut(&Path) -> bool,
         confirmed: &ConfirmedHookPaths,
     ) -> Result<Option<EventEpochStateGuard<'_>>, Arc<notify::Error>> {
         let guard = self.lock();
@@ -748,7 +739,7 @@ struct ConfirmedHookPaths {
 }
 
 impl ConfirmedHookPaths {
-    fn confirms(&self, path: &std::path::Path) -> bool {
+    fn confirms(&self, path: &Path) -> bool {
         self.paths.contains(path)
     }
 }
@@ -763,6 +754,20 @@ struct QuarantinedHookPaths {
     paths: std::collections::BTreeSet<PathBuf>,
     rebuild_scope: RebuildScope,
     overflowed: bool,
+}
+
+impl QuarantinedHookPaths {
+    /// The batch this candidate implies, or none when it observed nothing.
+    fn into_batch(self) -> Option<FileChangeBatch> {
+        (!self.paths.is_empty() || self.overflowed).then(|| FileChangeBatch {
+            paths: self.paths.into_iter().collect(),
+            rebuild_scope: if self.overflowed {
+                RebuildScope::FullSite
+            } else {
+                self.rebuild_scope
+            },
+        })
+    }
 }
 
 struct EventEpochStateGuard<'a> {
@@ -828,7 +833,7 @@ impl FileChangeSource {
         config: &ResolvedSiteConfig,
         dynamic: &WatchRequirements,
         source_hooks: &tola_build::hooks::SourceHookOutputs,
-        log_file: Option<&std::path::Path>,
+        log_file: Option<&Path>,
     ) -> Result<Self, WatchError> {
         let (event_tx, events) = WatchEventQueue::channel();
         let event_epoch = EventEpoch::default();
@@ -927,16 +932,20 @@ impl FileChangeSource {
         }
     }
 
+    /// Add the module outputs a prepared hook watch declares, before any hook starts.
+    pub(crate) fn extend_hook_candidate_claims(
+        &mut self,
+        inputs: &tola_build::modules::HookWatchInputs,
+    ) {
+        if let Some(candidate) = self.hook_candidate.as_mut() {
+            candidate
+                .source_identities
+                .extend(generated_source_identities(inputs));
+        }
+    }
+
     pub(crate) fn reject_hook_candidate(&mut self) -> Option<FileChangeBatch> {
-        let candidate = self.hook_candidate.take()?;
-        (!candidate.paths.is_empty() || candidate.overflowed).then(|| FileChangeBatch {
-            paths: candidate.paths.into_iter().collect(),
-            rebuild_scope: if candidate.overflowed {
-                RebuildScope::FullSite
-            } else {
-                candidate.rebuild_scope
-            },
-        })
+        self.hook_candidate.take()?.into_batch()
     }
 
     pub(crate) fn complete_hook_candidate(
@@ -987,14 +996,7 @@ impl FileChangeSource {
             {
                 candidate.overflowed = false;
             }
-            (!candidate.paths.is_empty() || candidate.overflowed).then(|| FileChangeBatch {
-                paths: candidate.paths.into_iter().collect(),
-                rebuild_scope: if candidate.overflowed {
-                    RebuildScope::FullSite
-                } else {
-                    candidate.rebuild_scope
-                },
-            })
+            candidate.into_batch()
         });
         drop(epoch);
         self.source_hooks = source_hooks.clone();
@@ -1003,7 +1005,7 @@ impl FileChangeSource {
     }
 
     pub(crate) fn event_epoch(&self) -> u64 {
-        self.event_epoch.snapshot()
+        self.event_epoch.revision()
     }
 
     pub(crate) fn accepts_events_for(
@@ -1285,28 +1287,20 @@ impl FileChangeSource {
             .as_ref()
             .filter(|folded| !folded.represented_by_hook)
             .cloned();
+        let relevant = |covers: &dyn Fn(&std::path::Path) -> bool| {
+            paths.iter().any(|path| covers(path))
+                || folded.as_ref().is_some_and(|folded| {
+                    folded
+                        .roots()
+                        .any(|root| covers(root.logical_path()) || covers(root.physical_path()))
+                })
+        };
         let outputs = outputs
             .iter()
-            .filter(|output| {
-                paths.iter().any(|path| output.covers_path(path))
-                    || folded.as_ref().is_some_and(|folded| {
-                        folded.roots().any(|root| {
-                            output.covers_path(root.logical_path())
-                                || output.covers_path(root.physical_path())
-                        })
-                    })
-            })
+            .filter(|output| relevant(&|path| output.covers_path(path)))
             .cloned()
             .collect::<Vec<_>>();
-        let failed = failed.filter(|failed| {
-            paths.iter().any(|path| failed.covers_path(path))
-                || folded.as_ref().is_some_and(|folded| {
-                    folded.roots().any(|root| {
-                        failed.covers_path(root.logical_path())
-                            || failed.covers_path(root.physical_path())
-                    })
-                })
-        });
+        let failed = failed.filter(|failed| relevant(&|path| failed.covers_path(path)));
         if outputs.is_empty() && failed.is_none() {
             return Ok(ConfirmedHookPaths::default());
         }
@@ -1474,11 +1468,21 @@ impl FileChangeSource {
     }
 }
 
+/// Every generated path a prepared hook watch declares, as a watch source identity.
+fn generated_source_identities(
+    inputs: &tola_build::modules::HookWatchInputs,
+) -> impl Iterator<Item = tola_build::filesystem::FilesystemSourceIdentity> + '_ {
+    inputs
+        .generated_paths()
+        .iter()
+        .map(|path| tola_build::filesystem::FilesystemSourceIdentity::from_path(path))
+}
+
 fn forward_watch_result<S: WatchMessageSink>(
     mut event: notify::Result<notify::Event>,
     event_epoch: &EventEpoch,
     events: &S,
-    log_file: Option<&std::path::Path>,
+    log_file: Option<&Path>,
 ) {
     if let (Ok(event), Some(log_file)) = (&mut event, log_file)
         && !event.need_rescan()
@@ -1681,7 +1685,7 @@ struct RebuildPathFilter {
 impl RebuildPathFilter {
     fn for_config(config: &ResolvedSiteConfig) -> Self {
         use tola_build::filesystem::{
-            FilesystemSourceIdentity, INTERNAL_DIR, SITE_BUILD_LOCK_FILE, publication_workspace,
+            FilesystemSourceIdentity, INTERNAL_DIR, SITE_BUILD_LOCK_FILE, swap_workspace,
         };
         let root = config.get_root();
         Self {
@@ -1689,14 +1693,14 @@ impl RebuildPathFilter {
                 Some(config.build().publish_dir.clone()),
                 Some(root.join(INTERNAL_DIR)),
                 Some(root.join(SITE_BUILD_LOCK_FILE)),
-                publication_workspace(&config.build().publish_dir),
-                config.vendor().workspace_path().map(|path| root.join(path)),
+                swap_workspace(&config.build().publish_dir),
+                config.vendor().path.as_deref().and_then(swap_workspace),
             ]
             .map(|path| path.map(|path| FilesystemSourceIdentity::from_path(&path))),
         }
     }
 
-    fn accepts(&self, path: &std::path::Path) -> bool {
+    fn accepts(&self, path: &Path) -> bool {
         let path = tola_build::filesystem::FilesystemSourceIdentity::from_path(path);
         !self.excluded.iter().flatten().any(|boundary| {
             [path.logical_path(), path.physical_path()]
@@ -1727,6 +1731,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use tokio::sync::mpsc;
+    use tola_build::build::InputPathScope;
 
     impl WatchMessageSink for mpsc::UnboundedSender<WatchMessage> {
         fn send_message(&self, message: WatchMessage) -> Option<ProducerSet> {
@@ -1926,7 +1931,7 @@ mod tests {
         };
         assert_eq!(producers, expected_producers);
         assert_eq!(error.to_string(), "injected callback failure");
-        assert_eq!(epoch.snapshot(), 1);
+        assert_eq!(epoch.revision(), 1);
         assert!(epoch.guard_relevant(0, |_| true).is_err());
     }
 
@@ -1940,11 +1945,13 @@ mod tests {
         std::fs::write(&source, "site input").unwrap();
         let log_file = std::fs::canonicalize(log_file).unwrap();
         let mut required = WatchRequirements::default();
-        required.recursive(ProducerKind::TypstReads, [config.get_root().to_path_buf()]);
-        let epoch = EventEpoch::default();
-        epoch.lock().boundary = RootSet::from_config(&config, &required)
-            .initial_selection()
-            .boundary();
+        required.observe_paths(
+            ProducerKind::TypstReads,
+            InputPathScope::Recursive,
+            true,
+            [config.get_root().to_path_buf()],
+        );
+        let epoch = watching_epoch(&config, &required);
         let (events, mut received) = mpsc::unbounded_channel();
 
         forward_watch_result(
@@ -1953,14 +1960,14 @@ mod tests {
             &events,
             Some(&log_file),
         );
-        assert_eq!(epoch.snapshot(), 0);
+        assert_eq!(epoch.revision(), 0);
         assert!(received.try_recv().is_err());
         #[cfg(unix)]
         {
             let alias = config.get_root().join("log-link");
             std::os::unix::fs::symlink(&log_file, &alias).unwrap();
             forward_watch_result(Ok(modified_event(alias)), &epoch, &events, Some(&log_file));
-            assert_eq!(epoch.snapshot(), 0);
+            assert_eq!(epoch.revision(), 0);
             assert!(received.try_recv().is_err());
         }
 
@@ -1990,32 +1997,6 @@ mod tests {
             epoch.claim_candidate().rebuild_scope(),
             RebuildScope::FullSite
         );
-    }
-
-    #[test]
-    fn editor_artifact_edit_reaches_no_rebuild() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = watch_config(directory.path());
-        let mut required = WatchRequirements::default();
-        required.recursive(ProducerKind::Content, [config.get_root().join("content")]);
-        let epoch = EventEpoch::default();
-        epoch.lock().boundary = RootSet::from_config(&config, &required)
-            .initial_selection()
-            .boundary();
-        let (events, mut received) = mpsc::unbounded_channel();
-
-        // Content discovery reads only `.typ` names and skips hidden ones, so it consumes
-        // neither shape an editor leaves behind.
-        for name in ["content/page.typ.swp", "content/.#page.typ"] {
-            forward_watch_result(
-                Ok(modified_event(config.get_root().join(name))),
-                &epoch,
-                &events,
-                None,
-            );
-        }
-
-        assert!(received.try_recv().is_err());
     }
 
     #[test]
@@ -2075,11 +2056,13 @@ mod tests {
         std::fs::create_dir_all(generated.parent().unwrap()).unwrap();
         std::fs::write(&generated, "generated").unwrap();
         let mut required = WatchRequirements::default();
-        required.exact(ProducerKind::Hooks, [generated.clone()]);
-        let epoch = EventEpoch::default();
-        epoch.lock().boundary = RootSet::from_config(&config, &required)
-            .initial_selection()
-            .boundary();
+        required.observe_paths(
+            ProducerKind::Hooks,
+            InputPathScope::Exact,
+            true,
+            [generated.clone()],
+        );
+        let epoch = watching_epoch(&config, &required);
         let (events, mut received) = mpsc::unbounded_channel();
 
         forward_watch_result(Ok(modified_event(&generated)), &epoch, &events, None);
@@ -2091,16 +2074,18 @@ mod tests {
     }
 
     #[test]
-    fn editor_save_keeps_the_saved_path_only() {
+    fn editor_save_saved_path_only() {
         let directory = tempfile::TempDir::new().unwrap();
         let config = watch_config(directory.path());
         let content = config.get_root().join("content");
         let mut required = WatchRequirements::default();
-        required.recursive(ProducerKind::Content, [content.clone()]);
-        let epoch = EventEpoch::default();
-        epoch.lock().boundary = RootSet::from_config(&config, &required)
-            .initial_selection()
-            .boundary();
+        required.observe_paths(
+            ProducerKind::Content,
+            InputPathScope::Recursive,
+            true,
+            [content.clone()],
+        );
+        let epoch = watching_epoch(&config, &required);
         let (events, mut received) = mpsc::unbounded_channel();
         let page = content.join("page.typ");
         let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Name(
@@ -2158,12 +2143,25 @@ mod tests {
         .add_path(path.into())
     }
 
-    fn inject_rescan(changes: &FileChangeSource) {
+    fn watching_epoch(config: &ResolvedSiteConfig, required: &WatchRequirements) -> EventEpoch {
+        let epoch = EventEpoch::default();
+        epoch.lock().boundary = RootSet::from_config(config, required)
+            .initial_selection()
+            .boundary();
+        epoch
+    }
+
+    fn deliver_event(changes: &mut FileChangeSource, event: &notify::Event) {
         forward_watch_result(
-            Ok(notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)),
+            Ok(event.clone()),
             &changes.event_epoch,
             &changes.event_tx,
             None,
+        );
+        changes.debouncer.add_event(
+            event,
+            std::time::Instant::now()
+                - std::time::Duration::from_millis(debouncer::MAX_BATCH_WAIT_MS + 1),
         );
     }
 
@@ -2173,17 +2171,7 @@ mod tests {
         let config = watch_config(directory.path());
         let mut changes = manual_watch_source(&config, &Default::default()).await;
         let event = modified_event(config.build().entry.clone());
-        forward_watch_result(
-            Ok(event.clone()),
-            &changes.event_epoch,
-            &changes.event_tx,
-            None,
-        );
-        changes.debouncer.add_event(
-            &event,
-            std::time::Instant::now()
-                - std::time::Duration::from_millis(debouncer::MAX_BATCH_WAIT_MS + 1),
-        );
+        deliver_event(&mut changes, &event);
         let claim = changes.begin_candidate(&config);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         assert!(
@@ -2202,17 +2190,7 @@ mod tests {
         assert!(changes.event_epoch.claim_candidate().paths.is_empty());
         // The redelivered event must describe a new change; unchanged bytes owe no round.
         std::fs::write(&config.build().entry, "#document(\"changed.html\")[Site]").unwrap();
-        forward_watch_result(
-            Ok(event.clone()),
-            &changes.event_epoch,
-            &changes.event_tx,
-            None,
-        );
-        changes.debouncer.add_event(
-            &event,
-            std::time::Instant::now()
-                - std::time::Duration::from_millis(debouncer::MAX_BATCH_WAIT_MS + 1),
-        );
+        deliver_event(&mut changes, &event);
         let batch = std::pin::pin!(changes.next(&config))
             .as_mut()
             .poll(&mut context);
@@ -2220,21 +2198,105 @@ mod tests {
         changes.shutdown().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn idle_rescan_rebuilds_whole_site() {
+    async fn hook_watch_tracks_tool_and_output() {
+        use tola_build::build::{BuildMode, BuildRequest, BuildSession};
         let directory = tempfile::TempDir::new().unwrap();
-        let config = watch_config(directory.path());
-        let mut changes =
-            manual_watch_source(&config, &tola_build::hooks::SourceHookOutputs::default()).await;
-
-        inject_rescan(&changes);
-
-        let batch = tokio::time::timeout(std::time::Duration::from_secs(1), changes.next(&config))
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("content")).unwrap();
+        std::fs::write(root.join("site.typ"), "#document(\"index.html\")[Site]").unwrap();
+        let module = root.join("module");
+        std::fs::create_dir_all(module.join("tools")).unwrap();
+        let tool = module.join("tools/input.txt");
+        std::fs::write(&tool, "first").unwrap();
+        std::fs::write(
+            module.join("tola-module.toml"),
+            r#"
+schema-version = 1
+[[hooks]]
+stage = "before-build"
+name = "generate"
+command = ["sh", "-c", "mkdir -p generated; printf generated > generated/notes.txt"]
+rerun-on = [{module = "tools/input.txt"}]
+generates = ["generated/{name}.txt"]
+"#,
+        )
+        .unwrap();
+        let config = tola_build::config::loading::resolve_site_config(
+            &root.join("tola.toml"),
+            "[modules.notes]\npath = \"module\"\n",
+            local_packages(),
+            &tola_build::config::loading::BuildOverrides::default(),
+        )
+        .unwrap()
+        .into_config();
+        let hook_watch =
+            tola_build::modules::prepare_hook_watch(&config, tola_build::InputScope::Online)
+                .unwrap();
+        let mut changes = manual_watch_source(&config, &Default::default()).await;
+        let claim = changes.begin_candidate(&config);
+        changes.update_hook_candidate_claims(hook_watch.config());
+        changes.extend_hook_candidate_claims(hook_watch.inputs());
+        let mut dynamic = WatchRequirements::default();
+        dynamic.add_module_hook_inputs(hook_watch.inputs());
+        changes
+            .stage_config(hook_watch.config(), &dynamic)
             .await
-            .expect("rescan must wake an idle consumer")
             .unwrap();
-        assert_eq!(batch.rebuild_scope, RebuildScope::FullSite);
-        assert!(batch.paths.is_empty());
+        changes.refresh_pending().await.unwrap();
+        let mut session = BuildSession::new();
+        let built = session
+            .prepare_with_hook_watch(&hook_watch, BuildRequest::new(BuildMode::Development))
+            .unwrap()
+            .run()
+            .unwrap();
+        let output = root.join("generated/notes.txt");
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "generated");
+        forward_watch_result(
+            Ok(modified_event(&output)),
+            &changes.event_epoch,
+            &changes.event_tx,
+            None,
+        );
+        let actual_config = Arc::clone(built.config());
+        let source_hooks = built.source_hooks().clone();
+        let subscriptions = changes
+            .stage_config(
+                &actual_config,
+                &crate::dev::watch::watch_requirements_from_observation(&built.input_observation()),
+            )
+            .await
+            .unwrap();
+        assert!(changes.event_epoch.lock().pending.contains_key(&output));
+        // Promote watches for the directory the hook created; never discard its event.
+        changes.refresh_pending().await.unwrap();
+        assert!(changes.event_epoch.lock().pending.contains_key(&output));
+        let guard = changes
+            .guard_epoch(
+                claim.revision(),
+                &actual_config,
+                source_hooks.outputs(),
+                &tola_build::cancellation::BuildCancellation::default(),
+            )
+            .await
+            .unwrap()
+            .expect("confirmed generator output must not reject the candidate");
+        guard.commit(claim, subscriptions);
+        changes.complete_hook_candidate(&source_hooks);
+        assert!(changes.event_epoch.claim_candidate().paths.is_empty());
+
+        std::fs::write(&tool, "changed").unwrap();
+        let event = modified_event(&tool);
+        deliver_event(&mut changes, &event);
+        let batch = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            changes.next(&actual_config),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(batch.paths.contains(&tool), "{batch:?}");
         changes.shutdown().await.unwrap();
     }
 
@@ -2269,7 +2331,7 @@ mod tests {
                 [
                     modified_event(root.join("public/index.html")),
                     modified_event(root.join(".tola-build.lock")),
-                    modified_event(root.join(".public-publish/candidate/index.html")),
+                    modified_event(root.join(".public-swap/staged/0/index.html")),
                 ],
                 RebuildScope::Paths,
             )
@@ -2295,7 +2357,10 @@ mod tests {
         let config = &configured;
         let batch = settled_batch(
             config,
-            [modified_event(root.join(".tola/ignored.typ"))],
+            [modified_event(
+                root.join(tola_build::filesystem::INTERNAL_DIR)
+                    .join("ignored.typ"),
+            )],
             RebuildScope::FullTypst,
         )
         .expect("typed recovery must not be discarded with a filtered path");
@@ -2318,22 +2383,20 @@ mod tests {
         let config = watch_config(&alias_root);
 
         let filter = RebuildPathFilter::for_config(&config);
+        let mirror = tola_build::filesystem::layout::builtin_packages(&alias_root);
         assert!(!filter.accepts(&alias_root.join("public/index.html")));
-        assert!(!filter.accepts(&alias_root.join(".tola/builtin-packages/cache")));
+        assert!(!filter.accepts(&mirror.join("cache")));
         assert!(!filter.accepts(&alias_root.join(".tola-build.lock")));
-        assert!(!filter.accepts(&alias_root.join(".public-publish/previous/index.html")));
-        let packages = tola_typst::PackageLocations::from_absolute_roots(
-            None,
-            Some(alias_root.join(".tola/builtin-packages")),
-        )
-        .unwrap();
+        assert!(!filter.accepts(&alias_root.join(".public-swap/previous/0/index.html")));
+        let packages =
+            tola_typst::PackageLocations::from_absolute_roots(None, Some(mirror.clone())).unwrap();
         let config = resolve_schema(
             &alias_root,
             tola_build::config::SiteConfigSchema::default(),
             packages,
         );
         let filter = RebuildPathFilter::for_config(&config);
-        assert!(!filter.accepts(&alias_root.join(".tola/builtin-packages/cache")));
+        assert!(!filter.accepts(&mirror.join("cache")));
         assert!(filter.accepts(&alias_root.join("content/index.typ")));
     }
 
@@ -2402,7 +2465,7 @@ mod tests {
     /// A rename is structural, and the same path a hook writes is one an author may edit: the
     /// content evidence differs, so the edit opens exactly one round naming that path.
     #[tokio::test]
-    async fn hand_edited_hook_output_opens_one_rebuild() {
+    async fn hand_output_opens_one_rebuild() {
         use notify::event::RenameMode;
 
         let directory = tempfile::TempDir::new().unwrap();

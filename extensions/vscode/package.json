@@ -263,6 +263,10 @@
         "title": "Tola: Open Page for Current Document"
       },
       {
+        "command": "tola.openPreviewFragment",
+        "title": "Tola: Open Published Fragment for Current Document"
+      },
+      {
         "command": "tola.copyRoute",
         "title": "Tola: Copy Route"
       },
@@ -309,6 +313,20 @@
           "default": "tola",
           "scope": "resource",
           "description": "Tola executable. Relative paths use the workspace folder."
+        },
+        "tola.checkMode": {
+          "type": "string",
+          "enum": [
+            "onType",
+            "onSave"
+          ],
+          "enumDescriptions": [
+            "Check source changes after typing pauses.",
+            "Check source changes when a document is saved."
+          ],
+          "default": "onType",
+          "scope": "resource",
+          "description": "When Tola checks source changes for diagnostics and page routes. Changes take effect without restarting language services."
         },
         "tola.onEnter": {
           "type": "boolean",
@@ -383,6 +401,11 @@
           "group": "navigation"
         },
         {
+          "command": "tola.openPreviewFragment",
+          "when": "resourceLangId == typst && editorTextFocus",
+          "group": "navigation"
+        },
+        {
           "command": "tola.build",
           "when": "resourceLangId == typst && editorTextFocus",
           "group": "navigation"
@@ -406,6 +429,10 @@
       "commandPalette": [
         {
           "command": "tola.openPage",
+          "when": "editorLangId == typst"
+        },
+        {
+          "command": "tola.openPreviewFragment",
           "when": "editorLangId == typst"
         },
         {

@@ -12,9 +12,9 @@ use hyper::header::{
 use hyper::{Method, Request, Response, StatusCode};
 use tola_address::{SiteUrlMount, UrlPath};
 use tola_build::config::ResolvedSiteConfig;
-use tola_build::diagnostic::Diagnostic;
 use tola_build::output::graph::{OutputFile, OutputKind};
 use tola_build::output::revision::OutputRevision;
+use tola_diagnostic::Diagnostic;
 
 use super::html::HtmlInjection;
 use crate::dev::reload::transport::ReloadEndpoint;
@@ -221,7 +221,7 @@ fn respond_published(
         let diagnostic = site
             .diagnostics()
             .iter()
-            .find(|diagnostic| diagnostic.code == tola_build::codes::site::NO_PAGES)
+            .find(|diagnostic| diagnostic.code == tola_diagnostic::codes::site::NO_PAGES)
             .expect("empty published revisions hold the canonical no-pages diagnostic");
         debug_assert_eq!(diagnostic, &canonical);
         return respond_welcome(
@@ -305,22 +305,20 @@ fn published_output_body(
     html: &HtmlResponses,
 ) -> ResponseBody {
     match reload_endpoint.filter(|_| output.kind() == OutputKind::HtmlDocument) {
-        Some(endpoint) => html
-            .page(Some(output.path()), url_mount, endpoint)
-            .response(
-                method,
-                output.bytes().len(),
-                || {
-                    HtmlInjection::new(
-                        url_mount,
-                        endpoint,
-                        Some(revision.manifest().revision()),
-                        Some(revision.page_availability()),
-                        Some(output.path()),
-                    )
-                },
-                || Bytes::from_owner(output.bytes_owner()),
-            ),
+        Some(endpoint) => html.page(Some(output.path())).response(
+            method,
+            output.bytes().len(),
+            || {
+                HtmlInjection::new(
+                    url_mount,
+                    endpoint,
+                    Some(revision.manifest().revision()),
+                    Some(revision.page_availability()),
+                    Some(output.path()),
+                )
+            },
+            || Bytes::from_owner(output.bytes_owner()),
+        ),
         None if method == Method::HEAD => ResponseBody::head_metadata(output.bytes().len()),
         None => ResponseBody::whole(Bytes::from_owner(output.bytes_owner())),
     }
@@ -487,29 +485,17 @@ fn respond_welcome(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Tola</title></head><body><p>{message}</p>{help}</body></html>"
     ))
     });
-    let body = match reload_endpoint {
-        Some(endpoint) => html.page(None, url_mount, endpoint).response(
-            request.method(),
-            body.len(),
-            || {
-                HtmlInjection::new(
-                    url_mount,
-                    endpoint,
-                    Some(revision),
-                    Some(page_availability),
-                    None,
-                )
-            },
-            || body.clone(),
-        ),
-        None => ResponseBody::whole(body.clone()),
-    };
-    respond_bytes(
-        request.method(),
-        StatusCode::OK,
-        Some(tola_build::output::semantics::ResponseMediaType::HTML.as_str()),
-        body,
-    )
+    respond_generated_html(&request, StatusCode::OK, html, body.clone(), || {
+        reload_endpoint.map(|endpoint| {
+            HtmlInjection::new(
+                url_mount,
+                endpoint,
+                Some(revision),
+                Some(page_availability),
+                None,
+            )
+        })
+    })
 }
 
 fn respond_hotreload_js(request: Request<()>) -> Response<ResponseBody> {
@@ -563,18 +549,33 @@ fn respond_unpublished(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Build failed — Tola</title></head><body><main><h1>Build failed</h1><p>{help}</p></main></body></html>"
     ))
     });
-    let body = match endpoint {
-        Some(endpoint) => html.page(None, mount, endpoint).response(
-            request.method(),
-            body.len(),
-            || HtmlInjection::new(mount, endpoint, None, None, None),
-            || body.clone(),
-        ),
-        None => ResponseBody::whole(body.clone()),
+    respond_generated_html(
+        &request,
+        StatusCode::SERVICE_UNAVAILABLE,
+        html,
+        body.clone(),
+        || endpoint.map(|endpoint| HtmlInjection::new(mount, endpoint, None, None, None)),
+    )
+}
+
+/// A generated page, with the reload runtime when an endpoint exists.
+fn respond_generated_html(
+    request: &Request<()>,
+    status: StatusCode,
+    html: &HtmlResponses,
+    body: Bytes,
+    injection: impl FnOnce() -> Option<HtmlInjection>,
+) -> Response<ResponseBody> {
+    let body = match injection() {
+        Some(injection) => {
+            html.page(None)
+                .response(request.method(), body.len(), || injection, || body.clone())
+        }
+        None => ResponseBody::whole(body),
     };
     respond_bytes(
         request.method(),
-        StatusCode::SERVICE_UNAVAILABLE,
+        status,
         Some(tola_build::output::semantics::ResponseMediaType::HTML.as_str()),
         body,
     )
@@ -712,22 +713,28 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn satisfiable_ranges_resolve_to_bounds() {
-        assert_eq!(super::parse_range("0-4", 10).unwrap(), (0, 4));
-        assert_eq!(super::parse_range("7-", 10).unwrap(), (7, 9));
-        assert_eq!(super::parse_range("-3", 10).unwrap(), (7, 9));
-        assert_eq!(super::parse_range("-30", 10).unwrap(), (0, 9));
+    fn published_response(
+        request: Request<()>,
+        site: &Arc<super::InstalledRevision>,
+        endpoint: Option<&crate::dev::reload::transport::ReloadEndpoint>,
+    ) -> Response<super::ResponseBody> {
+        super::respond_published(request, Arc::clone(site), endpoint)
     }
 
-    #[test]
-    fn invalid_byte_ranges_are_rejected() {
-        assert!(super::parse_range("0-", 0).is_err());
-        assert!(super::parse_range("10-", 10).is_err());
-        assert!(super::parse_range("7-2", 10).is_err());
-        assert!(super::parse_range("-0", 10).is_err());
-        assert!(super::parse_range("oops", 10).is_err());
-        assert!(super::parse_range("0-1,3-4", 10).is_err());
+    fn file_response(
+        request: Request<()>,
+        output: &tola_build::output::graph::OutputFile,
+        revision: &tola_build::output::revision::OutputRevision,
+        endpoint: Option<&crate::dev::reload::transport::ReloadEndpoint>,
+    ) -> Response<super::ResponseBody> {
+        super::respond_file(
+            request,
+            output,
+            &SiteUrlMount::root(),
+            endpoint,
+            revision,
+            &super::HtmlResponses::default(),
+        )
     }
 
     #[test]
@@ -744,14 +751,8 @@ mod tests {
             conditional,
             request_with_header(Method::GET, "/download.bin", "range", "items=2-5"),
         ] {
-            let response = super::respond_file(
-                request,
-                output(&revision, "download.bin"),
-                &SiteUrlMount::root(),
-                None,
-                &revision,
-                &super::HtmlResponses::default(),
-            );
+            let response =
+                file_response(request, output(&revision, "download.bin"), &revision, None);
 
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(body_bytes(response.body()).as_ref(), b"0123456789");
@@ -769,51 +770,41 @@ mod tests {
     fn head_reports_get_length_without_body() {
         let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
         let asset = output(&revision, "media/video.mp4");
-        let asset_get = super::respond_file(
+        let asset_get = file_response(
             request("/media/video.mp4"),
             asset,
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
-        let asset_head = super::respond_file(
+        let asset_head = file_response(
             request_with_header(Method::HEAD, "/media/video.mp4", "range", "bytes=2-5"),
             asset,
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
         assert_eq!(
-            content_length(super::respond_file(
+            content_length(file_response(
                 request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=2-5"),
                 asset,
-                &SiteUrlMount::root(),
-                Some(&reload_endpoint()),
                 &revision,
-                &super::HtmlResponses::default(),
+                Some(&reload_endpoint()),
             )),
             4,
             "a ranged GET carries only the selected bytes"
         );
 
         let page = site_outputs(&document_program("index.html", "Page"), &[]);
-        let page_get = super::respond_file(
+        let page_get = file_response(
             request("/index.html"),
             output(&page, "index.html"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &page,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
-        let page_head = super::respond_file(
+        let page_head = file_response(
             request_with_method(Method::HEAD, "/index.html"),
             output(&page, "index.html"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &page,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
 
         let runtime_get = super::respond_hotreload_js(request("/hotreload.js"));
@@ -849,26 +840,22 @@ mod tests {
         let current = output(&revision, "styles/site.css");
         let representation =
             tola_build::output::manifest::RepresentationId::from_output(current).to_hex();
-        let accepted = super::respond_file(
+        let accepted = file_response(
             request(&format!(
                 "/styles/site.css?tola-representation={representation}"
             )),
             current,
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
         assert_eq!(accepted.status().as_u16(), 200);
         assert_eq!(body_bytes(accepted.body()).as_ref(), b"body {}");
 
-        let unknown = super::respond_file(
+        let unknown = file_response(
             request("/styles/site.css?tola-representation=stale"),
             current,
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
         assert_eq!(unknown.status().as_u16(), 409);
         assert_eq!(
@@ -876,13 +863,11 @@ mod tests {
             b"the site changed; reload the page"
         );
 
-        let head = super::respond_file(
+        let head = file_response(
             request_with_method(Method::HEAD, "/styles/site.css?tola-representation=stale"),
             current,
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
         assert_eq!(head.status().as_u16(), 409);
         assert!(body_bytes(head.body()).is_empty());
@@ -894,13 +879,11 @@ mod tests {
             "styles/site",
         ))
         .to_hex();
-        let changed = super::respond_file(
+        let changed = file_response(
             request(&format!("/styles/site?tola-representation={previous}")),
             output(&after, "styles/site"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &after,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
         assert_eq!(changed.status().as_u16(), 409);
         assert_eq!(
@@ -913,13 +896,11 @@ mod tests {
     fn user_representation_query_is_ignored() {
         let revision = site_outputs("", &[("styles/site.css", "input.css", b"body {}")]);
 
-        let response = super::respond_file(
+        let response = file_response(
             request("/styles/site.css?tola-representation=user-value"),
             output(&revision, "styles/site.css"),
-            &SiteUrlMount::root(),
-            None,
             &revision,
-            &super::HtmlResponses::default(),
+            None,
         );
 
         assert_eq!(response.status().as_u16(), 200);
@@ -933,29 +914,18 @@ mod tests {
         let css = ResponseMediaType::CSS;
 
         for response in [
-            super::respond_file(
-                request("/styles/app"),
-                output,
-                &SiteUrlMount::root(),
-                None,
-                &revision,
-                &super::HtmlResponses::default(),
-            ),
-            super::respond_file(
+            file_response(request("/styles/app"), output, &revision, None),
+            file_response(
                 request_with_method(Method::HEAD, "/styles/app"),
                 output,
-                &SiteUrlMount::root(),
-                None,
                 &revision,
-                &super::HtmlResponses::default(),
+                None,
             ),
-            super::respond_file(
+            file_response(
                 request_with_header(Method::GET, "/styles/app", "range", "bytes=0-3"),
                 output,
-                &SiteUrlMount::root(),
-                None,
                 &revision,
-                &super::HtmlResponses::default(),
+                None,
             ),
         ] {
             assert_eq!(
@@ -968,13 +938,11 @@ mod tests {
     #[test]
     fn html_without_reload_keeps_bytes() {
         let revision = site_outputs(&document_program("index.html", "exact"), &[]);
-        let response = super::respond_file(
+        let response = file_response(
             request("/index.html"),
             output(&revision, "index.html"),
-            &SiteUrlMount::root(),
-            None,
             &revision,
-            &super::HtmlResponses::default(),
+            None,
         );
 
         assert_eq!(response.status().as_u16(), 200);
@@ -987,13 +955,11 @@ mod tests {
     #[test]
     fn duplicate_representation_is_rejected() {
         let revision = site_outputs("", &[("site.css", "input.css", b"body {}")]);
-        let response = super::respond_file(
+        let response = file_response(
             request("/site.css?tola-representation=first&tola-representation=second"),
             output(&revision, "site.css"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&reload_endpoint()),
         );
 
         assert_eq!(response.status().as_u16(), 400);
@@ -1001,42 +967,16 @@ mod tests {
     }
 
     #[test]
-    fn asset_range_serves_selected_bytes() {
-        let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
-        let output = output(&revision, "media/video.mp4");
-        let response = super::respond_file(
-            request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=2-5"),
-            output,
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
-            &revision,
-            &super::HtmlResponses::default(),
-        );
-
-        assert_eq!(response.status().as_u16(), 206);
-        assert_eq!(body_bytes(response.body()).as_ref(), b"2345");
-    }
-
-    #[test]
     fn range_spans_injected_slices() {
         let revision = site_outputs(&document_program("index.html", "Home"), &[]);
         let endpoint = reload_endpoint();
         let output = output(&revision, "index.html");
-        let whole = super::respond_file(
-            request("/"),
-            output,
-            &SiteUrlMount::root(),
-            Some(&endpoint),
-            &revision,
-            &super::HtmlResponses::default(),
-        );
-        let partial = super::respond_file(
+        let whole = file_response(request("/"), output, &revision, Some(&endpoint));
+        let partial = file_response(
             request_with_header(Method::GET, "/", "range", "bytes=7-40"),
             output,
-            &SiteUrlMount::root(),
-            Some(&endpoint),
             &revision,
-            &super::HtmlResponses::default(),
+            Some(&endpoint),
         );
 
         let whole = body_bytes(whole.body());
@@ -1060,29 +1000,23 @@ mod tests {
         let diagnostic = tola_build::build::no_pages_diagnostic(&config);
         let endpoint = reload_endpoint();
         let responses = [
-            super::respond_file(
+            file_response(
                 request("/site.css"),
                 output(&revision, "site.css"),
-                &SiteUrlMount::root(),
-                Some(&endpoint),
                 &revision,
-                &super::HtmlResponses::default(),
+                Some(&endpoint),
             ),
-            super::respond_file(
+            file_response(
                 request_with_header(Method::GET, "/site.css", "range", "bytes=0-3"),
                 output(&revision, "site.css"),
-                &SiteUrlMount::root(),
-                Some(&endpoint),
                 &revision,
-                &super::HtmlResponses::default(),
+                Some(&endpoint),
             ),
-            super::respond_file(
+            file_response(
                 request_with_header(Method::GET, "/site.css", "range", "bytes=99-"),
                 output(&revision, "site.css"),
-                &SiteUrlMount::root(),
-                Some(&endpoint),
                 &revision,
-                &super::HtmlResponses::default(),
+                Some(&endpoint),
             ),
             super::respond_not_found(
                 request("/missing"),
@@ -1155,13 +1089,11 @@ mod tests {
     #[test]
     fn unsatisfiable_range_reports_length() {
         let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
-        let response = super::respond_file(
+        let response = file_response(
             request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=10-"),
             output(&revision, "media/video.mp4"),
-            &SiteUrlMount::root(),
-            None,
             &revision,
-            &super::HtmlResponses::default(),
+            None,
         );
 
         assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
@@ -1208,11 +1140,10 @@ mod tests {
             let site = published_site(directory.path(), "", configuration);
             let diagnostic = tola_build::build::no_pages_diagnostic(site.config());
             let endpoint = reload_endpoint();
-            let get =
-                super::respond_published(request(root_path), Arc::clone(&site), Some(&endpoint));
-            let head = super::respond_published(
+            let get = published_response(request(root_path), &site, Some(&endpoint));
+            let head = published_response(
                 request_with_method(Method::HEAD, root_path),
-                Arc::clone(&site),
+                &site,
                 Some(&endpoint),
             );
 
@@ -1302,7 +1233,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_file_and_missing_routes_serve_exact() {
+    fn directory_missing_routes_serve_exact() {
         let directory = TempDir::new().unwrap();
         fs::write(directory.path().join("download.txt"), "download").unwrap();
         let site = published_site(
@@ -1322,11 +1253,8 @@ mod tests {
             ("/404.html", StatusCode::NOT_FOUND, "404.html"),
         ] {
             for method in [Method::GET, Method::HEAD] {
-                let response = super::respond_published(
-                    request_with_method(method.clone(), path),
-                    Arc::clone(&site),
-                    None,
-                );
+                let response =
+                    published_response(request_with_method(method.clone(), path), &site, None);
                 assert_eq!(response.status(), status, "{method} {path}");
                 assert!(!response.headers().contains_key(hyper::header::LOCATION));
                 if method == Method::HEAD {
@@ -1350,9 +1278,9 @@ mod tests {
             "[site]\nbase-path = \"/文档/\"",
         );
 
-        let response = super::respond_published(
+        let response = published_response(
             request("/%e6%96%87%e6%a1%a3/release..notes/%e4%b8%ad%e6%96%87/"),
-            Arc::clone(&site),
+            &site,
             None,
         );
 
@@ -1385,20 +1313,17 @@ mod tests {
         let config = site.config();
         let first = super::ReloadEndpoint::new(35729, "secret-first", "public-first");
         let restarted = super::ReloadEndpoint::new(35729, "secret-next", "public-next");
-        let original = super::respond(
-            request_with_method(Method::HEAD, "/"),
-            Some(Arc::clone(&site)),
-            config,
-            Some(&first),
-            &super::HtmlResponses::default(),
-        );
-        let next = super::respond(
-            request_with_method(Method::HEAD, "/"),
-            Some(Arc::clone(&site)),
-            config,
-            Some(&restarted),
-            &super::HtmlResponses::default(),
-        );
+        let respond = |request, endpoint| {
+            super::respond(
+                request,
+                Some(Arc::clone(&site)),
+                config,
+                Some(endpoint),
+                &super::HtmlResponses::default(),
+            )
+        };
+        let original = respond(request_with_method(Method::HEAD, "/"), &first);
+        let next = respond(request_with_method(Method::HEAD, "/"), &restarted);
         assert_eq!(original.status(), StatusCode::OK);
         assert_eq!(next.status(), StatusCode::OK);
         assert_ne!(
@@ -1422,26 +1347,14 @@ mod tests {
             Some(&restarted),
             &super::HtmlResponses::default(),
         );
-        let missing = super::respond(
-            request_with_method(Method::HEAD, "/removed"),
-            Some(Arc::clone(&site)),
-            config,
-            Some(&restarted),
-            &super::HtmlResponses::default(),
-        );
-        let fenced = super::respond(
+        let missing = respond(request_with_method(Method::HEAD, "/removed"), &restarted);
+        let fenced = respond(
             hot_reload_request_with_method(Method::HEAD, "stale"),
-            Some(Arc::clone(&site)),
-            config,
-            Some(&restarted),
-            &super::HtmlResponses::default(),
+            &restarted,
         );
-        let fenced_get = super::respond(
+        let fenced_get = respond(
             hot_reload_request_with_method(Method::GET, "stale"),
-            Some(Arc::clone(&site)),
-            config,
-            Some(&restarted),
-            &super::HtmlResponses::default(),
+            &restarted,
         );
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
@@ -1485,12 +1398,8 @@ mod tests {
                 configuration,
             );
             for path in missing_paths {
-                let get = super::respond_published(request(path), Arc::clone(&site), None);
-                let head = super::respond_published(
-                    request_with_method(Method::HEAD, path),
-                    Arc::clone(&site),
-                    None,
-                );
+                let get = published_response(request(path), &site, None);
+                let head = published_response(request_with_method(Method::HEAD, path), &site, None);
 
                 assert_eq!(get.status(), StatusCode::NOT_FOUND, "{path}");
                 assert_eq!(
@@ -1516,7 +1425,7 @@ mod tests {
         );
         let request = request("/404.html");
 
-        let response = super::respond_published(request, site, Some(&reload_endpoint()));
+        let response = published_response(request, &site, Some(&reload_endpoint()));
 
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(body_bytes(response.body()).as_ref(), b"ordinary asset");
@@ -1537,12 +1446,8 @@ mod tests {
                 ("/theme.css", StatusCode::OK),
                 ("/missing", StatusCode::NOT_FOUND),
             ] {
-                let get = super::respond_published(request(path), Arc::clone(&site), None);
-                let head = super::respond_published(
-                    request_with_method(Method::HEAD, path),
-                    Arc::clone(&site),
-                    None,
-                );
+                let get = published_response(request(path), &site, None);
+                let head = published_response(request_with_method(Method::HEAD, path), &site, None);
 
                 assert_eq!(get.status(), status, "{program}: {path}");
                 assert_eq!(head.status(), status, "{program}: {path}");

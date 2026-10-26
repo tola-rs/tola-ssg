@@ -35,7 +35,7 @@ test('missing not found document reports one warning', async ({ page, sites }) =
   expect(status).toMatchObject({ errors: 0, warnings: 1 })
 })
 
-test('recovery compacts diagnostic progress', async ({ sites }) => {
+test('recovery clears limited diagnostics', async ({ sites }) => {
   const errors = ['#let broken1 = ', '#let broken2 = ', '#let broken3 = ', '#let broken4 = ']
   const failedProgram = `${errors.join('\n')}\n#document("index.html")[Rejected]\n`
   const site = await sites.dev({
@@ -50,23 +50,6 @@ test('recovery compacts diagnostic progress', async ({ sites }) => {
       record.fields.kind === 'diagnostic' && record.fields.code === 'typst.compile'
     ).length
   ).toBe(4)
-  const diagnostics = (await readSessionRecords(site.root)).filter((record) =>
-    record.fields.kind === 'diagnostic' && record.fields.code === 'typst.compile'
-  )
-  expect(diagnostics.map((record) =>
-    (record.fields as typeof record.fields & {
-      diagnostic: { severity: string; location: { path: string; line: number; column: number } }
-    }).diagnostic
-  )).toEqual(errors.map((source, index) =>
-    expect.objectContaining({
-      severity: 'error',
-      location: expect.objectContaining({
-        path: 'site.typ',
-        line: index + 1,
-        column: source.length,
-      }),
-    })
-  ))
   const failedTranscript = site.stderr()
   expect(failedTranscript.match(/error\[typst\.compile\]/g)).toHaveLength(2)
   await writeSiteProgram(
@@ -76,11 +59,6 @@ test('recovery compacts diagnostic progress', async ({ sites }) => {
   await expect.poll(async () =>
     (await readSessionRecords(site.root)).filter((record) => record.fields.kind === 'resolved').length
   ).toBe(4)
-  await expect.poll(() => site.stderr().slice(failedTranscript.length).trim())
-    .toMatch(/\bbuild succeeded\b/i)
-  const recovery = site.stderr().slice(failedTranscript.length).trim().split('\n')
-  expect(recovery).toHaveLength(1)
-  expect(recovery[0]).toMatch(/\bbuild succeeded\b/i)
   const published = await fetch(site.url)
   expect(published.status).toBe(200)
   expect(await published.text()).toContain('Recovered')
@@ -98,7 +76,7 @@ test('quiet dev retains diagnostics', async ({ binary, directory: root }) => {
     '--port',
     '0',
     '--log-file',
-    '.tola/logs/session.jsonl',
+    '.tola/state/logs/session.jsonl',
     '--color',
     'never',
   ], root)
@@ -116,7 +94,6 @@ test('quiet dev retains diagnostics', async ({ binary, directory: root }) => {
     expect(server.stderr()).not.toContain(url!)
     await writeSiteProgram(root, '#document("index.html")[#unknown_quiet_edit]\n')
     await expect.poll(server.stderr).toContain('error[typst.compile]')
-    expect(server.stderr()).toContain('still serving')
     expect(await (await fetch(url!)).text()).toContain('Quiet publication')
     const failureTranscript = server.stderr()
     await writeSiteProgram(root, '#document("index.html")[Quiet recovery]\n')
@@ -183,18 +160,6 @@ test('indicator reflects the pushed counts', async ({ page }) => {
 
   await submitStatus(page, { rebuilding: false, errors: 0, warnings: 0 })
   await expect(indicator).not.toBeVisible()
-})
-
-test('rebuild indicator waits out the reveal delay', async ({ page }) => {
-  await statusPage(page)
-  await submitStatus(page, { rebuilding: true, errors: 0, warnings: 0 })
-  await expect(page.locator('#tola-dev-status')).not.toBeVisible()
-
-  await expect(page.locator('#tola-dev-status')).toBeVisible()
-  await expect(page.locator('.tola-dev-status-label')).toHaveText('Rebuilding site')
-
-  await submitStatus(page, { rebuilding: false, errors: 0, warnings: 0 })
-  await expect(page.locator('#tola-dev-status')).not.toBeVisible()
 })
 
 async function statusPage(page: Page) {

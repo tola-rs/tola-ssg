@@ -6,7 +6,10 @@ import { check } from './site.ts'
 
 // The suite runs bundled as CommonJS inside the extension host: esbuild inlines a `require` of
 // this extension's own dependencies, but this module's types do not declare it.
-declare const require: (specifier: string) => unknown
+declare const require: {
+  (specifier: string): unknown
+  resolve(specifier: string): string
+}
 /** The fence-language tags the extension must embed: Typst's own raw tags for markup, code, and
  * math, plus `example`, the tag Typst's documentation fences its examples with. */
 const TAGS = ['typst', 'typ', 'typc', 'typm', 'example']
@@ -84,7 +87,7 @@ async function loadMarkdown(extensionPath: string): Promise<Grammar> {
     return null
   }
   await oniguruma.loadWASM(
-    (await fs.readFile(path.join(extensionPath, 'node_modules/vscode-oniguruma/release/onig.wasm')))
+    (await fs.readFile(require.resolve('vscode-oniguruma/release/onig.wasm')))
       .buffer as ArrayBuffer,
   )
   const registry = new textmate.Registry({

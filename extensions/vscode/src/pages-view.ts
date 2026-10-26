@@ -3,6 +3,7 @@ import * as vscode from 'vscode'
 import type { Selection } from './selection.ts'
 import type { SiteRoute } from './routes.ts'
 import type { PreviewSite } from './preview.ts'
+import { isCancellation } from './virtual.ts'
 
 /** One site the view lists pages for. */
 export type PagesSite = { readonly name: string; readonly site: PreviewSite }
@@ -44,7 +45,7 @@ export class PagesView implements vscode.TreeDataProvider<vscode.TreeItem> {
       : states.includes('checking')
       ? 'Checking source changes. Routes are from the last query.'
       : states.includes('failed')
-      ? 'Source check failed. Open Tola output for diagnostics.'
+      ? 'Source check failed. See Problems for diagnostics.'
       : ''
   }
 
@@ -67,7 +68,7 @@ export class PagesView implements vscode.TreeDataProvider<vscode.TreeItem> {
         ? []
         : pages.map((page) => new PageItem(page, site.selection))
     } catch (error) {
-      if (site.lifetime.isCancellationRequested) return []
+      if (site.lifetime.isCancellationRequested || isCancellation(error)) return []
       this.output.appendLine(
         `Checked page request failed for ${site.selection.folder.name}: ${String(error)}`,
       )

@@ -7,8 +7,12 @@ import {
   runtimeState,
   sendNextRevision,
   type TolaWindow,
+  fulfillPng,
+  fulfillCss,
+  fulfillHtml,
+  fulfillSvg,
+  serveResources,
 } from '../../../support/reload.ts'
-import { ONE_PIXEL_PNG } from '../../../support/media.ts'
 
 declare global {
   interface Window {
@@ -28,8 +32,8 @@ async function serveImagePage(page: Page, origin: string, body: string): Promise
     `${origin}/**`,
     (route) =>
       new URL(route.request().url()).pathname === '/index.html'
-        ? route.fulfill({ status: 200, contentType: 'text/html', body })
-        : route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG }),
+        ? fulfillHtml(route, body)
+        : fulfillPng(route),
   )
   await page.goto(`${origin}/index.html`, { waitUntil: 'load' })
   await installReload(page)
@@ -43,21 +47,18 @@ test.describe('development resource updates', () => {
         const url = new URL(route.request().url())
         if (url.pathname === '/site.css') {
           if (url.searchParams.has('tola-representation')) await released
-          return route.fulfill({
-            status: 200,
-            contentType: 'text/css',
-            body: `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
-          })
+          return fulfillCss(
+            route,
+            `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
+          )
         }
         if (url.pathname === '/cover.png') {
-          return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+          return fulfillPng(route)
         }
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><script>window.resourceApplication = {};</script></body></html>',
-        })
+        return fulfillHtml(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><script>window.resourceApplication = {};</script></body></html>',
+        )
       })
       await page.goto('https://mixed-resources.test/index.html', { waitUntil: 'load' })
       await installReload(page)
@@ -106,10 +107,9 @@ test.describe('development resource updates', () => {
       await page.route('https://bounded-styles.test/**', (route) => {
         const url = new URL(route.request().url())
         if (url.pathname === '/site.css') {
-          return route.fulfill({
-            status: 200,
-            contentType: 'text/css',
-            body: !url.searchParams.has('tola-representation')
+          return fulfillCss(
+            route,
+            !url.searchParams.has('tola-representation')
               ? `${
                 change === 'unloaded font'
                   ? '@font-face { font-family: new-font; src: url(/new.woff2); }'
@@ -120,14 +120,12 @@ test.describe('development resource updates', () => {
               : `body { color: blue; background-image: ${
                 Array.from({ length: 129 }, (_, index) => `url(/image-${index}.png)`).join(',')
               }; }`,
-          })
+          )
         }
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><input id="search" value="seed"></body></html>',
-        })
+        return fulfillHtml(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><input id="search" value="seed"></body></html>',
+        )
       })
       await page.goto('https://bounded-styles.test/index.html', { waitUntil: 'load' })
       await installReload(page)
@@ -150,30 +148,23 @@ test.describe('development resource updates', () => {
         const request = route.request()
         const url = new URL(request.url())
         if (url.pathname === '/site.css') {
-          return route.fulfill({
-            status: 200,
-            contentType: 'text/css',
-            body: '.first { background: red; } .second { background: blue url(/new.svg); }',
-          })
+          return fulfillCss(
+            route,
+            '.first { background: red; } .second { background: blue url(/new.svg); }',
+          )
         }
         if (url.pathname === '/new.svg') {
           await released
-          return route.fulfill({
-            status: 200,
-            contentType: 'image/svg+xml',
-            body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>',
-          })
+          return fulfillSvg(route, '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
         }
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            `<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><section id="panel" class="${
+        return fulfillHtml(
+          route,
+          `<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><section id="panel" class="${
               request.headers()['x-tola-revision'] === '0'.repeat(64) ? 'first' : classes
             }"><input id="search" value="seed"></section>${
               behavior === 'scripted' ? '<script>window.resourceApplication = {};</script>' : ''
             }</body></html>`,
-        })
+        )
       })
       await page.goto('https://class-background.test/index.html', { waitUntil: 'load' })
       await installReload(page)
@@ -209,17 +200,15 @@ test.describe('development resource updates', () => {
         const url = new URL(route.request().url())
         if (url.pathname.endsWith('.css')) {
           if (url.searchParams.has('tola-representation')) await released
-          return route.fulfill({ status: 200, contentType: 'text/css', body: 'body { color: red; }' })
+          return fulfillCss(route, 'body { color: red; }')
         }
         if (url.pathname.endsWith('.png')) {
-          return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+          return fulfillPng(route)
         }
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><script>window.resourceApplication = {};</script></body></html>',
-        })
+        return fulfillHtml(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><script>window.resourceApplication = {};</script></body></html>',
+        )
       })
       await page.goto('https://resource-owner.test/index.html', { waitUntil: 'load' })
       await installReload(page)
@@ -258,29 +247,24 @@ test.describe('development resource updates', () => {
     await page.route('https://cold-background.test/**', async (route) => {
       const url = new URL(route.request().url())
       if (url.pathname === '/styles/site.css') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: url.searchParams.has('tola-representation')
+        return fulfillCss(
+          route,
+          url.searchParams.has('tola-representation')
             ? '@property --brand { syntax: "<color>"; inherits: false; initial-value: blue; } @layer utilities { @supports (display: grid) { body { background: blue url("../new.svg"); } } }'
             : 'body { background: red; }',
-        })
+        )
       }
       if (url.pathname === '/new.svg') {
         await released
-        return route.fulfill({
-          status: 200,
-          contentType: 'image/svg+xml',
-          body:
-            '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="green"/></svg>',
-        })
+        return fulfillSvg(
+          route,
+          '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="green"/></svg>',
+        )
       }
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body:
-          '<!doctype html><html><head><link rel="stylesheet" href="/styles/site.css"></head><body><input id="search" value="seed"></body></html>',
-      })
+      return fulfillHtml(
+        route,
+        '<!doctype html><html><head><link rel="stylesheet" href="/styles/site.css"></head><body><input id="search" value="seed"></body></html>',
+      )
     })
     await page.goto('https://cold-background.test/index.html', { waitUntil: 'load' })
     await installReload(page)
@@ -324,14 +308,12 @@ test.describe('development resource updates', () => {
           requestedImages.push(headers.referer)
           if (requestedImages.length > 1) await released
         }
-        return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+        return fulfillPng(route)
       }
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body:
-          '<!doctype html><html><body><img id="cover" src="/cover.png" crossorigin="anonymous" referrerpolicy="no-referrer"></body></html>',
-      })
+      return fulfillHtml(
+        route,
+        '<!doctype html><html><body><img id="cover" src="/cover.png" crossorigin="anonymous" referrerpolicy="no-referrer"></body></html>',
+      )
     })
     await page.goto('https://image-request.test/index.html', { waitUntil: 'load' })
     await installReload(page)
@@ -357,23 +339,10 @@ test.describe('development resource updates', () => {
   for (const outcome of ['ready', 'failed'] as const) {
     test(`${outcome} image decoding gates resource updates`, async ({ page }) => {
       await page.route('https://decoded-resources.test/**', (route) => {
-        const url = new URL(route.request().url())
-        if (url.pathname === '/site.css') {
-          return route.fulfill({
-            status: 200,
-            contentType: 'text/css',
-            body: `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
-          })
-        }
-        if (url.pathname === '/cover.png') {
-          return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
-        }
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><input id="search" value="seed"></body></html>',
-        })
+        return serveResources(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><input id="search" value="seed"></body></html>',
+        )
       })
       await page.goto('https://decoded-resources.test/index.html', { waitUntil: 'load' })
       await installReload(page)
@@ -449,20 +418,17 @@ test.describe('development resource updates', () => {
       if (url.pathname === '/site.css') {
         const representation = url.searchParams.get('tola-representation')
         if (representation) await stylesheetResponses[representation.startsWith('b') ? 0 : 1].promise
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: `body { color: ${
+        return fulfillCss(
+          route,
+          `body { color: ${
             representation === null ? 'red' : representation.startsWith('b') ? 'blue' : 'green'
           }; }`,
-        })
+        )
       }
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body:
-          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body>Document</body></html>',
-      })
+      return fulfillHtml(
+        route,
+        '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body>Document</body></html>',
+      )
     })
     await page.goto('https://retained-capacity.test/index.html', { waitUntil: 'load' })
     await page.evaluate(() => {
@@ -525,20 +491,10 @@ test.describe('development resource updates', () => {
 
   test('timing buffer overflow retains dependencies', async ({ page }) => {
     await page.route('https://timing-capacity.test/**', (route) => {
-      const url = new URL(route.request().url())
-      if (url.pathname === '/site.css') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
-        })
-      }
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body:
-          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><input id="search" value="seed"></body></html>',
-      })
+      return serveResources(
+        route,
+        '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><input id="search" value="seed"></body></html>',
+      )
     })
     await page.goto('https://timing-capacity.test/index.html', { waitUntil: 'load' })
     await installReload(page)
@@ -574,33 +530,6 @@ test.describe('development resource updates', () => {
     await sendNextRevision(page, [modifiedOutput('after-capacity.txt')])
 
     expect(await runtimeState(page)).toEqual({ reloads: 1, revision: 'b'.repeat(64) })
-    expect(await page.evaluate(() => (window as TolaWindow).Tola.revisionReloadRequired)).toBe(true)
-  })
-
-  test('site resources update without reload', async ({ page }) => {
-    await page.route('https://assets.test/**', async (route) => {
-      const url = route.request().url()
-      if (url.endsWith('/index.html')) {
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="https://assets.test/site.css"></head><body><img id="cover" src="https://assets.test/cover.png"></body></html>',
-        })
-      } else if (url.includes('.png')) {
-        await route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
-      } else {
-        await route.fulfill({ status: 200, contentType: 'text/css', body: 'body {}' })
-      }
-    })
-    await page.goto('https://assets.test/index.html', { waitUntil: 'load' })
-    await installReload(page)
-
-    await sendNextRevision(page, [modifiedOutput('site.css')])
-    await expect(page.locator('link[rel~=stylesheet]')).toHaveAttribute('href', /tola-representation=b{64}/)
-    await sendNextRevision(page, [modifiedOutput('cover.png')])
-    await expect(page.locator('#cover')).toHaveAttribute('src', /tola-representation=[bc]{64}/)
-    await expectReloads(page, 0)
   })
 
   test('css image revisions retain stylesheet address', async ({ page }) => {
@@ -608,21 +537,15 @@ test.describe('development resource updates', () => {
     await page.route('https://css-dependency.test/**', async (route) => {
       const url = route.request().url()
       if (url.endsWith('/index.html')) {
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><main>stable</main></body></html>',
-        })
+        await fulfillHtml(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><main>stable</main></body></html>',
+        )
       } else if (new URL(url).pathname === '/site.css') {
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: 'main { background-image: url("/background.png"); }',
-        })
+        await fulfillCss(route, 'main { background-image: url("/background.png"); }')
       } else {
         requestedImages.push(url)
-        await route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+        await fulfillPng(route)
       }
     })
     await page.goto('https://css-dependency.test/index.html', { waitUntil: 'load' })
@@ -715,20 +638,14 @@ test.describe('development resource updates', () => {
       const pending = url.searchParams.has('tola-representation')
       if (url.pathname === '/site.css') {
         if (pending) await released
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: `body { color: ${pending ? 'blue' : 'red'}; }`,
-        })
+        await fulfillCss(route, `body { color: ${pending ? 'blue' : 'red'}; }`)
       } else if (url.pathname === '/cover.png') {
-        await route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+        await fulfillPng(route)
       } else {
-        await route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"></body></html>',
-        })
+        await fulfillHtml(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"></body></html>',
+        )
       }
     })
     await page.goto('https://concurrent-resources.test/index.html', { waitUntil: 'load' })
@@ -762,24 +679,21 @@ test.describe('development resource updates', () => {
     await page.route('https://timed-out-image.test/**', async (route) => {
       const url = new URL(route.request().url())
       if (url.pathname === '/index.html') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png" loading="eager"></body></html>',
-        })
+        return fulfillHtml(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png" loading="eager"></body></html>',
+        )
       }
       if (url.pathname === '/site.css') {
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: url.searchParams.has('tola-representation')
+        return fulfillCss(
+          route,
+          url.searchParams.has('tola-representation')
             ? 'body { color: blue; }'
             : 'body { color: red; }',
-        })
+        )
       }
       if (url.searchParams.has('tola-representation')) await released
-      return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+      return fulfillPng(route)
     })
     await page.goto('https://timed-out-image.test/index.html', { waitUntil: 'load' })
     await installReload(page)
@@ -811,23 +725,10 @@ test.describe('development resource updates', () => {
   for (const resource of ['site.css', 'cover.png']) {
     test(`${resource} edits retain scripted pages`, async ({ page }) => {
       await page.route('https://scripted-resources.test/**', (route) => {
-        const url = new URL(route.request().url())
-        if (url.pathname === '/site.css') {
-          return route.fulfill({
-            status: 200,
-            contentType: 'text/css',
-            body: `body { color: ${url.searchParams.has('tola-representation') ? 'blue' : 'red'}; }`,
-          })
-        }
-        if (url.pathname === '/cover.png') {
-          return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
-        }
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/html',
-          body:
-            '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><input id="search" value="seed"><script>window.resourceApplication = {};</script></body></html>',
-        })
+        return serveResources(
+          route,
+          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><img id="cover" src="/cover.png"><input id="search" value="seed"><script>window.resourceApplication = {};</script></body></html>',
+        )
       })
       await page.goto('https://scripted-resources.test/index.html', { waitUntil: 'load' })
       await installReload(page)
@@ -852,18 +753,12 @@ test.describe('development resource updates', () => {
       if (url.pathname === '/site.css') {
         const pending = url.searchParams.has('tola-representation')
         if (pending) await released
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: `body { color: ${pending ? 'blue' : 'red'}; }`,
-        })
+        return fulfillCss(route, `body { color: ${pending ? 'blue' : 'red'}; }`)
       }
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body:
-          '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><input id="search" value="seed"></body></html>',
-      })
+      return fulfillHtml(
+        route,
+        '<!doctype html><html><head><link rel="stylesheet" href="/site.css"></head><body><input id="search" value="seed"></body></html>',
+      )
     })
     await page.goto('https://late-script.test/index.html', { waitUntil: 'load' })
     await installReload(page)

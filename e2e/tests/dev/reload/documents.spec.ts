@@ -6,8 +6,11 @@ import {
   modifiedOutput,
   runtimeState,
   sendNextRevision,
+  fulfillHtml,
+  fulfillCss,
+  fulfillPng,
+  fulfillSvg,
 } from '../../../support/reload.ts'
-import { ONE_PIXEL_PNG } from '../../../support/media.ts'
 
 declare global {
   interface Window {
@@ -30,7 +33,7 @@ test('in-place edits preserve page state', async ({ page }) => {
     .replace('id="sidebar"', 'id="sidebar" title="first"')
   await page.route(
     'https://documents.test/**',
-    (route) => route.fulfill({ status: 200, contentType: 'text/html', body }),
+    (route) => fulfillHtml(route, body),
   )
   await page.goto('https://documents.test/index.html')
   await installReload(page)
@@ -76,11 +79,7 @@ test('in-place edits preserve page state', async ({ page }) => {
 test('text edits preserve ongoing scrolling', async ({ page }) => {
   let text = 'First'
   await page.route('https://scrolling-edit.test/**', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: documentBody(text).replace('<main>', '<main style="height:6000px">'),
-    }))
+    fulfillHtml(route, documentBody(text).replace('<main>', '<main style="height:6000px">')))
   await page.goto('https://scrolling-edit.test/index.html', { waitUntil: 'load' })
   await installReload(page)
   await page.evaluate(() => {
@@ -99,12 +98,10 @@ test('text edits preserve ongoing scrolling', async ({ page }) => {
 test('height edits retain reading position', async ({ page }) => {
   let height = 600
   await page.route('https://reading-position.test/**', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body:
-        `<!doctype html><html><body><div style="height:${height}px"></div><main style="height:4000px"><p id="reading">Reading</p></main></body></html>`,
-    }))
+    fulfillHtml(
+      route,
+      `<!doctype html><html><body><div style="height:${height}px"></div><main style="height:4000px"><p id="reading">Reading</p></main></body></html>`,
+    ))
   await page.goto('https://reading-position.test/index.html', { waitUntil: 'load' })
   await installReload(page)
   await page.evaluate(() => {
@@ -132,25 +129,22 @@ for (const identity of ['id', 'position']) {
       if (url.pathname === '/theme.css') {
         const updated = url.searchParams.has('tola-representation')
         if (updated) await stylesheetReady
-        return route.fulfill({
-          status: 200,
-          contentType: 'text/css',
-          body: updated
+        return fulfillCss(
+          route,
+          updated
             ? '.bg-blue-500 { background-color: rgb(0, 0, 255); }'
             : '.bg-red-500 { background-color: rgb(255, 0, 0); }',
-        })
+        )
       }
       const sourceClasses = route.request().headers()['x-tola-revision'] === '0'.repeat(64)
         ? 'bg-red-500'
         : classes
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body:
-          `<!doctype html><html><head><link rel="stylesheet" href="/theme.css"></head><body><main><section ${
+      return fulfillHtml(
+        route,
+        `<!doctype html><html><head><link rel="stylesheet" href="/theme.css"></head><body><main><section ${
             identity === 'id' ? 'id="panel"' : ''
           } class="${sourceClasses}"><h1>Title</h1><div id="widget"></div></section></main><script>${script}</script></body></html>`,
-      })
+      )
     })
     await page.goto('https://class-widget.test/index.html', { waitUntil: 'load' })
     await installReload(page)
@@ -242,13 +236,12 @@ for (const conflict of ['class conflict', 'position shift', 'position reorder', 
       const sourceClasses = route.request().headers()['x-tola-revision'] === '0'.repeat(64)
         ? 'bg-red-500'
         : classes
-      return route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: `<!doctype html><html><body><main><${tag} ${
+      return fulfillHtml(
+        route,
+        `<!doctype html><html><body><main><${tag} ${
           conflict === 'class conflict' ? 'id="panel"' : ''
         } class="${sourceClasses}">Static</${tag}>${sibling}</main><script>${script}</script></body></html>`,
-      })
+      )
     })
     await page.goto('https://class-conflict.test/index.html', { waitUntil: 'load' })
     await installReload(page)
@@ -272,7 +265,7 @@ test('head metadata patches without reload', async ({ page }) => {
     `<!doctype html><html><head><title>First</title><meta name="description" content="first"></head><body><p id="text">Body</p></body></html>`
   await page.route(
     'https://head.test/**',
-    (route) => route.fulfill({ status: 200, contentType: 'text/html', body: document }),
+    (route) => fulfillHtml(route, document),
   )
   await page.goto('https://head.test/index.html')
   await installReload(page)
@@ -364,7 +357,7 @@ for (const edit of unpatchableEdits) {
     let body = documentBody('First', 'Sidebar', edit.before ?? '')
     await page.route(
       'https://unsupported.test/**',
-      (route) => route.fulfill({ status: 200, contentType: 'text/html', body }),
+      (route) => fulfillHtml(route, body),
     )
     await page.goto('https://unsupported.test/index.html')
     await installReload(page)
@@ -383,7 +376,7 @@ for (const type of ['application/json', 'application/ld+json']) {
     let body = documentBody('First', 'Sidebar', `<script type="${type}">{"value":1}</script>`)
     await page.route(
       'https://data-blocks.test/**',
-      (route) => route.fulfill({ status: 200, contentType: 'text/html', body }),
+      (route) => fulfillHtml(route, body),
     )
     await page.goto('https://data-blocks.test/index.html')
     await installReload(page)
@@ -407,7 +400,7 @@ for (const behavior of ['external data block', 'removed data source', 'SVG data 
     let body = documentBody('First', 'Sidebar', inner)
     await page.route(
       'https://data-behavior.test/**',
-      (route) => route.fulfill({ status: 200, contentType: 'text/html', body }),
+      (route) => fulfillHtml(route, body),
     )
     await page.goto('https://data-behavior.test/index.html')
     await installReload(page)
@@ -453,9 +446,9 @@ test('page update awaits content images', async ({ page }) => {
   await page.route('https://prepared.test/**', async (route) => {
     if (new URL(route.request().url()).pathname === '/cover.png') {
       await released
-      return route.fulfill({ status: 200, contentType: 'image/png', body: ONE_PIXEL_PNG })
+      return fulfillPng(route)
     }
-    return route.fulfill({ status: 200, contentType: 'text/html', body })
+    return fulfillHtml(route, body)
   })
   await page.goto('https://prepared.test/index.html')
   await installReload(page)
@@ -487,19 +480,15 @@ test('base-resolved image survives updates', async ({ page }) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('/cover.svg')) {
       const width = url.pathname === '/cover.svg' ? 30 : url.searchParams.has('tola-representation') ? 20 : 10
-      return route.fulfill({
-        status: 200,
-        contentType: 'image/svg+xml',
-        body:
-          `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="10"><rect width="100%" height="100%" fill="red"/></svg>`,
-      })
+      return fulfillSvg(
+        route,
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="10"><rect width="100%" height="100%" fill="red"/></svg>`,
+      )
     }
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body:
-        `<!doctype html><html><head><base href="/images/"></head><body><main><p id="text">${text}</p><img id="cover" src="cover.svg"></main></body></html>`,
-    })
+    return fulfillHtml(
+      route,
+      `<!doctype html><html><head><base href="/images/"></head><body><main><p id="text">${text}</p><img id="cover" src="cover.svg"></main></body></html>`,
+    )
   })
   await page.goto('https://based-document.test/index.html', { waitUntil: 'load' })
   await installReload(page)
@@ -538,7 +527,7 @@ test('failed image preparation discards update', async ({ page }) => {
   let body = documentBody('First')
   await page.route('https://failed-image.test/**', (route) => {
     if (new URL(route.request().url()).pathname === '/cover.png') return route.abort()
-    return route.fulfill({ status: 200, contentType: 'text/html', body })
+    return fulfillHtml(route, body)
   })
   await page.goto('https://failed-image.test/index.html')
   await installReload(page)
@@ -560,20 +549,18 @@ test('image address edits await replacement', async ({ page }) => {
     const url = new URL(route.request().url())
     if (url.pathname.endsWith('.svg')) {
       if (url.pathname === '/images/second.svg') await released
-      return route.fulfill({
-        status: 200,
-        contentType: 'image/svg+xml',
-        body: `<svg xmlns="http://www.w3.org/2000/svg" width="${
+      return fulfillSvg(
+        route,
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${
           url.pathname.endsWith('second.svg') ? 20 : 10
         }" height="10"/>`,
-      })
+      )
     }
-    return route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: documentBody(imageName, 'Sidebar', `<img id="cover" src="${imageName}" loading="lazy">`)
+    return fulfillHtml(
+      route,
+      documentBody(imageName, 'Sidebar', `<img id="cover" src="${imageName}" loading="lazy">`)
         .replace('</head>', '<base href="/images/"></head>'),
-    })
+    )
   })
   await page.goto('https://changed-image.test/index.html', { waitUntil: 'load' })
   await installReload(page)

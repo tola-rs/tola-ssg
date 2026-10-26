@@ -24,10 +24,10 @@ use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 
 use crate::dev::reload::message::{DiagnosticCounts, HotReloadMessage};
 use crate::dev::site::CurrentSite;
-use tola_build::diagnostic::Diagnostic;
 use tola_build::output::PageAvailability;
 use tola_build::output::manifest::{RevisionDiff, RevisionId};
 use tola_build::site::SiteRevision;
+use tola_diagnostic::Diagnostic;
 
 const MAX_RELOAD_CLIENTS: usize = 64;
 const MAX_PENDING_HANDSHAKES: usize = 8;
@@ -563,7 +563,6 @@ struct SessionHandshake<'a> {
 }
 
 impl Callback for SessionHandshake<'_> {
-    #[allow(clippy::result_large_err)]
     fn on_request(
         self,
         request: &Request,
@@ -932,8 +931,8 @@ mod tests {
         let transport =
             ReloadTransport::start("127.0.0.1".parse().unwrap(), 0, sites.clone()).unwrap();
         transport.replace_diagnostics(&[Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Error,
+            tola_diagnostic::codes::typst::COMPILE,
+            tola_diagnostic::Severity::Error,
             "First build failed",
         )]);
         let mut client = connect(&transport).await;
@@ -1190,23 +1189,23 @@ mod tests {
     fn hook_failure() -> Diagnostic {
         Diagnostic::new(
             crate::codes::hook::AFTER_PUBLISH,
-            tola_build::diagnostic::Severity::Error,
+            tola_diagnostic::Severity::Error,
             "After-publish command failed",
         )
     }
 
     fn build_failure() -> Diagnostic {
         Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Error,
+            tola_diagnostic::codes::typst::COMPILE,
+            tola_diagnostic::Severity::Error,
             "Page build failed",
         )
     }
 
     fn build_warning() -> Diagnostic {
         Diagnostic::new(
-            tola_build::codes::typst::COMPILE,
-            tola_build::diagnostic::Severity::Warning,
+            tola_diagnostic::codes::typst::COMPILE,
+            tola_diagnostic::Severity::Warning,
             "Unused import",
         )
     }

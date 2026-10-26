@@ -2,9 +2,9 @@
 
 use serde::Serialize;
 
-use tola_build::diagnostic::{Diagnostic, Severity};
 use tola_build::output::PageAvailability;
 use tola_build::output::manifest::{RevisionDiff, RevisionId};
+use tola_diagnostic::{Diagnostic, Severity};
 
 /// Errors and warnings the browser indicator counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -26,6 +26,7 @@ impl DiagnosticCounts {
         match diagnostic.severity {
             Severity::Error => self.errors += 1,
             Severity::Warning => self.warnings += 1,
+            Severity::Info | Severity::Hint => {}
         }
     }
 
@@ -153,19 +154,19 @@ mod tests {
     #[test]
     fn status_message_counts_severities() {
         let diagnostics = [
-            tola_build::diagnostic::Diagnostic::new(
-                tola_build::codes::typst::COMPILE,
-                tola_build::diagnostic::Severity::Error,
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::typst::COMPILE,
+                tola_diagnostic::Severity::Error,
                 "unclosed delimiter",
             ),
-            tola_build::diagnostic::Diagnostic::new(
-                tola_build::codes::typst::COMPILE,
-                tola_build::diagnostic::Severity::Warning,
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::typst::COMPILE,
+                tola_diagnostic::Severity::Warning,
                 "layout was ignored during HTML export",
             ),
-            tola_build::diagnostic::Diagnostic::new(
-                tola_build::codes::typst::COMPILE,
-                tola_build::diagnostic::Severity::Error,
+            tola_diagnostic::Diagnostic::new(
+                tola_diagnostic::codes::typst::COMPILE,
+                tola_diagnostic::Severity::Error,
                 "unknown variable",
             ),
         ];

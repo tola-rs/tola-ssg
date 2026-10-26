@@ -36,9 +36,16 @@ export function containsFile(root: string, filename: string): boolean {
   return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
 }
 
-export function ownsTypstDocument(selected: ServedWorkspace, document: vscode.TextDocument): boolean {
-  return document.uri.scheme === 'file' && document.languageId === 'typst' &&
-    vscode.workspace.getWorkspaceFolder(document.uri)?.uri.toString() === selected.folder.uri.toString()
+export function ownsTypstDocument(
+  selected: ServedWorkspace,
+  document: vscode.TextDocument,
+  roots: readonly string[] = selected.inputRoots,
+): boolean {
+  if (document.uri.scheme !== 'file' || document.languageId !== 'typst') return false
+  const folder = vscode.workspace.getWorkspaceFolder(document.uri)
+  return folder
+    ? folder.uri.toString() === selected.folder.uri.toString()
+    : roots.some((root) => containsFile(root, document.uri.fsPath))
 }
 
 /** An unsaved Typst buffer: no file on disk, and language features answer from the one site that owns it. */

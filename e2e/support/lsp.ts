@@ -51,17 +51,13 @@ export class LanguageConnection {
   private stderr = ''
   private failure: Error | undefined
 
-  /**
-   * `mode` is the command's input-scope flag; `null` runs the default online scope a client
-   * without `--pure` or `--offline` gets.
-   */
   constructor(
     binary: string,
     root: string,
     environment: NodeJS.ProcessEnv = {},
-    mode: string | null = '--pure',
+    args: string[] = ['lsp', '--pure'],
   ) {
-    this.command = new RunningProcess(binary, mode === null ? ['lsp'] : ['lsp', mode], root, environment)
+    this.command = new RunningProcess(binary, args, root, environment)
     this.root = root
     const child = this.command.child
     const channels: EventEmitter[] = [child, child.stdin, child.stdout, child.stderr]

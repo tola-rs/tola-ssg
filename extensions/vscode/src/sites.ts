@@ -12,7 +12,7 @@ import {
   type ServerOptions,
   State,
 } from 'vscode-languageclient/node'
-import { Assets, type AssetSite } from './assets.ts'
+import { Assets, type AssetSite, type AssetSources } from './assets.ts'
 import { SiteCli } from './site-cli.ts'
 import { type PagesSite, PagesView } from './pages-view.ts'
 import { type EnterSite, insertNewline } from './enter.ts'
@@ -46,6 +46,14 @@ import type { PreviewSite, PreviewStatus } from './preview.ts'
 export interface SourceCheckStatus {
   readonly revision: number
   readonly state: 'notChecked' | 'checking' | 'checked' | 'failed'
+  readonly site?: {
+    readonly root: string
+    readonly entry: string
+    readonly packageRoots: readonly string[]
+    readonly assetSources: AssetSources
+    readonly generatedRoots: readonly string[]
+    readonly configVersions: Readonly<Record<string, number>>
+  }
 }
 
 interface WorkspaceClient extends SiteClient {
@@ -109,7 +117,7 @@ export class Sites {
   private closing = false
   private readonly virtual = new VirtualSources(
     (key) => this.clientForWorkspace(key),
-    (key) => this.clientWhenReady(key),
+    (key, token) => this.clientWhenReady(key, token),
   )
   private readonly tasks = new SiteTasks(() => [...this.selections.values()])
   private readonly pages: PagesView
@@ -151,7 +159,11 @@ export class Sites {
       vscode.commands.registerCommand('tola.revealOutput', () => this.revealOutput()),
       vscode.workspace.onDidChangeWorkspaceFolders(() => this.refreshInBackground()),
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (!event.affectsConfiguration('tola')) return
+        if (
+          !['enabled', 'serverPath', 'configPath', 'packagePath', 'packageCachePath'].some((setting) =>
+            event.affectsConfiguration(`tola.${setting}`)
+          )
+        ) return
         void this.refresh().catch((error) => this.report(error))
       }),
       vscode.workspace.onDidGrantWorkspaceTrust(() => this.refreshInBackground()),
@@ -183,19 +195,24 @@ export class Sites {
   /**
    * A package document opened during a transition waits for the workspace client that comes up.
    */
-  private async clientWhenReady(key: string): Promise<WorkspaceClient | undefined> {
+  private async clientWhenReady(
+    key: string,
+    token: vscode.CancellationToken,
+  ): Promise<WorkspaceClient | undefined> {
+    if (token.isCancellationRequested) throw new vscode.CancellationError()
     const running = this.clientForWorkspace(key)
     if (running) return running
     while (true) {
       const transition = this.queue
       // Waiting for the whole queue would hold this request behind every other folder's handshake;
       // the transition this folder's own start attempt belongs to is the one it can answer from.
-      const settled = this.awaitFolder(key)
+      const settled = this.awaitFolder(key, token)
       try {
         await Promise.race([transition, settled.ready])
       } finally {
         settled.dispose()
       }
+      if (token.isCancellationRequested) throw new vscode.CancellationError()
       if (this.closing) return undefined
       const site = this.clientForWorkspace(key)
       // A transition enqueued while this one ran decides the site, so the wait continues with it.
@@ -203,15 +220,25 @@ export class Sites {
     }
   }
 
-  /** Resolves when one folder's start attempt settles, whether it started a client or not. */
-  private awaitFolder(key: string): { ready: Promise<void>; dispose: () => void } {
+  private awaitFolder(
+    key: string,
+    token: vscode.CancellationToken,
+  ): { ready: Promise<void>; dispose: () => void } {
     let listener: vscode.Disposable | undefined
+    let cancelled: vscode.Disposable | undefined
     const ready = new Promise<void>((resolve) => {
       listener = this.settled.event((settled) => {
         if (settled === key) resolve()
       })
+      cancelled = token.onCancellationRequested(() => resolve())
     })
-    return { ready, dispose: () => listener?.dispose() }
+    return {
+      ready,
+      dispose: () => {
+        listener?.dispose()
+        cancelled?.dispose()
+      },
+    }
   }
 
   private async answers(document: vscode.TextDocument, selected: ServedWorkspace): Promise<boolean> {
@@ -257,6 +284,13 @@ export class Sites {
     return document.isClosed ? undefined : chosen?.key
   }
 
+  private inputRoots(site: WorkspaceClient): readonly string[] {
+    return [
+      ...site.selection.inputRoots,
+      ...(site.sourceCheck.site?.packageRoots ?? []).map((root) => vscode.Uri.parse(root).fsPath),
+    ]
+  }
+
   private clientForDocument(document: vscode.TextDocument): SiteClient | undefined {
     if (document.uri.scheme === packageScheme) return this.virtual.clientForDocument(document)
     if (isUntitledTypst(document)) {
@@ -267,8 +301,15 @@ export class Sites {
       return undefined
     }
     const folder = vscode.workspace.getWorkspaceFolder(document.uri)
-    const site = folder && this.clientForWorkspace(folder.uri.toString())
-    return site && ownsTypstDocument(site.selection, document) ? site : undefined
+    if (folder) {
+      const site = this.clientForWorkspace(folder.uri.toString())
+      return site && ownsTypstDocument(site.selection, document) ? site : undefined
+    }
+    const candidates = [...this.workspaces.values()].filter((site) =>
+      this.clientForWorkspace(site.key) === site &&
+      ownsTypstDocument(site.selection, document, this.inputRoots(site))
+    )
+    return candidates.length === 1 ? candidates[0] : undefined
   }
 
   refresh(restart = false): Promise<void> {
@@ -287,14 +328,50 @@ export class Sites {
 
   /** The site a dropped or pasted file publishes into: its root, and its asset directory. */
   assetSite(document: vscode.TextDocument): AssetSite | undefined {
-    const folder = vscode.workspace.getWorkspaceFolder(document.uri)
-    const site = folder && this.clientForSite(folder.uri.toString())
+    const selected = this.selectionForUri(document.uri)
+    const site = selected && this.clientForSite(selected.folder.uri.toString())
     if (!site || !ownsTypstDocument(site.selection, document)) return undefined
+    const configuration = site.sourceCheck.site
+    if (!configuration) return undefined
+    const configurations = [
+      site.selection.config,
+      vscode.Uri.file(site.selection.configurationFile),
+      ...Object.keys(configuration.configVersions).map((uri) => vscode.Uri.parse(uri)),
+    ]
+    const configurationSaved = () =>
+      !configurations.some((uri) =>
+        site.client.diagnostics?.get(uri)?.some((report) =>
+          report.severity === vscode.DiagnosticSeverity.Error
+        )
+      ) &&
+      vscode.workspace.textDocuments.every((source) => {
+        const uri = source.uri.toString()
+        const config = configurations.some((configured) => configured.toString() === uri)
+        return !config || !source.isDirty && configuration.configVersions[uri] === source.version
+      })
+    if (!configurationSaved()) return undefined
+    const root = vscode.Uri.parse(configuration.root).fsPath
+    const spelled = site.selection.inputRoots[0]!
+    const source = containsFile(spelled, document.uri.fsPath)
+      ? path.join(root, path.relative(spelled, document.uri.fsPath))
+      : document.uri.fsPath
+    const packages = configuration.packageRoots.map((directory) => vscode.Uri.parse(directory).fsPath)
+      .filter((directory) => containsFile(root, directory) && path.relative(root, directory) !== '')
+    if (
+      !containsFile(root, source) ||
+      [...packages, ...configuration.generatedRoots.map((directory) => vscode.Uri.parse(directory).fsPath)]
+        .some((directory) => containsFile(directory, source))
+    ) return undefined
     const settings = vscode.workspace.getConfiguration('tola', site.selection.folder.uri)
     return {
-      root: path.dirname(site.selection.config.fsPath),
+      root,
       directory: settings.get<string>('assetDirectory', 'assets'),
-      current: () => this.clientForWorkspace(site.key) === site,
+      entry: vscode.Uri.parse(configuration.entry),
+      sources: configuration.assetSources,
+      generated: configuration.generatedRoots,
+      current: () =>
+        this.clientForWorkspace(site.key) === site &&
+        JSON.stringify(site.sourceCheck.site) === JSON.stringify(configuration) && configurationSaved(),
     }
   }
 
@@ -346,10 +423,12 @@ export class Sites {
     const folder = vscode.workspace.getWorkspaceFolder(uri)
     if (folder) return this.selections.get(folder.uri.toString())
     if (uri.scheme !== 'file') return undefined
-    const owners = [...this.selections.values()].filter((selected) =>
-      uri.fsPath === selected.config.fsPath || uri.fsPath === selected.configurationFile ||
-      selected.inputRoots.some((root) => containsFile(root, uri.fsPath))
-    )
+    const owners = [...this.selections.values()].filter((selected) => {
+      const site = this.clientForSite(selected.folder.uri.toString())
+      return uri.fsPath === selected.config.fsPath || uri.fsPath === selected.configurationFile ||
+        (site ? this.inputRoots(site) : selected.inputRoots)
+          .some((root) => containsFile(root, uri.fsPath))
+    })
     return owners.length === 1 ? owners[0] : undefined
   }
 
@@ -372,7 +451,7 @@ export class Sites {
       const site = this.clientForSite(siteKey)
       if (
         !site || uri && (uri.scheme !== 'file' ||
-            !site.selection.inputRoots.some((root) => containsFile(root, uri.fsPath)) &&
+            !this.inputRoots(site).some((root) => containsFile(root, uri.fsPath)) &&
               uri.fsPath !== site.selection.config.fsPath &&
               uri.fsPath !== site.selection.configurationFile)
       ) return undefined
@@ -389,6 +468,7 @@ export class Sites {
   private previewSiteFor(site: Site): PreviewSite {
     return {
       selection: site.selection,
+      inputRoots: () => this.inputRoots(site),
       lifetime: site.lifetime,
       state: () =>
         site.client.state === State.Running
@@ -434,16 +514,18 @@ export class Sites {
     if (directory) await this.siteCli.initSite(serverCommand(directory, directory.fsPath), directory)
   }
 
-  report(error: unknown): void {
+  report(error: unknown, restart?: () => Promise<void>): void {
     if (this.closing || isCancellation(error)) return
     const message = error instanceof Error ? error.message : String(error)
     this.output.appendLine(message)
     void vscode.window.showErrorMessage(
       message.startsWith('Tola ') ? message : `Tola: ${message}`,
-      'Restart',
+      ...(restart ? ['Restart'] : []),
       'Show Output',
     ).then((selected) => {
-      if (selected === 'Restart') void this.refresh(true).catch((error) => this.report(error))
+      if (selected === 'Restart' && restart) {
+        void restart().catch((error) => this.report(error, restart))
+      }
       if (selected === 'Show Output') this.output.show()
     })
   }
@@ -489,7 +571,12 @@ export class Sites {
 
   /** Whether this client answers feature requests for the document, waiting for the site an untitled buffer is still choosing. */
   private async attached(site: WorkspaceClient, document: vscode.TextDocument): Promise<boolean> {
-    if (!isUntitledTypst(document)) return ownsDocument(site.selection, document)
+    if (!isUntitledTypst(document)) {
+      // Shared dependencies sync to each reading site; feature replies need one owner.
+      return document.languageId === 'typst'
+        ? this.clientForDocument(document) === site
+        : ownsDocument(site.selection, document)
+    }
     const uri = document.uri.toString()
     if (!site.untitledDocuments.has(uri) && await this.untitled.get(uri) !== site.key) return false
     // A chosen client answers once its own open notification has gone out, never before.
@@ -503,10 +590,10 @@ export class Sites {
     action: (token: vscode.CancellationToken) => vscode.ProviderResult<T>,
   ): Promise<T | null | undefined> {
     const version = document.version
-    const scope = this.scopedCancellation(document, () => this.clientForWorkspace(site.key) !== site, [
-      token,
-      site.lifetime,
-    ])
+    const scope = this.scopedCancellation(document, () =>
+      this.clientForWorkspace(site.key) !== site ||
+      document.uri.scheme === 'file' && document.languageId === 'typst' &&
+        this.clientForDocument(document) !== site, [token, site.lifetime])
     try {
       if (scope.stale() || !await this.attached(site, document)) return null
       if (!await site.synchronization.wait(document, version, scope.token) || scope.stale()) return null
@@ -527,7 +614,10 @@ export class Sites {
   ): LanguageClientOptions {
     return {
       workspaceFolder: selected.folder,
-      initializationOptions: { sourceCheckStatus: true },
+      initializationOptions: {
+        sourceCheckStatus: true,
+        checkMode: vscode.workspace.getConfiguration('tola', selected.folder.uri).get('checkMode', 'onType'),
+      },
       documentSelector: [
         { scheme: 'file', language: 'typst' },
         ...(selected.kind === 'site'
@@ -543,7 +633,7 @@ export class Sites {
       diagnosticCollectionName: `tola:${selected.folder.uri.toString()}`,
       outputChannel: this.output,
       initializationFailedHandler: () => false,
-      synchronize: { fileEvents: sourceWatchers },
+      synchronize: { fileEvents: sourceWatchers, configurationSection: 'tola' },
       errorHandler: {
         error: () => ({ action: ErrorAction.Shutdown, handled: true }),
         closed: () => ({
@@ -580,17 +670,18 @@ export class Sites {
             candidate.uri.toString() === uri
           )
           if (!document) {
-            return vscode.Uri.parse(uri).scheme === 'untitled'
-              ? undefined as never
-              : next(type, params, token)
+            if (vscode.Uri.parse(uri).scheme === 'untitled') throw new vscode.CancellationError()
+            return next(type, params, token)
           }
           const owner = site()
-          return await this.semantic(
+          const response = await this.semantic(
             owner,
             document,
             token ?? owner.lifetime,
-            (requestToken) => next(type, params, requestToken),
-          ) as never
+            async (requestToken) => ({ reply: await next(type, params, requestToken) }),
+          )
+          if (!response) throw new vscode.CancellationError()
+          return response.reply as never
         },
         provideCodeLenses: (document, token, next) =>
           selected.kind === 'site'
@@ -709,48 +800,46 @@ export class Sites {
   private synchronize(document: vscode.TextDocument, change: 'open' | 'change' | 'save' | 'close'): void {
     if (document.uri.scheme !== 'file') return
     for (const site of this.workspaces.values()) {
-      // The client's own middleware sends what this site owns; the mirror carries the rest of its inputs.
+      // The client's middleware sends launch-owned sources; this mirror carries its other inputs.
       if (this.clientForWorkspace(site.key) !== site || ownsDocument(site.selection, document)) continue
-      if (
-        !(site.selection.kind === 'site' && document.uri.fsPath === site.selection.configurationFile) &&
-        !site.selection.inputRoots.some((root) => containsFile(root, document.uri.fsPath))
-      ) continue
+      const included =
+        site.selection.kind === 'site' && document.uri.fsPath === site.selection.configurationFile ||
+        this.inputRoots(site).some((root) => containsFile(root, document.uri.fsPath))
       const uri = document.uri.toString()
       const converter = site.client.code2ProtocolConverter
       const notifications: Promise<void>[] = []
-      if (change === 'close') {
+      if (change === 'close' || !included) {
         if (site.extraDocuments.delete(uri)) {
-          notifications.push(
+          notifications.push(site.synchronization.close(document, () =>
             site.client.sendNotification(
               DidCloseTextDocumentNotification.type,
               converter.asCloseTextDocumentParams(document),
-            ),
-          )
+            )))
         }
       } else {
         if (!site.extraDocuments.has(uri)) {
           site.extraDocuments.add(uri)
-          notifications.push(
+          notifications.push(site.synchronization.open(document, () =>
             site.client.sendNotification(
               DidOpenTextDocumentNotification.type,
               converter.asOpenTextDocumentParams(document),
-            ),
-          )
+            )))
         } else if (change === 'change') {
+          const parameters = converter.asChangeTextDocumentParams(document)
           notifications.push(
-            site.client.sendNotification(
-              DidChangeTextDocumentNotification.type,
-              converter.asChangeTextDocumentParams(document),
+            site.synchronization.change(
+              document,
+              document.version,
+              () => site.client.sendNotification(DidChangeTextDocumentNotification.type, parameters),
             ),
           )
         }
         if (change === 'save') {
-          notifications.push(
+          notifications.push(site.synchronization.save(document, () =>
             site.client.sendNotification(
               DidSaveTextDocumentNotification.type,
               converter.asSaveTextDocumentParams(document),
-            ),
-          )
+            )))
         }
       }
       void Promise.all(notifications).catch((error) => {
@@ -786,7 +875,6 @@ export class Sites {
       if (failed?.status === 'rejected') throw failed.reason
     } finally {
       await site.service.close()
-      site.cancellation.dispose()
       site.extraDocuments.clear()
       site.untitledDocuments.clear()
     }
@@ -803,7 +891,10 @@ export class Sites {
       resources.push(synchronization)
       const service = new LanguageService(selected, this.output, () => {
         if (!this.closing && this.workspaces.get(key) === site) {
-          this.report(new Error(`Tola language services stopped for ${selected.folder.name}.`))
+          this.report(
+            new Error(`Tola language services stopped for ${selected.folder.name}.`),
+            () => this.refresh(),
+          )
         }
       })
       const server: ServerOptions = () => Promise.resolve(service.start(cancellation.token))
@@ -866,7 +957,13 @@ export class Sites {
             this.workspaces.get(key) !== site || site!.lifetime.isCancellationRequested ||
             status.revision < site!.sourceCheck.revision
           ) return
-          site!.sourceCheck = status
+          site!.sourceCheck = {
+            ...site!.sourceCheck,
+            ...status,
+          }
+          if (status.site !== undefined) {
+            for (const document of vscode.workspace.textDocuments) this.synchronize(document, 'open')
+          }
           if (
             client.state === State.Running && (status.state === 'checked' || status.state === 'failed')
           ) this.pages.refresh()
@@ -1021,10 +1118,6 @@ export class Sites {
         )
       if (scope.stale()) return
       const entries = !locations ? [] : Array.isArray(locations) ? locations : [locations]
-      if (!entries.length) {
-        void vscode.window.showInformationMessage('No Tola definition at this position.')
-        return
-      }
       const targets = entries.map((location) =>
         'targetUri' in location
           ? new vscode.Location(location.targetUri, location.targetSelectionRange ?? location.targetRange)
