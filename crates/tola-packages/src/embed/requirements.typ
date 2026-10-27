@@ -740,6 +740,37 @@
     if not parsed.ok { panic(format-issues(parsed.issues)) }
     parsed.value
   }
+  // Building a value: `partial` fixes some fields for a later `parse`, and `defaults` reports what
+  // an omitted key becomes.
+  let object-description(member, owner) = {
+    let description = inspect(member)
+    require(
+      description.kind == "object",
+      message: owner + ": expected an object schema; found a `" + description.kind + "` declaration",
+    )
+    description
+  }
+  let partial(member, ..fixed) = {
+    require(fixed.pos().len() == 0, message: "partial: expected named fields only")
+    let _ = object-description(member, "partial")
+    let declared = fixed.named()
+    (..rest) => {
+      require(rest.pos().len() == 0, message: "partial: expected named fields only")
+      let supplied = rest.named()
+      for key in supplied.keys() {
+        require(key not in declared, message: "partial: `" + key + "` is already fixed")
+      }
+      parse(declared + supplied, member)
+    }
+  }
+  let defaults(member) = {
+    let description = object-description(member, "defaults")
+    let found = (:)
+    for (key, field) in description.fields {
+      if "default" in field { found.insert(key, field.default.value) }
+    }
+    found
+  }
   import "schema-rules.typ": rules
   (
     any: any,
@@ -765,6 +796,8 @@
     inspect: inspect,
     parse: parse,
     try-parse: try-parse,
+    partial: partial,
+    defaults: defaults,
     ok: ok,
     err: err,
     issue: issue,
@@ -1292,6 +1325,44 @@
 /// - member (type | dictionary): the schema the value is parsed through.
 /// -> dictionary
 #let try-parse = core.try-parse
+
+/// Fix some fields now and supply the rest when the result is called.
+///
+/// The returned function takes the remaining fields as named arguments and parses them together
+/// with the fixed ones, so declared defaults still fill whatever neither call supplies. Supplying
+/// a field the first call fixed is an error, so a fixed field cannot be silently overridden.
+///
+/// Example - share one layout across many pages:
+/// ```typst
+/// #import "@tola/schema:0.0.0": optional, partial, schema
+/// #let page-schema = schema((title: str, layout: optional(str, default: "page")))
+/// #let note = partial(page-schema, layout: "note")
+/// #assert.eq(note(title: "Notes"), (title: "Notes", layout: "note"))
+/// ```
+///
+/// Related: defaults, parse
+/// - member (type | dictionary): the object schema the fields are checked against.
+/// -> function
+#let partial = core.partial
+
+/// Report the value each omitted key becomes.
+///
+/// Only keys whose declaration declares a default are listed, and each is the declared default as
+/// written rather than a parsed value. A nested object's own defaults apply when that object is
+/// supplied, so they are not listed here: the object itself is required unless its declaration is
+/// optional with a default.
+///
+/// Example - read the fallbacks a declaration supplies:
+/// ```typst
+/// #import "@tola/schema:0.0.0": array-of, defaults, optional, schema
+/// #let page-schema = schema((title: str, tags: optional(array-of(str), default: ())))
+/// #assert.eq(defaults(page-schema), (tags: ()))
+/// ```
+///
+/// Related: optional, inspect, parse
+/// - member (type | dictionary): the object schema whose defaults are read.
+/// -> dictionary
+#let defaults = core.defaults
 
 /// Construct a successful Result from any value.
 /// `ok(none)` is a success whose value is `none`.

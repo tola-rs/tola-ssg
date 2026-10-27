@@ -653,6 +653,8 @@ mod tests {
                     "inspect",
                     "parse",
                     "try-parse",
+                    "partial",
+                    "defaults",
                     "ok",
                     "err",
                     "issue",
