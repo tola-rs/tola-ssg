@@ -147,6 +147,10 @@ validating them. `try-parse` returns `(ok: true, value:)` or `(ok: false, issues
 declarations and callback errors still stop compilation. Exact contracts:
 `tola help "@tola/schema"`.
 
+A page a program generates carries metadata the same way: `parse(dict, page-schema)` checks the
+fields and fills the declared defaults. `partial(page-schema, ..fixed)` fixes fields for a later
+call and rejects a field supplied twice; `defaults(page-schema)` lists what an omitted key becomes.
+
 Use `date` for calendar fields: a native date or strict `YYYY-MM-DD` string becomes a native
 date-only `datetime`. Use `timestamp` for instants: a complete native calendar datetime or strict
 RFC 3339 string becomes `(rfc3339:, unix-seconds:, subsecond:)`. Native values use UTC, with
@@ -344,7 +348,23 @@ recomputing destinations is how links drift.
   the helper in `site/` and place it from the page template.
 - **Backlinks** — query body references, choose one row per linking document, and render the list
   outside the queried region so it does not include itself. A heading label selects the heading,
-  not the chapter text after it; label a containing element to select that text.
+  not the chapter text after it; label a containing element to select that text. The query gives
+  one record per reference, so a page that links here three times appears three times until you
+  keep one row per `document.output`:
+
+  ```typst
+  #context {
+    let rows = ()
+    let seen = ()
+    for reference in references(to: auto, from-within: <page>) {
+      let output = reference.document.output
+      if output in seen { continue }
+      seen.push(output)
+      rows.push(reference)
+    }
+    for row in rows [#link(row.document.location)[#row.document.route]]
+  }
+  ```
 - **Hierarchy** — `key`/`keys` receive members, and `parent` receives keys, including keys absent
   from the array. Hierarchy keys must be unique and non-`none`, and the parent rule must reach
   `none`. Contracts: `tola help "@tola/collection"`.

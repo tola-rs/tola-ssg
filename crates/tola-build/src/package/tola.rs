@@ -4725,6 +4725,40 @@ path = "icons/brand"
         }
 
         #[test]
+        fn partial_parses_remaining_fields() {
+            assert_schema(
+                r#"
+#let page = schema((title: str, tags: optional(array-of(str), default: ())))
+#assert.eq(partial(page, tags: ("notes",))(title: "Notes"), (title: "Notes", tags: ("notes",)))
+#assert.eq(partial(page)(title: "Notes"), parse((title: "Notes"), page))
+"#,
+            );
+        }
+
+        #[test]
+        fn partial_refuses_duplicate_field() {
+            reject_schema(
+                r#"
+#let page = schema((title: str, layout: str))
+#let note = partial(page, title: "Notes")
+#note(title: "Other", layout: "page")
+"#,
+            );
+        }
+
+        #[test]
+        fn defaults_list_declared_fallbacks_only() {
+            assert_schema(
+                r#"
+#let child = schema((label: optional(str)))
+#let page = schema((title: str, tags: optional(array-of(str), default: ()), child: child))
+#assert.eq(defaults(page), (tags: ()))
+#assert.eq(defaults(child), (:))
+"#,
+            );
+        }
+
+        #[test]
         fn nullable_bypasses_the_inner_schema() {
             assert_schema(
                 r#"

@@ -17,6 +17,8 @@
 // Hand a value and a declaration to `parse` to get the normalized value, or to `try-parse` to get a
 // Result. The value you pass is never changed; a normalized value is a new value.
 //
+// `partial` fixes some fields for a later `parse`, and `defaults` reports the declared fallbacks.
+//
 // Wrap a declaration to change how its value is checked or shaped. `trim` and `non-empty`
 // normalize and reject, `refine` and `check` validate against a callback, `map` transforms, and
 // `convert` transforms with a possible rejection. Wrappers run from the inside out:
@@ -35,8 +37,8 @@
 // `parse-sources`.
 
 #import "requirements.typ": (
-  any, array-of, at-least, at-most, check, convert, date, describe, dictionary-of, email, enum-of, err, format-issues,
-  http-url, https-url, inspect, ip, ipv4, ipv6, issue, lazy, literal, map, matches, max-length, min-length, non-empty,
-  nullable, ok, one-or-many, optional, parse, refine, schema, timestamp, trim, try-parse, tuple, union, url-path,
-  variant,
+  any, array-of, at-least, at-most, check, convert, date, defaults, describe, dictionary-of,
+  email, enum-of, err, format-issues, http-url, https-url, inspect, ip, ipv4, ipv6, issue, lazy, literal,
+  map, matches, max-length, min-length, non-empty, nullable, ok, one-or-many, optional, parse, partial,
+  refine, schema, timestamp, trim, try-parse, tuple, union, url-path, variant,
 )

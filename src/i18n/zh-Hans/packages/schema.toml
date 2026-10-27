@@ -436,6 +436,40 @@ Example - 返回 Result 而不是失败：
 value = "要解析的值。"
 member = "值要经其解析的 schema。"
 
+[exports.partial]
+
+summary = [
+  '''
+先固定一部分字段，其余字段在返回的函数被调用时补上。
+
+返回的函数接收剩余字段（具名参数），并与固定字段一起解析，所以两次调用都没给的键仍由声明的默认值填充。给第一次已固定的字段再次赋值是错误，固定字段不会被静默覆盖。
+
+Example - 让许多页面共享同一个版式：
+''',
+  '',
+]
+
+[exports.partial.parameters]
+
+member = "字段要经其检查的对象 schema。"
+
+[exports.defaults]
+
+summary = [
+  '''
+报告每个被省略的键会取什么值。
+
+只列出声明了默认值的键，且列出的是声明里原样写下的默认值，而不是解析后的值。嵌套对象自身的默认值只在提供该对象时生效，所以不在这里列出：除非声明是带默认值的 optional，否则对象本身仍然必需。
+
+Example - 读取声明提供的回退值：
+''',
+  '',
+]
+
+[exports.defaults.parameters]
+
+member = "要读取默认值的对象 schema。"
+
 [exports.ok]
 
 summary = [
