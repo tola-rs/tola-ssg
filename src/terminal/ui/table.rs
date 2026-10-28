@@ -435,38 +435,33 @@ mod tests {
         assert!(table.can_scroll_detail(-1));
     }
 
+    /// A frame too narrow for the columns still draws the values later columns hold.
     #[test]
-    fn unicode_columns_leave_text_visible() {
-        let mut table = Table::new(
+    fn narrow_frames_keep_later_columns() {
+        let mut unicode = Table::new(
             vec!["name".to_owned(), "value".to_owned()],
             vec![vec!["界界".to_owned(), "tail".to_owned()]],
         );
-        let rows = drawn(&mut table, Rect::new(0, 0, 12, 3));
+        let rows = drawn(&mut unicode, Rect::new(0, 0, 12, 3));
         assert!(rows.iter().any(|row| row.contains("tail")), "{rows:?}");
-    }
 
-    #[test]
-    fn narrow_table_keeps_later_columns() {
-        let mut table = Table::new(
+        let mut wide_head = Table::new(
             vec!["properties.description".to_owned(), "name".to_owned()],
             vec![vec!["a long description".to_owned(), "tail".to_owned()]],
         );
-        let rows = drawn(&mut table, Rect::new(0, 0, 12, 3));
+        let rows = drawn(&mut wide_head, Rect::new(0, 0, 12, 3));
         assert!(rows.iter().any(|row| row.contains("tail")), "{rows:?}");
-        let rows = drawn(&mut table, Rect::new(0, 0, 60, 3));
+        let rows = drawn(&mut wide_head, Rect::new(0, 0, 60, 3));
         assert!(
             rows.iter().any(|row| row.contains("a long description")),
             "{rows:?}"
         );
-    }
 
-    #[test]
-    fn many_columns_keep_row_visible() {
-        let mut table = Table::new(
+        let mut many = Table::new(
             (0..12).map(|column| format!("column {column}")).collect(),
             vec![(0..12).map(|column| format!("value {column}")).collect()],
         );
-        let rows = drawn(&mut table, Rect::new(0, 0, 3, 1));
+        let rows = drawn(&mut many, Rect::new(0, 0, 3, 1));
         assert!(rows[0].contains('v'), "{rows:?}");
     }
 
@@ -502,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn movement_hints_follow_viewport_and_selection() {
+    fn only_reachable_moves_are_offered() {
         let mut table = table();
         drawn(&mut table, Rect::new(0, 0, 24, 20));
         assert!(!table.overflows_viewport());

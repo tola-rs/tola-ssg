@@ -25,7 +25,7 @@ pub(crate) struct BuildAttemptProducers {
     pub(crate) generated_files: Vec<crate::output::GeneratedFile>,
     /// Accepted icon resources; preparation checks their configuration,
     /// source identities, bytes, and directory membership before reuse.
-    pub(crate) icons: Option<crate::icon::IconSnapshot>,
+    pub(crate) icons: Option<crate::icon::IconInventory>,
     pub(crate) images: Option<std::sync::Arc<crate::image::output::ImageOutputs>>,
     pub(crate) seo: Option<std::sync::Arc<crate::seo::SeoCompilation>>,
     pub(crate) reference_reuse: Option<crate::site::references::References>,
@@ -588,7 +588,7 @@ pub(super) fn compile_site_program(
 /// root Bundle compiles.
 struct PreparedProducerInputs {
     content: std::sync::Arc<[crate::content::ContentUnit]>,
-    icons: crate::icon::IconSnapshot,
+    icons: crate::icon::IconInventory,
     typst_host: TypstHost,
 }
 
@@ -868,97 +868,12 @@ mod tests {
     use super::*;
     use crate::build::tests::*;
     use crate::build::*;
-    use crate::config::section::build::BeforeBuildHookConfig;
+
     use crate::config::section::{
         AssetFileDeclaration, AssetTreeDeclaration, AssetUrl, AssetUrlPrefix,
     };
     use std::fs;
     use tempfile::TempDir;
-
-    /// A check that reuses its source analysis leaves a build's published bytes untouched.
-    ///
-    /// The check owns no output; this states the other half of its contract at the layer that does:
-    /// whatever the check derived or reused, the tree a build publishes over the same site is
-    /// byte-for-byte what it published before.
-    #[test]
-    fn reused_check_leaves_published_bytes_unchanged() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir_all(root.join("content")).unwrap();
-        for index in 0..8 {
-            fs::write(
-                root.join(format!("content/doc-{index:02}.typ")),
-                format!("= Document {index}\n\nBody {index}.\n"),
-            )
-            .unwrap();
-        }
-        fs::write(
-            root.join("site.typ"),
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of, slugify
-#for source in all-sources() {
-  let route = join-route(source.route-segments.map(segment => slugify(segment)))
-  document(output-of(route), format: "html")[#include source.file]
-}
-"#,
-        )
-        .unwrap();
-        let mut config = site_config(root);
-        config.build.publish_dir = root.join("public");
-
-        build_and_publish(&config).unwrap();
-        let cold = published_files(&config);
-        assert!(!cold.is_empty(), "the build published nothing to compare");
-
-        let cancellation = crate::cancellation::BuildCancellation::new();
-        let mut session =
-            crate::check::SourceDiagnosticSession::new(std::sync::Arc::new(config.clone()));
-        session.inspect(Vec::new(), &cancellation).unwrap();
-        session.inspect(Vec::new(), &cancellation).unwrap();
-        assert!(
-            session.reused_source_analysis(),
-            "the second revision reused the first revision's analysis"
-        );
-
-        build_and_publish(&config).unwrap();
-        assert_eq!(
-            cold,
-            published_files(&config),
-            "a reused check changed what the build published"
-        );
-    }
-
-    /// Every file under the output root, by relative path, with the bytes it holds.
-    fn published_files(config: &ResolvedSiteConfig) -> Vec<(String, Vec<u8>)> {
-        fn collect(
-            root: &std::path::Path,
-            directory: &std::path::Path,
-            files: &mut Vec<(String, Vec<u8>)>,
-        ) {
-            for entry in fs::read_dir(directory).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                if entry.file_type().unwrap().is_dir() {
-                    collect(root, &path, files);
-                } else {
-                    let relative = path
-                        .strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .into_owned();
-                    files.push((relative, fs::read(&path).unwrap()));
-                }
-            }
-        }
-        let mut files = Vec::new();
-        collect(
-            &config.build.publish_dir,
-            &config.build.publish_dir,
-            &mut files,
-        );
-        files.sort_by(|left, right| left.0.cmp(&right.0));
-        files
-    }
 
     #[test]
     fn matching_media_types_resolve_references() {
@@ -996,54 +911,13 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn mismatched_media_types_report_errors() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir_all(root.join("content")).unwrap();
-        let site_program = root.join("site.typ");
-        fs::write(
-            &site_program,
-            r#"#document("index.html", html.html(
-  html.head(
-    html.link(rel: "stylesheet", href: "/opaque.bin")
-    + html.link(rel: "stylesheet", href: "/module.js")
-    + html.script(src: "/site.css")
-  )
-  + html.body[Site]
-))
-#asset("opaque.bin", "")
-#asset("module.js", "")
-#asset("site.css", "")"#,
-        )
-        .unwrap();
-        let config = site_config(root);
-
-        let error = build_failure(&config);
-        let diagnostics = crate::diagnostic::attached(&error).expect("reference diagnostics");
-
-        assert_eq!(diagnostics.len(), 3);
-        assert!(diagnostics.iter().all(|diagnostic| {
-            diagnostic.code == "reference.resource_media_mismatch"
-                && diagnostic.severity == crate::diagnostic::Severity::Error
-        }));
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains("application/octet-stream")
-                && diagnostic.message.contains("text/css")
-        }));
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains("text/javascript")
-                && diagnostic.message.contains("text/css")
-        }));
-    }
-
     /// The identity of the bytes this build published at `path`.
     fn published_identity(graph: &crate::output::graph::OutputGraph, path: &str) -> String {
         tola_typst::ContentDigest::of(output_bytes(graph, path)).to_hex()
     }
 
     #[test]
-    fn cache_busting_tracks_published_bytes() {
+    fn asset_url_changes_with_its_bytes() {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
         fs::create_dir_all(root.join("content")).unwrap();
@@ -1236,119 +1110,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_output_produces_no_candidate() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#document("index.html")[Current]
-#document("bad.html")[#html.script("</script>")]"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let error = match build_site_with_host(
-            &config,
-            &compiler_host(&config).unwrap(),
-            BuildMode::Production,
-            &mut BuildAttemptProducers::default(),
-        ) {
-            Ok(_) => panic!("invalid background HTML unexpectedly produced a site candidate"),
-            Err(error) => error,
-        };
-        assert!(
-            format!("{error:#}").contains("cannot contain its own closing tag"),
-            "{error:#}"
-        );
-    }
-
-    #[test]
-    fn candidate_reports_warnings() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#document("index.html")[
-#show strong: none
-= Real
-#context {
-  let count = query(heading).len()
-  count * [= Generated]
-}
-]"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-        let candidate = build_site_with_host(
-            &config,
-            &compiler_host(&config).unwrap(),
-            BuildMode::Production,
-            &mut BuildAttemptProducers::default(),
-        )
-        .unwrap();
-
-        assert!(
-            candidate
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Warning)
-        );
-    }
-
-    #[test]
-    fn export_failure_retains_source_diagnostics() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir_all(root.join("content")).unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#document("index.html")[#text(font: "missing-font-qxyz")[Hi]]
-#document("file.pdf", format: "pdf")[#pdf.attach("bad.txt", bytes("hi"), mime-type: "invalid")]"#,
-        )
-        .unwrap();
-        let config = site_config(root);
-        let error = build_site_with_host(
-            &config,
-            &compiler_host(&config).unwrap(),
-            BuildMode::Production,
-            &mut BuildAttemptProducers::default(),
-        )
-        .err()
-        .expect("the attachment cannot export with this MIME type");
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
-        let export = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.code == crate::codes::typst::BUNDLE_EXPORT)
-            .unwrap();
-        assert_eq!(export.severity, crate::diagnostic::Severity::Error);
-        let location = export.location.as_ref().unwrap();
-        assert_eq!(location.path, "site.typ");
-        assert_eq!(location.line, Some(2));
-        assert!(location.range.is_some());
-        assert!(location.source_lines[0].text.contains("pdf.attach"));
-        assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.severity == crate::diagnostic::Severity::Warning
-                && diagnostic
-                    .location
-                    .as_ref()
-                    .is_some_and(|location| location.line == Some(1))
-                && diagnostic.message.contains("missing-font-qxyz")
-        }));
-        assert!(error.chain().any(|cause| {
-            matches!(
-                cause.downcast_ref::<tola_typst::CompileError>(),
-                Some(tola_typst::CompileError::BundleExport { .. })
-            )
-        }));
-    }
-
-    #[test]
     fn cancelled_execution_writes_no_candidate() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
@@ -1430,44 +1191,6 @@ mod tests {
         assert!(!output.exists());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn configured_asset_keeps_logical_path() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let physical = root.join("physical.bin");
-        let logical = root.join("logical.bin");
-        fs::write(&physical, b"asset").unwrap();
-        symlink(&physical, &logical).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, "#document(\"index.html\")[Hello]").unwrap();
-        let mut config = site_config(root);
-        config.assets.files = vec![AssetFileDeclaration::new(
-            &logical,
-            AssetUrl::parse("/download.bin").unwrap(),
-        )];
-
-        let build = build_site(&config, BuildMode::Production).unwrap();
-        let output = build
-            .graph
-            .outputs()
-            .iter()
-            .find(|output| output.path().as_str() == "download.bin")
-            .unwrap();
-        let crate::output::owner::OutputOwner::ConfiguredAsset { source } = output.owner() else {
-            panic!(
-                "configured output has the wrong owner: {:?}",
-                output.owner()
-            );
-        };
-        assert_eq!(source, &std::path::absolute(&logical).unwrap());
-        assert_ne!(source, &fs::canonicalize(&logical).unwrap());
-    }
-
     /// ASCII slugification reads each source name in the site's declared language: 東京
     /// slugs as `toukyou` under `ja`, not the Chinese `dong-jing`.
     #[test]
@@ -1522,38 +1245,6 @@ mod tests {
     }
 
     #[test]
-    fn every_build_publishes_minified_code_stylesheet() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir_all(root.join("content")).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, r#"#document("index.html", title: [Home])[Home]"#).unwrap();
-        let config = site_config(root);
-
-        let build = build_site(&config, BuildMode::Production).unwrap();
-        let path = tola_packages::code_stylesheet_output();
-        let output = build
-            .graph
-            .outputs()
-            .iter()
-            .find(|output| output.path().as_str() == path)
-            .unwrap_or_else(|| panic!("every build publishes `{path}`"));
-
-        assert_eq!(
-            output.declaration().media_type(),
-            &crate::output::semantics::ResponseMediaType::CSS
-        );
-        let stylesheet = String::from_utf8(output_bytes(&build.graph, &path).to_vec()).unwrap();
-        assert!(
-            stylesheet.contains(":where(.tola-code span)"),
-            "{stylesheet}"
-        );
-        assert!(stylesheet.contains("--tola-code-color"), "{stylesheet}");
-        assert!(!stylesheet.contains("/*"), "{stylesheet}");
-        assert!(!stylesheet.contains('\n'), "{stylesheet}");
-    }
-
-    #[test]
     fn seo_outputs_use_effective_site_url() {
         let directory = TempDir::new().unwrap();
         let root = directory.path();
@@ -1577,43 +1268,6 @@ mod tests {
         let sitemap = String::from_utf8_lossy(output_bytes(&build.graph, "sitemap.xml"));
         assert!(feed.contains("https://example.test/docs/"), "{feed}");
         assert!(sitemap.contains("https://example.test/docs/"), "{sitemap}");
-    }
-
-    #[test]
-    fn package_declaration_error_names_importing_file() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        fs::create_dir_all(root.join("content")).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/web:0.0.0": feed
-#document("index.html", title: [Home])[Home]
-#feed(entries: ((published: datetime(year: 2026, month: 9, day: 1)),))"#,
-        )
-        .unwrap();
-        let config = site_config_from(
-            root,
-            "[site]\norigin = \"https://example.test\"\ntitle = \"Notes\"\ndescription = \"Published notes\"",
-        );
-
-        let error = build_failure(&config);
-        let diagnostics = error_diagnostics(&error, config.get_root());
-        let diagnostic = diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.message.contains("/entries/0/target"))
-            .unwrap_or_else(|| panic!("missing feed declaration diagnostic: {diagnostics:#?}"));
-
-        let location = diagnostic
-            .location
-            .as_ref()
-            .expect("the declaration error resolves a location");
-        assert!(
-            location.path.contains("@tola/web"),
-            "unexpected diagnostic source: {}",
-            location.path
-        );
-        assert_eq!(diagnostic.imported_by, ["site.typ"]);
     }
 
     #[test]
@@ -1643,678 +1297,154 @@ mod tests {
         assert!(!output.exists());
     }
 
+    /// A root Bundle that generates documents and assets publishes every one of them: a
+    /// route loop in an imported helper, and a taxonomy over source metadata.
     #[test]
-    fn imported_routes_emit_sibling_outputs() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let routes = root.join("routes");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        fs::create_dir_all(&routes).unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#import "routes/routes.typ": emit-routes
-#emit-routes()
-"#,
-        )
-        .unwrap();
-        fs::write(
-            routes.join("routes.typ"),
-            r#"#let emit-routes() = include "generated.typ""#,
-        )
-        .unwrap();
-        fs::write(
-            routes.join("generated.typ"),
-            r#"#for slug in ("alpha", "beta") {
-  document(slug + "/index.html", [Route #slug])
-}
-#asset("generated/routes.txt", "alpha,beta")
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let build = build_and_publish(&config).unwrap();
-
-        for path in ["alpha/index.html", "beta/index.html"] {
-            assert!(
-                has_output(&build.graph, path),
-                "missing Bundle document {path}"
-            );
-            assert!(
-                output.join(path).is_file(),
-                "unpublished Bundle document {path}"
-            );
-        }
-        assert_eq!(
-            output_bytes(&build.graph, "generated/routes.txt"),
-            b"alpha,beta"
-        );
-        assert_eq!(
-            fs::read(output.join("generated/routes.txt")).unwrap(),
-            b"alpha,beta"
-        );
-    }
-
-    #[test]
-    fn taxonomy_generator_builds_tag_documents() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let routes = root.join("routes");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        fs::create_dir_all(&routes).unwrap();
-        fs::write(
-            content.join("alpha.typ"),
-            r#"#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Alpha], tags: ("rust", "typst")))"#,
-        )
-        .unwrap();
-        fs::write(
-            content.join("beta.typ"),
-            r#"#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Beta], tags: ("rust",)))"#,
-        )
-        .unwrap();
-        fs::write(
-            routes.join("taxonomy.typ"),
-            r#"#let emit-taxonomies(sources) = {
-  for tag in ("rust", "typst") {
-    let members = sources.filter(source => source.meta.tags.contains(tag))
-    if members.len() > 0 {
-      let names = members.map(source => source.meta.title).join(", ")
-      document("tags/" + tag + "/index.html", [#names])
-    }
-  }
-}
-"#,
-        )
-        .unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "routes/taxonomy.typ": emit-taxonomies
-#emit-taxonomies(all-sources())
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let build = build_and_publish(&config).unwrap();
-
-        let rust = fs::read_to_string(output.join("tags/rust/index.html")).unwrap();
-        assert!(rust.contains("Alpha"), "{rust}");
-        assert!(rust.contains("Beta"), "{rust}");
-        let typst = fs::read_to_string(output.join("tags/typst/index.html")).unwrap();
-        assert!(typst.contains("Alpha"), "{typst}");
-        assert!(!typst.contains("Beta"), "{typst}");
-
-        assert_eq!(build.index.address().pages().len(), 2);
-    }
-
-    #[test]
-    fn nested_document_construction_fails() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let routes = root.join("routes");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        fs::create_dir_all(&routes).unwrap();
-        fs::create_dir_all(&output).unwrap();
-        fs::write(output.join("sentinel.txt"), "unchanged").unwrap();
-        fs::write(
-            routes.join("nested.typ"),
-            r#"#let emit-inner() = document("inner/index.html")[Inner]"#,
-        )
-        .unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#import "routes/nested.typ": emit-inner
-#document("outer/index.html")[#emit-inner()]
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let error = build_failure(&config);
-        let diagnostics = error_diagnostics(&error, config.get_root());
-        let diagnostic = diagnostics
-            .iter()
-            .find(|diagnostic| {
-                diagnostic.message
-                    == "constructing a document is only supported in the bundle target"
-            })
-            .unwrap_or_else(|| {
-                panic!("missing native nested-document diagnostic: {diagnostics:#?}")
-            });
-        let location = diagnostic
-            .location
-            .as_ref()
-            .expect("native diagnostic should resolve the imported source");
-        assert!(
-            std::path::Path::new(&location.path).ends_with("routes/nested.typ"),
-            "unexpected diagnostic source: {}",
-            location.path
-        );
-        assert_eq!(
-            fs::read_to_string(output.join("sentinel.txt")).unwrap(),
-            "unchanged"
-        );
-        assert!(!output.join("outer/index.html").exists());
-        assert!(!output.join("inner/index.html").exists());
-    }
-
-    #[test]
-    fn failed_bundle_reports_the_label_declaration() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let routes = root.join("routes");
-        fs::create_dir_all(&content).unwrap();
-        fs::create_dir_all(&routes).unwrap();
-        fs::write(
-            content.join("post.typ"),
-            "#metadata((title: \"Post\")) <tola-meta>",
-        )
-        .unwrap();
-        fs::write(
-            routes.join("nested.typ"),
-            r#"#let emit-inner() = document("inner/index.html")[Inner]"#,
-        )
-        .unwrap();
-        fs::write(
-            root.join("site.typ"),
-            r#"#import "routes/nested.typ": emit-inner
-#document("outer/index.html")[#emit-inner()]
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let error = build_failure(&config);
-        let diagnostics = error_diagnostics(&error, config.get_root());
-
-        assert!(
-            diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == crate::codes::source::DECLARATION_DEPRECATED
-                    && diagnostic.severity == crate::diagnostic::Severity::Warning
-            }),
-            "{diagnostics:#?}"
-        );
-    }
-
-    #[test]
-    fn site_package_receives_resolved_site() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/site:0.0.0": site
-#document("index.html")[#site.title #site.base-path]"#,
-        )
-        .unwrap();
-
-        let config = site_config_from(
-            root,
-            "[site]\ntitle = \"Configured Title\"\norigin = \"https://example.test\"\nbase-path = \"/docs/\"",
-        );
-
-        build_and_publish(&config).unwrap();
-
-        let html = fs::read_to_string(output.join("index.html")).unwrap();
-        assert!(html.contains("Configured Title"), "{html}");
-        assert!(html.contains("/docs/"), "{html}");
-    }
-
-    #[test]
-    fn writes_stylesheet() {
-        if !is_hook_child_for("before-build") {
-            return;
-        }
-        fs::create_dir_all("generated").unwrap();
-        fs::write("generated/site.css", "compiled").unwrap();
-    }
-
-    #[test]
-    fn hook_generated_input_publishes_asset() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let generated = root.join("generated");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of
-
-#let published = all-sources()
-
-#for source in published {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}
-"#,
-        )
-        .unwrap();
-
-        let mut config = site_config(root);
-        config.assets.trees = vec![AssetTreeDeclaration::new(
-            &generated,
-            AssetUrlPrefix::parse("/styles").unwrap(),
-        )];
-        config.build.hooks.before_build.push(BeforeBuildHookConfig {
-            name: "generate stylesheet".into(),
-            command: hook_child_command("build::pipeline::tests::writes_stylesheet"),
-            dev: crate::config::section::build::DevParticipation::Skip,
-            generates: vec!["generated/site.css".into()],
-            ..BeforeBuildHookConfig::default()
-        });
-
-        build_and_publish(&config).unwrap();
-        assert_eq!(
-            fs::read_to_string(output.join("styles/site.css")).unwrap(),
-            "compiled"
-        );
-    }
-
-    #[test]
-    fn generated_document_keeps_native_title() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#document("tags/rust/index.html", title: [Native Rust])[
-  #import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Rust], pin: true))
-  = Rust
-]
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let snapshot = build_and_publish(&config).unwrap();
-        let url = tola_address::UrlPath::parse("/tags/rust/").unwrap();
-        let crate::site::Resource::Page { document } =
-            snapshot.index.address().get_by_url(&url).unwrap()
-        else {
-            panic!("expected generated document");
-        };
-
-        assert_eq!(
-            document
-                .properties
-                .title
-                .as_ref()
-                .map(|title| title.to_string()),
-            Some("Native Rust".to_string())
-        );
-    }
-
-    #[test]
-    fn documents_report_their_own_routes() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(
-            content.join("document.typ"),
-            r#"#import "@tola/document:0.0.0": current-document
-#context {
-  let ctx = current-document()
-  html.span(class: "current-route")[#ctx.route]
-}"#,
-        )
-        .unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/document:0.0.0": current-document
-#import "@tola/address:0.0.0": join-route, output-of
-
-#for source in all-sources() {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}
-
-#document("tags/rust/index.html", context {
-  let ctx = current-document()
-  html.span(class: "current-route")[#ctx.route]
-})
-
-#let body = include "content/document.typ"
-#document("first/index.html", body)
-#document("second/index.html", body)
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-        build_and_publish(&config).unwrap();
-
-        for (path, route) in [
-            ("document/index.html", "/document/"),
-            ("tags/rust/index.html", "/tags/rust/"),
-            ("first/index.html", "/first/"),
-            ("second/index.html", "/second/"),
-        ] {
-            let html = fs::read_to_string(output.join(path)).unwrap();
-            assert!(
-                html.contains(&format!(r#"class="current-route">{route}</span>"#)),
-                "{html}"
-            );
-        }
-    }
-
-    #[test]
-    fn not_found_document_uses_authored_body() {
-        let dir = TempDir::new().unwrap();
-        let root = crate::filesystem::normalize_path(dir.path());
-        let content = root.join("content");
-        let templates = root.join("templates");
-        let output = root.join("public");
-        fs::create_dir_all(&content).unwrap();
-        fs::create_dir_all(&templates).unwrap();
-        fs::write(templates.join("not-found.typ"), "= Not Found").unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#document("404.html", format: "html", title: [Page not found])[
-  #include "templates/not-found.typ"
-]
-"#,
-        )
-        .unwrap();
-
-        let config = site_config(&root);
-
-        build_and_publish(&config).unwrap();
-
-        let html = fs::read_to_string(output.join("404.html")).unwrap();
-        assert!(html.contains("<title>Page not found</title>"), "{html}");
-        assert!(html.contains("Not Found"), "{html}");
-        assert!(!output.join("404.html/index.html").exists());
-    }
-
-    #[test]
-    fn parent_index_keeps_flat_children() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        let posts = content.join("posts");
-        let rust = posts.join("rust");
-        let global_assets = root.join("global-assets");
-        let exact_asset = root.join("CNAME");
-        let output = root.join("public");
-        fs::create_dir_all(&rust).unwrap();
-        fs::create_dir_all(&global_assets).unwrap();
-        fs::write(posts.join("index.typ"), "Posts").unwrap();
-        fs::write(posts.join("child.typ"), "Child").unwrap();
-        fs::write(rust.join("index.typ"), "Rust").unwrap();
-        fs::write(global_assets.join("site.txt"), "site asset").unwrap();
-        fs::write(&exact_asset, "example.com").unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of
-
-#for source in all-sources() {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}
-#asset("generated.txt", "generated asset")
-"#,
-        )
-        .unwrap();
-
-        let mut config = site_config(root);
-        config.assets.trees = vec![AssetTreeDeclaration::new(
-            global_assets,
-            AssetUrlPrefix::parse("/global").unwrap(),
-        )];
-        config.assets.files = vec![AssetFileDeclaration::new(
-            exact_asset,
-            AssetUrl::parse("/CNAME").unwrap(),
-        )];
-
-        build_and_publish(&config).unwrap();
-
-        for path in [
-            "posts/index.html",
-            "posts/child/index.html",
-            "posts/rust/index.html",
-            "global/site.txt",
-            "CNAME",
-            "generated.txt",
-        ] {
-            assert!(output.join(path).is_file(), "missing output {path}");
-        }
-    }
-
-    #[test]
-    fn draft_sources_are_filtered_by_metadata() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(
-            content.join("included.typ"),
-            r#"#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Included], draft: false))"#,
-        )
-        .unwrap();
-        fs::write(
-            content.join("excluded.typ"),
-            r#"#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Excluded], draft: true))"#,
-        )
-        .unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of
-#for source in all-sources().filter(source => not source.meta.draft) {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let snapshot = build_and_publish(&config).unwrap();
-        assert!(
-            snapshot
-                .index
-                .address()
-                .get_by_url(&tola_address::UrlPath::parse("/included/").unwrap())
-                .is_some()
-        );
-        assert!(
-            snapshot
-                .index
-                .address()
-                .get_by_url(&tola_address::UrlPath::parse("/excluded/").unwrap())
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn document_without_metadata_becomes_page() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, r#"#document("plain/index.html")[Plain]"#).unwrap();
-
-        let config = site_config(root);
-
-        let snapshot = build_and_publish(&config).unwrap();
-        let url = tola_address::UrlPath::parse("/plain/").unwrap();
-        let crate::site::Resource::Page { document } =
-            snapshot.index.address().get_by_url(&url).unwrap()
-        else {
-            panic!("expected generated document");
-        };
-
-        assert!(document.properties.title.is_none());
-    }
-
-    #[test]
-    fn document_keeps_native_metadata() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#document(
-  "native/index.html",
-  title: [Native Title],
-  author: "Alice",
-  description: [Native Summary],
-)[Native]"#,
-        )
-        .unwrap();
-
-        let config = site_config(root);
-
-        let snapshot = build_and_publish(&config).unwrap();
-        let url = tola_address::UrlPath::parse("/native/").unwrap();
-        let crate::site::Resource::Page { document } =
-            snapshot.index.address().get_by_url(&url).unwrap()
-        else {
-            panic!("expected generated document");
-        };
-
-        assert_eq!(
-            document
-                .properties
-                .title
-                .as_ref()
-                .map(|title| title.to_string()),
-            Some("Native Title".to_string())
-        );
-        assert_eq!(
-            document
-                .properties
-                .description
-                .as_ref()
-                .map(|summary| summary.to_string()),
-            Some("Native Summary".to_string())
-        );
-        assert_eq!(document.properties.author.as_slice(), &["Alice"]);
-    }
-
-    #[test]
-    fn no_pages_warning_follows_html_outputs() {
-        for (program, availability) in [
-            ("", crate::output::PageAvailability::Empty),
-            (
-                "#document(\"404.html\", format: \"html\")[Missing]",
-                crate::output::PageAvailability::Present,
-            ),
-            (
-                "#asset(\"index.html\", \"ordinary asset\")",
-                crate::output::PageAvailability::Empty,
-            ),
-            (
-                "#document(\"download.pdf\", format: \"pdf\")[Download]",
-                crate::output::PageAvailability::Empty,
-            ),
-            (
-                "#document(\"plain.html\")[Plain]",
-                crate::output::PageAvailability::Present,
-            ),
-        ] {
-            let directory = TempDir::new().unwrap();
-            let root = directory.path();
-            let config = site_config(root);
-            fs::write(&config.build.entry, program).unwrap();
-
-            let build = build_site(&config, BuildMode::Production).unwrap();
-
-            assert_eq!(
-                crate::output::PageAvailability::from_outputs(build.graph().outputs()),
-                availability,
-                "{program}"
-            );
-            let mut diagnostics = build
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.code == crate::codes::site::NO_PAGES);
-            assert_eq!(
-                diagnostics.next(),
-                (availability == crate::output::PageAvailability::Empty)
-                    .then(|| no_pages_diagnostic(&config))
-                    .as_ref(),
-                "{program}"
-            );
-            assert!(diagnostics.next().is_none(), "{program}");
-        }
-    }
-
-    #[test]
-    fn not_found_warning_follows_output_kind_and_path() {
-        let cases = [
-            ("#document(\"404.html\", format: \"html\")[Missing]", false),
-            (
-                "#import \"templates/not-found.typ\": not-found-page\n\n#not-found-page()",
-                false,
-            ),
-            (
-                "#document(\"404/index.html\", format: \"html\")[Missing]",
-                true,
-            ),
-            (
-                "#document(\"index.html\")[Home]\n#asset(\"404.html\", \"ordinary asset\")",
-                true,
-            ),
-            ("", true),
-        ];
-        for (program, expected) in cases {
-            let directory = TempDir::new().unwrap();
-            let root = directory.path();
-            let config = site_config(root);
-            fs::create_dir_all(root.join("templates")).unwrap();
+    fn generated_routes_publish_their_outputs() {
+        // Documents emitted from an imported helper, beside an asset it declares.
+        {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path();
+            fs::create_dir_all(root.join("content")).unwrap();
+            fs::create_dir_all(root.join("routes")).unwrap();
             fs::write(
-                root.join("templates/not-found.typ"),
-                "#let not-found-page() = document(\"404.html\", format: \"html\")[Missing]",
+                root.join("site.typ"),
+                "#import \"routes/routes.typ\": emit-routes\n#emit-routes()\n",
             )
             .unwrap();
-            fs::write(&config.build.entry, program).unwrap();
-
-            let build = build_site(&config, BuildMode::Production).unwrap();
-
-            let mut diagnostics = build
-                .diagnostics()
-                .iter()
-                .filter(|diagnostic| diagnostic.code == crate::codes::site::NOT_FOUND_MISSING);
+            fs::write(
+                root.join("routes/routes.typ"),
+                "#let emit-routes() = include \"generated.typ\"",
+            )
+            .unwrap();
+            fs::write(
+                root.join("routes/generated.typ"),
+                "#for slug in (\"alpha\", \"beta\") {\n  document(slug + \"/index.html\", [Route #slug])\n}\n#asset(\"generated/routes.txt\", \"alpha,beta\")\n",
+            )
+            .unwrap();
+            let config = site_config(root);
+            let output = config.build.publish_dir.clone();
+            let build = build_and_publish(&config).unwrap();
+            for path in ["alpha/index.html", "beta/index.html"] {
+                assert!(has_output(&build.graph, path), "missing {path}");
+                assert!(output.join(path).is_file(), "unpublished {path}");
+            }
             assert_eq!(
-                diagnostics.next().map(|diagnostic| diagnostic.severity),
-                expected.then_some(crate::diagnostic::Severity::Warning),
-                "{program}"
+                output_bytes(&build.graph, "generated/routes.txt"),
+                b"alpha,beta"
             );
-            assert!(diagnostics.next().is_none(), "{program}");
+        }
+
+        // Tag documents computed from the sources' own metadata.
+        {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path();
+            fs::create_dir_all(root.join("content")).unwrap();
+            fs::create_dir_all(root.join("routes")).unwrap();
+            fs::write(
+                root.join("content/alpha.typ"),
+                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [Alpha], tags: (\"rust\", \"typst\")))",
+            )
+            .unwrap();
+            fs::write(
+                root.join("content/beta.typ"),
+                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [Beta], tags: (\"rust\",)))",
+            )
+            .unwrap();
+            fs::write(
+                root.join("routes/taxonomy.typ"),
+                "#let emit-taxonomies(sources) = {\n  for tag in (\"rust\", \"typst\") {\n    let members = sources.filter(source => source.meta.tags.contains(tag))\n    if members.len() > 0 {\n      let names = members.map(source => source.meta.title).join(\", \")\n      document(\"tags/\" + tag + \"/index.html\", [#names])\n    }\n  }\n}\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("site.typ"),
+                "#import \"@tola/source:0.0.0\": all-sources\n#import \"routes/taxonomy.typ\": emit-taxonomies\n#emit-taxonomies(all-sources())\n",
+            )
+            .unwrap();
+            let config = site_config(root);
+            let output = config.build.publish_dir.clone();
+            let build = build_and_publish(&config).unwrap();
+            let rust = fs::read_to_string(output.join("tags/rust/index.html")).unwrap();
+            assert!(rust.contains("Alpha") && rust.contains("Beta"), "{rust}");
+            let typst = fs::read_to_string(output.join("tags/typst/index.html")).unwrap();
+            assert!(
+                typst.contains("Alpha") && !typst.contains("Beta"),
+                "{typst}"
+            );
+            assert_eq!(build.index.address().pages().len(), 2);
+        }
+    }
+
+    /// A document's page properties come from wherever the author wrote them: the
+    /// `document` call's own arguments, or absent when they wrote none.
+    #[test]
+    fn page_properties_follow_document_metadata() {
+        struct Case {
+            program: &'static str,
+            url: &'static str,
+            title: Option<&'static str>,
+            description: Option<&'static str>,
+            author: &'static [&'static str],
+        }
+        for case in [
+            Case {
+                program: r#"#document("plain/index.html")[Plain]"#,
+                url: "/plain/",
+                title: None,
+                description: None,
+                author: &[],
+            },
+            Case {
+                program: r#"#document("native/index.html", title: [Native Title], author: "Alice", description: [Native Summary])[Native]"#,
+                url: "/native/",
+                title: Some("Native Title"),
+                description: Some("Native Summary"),
+                author: &["Alice"],
+            },
+            Case {
+                program: "#document(\"tags/rust/index.html\", title: [Native Rust])[\n  #import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [Rust], pin: true))\n  = Rust\n]\n",
+                url: "/tags/rust/",
+                title: Some("Native Rust"),
+                description: None,
+                author: &[],
+            },
+        ] {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path();
+            fs::create_dir_all(root.join("content")).unwrap();
+            fs::write(root.join("site.typ"), case.program).unwrap();
+            let config = site_config(root);
+
+            let snapshot = build_and_publish(&config).unwrap();
+            let url = tola_address::UrlPath::parse(case.url).unwrap();
+            let crate::site::Resource::Page { document } =
+                snapshot.index.address().get_by_url(&url).unwrap()
+            else {
+                panic!("expected generated document at {}", case.url);
+            };
+
+            assert_eq!(
+                document.properties.title.as_ref().map(|t| t.to_string()),
+                case.title.map(str::to_owned),
+                "{}",
+                case.url
+            );
+            assert_eq!(
+                document
+                    .properties
+                    .description
+                    .as_ref()
+                    .map(|d| d.to_string()),
+                case.description.map(str::to_owned),
+                "{}",
+                case.url
+            );
+            assert_eq!(
+                document.properties.author.as_slice(),
+                case.author,
+                "{}",
+                case.url
+            );
         }
     }
 

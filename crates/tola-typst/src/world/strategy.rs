@@ -5,8 +5,8 @@ use std::sync::Arc;
 use typst::Library;
 use typst::utils::LazyHash;
 
-use super::snapshot::SourceSnapshot;
-use crate::world::file::{FileResolver, FileSnapshot, SharedFileCache};
+use super::sources::ExplicitSources;
+use crate::world::file::{FileResolver, FileView, SharedFileCache};
 use crate::world::font::FontStore;
 use crate::world::library::create_library_with_inputs;
 
@@ -15,16 +15,16 @@ pub(crate) enum FileCacheMode {
     Local,
     /// Shared cache owned by the caller.
     Shared(Arc<SharedFileCache>),
-    /// Pre-built source snapshot plus a shared fallback cache.
-    Snapshot {
-        /// Immutable snapshot containing preloaded root sources.
-        snapshot: Arc<SourceSnapshot>,
-        /// Shared cache used for files that are not covered by the snapshot.
+    /// Pre-loaded explicit sources plus a shared fallback cache.
+    Sources {
+        /// Explicit sources the compilation reads.
+        sources: Arc<ExplicitSources>,
+        /// Shared cache used for files the explicit sources do not cover.
         fallback: Arc<SharedFileCache>,
     },
     /// An externally owned frozen file view.
     Frozen {
-        files: Arc<FileSnapshot>,
+        files: Arc<FileView>,
         parsed: Arc<SharedFileCache>,
     },
 }
@@ -38,25 +38,25 @@ impl FileCacheMode {
         Self::Shared(cache)
     }
 
-    pub(crate) fn snapshot(snapshot: Arc<SourceSnapshot>) -> Self {
-        Self::Snapshot {
-            snapshot,
+    pub(crate) fn sources(sources: Arc<ExplicitSources>) -> Self {
+        Self::Sources {
+            sources,
             fallback: Arc::new(SharedFileCache::new()),
         }
     }
 
-    pub(crate) fn frozen(files: Arc<FileSnapshot>, parsed: Arc<SharedFileCache>) -> Self {
+    pub(crate) fn frozen(files: Arc<FileView>, parsed: Arc<SharedFileCache>) -> Self {
         Self::Frozen { files, parsed }
     }
 }
 
 pub(crate) enum FileAccess {
-    Local(Arc<FileSnapshot>),
+    Local(Arc<FileView>),
     Live {
         files: Arc<FileResolver>,
-        sources: Option<Arc<SourceSnapshot>>,
+        sources: Option<Arc<ExplicitSources>>,
     },
-    Frozen(Arc<FileSnapshot>),
+    Frozen(Arc<FileView>),
 }
 
 #[derive(Clone)]

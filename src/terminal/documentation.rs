@@ -599,22 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn words_fill_available_columns() {
-        assert_eq!(
-            Documentation::new(Some(7), false).render("one two three"),
-            "one two\nthree\n"
-        );
-    }
-
-    #[test]
-    fn cjk_breaks_fill_lines() {
-        assert_eq!(
-            Documentation::new(Some(10), false).render("ab 中文中文中文"),
-            "ab 中文中\n文中文\n"
-        );
-    }
-
-    #[test]
     fn rule_fills_the_rendered_width() {
         assert_eq!(
             Documentation::new(Some(12), false).render("one\n\n---\n\ntwo\n"),

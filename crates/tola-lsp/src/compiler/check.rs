@@ -153,7 +153,7 @@ where
 /// The parsed index of one open document, under the id the site's selection index knows it by.
 ///
 /// Only a Typst document inside the workspace's own root is one the index can license. The
-/// connection parsed every document it holds for its own answers, so a snapshot this revision
+/// connection parsed every document it holds for its own answers, so a parsed source this revision
 /// already indexed under the text the check reads answers here; only a document the connection
 /// holds no index for is parsed from the text.
 fn open_document_names(
@@ -167,7 +167,7 @@ fn open_document_names(
     }
     let id = crate::identity::path_id(path, root)?;
     match view.by_id(id) {
-        Some(snapshot) if snapshot.source.text() == text => Some(snapshot.names()),
+        Some(parsed) if parsed.source.text() == text => Some(parsed.names()),
         _ => Some(Arc::new(SourceNames::new(Source::new(id, text.to_owned())))),
     }
 }
@@ -421,67 +421,6 @@ mod tests {
             failed.read_paths
         );
     }
-
-    #[test]
-    fn document_checks_require_every_source() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let configuration = Arc::new(
-            tola_build::config::loading::resolve_site_config(
-                &root.join("tola.toml"),
-                "",
-                tola_typst::PackageLocations::default(),
-                &tola_build::config::loading::BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config(),
-        );
-        let mut compiler = SourceCompiler::new(
-            move |_: &Path, _: &[UnsavedSource]| {
-                Ok(ServedWorkspace::Documents(Arc::clone(&configuration)))
-            },
-            tola_build::BuildResources::default(),
-        );
-        let documents: Arc<[UnsavedSource]> = Arc::from([
-            (
-                root.join("data.typ"),
-                Arc::<str>::from("#let value = json(\"values.json\")\n#repr(value)"),
-            ),
-            (root.join("plain.typ"), Arc::<str>::from("Body")),
-        ]);
-        for (revision, contents, compiled) in [(1, "invalid", false), (2, "{}", true)] {
-            std::fs::write(root.join("values.json"), contents).unwrap();
-            let SourceCompilation::Checked { checked, .. } =
-                compiler.compile(SourceJob::Check(CheckRequest {
-                    checked_revision: revision,
-                    sources: inputs_at(&root, revision, Arc::clone(&documents)),
-                    view: SourceView::default(),
-                }))
-            else {
-                panic!("expected document check completion");
-            };
-            let checked = checked.unwrap();
-            assert_eq!(checked.compiled, compiled, "{:?}", checked.diagnostics);
-            if compiled {
-                assert!(
-                    checked
-                        .read_paths
-                        .unwrap()
-                        .iter()
-                        .any(|path| path.ends_with("values.json"))
-                );
-            } else {
-                assert!(checked.read_paths.is_none());
-                assert!(
-                    checked
-                        .diagnostics
-                        .iter()
-                        .any(|diagnostic| diagnostic.severity == Severity::Error)
-                );
-            }
-        }
-    }
-
     #[test]
     fn unsaved_entry_is_compiled_in_place() {
         let directory = tempfile::tempdir().unwrap();

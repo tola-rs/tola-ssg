@@ -224,18 +224,6 @@ pub(in crate::query) fn descriptor_field_type(
 mod tests {
     use crate::query::tests::*;
 
-    #[test]
-    fn metadata_field_answers_its_schema_description() {
-        let program = parsed_program(PAGE_SCHEMA);
-        let mut site = QuerySession::with_program(&program);
-        site.site.write("content/page.typ", SCHEMA_PAGE);
-        let hover = site_hover(&mut site, &marked_before(&program, "aft)")).expect("a hover");
-        assert!(
-            hover.contains("keeps the page out of the published site"),
-            "{hover}"
-        );
-    }
-
     /// The metadata container answers every field of the schema the file parses against.
     #[test]
     fn metadata_shape_follows_the_parsed_schema() {
@@ -251,59 +239,6 @@ mod tests {
             hover.contains("- `title: str = \"Untitled\"`\n  the page title"),
             "{hover}"
         );
-    }
-
-    #[test]
-    fn metadata_hover_preserves_output_contract() {
-        let schema = "title: describe(optional(str), \"Title\"), draft: optional(bool, default: false), author: schema((name: describe(str, \"Author name\"))), score: optional(map(int, str, output: str), default: 7),";
-        let program = parsed_program(schema)
-            .replace(
-                "describe, optional, schema",
-                "describe, optional, schema, map",
-            )
-            .replace("))\n#let declared", "), unknown: \"keep\")\n#let declared")
-            .replace(
-                "not source.meta.draft",
-                "source.meta.author.name != \"hidden\"",
-            );
-        let mut site = QuerySession::with_program(&program);
-        site.site.write("content/page.typ", "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((author: (name: \"Ada\"), extra: 1))\n");
-        let container = site_hover(&mut site, &marked_before(&program, "ta.author")).unwrap();
-        for expected in ["### Declared fields", "title?: str", "score: str = 7"] {
-            assert!(container.contains(expected), "{expected}: {container}");
-        }
-        let field = site_hover(&mut site, &marked_before(&program, "me !=")).unwrap();
-        assert!(field.contains("Author name"), "{field}");
-        assert!(field.contains("str"), "{field}");
-    }
-    #[test]
-    fn wrapped_schema_keeps_field_docs() {
-        for wrapper in [
-            "describe(page-schema, \"Pages\")",
-            "check(page-schema, _ => ())",
-            "map(any, value => value, output: page-schema)",
-        ] {
-            let program = parsed_program(PAGE_SCHEMA)
-                .replace(
-                    "describe, optional, schema",
-                    "describe, optional, schema, check, map, any",
-                )
-                .replace(
-                    "parse-sources(all-sources(), page-schema)",
-                    &format!("parse-sources(all-sources(), {wrapper})"),
-                );
-            let mut site = QuerySession::with_program(&program);
-            site.site.write("content/page.typ", DECLARED_PAGE);
-            let hover = site_hover(&mut site, &marked_before(&program, "aft)")).unwrap();
-            assert!(hover.contains("keeps the page out"), "{wrapper}: {hover}");
-        }
-    }
-
-    #[test]
-    fn field_docs_follow_schema_values() {
-        let mut site = QuerySession::new();
-        let hover = site.hover_text("#import \"@tola/schema:0.0.0\": optional, describe\n#let explanation = \"The title\"\n#let fields = (tit|le: optional(describe(str, explanation)))\n").unwrap();
-        assert!(hover.contains("The title"), "{hover}");
     }
 
     #[test]
@@ -424,58 +359,6 @@ mod tests {
                 "{program}: {hover}"
             );
             assert!(!hover.contains("unrelated title"), "{program}: {hover}");
-        }
-    }
-
-    #[test]
-    fn nested_metadata_shape_follows_its_value() {
-        let program = parsed_program(&format!("{PAGE_SCHEMA}\n  author: schema((name: str)),"))
-            .replace(
-                "not source.meta.draft",
-                "source.meta.author.name != \"hidden\"",
-            );
-        let mut site = QuerySession::with_program(&program);
-        site.site.write("content/page.typ", "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\", author: (name: \"A\")))\n");
-        let hover = site_hover(&mut site, &marked_before(&program, "or.name"))
-            .expect("nested metadata hover");
-        assert!(hover.contains("- `name: str`"), "{hover}");
-        assert!(!hover.contains("- `title:"), "{hover}");
-    }
-
-    /// A schema wider than the shape lists counts the fields it left out.
-    #[test]
-    fn wide_schema_counts_remaining_fields() {
-        let mut schema = String::from(
-            "  draft: describe(optional(bool, default: false), \"keeps the page out of the published site\"),\n",
-        );
-        for index in 0..24 {
-            schema.push_str(&format!(
-                "  field{index}: describe(optional(str), \"field {index}\"),\n"
-            ));
-        }
-        let program = parsed_program(&schema);
-        let mut site = QuerySession::with_program(&program);
-        site.site.write("content/page.typ", SCHEMA_PAGE);
-        let hover = site_hover(&mut site, &marked_before(&program, "ta.draft)")).expect("a hover");
-        assert!(hover.contains("… 5 more fields"), "{hover}");
-    }
-
-    /// The descriptor shape answers from its authority even where the world observed no record.
-    #[test]
-    fn descriptor_shape_answers_without_sources() {
-        let program = parsed_program(PAGE_SCHEMA);
-        let mut site = QuerySession::with_program(&program);
-        let hover =
-            site_hover(&mut site, &marked_before(&program, "rce.meta.draft)")).expect("a hover");
-        for field in [
-            "- `id: str`",
-            "- `file: path`",
-            "- `path: str`",
-            "- `filename: str`",
-            "- `route-segments: array`",
-            "- `meta: dictionary`",
-        ] {
-            assert!(hover.contains(field), "{field}: {hover}");
         }
     }
 

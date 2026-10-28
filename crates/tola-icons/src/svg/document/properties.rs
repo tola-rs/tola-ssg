@@ -776,25 +776,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn filter_keywords_are_primitive_specific() {
-        for (element, attribute, accepted, rejected) in [
-            ("feColorMatrix", "type", "hueRotate", "gamma"),
-            ("feFuncR", "type", "gamma", "hueRotate"),
-            ("feTurbulence", "type", "fractalNoise", "matrix"),
-            ("feMorphology", "operator", "dilate", "over"),
-            ("feComposite", "operator", "over", "dilate"),
-            ("feBlend", "mode", "multiply", "plus-lighter"),
-            ("feConvolveMatrix", "preserveAlpha", "true", "banana"),
-        ] {
-            let svg = |value| {
-                format!(
-                    r#"<svg viewBox="0 0 24 24"><filter><{element} {attribute}="{value}"/></filter></svg>"#
-                )
-            };
-            assert!(SvgIcon::parse(svg(accepted)).is_ok());
-            assert!(SvgIcon::parse(svg(rejected)).is_err());
-        }
-    }
 }

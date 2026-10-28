@@ -9,7 +9,7 @@ use typst::syntax::FileId;
 /// A provider-selected source for one Typst file.
 ///
 /// A provider resolves identities only. Observing the filesystem inside `target` would escape the
-/// resolver's snapshot and its dependency evidence; a provider that needs content returns
+/// resolver's observations and its dependency evidence; a provider that needs content returns
 /// [`FileTarget::Disk`] and lets the resolver read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileTarget {

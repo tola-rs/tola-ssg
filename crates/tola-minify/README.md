@@ -1,6 +1,6 @@
 # tola-minify
 
-Deterministic minification of CSS and JavaScript source text: the same input, the same output.
+Minifies CSS and JavaScript text deterministically: the same input, the same output.
 
 ```rust
 use std::path::Path;
@@ -31,8 +31,7 @@ let module = minify_javascript("export const answer = 6 * 7;", JavaScriptKind::M
 assert_eq!(module, "export const answer=42;");
 ```
 
-CSS minification merges equivalent rules and keeps legal comments (`/*! … */`).
-
-JavaScript minification parses, compresses, and mangles. A classic script keeps its top-level
-binding names because inline handlers and other scripts on the same page may reference them by
-name; a module's top-level bindings may be renamed, unreachable from outside.
+CSS minification merges equivalent rules and keeps legal comments (`/*! … */`). JavaScript
+minification parses, compresses, and mangles. A classic script keeps its top-level binding names
+because inline handlers and other scripts on the page may reference them; a module's top-level
+bindings may be renamed, unreachable from outside.

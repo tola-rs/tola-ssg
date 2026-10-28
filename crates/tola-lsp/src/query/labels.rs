@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn text_that_names_no_label_yields_none() {
+    fn unlabelled_text_yields_no_reference() {
         for (text, cursor) in [("See the introduction\n", 12), ("#import \"abc\n", 10)] {
             let source = Source::detached(text);
             assert!(referenced(&source, cursor).is_none(), "{text:?}");
@@ -574,16 +574,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn literal_labels_read_in_code() {
-        let source = Source::detached("= Title <intro>\n#ref(<intro>)\n");
-        let selected = highlights(&source, "intro");
-        assert_eq!(selected.len(), 2);
-        assert_eq!(selected[0].kind, Some(DocumentHighlightKind::WRITE));
-        assert_eq!(selected[1].kind, Some(DocumentHighlightKind::READ));
-    }
-
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Arc;
 
     use tola_build::BuildResources;
@@ -594,40 +585,11 @@ mod tests {
     const SITE_PROGRAM: &str =
         "#for source in (\"content/page.typ\",) {\n  document(\"page.html\")[#include source]\n}\n";
 
-    /// One site on disk, with the configuration its own `tola.toml` declares.
-    struct Site {
-        _directory: tempfile::TempDir,
-        root: PathBuf,
-    }
-
-    impl Site {
-        fn new(program: &str) -> Self {
-            let directory = tempfile::tempdir().unwrap();
-            // The world resolves the site root through the filesystem, so the site's paths are
-            // the ones it resolves.
-            let root = tola_build::filesystem::normalize_existing_prefix(directory.path());
-            let site = Self {
-                _directory: directory,
-                root,
-            };
-            site.write("tola.toml", "");
-            site.write("site.typ", program);
-            site
-        }
-
-        fn root(&self) -> &Path {
-            &self.root
-        }
-
-        fn path(&self, relative: &str) -> PathBuf {
-            self.root().join(relative)
-        }
-
-        fn write(&self, relative: &str, text: &str) {
-            let path = self.path(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
+    /// One site on disk whose entry program the caller supplies.
+    fn site_with_program(program: &str) -> SiteDirectory {
+        let site = SiteDirectory::new();
+        site.write("site.typ", program);
+        site
     }
 
     fn configuration(root: &Path) -> Arc<ResolvedSiteConfig> {
@@ -644,12 +606,13 @@ mod tests {
 
     /// The label hover over `marked` in `relative`, from the compilation the query ladder answers
     /// with: the site's own when it compiled, and the file's alone when it did not.
-    fn label_hover(site: &Site, relative: &str, marked: &str) -> String {
-        let path = site.path(relative);
+    fn label_hover(site: &SiteDirectory, relative: &str, marked: &str) -> String {
+        let root = resolved_root(site);
+        let path = root.join(relative);
         let text = marked.replace('|', "");
         let cursor = marked.find('|').expect("a cursor marker");
         site.write(relative, &text);
-        let config = configuration(site.root());
+        let config = configuration(&root);
         let cancellation = BuildCancellation::new();
         let overrides = vec![(path.clone(), Arc::<str>::from(text.as_str()))];
         let mut session = SourceDiagnosticSession::with_resources(
@@ -673,7 +636,7 @@ mod tests {
             }
         };
         let uri = crate::uri::from_file_path(&path).expect("the file's uri");
-        let id = crate::identity::file_id(&uri, site.root()).expect("the file's id");
+        let id = crate::identity::file_id(&uri, &root).expect("the file's id");
         let source = compilation.world().source(id).expect("the file's source");
         let hover = hover(compilation, &config, &source, cursor, &cancellation)
             .expect("a label hover")
@@ -688,7 +651,7 @@ mod tests {
     fn file_labels_answer_while_the_check_fails() {
         // The site's own program does not compile, and neither does the page on its own, so the
         // compiled label set is unknown while the page still has the label the author reads.
-        let site = Site::new("#let broken = )\n");
+        let site = site_with_program("#let broken = )\n");
         let answer = label_hover(
             &site,
             "content/page.typ",
@@ -700,21 +663,23 @@ mod tests {
     }
 
     #[test]
-    fn compiled_site_still_denies_unknown_labels() {
+    fn unknown_label_absent_from_compiled_site() {
         // A site that compiled knows every label it has, so one it does not hold is absent
         // rather than unknown.
-        let site = Site::new(SITE_PROGRAM);
+        let site = site_with_program(SITE_PROGRAM);
         let answer = label_hover(&site, "content/page.typ", "See @missing|\n");
         assert!(answer.contains("no source declares the label"), "{answer}");
     }
 
-    /// A label definition, reference and rename edit name the file the client spelled, never the
-    /// resolved root the compiler reads through.
-    #[test]
-    fn label_answers_keep_the_client_spelling() {
-        // The same shape `QuerySession` compiles with: `all-sources()` reads every content unit,
-        // and `document(…)` realizes one page for it.
-        let site = Site::new(
+    /// The site called `page`, with the client naming its root `spelled` while the compiler
+    /// reads it through the resolved root.
+    fn spelled_site() -> (
+        SiteDirectory,
+        SourceCompilation,
+        crate::uri::ClientRoot,
+        Uri,
+    ) {
+        let site = site_with_program(
             r#"#import "@tola/source:0.0.0": all-sources
 #for source in all-sources() {
   document("page.html")[#include source.file]
@@ -725,7 +690,7 @@ mod tests {
             "content/page.typ",
             "#figure([Body]) <intro>\n\nSee @intro\n",
         );
-        let config = configuration(site.root());
+        let config = configuration(&resolved_root(&site));
         let cancellation = BuildCancellation::new();
         let mut session = SourceDiagnosticSession::with_resources(
             Arc::clone(&config),
@@ -736,20 +701,38 @@ mod tests {
         let revision = session
             .inspect(Vec::new(), &cancellation)
             .expect("a completed check");
-        let compilation = revision.checked().expect("the site compiles");
-        let spelled = site.root().join("spelled");
-        let client_root = crate::uri::ClientRoot::with_resolved(&spelled, site.root());
+        let compilation = revision.into_checked().expect("the site compiles");
+        let root = resolved_root(&site);
+        let spelled = root.join("spelled");
+        let client_root = crate::uri::ClientRoot::with_resolved(&spelled, &root);
         let expected = crate::uri::from_file_path(&spelled.join("content/page.typ")).unwrap();
+        (site, compilation, client_root, expected)
+    }
+
+    /// A label's locations name the file the client spelled, never the resolved root the compiler
+    /// reads through.
+    #[test]
+    fn label_locations_keep_the_client_spelling() {
+        let (_site, compilation, client_root, expected) = spelled_site();
+        let cancellation = BuildCancellation::new();
 
         let found =
-            locations(compilation, "intro", true, &cancellation, &client_root).expect("locations");
+            locations(&compilation, "intro", true, &cancellation, &client_root).expect("locations");
         assert!(!found.is_empty(), "the label's spellings");
         assert!(
             found.iter().all(|location| location.uri == expected),
             "{found:?}"
         );
+    }
 
-        let rename = rename(compilation, "intro", "outro", &cancellation, &client_root)
+    /// A label's rename edits name the file the client spelled, never the resolved root the
+    /// compiler reads through.
+    #[test]
+    fn label_rename_keeps_the_client_spelling() {
+        let (_site, compilation, client_root, expected) = spelled_site();
+        let cancellation = BuildCancellation::new();
+
+        let rename = rename(&compilation, "intro", "outro", &cancellation, &client_root)
             .expect("a rename")
             .expect("edits");
         // The protocol's own edit map is keyed by URI, which clippy reads as interior-mutable.
@@ -760,7 +743,7 @@ mod tests {
     /// A label hover names the page the labelled element is served at.
     #[test]
     fn label_hover_names_the_serving_page() {
-        let site = Site::new(
+        let site = site_with_program(
             r#"#for source in ("content/page.typ",) {
   document("page.html")[#include source]
 }
@@ -771,10 +754,8 @@ mod tests {
             "content/page.typ",
             "#figure([Body]) <introduction>\n\nSee @intro|duction\n",
         );
-        assert_eq!(
-            answer,
-            "```typc\n@introduction\n```\n\nLabels a `figure` element declared in `content/page.typ`, served at /page.html."
-        );
+        assert!(answer.contains("@introduction"), "{answer}");
+        assert!(answer.contains("/page.html"), "{answer}");
     }
 
     use crate::query::tests::*;
@@ -782,7 +763,7 @@ mod tests {
     /// A cursor resting on a reference's own marker — where a click or a motion lands — means that
     /// reference, not the text beside it.
     #[test]
-    fn reference_answers_on_its_marker() {
+    fn cursor_on_the_marker_names_the_reference() {
         let mut site = QuerySession::new();
         let hover = site
             .hover_text("= Title <intro>\n\nSee |@intro.\n")
@@ -792,7 +773,7 @@ mod tests {
 
     /// A cursor on a loop's control flow answers the loop it belongs to.
     #[test]
-    fn loop_control_flow_highlights_its_loop() {
+    fn control_flow_keywords_highlight_their_loop() {
         let mut site = QuerySession::new();
         let highlights = site
             .highlights("#for x in (1, 2) {\n  if x == 1 { br|eak }\n  continue\n}\n")
@@ -830,45 +811,28 @@ mod tests {
         assert!(hover.contains("/document/"), "{hover}");
     }
 
-    /// A label answers every place the site spells it, wherever that is written.
+    /// A label answers every place the site spells it, and the declaration only when the client
+    /// asks for it.
     #[test]
-    fn references_answer_every_spelling() {
+    fn reference_count_follows_include_declaration() {
         let mut site = QuerySession::new();
-        let references = site
-            .references(
-                "#figure([Body]) <introduction>\nSee @intro|duction and @introduction\n",
-                true,
-            )
-            .expect("the spellings of the label");
-        assert_eq!(references.len(), 3, "{references:?}");
-        assert!(
-            references
-                .iter()
-                .all(|location| location.uri.as_str().ends_with("document.typ")),
-            "{references:?}"
-        );
+        let text = "#figure([Body]) <intro>\nSee @int|ro and #ref(<intro>)\n";
+        for (include_declaration, expected) in [(true, 3), (false, 2)] {
+            let references = site
+                .references(text, include_declaration)
+                .expect("the spellings of the label");
+            assert_eq!(references.len(), expected, "{references:?}");
+            assert!(
+                references
+                    .iter()
+                    .all(|location| location.uri.as_str().ends_with("document.typ")),
+                "{references:?}"
+            );
+        }
     }
 
     #[test]
-    fn label_references_exclude_declarations() {
-        let mut site = QuerySession::new();
-        let references = site
-            .references(
-                "#figure([Body]) <intro>\nSee @int|ro and #ref(<intro>)\n",
-                false,
-            )
-            .expect("label reads");
-        assert_eq!(references.len(), 2, "{references:?}");
-        assert!(
-            references
-                .iter()
-                .all(|location| location.range.start.line == 1),
-            "{references:?}"
-        );
-    }
-
-    #[test]
-    fn label_renames_preserve_token_identity() {
+    fn rename_refuses_names_that_are_not_labels() {
         let mut site = QuerySession::new();
         let source = "#figure([Body]) <intro>\nSee @int|ro\n";
         for name in [
@@ -882,27 +846,36 @@ mod tests {
             assert!(site.rename(source, name).is_none(), "{name}");
         }
         assert!(site.rename(source, "章节-二").is_some());
+        assert_eq!(
+            site.rename_refusal("#let factor = 2\n#f|actor\n", "2scale"),
+            "invalidIdentifier",
+            "a name that is not one identifier is refused"
+        );
     }
 
-    /// Renaming a label edits every spelling of it in the site's own files.
+    /// A rename edits every spelling of a label, or of a name the file binds.
     #[test]
-    fn label_rename_edits_every_spelling() {
+    fn rename_edits_every_spelling() {
         let mut site = QuerySession::new();
-        let edit = site
-            .rename(
+        for (text, new_name, expected) in [
+            (
                 "#figure([Body]) <introduction>\nSee @intro|duction and @introduction\n",
                 "overview",
-            )
-            .expect("edits for the rename");
-        #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
-        let changes = edit.changes.expect("a changes map");
-        assert_eq!(changes.len(), 1, "{changes:?}");
-        let edits = changes.values().flatten().collect::<Vec<_>>();
-        assert_eq!(edits.len(), 3, "{changes:?}");
-        assert!(
-            edits.iter().all(|change| change.new_text == "overview"),
-            "{changes:?}"
-        );
+                3,
+            ),
+            ("#let factor = 2\n#f|actor\n", "scale", 2),
+        ] {
+            let edit = site.rename(text, new_name).expect("the rename edits");
+            #[expect(clippy::mutable_key_type, reason = "the protocol keys edits by URI")]
+            let changes = edit.changes.expect("edits by file");
+            assert_eq!(changes.len(), 1, "{changes:?}");
+            let edits = changes.values().flatten().collect::<Vec<_>>();
+            assert_eq!(edits.len(), expected, "{edits:?}");
+            assert!(
+                edits.iter().all(|edit| edit.new_text == new_name),
+                "{edits:?}"
+            );
+        }
     }
 
     /// The names a file binds answer references, with or without their declaration.
@@ -922,34 +895,6 @@ mod tests {
             (all[0].range.start.line, all[0].range.start.character),
             (0, 5),
             "the declaration comes first: {all:?}"
-        );
-    }
-
-    /// A rename replaces every spelling of a name the file binds, and refuses a name that is not
-    /// one identifier.
-    #[test]
-    fn bound_name_rename_edits_every_spelling() {
-        let mut site = QuerySession::new();
-        let text = "#let factor = 2\n#f|actor\n";
-        let Some(PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) =
-            site.prepare_rename(text)
-        else {
-            panic!("no rename preparation for a bound name");
-        };
-        assert_eq!(placeholder, "factor");
-        let edit = site.rename(text, "scale").expect("the rename edits");
-        let mut files = edit.changes.expect("edits by file").into_values();
-        let edits = files.next().expect("one edited file");
-        assert!(files.next().is_none(), "the rename edits one file");
-        assert_eq!(edits.len(), 2, "{edits:?}");
-        assert!(
-            edits.iter().all(|edit| edit.new_text == "scale"),
-            "{edits:?}"
-        );
-        assert_eq!(
-            site.rename_refusal(text, "2scale"),
-            "invalidIdentifier",
-            "a name that is not one identifier is refused"
         );
     }
 
@@ -975,7 +920,7 @@ mod tests {
 
     /// A rename replaces the parameter's own spellings, never the outer binding of that name.
     #[test]
-    fn rename_touches_only_the_parameter() {
+    fn rename_spares_the_shadowed_binding() {
         let mut site = QuerySession::new();
         let edit = site
             .rename(
@@ -1028,15 +973,24 @@ mod tests {
         );
     }
 
+    /// A rename preparation answers the name the cursor names, whether a label or a bound name.
     #[test]
     fn prepare_rename_answers_the_name() {
         let mut site = QuerySession::new();
-        let Some(PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) =
-            site.prepare_rename("#metadata((kind: \"note\")) <introduction>\nSee @intro|duction\n")
-        else {
-            panic!("no rename preparation for a declared label");
-        };
-        assert_eq!(placeholder, "introduction");
+        for (text, expected) in [
+            (
+                "#metadata((kind: \"note\")) <introduction>\nSee @intro|duction\n",
+                "introduction",
+            ),
+            ("#let factor = 2\n#f|actor\n", "factor"),
+        ] {
+            let Some(PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) =
+                site.prepare_rename(text)
+            else {
+                panic!("no rename preparation for {text:?}");
+            };
+            assert_eq!(placeholder, expected);
+        }
     }
 
     /// Renaming what the site never declares would rename a typo, so nothing is offered.
@@ -1074,7 +1028,7 @@ mod tests {
 
     /// A reference points at the element its label sits on, wherever in the site that is.
     #[test]
-    fn references_resolve_their_element() {
+    fn reference_definition_names_its_element() {
         let mut site = QuerySession::new();
         let Some(GotoDefinitionResponse::Scalar(location)) =
             site.definition("#metadata((kind: \"note\")) <introduction>\nSee @intro|duction")

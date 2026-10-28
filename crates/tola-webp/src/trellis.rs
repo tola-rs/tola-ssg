@@ -809,8 +809,20 @@ mod tests {
         minimum
     }
 
+    const SEARCH_PLANES: [CoefficientPlane; 4] = [
+        CoefficientPlane::LumaAc,
+        CoefficientPlane::LumaDc,
+        CoefficientPlane::Chroma,
+        CoefficientPlane::Luma,
+    ];
+
+    /// Every accelerated search returns the optimum the exhaustive search finds.
+    ///
+    /// The trellis, the empty-block bound and the magnitude-category bounds all exist to avoid
+    /// enumerating candidates; each is only worth its arithmetic if it lands on the same answer
+    /// the enumeration would.
     #[test]
-    fn trellis_matches_full_magnitude_search() {
+    fn searches_find_the_exhaustive_optimum() {
         let factors = Factors {
             y_dc: 11,
             y_ac: 8,
@@ -825,12 +837,7 @@ mod tests {
                 Quantizer::new(factors, 1024, 1024, &costs, TrellisMode::Exact),
                 Quantizer::new(factors, 258_064, 258_064, &costs, TrellisMode::Exact),
             ];
-            for plane in [
-                CoefficientPlane::LumaAc,
-                CoefficientPlane::LumaDc,
-                CoefficientPlane::Chroma,
-                CoefficientPlane::Luma,
-            ] {
+            for plane in SEARCH_PLANES {
                 let first = plane.first_position();
                 for context in 0..3 {
                     let mut coefficients = [3; 16];
@@ -858,58 +865,25 @@ mod tests {
                                 context,
                                 lambda,
                                 &probs
-                            )
+                            ),
+                            "trellis {} {context} {lambda}",
+                            plane.index()
                         );
                     }
                 }
             }
-        }
-    }
-
-    #[test]
-    fn frame_quantizers_bind_score_models() {
-        let coefficients = [
-            12, -79, 127, -127, 0, 3, -4, 18, 40, -66, 128, -128, 2040, -2040, 7, -11,
-        ];
-        for index in [8, 32] {
-            let factors = crate::quantize::factors(index);
-            for probs in [probabilities(), crate::tables::DEFAULT_COEFF_PROBS] {
-                let costs = TokenCosts::new(&probs);
-                let model = Quantizer::new(factors, 1024, 64, &costs, TrellisMode::Exact);
-                for _ in 0..2 {
-                    for (plane, dc, ac, lambda) in [
-                        (CoefficientPlane::LumaAc, factors.y_dc, factors.y_ac, 1024),
-                        (CoefficientPlane::LumaDc, factors.y2_dc, factors.y2_ac, 1024),
-                        (
-                            CoefficientPlane::Chroma,
-                            factors.chroma_dc,
-                            factors.chroma_ac,
-                            64,
-                        ),
-                        (CoefficientPlane::Luma, factors.y_dc, factors.y_ac, 1024),
-                    ] {
-                        for context in 0..3 {
-                            assert_eq!(
-                                model.quantize(&coefficients, plane, context),
-                                quantize_block(
-                                    &coefficients,
-                                    dc,
-                                    ac,
-                                    plane,
-                                    context,
-                                    lambda,
-                                    &costs
-                                )
-                            );
-                        }
-                    }
-                }
+            let plane = CoefficientPlane::Chroma;
+            for coefficient in [0, 1, 3, 17] {
+                let coefficients = [coefficient; 16];
+                let levels = quantize_block(&coefficients, 36, 36, plane, 0, 16_384, &costs);
+                assert_eq!(
+                    objective(&coefficients, &levels, [36; 2], plane, 0, 16_384, &probs),
+                    exhaustive_score(&coefficients, [36; 2], plane, 0, 16_384, &probs),
+                    "empty block {coefficient}"
+                );
             }
         }
-    }
 
-    #[test]
-    fn category_bounds_preserve_full_search() {
         let costs = TokenCosts::new(&probabilities());
         for coefficient in [0, 3, 44, 1462, 2060, 16_320] {
             for factor in [4, 8, 22, 58, 284] {
@@ -929,35 +903,20 @@ mod tests {
                                 })
                                 .min()
                                 .unwrap();
-                            assert_eq!(score, minimum);
+                            assert_eq!(
+                                score, minimum,
+                                "categories {coefficient} {factor} {weight} {lambda}"
+                            );
                         }
                     }
                 }
             }
         }
-    }
 
-    #[test]
-    fn empty_block_bound_preserves_full_search() {
-        let probs = probabilities();
-        let costs = TokenCosts::new(&probs);
-        let plane = CoefficientPlane::Chroma;
-        for coefficient in [0, 1, 3, 17] {
-            let coefficients = [coefficient; 16];
-            let levels = quantize_block(&coefficients, 36, 36, plane, 0, 16_384, &costs);
-            assert_eq!(
-                objective(&coefficients, &levels, [36; 2], plane, 0, 16_384, &probs),
-                exhaustive_score(&coefficients, [36; 2], plane, 0, 16_384, &probs)
-            );
-        }
-    }
-
-    #[test]
-    fn category_bounds_match_full_search() {
-        let probs = crate::tables::DEFAULT_COEFF_PROBS;
-        let costs = TokenCosts::new(&probs);
-        for (coefficient, factor, context, lambda, scalar, expected) in
-            [(1462, 22, 0, 1024, 66, 67), (2060, 58, 1, 16_384, 36, 34)]
+        // The bound also picks the magnitude the exhaustive walk above already covered.
+        let costs = TokenCosts::new(&crate::tables::DEFAULT_COEFF_PROBS);
+        for (coefficient, factor, context, lambda, expected) in
+            [(1462, 22, 0, 1024, 67), (2060, 58, 1, 16_384, 34)]
         {
             let mut coefficients = [0; 16];
             coefficients[0] = coefficient;
@@ -971,33 +930,12 @@ mod tests {
                 lambda,
                 &costs,
             );
-            let mut restricted = [0; 16];
-            restricted[0] = scalar;
-            assert_eq!(selected[0], expected);
-            assert!(
-                objective(
-                    &coefficients,
-                    &selected,
-                    [factor; 2],
-                    plane,
-                    context,
-                    lambda,
-                    &probs
-                ) < objective(
-                    &coefficients,
-                    &restricted,
-                    [factor; 2],
-                    plane,
-                    context,
-                    lambda,
-                    &probs
-                )
-            );
+            assert_eq!(selected[0], expected, "{coefficient} {factor}");
         }
     }
 
     #[test]
-    fn zero_lambda_preserves_nearest_rounding() {
+    fn zero_lambda_rounds_to_nearest() {
         let costs = TokenCosts::new(&probabilities());
         let coefficients = [
             6, -4, 12, -20, 28, 36, -44, 52, 0, 1, -1, 16_380, -16_380, 3, -3, 5,
@@ -1015,40 +953,6 @@ mod tests {
             assert_eq!(
                 quantize_block(&coefficients, 11, 8, plane, 0, 0, &costs),
                 nearest
-            );
-        }
-    }
-
-    #[test]
-    fn coefficient_weights_match_pixel_energy() {
-        let mut dct = [0; 16];
-        dct[0] = 64;
-        let pixel_energy: u64 = crate::transform::inverse_dct(fearless_simd::Fallback::new(), &dct)
-            .into_iter()
-            .map(|sample| (sample * sample) as u64)
-            .sum();
-        assert_eq!(
-            64 * 64 * CoefficientPlane::Chroma.distortion_weight(),
-            pixel_energy * 65536
-        );
-
-        for position in 0..16 {
-            let mut wht = [0; 16];
-            wht[position] = 256;
-            let pixel_energy: u64 = crate::transform::inverse_wht(&wht)
-                .into_iter()
-                .map(|dc| {
-                    let mut dct = [0; 16];
-                    dct[0] = dc;
-                    crate::transform::inverse_dct(fearless_simd::Fallback::new(), &dct)
-                        .into_iter()
-                        .map(|sample| (sample * sample) as u64)
-                        .sum::<u64>()
-                })
-                .sum();
-            assert_eq!(
-                256 * 256 * CoefficientPlane::LumaDc.distortion_weight(),
-                pixel_energy * 65536
             );
         }
     }

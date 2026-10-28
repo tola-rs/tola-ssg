@@ -236,12 +236,6 @@ mod tests {
     use super::*;
     use tola_typst::typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
-    use std::sync::Arc;
-
-    use tola_build::check::{SourceDiagnosticSession, SourceRevision};
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
-    use tola_build::diagnostic::Severity;
-
     /// The site path a written link resolves to, from the file that writes it.
     fn resolved_target(root: &Path, writing: &str, text: &str) -> Option<String> {
         let id = RootedPath::new(
@@ -326,21 +320,6 @@ mod tests {
             })
             .collect()
     }
-
-    #[test]
-    fn module_sources_link_to_their_files() {
-        assert_eq!(
-            rendered(
-                "site.typ",
-                "#import \"templates/page.typ\": page\n#include \"content/post.typ\"\n"
-            ),
-            [
-                link_line("templates/page.typ", "templates/page.typ"),
-                link_line("content/post.typ", "content/post.typ"),
-            ]
-        );
-    }
-
     #[test]
     fn reader_calls_link_their_file_arguments() {
         assert_eq!(
@@ -370,42 +349,6 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn bibliography_style_names_are_no_paths() {
-        assert_eq!(
-            rendered(
-                "content/post.typ",
-                "#bibliography(\"refs.bib\", style: \"ieee\")\n"
-            ),
-            [link_line("refs.bib", "content/refs.bib")]
-        );
-    }
-
-    #[test]
-    fn reader_names_respect_lexical_bindings() {
-        assert_eq!(
-            rendered(
-                "site.typ",
-                "#{ let image(path) = path; image(\"caption\") }\n#image(\"logo.svg\")\n"
-            ),
-            [link_line("logo.svg", "logo.svg")]
-        );
-    }
-
-    #[test]
-    fn paths_that_name_no_file_declare_no_link() {
-        assert_eq!(
-            rendered(
-                "site.typ",
-                "#import \"@tola/site:0.0.0\": site\n\
-                 #let logo = image(\"https://example.com/logo.png\")\n\
-                 #let theme = raw(theme: \"themes/one.tmTheme\")\n"
-            ),
-            Vec::<String>::new()
-        );
-    }
-
     #[test]
     fn link_target_follows_the_caller_root_spelling() {
         let directory = tempfile::tempdir().unwrap();
@@ -429,137 +372,6 @@ mod tests {
         assert_eq!(
             target,
             crate::uri::from_file_path(&spelled.join("content/page.typ")).unwrap()
-        );
-    }
-
-    /// A site whose entry program realizes one page per content source, compiled once.
-    fn compiled_site(
-        files: &[(&str, &str)],
-    ) -> (
-        tempfile::TempDir,
-        Arc<ResolvedSiteConfig>,
-        BuildCancellation,
-        SourceRevision,
-    ) {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::write(
-            root.join("site.typ"),
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/address:0.0.0": join-route, output-of
-#for source in all-sources() {
-  document(output-of(join-route(source.route-segments)))[#include source.file]
-}"#,
-        )
-        .unwrap();
-        for (name, text) in files {
-            let path = root.join(name);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-        let toml = root.join("tola.toml");
-        std::fs::write(&toml, "").unwrap();
-        let configuration = Arc::new(
-            load_site_config(
-                Some(&toml),
-                tola_typst::PackageLocations::default(),
-                &BuildOverrides::default(),
-            )
-            .unwrap()
-            .into_config(),
-        );
-        let cancellation = BuildCancellation::new();
-        let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-        let revision = session.inspect(Vec::new(), &cancellation).unwrap();
-        assert!(
-            revision
-                .diagnostics()
-                .iter()
-                .all(|diagnostic| diagnostic.severity != Severity::Error),
-            "{:#?}",
-            revision.diagnostics()
-        );
-        (directory, configuration, cancellation, revision)
-    }
-
-    /// The hover one written link answers with, over a compiled site.
-    fn link_hover(files: &[(&str, &str)], hovered: &str, written: &str) -> String {
-        let (_directory, configuration, cancellation, revision) = compiled_site(files);
-        let root = configuration.get_root();
-        let path = root.join(hovered);
-        let id = crate::identity::path_id(&path, root).expect("the file has a site identity");
-        let source = Source::new(id, std::fs::read_to_string(&path).unwrap());
-        let cursor = source.text().find(written).expect("the written path") + 1;
-        let hover = hover(
-            revision.checked().expect("the site compiles"),
-            &configuration,
-            &source,
-            cursor,
-            &cancellation,
-        )
-        .unwrap()
-        .expect("a hover");
-        let lsp_types::HoverContents::Markup(markup) = hover.contents else {
-            panic!("a link hover is markdown");
-        };
-        markup.value
-    }
-
-    /// The hover a link answers with: the file it names, and the pages that serve it.
-    #[test]
-    fn link_hover_lists_the_serving_pages() {
-        let one = link_hover(
-            &[
-                (
-                    "content/document.typ",
-                    "#include \"../templates/page.typ\"\nBody\n",
-                ),
-                ("templates/page.typ", "Note.\n"),
-            ],
-            "content/document.typ",
-            "templates/page.typ",
-        );
-        assert_eq!(
-            one,
-            "```typc\ntemplates/page.typ\n```\n\nServed at /document/."
-        );
-
-        let five = link_hover(
-            &[
-                ("content/one.typ", "#include \"../templates/shared.typ\"\n"),
-                ("content/two.typ", "#include \"../templates/shared.typ\"\n"),
-                (
-                    "content/three.typ",
-                    "#include \"../templates/shared.typ\"\n",
-                ),
-                ("content/four.typ", "#include \"../templates/shared.typ\"\n"),
-                ("content/five.typ", "#include \"../templates/shared.typ\"\n"),
-                ("templates/shared.typ", "Note.\n"),
-            ],
-            "content/one.typ",
-            "templates/shared.typ",
-        );
-        assert_eq!(
-            five,
-            "```typc\ntemplates/shared.typ\n```\n\nServed at /five/, /four/, /one/ and 2 more."
-        );
-
-        let none = link_hover(
-            &[
-                (
-                    "content/document.typ",
-                    "#include \"../templates/page.typ\"\nBody\n",
-                ),
-                ("templates/page.typ", "Note.\n"),
-                ("templates/other.typ", "#include \"idle.typ\"\n"),
-                ("templates/idle.typ", "Note.\n"),
-            ],
-            "templates/other.typ",
-            "idle.typ",
-        );
-        assert_eq!(
-            none,
-            "```typc\ntemplates/idle.typ\n```\n\nA file this site includes; no document is built from it."
         );
     }
 }

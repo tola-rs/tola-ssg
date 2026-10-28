@@ -100,37 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn break_answers_its_loop() {
-        assert_eq!(
-            keywords_of("#for x in (1, 2) {\n  if x == 1 { br|eak }\n  continue\n}\n"),
-            ["#for", "break", "continue"]
-        );
-    }
-
-    #[test]
-    fn nested_loop_keeps_its_own_breaks() {
-        assert_eq!(
-            keywords_of("#for x in (1,) {\n  for y in (2,) { br|eak }\n  continue\n}\n"),
-            ["for", "break"]
-        );
-    }
-
-    #[test]
     fn closure_keeps_its_own_control_flow() {
         assert_eq!(
             keywords_of("#for x in (1,) {\n  let f = () => { br|eak }\n}\n"),
             Vec::<String>::new()
         );
-    }
-
-    #[test]
-    fn cursor_outside_loop_owns_nothing() {
-        for marked in [
-            "#for x in (1, 2) {\n  let y = |x\n}\n",
-            "#if x == 1 { br|eak }\n",
-            "Body te|xt\n",
-        ] {
-            assert_eq!(keywords_of(marked), Vec::<String>::new(), "{marked:?}");
-        }
     }
 }

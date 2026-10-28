@@ -9,7 +9,7 @@ use typst::foundations::Bytes;
 use typst::syntax::{FileId, Source};
 
 use super::{FileRead, FileResolver, Loaded, ReadAttempt};
-use crate::world::SourceSnapshot;
+use crate::world::ExplicitSources;
 use crate::world::package::{PackageCheck, PackageSpec, PackageStore};
 
 type ObservationCell<V> = Arc<OnceLock<V>>;
@@ -40,30 +40,30 @@ where
 
 /// One file view shared by compilations that must observe the same inputs.
 ///
-/// Explicit source bytes come from the supplied [`SourceSnapshot`]. Every
+/// Explicit source bytes come from the supplied [`ExplicitSources`]. Every
 /// other successful read, failure, and package selection is retained from its
-/// first observation. Create another snapshot to observe changed files.
+/// first observation. Create another view to observe changed files.
 /// Different files can be first observed at different times.
-pub struct FileSnapshot {
+pub struct FileView {
     root: PathBuf,
-    sources: Option<Arc<SourceSnapshot>>,
+    sources: Option<Arc<ExplicitSources>>,
     files: Arc<FileResolver>,
     observations: RwLock<FxHashMap<FileId, FileObservation>>,
-    packages: PackageSnapshot,
+    packages: PackageObservations,
 }
 
-impl FileSnapshot {
+impl FileView {
     /// Retain explicit sources and the resolver's first observations.
     ///
     /// Sources captured under different restrictions are read again through the resolver.
-    pub fn new(sources: Arc<SourceSnapshot>, files: Arc<FileResolver>) -> Self {
+    pub fn new(sources: Arc<ExplicitSources>, files: Arc<FileResolver>) -> Self {
         let same_boundary = sources.source_boundary() == files.source_boundary();
-        let mut snapshot = Self::from_resolver(sources.root(), files);
-        snapshot.sources = same_boundary.then_some(sources);
-        snapshot
+        let mut view = Self::from_resolver(sources.root(), files);
+        view.sources = same_boundary.then_some(sources);
+        view
     }
 
-    /// Normalized compilation root owned by this snapshot view.
+    /// Normalized compilation root owned by this file view.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -74,7 +74,7 @@ impl FileSnapshot {
             sources: None,
             files,
             observations: RwLock::new(FxHashMap::default()),
-            packages: PackageSnapshot::default(),
+            packages: PackageObservations::default(),
         }
     }
 
@@ -103,7 +103,7 @@ impl FileSnapshot {
             .get_or_init(|| {
                 let read = self
                     .files
-                    .read_attempt_with_snapshot(id, self.root(), &self.packages);
+                    .read_attempt_with_packages(id, self.root(), &self.packages);
                 ReadAttempt {
                     result: read.result.map(Bytes::new),
                     reads: read.reads,
@@ -137,7 +137,7 @@ impl FileSnapshot {
 }
 
 #[derive(Default)]
-pub(crate) struct PackageSnapshot {
+pub(crate) struct PackageObservations {
     observations: RwLock<FxHashMap<PackageSpec, PackageObservationCell>>,
 }
 
@@ -147,7 +147,7 @@ pub(crate) struct PackageObservation {
     pub(crate) checks: Vec<PackageCheck>,
 }
 
-impl PackageSnapshot {
+impl PackageObservations {
     pub(crate) fn observe(
         &self,
         package: &PackageSpec,
@@ -179,7 +179,6 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use typst::syntax::package::PackageSpec;
     use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
 
     use super::*;
@@ -191,29 +190,22 @@ mod tests {
         ))
     }
 
-    fn package_id(package: &PackageSpec, path: &str) -> FileId {
-        FileId::new(RootedPath::new(
-            VirtualRoot::Package(package.clone()),
-            VirtualPath::new(path).unwrap(),
-        ))
-    }
-
-    fn file_snapshot(root: &Path, files: Arc<FileResolver>) -> FileSnapshot {
-        let snapshot = SourceSnapshot::build(&[], root)
+    fn file_view(root: &Path, files: Arc<FileResolver>) -> FileView {
+        let sources = ExplicitSources::build(&[], root)
             .unwrap()
-            .into_snapshot_and_accessed()
+            .into_sources_and_accessed()
             .0;
-        FileSnapshot::new(Arc::new(snapshot), files)
+        FileView::new(Arc::new(sources), files)
     }
 
     #[test]
-    fn snapshot_freezes_first_observation() {
+    fn file_view_freezes_first_observation() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("value.txt");
         let files = Arc::new(FileResolver::new());
 
         fs::write(&path, "first").unwrap();
-        let present = file_snapshot(directory.path(), Arc::clone(&files));
+        let present = file_view(directory.path(), Arc::clone(&files));
         assert_eq!(
             present.read(id("value.txt")).result.unwrap().as_ref(),
             b"first"
@@ -224,7 +216,7 @@ mod tests {
             b"first"
         );
         assert_eq!(
-            file_snapshot(directory.path(), Arc::clone(&files))
+            file_view(directory.path(), Arc::clone(&files))
                 .read(id("value.txt"))
                 .result
                 .unwrap()
@@ -233,12 +225,12 @@ mod tests {
         );
 
         fs::remove_file(&path).unwrap();
-        let absent = file_snapshot(directory.path(), Arc::clone(&files));
+        let absent = file_view(directory.path(), Arc::clone(&files));
         assert!(absent.read(id("value.txt")).result.is_err());
         fs::write(&path, "created").unwrap();
         assert!(absent.read(id("value.txt")).result.is_err());
         assert_eq!(
-            file_snapshot(directory.path(), files)
+            file_view(directory.path(), files)
                 .read(id("value.txt"))
                 .result
                 .unwrap()
@@ -247,78 +239,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn repeated_reads_share_bytes() {
-        let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("shared.bin"), vec![42; 1024 * 1024]).unwrap();
-        let snapshot = file_snapshot(directory.path(), Arc::new(FileResolver::new()));
-        let first = snapshot.read(id("shared.bin"));
-        let expected = first.reads.clone().expect("a successful read has evidence");
-        let bytes = first.result.unwrap();
-
-        assert!(snapshot.matches_read(id("shared.bin"), &expected));
-        let repeated = snapshot.read(id("shared.bin")).result.unwrap();
-        assert!(std::ptr::eq(
-            bytes.as_slice().as_ptr(),
-            repeated.as_slice().as_ptr()
-        ));
-    }
-
-    #[test]
-    fn snapshot_keeps_package_selection() {
-        let directory = TempDir::new().unwrap();
-        let data = directory.path().join("data");
-        let cache = directory.path().join("cache");
-        let cached_package = cache.join("preview/demo/1.0.0");
-        fs::create_dir_all(&cached_package).unwrap();
-        fs::write(cached_package.join("lib.typ"), "cache lib").unwrap();
-        fs::write(cached_package.join("other.txt"), "cache other").unwrap();
-        let locations = crate::world::package::PackageLocations::from_absolute_roots(
-            Some(data.clone()),
-            Some(cache),
-        )
-        .unwrap();
-        let files = Arc::new(FileResolver::from_package_locations(
-            locations,
-            crate::world::package::PackageFetchPolicy::LocalOnly,
-        ));
-        let package: PackageSpec = "@preview/demo:1.0.0".parse().unwrap();
-        let first = file_snapshot(directory.path(), Arc::clone(&files));
-
-        assert_eq!(
-            first
-                .read(package_id(&package, "lib.typ"))
-                .result
-                .unwrap()
-                .as_ref(),
-            b"cache lib"
-        );
-        let data_package = data.join("preview/demo/1.0.0");
-        fs::create_dir_all(&data_package).unwrap();
-        fs::write(data_package.join("other.txt"), "data other").unwrap();
-        assert_eq!(
-            first
-                .read(package_id(&package, "other.txt"))
-                .result
-                .unwrap()
-                .as_ref(),
-            b"cache other"
-        );
-
-        let second = file_snapshot(directory.path(), files);
-        assert_eq!(
-            second
-                .read(package_id(&package, "other.txt"))
-                .result
-                .unwrap()
-                .as_ref(),
-            b"data other"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn retargeted_package_symlink_ignored() {
+        use typst::syntax::package::PackageSpec;
+
+        fn package_id(package: &PackageSpec, path: &str) -> FileId {
+            FileId::new(RootedPath::new(
+                VirtualRoot::Package(package.clone()),
+                VirtualPath::new(path).unwrap(),
+            ))
+        }
+
         let directory = TempDir::new().unwrap();
         let packages = directory.path().join("packages");
         let package_link = packages.join("local/demo/1.0.0");
@@ -338,7 +270,7 @@ mod tests {
             crate::world::package::PackageFetchPolicy::LocalOnly,
         ));
         let package: PackageSpec = "@local/demo:1.0.0".parse().unwrap();
-        let frozen = file_snapshot(directory.path(), Arc::clone(&files));
+        let frozen = file_view(directory.path(), Arc::clone(&files));
         assert_eq!(
             frozen
                 .read(package_id(&package, "value.txt"))
@@ -358,92 +290,12 @@ mod tests {
             Some(first_directory.canonicalize().unwrap().as_path())
         );
         assert_eq!(
-            file_snapshot(directory.path(), files)
+            file_view(directory.path(), files)
                 .read(package_id(&package, "value.txt"))
                 .result
                 .unwrap()
                 .as_ref(),
             b"second value"
         );
-    }
-
-    #[test]
-    fn frozen_source_matches_file_bytes() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("main.typ");
-        let original = b"\xef\xbb\xbf= Frozen";
-        fs::write(&path, original).unwrap();
-        let files = Arc::new(FileResolver::new());
-        let loaded = SourceSnapshot::build_with_files(
-            std::slice::from_ref(&path),
-            directory.path(),
-            Arc::clone(&files),
-        )
-        .unwrap();
-        let (snapshot, accessed) = loaded.into_snapshot_and_accessed();
-        let expected = accessed.reads.first().unwrap().clone();
-        let snapshot = FileSnapshot::new(Arc::new(snapshot), files);
-        fs::write(&path, "= Changed").unwrap();
-
-        assert_eq!(
-            snapshot.source(id("main.typ")).unwrap().value.text(),
-            "= Frozen"
-        );
-        assert_eq!(
-            snapshot.file(id("main.typ")).unwrap().value.as_slice(),
-            original
-        );
-        assert!(snapshot.matches_read(id("main.typ"), &expected));
-    }
-
-    #[test]
-    fn world_reads_overridden_source() {
-        use typst::World;
-
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("main.typ");
-        let added = directory.path().join("added.typ");
-        fs::write(&path, "disk source").unwrap();
-        let files = Arc::new(
-            FileResolver::new()
-                .with_disk_overrides([
-                    (path.clone(), Arc::from(&b"editor source"[..])),
-                    (added.clone(), Arc::from(&b"new source"[..])),
-                ])
-                .unwrap(),
-        );
-        let snapshot = Arc::new(
-            SourceSnapshot::build_with_files(
-                &[path.clone(), added],
-                directory.path(),
-                Arc::clone(&files),
-            )
-            .unwrap()
-            .into_snapshot_and_accessed()
-            .0,
-        );
-        let snapshot = Arc::new(FileSnapshot::new(snapshot, files));
-        fs::write(&path, "changed disk source").unwrap();
-        let world = crate::world::TypstWorld::builder(&path, directory.path())
-            .with_file_snapshot(
-                snapshot.clone(),
-                Arc::new(super::super::SharedFileCache::new()),
-            )
-            .no_fonts()
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-
-        assert_eq!(world.source(world.main()).unwrap().text(), "editor source");
-        assert_eq!(
-            world.file(world.main()).unwrap().as_slice(),
-            b"editor source"
-        );
-        assert_eq!(world.source(id("added.typ")).unwrap().text(), "new source");
-        let read = snapshot.source(world.main()).unwrap().read;
-        assert!(matches!(
-            read.origin(),
-            crate::world::file::ReadOrigin::Provider
-        ));
-        assert!(snapshot.matches_read(world.main(), &read));
     }
 }

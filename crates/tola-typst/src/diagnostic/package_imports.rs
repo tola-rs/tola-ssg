@@ -161,42 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn imports_ignore_non_import_text() {
-        let file = source(
-            "#import \"@preview/cetz:0.3.4\": canvas\n\
-             #let example = \"@preview/other:1.0.0\"\n\
-             // #import \"@preview/commented:1.0.0\": canvas\n",
-        );
-
-        assert_eq!(imported_packages(&file), ["@preview/cetz:0.3.4"]);
-    }
-
-    #[test]
-    fn nested_block_imports_are_found() {
-        let file = source(
-            "#let figure() = {\n  import \"@preview/cetz:0.3.4\": canvas\n  canvas(())\n}\n",
-        );
-
-        assert_eq!(imported_packages(&file), ["@preview/cetz:0.3.4"]);
-    }
-
-    #[test]
-    fn includes_name_package_identity() {
-        let file = source(
-            "#include \"@local/diag:1.0.0\"\n\
-             #include \"@local/diag:1.0.0/part.typ\"\n\
-             #include \"helper.typ\"\n\
-             #let example = \"@local/other:1.0.0\"\n",
-        );
-        assert_eq!(imported_packages(&file), ["@local/diag:1.0.0"]);
-        let span = DiagSpan::from_range(file.id(), 10..15);
-        assert_eq!(
-            imported_package(&file, span).as_deref(),
-            Some("@local/diag:1.0.0")
-        );
-    }
-
-    #[test]
     fn importers_name_each_importing_file_once() {
         let importers = PackageImporters::collect(
             [

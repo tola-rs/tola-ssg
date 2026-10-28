@@ -134,7 +134,7 @@ impl TypstHost {
             && self.source_boundary == other.source_boundary
     }
 
-    /// Bind validated icons before creating any source or candidate snapshots.
+    /// Bind validated icons before creating any source sets or candidate files.
     /// Older hosts and worlds keep their own immutable icon collections.
     pub(crate) fn with_icons(&self, icons: Arc<tola_icons::IconCollections>) -> Self {
         let mut host = self.clone();
@@ -213,18 +213,18 @@ impl TypstHost {
         root: &Path,
         main: &Path,
         library: &tola_packages::library::SiteLibrary,
-        candidate_files: Arc<FileSnapshot>,
+        candidate_files: Arc<FileView>,
         cancellation: &BundleCancellation,
     ) -> Result<TypstWorld, WorldBuildError> {
         TypstWorld::builder(main, root)
-            .with_file_snapshot(candidate_files, Arc::clone(&self.file_cache))
+            .with_file_view(candidate_files, Arc::clone(&self.file_cache))
             .with_fonts(Arc::clone(&self.fonts))
             .with_shared_library(library.shared())
             .build(cancellation)
     }
 
-    pub(crate) fn candidate_files(&self, snapshot: Arc<SourceSnapshot>) -> Arc<FileSnapshot> {
-        Arc::new(FileSnapshot::new(snapshot, Arc::new(self.files.clone())))
+    pub(crate) fn candidate_files(&self, sources: Arc<ExplicitSources>) -> Arc<FileView> {
+        Arc::new(FileView::new(sources, Arc::new(self.files.clone())))
     }
 
     pub(crate) fn read_is_process_stable(&self, locator: &ReadLocator) -> bool {
@@ -254,7 +254,7 @@ impl TypstHost {
     }
 
     /// Keep parsed imports across short runs of builds that reuse their compilation.
-    /// Explicit content sources and the entry program live in the source snapshot.
+    /// Explicit content sources and the entry program live in the explicit sources.
     pub(crate) const RETAINED_FILE_CACHE_EPOCHS: usize = 10;
 
     pub(crate) fn evict_stale_file_cache_entries(&self, max_age: usize) {
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_ignores_site_paths() {
+    fn site_paths_have_no_package_target() {
         let files = TolaPackageFiles;
         assert_eq!(
             tola_typst::FileProvider::target(&files, tola_typst::file_id("images/photo.webp")),

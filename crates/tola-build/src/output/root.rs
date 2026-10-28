@@ -650,47 +650,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn output_rejects_linked_protected_inputs() {
-        use std::os::unix::fs::symlink;
-        let dir = TempDir::new().unwrap();
-
-        let root = TempDir::new().unwrap();
-        let mut config = output_test_config(root.path());
-        fs::create_dir(&config.build.publish_dir).unwrap();
-        let source = config.get_root().join("brand");
-        symlink(&config.build.publish_dir, &source).unwrap();
-        config.icons.collections.insert(
-            "brand".into(),
-            crate::config::section::IconCollectionSource::LocalSvgDir { path: source },
-        );
-        let error = resolve_configured_output(&config).unwrap_err();
-        assert_protected_input("linked icon source", error, "icon source");
-
-        let config = output_test_config(dir.path());
-        let output = &config.build.publish_dir;
-        fs::create_dir_all(output).unwrap();
-        fs::write(output.join("template.typ"), "#let value = 1").unwrap();
-        let read_alias = config.get_root().join("template.typ");
-        symlink(output.join("template.typ"), &read_alias).unwrap();
-        let error =
-            resolve_site_output_root_with_inputs(&config, [("Typst read", read_alias.as_path())])
-                .unwrap_err();
-        assert_protected_input("linked Typst read", error, "Typst read");
-
-        let internal = TempDir::new().unwrap();
-        let config = output_test_config(internal.path());
-        fs::create_dir(&config.build.publish_dir).unwrap();
-        symlink(
-            &config.build.publish_dir,
-            config.get_root().join(crate::filesystem::INTERNAL_DIR),
-        )
-        .unwrap();
-        let error = resolve_configured_output(&config).unwrap_err();
-        assert_protected_input("linked `.tola` directory", error, "`.tola` directory");
-    }
-
     #[cfg(windows)]
     #[test]
     fn output_rejects_case_aliased_internal() {
@@ -765,130 +724,69 @@ mod tests {
         }
     }
 
+    /// An output whose real path is a symlink is refused: at resolution through a chain,
+    /// after resolution through one created later, and when a protected input aliases it.
     #[cfg(unix)]
     #[test]
-    fn output_chain_symlinks_are_rejected() {
+    fn output_symlinks_are_refused() {
         use std::os::unix::fs::symlink;
 
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join("site");
-        let external = dir.path().join("external");
-        fs::create_dir(&root).unwrap();
-        fs::create_dir(&external).unwrap();
-        symlink(&external, root.join("public")).unwrap();
-        let expected = root.canonicalize().unwrap().join("public");
+        // A symlinked component below the output makes the real path differ from the logical one.
+        {
+            let dir = TempDir::new().unwrap();
+            let root = dir.path().join("site");
+            let external = dir.path().join("external");
+            fs::create_dir(&root).unwrap();
+            fs::create_dir(&external).unwrap();
+            symlink(&external, root.join("public")).unwrap();
+            let expected = root.canonicalize().unwrap().join("public");
+            assert!(matches!(
+                OwnedOutputRoot::resolve(&root, &root.join("public/site"), []),
+                Err(OutputRootError::Boundary(crate::filesystem::OutputBoundaryError::Symlink { path, .. })) if path == expected
+            ));
+        }
 
-        assert!(matches!(
-            OwnedOutputRoot::resolve(&root, &root.join("public/site"), []),
-            Err(OutputRootError::Boundary(crate::filesystem::OutputBoundaryError::Symlink { path, .. })) if path == expected
-        ));
+        // A symlink created after the root was resolved is still seen before the write.
+        {
+            let dir = TempDir::new().unwrap();
+            let output = dir.path().join("public");
+            let external = dir.path().join("external");
+            fs::create_dir(&external).unwrap();
+            fs::write(external.join("keep.txt"), "external data").unwrap();
+            let owned = OwnedOutputRoot::resolve(dir.path(), &output, []).unwrap();
+            let expected = owned.path().to_path_buf();
+            symlink(&external, &output).unwrap();
+            assert!(matches!(
+                prepare(&owned),
+                Err(OutputRootError::Boundary(crate::filesystem::OutputBoundaryError::Symlink { path, .. })) if path == expected
+            ));
+            assert_eq!(
+                fs::read_to_string(external.join("keep.txt")).unwrap(),
+                "external data"
+            );
+        }
+
+        // A protected input that aliases the output is refused at resolution.
+        {
+            let dir = TempDir::new().unwrap();
+            let output = dir.path().join("public");
+            let protected = dir.path().join("assets");
+            fs::create_dir(&output).unwrap();
+            symlink(&output, &protected).unwrap();
+            assert!(matches!(
+                OwnedOutputRoot::resolve(dir.path(), &output, [("asset", protected.as_path())]),
+                Err(OutputRootError::Boundary(
+                    crate::filesystem::OutputBoundaryError::ProtectedPath { kind: "asset", .. }
+                ))
+            ));
+        }
     }
 
-    #[cfg(unix)]
+    /// Tola publishes only into an output it can prove it owns: a directory or workspace
+    /// whose ownership it cannot establish keeps its files and receives nothing.
     #[test]
-    fn symlink_created_after_resolution_is_seen() {
-        use std::os::unix::fs::symlink;
-
-        let dir = TempDir::new().unwrap();
-        let output = dir.path().join("public");
-        let external = dir.path().join("external");
-        fs::create_dir(&external).unwrap();
-        fs::write(external.join("keep.txt"), "external data").unwrap();
-        let owned = OwnedOutputRoot::resolve(dir.path(), &output, []).unwrap();
-        let expected = owned.path().to_path_buf();
-        symlink(&external, &output).unwrap();
-
-        assert!(matches!(
-            prepare(&owned),
-            Err(OutputRootError::Boundary(crate::filesystem::OutputBoundaryError::Symlink { path, .. })) if path == expected
-        ));
-        assert_eq!(
-            fs::read_to_string(external.join("keep.txt")).unwrap(),
-            "external data"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn protected_symlink_to_output_is_rejected() {
-        use std::os::unix::fs::symlink;
-
-        let dir = TempDir::new().unwrap();
-        let output = dir.path().join("public");
-        let protected = dir.path().join("assets");
-        fs::create_dir(&output).unwrap();
-        symlink(&output, &protected).unwrap();
-
-        assert!(matches!(
-            OwnedOutputRoot::resolve(dir.path(), &output, [("asset", protected.as_path())]),
-            Err(OutputRootError::Boundary(
-                crate::filesystem::OutputBoundaryError::ProtectedPath { kind: "asset", .. }
-            ))
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_rechecks_protected_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let dir = TempDir::new().unwrap();
-        let output = dir.path().join("public");
-        let protected = dir.path().join("assets");
-        let owned = OwnedOutputRoot::resolve(dir.path(), &output, [("asset", protected.as_path())])
-            .unwrap();
-        fs::create_dir(&output).unwrap();
-        fs::write(output.join("keep.txt"), "generated data").unwrap();
-        symlink(&output, &protected).unwrap();
-
-        assert!(matches!(
-            prepare(&owned),
-            Err(OutputRootError::Boundary(
-                crate::filesystem::OutputBoundaryError::ProtectedPath { kind: "asset", .. }
-            ))
-        ));
-        assert_eq!(
-            fs::read_to_string(output.join("keep.txt")).unwrap(),
-            "generated data"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn publisher_rechecks_workspace_identity() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let output = root.join("public");
-        let content = root.join("content");
-        fs::create_dir_all(content.join("previous")).unwrap();
-        let source = content.join("previous/page.typ");
-        fs::write(&source, "source").unwrap();
-        let owned =
-            OwnedOutputRoot::resolve(root, &output, [("content", content.as_path())]).unwrap();
-        published_output(root, &[("index.html", "published")]);
-        let staging = tempfile::tempdir_in(root).unwrap();
-        fs::write(staging.path().join("index.html"), "candidate").unwrap();
-        let lock = site_lock(&owned);
-        let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
-
-        let workspace = owned.output_workspace().unwrap();
-        let displaced = root.join("displaced-workspace");
-        fs::rename(workspace, &displaced).unwrap();
-        std::os::unix::fs::symlink(&content, workspace).unwrap();
-
-        let published = writer.replace_with(staging);
-        assert_eq!(fs::read(&source).unwrap(), b"source");
-        assert_eq!(fs::read(output.join("index.html")).unwrap(), b"published");
-        assert!(matches!(
-            published,
-            Err(OutputRootError::Boundary(
-                crate::filesystem::OutputBoundaryError::Symlink { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn unpublished_output_is_preserved() {
+    fn foreign_ownership_is_refused() {
+        // Neither a missing output marker nor one naming another owner lets Tola write.
         for marker in [None, Some("not an owner marker")] {
             let dir = TempDir::new().unwrap();
             let output = dir.path().join("public");
@@ -896,17 +794,80 @@ mod tests {
             fs::write(output.join("keep.txt"), "user data").unwrap();
             let owned = OwnedOutputRoot::resolve(dir.path(), &output, []).unwrap();
             if let Some(marker) = marker {
-                // A record inside the output is the only one that speaks for it.
                 let path = owner_marker_path(owned.path());
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::write(path, marker).unwrap();
             }
-
             assert!(prepare(&owned).is_err(), "{marker:?}");
             assert_eq!(
                 fs::read_to_string(output.join("keep.txt")).unwrap(),
                 "user data"
             );
+        }
+
+        // A workspace another owner left behind keeps its previous tree and receives nothing.
+        for marker in [None, Some("another owner")] {
+            let directory = TempDir::new().unwrap();
+            let output = directory.path().join("public");
+            let workspace = crate::filesystem::publication_workspace(&output).unwrap();
+            fs::create_dir_all(workspace.join("previous")).unwrap();
+            fs::write(workspace.join("previous/keep.txt"), "author files").unwrap();
+            if let Some(marker) = marker {
+                fs::write(workspace.join(OWNER_MARKER_FILE), marker).unwrap();
+            }
+            let owned = OwnedOutputRoot::resolve(directory.path(), &output, []).unwrap();
+            let lock = site_lock(&owned);
+            assert!(matches!(
+                owned.write(&lock, &BuildCancellation::default()),
+                Err(OutputRootError::UnownedWorkspace { .. })
+            ));
+            assert_eq!(
+                fs::read(workspace.join("previous/keep.txt")).unwrap(),
+                b"author files"
+            );
+            assert!(!output.exists());
+        }
+
+        // A marker copied from another output does not transfer ownership.
+        {
+            let dir = TempDir::new().unwrap();
+            let output_a = dir.path().join("public-a");
+            let output_b = dir.path().join("public-b");
+            let owned_a = OwnedOutputRoot::resolve(dir.path(), &output_a, []).unwrap();
+            replace(&owned_a, tempfile::tempdir_in(dir.path()).unwrap()).unwrap();
+
+            fs::create_dir(&output_b).unwrap();
+            fs::write(output_b.join("keep.txt"), "user data").unwrap();
+            let owned_b = OwnedOutputRoot::resolve(dir.path(), &output_b, []).unwrap();
+            let marker = owner_marker_path(&output_b);
+            fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            fs::copy(owner_marker_path(&output_a), marker).unwrap();
+
+            assert!(matches!(
+                prepare(&owned_b),
+                Err(OutputRootError::InvalidMarker { .. })
+            ));
+            assert_eq!(
+                fs::read_to_string(output_b.join("keep.txt")).unwrap(),
+                "user data"
+            );
+        }
+
+        // A lock taken by another site's build refuses the write and creates nothing.
+        {
+            let directory = TempDir::new().unwrap();
+            let other = TempDir::new().unwrap();
+            let output =
+                OwnedOutputRoot::resolve(directory.path(), &directory.path().join("public"), [])
+                    .unwrap();
+            let foreign =
+                OwnedOutputRoot::resolve(other.path(), &other.path().join("public"), []).unwrap();
+            let lock = site_lock(&foreign);
+            assert!(matches!(
+                output.write(&lock, &BuildCancellation::default()),
+                Err(OutputRootError::WrongSiteLock)
+            ));
+            assert!(!output.path().exists());
         }
     }
 
@@ -940,31 +901,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_marker_is_bound_to_one_output() {
-        let dir = TempDir::new().unwrap();
-        let output_a = dir.path().join("public-a");
-        let output_b = dir.path().join("public-b");
-        let owned_a = OwnedOutputRoot::resolve(dir.path(), &output_a, []).unwrap();
-        replace(&owned_a, tempfile::tempdir_in(dir.path()).unwrap()).unwrap();
-
-        fs::create_dir(&output_b).unwrap();
-        fs::write(output_b.join("keep.txt"), "user data").unwrap();
-        let owned_b = OwnedOutputRoot::resolve(dir.path(), &output_b, []).unwrap();
-        let marker = owner_marker_path(&output_b);
-        fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        fs::copy(owner_marker_path(&output_a), marker).unwrap();
-
-        assert!(matches!(
-            prepare(&owned_b),
-            Err(OutputRootError::InvalidMarker { .. })
-        ));
-        assert_eq!(
-            fs::read_to_string(output_b.join("keep.txt")).unwrap(),
-            "user data"
-        );
-    }
-
-    #[test]
     fn alternating_outputs_keep_ownership() {
         let directory = TempDir::new().unwrap();
         let first =
@@ -988,50 +924,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn foreign_site_lock_is_rejected() {
-        let directory = TempDir::new().unwrap();
-        let other = TempDir::new().unwrap();
-        let output =
-            OwnedOutputRoot::resolve(directory.path(), &directory.path().join("public"), [])
-                .unwrap();
-        let foreign =
-            OwnedOutputRoot::resolve(other.path(), &other.path().join("public"), []).unwrap();
-        let lock = site_lock(&foreign);
-        assert!(matches!(
-            output.write(&lock, &BuildCancellation::default()),
-            Err(OutputRootError::WrongSiteLock)
-        ));
-        assert!(!output.path().exists());
-    }
-
-    #[test]
-    fn foreign_workspace_is_preserved() {
-        for marker in [None, Some("another owner")] {
-            let directory = TempDir::new().unwrap();
-            let output = directory.path().join("public");
-            let workspace = crate::filesystem::publication_workspace(&output).unwrap();
-            fs::create_dir_all(workspace.join("previous")).unwrap();
-            fs::write(workspace.join("previous/keep.txt"), "author files").unwrap();
-            if let Some(marker) = marker {
-                fs::write(workspace.join(OWNER_MARKER_FILE), marker).unwrap();
-            }
-            let owned = OwnedOutputRoot::resolve(directory.path(), &output, []).unwrap();
-            let lock = site_lock(&owned);
-
-            assert!(matches!(
-                owned.write(&lock, &BuildCancellation::default()),
-                Err(OutputRootError::UnownedWorkspace { .. })
-            ));
-            assert_eq!(
-                fs::read(workspace.join("previous/keep.txt")).unwrap(),
-                b"author files"
-            );
-            assert!(!output.exists());
-        }
-    }
-
-    /// A build killed between creating the workspace and recording its owner leaves this behind.
+    /// A build killed before the workspace owner marker lands leaves an empty directory, which
+    /// the next build adopts.
     #[test]
     fn empty_workspace_is_adopted() {
         let directory = TempDir::new().unwrap();
@@ -1040,7 +934,6 @@ mod tests {
                 .unwrap();
         let workspace = crate::filesystem::publication_workspace(owned.path()).unwrap();
         fs::create_dir(&workspace).unwrap();
-
         assert_eq!(prepared_workspace(&owned), workspace);
         assert_eq!(
             fs::read(workspace.join(OWNER_MARKER_FILE)).unwrap(),
@@ -1048,6 +941,8 @@ mod tests {
         );
     }
 
+    /// A staging directory from an earlier interrupted build is reclaimed, without touching the
+    /// author's files beside it.
     #[test]
     fn abandoned_staging_is_reclaimed() {
         let directory = TempDir::new().unwrap();
@@ -1059,9 +954,7 @@ mod tests {
         fs::create_dir_all(abandoned.join("posts")).unwrap();
         fs::write(abandoned.join("posts/index.html"), "discarded candidate").unwrap();
         fs::write(workspace.join("keep.txt"), "author file").unwrap();
-
         assert_eq!(prepared_workspace(&owned), workspace);
-
         assert!(!abandoned.exists());
         assert_eq!(
             fs::read(workspace.join("keep.txt")).unwrap(),
@@ -1092,98 +985,28 @@ mod tests {
         assert_eq!(fs::read(&alias).unwrap(), b"source");
     }
 
+    /// A rename that fails mid-install leaves the previously published tree reachable: the
+    /// first install leaves no output at all, and a later one keeps or restores what was there.
     #[test]
-    fn first_install_failure_leaves_no_output() {
-        let directory = TempDir::new().unwrap();
-        let output = directory.path().join("public");
-        let owned = OwnedOutputRoot::resolve(directory.path(), &output, []).unwrap();
-        let lock = site_lock(&owned);
-        let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
-        let staging = tempfile::tempdir_in(directory.path()).unwrap();
-        fs::write(staging.path().join("index.html"), "candidate").unwrap();
+    fn failed_install_keeps_previous_output() {
+        // First publication: the rename never happens, so nothing is published.
+        {
+            let directory = TempDir::new().unwrap();
+            let output = directory.path().join("public");
+            let owned = OwnedOutputRoot::resolve(directory.path(), &output, []).unwrap();
+            let lock = site_lock(&owned);
+            let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
+            let staging = tempfile::tempdir_in(directory.path()).unwrap();
+            fs::write(staging.path().join("index.html"), "candidate").unwrap();
+            let result = writer.replace_with_rename(staging, |_, _| {
+                Err(io::Error::other("installation refused"))
+            });
+            assert!(result.is_err());
+            assert!(!output.exists());
+            assert!(!owned.output_workspace().unwrap().join("previous").exists());
+        }
 
-        let result = writer.replace_with_rename(staging, |_, _| {
-            Err(io::Error::other("installation refused"))
-        });
-        assert!(result.is_err());
-        assert!(!output.exists());
-        assert!(!owned.output_workspace().unwrap().join("previous").exists());
-    }
-
-    #[test]
-    fn cleanup_failure_keeps_committed_output() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "previous")]);
-        let previous = owned.output_workspace().unwrap().join("previous");
-        let lock = site_lock(&owned);
-        let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
-        let staging = tempfile::tempdir_in(directory.path()).unwrap();
-        fs::write(staging.path().join("index.html"), "committed").unwrap();
-
-        writer
-            .replace_with_rename(staging, |from, to| {
-                fs::rename(from, to)?;
-                if to == owned.path() {
-                    fs::write(owner_marker_path(&previous), "foreign ownership")?;
-                }
-                Ok(())
-            })
-            .unwrap();
-
-        assert_eq!(
-            fs::read(owned.path().join("index.html")).unwrap(),
-            b"committed"
-        );
-        assert_eq!(
-            fs::read(owner_marker_path(&previous)).unwrap(),
-            b"foreign ownership"
-        );
-    }
-
-    #[test]
-    fn cancelled_commit_keeps_published_output() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "successful")]);
-        let canceller = crate::cancellation::BuildCanceller::default();
-        let cancellation = canceller.token();
-        let lock = site_lock(&owned);
-        let writer = owned.write(&lock, &cancellation).unwrap();
-        let staging = tempfile::tempdir_in(directory.path()).unwrap();
-        fs::write(staging.path().join("index.html"), "candidate").unwrap();
-        canceller.cancel();
-        let error = writer.replace_with(staging).unwrap_err();
-        assert!(crate::cancellation::is_cancelled(&error.into()));
-        assert_eq!(
-            fs::read(owned.path().join("index.html")).unwrap(),
-            b"successful"
-        );
-    }
-
-    #[test]
-    fn installed_tree_is_not_reported_failed() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "successful")]);
-        let canceller = crate::cancellation::BuildCanceller::default();
-        let cancellation = canceller.token();
-        let lock = site_lock(&owned);
-        let writer = owned.write(&lock, &cancellation).unwrap();
-        let staging = tempfile::tempdir_in(directory.path()).unwrap();
-        fs::write(staging.path().join("index.html"), "candidate").unwrap();
-        writer
-            .replace_with_rename(staging, |from, to| {
-                fs::rename(from, to)?;
-                canceller.cancel();
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(
-            fs::read(owned.path().join("index.html")).unwrap(),
-            b"candidate"
-        );
-    }
-
-    #[test]
-    fn failed_install_restores_previous_output() {
+        // A failed swap over a published tree either restores it or leaves it in `previous`.
         for fail_restore in [false, true] {
             let directory = TempDir::new().unwrap();
             let owned = published_output(directory.path(), &[("index.html", "successful")]);
@@ -1228,82 +1051,161 @@ mod tests {
         }
     }
 
+    /// How a commit ends decides what the output holds: once the staged tree is renamed
+    /// in, a later cleanup failure or a cancellation cannot take it back; a cancellation
+    /// before the rename leaves the previously published tree.
     #[test]
-    fn recovery_restores_previous_into_empty_output() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "successful")]);
-        let previous = owned.output_workspace().unwrap().join("previous");
-        fs::rename(owned.path(), &previous).unwrap();
-        fs::create_dir(owned.path()).unwrap();
-        let lock = site_lock(&owned);
+    fn committed_tree_survives_late_failure() {
+        // A cleanup step after the rename fails: the committed bytes stay published.
+        {
+            let directory = TempDir::new().unwrap();
+            let owned = published_output(directory.path(), &[("index.html", "previous")]);
+            let previous = owned.output_workspace().unwrap().join("previous");
+            let lock = site_lock(&owned);
+            let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
+            let staging = tempfile::tempdir_in(directory.path()).unwrap();
+            fs::write(staging.path().join("index.html"), "committed").unwrap();
+            writer
+                .replace_with_rename(staging, |from, to| {
+                    fs::rename(from, to)?;
+                    if to == owned.path() {
+                        fs::write(owner_marker_path(&previous), "foreign ownership")?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                fs::read(owned.path().join("index.html")).unwrap(),
+                b"committed"
+            );
+            assert_eq!(
+                fs::read(owner_marker_path(&previous)).unwrap(),
+                b"foreign ownership"
+            );
+        }
 
-        let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
+        // Cancelling before the rename leaves the previously published tree.
+        {
+            let directory = TempDir::new().unwrap();
+            let owned = published_output(directory.path(), &[("index.html", "successful")]);
+            let canceller = crate::cancellation::BuildCanceller::default();
+            let cancellation = canceller.token();
+            let lock = site_lock(&owned);
+            let writer = owned.write(&lock, &cancellation).unwrap();
+            let staging = tempfile::tempdir_in(directory.path()).unwrap();
+            fs::write(staging.path().join("index.html"), "candidate").unwrap();
+            canceller.cancel();
+            let error = writer.replace_with(staging).unwrap_err();
+            assert!(crate::cancellation::is_cancelled(&error.into()));
+            assert_eq!(
+                fs::read(owned.path().join("index.html")).unwrap(),
+                b"successful"
+            );
+        }
 
-        assert_eq!(
-            fs::read(writer.path().join("index.html")).unwrap(),
-            b"successful"
-        );
-        assert!(!previous.exists());
+        // Cancelling after the rename does not report the installed tree as failed.
+        {
+            let directory = TempDir::new().unwrap();
+            let owned = published_output(directory.path(), &[("index.html", "successful")]);
+            let canceller = crate::cancellation::BuildCanceller::default();
+            let cancellation = canceller.token();
+            let lock = site_lock(&owned);
+            let writer = owned.write(&lock, &cancellation).unwrap();
+            let staging = tempfile::tempdir_in(directory.path()).unwrap();
+            fs::write(staging.path().join("index.html"), "candidate").unwrap();
+            writer
+                .replace_with_rename(staging, |from, to| {
+                    fs::rename(from, to)?;
+                    canceller.cancel();
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                fs::read(owned.path().join("index.html")).unwrap(),
+                b"candidate"
+            );
+        }
     }
 
+    /// What a published output holds after an interrupted swap, decided by what the
+    /// recovery finds in the output directory and in the `previous` tree.
     #[test]
-    fn nonempty_destination_keeps_foreign_files() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "successful")]);
-        let previous = owned.output_workspace().unwrap().join("previous");
-        fs::rename(owned.path(), &previous).unwrap();
-        fs::create_dir(owned.path()).unwrap();
-        fs::write(owned.path().join("foreign.txt"), "author data").unwrap();
-        let lock = site_lock(&owned);
+    fn interrupted_swap_recovery_keeps_author_tree() {
+        /// What the output directory holds before the next build starts, after a swap
+        /// was interrupted with the real tree already moved into `previous`.
+        #[derive(Clone, Copy)]
+        enum Interrupted {
+            /// The output directory is gone entirely.
+            Emptied,
+            /// The output directory exists but holds a file the build did not write.
+            ForeignFile,
+            /// The `previous` tree carries a marker that does not name this output.
+            InvalidMarker,
+            /// The new tree was installed and its owner marker written before the crash.
+            Installed,
+        }
+        for interrupted in [
+            Interrupted::Emptied,
+            Interrupted::ForeignFile,
+            Interrupted::InvalidMarker,
+            Interrupted::Installed,
+        ] {
+            let directory = TempDir::new().unwrap();
+            let owned = published_output(directory.path(), &[("index.html", "successful")]);
+            let previous = owned.output_workspace().unwrap().join("previous");
+            fs::rename(owned.path(), &previous).unwrap();
+            let lock = site_lock(&owned);
 
-        assert!(matches!(
-            owned.write(&lock, &BuildCancellation::default()),
-            Err(OutputRootError::Unowned { .. })
-        ));
-        assert_eq!(
-            fs::read_to_string(owned.path().join("foreign.txt")).unwrap(),
-            "author data"
-        );
-        assert_eq!(
-            fs::read(previous.join("index.html")).unwrap(),
-            b"successful"
-        );
-    }
-
-    #[test]
-    fn failed_recovery_keeps_previous_tree() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "successful")]);
-        let previous = owned.output_workspace().unwrap().join("previous");
-        fs::rename(owned.path(), &previous).unwrap();
-        let marker = owner_marker_path(&previous);
-        fs::create_dir_all(marker.parent().unwrap()).unwrap();
-        fs::write(marker, "invalid").unwrap();
-        let lock = site_lock(&owned);
-        assert!(owned.write(&lock, &BuildCancellation::default()).is_err());
-        assert_eq!(
-            fs::read(previous.join("index.html")).unwrap(),
-            b"successful"
-        );
-        assert!(!owned.path().exists());
-    }
-
-    #[test]
-    fn recovered_swap_keeps_installed_tree() {
-        let directory = TempDir::new().unwrap();
-        let owned = published_output(directory.path(), &[("index.html", "previous")]);
-        let previous = owned.output_workspace().unwrap().join("previous");
-        fs::rename(owned.path(), &previous).unwrap();
-        fs::create_dir(owned.path()).unwrap();
-        fs::write(owned.path().join("index.html"), "installed").unwrap();
-        owned.write_owner_marker(owned.path()).unwrap();
-        let lock = site_lock(&owned);
-        let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
-        assert_eq!(
-            fs::read(writer.path().join("index.html")).unwrap(),
-            b"installed"
-        );
-        assert!(!previous.exists());
+            match interrupted {
+                Interrupted::Emptied => {
+                    fs::create_dir(owned.path()).unwrap();
+                    let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
+                    assert_eq!(
+                        fs::read(writer.path().join("index.html")).unwrap(),
+                        b"successful"
+                    );
+                    assert!(!previous.exists());
+                }
+                Interrupted::ForeignFile => {
+                    fs::create_dir(owned.path()).unwrap();
+                    fs::write(owned.path().join("foreign.txt"), "author data").unwrap();
+                    assert!(matches!(
+                        owned.write(&lock, &BuildCancellation::default()),
+                        Err(OutputRootError::Unowned { .. })
+                    ));
+                    assert_eq!(
+                        fs::read_to_string(owned.path().join("foreign.txt")).unwrap(),
+                        "author data"
+                    );
+                    assert_eq!(
+                        fs::read(previous.join("index.html")).unwrap(),
+                        b"successful"
+                    );
+                }
+                Interrupted::InvalidMarker => {
+                    let marker = owner_marker_path(&previous);
+                    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+                    fs::write(marker, "invalid").unwrap();
+                    assert!(owned.write(&lock, &BuildCancellation::default()).is_err());
+                    assert_eq!(
+                        fs::read(previous.join("index.html")).unwrap(),
+                        b"successful"
+                    );
+                    assert!(!owned.path().exists());
+                }
+                Interrupted::Installed => {
+                    fs::create_dir(owned.path()).unwrap();
+                    fs::write(owned.path().join("index.html"), "installed").unwrap();
+                    owned.write_owner_marker(owned.path()).unwrap();
+                    let writer = owned.write(&lock, &BuildCancellation::default()).unwrap();
+                    assert_eq!(
+                        fs::read(writer.path().join("index.html")).unwrap(),
+                        b"installed"
+                    );
+                    assert!(!previous.exists());
+                }
+            }
+        }
     }
 
     #[test]

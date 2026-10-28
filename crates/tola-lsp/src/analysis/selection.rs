@@ -38,7 +38,7 @@ pub(crate) fn site_selected_interfaces(
     let boundary = crate::sources::base_source_boundary(root, false);
     let mut sources: HashMap<FileId, Arc<SourceNames>> = view
         .iter()
-        .map(|snapshot| (snapshot.source.id(), snapshot.names()))
+        .map(|parsed| (parsed.source.id(), parsed.names()))
         .collect();
     disk.begin();
     add_walked_sources(&mut sources, root, &boundary, cancellation, |path, id| {

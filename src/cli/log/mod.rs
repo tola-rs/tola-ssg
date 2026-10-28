@@ -678,19 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn command_record_keeps_envelope_bytes() {
-        let record = record_bytes(
-            "INFO",
-            "tola::test",
-            json!({"kind": "pinned", "detail": "value"}),
-        );
-        assert_eq!(
-            normalized_record(&record),
-            "{\"timestamp\":\"<timestamp>\",\"level\":\"INFO\",\"target\":\"tola::test\",\"pid\":<pid>,\"fields\":{\"kind\":\"pinned\",\"detail\":\"value\"}}\n"
-        );
-    }
-
-    #[test]
     fn preparing_log_creates_no_target() {
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("site");

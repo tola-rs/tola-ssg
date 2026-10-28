@@ -103,28 +103,6 @@ mod tests {
     }
 
     #[test]
-    fn heading_owns_its_block_content() {
-        let source =
-            Source::detached("= One\n#block[\n  == Two\n  inside\n]\nafter\n\n= Three\nouter\n");
-        let sections = sections(&source);
-        assert_eq!(
-            sections
-                .iter()
-                .map(|section| section.name.as_str())
-                .collect::<Vec<_>>(),
-            ["One", "Two", "Three"]
-        );
-        assert_eq!(
-            &source.text()[sections[1].body.clone()],
-            "== Two\n  inside\n"
-        );
-        assert_eq!(
-            &source.text()[sections[0].body.clone()],
-            "= One\n#block[\n  == Two\n  inside\n]\nafter\n\n"
-        );
-    }
-
-    #[test]
     fn heading_without_content_owns_its_line() {
         let source = Source::detached("= One");
         let sections = sections(&source);

@@ -171,7 +171,7 @@ mod tests {
     /// A preview lens names the route it opens, and the address this connection knows the page is
     /// served at: a client that runs no command of its own still reads the page it is about.
     #[test]
-    fn preview_lens_names_the_address_when_the_origin_is_known() {
+    fn preview_lens_carries_its_url() {
         let mut connection = ready(Vec::new());
         connection.default_origin = Some("http://localhost:4321".to_owned());
         let uri: Uri = "file:///site/page.typ".parse().unwrap();

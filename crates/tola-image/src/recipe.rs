@@ -1130,18 +1130,35 @@ mod tests {
         assert_eq!(lanczos, ImageRecipe::resolve(&source, triangle).unwrap());
     }
 
+    /// A recipe whose resize reads no filter answers the same whichever one the caller names.
     #[test]
-    fn unchanged_crop_ignores_filter() {
-        let source = metadata(9, 6);
+    fn unused_filters_leave_recipes_unchanged() {
         for (operation, width, height) in [
             (ResizeOperation::Fit, 12, 12),
             (ResizeOperation::Fill, 6, 6),
         ] {
             let mut request = options(operation, Some(width), Some(height));
-            let recipe = ImageRecipe::resolve(&source, request).unwrap();
+            let recipe = ImageRecipe::resolve(&metadata(9, 6), request).unwrap();
             request.filter = ResizeFilter::Triangle;
-            assert_eq!(recipe, ImageRecipe::resolve(&source, request).unwrap());
+            assert_eq!(
+                recipe,
+                ImageRecipe::resolve(&metadata(9, 6), request).unwrap()
+            );
         }
+
+        let render = SvgRender::new(1);
+        let mut triangle = vector_options(ResizeOperation::FitWidth, Some(100), None);
+        triangle.filter = ResizeFilter::Triangle;
+        let lanczos = ImageRecipe::resolve_svg(
+            (300.0, 380.0),
+            vector_options(ResizeOperation::FitWidth, Some(100), None),
+            render,
+        )
+        .unwrap();
+        assert_eq!(
+            lanczos,
+            ImageRecipe::resolve_svg((300.0, 380.0), triangle, render).unwrap()
+        );
     }
 
     #[test]
@@ -1182,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn crop_is_full_or_anchored() {
+    fn fill_crop_keeps_the_target_ratio() {
         let source = metadata(9, 6);
         let recipe =
             ImageRecipe::resolve(&source, options(ResizeOperation::Fill, Some(4), Some(4)))
@@ -1311,56 +1328,43 @@ mod tests {
         );
     }
 
+    /// A recipe serializes the geometry it resizes by — a raster's crop or a vector's own — and
+    /// reads back as the recipe it was.
     #[test]
-    fn vector_recipe_ignores_filter() {
-        let render = SvgRender::new(1);
-        let mut triangle = vector_options(ResizeOperation::FitWidth, Some(100), None);
-        triangle.filter = ResizeFilter::Triangle;
-        let lanczos = ImageRecipe::resolve_svg(
-            (300.0, 380.0),
-            vector_options(ResizeOperation::FitWidth, Some(100), None),
-            render,
-        )
-        .unwrap();
-        assert_eq!(
-            lanczos,
-            ImageRecipe::resolve_svg((300.0, 380.0), triangle, render).unwrap()
-        );
-    }
-
-    #[test]
-    fn raster_recipes_keep_their_wire_shape() {
-        let recipe = ImageRecipe::resolve(
-            &metadata(10, 10),
-            options(ResizeOperation::Scale, Some(5), Some(5)),
-        )
-        .unwrap();
-        let value = serde_json::to_value(&recipe).unwrap();
-        assert!(value.get("crop").is_some());
-        assert!(value.get("vector").is_none());
-        assert!(value.get("svg").is_none());
-        assert_eq!(
-            serde_json::from_value::<ImageRecipe>(value).unwrap(),
-            recipe
-        );
-    }
-
-    #[test]
-    fn vector_recipes_serialize_without_raster_crop() {
-        let recipe = ImageRecipe::resolve_svg(
-            (10.0, 10.0),
-            vector_options(ResizeOperation::Scale, Some(5), Some(5)),
-            SvgRender::new(9),
-        )
-        .unwrap();
-        let value = serde_json::to_value(&recipe).unwrap();
-        assert!(value.get("vector").is_some());
-        assert!(value.get("svg").is_some());
-        assert!(value.get("crop").is_none());
-        assert_eq!(
-            serde_json::from_value::<ImageRecipe>(value).unwrap(),
-            recipe
-        );
+    fn recipes_serialize_their_own_geometry() {
+        for (recipe, present, absent) in [
+            (
+                ImageRecipe::resolve(
+                    &metadata(10, 10),
+                    options(ResizeOperation::Scale, Some(5), Some(5)),
+                )
+                .unwrap(),
+                &["crop"][..],
+                &["vector", "svg"][..],
+            ),
+            (
+                ImageRecipe::resolve_svg(
+                    (10.0, 10.0),
+                    vector_options(ResizeOperation::Scale, Some(5), Some(5)),
+                    SvgRender::new(9),
+                )
+                .unwrap(),
+                &["vector", "svg"][..],
+                &["crop"][..],
+            ),
+        ] {
+            let value = serde_json::to_value(&recipe).unwrap();
+            for field in present {
+                assert!(value.get(field).is_some(), "{field}: {value}");
+            }
+            for field in absent {
+                assert!(value.get(field).is_none(), "{field}: {value}");
+            }
+            assert_eq!(
+                serde_json::from_value::<ImageRecipe>(value).unwrap(),
+                recipe
+            );
+        }
     }
 
     #[test]

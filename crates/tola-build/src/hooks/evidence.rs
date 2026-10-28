@@ -19,14 +19,14 @@ pub struct HookOutputEvidence {
 }
 
 impl HookOutputEvidence {
-    /// Promote a snapshot only after the hook and all declared-output checks succeed.
-    pub(super) fn from_successful_snapshot(
-        snapshot: HookOutputSnapshot,
+    /// Promote declared output files only after the hook and all declared-output checks succeed.
+    pub(super) fn from_successful_output(
+        files: DeclaredOutputFiles,
         cancellation: Option<&crate::cancellation::BuildCancellation>,
     ) -> Result<Self> {
         cancellation.ensure_active_if_present()?;
-        let kind = snapshot.kind.ok_or_else(|| {
-            let declared = snapshot.source_identity.logical_path().display();
+        let kind = files.kind.ok_or_else(|| {
+            let declared = files.source_identity.logical_path().display();
             super::hook_contract_error(
                 format!(
                     "the declared `outputs` path `{declared}` is not a regular file or directory"
@@ -36,8 +36,8 @@ impl HookOutputEvidence {
         })?;
         Ok(Self {
             kind,
-            physical_content: crate::filesystem::snapshot_fingerprint(&snapshot.entries),
-            source_identity: snapshot.source_identity,
+            physical_content: crate::filesystem::entries_fingerprint(&files.entries),
+            source_identity: files.source_identity,
         })
     }
 
@@ -197,19 +197,19 @@ pub(super) fn validate_declared_output_boundaries(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct HookOutputSnapshot {
+pub(super) struct DeclaredOutputFiles {
     kind: Option<crate::filesystem::FilesystemSourceKind>,
     pub(super) source_identity: crate::filesystem::FilesystemSourceIdentity,
     pub(super) entries: BTreeMap<PathBuf, crate::filesystem::PathFingerprint>,
 }
 
-impl HookOutputSnapshot {
+impl DeclaredOutputFiles {
     fn capture(
         source_identity: crate::filesystem::FilesystemSourceIdentity,
         cancellation: Option<&crate::cancellation::BuildCancellation>,
     ) -> Result<Self> {
-        let crate::filesystem::PathSnapshot { kind, entries } =
-            crate::filesystem::entry_snapshot(source_identity.physical_path(), cancellation)?;
+        let crate::filesystem::PathContents { kind, entries } =
+            crate::filesystem::path_contents(source_identity.physical_path(), cancellation)?;
         let current_identity =
             crate::filesystem::FilesystemSourceIdentity::from_path(source_identity.logical_path());
         if current_identity != source_identity {
@@ -249,14 +249,14 @@ impl HookOutputSnapshot {
     }
 }
 
-pub(super) fn declared_output_snapshots(
+pub(super) fn declared_output_files(
     hook: &BeforeBuildHookConfig,
     config: &ResolvedSiteConfig,
     cancellation: Option<&crate::cancellation::BuildCancellation>,
-) -> Result<Vec<HookOutputSnapshot>> {
+) -> Result<Vec<DeclaredOutputFiles>> {
     validate_declared_output_boundaries(hook, config, &config.build.publish_dir)?
         .into_iter()
-        .map(|identity| HookOutputSnapshot::capture(identity, cancellation))
+        .map(|identity| DeclaredOutputFiles::capture(identity, cancellation))
         .collect()
 }
 
@@ -266,7 +266,7 @@ pub(super) fn declared_output_snapshots(
 /// the failure. They do not establish successful generation or permit reuse.
 #[derive(Clone, Debug)]
 pub struct FailedHookOutputs {
-    outputs: Vec<HookOutputSnapshot>,
+    outputs: Vec<DeclaredOutputFiles>,
 }
 
 impl FailedHookOutputs {
@@ -280,7 +280,7 @@ impl FailedHookOutputs {
             let identity = crate::filesystem::FilesystemSourceIdentity::from_path(path);
             // An unreadable boundary supplies no evidence for event suppression.
             // The command failure remains the diagnostic for this attempt.
-            if let Ok(output) = HookOutputSnapshot::capture(identity, cancellation) {
+            if let Ok(output) = DeclaredOutputFiles::capture(identity, cancellation) {
                 outputs.push(output);
             }
         }
@@ -332,8 +332,8 @@ mod tests {
 
     fn file_evidence(path: PathBuf) -> HookOutputEvidence {
         let identity = crate::filesystem::FilesystemSourceIdentity::from_path(&path);
-        let snapshot = HookOutputSnapshot::capture(identity, None).unwrap();
-        HookOutputEvidence::from_successful_snapshot(snapshot, None).unwrap()
+        let files = DeclaredOutputFiles::capture(identity, None).unwrap();
+        HookOutputEvidence::from_successful_output(files, None).unwrap()
     }
     #[test]
     fn cancellation_keeps_watch_evidence() {
@@ -357,7 +357,7 @@ mod tests {
         );
         assert!(evidence.is_current());
     }
-    /// Evidence stays current while the snapshotted output is unchanged and goes stale
+    /// Evidence stays current while the captured output is unchanged and goes stale
     /// on any change, whether the output is one file or a tree.
     #[test]
     fn evidence_goes_stale_when_output_changes() {

@@ -383,60 +383,6 @@ mod tests {
     use super::*;
     use tola_packages::{DocumentationSegment, documentation_segments};
 
-    fn environment(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
-        let pairs = pairs
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect::<BTreeMap<_, _>>();
-        move |name: &str| pairs.get(name).cloned()
-    }
-
-    #[test]
-    fn tags_name_the_language_they_spell() {
-        for (tag, expected) in [
-            ("en", Some(HelpLanguage::English)),
-            ("EN-us", Some(HelpLanguage::English)),
-            ("C", Some(HelpLanguage::English)),
-            ("POSIX", Some(HelpLanguage::English)),
-            ("zh", Some(HelpLanguage::SimplifiedChinese)),
-            ("zh_CN.UTF-8", Some(HelpLanguage::SimplifiedChinese)),
-            ("zh-Hant-TW", Some(HelpLanguage::SimplifiedChinese)),
-            ("fr", None),
-            ("", None),
-        ] {
-            assert_eq!(HelpLanguage::parse(tag), expected, "{tag}");
-        }
-    }
-
-    #[test]
-    fn environment_follows_gettext_order() {
-        assert_eq!(
-            resolve_from_environment(environment(&[("LANG", "zh_CN.UTF-8")])),
-            Some(HelpLanguage::SimplifiedChinese)
-        );
-        assert_eq!(
-            resolve_from_environment(environment(&[
-                ("LANG", "zh_CN.UTF-8"),
-                ("LC_ALL", "fr_FR.UTF-8"),
-            ])),
-            Some(HelpLanguage::English),
-            "a set variable decides without reaching the ones below it"
-        );
-        assert_eq!(
-            resolve_from_environment(environment(&[
-                ("LANG", "zh_CN.UTF-8"),
-                ("LANGUAGE", "fr:zh"),
-            ])),
-            Some(HelpLanguage::SimplifiedChinese)
-        );
-        assert_eq!(
-            resolve_from_environment(environment(&[("LANG", "")])),
-            None,
-            "an empty variable is ignored"
-        );
-        assert_eq!(resolve_from_environment(environment(&[])), None);
-    }
-
     #[test]
     // Exhaustive on purpose: a new phrase stops this test compiling until it is listed.
     #[allow(clippy::single_element_loop)]

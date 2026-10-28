@@ -404,50 +404,75 @@ mod tests {
     use super::*;
     use crate::diagnostic::tests::Site;
     use lsp_types::Position;
+    use tola_build::diagnostic::DiagnosticCause;
 
-    #[test]
-    fn folded_help_keeps_location() {
-        let mut site = Site::new(&[("content/page.typ", "Body\n")]);
-        let location = Location {
-            path: "content/page.typ".into(),
-            line: Some(1),
-            column: Some(1),
-            range: Some(SourceRange {
-                start: SourcePosition {
-                    line: 0,
-                    character: 0,
-                },
-                end: SourcePosition {
-                    line: 0,
-                    character: 4,
-                },
-            }),
+    /// One location a producer named without its text.
+    fn located_at(path: &str, line: usize, column: usize) -> Location {
+        Location {
+            path: path.into(),
+            line: Some(line),
+            column: Some(column),
+            range: None,
             source_lines: Vec::new(),
-        };
-        let mut diagnostic = Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
-            Severity::Error,
-            "content/page.typ",
-            "primary failure",
-        );
-        diagnostic.help.push(tola_build::diagnostic::Help {
-            message: "check the import".into(),
-            location: Some(location),
-        });
-        site.publish(vec![diagnostic]);
+        }
+    }
+
+    /// One projected diagnostic, which every case in this module expects to be alone.
+    fn alone(site: &Site) -> lsp_types::Diagnostic {
         let diagnostics = site.diagnostics();
         let [diagnostic] = diagnostics.as_slice() else {
             panic!("one diagnostic: {diagnostics:?}");
         };
-        assert!(diagnostic.message.contains("content/page.typ:1:1"));
-        assert!(diagnostic.message.contains("help: check the import"));
-        assert_eq!(diagnostic.related_information, None);
+        diagnostic.clone()
+    }
+
+    /// A range the protocol cannot hold anchors where the report began, so the publish that carries
+    /// every other diagnostic still happens.
+    #[test]
+    fn unrepresentable_range_anchors_at_start() {
+        for (start, end, anchored) in [
+            (
+                SourcePosition {
+                    line: usize::MAX,
+                    character: 0,
+                },
+                SourcePosition {
+                    line: usize::MAX,
+                    character: 3,
+                },
+                Position::new(0, 0),
+            ),
+            (
+                SourcePosition {
+                    line: 1,
+                    character: 4,
+                },
+                SourcePosition {
+                    line: 0,
+                    character: 0,
+                },
+                Position::new(1, 4),
+            ),
+        ] {
+            let mut site = Site::new(&[("content/page.typ", "Body\n")]);
+            site.publish(vec![
+                Diagnostic::at_path(
+                    tola_build::codes::typst::COMPILE,
+                    Severity::Error,
+                    "content/page.typ",
+                    "unrepresentable span",
+                )
+                .with_source_range(SourceRange { start, end }),
+            ]);
+            let diagnostic = alone(&site);
+            assert_eq!(diagnostic.range, Range::new(anchored, anchored));
+        }
     }
 
     /// A diagnostic after a line separator the compiler counts and the client does not lands on the
-    /// client's own line.
+    /// client's own line: the range is projected through the protocol's own line model.
     #[test]
-    fn diagnostic_after_line_separator_lands_on_client_line() {
+    fn line_separator_projects_client_line() {
         let mut site = Site::new(&[("content/page.typ", "one\u{2028}two\nthree\n")]);
         site.publish(vec![
             Diagnostic::at_path(
@@ -467,352 +492,124 @@ mod tests {
                 },
             }),
         ]);
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one diagnostic: {diagnostics:?}");
-        };
+        let diagnostic = alone(&site);
         assert_eq!(
             diagnostic.range,
             Range::new(Position::new(0, 4), Position::new(0, 7))
         );
     }
-
-    /// A range the protocol cannot hold anchors at the document's first byte, so the publish that
-    /// carries every other diagnostic still happens.
+    /// Advice kept out of the message travels as related information when the client reads it, and
+    /// folds back into the message when it does not: the same text reaches exactly one channel.
     #[test]
-    fn absurd_coordinates_anchor_at_the_start() {
+    fn advice_takes_exactly_one_channel() {
+        struct Case {
+            name: &'static str,
+            advice: &'static str,
+            location: Option<Location>,
+            expect_related: bool,
+        }
+        let cases = [
+            Case {
+                name: "site-located help",
+                advice: "pass the page title",
+                location: Some(located_at("content/page.typ", 1, 1)),
+                expect_related: true,
+            },
+            Case {
+                name: "site-located trace",
+                advice: "while calling `select-pages`",
+                location: Some(located_at("content/page.typ", 1, 1)),
+                expect_related: true,
+            },
+            Case {
+                name: "package-located help",
+                advice: "pass the page title",
+                location: Some(located_at("@tola/source:0.0.0/lib.typ", 93, 7)),
+                expect_related: false,
+            },
+            Case {
+                name: "unlocated trace",
+                advice: "while calling an anonymous function",
+                location: None,
+                expect_related: false,
+            },
+        ];
+        for case in cases {
+            for related in [false, true] {
+                let mut site = Site::new(&[("content/page.typ", "Body\n")]);
+                let mut diagnostic = Diagnostic::at_path(
+                    tola_build::codes::typst::COMPILE,
+                    Severity::Error,
+                    "content/page.typ",
+                    "primary failure",
+                );
+                let help = tola_build::diagnostic::Help {
+                    message: case.advice.into(),
+                    location: case.location.clone(),
+                };
+                diagnostic.help.push(help);
+                if related {
+                    site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
+                } else {
+                    site.publish(vec![diagnostic]);
+                }
+                let diagnostic = alone(&site);
+                let in_message = diagnostic.message.matches(case.advice).count();
+                let in_related = diagnostic
+                    .related_information
+                    .iter()
+                    .flatten()
+                    .filter(|info| info.message == case.advice)
+                    .count();
+                let routed = related && case.expect_related;
+                assert_eq!(
+                    (in_message, in_related),
+                    if routed { (0, 1) } else { (1, 0) },
+                    "{} (related information {related})",
+                    case.name
+                );
+            }
+        }
+    }
+    /// A source metadata issue names a field, not a site call: the editor does not surface the
+    /// parse pipeline that reached it.
+    #[test]
+    fn source_metadata_omits_the_parse_trace() {
+        let mut site = Site::new(&[("content/page.typ", "Body\n")]);
+        let mut diagnostic = Diagnostic::at_path(
+            tola_build::codes::source::METADATA,
+            Severity::Error,
+            "content/page.typ",
+            "`$.published` is not set",
+        );
+        diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
+            message: "while calling `select-pages`".into(),
+            location: Some(located_at("site/pages.typ", 2, 2)),
+        });
+        site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
+        let diagnostic = alone(&site);
+        assert!(!diagnostic.message.contains("select-pages"));
+        assert!(diagnostic.related_information.is_none());
+    }
+    /// A cause a client echoes back travels in `data`, so a correction can read it back.
+    #[test]
+    fn causes_travel_in_diagnostic_data() {
         let mut site = Site::new(&[("content/page.typ", "Body\n")]);
         site.publish(vec![
             Diagnostic::at_path(
                 tola_build::codes::typst::COMPILE,
                 Severity::Error,
                 "content/page.typ",
-                "absurd span",
+                "unknown variable",
             )
-            .with_source_range(SourceRange {
-                start: SourcePosition {
-                    line: usize::MAX,
-                    character: 0,
-                },
-                end: SourcePosition {
-                    line: usize::MAX,
-                    character: 3,
-                },
+            .with_cause(DiagnosticCause::UnknownVariable {
+                name: "missing".into(),
             }),
         ]);
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one diagnostic: {diagnostics:?}");
-        };
+        let diagnostic = alone(&site);
         assert_eq!(
-            diagnostic.range,
-            Range::new(Position::new(0, 0), Position::new(0, 0))
+            diagnostic.data,
+            Some(serde_json::json!({ "kind": "unknown-variable", "name": "missing" }))
         );
-    }
-
-    /// Coordinates that run backwards answer an empty range where the report began.
-    #[test]
-    fn reversed_range_collapses_to_its_start() {
-        let mut site = Site::new(&[("content/page.typ", "Body\n")]);
-        let mut diagnostic = Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
-            Severity::Error,
-            "content/page.typ",
-            "reversed span",
-        );
-        diagnostic.location = Some(Location {
-            path: "elsewhere/page.typ".into(),
-            line: Some(2),
-            column: Some(1),
-            range: Some(SourceRange {
-                start: SourcePosition {
-                    line: 1,
-                    character: 4,
-                },
-                end: SourcePosition {
-                    line: 0,
-                    character: 0,
-                },
-            }),
-            source_lines: Vec::new(),
-        });
-        site.publish(vec![diagnostic]);
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one diagnostic: {diagnostics:?}");
-        };
-        assert_eq!(
-            diagnostic.range,
-            Range::new(Position::new(1, 4), Position::new(1, 4))
-        );
-    }
-
-    #[test]
-    fn retained_window_keeps_source_column() {
-        let mut site = Site::new(&[("content/page.typ", "🦊prefix target\n")]);
-        let mut diagnostic = Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
-            Severity::Error,
-            "content/page.typ",
-            "unknown variable",
-        );
-        let location = diagnostic.location.as_mut().unwrap();
-        location.line = Some(1);
-        location.column = Some(9);
-        location
-            .source_lines
-            .push(tola_build::diagnostic::SourceLine {
-                line: 1,
-                text: "target".to_owned(),
-                start_column: 8,
-                start_character: 9,
-                ends_line: true,
-                highlight: Some((0, 6)),
-            });
-        site.publish(vec![diagnostic]);
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one diagnostic: {diagnostics:?}");
-        };
-        assert_eq!(
-            diagnostic.range,
-            Range::new(Position::new(0, 9), Position::new(0, 15))
-        );
-    }
-
-    /// One location a producer named without its text.
-    fn located_at(path: &str, line: usize, column: usize) -> Location {
-        Location {
-            path: path.into(),
-            line: Some(line),
-            column: Some(column),
-            range: None,
-            source_lines: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn anonymous_call_keeps_navigation() {
-        for related in [false, true] {
-            let mut site = Site::new(&[
-                ("content/page.typ", "Body\n"),
-                ("site/pages.typ", "#let render = () => 1\n#render()\n"),
-            ]);
-            let mut diagnostic = Diagnostic::at_path(
-                tola_build::codes::typst::COMPILE,
-                Severity::Error,
-                "content/page.typ",
-                "primary failure",
-            );
-            diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
-                message: "while calling function".into(),
-                location: Some(located_at("site/pages.typ", 2, 2)),
-            });
-            if related {
-                site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
-            } else {
-                site.publish(vec![diagnostic]);
-            }
-            let diagnostics = site.diagnostics();
-            let [diagnostic] = diagnostics.as_slice() else {
-                panic!("one diagnostic: {diagnostics:?}");
-            };
-            if related {
-                let related = diagnostic.related_information.as_ref().unwrap();
-                let [call] = related.as_slice() else {
-                    panic!("one call location: {related:?}");
-                };
-                assert_eq!(
-                    call.location.uri,
-                    crate::uri::from_file_path(&site.physical.join("site/pages.typ")).unwrap()
-                );
-                assert_eq!(call.location.range.start, Position::new(1, 1));
-                assert!(call.message.contains("while calling function"));
-            } else {
-                assert!(diagnostic.message.contains("site/pages.typ:2"));
-                assert!(diagnostic.message.contains("while calling function"));
-            }
-        }
-    }
-
-    /// A source metadata issue names a field, not a site call: the editor does not surface the
-    /// parse pipeline that reached it.
-    #[test]
-    fn source_metadata_omits_the_parse_trace() {
-        for related in [false, true] {
-            let mut site = Site::new(&[
-                ("content/page.typ", "Body\n"),
-                ("site/pages.typ", "#let render = () => 1\n#render()\n"),
-            ]);
-            let mut diagnostic = Diagnostic::at_path(
-                tola_build::codes::source::METADATA,
-                Severity::Error,
-                "content/page.typ",
-                "`$.published` is not set",
-            );
-            diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
-                message: "while calling `select-pages`".into(),
-                location: Some(located_at("site/pages.typ", 2, 2)),
-            });
-            if related {
-                site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
-            } else {
-                site.publish(vec![diagnostic]);
-            }
-            let diagnostics = site.diagnostics();
-            let [diagnostic] = diagnostics.as_slice() else {
-                panic!("one diagnostic: {diagnostics:?}");
-            };
-            assert!(
-                !diagnostic.message.contains("select-pages"),
-                "{}",
-                diagnostic.message
-            );
-            assert!(diagnostic.related_information.is_none());
-        }
-    }
-
-    #[test]
-    fn package_locations_keep_referents() {
-        for related in [false, true] {
-            let mut site = Site::new(&[("content/page.typ", "Body\n")]);
-            let mut diagnostic = Diagnostic::at_path(
-                tola_build::codes::typst::COMPILE,
-                Severity::Error,
-                "content/page.typ",
-                "primary failure",
-            );
-            diagnostic.help.push(tola_build::diagnostic::Help {
-                message: "pass the page title".into(),
-                location: Some(located_at("@tola/source:0.0.0/lib.typ", 93, 7)),
-            });
-            diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
-                message: "while calling `tola-report-source-issues`".into(),
-                location: Some(located_at("@tola/source:0.0.0/lib.typ", 94, 9)),
-            });
-            if related {
-                site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
-            } else {
-                site.publish(vec![diagnostic]);
-            }
-            let diagnostics = site.diagnostics();
-            let [diagnostic] = diagnostics.as_slice() else {
-                panic!("one diagnostic: {diagnostics:?}");
-            };
-            assert_eq!(diagnostic.message.matches("pass the page title").count(), 1);
-            assert!(
-                diagnostic
-                    .message
-                    .contains("@tola/source:0.0.0/lib.typ:93:7")
-            );
-            assert!(
-                diagnostic
-                    .message
-                    .contains("@tola/source:0.0.0/lib.typ:94:9")
-            );
-            assert!(
-                diagnostic
-                    .message
-                    .contains("while calling `tola-report-source-issues`")
-            );
-            assert_eq!(diagnostic.related_information, None);
-        }
-    }
-
-    #[test]
-    fn duplicate_advice_is_projected_once() {
-        for related in [false, true] {
-            let mut site = Site::new(&[("content/page.typ", "First\nSecond\n")]);
-            let mut diagnostic = Diagnostic::at_path(
-                tola_build::codes::typst::COMPILE,
-                Severity::Error,
-                "content/page.typ",
-                "primary failure",
-            )
-            .with_note("the page needs a title")
-            .with_note("the page needs a title");
-            let help = tola_build::diagnostic::Help {
-                message: "pass the page title".into(),
-                location: Some(located_at("content/page.typ", 1, 1)),
-            };
-            diagnostic.help.extend([help.clone(), help]);
-            diagnostic.help.push(tola_build::diagnostic::Help {
-                message: "pass the page title".into(),
-                location: Some(located_at("content/page.typ", 2, 1)),
-            });
-            if related {
-                site.publish_with(&crate::diagnostic::tests::features(), vec![diagnostic]);
-            } else {
-                site.publish(vec![diagnostic]);
-            }
-            let diagnostics = site.diagnostics();
-            let [diagnostic] = diagnostics.as_slice() else {
-                panic!("one diagnostic: {diagnostics:?}");
-            };
-            assert_eq!(
-                diagnostic.message.matches("the page needs a title").count(),
-                1
-            );
-            if related {
-                let locations = diagnostic.related_information.as_ref().unwrap();
-                assert_eq!(locations.len(), 2);
-                assert_eq!(locations[0].location.range.start, Position::new(0, 0));
-                assert_eq!(locations[1].location.range.start, Position::new(1, 0));
-            } else {
-                assert_eq!(diagnostic.message.matches("pass the page title").count(), 2);
-            }
-        }
-    }
-
-    /// A trace frame that names a call but no location reads as Typst's own sentence, without the
-    /// `trace:` marker.
-    #[test]
-    fn unlocated_frame_keeps_its_sentence() {
-        let mut site = Site::new(&[("content/page.typ", "Body\n")]);
-        let mut diagnostic = Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
-            Severity::Error,
-            "content/page.typ",
-            "primary failure",
-        );
-        diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
-            message: "while calling `select-pages`".into(),
-            location: None,
-        });
-        site.publish(vec![diagnostic]);
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one diagnostic: {diagnostics:?}");
-        };
-        assert_eq!(
-            diagnostic.message,
-            "primary failure\nwhile calling `select-pages`"
-        );
-    }
-
-    /// A trace frame inside the site keeps the position it happened at before Typst's sentence.
-    #[test]
-    fn located_frame_keeps_its_position() {
-        let mut site = Site::new(&[
-            ("content/page.typ", "Body\n"),
-            ("site.typ", "#let pages = select-pages()\n"),
-        ]);
-        let mut diagnostic = Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
-            Severity::Error,
-            "content/page.typ",
-            "primary failure",
-        );
-        diagnostic.trace.push(tola_build::diagnostic::TraceFrame {
-            message: "while calling `select-pages`".into(),
-            location: Some(located_at("site.typ", 1, 14)),
-        });
-        site.publish(vec![diagnostic]);
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one diagnostic: {diagnostics:?}");
-        };
-        assert!(diagnostic.message.contains("site.typ:1:14"));
-        assert!(diagnostic.message.contains("while calling `select-pages`"));
     }
 }

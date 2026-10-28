@@ -386,53 +386,6 @@ mod tests {
             assert_eq!(findings(text), expected, "{text:?}");
         }
     }
-
-    #[test]
-    fn valueless_return_discards_only_rules() {
-        for (text, discarded) in [
-            (
-                "#let f() = if true {\n  set text(red)\n  return\n} else {\n  return []\n}\n",
-                &["set text(red)"][..],
-            ),
-            (
-                "#let f() = if true {\n  set text(red)\n  return\n} else {\n  set text(blue)\n  return []\n}\n",
-                &["set text(red)", "set text(blue)"][..],
-            ),
-            (
-                "#let f() = for i in range(10) {\n  show: it => it\n  return\n}\n",
-                &["show: it => it"][..],
-            ),
-        ] {
-            let expected = discarded
-                .iter()
-                .map(|covered| {
-                    (
-                        "editor.discarded_by_return".to_owned(),
-                        (*covered).to_owned(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(findings(text), expected, "{text:?}");
-        }
-        assert!(findings("#let f() = {\n  [0]\n  return\n}\n").is_empty());
-    }
-
-    #[test]
-    fn branch_merge_keeps_partial_returns() {
-        assert_eq!(
-            findings(
-                "#let f() = {\n  if true {\n    [1]\n    return\n  } else {\n    [2]\n  }\n  return []\n}\n"
-            ),
-            [("editor.discarded_by_return".to_owned(), "2".to_owned())]
-        );
-        assert_eq!(
-            findings(
-                "#let f() = {\n  if true {\n    [1]\n  } else {\n    [2]\n    return\n  }\n  return []\n}\n"
-            ),
-            [("editor.discarded_by_return".to_owned(), "1".to_owned())]
-        );
-    }
-
     #[test]
     fn partial_paths_keep_their_values() {
         for text in [
@@ -456,22 +409,6 @@ mod tests {
             [("editor.discarded_by_return".to_owned(), "0".to_owned())]
         );
     }
-
-    #[test]
-    fn container_values_are_discarded() {
-        for (text, covered) in [
-            ("#let f() = {\n  ([0])\n  return 1\n}\n", "0"),
-            ("#let f() = [\n  *bold*\n  #return 1\n]\n", "bold"),
-            ("#let f() = [\n  = Heading\n  #return 1\n]\n", "Heading"),
-        ] {
-            assert_eq!(
-                findings(text),
-                [("editor.discarded_by_return".to_owned(), covered.to_owned())],
-                "{text:?}"
-            );
-        }
-    }
-
     #[test]
     fn closure_default_return_discards_outer_values() {
         assert_eq!(

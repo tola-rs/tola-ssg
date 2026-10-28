@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn control_d_reaches_the_surface_instead_of_cancelling() {
+    fn control_d_half_pages_through_the_surface() {
         let (sink, _output) = OutputSink::buffered();
         let mut surface = HelpKeys {
             actions: Rc::new(RefCell::new(Vec::new())),

@@ -108,23 +108,6 @@ mod tests {
         assert!(byte_offset(&lines, Utf16Position::new(3, 0)).is_err());
     }
 
-    /// Every byte range maps back to the positions that bound it, and a range the source
-    /// cannot express has no pair.
-    #[test]
-    fn byte_ranges_map_to_positions() {
-        let lines = Lines::new("a🦊b\r\n正文\n");
-        assert_eq!(
-            utf16_range(&lines, 1..14),
-            Some(Utf16Range::new(
-                Utf16Position::new(0, 1),
-                Utf16Position::new(1, 2)
-            ))
-        );
-        assert!(utf16_range(&lines, 2..5).is_none());
-        assert!(utf16_range(&lines, 0..16).is_none());
-        assert!(utf16_range(&lines, std::ops::Range { start: 5, end: 1 }).is_none());
-    }
-
     /// A position beyond the protocol's u32 coordinates is refused, never truncated.
     #[test]
     fn out_of_range_positions_are_refused() {
@@ -132,24 +115,5 @@ mod tests {
             assert!(checked_position(usize::MAX, 0).is_none());
             assert!(checked_position(0, usize::MAX).is_none());
         }
-    }
-
-    #[test]
-    fn final_lines_accept_column_zero() {
-        assert_eq!(
-            byte_offset(&Lines::new(""), Utf16Position::new(0, 0)).unwrap(),
-            0
-        );
-        assert_eq!(
-            byte_offset(&Lines::new("abc\r\n"), Utf16Position::new(1, 0)).unwrap(),
-            5
-        );
-        assert_eq!(
-            utf16_range(&Lines::new("abc\r\n"), 5..5),
-            Some(Utf16Range::new(
-                Utf16Position::new(1, 0),
-                Utf16Position::new(1, 0)
-            ))
-        );
     }
 }

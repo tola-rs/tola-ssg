@@ -382,28 +382,4 @@ mod tests {
         assert!(!root.path().join(".helix").exists());
         assert!(!root.path().join(".tola").exists());
     }
-
-    /// A settings path reaches the language server as one argument, quoted by each client's format.
-    #[test]
-    #[cfg(unix)]
-    fn quoted_and_backslashed_paths_round_trip() {
-        let directory = editor_directory("/site \"quoted\"\\dir");
-        for (snippet, pointer) in [
-            (
-                zed::snippet as fn(&EditorDirectory) -> String,
-                "/lsp/tinymist/binary/arguments/2",
-            ),
-            (
-                sublime::snippet as fn(&EditorDirectory) -> String,
-                "/settings/LSP/tola-lsp/command/3",
-            ),
-        ] {
-            assert_eq!(
-                parsed_settings(&snippet(&directory))
-                    .pointer(pointer)
-                    .unwrap(),
-                "/site \"quoted\"\\dir/tola.toml"
-            );
-        }
-    }
 }

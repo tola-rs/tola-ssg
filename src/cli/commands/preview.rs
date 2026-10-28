@@ -1,22 +1,18 @@
-use crate::cancellation::Cancellation;
 use anyhow::Result;
 
-use crate::cli::output::CommandOutput;
-use crate::cli::{BuildOverrideArgs, ConfigFileArgs, ServerArgs, TypstPackageArgs};
+use crate::cli::ServerArgs;
 use crate::config::ConfigOverrides;
-use tola_build::InputScope;
 
-#[allow(clippy::too_many_arguments)]
-pub(in crate::cli) fn run(
-    config_file: ConfigFileArgs,
-    packages: TypstPackageArgs,
-    scope: InputScope,
-    build: BuildOverrideArgs,
-    server: ServerArgs,
-    resources: tola_build::BuildResources,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
+pub(in crate::cli) fn run(request: super::SiteRequest<'_>, server: ServerArgs) -> Result<()> {
+    let super::SiteRequest {
+        config_file,
+        packages,
+        scope,
+        build,
+        resources,
+        output,
+        cancellation,
+    } = request;
     let overrides = ConfigOverrides {
         build: crate::cli::config::build_overrides(&build),
         server: crate::cli::config::server_overrides(&server),
@@ -31,12 +27,12 @@ pub(in crate::cli) fn run(
         cancellation,
     )?;
     let (config, server, _, loader) = loaded.into_parts();
-    crate::dev::run_preview(
+    crate::dev::run_preview(crate::dev::ServerLaunch {
         config,
         server,
-        loader,
+        config_loader: loader,
         resources,
-        output.clone(),
-        cancellation.clone(),
-    )
+        output: output.clone(),
+        shutdown: cancellation.clone(),
+    })
 }

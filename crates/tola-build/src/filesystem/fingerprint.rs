@@ -36,10 +36,8 @@ pub(crate) fn path_fingerprint(
     Ok(PathFingerprint::new(*hasher.finalize().as_bytes()))
 }
 
-/// Aggregate an existing snapshot without reading the filesystem again.
-pub(crate) fn snapshot_fingerprint(
-    entries: &BTreeMap<PathBuf, PathFingerprint>,
-) -> PathFingerprint {
+/// Aggregate already-read contents without reading the filesystem again.
+pub(crate) fn entries_fingerprint(entries: &BTreeMap<PathBuf, PathFingerprint>) -> PathFingerprint {
     let mut hasher = tree_hasher();
     for fingerprint in entries.values() {
         hasher.update(&fingerprint.0);
@@ -57,23 +55,23 @@ fn tree_hasher() -> blake3::Hasher {
 
 /// The root kind and its contents come from the same filesystem traversal.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PathSnapshot {
+pub(crate) struct PathContents {
     pub(crate) kind: Option<FilesystemSourceKind>,
     pub(crate) entries: BTreeMap<PathBuf, PathFingerprint>,
 }
 
-/// Snapshot a file or directory by relative path, including its root entry.
+/// Read a file or directory by relative path, including its root entry.
 /// Directory entries record their kind; each file's bytes are read once.
-/// Missing paths produce an empty snapshot.
-pub(crate) fn entry_snapshot(
+/// Missing paths produce empty contents.
+pub(crate) fn path_contents(
     path: &Path,
     cancellation: Option<&BuildCancellation>,
-) -> Result<PathSnapshot> {
+) -> Result<PathContents> {
     let mut entries = BTreeMap::new();
     let kind = visit_entries(path, cancellation, &mut |relative, fingerprint| {
         entries.insert(relative.to_path_buf(), fingerprint);
     })?;
-    Ok(PathSnapshot { kind, entries })
+    Ok(PathContents { kind, entries })
 }
 
 fn visit_entries(
@@ -200,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_matches_streaming_fingerprint() {
+    fn path_contents_match_streaming_fingerprint() {
         let directory = TempDir::new().unwrap();
         let root = directory.path().join("tree");
         for phase in 0..3 {
@@ -213,7 +211,7 @@ mod tests {
             }
             assert_eq!(
                 path_fingerprint(&root, None).unwrap(),
-                snapshot_fingerprint(&entry_snapshot(&root, None).unwrap().entries)
+                entries_fingerprint(&path_contents(&root, None).unwrap().entries)
             );
         }
     }
@@ -237,16 +235,16 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_tracks_nested_paths() {
+    fn path_contents_track_nested_paths() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("sources");
         fs::create_dir_all(root.join("generated")).unwrap();
         fs::write(root.join("generated/site.css"), "v1").unwrap();
 
-        let first = entry_snapshot(&root, None).unwrap();
+        let first = path_contents(&root, None).unwrap();
         fs::write(root.join("generated/site.css"), "v2").unwrap();
         fs::write(root.join("generated/extra.css"), "extra").unwrap();
-        let second = entry_snapshot(&root, None).unwrap();
+        let second = path_contents(&root, None).unwrap();
 
         assert_ne!(
             first.entries.get(Path::new("generated/site.css")),
@@ -258,26 +256,26 @@ mod tests {
                 .contains_key(Path::new("generated/extra.css"))
         );
         fs::remove_file(root.join("generated/site.css")).unwrap();
-        let third = entry_snapshot(&root, None).unwrap();
+        let third = path_contents(&root, None).unwrap();
         assert!(!third.entries.contains_key(Path::new("generated/site.css")));
     }
 
     #[test]
-    fn snapshot_distinguishes_empty_directory() {
+    fn path_contents_distinguish_empty_directory() {
         let directory = TempDir::new().unwrap();
         let output = directory.path().join("generated");
-        let missing = entry_snapshot(&output, None).unwrap();
+        let missing = path_contents(&output, None).unwrap();
         assert_eq!(missing.kind, None);
         assert!(missing.entries.is_empty());
 
         fs::create_dir(&output).unwrap();
-        let tree = entry_snapshot(&output, None).unwrap();
+        let tree = path_contents(&output, None).unwrap();
         assert_eq!(tree.kind, Some(FilesystemSourceKind::Tree));
         assert!(tree.entries.contains_key(Path::new("")));
 
         fs::remove_dir(&output).unwrap();
         fs::write(&output, "generated").unwrap();
-        let file = entry_snapshot(&output, None).unwrap();
+        let file = path_contents(&output, None).unwrap();
         assert_eq!(file.kind, Some(FilesystemSourceKind::File));
         assert_ne!(tree, file);
     }

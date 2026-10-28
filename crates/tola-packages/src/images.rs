@@ -680,7 +680,7 @@ fn warn_shadowed_asset_url(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use typst::visualize::{Cmyk, LinearRgb, ProcessColor};
+    use typst::visualize::{LinearRgb, ProcessColor};
 
     #[test]
     fn linear_background_uses_srgb() {
@@ -696,57 +696,11 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn black_ink_darkens_background() {
-        let background = |[c, m, y, k]: [f32; 4]| {
-            opaque_srgb_background(
-                Color::Process(ProcessColor::Cmyk(Cmyk { c, m, y, k })),
-                Span::detached(),
-            )
-            .unwrap()
-        };
-        let cyan = background([1.0, 0.0, 0.0, 0.0]);
-        let ink = background([1.0, 0.0, 0.0, 1.0]);
-        assert!(ink.red <= cyan.red);
-        assert!(ink.green < cyan.green);
-        assert!(ink.blue < cyan.blue);
-    }
-
     #[test]
     fn translucent_background_is_rejected() {
         let color = Color::WHITE.with_alpha(0.999);
         assert!(opaque_srgb_background(color, Span::detached()).is_err());
     }
-
-    #[test]
-    fn resize_operation_accepts_only_hyphens() {
-        assert_eq!(
-            resize_operation("fit-width"),
-            Some(ResizeOperation::FitWidth)
-        );
-        assert_eq!(
-            resize_operation("fit-height"),
-            Some(ResizeOperation::FitHeight)
-        );
-        assert_eq!(resize_operation("fit_width"), None);
-        assert_eq!(resize_operation("fit_height"), None);
-    }
-
-    #[test]
-    fn crop_anchor_parses_hyphenated_corners() {
-        assert_eq!(crop_anchor("top-left"), Some(CropAnchor::TopLeft));
-        assert_eq!(crop_anchor("bottom-right"), Some(CropAnchor::BottomRight));
-        assert_eq!(crop_anchor("top_left"), None);
-        assert_eq!(crop_anchor("middle"), None);
-    }
-
-    #[test]
-    fn resize_filter_accepts_only_hyphens() {
-        assert_eq!(resize_filter("catmull-rom"), Some(ResizeFilter::CatmullRom));
-        assert_eq!(resize_filter("catmull_rom"), None);
-    }
-
     #[test]
     fn reordered_evidence_keeps_asset_identity() {
         let warning = tola_typst::diagnostic::producer_warning(

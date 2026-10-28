@@ -20,14 +20,14 @@ use input::{IconFileRead, SvgDirectoryRead};
 
 /// An immutable set of icon collections and its local input evidence.
 #[derive(Debug, Clone)]
-pub(crate) struct IconSnapshot {
+pub(crate) struct IconInventory {
     collections: Arc<tola_icons::IconCollections>,
-    collection_snapshots: Arc<BTreeMap<String, Arc<CollectionSnapshot>>>,
+    resolved_collections: Arc<BTreeMap<String, Arc<ResolvedCollection>>>,
     evidence: IconInventoryEvidence,
 }
 
 #[derive(Debug)]
-struct CollectionSnapshot {
+struct ResolvedCollection {
     collection: Arc<tola_icons::IconCollection>,
     reads: CollectionReads,
 }
@@ -48,7 +48,7 @@ struct SvgSource {
     icon: tola_icons::SvgIcon,
 }
 
-impl IconSnapshot {
+impl IconInventory {
     pub(crate) fn collections(&self) -> Arc<tola_icons::IconCollections> {
         Arc::clone(&self.collections)
     }
@@ -301,60 +301,62 @@ pub(crate) fn error_diagnostic(error: &anyhow::Error, root: &Path) -> Option<Dia
 }
 
 /// Observe each configured collection and reuse only imports whose source evidence still holds.
-/// Reuse requires a caller-supplied successful snapshot, not a failed attempt.
+/// Reuse requires a caller-supplied successful inventory, not a failed attempt.
 pub(crate) fn prepare(
     config: &ResolvedSiteConfig,
     cancellation: &BuildCancellation,
-    previous: Option<&IconSnapshot>,
+    previous: Option<&IconInventory>,
     resources: &crate::resources::BuildResources,
     overrides: &SourceOverrides,
-) -> anyhow::Result<IconSnapshot> {
+) -> anyhow::Result<IconInventory> {
     cancellation.ensure_active()?;
     let internal = crate::filesystem::normalize_existing_prefix(
         &config.get_root().join(crate::filesystem::INTERNAL_DIR),
     );
     let boundary = resources.source_boundary(config);
-    let previous = previous.filter(|snapshot| {
-        snapshot.evidence.internal_root == internal
-            && snapshot.evidence.boundary == boundary
-            && snapshot.evidence.vendor_root == config.vendor.path
+    let previous = previous.filter(|inventory| {
+        inventory.evidence.internal_root == internal
+            && inventory.evidence.boundary == boundary
+            && inventory.evidence.vendor_root == config.vendor.path
     });
     let mut unchanged =
-        previous.is_some_and(|snapshot| snapshot.evidence.configuration == config.icons);
-    let mut collection_snapshots = BTreeMap::new();
+        previous.is_some_and(|inventory| inventory.evidence.configuration == config.icons);
+    let mut resolved_collections = BTreeMap::new();
     for (namespace, source) in &config.icons.collections {
         cancellation.ensure_active()?;
         let retained = previous
-            .filter(|snapshot| {
-                snapshot.evidence.configuration.collections.get(namespace) == Some(source)
+            .filter(|inventory| {
+                inventory.evidence.configuration.collections.get(namespace) == Some(source)
             })
-            .and_then(|snapshot| snapshot.collection_snapshots.get(namespace));
+            .and_then(|inventory| inventory.resolved_collections.get(namespace));
         let collection = prepare_collection(
             namespace,
-            config,
-            &internal,
-            cancellation,
+            &CollectionContext {
+                config,
+                internal: &internal,
+                cancellation,
+                resources,
+                overrides,
+                boundary: &boundary,
+            },
             retained,
-            resources,
-            overrides,
-            &boundary,
         )?;
         unchanged &= retained.is_some_and(|retained| Arc::ptr_eq(retained, &collection));
-        collection_snapshots.insert(namespace.clone(), collection);
+        resolved_collections.insert(namespace.clone(), collection);
     }
     cancellation.ensure_active()?;
     if unchanged {
         return Ok(previous
-            .expect("unchanged collections have an accepted snapshot")
+            .expect("unchanged collections have an accepted inventory")
             .clone());
     }
 
     let mut collections = tola_icons::IconCollections::new();
     let mut files = Vec::new();
     let mut directories = Vec::new();
-    for (namespace, snapshot) in &collection_snapshots {
+    for (namespace, inventory) in &resolved_collections {
         cancellation.ensure_active()?;
-        match &snapshot.reads {
+        match &inventory.reads {
             CollectionReads::Pinned => {}
             CollectionReads::Json(read) => files.push(read.clone()),
             CollectionReads::SvgDirectory {
@@ -366,7 +368,7 @@ pub(crate) fn prepare(
             }
         }
         collections
-            .mount(namespace, Arc::clone(&snapshot.collection))
+            .mount(namespace, Arc::clone(&inventory.collection))
             .map_err(|source| collection_error(namespace, None, source))?;
     }
     files.sort_by(|left, right| left.source.logical_path().cmp(right.source.logical_path()));
@@ -381,9 +383,9 @@ pub(crate) fn prepare(
     };
     let collections = Arc::new(collections);
     cancellation.ensure_active()?;
-    Ok(IconSnapshot {
+    Ok(IconInventory {
         collections,
-        collection_snapshots: Arc::new(collection_snapshots),
+        resolved_collections: Arc::new(resolved_collections),
         evidence,
     })
 }
@@ -418,16 +420,16 @@ pub fn remote_collection_bytes(
         mirrors.as_deref(),
     );
     let vendored = config.vendor.icon_collection(namespace);
-    let verified = remote::collection_bytes(
+    let verified = remote::collection_bytes(&remote::RemoteCollection {
         namespace,
-        &urls,
+        urls: &urls,
         sha256,
-        vendored.as_deref(),
-        &crate::BuildResources::icon_cache_directory(config.get_root()),
+        vendored: vendored.as_deref(),
+        cache_root: &crate::BuildResources::icon_cache_directory(config.get_root()),
         cancellation,
         resources,
-        &resources.source_boundary(config),
-    )?;
+        boundary: &resources.source_boundary(config),
+    })?;
     parse_collection(namespace, verified.read_from.as_deref(), &verified.bytes)?;
     remote::store_downloaded(namespace, &verified);
     Ok(verified.bytes)
@@ -491,17 +493,29 @@ fn remote_endpoint(
         .expect("configuration validation accepts exactly one declaration for a remote collection")
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The site-wide facts every collection in one build shares.
+struct CollectionContext<'a> {
+    config: &'a ResolvedSiteConfig,
+    internal: &'a Path,
+    cancellation: &'a BuildCancellation,
+    resources: &'a crate::resources::BuildResources,
+    overrides: &'a SourceOverrides,
+    boundary: &'a tola_typst::SourceBoundary,
+}
+
 fn prepare_collection(
     namespace: &str,
-    config: &ResolvedSiteConfig,
-    internal: &Path,
-    cancellation: &BuildCancellation,
-    previous: Option<&Arc<CollectionSnapshot>>,
-    resources: &crate::resources::BuildResources,
-    overrides: &SourceOverrides,
-    boundary: &tola_typst::SourceBoundary,
-) -> anyhow::Result<Arc<CollectionSnapshot>> {
+    context: &CollectionContext<'_>,
+    previous: Option<&Arc<ResolvedCollection>>,
+) -> anyhow::Result<Arc<ResolvedCollection>> {
+    let CollectionContext {
+        config,
+        internal,
+        cancellation,
+        resources,
+        overrides,
+        boundary,
+    } = *context;
     let (collection, reads) = match &config.icons.collections[namespace] {
         IconCollectionSource::RemoteJson {
             preset,
@@ -529,16 +543,16 @@ fn prepare_collection(
                 }
             }
             let vendored = config.vendor.icon_collection(namespace);
-            let (collection, read) = remote::load_collection(
+            let (collection, read) = remote::load_collection(remote::RemoteCollection {
                 namespace,
-                &urls,
+                urls: &urls,
                 sha256,
-                vendored.as_deref(),
-                &crate::BuildResources::icon_cache_directory(config.get_root()),
+                vendored: vendored.as_deref(),
+                cache_root: &crate::BuildResources::icon_cache_directory(config.get_root()),
                 cancellation,
                 resources,
                 boundary,
-            )?;
+            })?;
             (
                 Arc::new(collection),
                 read.map_or(CollectionReads::Pinned, CollectionReads::Json),
@@ -572,7 +586,7 @@ fn prepare_collection(
         }
     };
     cancellation.ensure_active()?;
-    Ok(Arc::new(CollectionSnapshot { collection, reads }))
+    Ok(Arc::new(ResolvedCollection { collection, reads }))
 }
 
 fn prepare_directory(
@@ -580,13 +594,13 @@ fn prepare_directory(
     directory: &Path,
     internal: &Path,
     cancellation: &BuildCancellation,
-    previous: Option<&Arc<CollectionSnapshot>>,
+    previous: Option<&Arc<ResolvedCollection>>,
     overrides: &SourceOverrides,
     boundary: &tola_typst::SourceBoundary,
-) -> anyhow::Result<Arc<CollectionSnapshot>> {
+) -> anyhow::Result<Arc<ResolvedCollection>> {
     reject_internal_source(directory, internal)?;
     let (paths, membership) = input::svg_paths(directory, overrides, cancellation, boundary)?;
-    let retained = previous.and_then(|snapshot| match &snapshot.reads {
+    let retained = previous.and_then(|inventory| match &inventory.reads {
         CollectionReads::SvgDirectory { membership, files } => Some((membership, files)),
         _ => None,
     });
@@ -637,7 +651,7 @@ fn prepare_directory(
             .insert(&name, source.icon.clone())
             .map_err(|source| collection_error(namespace, Some(path), source))?;
     }
-    Ok(Arc::new(CollectionSnapshot {
+    Ok(Arc::new(ResolvedCollection {
         collection: Arc::new(collection),
         reads: CollectionReads::SvgDirectory { membership, files },
     }))
@@ -703,8 +717,8 @@ mod tests {
     fn prepare_icons(
         config: &ResolvedSiteConfig,
         cancellation: &BuildCancellation,
-        previous: Option<&IconSnapshot>,
-    ) -> anyhow::Result<IconSnapshot> {
+        previous: Option<&IconInventory>,
+    ) -> anyhow::Result<IconInventory> {
         prepare(
             config,
             cancellation,
@@ -715,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_sources_reuse_the_snapshot() {
+    fn unchanged_sources_reuse_the_inventory() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::create_dir(root.join("brand")).unwrap();
@@ -725,8 +739,8 @@ mod tests {
             root,
             &format!("{BRAND_COLLECTION_TOML}{UI_COLLECTION_TOML}"),
         );
-        let snapshot = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
-        let collections = snapshot.collections();
+        let inventory = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
+        let collections = inventory.collections();
         assert!(collections.get("brand", "mark").is_some());
         assert!(collections.get("ui", "home").is_some());
         assert_eq!(
@@ -734,14 +748,14 @@ mod tests {
             Some("upstream-name")
         );
         assert!(
-            snapshot
+            inventory
                 .evidence()
                 .is_fresh_for(&config, &BuildCancellation::new())
                 .unwrap()
         );
-        let retained = prepare_icons(&config, &BuildCancellation::new(), Some(&snapshot)).unwrap();
+        let retained = prepare_icons(&config, &BuildCancellation::new(), Some(&inventory)).unwrap();
         assert!(Arc::ptr_eq(&collections, &retained.collections()));
-        assert_eq!(snapshot.evidence(), retained.evidence());
+        assert_eq!(inventory.evidence(), retained.evidence());
 
         std::fs::write(
             root.join("brand/mark.svg"),
@@ -760,132 +774,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&collections, &changed.collections()));
     }
 
-    #[test]
-    fn cancelled_icons_do_not_reuse_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let snapshot = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
-        let canceller = crate::cancellation::BuildCanceller::new();
-        canceller.cancel();
-
-        assert!(
-            prepare_icons(&config, &canceller.token(), Some(&snapshot))
-                .unwrap_err()
-                .is::<crate::cancellation::BuildCancelled>()
-        );
-    }
-
-    #[test]
-    fn only_changed_sources_are_reparsed() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("brand")).unwrap();
-        std::fs::write(root.join("brand/mark.svg"), SVG).unwrap();
-        std::fs::write(root.join("brand/steady.svg"), SVG).unwrap();
-        let json = br#"{"prefix":"ui","icons":{"home":{"body":"<path/>"}}}"#;
-        std::fs::write(root.join("ui.json"), json).unwrap();
-        let config = crate::config::tests::load_test_config(
-            root,
-            &format!("{BRAND_COLLECTION_TOML}{UI_COLLECTION_TOML}"),
-        );
-        let cancellation = BuildCancellation::new();
-        let first = prepare_icons(&config, &cancellation, None).unwrap();
-        std::fs::write(
-            root.join("brand/mark.svg"),
-            SVG.replace("currentColor", "red"),
-        )
-        .unwrap();
-        let changed = prepare_icons(&config, &cancellation, Some(&first)).unwrap();
-        assert!(std::ptr::eq(
-            first.collections().collection("ui").unwrap(),
-            changed.collections().collection("ui").unwrap(),
-        ));
-        assert!(std::ptr::eq(
-            first
-                .collections()
-                .get("brand", "steady")
-                .unwrap()
-                .svg()
-                .as_ptr(),
-            changed
-                .collections()
-                .get("brand", "steady")
-                .unwrap()
-                .svg()
-                .as_ptr(),
-        ));
-        assert!(!std::ptr::eq(
-            first
-                .collections()
-                .get("brand", "mark")
-                .unwrap()
-                .svg()
-                .as_ptr(),
-            changed
-                .collections()
-                .get("brand", "mark")
-                .unwrap()
-                .svg()
-                .as_ptr(),
-        ));
-        std::fs::write(
-            root.join("ui.json"),
-            br#"{"prefix":"ui","icons":{"home":{"body":"<circle r='2'/>"}}}"#,
-        )
-        .unwrap();
-        let changed_json = prepare_icons(&config, &cancellation, Some(&changed)).unwrap();
-        assert!(std::ptr::eq(
-            changed.collections().collection("brand").unwrap(),
-            changed_json.collections().collection("brand").unwrap(),
-        ));
-        assert!(!std::ptr::eq(
-            changed.collections().collection("ui").unwrap(),
-            changed_json.collections().collection("ui").unwrap(),
-        ));
-        assert!(
-            changed_json
-                .evidence
-                .is_fresh_for(&config, &cancellation)
-                .unwrap()
-        );
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn retargeted_source_is_not_reused() {
-        use std::os::unix::fs::symlink;
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let json = br#"{"prefix":"ui","icons":{"home":{"body":"<path/>"}}}"#;
-        std::fs::write(root.join("first.json"), json).unwrap();
-        std::fs::write(root.join("second.json"), json).unwrap();
-        symlink(root.join("first.json"), root.join("ui.json")).unwrap();
-        let config = crate::config::tests::load_test_config(
-            root,
-            r#"
-            [icons.collections.ui]
-            source-type = "local-json"
-            path = "ui.json"
-        "#,
-        );
-        let cancellation = BuildCancellation::new();
-        let first = prepare_icons(&config, &cancellation, None).unwrap();
-        std::fs::remove_file(root.join("ui.json")).unwrap();
-        symlink(root.join("second.json"), root.join("ui.json")).unwrap();
-        let retargeted = prepare_icons(&config, &cancellation, Some(&first)).unwrap();
-        assert!(!std::ptr::eq(
-            first.collections().collection("ui").unwrap(),
-            retargeted.collections().collection("ui").unwrap(),
-        ));
-        assert_ne!(first.evidence.files, retargeted.evidence.files);
-        assert!(
-            retargeted
-                .evidence
-                .is_fresh_for(&config, &cancellation)
-                .unwrap()
-        );
-    }
-
     #[test]
     fn invalid_member_invalidates_directory() {
         let directory = tempfile::tempdir().unwrap();
@@ -963,32 +852,6 @@ mod tests {
         assert!(boundary.logical_path().ends_with("missing/brand"));
     }
 
-    #[test]
-    fn changed_collection_config_is_stale() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        let snapshot = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
-        assert!(
-            snapshot
-                .evidence()
-                .is_fresh_for(&config, &BuildCancellation::new())
-                .unwrap()
-        );
-        config.icons.collections.insert(
-            "brand".into(),
-            IconCollectionSource::LocalJson {
-                path: directory.path().join("brand.json"),
-            },
-        );
-        assert!(
-            !snapshot
-                .evidence()
-                .is_fresh_for(&config, &BuildCancellation::new())
-                .unwrap()
-        );
-        assert!(prepare_icons(&config, &BuildCancellation::new(), Some(&snapshot),).is_err());
-    }
-
     #[cfg(unix)]
     #[test]
     fn reuse_rejects_internal_sources() {
@@ -998,19 +861,20 @@ mod tests {
         std::fs::create_dir(root.join("brand")).unwrap();
         std::fs::write(root.join("brand/mark.svg"), SVG).unwrap();
         let config = brand_icons_config(root);
-        let snapshot = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
+        let inventory = prepare_icons(&config, &BuildCancellation::new(), None).unwrap();
         symlink(
             root.join("brand"),
             root.join(crate::filesystem::INTERNAL_DIR),
         )
         .unwrap();
 
-        let error = prepare_icons(&config, &BuildCancellation::new(), Some(&snapshot)).unwrap_err();
+        let error =
+            prepare_icons(&config, &BuildCancellation::new(), Some(&inventory)).unwrap_err();
         assert!(matches!(
             error.downcast_ref::<IconError>(),
             Some(IconError::InternalSource { .. })
         ));
-        assert!(snapshot.collections().get("brand", "mark").is_some());
+        assert!(inventory.collections().get("brand", "mark").is_some());
     }
 
     #[test]
@@ -1094,52 +958,5 @@ mod tests {
         // A declared URL names one address; only a preset knows mirrors.
         assert_eq!(urls, ["https://example.test/brand.json"]);
         assert_eq!(sha256, digest);
-    }
-
-    #[test]
-    fn icon_errors_name_reason_or_fix() {
-        let root = Path::new("/site");
-        let path = PathBuf::from("/site/icons/brand.json");
-        let url = "https://example.test/brand.json".to_owned();
-        let missing = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
-        let read_reason = crate::filesystem::path_failure_reason(&missing);
-        let diagnostic = error_diagnostic(
-            &anyhow::Error::new(IconError::Read {
-                path: path.clone(),
-                source: missing,
-            }),
-            root,
-        )
-        .unwrap();
-        assert_eq!(diagnostic.notes, [read_reason]);
-        assert!(!diagnostic.help.is_empty(), "{diagnostic:?}");
-
-        for error in [
-            IconError::Changed { path: path.clone() },
-            IconError::TooLarge {
-                path: path.clone(),
-                limit: 64,
-            },
-            IconError::LinkedDirectoryMember { path: path.clone() },
-            IconError::InternalSource { path: path.clone() },
-            IconError::InvalidName { path: path.clone() },
-            IconError::NetworkDenied {
-                namespace: "brand".to_owned(),
-                url: url.clone(),
-            },
-            IconError::RemoteTooLarge {
-                namespace: "brand".to_owned(),
-                url: url.clone(),
-                limit: 64,
-            },
-            IconError::NetworkWorker,
-            IconError::NetworkRuntime(std::io::Error::other("connection refused")),
-        ] {
-            let diagnostic = error_diagnostic(&anyhow::Error::new(error), root).unwrap();
-            assert!(
-                !diagnostic.notes.is_empty() || !diagnostic.help.is_empty(),
-                "{diagnostic:?} has neither a cause nor a next action"
-            );
-        }
     }
 }

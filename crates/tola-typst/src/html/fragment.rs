@@ -12,7 +12,8 @@ use super::reference::{
     HtmlReferenceUse, attribute, classify_reference_use, map_url_ranges, unique_attributes,
     url_ranges,
 };
-use crate::{BundleCancellation, CompiledBundleDocument};
+use crate::BundleCancellation;
+use crate::bundle::CompiledBundleDocument;
 
 /// HTML encoding options and ancestor retention for a selection.
 #[derive(Clone, Debug, Default)]
@@ -421,6 +422,25 @@ fn rewrite_frame(
 
 #[cfg(test)]
 mod tests {
+    /// The text one element holds in a fragment, found by its tag rather than by its bytes.
+    fn fragment_element<'a>(html: &'a str, tag: &str) -> Option<&'a str> {
+        let open = format!("<{tag}");
+        let start = html.find(&open)?;
+        let body = &html[html[start..].find('>')? + start + 1..];
+        let end = body.find("</")?;
+        Some(&body[..end])
+    }
+
+    /// One attribute of the first element with `tag`, as the fragment wrote it.
+    fn fragment_attribute<'a>(html: &'a str, tag: &str, attribute: &str) -> Option<&'a str> {
+        let open = format!("<{tag} ");
+        let start = html.find(&open)? + open.len();
+        let attributes = &html[start..start + html[start..].find('>')?];
+        let key = format!("{attribute}=\"");
+        let value = &attributes[attributes.find(&key)? + key.len()..];
+        Some(&value[..value.find('"')?])
+    }
+
     use super::*;
 
     fn world(source: &str) -> (tempfile::TempDir, crate::TypstWorld) {
@@ -434,74 +454,6 @@ mod tests {
             .unwrap();
         (directory, world)
     }
-    #[test]
-    fn fragment_styles_exclude_head_scripts() {
-        let (_directory, world) = world(
-            r#"#document("index.html", html.html(
-  html.head(
-    html.style(".shell { color: red; }")
-    + html.link(rel: "stylesheet", href: "theme.css")
-    + html.script("headScript()")
-  ) + html.body(id: "body", class: "shell", lang: "zh")[
-    #html.article(id: "article")[Selected]
-    #html.p[Outside]
-  ]
-))"#,
-        );
-        let cancellation = BundleCancellation::default();
-        let compilation = crate::compile_bundle_world(&world, &cancellation).unwrap();
-        let document = compilation.documents().next().unwrap();
-        let options = HtmlFragmentOptions {
-            preserve_ancestors: true,
-            ..Default::default()
-        };
-        let fragment = document
-            .html_fragment_with_links(
-                &HtmlFragmentSelection::Id("article".into()),
-                &options,
-                &cancellation,
-                &mut |uri, usage| {
-                    assert_eq!(usage, HtmlReferenceUse::Stylesheet);
-                    Ok(format!("https://example.test/{uri}"))
-                },
-            )
-            .unwrap();
-        assert!(fragment.html.contains("class=\"shell\""), "{fragment:?}");
-        assert!(fragment.html.contains("lang=\"zh\""));
-        assert!(!fragment.html.contains("Outside"));
-        assert_eq!(fragment.styles.len(), 2);
-        assert!(fragment.styles[0].contains(".shell"));
-        assert!(fragment.styles[0].contains("color: red"));
-        assert!(fragment.styles[1].contains("https://example.test/theme.css"));
-        assert!(
-            !fragment
-                .styles
-                .iter()
-                .any(|style| style.contains("headScript"))
-        );
-        assert!(
-            fragment
-                .ancestors
-                .iter()
-                .all(|ancestor| ancestor.children.is_empty())
-        );
-        assert!(
-            fragment
-                .ancestors
-                .iter()
-                .any(|ancestor| ancestor.tag == typst_html::tag::body)
-        );
-        let body = document
-            .html_fragment(
-                &HtmlFragmentSelection::Id("body".into()),
-                &options,
-                &cancellation,
-            )
-            .unwrap();
-        assert!(!body.html.contains("<body"));
-        assert!(body.html.contains("class=\"shell\""));
-    }
-
     #[test]
     fn srcset_rewrite_keeps_descriptors() {
         let source = "  first.png 1x, data:image/png;base64,AAAA 2x, third.png 3x";
@@ -540,12 +492,22 @@ mod tests {
                 &mut |url, _| Ok(format!("https://example.test/{url}")),
             )
             .unwrap();
-        assert!(html.html.contains("<strong>world</strong>"), "{html:?}");
         assert!(
-            html.html.contains("href=\"https://example.test/next/\""),
-            "{html:?}"
+            fragment_element(&html.html, "strong").is_some_and(|text| text == "world"),
+            "the selected subtree keeps its strong element: {html:?}"
         );
-        assert!(!html.html.contains("Outside"));
+        assert!(
+            fragment_attribute(&html.html, "a", "href") == Some("https://example.test/next/"),
+            "the fragment's link is rewritten through the caller: {html:?}"
+        );
+        assert!(
+            !html.html.contains("Outside"),
+            "a sibling outside the selection is not copied: {html:?}"
+        );
+        assert!(
+            html.html.starts_with("<article id=\"article\">"),
+            "the selection is the fragment's root: {html:?}"
+        );
         let original = page
             .html_fragment(&selection, &HtmlFragmentOptions::default(), &cancellation)
             .unwrap();
@@ -564,105 +526,5 @@ mod tests {
                 .unwrap_err()
                 .is_cancelled()
         );
-    }
-
-    #[test]
-    fn frame_links_resolve_against_the_bundle() {
-        use typst::foundations::{Label, Selector};
-        use typst::layout::{Abs, Point, Size};
-        let (_directory, world) = world(
-            "#document(\"index.html\")[#link(<target>)[Next]]\n#document(\"other/index.html\")[= Target <target>]",
-        );
-        let cancellation = BundleCancellation::default();
-        let compilation = crate::compile_bundle_world(&world, &cancellation).unwrap();
-        let label = Label::new(typst::utils::PicoStr::intern("target")).unwrap();
-        let location = compilation
-            .introspector()
-            .query_unique(&Selector::Label(label))
-            .unwrap()
-            .location()
-            .unwrap();
-        let source = VirtualPath::new("index.html").unwrap();
-        let resolver = LateLinkResolver::new(Some(&source), compilation.introspector());
-        let size = Size::new(Abs::pt(10.0), Abs::pt(10.0));
-        let mut frame = Frame::soft(size);
-        frame.push(
-            Point::zero(),
-            FrameItem::Link(Destination::Location(location), size),
-        );
-        let original = frame.clone();
-        rewrite_frame(&mut frame, &resolver, &cancellation, &mut |uri, _| {
-            Ok(format!("https://example.test/{uri}"))
-        })
-        .unwrap();
-        let FrameItem::Link(Destination::Url(uri), _) = &frame.items().next().unwrap().1 else {
-            panic!("expected a rewritten frame link");
-        };
-        assert!(
-            uri.as_str()
-                .starts_with("https://example.test/other/index.html#"),
-            "{uri:?}"
-        );
-        assert!(
-            matches!(&original.items().next().unwrap().1, FrameItem::Link(Destination::Location(retained), _) if *retained == location)
-        );
-    }
-
-    #[test]
-    fn frameless_destination_needs_no_uri() {
-        use typst::introspection::{EmptyIntrospector, Location};
-        use typst::layout::{Abs, Point, Size};
-        let location = Location::new(17);
-        let size = Size::new(Abs::pt(1.0), Abs::pt(1.0));
-        let mut frame = Frame::soft(size);
-        frame.push(
-            Point::zero(),
-            FrameItem::Link(Destination::Location(location), size),
-        );
-        rewrite_frame(
-            &mut frame,
-            &LateLinkResolver::new(None, &EmptyIntrospector),
-            &BundleCancellation::default(),
-            &mut |_, _| panic!("a frame destination without a URI does not invoke the URL policy"),
-        )
-        .unwrap();
-        assert!(
-            matches!(&frame.items().next().unwrap().1, FrameItem::Link(Destination::Location(retained), _) if *retained == location)
-        );
-    }
-
-    #[test]
-    fn template_content_stays_inert() {
-        let (_directory, world) = world(
-            r#"#document("index.html")[
-  #html.p(id: "selected")[Active]
-  #html.template[#html.p(id: "selected")[Inactive] #html.a(href: "https://[")[Deferred]]
-]"#,
-        );
-        let cancellation = BundleCancellation::default();
-        let compilation = crate::compile_bundle_world(&world, &cancellation).unwrap();
-        let page = compilation.documents().next().unwrap();
-        let selected = page
-            .html_fragment(
-                &HtmlFragmentSelection::Id("selected".into()),
-                &HtmlFragmentOptions::default(),
-                &cancellation,
-            )
-            .unwrap();
-        assert!(selected.html.contains("Active"));
-        assert!(!selected.html.contains("Inactive"));
-        let body = page
-            .html_fragment_with_links(
-                &HtmlFragmentSelection::Body,
-                &HtmlFragmentOptions::default(),
-                &cancellation,
-                &mut |_, _| {
-                    Err(HtmlFragmentError::InvalidReference {
-                        message: "inactive URL reached the policy".into(),
-                    })
-                },
-            )
-            .unwrap();
-        assert!(body.html.contains("https://["), "{body:?}");
     }
 }

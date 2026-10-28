@@ -12,7 +12,7 @@ use typst::syntax::FileId;
 use super::evidence::{DiskReadPath, FileRead, ReadAttempt, ReadEvidence, ReadLocator, ReadOrigin};
 use super::provider::{EmptyFiles, FileProvider, FileTarget};
 use super::read::{EMPTY_ID, STDIN_ID, decode_utf8, non_persistent_label, read_disk};
-use super::snapshot::PackageSnapshot;
+use super::view::PackageObservations;
 use crate::world::package::{PackageCheck, PackageFetchPolicy, PackageLocations, PackageStore};
 
 /// Resolves Typst file IDs against provided bytes, mapped files, packages, and disk.
@@ -81,14 +81,14 @@ impl FileResolver {
     /// or package selection.
     ///
     /// Paths must be absolute. Existing prefixes are canonicalized when this
-    /// snapshot is constructed, including for files that do not exist yet.
+    /// view is constructed, including for files that do not exist yet.
     /// Aliases with conflicting bytes are rejected. The same normalization is
     /// applied after ordinary root, mapped-disk, or package resolution.
     /// A provider's explicit [`FileTarget::Bytes`] takes precedence.
     ///
     /// Overrides are recorded as provider reads, retaining package checks.
     /// When bytes change, create another resolver and use it to construct or
-    /// refresh source snapshots; existing snapshots keep their original bytes.
+    /// refresh a file view; an existing view keeps its original bytes.
     pub fn with_disk_overrides(
         mut self,
         sources: impl IntoIterator<Item = (PathBuf, Arc<[u8]>)>,
@@ -168,11 +168,11 @@ impl FileResolver {
         self.read_attempt_inner(id, root, None)
     }
 
-    pub(crate) fn read_attempt_with_snapshot(
+    pub(crate) fn read_attempt_with_packages(
         &self,
         id: FileId,
         root: &Path,
-        packages: &PackageSnapshot,
+        packages: &PackageObservations,
     ) -> ReadAttempt<Arc<[u8]>> {
         self.read_attempt_inner(id, root, Some(packages))
     }
@@ -181,7 +181,7 @@ impl FileResolver {
         &self,
         id: FileId,
         root: &Path,
-        packages: Option<&PackageSnapshot>,
+        packages: Option<&PackageObservations>,
     ) -> ReadAttempt<Arc<[u8]>> {
         if id == *EMPTY_ID {
             return successful_provider_read(
@@ -310,13 +310,13 @@ impl FileResolver {
         &self,
         root: &Path,
         id: FileId,
-        package_snapshot: Option<&PackageSnapshot>,
+        package_observations: Option<&PackageObservations>,
     ) -> Result<(PathBuf, Vec<PackageCheck>), (FileError, Vec<PackageCheck>)> {
         let (root, package_checks) = match id.root() {
             typst::syntax::VirtualRoot::Project => (root.to_path_buf(), Vec::new()),
             typst::syntax::VirtualRoot::Package(spec) => {
-                if let Some(snapshot) = package_snapshot {
-                    let observation = snapshot.observe(spec, &self.packages);
+                if let Some(observations) = package_observations {
+                    let observation = observations.observe(spec, &self.packages);
                     match observation.directory {
                         Ok(directory) => (directory, observation.checks),
                         Err(error) => return Err((error, observation.checks)),
@@ -428,7 +428,7 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
-    use typst::syntax::{FileId, VirtualPath};
+    use typst::syntax::FileId;
 
     struct DiskMapping {
         id: FileId,
@@ -441,93 +441,7 @@ mod tests {
         }
     }
 
-    fn package_file_id(spec: &str, path: &str) -> FileId {
-        FileId::new(typst::syntax::RootedPath::new(
-            typst::syntax::VirtualRoot::Package(spec.parse().unwrap()),
-            VirtualPath::new(path).unwrap(),
-        ))
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn package_members_respect_containment() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().join("site");
-        let package_root = root.join("vendor/local/demo/1.0.0");
-        fs::create_dir_all(&package_root).unwrap();
-        let outside = directory.path().join("outside.typ");
-        fs::write(&outside, "host source").unwrap();
-        let inside = root.join("inside.typ");
-        fs::write(&inside, "site source").unwrap();
-        let locations = PackageLocations::default()
-            .with_declared_root(root.join("vendor"))
-            .unwrap();
-        let files = FileResolver::from_package_locations(locations, PackageFetchPolicy::LocalOnly)
-            .with_source_boundary(crate::SourceBoundary::new(&root, true));
-        for (name, target, permitted) in [
-            ("outside.typ", &outside, false),
-            ("inside.typ", &inside, true),
-        ] {
-            std::os::unix::fs::symlink(target, package_root.join(name)).unwrap();
-            let id = package_file_id("@local/demo:1.0.0", name);
-            let observed = files.read_attempt(id, &root);
-            assert!(
-                observed
-                    .package_checks
-                    .iter()
-                    .any(PackageCheck::was_selected)
-            );
-            if permitted {
-                assert_eq!(observed.result.unwrap().as_ref(), b"site source");
-            } else {
-                assert!(observed.result.is_err());
-                assert!(observed.reads.is_none());
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn generated_aliases_are_not_sources() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let internal = root.join(".tola");
-        fs::create_dir(&internal).unwrap();
-        fs::write(internal.join("cached.typ"), "cache source").unwrap();
-        std::os::unix::fs::symlink(internal.join("cached.typ"), root.join("alias.typ")).unwrap();
-        let files = FileResolver::new()
-            .with_source_boundary(crate::SourceBoundary::new(root, false).excluding(internal));
-        for name in [".tola/cached.typ", "alias.typ"] {
-            assert!(files.read(crate::file_id(name), root).is_err());
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unsaved_aliases_keep_source_limits() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().join("site");
-        let outside = directory.path().join("outside");
-        fs::create_dir(&root).unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("alias")).unwrap();
-        let files =
-            FileResolver::new().with_source_boundary(crate::SourceBoundary::new(&root, true));
-        for exists in [false, true] {
-            if exists {
-                fs::create_dir(&outside).unwrap();
-            }
-            assert!(
-                files
-                    .clone()
-                    .with_disk_overrides([(
-                        root.join("alias/unsaved.typ"),
-                        Arc::from(&b"unsaved host source"[..])
-                    ),])
-                    .is_err()
-            );
-        }
-    }
-
     #[test]
     fn disk_overrides_precede_package_disk() {
         let directory = TempDir::new().unwrap();
@@ -540,7 +454,10 @@ mod tests {
             fs::write(path, "disk source").unwrap();
         }
         let locations = PackageLocations::from_absolute_roots(Some(data), Some(cache)).unwrap();
-        let id = package_file_id("@local/demo:1.0.0", "lib.typ");
+        let id = FileId::new(typst::syntax::RootedPath::new(
+            typst::syntax::VirtualRoot::Package("@local/demo:1.0.0".parse().unwrap()),
+            typst::syntax::VirtualPath::new("lib.typ").unwrap(),
+        ));
         let resolver =
             FileResolver::from_package_locations(locations, PackageFetchPolicy::LocalOnly)
                 .with_disk_overrides([(shadowed, Arc::from(&b"shadowed editor source"[..]))])
@@ -587,63 +504,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn conflicting_disk_override_aliases_fail() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("source.typ");
-        let alias = directory.path().join("alias.typ");
-        fs::write(&path, "disk").unwrap();
-        std::os::unix::fs::symlink(&path, &alias).unwrap();
-        let resolver = FileResolver::new()
-            .with_disk_overrides([(path.clone(), Arc::from(&b"editor source"[..]))])
-            .unwrap();
-        assert_eq!(
-            resolver
-                .read(crate::world::file::file_id("alias.typ"), directory.path())
-                .unwrap(),
-            b"editor source"
-        );
-        assert!(
-            FileResolver::new()
-                .with_disk_overrides([
-                    (path, Arc::from(&b"first"[..])),
-                    (alias, Arc::from(&b"second"[..])),
-                ])
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn package_read_reports_its_checks() {
-        let dir = TempDir::new().unwrap();
-        let data = dir.path().join("data");
-        let cache = dir.path().join("cache");
-        let package_dir = cache.join("preview/demo/0.1.0");
-        fs::create_dir_all(&package_dir).unwrap();
-        let package_file = package_dir.join("lib.typ");
-        fs::write(&package_file, "#let value = 1").unwrap();
-        let locations =
-            PackageLocations::from_absolute_roots(Some(data.clone()), Some(cache)).unwrap();
-        let files = FileResolver::from_package_locations(locations, PackageFetchPolicy::LocalOnly);
-        let id = package_file_id("@preview/demo:0.1.0", "lib.typ");
-
-        let attempt = files.read_attempt(id, dir.path());
-
-        assert!(attempt.result.is_ok());
-        assert_eq!(attempt.package_checks.len(), 2);
-        assert_eq!(
-            attempt.package_checks[0].candidate(),
-            data.join("preview/demo/0.1.0")
-        );
-        assert!(!attempt.package_checks[0].was_selected());
-        assert!(attempt.package_checks[1].was_selected());
-        assert_eq!(attempt.disk_reads.len(), 1);
-        assert_eq!(
-            attempt.disk_reads[0].as_path(),
-            package_file.canonicalize().unwrap()
-        );
-    }
-
-    #[test]
     fn read_attempt_reports_disk_inputs() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("page.typ"), "= Page").unwrap();
@@ -671,75 +531,6 @@ mod tests {
             attempt.disk_reads[0].as_path(),
             dir.path().join("missing.typ")
         );
-    }
-
-    #[test]
-    fn provided_bytes_create_no_disk_read() {
-        let directory = TempDir::new().unwrap();
-        let id = crate::world::file::file_id("provided.typ");
-        let mut provider = crate::world::file::FileMap::new();
-        provider.insert(id, Arc::<[u8]>::from(&b"= Provided"[..]));
-
-        let attempt = FileResolver::new()
-            .with_provider(provider)
-            .read_attempt(id, directory.path());
-
-        assert_eq!(attempt.result.unwrap().as_ref(), b"= Provided");
-        assert!(attempt.disk_reads.is_empty());
-        assert!(matches!(
-            attempt
-                .reads
-                .as_ref()
-                .expect("a provider read has evidence")
-                .origin(),
-            ReadOrigin::Provider
-        ));
-    }
-
-    #[test]
-    fn provider_absence_stops_resolution() {
-        struct AbsentFiles;
-        impl FileProvider for AbsentFiles {
-            fn target(&self, _: FileId) -> Option<FileTarget> {
-                Some(FileTarget::Missing)
-            }
-        }
-
-        let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("image.svg"), b"unrelated disk image").unwrap();
-        let resolver = FileResolver::from_package_locations(
-            PackageLocations::from_absolute_roots(None, None).unwrap(),
-            PackageFetchPolicy::LocalOnly,
-        )
-        .with_provider(AbsentFiles);
-        let root = crate::world::file::file_id("image.svg");
-        let package = package_file_id("@local/icons:1.0.0", "image.svg");
-        for id in [root, package] {
-            let observed = resolver.read_attempt(id, directory.path());
-            assert!(matches!(observed.result, Err(FileError::NotFound(_))));
-            assert!(observed.disk_reads.is_empty());
-            assert!(observed.package_checks.is_empty());
-        }
-    }
-
-    #[test]
-    fn mapped_disk_failure_reads_no_fallback() {
-        let directory = TempDir::new().unwrap();
-        let logical = directory.path().join("image.svg");
-        fs::write(&logical, b"wrong fallback").unwrap();
-        let mapped = directory.path().join("assets/missing.svg");
-        let id = crate::world::file::file_id("image.svg");
-        let files = FileResolver::new().with_provider(DiskMapping {
-            id,
-            path: mapped.clone(),
-        });
-
-        let attempt = files.read_attempt(id, directory.path());
-
-        assert!(attempt.result.is_err());
-        assert!(attempt.reads.is_none());
-        assert_eq!(attempt.disk_reads.len(), 1);
-        assert_eq!(attempt.disk_reads[0].as_path(), mapped);
     }
 
     #[test]

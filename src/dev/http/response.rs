@@ -636,7 +636,6 @@ mod tests {
     use hyper::{Method, Request, Response, StatusCode};
     use tempfile::TempDir;
     use tola_address::{SiteUrlMount, UrlPath};
-    use tola_build::output::revision::OutputRevision;
     use tola_build::output::semantics::ResponseMediaType;
 
     fn request(url: &str) -> Request<()> {
@@ -667,53 +666,41 @@ mod tests {
         crate::dev::reload::transport::ReloadEndpoint::new(35729, "test-session", "test-generation")
     }
 
-    fn asset_revision(path: &str, bytes: &[u8]) -> tola_build::output::revision::OutputRevision {
-        let extension = std::path::Path::new(path)
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("bin");
-        asset_revision_from_source(path, &format!("input.{extension}"), bytes)
-    }
-
-    fn html_revision(path: &str, body: &str) -> tola_build::output::revision::OutputRevision {
+    /// The outputs one production build of `program` has, with each asset in `assets` published
+    /// at its path from a source file this call writes.
+    fn site_outputs(
+        program: &str,
+        assets: &[(&str, &str, &[u8])],
+    ) -> tola_build::output::revision::OutputRevision {
         let directory = tempfile::tempdir().unwrap();
-        revision_from_site(
-            directory.path(),
-            &format!(
-                "#document({})[{body}]",
-                serde_json::to_string(path).unwrap()
-            ),
-            "",
+        let root = directory.path();
+        let files = assets
+            .iter()
+            .map(|(path, source, bytes)| {
+                std::fs::write(root.join(source), bytes).unwrap();
+                format!(
+                    "{{source = {}, url = {}}}",
+                    serde_json::to_string(source).unwrap(),
+                    serde_json::to_string(&format!("/{path}")).unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let configuration = format!(
+            "[build.minify]\ncss = false\njavascript = false\n[assets]\nfiles = [{files}]\n"
+        );
+        crate::dev::tests::built_outputs(
+            &crate::dev::tests::write_site(root, program, &configuration),
+            tola_build::build::BuildMode::Production,
         )
     }
 
-    fn asset_revision_from_source(
-        path: &str,
-        source: &str,
-        bytes: &[u8],
-    ) -> tola_build::output::revision::OutputRevision {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join(source), bytes).unwrap();
-        let configuration = format!(
-            "[build.minify]\ncss = false\njavascript = false\n[assets]\nfiles = [{{source = {}, url = {}}}]\n",
-            serde_json::to_string(source).unwrap(),
-            serde_json::to_string(&format!("/{path}")).unwrap()
-        );
-        revision_from_site(directory.path(), "", &configuration)
-    }
-
-    fn revision_from_site(
-        root: &std::path::Path,
-        program: &str,
-        configuration: &str,
-    ) -> tola_build::output::revision::OutputRevision {
-        std::fs::create_dir_all(root.join("content")).unwrap();
-        std::fs::write(root.join("site.typ"), program).unwrap();
-        let config = site_config(root, configuration);
-        let built =
-            tola_build::build::build_site(&config, tola_build::build::BuildMode::Production)
-                .unwrap();
-        built.into_unchecked_revision(None).site().outputs().clone()
+    /// The entry documenting `path` with `body`.
+    fn document_program(path: &str, body: &str) -> String {
+        format!(
+            "#document({})[{body}]",
+            serde_json::to_string(path).unwrap()
+        )
     }
 
     fn output<'a>(
@@ -745,7 +732,7 @@ mod tests {
 
     #[test]
     fn unusable_ranges_serve_complete_body() {
-        let revision = asset_revision("download.bin", b"0123456789");
+        let revision = site_outputs("", &[("download.bin", "input.bin", b"0123456789")]);
         let mut conditional =
             request_with_header(Method::GET, "/download.bin", "range", "bytes=2-5");
         conditional.headers_mut().insert(
@@ -776,22 +763,89 @@ mod tests {
         }
     }
 
+    /// Every development response answers HEAD with the GET status and the GET body length, and
+    /// no bytes. HEAD also ignores `Range`: the client asked for the whole representation.
     #[test]
-    fn error_responses_omit_head_body() {
-        let get =
-            super::text_status_response(&Method::GET, StatusCode::BAD_REQUEST, "400 Bad Request");
-        assert_eq!(get.status().as_u16(), 400);
-        assert_eq!(body_bytes(get.body()).as_ref(), b"400 Bad Request");
+    fn head_reports_get_length_without_body() {
+        let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
+        let asset = output(&revision, "media/video.mp4");
+        let asset_get = super::respond_file(
+            request("/media/video.mp4"),
+            asset,
+            &SiteUrlMount::root(),
+            Some(&reload_endpoint()),
+            &revision,
+            &super::HtmlResponses::default(),
+        );
+        let asset_head = super::respond_file(
+            request_with_header(Method::HEAD, "/media/video.mp4", "range", "bytes=2-5"),
+            asset,
+            &SiteUrlMount::root(),
+            Some(&reload_endpoint()),
+            &revision,
+            &super::HtmlResponses::default(),
+        );
+        assert_eq!(
+            content_length(super::respond_file(
+                request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=2-5"),
+                asset,
+                &SiteUrlMount::root(),
+                Some(&reload_endpoint()),
+                &revision,
+                &super::HtmlResponses::default(),
+            )),
+            4,
+            "a ranged GET carries only the selected bytes"
+        );
 
-        let head =
+        let page = site_outputs(&document_program("index.html", "Page"), &[]);
+        let page_get = super::respond_file(
+            request("/index.html"),
+            output(&page, "index.html"),
+            &SiteUrlMount::root(),
+            Some(&reload_endpoint()),
+            &page,
+            &super::HtmlResponses::default(),
+        );
+        let page_head = super::respond_file(
+            request_with_method(Method::HEAD, "/index.html"),
+            output(&page, "index.html"),
+            &SiteUrlMount::root(),
+            Some(&reload_endpoint()),
+            &page,
+            &super::HtmlResponses::default(),
+        );
+
+        let runtime_get = super::respond_hotreload_js(request("/hotreload.js"));
+        let runtime_head =
+            super::respond_hotreload_js(request_with_method(Method::HEAD, "/hotreload.js"));
+
+        let error_get =
+            super::text_status_response(&Method::GET, StatusCode::BAD_REQUEST, "400 Bad Request");
+        let error_head =
             super::text_status_response(&Method::HEAD, StatusCode::BAD_REQUEST, "400 Bad Request");
-        assert_eq!(head.status().as_u16(), 400);
-        assert!(body_bytes(head.body()).is_empty());
+
+        assert_eq!(
+            body_bytes(error_get.body()).as_ref(),
+            b"400 Bad Request",
+            "the table's GET rows carry their body"
+        );
+
+        for (get, head) in [
+            (asset_get, asset_head),
+            (page_get, page_head),
+            (runtime_get, runtime_head),
+            (error_get, error_head),
+        ] {
+            assert_eq!(head.status(), get.status());
+            assert!(body_bytes(head.body()).is_empty());
+            assert_eq!(content_length(head), body_bytes(get.body()).len() as u64);
+        }
     }
 
     #[test]
     fn stale_representation_is_rejected() {
-        let revision = asset_revision("styles/site.css", b"body {}");
+        let revision = site_outputs("", &[("styles/site.css", "input.css", b"body {}")]);
         let current = output(&revision, "styles/site.css");
         let representation =
             tola_build::output::manifest::RepresentationId::from_output(current).to_hex();
@@ -833,8 +887,8 @@ mod tests {
         assert_eq!(head.status().as_u16(), 409);
         assert!(body_bytes(head.body()).is_empty());
 
-        let before = asset_revision_from_source("styles/site", "input.bin", b"body {}");
-        let after = asset_revision_from_source("styles/site", "input.css", b"body {}");
+        let before = site_outputs("", &[("styles/site", "input.bin", b"body {}")]);
+        let after = site_outputs("", &[("styles/site", "input.css", b"body {}")]);
         let previous = tola_build::output::manifest::RepresentationId::from_output(output(
             &before,
             "styles/site",
@@ -857,7 +911,7 @@ mod tests {
 
     #[test]
     fn user_representation_query_is_ignored() {
-        let revision = asset_revision("styles/site.css", b"body {}");
+        let revision = site_outputs("", &[("styles/site.css", "input.css", b"body {}")]);
 
         let response = super::respond_file(
             request("/styles/site.css?tola-representation=user-value"),
@@ -874,7 +928,7 @@ mod tests {
 
     #[test]
     fn extensionless_asset_keeps_media_type() {
-        let revision = asset_revision_from_source("styles/app", "input.css", b"body {}");
+        let revision = site_outputs("", &[("styles/app", "input.css", b"body {}")]);
         let output = output(&revision, "styles/app");
         let css = ResponseMediaType::CSS;
 
@@ -913,7 +967,7 @@ mod tests {
 
     #[test]
     fn html_without_reload_keeps_bytes() {
-        let revision = html_revision("index.html", "exact");
+        let revision = site_outputs(&document_program("index.html", "exact"), &[]);
         let response = super::respond_file(
             request("/index.html"),
             output(&revision, "index.html"),
@@ -932,7 +986,7 @@ mod tests {
 
     #[test]
     fn duplicate_representation_is_rejected() {
-        let revision = asset_revision("site.css", b"body {}");
+        let revision = site_outputs("", &[("site.css", "input.css", b"body {}")]);
         let response = super::respond_file(
             request("/site.css?tola-representation=first&tola-representation=second"),
             output(&revision, "site.css"),
@@ -948,7 +1002,7 @@ mod tests {
 
     #[test]
     fn asset_range_serves_selected_bytes() {
-        let revision = asset_revision("media/video.mp4", b"0123456789");
+        let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
         let output = output(&revision, "media/video.mp4");
         let response = super::respond_file(
             request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=2-5"),
@@ -965,7 +1019,7 @@ mod tests {
 
     #[test]
     fn range_spans_injected_slices() {
-        let revision = html_revision("index.html", "Home");
+        let revision = site_outputs(&document_program("index.html", "Home"), &[]);
         let endpoint = reload_endpoint();
         let output = output(&revision, "index.html");
         let whole = super::respond_file(
@@ -1000,7 +1054,7 @@ mod tests {
 
     #[test]
     fn development_responses_are_never_stored() {
-        let revision = asset_revision("site.css", b"body {}");
+        let revision = site_outputs("", &[("site.css", "input.css", b"body {}")]);
         let directory = tempfile::tempdir().unwrap();
         let config = site_config(directory.path(), "");
         let diagnostic = tola_build::build::no_pages_diagnostic(&config);
@@ -1079,23 +1133,6 @@ mod tests {
     }
 
     #[test]
-    fn head_reports_length_without_body() {
-        let revision = asset_revision("media/video.mp4", b"0123456789");
-        let response = super::respond_file(
-            request_with_header(Method::HEAD, "/media/video.mp4", "range", "bytes=2-5"),
-            output(&revision, "media/video.mp4"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
-            &revision,
-            &super::HtmlResponses::default(),
-        );
-
-        assert_eq!(response.status().as_u16(), 200);
-        assert!(body_bytes(response.body()).is_empty());
-        assert_eq!(content_length(response), 10);
-    }
-
-    #[test]
     fn method_not_allowed_declares_methods() {
         let directory = tempfile::tempdir().unwrap();
         let config = site_config(directory.path(), "");
@@ -1116,32 +1153,8 @@ mod tests {
     }
 
     #[test]
-    fn injected_html_head_matches_get() {
-        let revision = html_revision("index.html", "Page");
-        let get = super::respond_file(
-            request("/index.html"),
-            output(&revision, "index.html"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
-            &revision,
-            &super::HtmlResponses::default(),
-        );
-        let head = super::respond_file(
-            request_with_method(Method::HEAD, "/index.html"),
-            output(&revision, "index.html"),
-            &SiteUrlMount::root(),
-            Some(&reload_endpoint()),
-            &revision,
-            &super::HtmlResponses::default(),
-        );
-
-        assert!(body_bytes(head.body()).is_empty());
-        assert_eq!(content_length(head), body_bytes(get.body()).len() as u64);
-    }
-
-    #[test]
     fn unsatisfiable_range_reports_length() {
-        let revision = asset_revision("media/video.mp4", b"0123456789");
+        let revision = site_outputs("", &[("media/video.mp4", "input.mp4", b"0123456789")]);
         let response = super::respond_file(
             request_with_header(Method::GET, "/media/video.mp4", "range", "bytes=10-"),
             output(&revision, "media/video.mp4"),
@@ -1161,50 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn reload_runtime_available_before_build() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = site_config(directory.path(), "");
-        let endpoint = reload_endpoint();
-        let runtime = crate::embed::dev::hotreload_browser_path(config.url_mount());
-        let page = super::respond(
-            request("/"),
-            None,
-            &config,
-            Some(&endpoint),
-            &super::HtmlResponses::default(),
-        );
-        let script = super::respond(
-            request(&runtime),
-            None,
-            &config,
-            Some(&endpoint),
-            &super::HtmlResponses::default(),
-        );
-        let head = super::respond(
-            request_with_method(Method::HEAD, &runtime),
-            None,
-            &config,
-            Some(&endpoint),
-            &super::HtmlResponses::default(),
-        );
-
-        assert_eq!(page.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert!(String::from_utf8_lossy(&body_bytes(page.body())).contains("data-tola-runtime"));
-        assert_eq!(script.status(), StatusCode::OK);
-        assert_eq!(
-            body_bytes(script.body()).as_ref(),
-            crate::embed::dev::hotreload_js()
-                .expect("Tola's own runtime sources minify")
-                .as_bytes()
-        );
-        assert!(body_bytes(head.body()).is_empty());
-        assert_eq!(content_length(head), body_bytes(script.body()).len() as u64);
-    }
-
-    #[test]
     fn missing_route_serves_not_found() {
         let directory = tempfile::tempdir().unwrap();
-        let revision = revision_from_site(directory.path(), "", "");
+        let revision = site_outputs("", &[]);
         let config = site_config(directory.path(), "");
 
         let get = super::respond_not_found(
@@ -1265,27 +1237,18 @@ mod tests {
     }
 
     #[test]
-    fn hot_reload_head_omits_body() {
-        let get = super::respond_hotreload_js(request("/hotreload.js"));
-        let head = super::respond_hotreload_js(request_with_method(Method::HEAD, "/hotreload.js"));
-
-        assert_eq!(get.status().as_u16(), 200);
-        assert_eq!(
-            body_bytes(get.body()).as_ref(),
-            crate::embed::dev::hotreload_js()
-                .expect("Tola's own runtime sources minify")
-                .as_bytes()
-        );
-        assert_eq!(head.status().as_u16(), 200);
-        assert!(body_bytes(head.body()).is_empty());
-    }
-
-    #[test]
     fn hotreload_response_serves_minified_runtime() {
         let response = super::respond_hotreload_js(request("/hotreload.js"));
         let body = String::from_utf8_lossy(&body_bytes(response.body())).into_owned();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body.as_bytes(),
+            crate::embed::dev::hotreload_js()
+                .expect("Tola's own runtime sources minify")
+                .as_bytes(),
+            "the served runtime is the one Tola prepared"
+        );
         assert!(
             !body.contains("Development runtime for pages served"),
             "the served runtime is minified"
@@ -1313,10 +1276,6 @@ mod tests {
             "{body}"
         );
         assert!(
-            body.contains("https://github.com/tola-rs/tola-ssg/issues"),
-            "{body}"
-        );
-        assert!(
             !body.contains("deliberate failure"),
             "the minifier's own message stays in the log"
         );
@@ -1327,36 +1286,19 @@ mod tests {
         program: &str,
         configuration: &str,
     ) -> Arc<super::InstalledRevision> {
-        fs::create_dir_all(root.join("content")).unwrap();
-        fs::write(root.join("site.typ"), program).unwrap();
-        let config = site_config(root, configuration);
         let mut session = tola_build::build::BuildSession::new();
-        let attempt = session.prepare(
-            Arc::new(config),
-            tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production),
+        let (checked, _) = crate::dev::tests::checked_candidate(
+            &mut session,
+            crate::dev::tests::write_site(root, program, configuration),
+            tola_build::build::BuildMode::Production,
         );
-        let checked = attempt
-            .run()
-            .unwrap()
-            .into_unchecked_revision(None)
-            .check(&tola_build::cancellation::BuildCancellation::new())
-            .unwrap()
-            .into_checked()
-            .unwrap();
         Arc::new(super::InstalledRevision::new(Arc::new(
             session.install_revision(checked, Ok).unwrap(),
         )))
     }
 
     fn published_document(root: &Path, path: &str, body: &str) -> Arc<super::InstalledRevision> {
-        published_site(
-            root,
-            &format!(
-                "#document({})[{body}]",
-                serde_json::to_string(path).unwrap()
-            ),
-            "",
-        )
+        published_site(root, &document_program(path, body), "")
     }
 
     #[test]
@@ -1581,18 +1523,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_site_serves_not_found() {
-        let dir = TempDir::new().unwrap();
-        let site = published_document(dir.path(), "generated.html", "generated");
-        let request = request("/missing");
-
-        let response = super::respond_published(request, site, Some(&reload_endpoint()));
-
-        assert_eq!(response.status().as_u16(), 404);
-        assert_eq!(body_bytes(response.body()).as_ref(), b"404 Not Found");
-    }
-
-    #[test]
     fn non_html_sites_preserve_route_status() {
         for program in ["", "#document(\"download.pdf\", format: \"pdf\")[Download]"] {
             let directory = TempDir::new().unwrap();
@@ -1637,35 +1567,16 @@ mod tests {
         }
     }
 
-    fn revision<const N: usize>(outputs: [(&'static str, &'static [u8]); N]) -> OutputRevision {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("content")).unwrap();
-        std::fs::write(directory.path().join("site.typ"), "").unwrap();
-        let mut configuration = String::from("[assets]\nfiles = [\n");
-        for (index, (path, bytes)) in outputs.into_iter().enumerate() {
-            let extension = Path::new(path)
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .unwrap_or("bin");
-            let source = format!("input-{index}.{extension}");
-            std::fs::write(directory.path().join(&source), bytes).unwrap();
-            configuration.push_str(&format!(
-                "{{source = {}, url = {}}},\n",
-                serde_json::to_string(&source).unwrap(),
-                serde_json::to_string(&format!("/{path}")).unwrap()
-            ));
-        }
-        configuration.push_str("]\n");
-        let config = site_config(directory.path(), &configuration);
-        let built =
-            tola_build::build::build_site(&config, tola_build::build::BuildMode::Production)
-                .unwrap();
-        built.into_unchecked_revision(None).site().outputs().clone()
-    }
-
     #[test]
     fn encoded_dot_segments_resolve() {
-        let revision = revision([("release..notes/\u{4e2d}\u{6587}/index.html", b"ok")]);
+        let revision = site_outputs(
+            "",
+            &[(
+                "release..notes/\u{4e2d}\u{6587}/index.html",
+                "input-0.html",
+                b"ok",
+            )],
+        );
 
         let url = UrlPath::parse("/release..notes/%E4%B8%AD%E6%96%87/").unwrap();
         let resolved = super::resolve_output(&url, &revision).unwrap();
@@ -1678,7 +1589,13 @@ mod tests {
 
     #[test]
     fn revision_membership_decides_resolution() {
-        let revision = revision([("posts/rust/index.html", b"post"), ("feed.xml", b"feed")]);
+        let revision = site_outputs(
+            "",
+            &[
+                ("posts/rust/index.html", "input-0.html", b"post"),
+                ("feed.xml", "input-1.xml", b"feed"),
+            ],
+        );
 
         let post = UrlPath::parse("/posts/rust/").unwrap();
         let feed = UrlPath::parse("/feed.xml").unwrap();

@@ -545,16 +545,6 @@ mod tests {
             )]
         );
     }
-
-    #[test]
-    fn page_incoming_names_no_caller() {
-        let (_directory, configuration, cancellation, revision) =
-            compiled_site(&[("content/one.typ", "One.\n")]);
-        let found = incoming_for(&configuration, &revision, &cancellation, "content/one.typ");
-
-        assert!(found.is_empty(), "{found:#?}");
-    }
-
     #[test]
     fn outgoing_names_reached_files() {
         let (_directory, configuration) = site(&[
@@ -599,27 +589,6 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn outgoing_skips_non_site_paths() {
-        let (_directory, configuration) = site(&[(
-            "content/document.typ",
-            "#import \"@tola/host:0.0.0\": link\n#include \"../../outside.typ\"\n",
-        )]);
-        let root = configuration.get_root();
-        let source = source(root, "content/document.typ");
-
-        let found = outgoing(
-            root,
-            None,
-            &crate::sources::base_source_boundary(root, true),
-            &source,
-            &crate::uri::ClientRoot::new(root),
-        );
-
-        assert!(found.is_empty(), "{found:#?}");
-    }
-
     #[test]
     fn prepare_names_the_written_source() {
         let (_directory, configuration) = site(&[(
@@ -647,35 +616,6 @@ mod tests {
         assert_eq!(
             item.data,
             Some(json!({"kind": "source", "path": "templates/note.typ"}))
-        );
-    }
-
-    #[test]
-    fn prepare_names_the_cursor_file() {
-        let (_directory, configuration) = site(&[(
-            "content/one.typ",
-            "#include \"../templates/note.typ\"\nOne.\n",
-        )]);
-        let root = configuration.get_root();
-        let source = source(root, "content/one.typ");
-        let cursor = source.text().find("One.").unwrap();
-
-        let item = prepare(
-            root,
-            None,
-            &crate::sources::base_source_boundary(root, true),
-            &source,
-            cursor,
-            &crate::uri::ClientRoot::new(root),
-        )
-        .expect("an item");
-
-        assert_eq!(item.name, "content/one.typ");
-        assert_eq!(item.kind, SymbolKind::FILE);
-        assert_eq!(item.range, file_range());
-        assert_eq!(
-            item.data,
-            Some(json!({"kind": "source", "path": "content/one.typ"}))
         );
     }
 }

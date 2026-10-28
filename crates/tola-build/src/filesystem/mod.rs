@@ -125,8 +125,8 @@ pub use write::atomic_write;
 
 mod fingerprint;
 pub(crate) use fingerprint::{
-    PathFingerprint, PathSnapshot, digest_file, entry_snapshot, path_fingerprint,
-    snapshot_fingerprint,
+    PathContents, PathFingerprint, digest_file, entries_fingerprint, path_contents,
+    path_fingerprint,
 };
 
 mod directory;

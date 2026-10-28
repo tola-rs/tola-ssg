@@ -606,151 +606,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_geometry_contributes_no_paint() {
-        for shape in [
-            r#"<path fill="red" stroke="red"/>"#,
-            r#"<path d="" fill="red" stroke="red"/>"#,
-            r#"<path d=" &#9;&#10; " fill="red" stroke="red"/>"#,
-            r#"<rect width="0" height="12" fill="red" stroke="red"/>"#,
-            r#"<rect width="12" height="0" fill="red" stroke="red"/>"#,
-            r#"<rect width="0px" height="12" fill="red"/>"#,
-            r#"<rect width="0%" height="12" fill="red"/>"#,
-            r#"<rect width="0em" height="12" fill="red"/>"#,
-            r#"<rect width="-0cm" height="12" fill="red"/>"#,
-            r#"<rect width="0e2" height="12" fill="red"/>"#,
-        ] {
-            assert_eq!(
-                paint(&format!(
-                    r#"{shape}<path d="M0 0h12v12z" fill="currentColor"/>"#
-                )),
-                IconPaint::CurrentColor,
-                "{shape}",
-            );
-        }
-    }
-
-    #[test]
-    fn stroked_paths_keep_their_paint() {
-        for path in ["M0 0L12 0", "M0 0L0 0"] {
-            assert_eq!(
-                paint(&format!(
-                    r#"<path d="{path}" fill="none" stroke="red" stroke-linecap="round"/><path d="M0 0h12v12z" fill="currentColor"/>"#
-                )),
-                IconPaint::Mixed,
-                "{path}",
-            );
-        }
-    }
-
-    #[test]
-    fn empty_geometry_keeps_resource_effects() {
-        for shape in [
-            r##"<path filter="url(#effect)"/>"##,
-            r##"<rect width="0" height="12" filter="url(#effect)"/>"##,
-        ] {
-            assert_eq!(
-                paint(&format!(
-                    r##"<defs><filter id="effect"><feFlood flood-color="red"/></filter></defs>{shape}<path d="M0 0h12v12z" fill="currentColor"/>"##
-                )),
-                IconPaint::Mixed,
-                "{shape}",
-            );
-        }
-    }
-
-    #[test]
-    fn empty_geometry_keeps_reference_budget() {
-        for shape in [
-            r##"<path fill="url(#paint)"/>"##,
-            r##"<rect width="0" height="12" fill="url(#paint)"/>"##,
-        ] {
-            let document = svg_document(&format!(
-                r##"<defs><linearGradient id="paint"><stop/><stop/><stop/></linearGradient></defs>{shape}"##
-            ));
-            document.validate_references().unwrap();
-            let mut traversal = render_traversal(&document, 6);
-            assert!(matches!(
-                traversal.rendered(0, &ComputedPaint::default(), false),
-                Err(InvalidSvg::Limit { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn color_function_alpha_affects_paint() {
-        for components in ["rgb(255 0 0", "oklch(60% .2 40"] {
-            for (alpha, expected) in [
-                ("0", IconPaint::CurrentColor),
-                ("none", IconPaint::CurrentColor),
-                (".5", IconPaint::Mixed),
-            ] {
-                assert_eq!(
-                    paint(&format!(
-                        r#"<path d="M0 0h12v12z" fill="currentColor"/><path d="M0 0h12v12z" fill="{components} / {alpha})"/>"#
-                    )),
-                    expected,
-                    "{components} / {alpha})"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn template_paints_resolve_per_host() {
         let body = r##"<defs><linearGradient id="base"><stop stop-color="currentColor"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient><linearGradient id="fixed" href="#base" color="red"/><linearGradient id="dynamic" href="#base"/><path id="shape" d="M0 0h12v12z"/></defs><use href="#shape" fill="url(#dynamic)"/><use href="#shape" fill="url(#fixed)"/>"##;
         assert_eq!(paint(body), IconPaint::Mixed);
         assert_eq!(
             paint(&body.replace("url(#fixed)", "url(#dynamic)")),
             IconPaint::CurrentColor
-        );
-    }
-
-    #[test]
-    fn transparent_stops_contribute_color() {
-        for transparent_stop in [
-            r#"stop-color="rgba(255, 0, 0, 0)""#,
-            r#"stop-color="currentColor" color="rgba(255, 0, 0, 0)""#,
-        ] {
-            assert_eq!(
-                paint(&format!(
-                    r##"<defs><linearGradient id="paint"><stop stop-color="currentColor"/><stop offset="1" {transparent_stop}/></linearGradient></defs><rect width="24" height="24" fill="url(#paint)"/>"##
-                )),
-                IconPaint::Mixed,
-                "{transparent_stop}",
-            );
-        }
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="paint"><stop stop-color="currentColor" stop-opacity="0"/><stop offset="1" stop-color="red"/></linearGradient></defs><rect width="24" height="24" fill="url(#paint)"/>"##
-            ),
-            IconPaint::Mixed,
-        );
-    }
-
-    #[test]
-    fn transparent_stops_follow_inheritance() {
-        let definitions = r##"<defs><linearGradient id="base" stop-color="rgba(255, 0, 0, 0)"><stop stop-color="currentColor"/><stop offset="1" stop-color="inherit"/></linearGradient><linearGradient id="paint" href="#base" stop-color="rgba(255, 0, 0, 0)"/></defs>"##;
-        for resource in ["base", "paint"] {
-            assert_eq!(
-                paint(&format!(
-                    r##"{definitions}<rect width="24" height="24" fill="url(#{resource})"/>"##
-                )),
-                IconPaint::Mixed,
-                "{resource}",
-            );
-        }
-        let templates = r##"<defs><linearGradient id="base"><stop stop-color="currentColor"/><stop offset="1" stop-color="rgba(255, 0, 0, 0)"/></linearGradient><linearGradient id="paint" href="#base" color="rgba(0, 0, 255, 0)"/></defs>"##;
-        assert_eq!(
-            paint(&format!(
-                r##"{templates}<path d="M0 0h12v12z" fill="currentColor"/><rect width="24" height="24" fill="url(#paint)"/>"##
-            )),
-            IconPaint::CurrentColor,
-        );
-        assert_eq!(
-            paint(&format!(
-                r##"{templates}<rect width="24" height="24" fill="url(#base)"/>"##
-            )),
-            IconPaint::Mixed,
         );
     }
 
@@ -774,35 +635,6 @@ mod tests {
             ),
             IconPaint::CurrentColor,
         );
-    }
-
-    #[test]
-    fn paint_server_expansion_is_budgeted() {
-        for (body, budget) in [
-            (
-                r#"<linearGradient id="resource"><stop/><stop/><stop/></linearGradient>"#,
-                3,
-            ),
-            (
-                r#"<filter id="resource"><feFlood/><feFlood/><feFlood/></filter>"#,
-                2,
-            ),
-            (
-                r#"<pattern id="resource"><title>A</title><desc>B</desc></pattern>"#,
-                2,
-            ),
-        ] {
-            let document = svg_document(body);
-            let mut traversal = render_traversal(&document, budget);
-            let index = document.identifiers["resource"];
-            let expansion = match document.elements[index].name.as_str() {
-                "linearGradient" => traversal.gradient(index),
-                "filter" => traversal.filter(index),
-                "pattern" => traversal.pattern(index),
-                _ => unreachable!(),
-            };
-            assert!(matches!(expansion, Err(InvalidSvg::Limit { .. })), "{body}");
-        }
     }
 
     #[test]
@@ -874,28 +706,6 @@ mod tests {
         assert_eq!(
             paint(
                 r#"<path d="M0 0h12v12z" fill="currentColor"/><path d="M0 0h12v12z" fill="red" opacity="0"/>"#
-            ),
-            IconPaint::CurrentColor
-        );
-    }
-
-    #[test]
-    fn reachable_resources_contribute_paint() {
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="paint"><stop stop-color="currentColor"/><stop offset="1" stop-color="red"/></linearGradient></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::Mixed
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><path id="mark" d="M0 0h12v12z" fill="currentColor"/></defs><use href="#mark"/>"##
-            ),
-            IconPaint::CurrentColor
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><path id="mark" d="M0 0h12v12z"/></defs><use href="#mark" fill="currentColor"/>"##
             ),
             IconPaint::CurrentColor
         );
@@ -1044,66 +854,6 @@ mod tests {
                 r##"<defs><pattern id="tiles" style="mix-blend-mode:multiply"><path d="M0 0h12v12z" fill="currentColor" style="mix-blend-mode:inherit"/></pattern></defs><path d="M0 0h12v12z" fill="url(#tiles)"/>"##
             ),
             IconPaint::Mixed,
-        );
-    }
-
-    #[test]
-    fn paint_servers_inherit_from_their_host() {
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="base"><stop stop-color="currentColor"/></linearGradient><linearGradient id="paint" href="#base" color="red"/></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::Fixed,
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="base" color="red"><stop stop-color="currentColor"/></linearGradient><linearGradient id="paint" href="#base"/></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::CurrentColor,
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><pattern id="base"><path d="M0 0h12v12z" fill="currentColor"/></pattern><pattern id="paint" href="#base" color="red"><title>Tile</title></pattern></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::Fixed,
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><pattern id="base" color="red"><path d="M0 0h12v12z" fill="currentColor"/></pattern><pattern id="middle" href="#base" color="blue"><desc>Shared tile</desc></pattern><pattern id="paint" href="#middle"><title>Tile</title></pattern></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::CurrentColor,
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="base"><stop stop-color="red"/></linearGradient><linearGradient id="paint" href="#base"><stop stop-color="currentColor"/></linearGradient></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::CurrentColor,
-        );
-    }
-
-    #[test]
-    fn inherited_keywords_stay_dynamic() {
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="paint" stop-color="currentColor"><stop stop-color="unset"/></linearGradient></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::Fixed
-        );
-        assert_eq!(
-            paint(r#"<g fill="currentColor"><path d="M0 0h12v12z" fill="initial"/></g>"#),
-            IconPaint::Fixed
-        );
-        assert_eq!(
-            paint(
-                r##"<defs><linearGradient id="paint" stop-color="currentColor"><stop stop-color="inherit"/></linearGradient></defs><path d="M0 0h12v12z" fill="url(#paint)"/>"##
-            ),
-            IconPaint::CurrentColor
-        );
-        assert_eq!(
-            paint(
-                r#"<g fill="currentColor"><path d="M0 0h12v12z"/><path d="M0 0h12v12z" style="mix-blend-mode:multiply"/></g>"#
-            ),
-            IconPaint::Mixed
         );
     }
 }

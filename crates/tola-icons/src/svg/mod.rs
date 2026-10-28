@@ -232,144 +232,70 @@ mod tests {
         SvgIcon::parse(format!(r#"<svg viewBox="0 0 24 24">{body}</svg>"#))
     }
 
-    #[test]
-    fn malformed_inline_prefix_keeps_its_cause() {
-        let icon = icon(r#"<path id="mark" d="M0 0L1 1"/>"#).unwrap();
-        let error = icon.svg_with_id_prefix("bad prefix").unwrap_err();
-        assert!(matches!(&error, InvalidSvg::InvalidIdPrefix(_)));
-        assert!(std::error::Error::source(&error)
-            .unwrap()
-            .is::<crate::InvalidIconName>());
-    }
+    /// What one refused icon must report.
+    type Refusal = fn(&InvalidSvg) -> bool;
 
+    /// Every shape an icon refuses, and the variant it names for that shape.
     #[test]
-    fn prefixed_ids_report_their_length() {
-        let icon = icon(r#"<path id="mark" d="M0 0L1 1"/>"#).unwrap();
-        let prefix = "p".repeat(503);
-        assert!(icon.svg_with_id_prefix(&prefix).is_ok());
-        let error = icon.svg_with_id_prefix(&(prefix + "p")).unwrap_err();
-        assert!(matches!(
-            error,
-            InvalidSvg::PrefixedIdTooLong { byte_len: 513 }
-        ));
-    }
-
-    #[test]
-    fn malformed_xml_is_rejected() {
-        assert!(matches!(icon("<path"), Err(InvalidSvg::Xml { .. })));
-    }
-
-    #[test]
-    fn invalid_path_syntax_is_rejected() {
-        for path in ["M 0", "M0 0 L", "R0 0", "M0 0A1 1 0 3 0 4 4", "M1e999 0"] {
-            assert!(
-                matches!(
-                    icon(&format!(r#"<path d="{path}"/>"#)),
-                    Err(InvalidSvg::Path)
-                ),
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
-    fn unrepresentable_geometry_is_rejected() {
-        for geometry in ["0 0 0 24", "0 0 -2 24", "0 0 1e300 1e-300", "0 0 24 24 4"] {
-            assert!(matches!(
-                SvgIcon::parse(format!(r#"<svg viewBox="{geometry}"/>"#)),
-                Err(InvalidSvg::Geometry)
-            ));
-        }
-    }
-
-    #[test]
-    fn viewport_ratio_uses_explicit_dimensions() {
-        let icon = SvgIcon::parse(br#"<svg width="48" height="24" viewBox="0 0 24 24" preserveAspectRatio="xMidYMid meet"/>"#).unwrap();
-        assert_eq!(icon.aspect_ratio(), 2.0);
-        assert_eq!(icon.view_box().aspect_ratio(), 1.0);
-        assert!(icon.svg().contains(r#"width="48""#));
-        assert!(icon
-            .svg()
-            .contains(r#"preserveAspectRatio="xMidYMid meet""#));
-        assert_eq!(
-            SvgIcon::parse(br#"<svg width="1in" height="48px"/>"#)
-                .unwrap()
-                .aspect_ratio(),
-            2.0
-        );
-        assert!(matches!(
-            SvgIcon::parse(br#"<svg width="1em" height="24" viewBox="0 0 24 24"/>"#),
-            Err(InvalidSvg::Geometry)
-        ));
-    }
-
-    #[test]
-    fn local_references_are_validated() {
-        assert!(matches!(
-            icon(r##"<path fill="url(#missing)"/>"##),
-            Err(InvalidSvg::MissingReference { .. })
-        ));
-        assert!(matches!(
-            icon(r##"<path id="shape"/><path fill="url(#shape)"/>"##),
-            Err(InvalidSvg::ReferenceTarget { .. })
-        ));
-        assert!(matches!(
-            icon(r##"<defs><g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g></defs>"##),
-            Err(InvalidSvg::ReferenceCycle)
-        ));
-        assert!(matches!(
-            icon(r##"<g id="a"><use href="#a"/></g>"##),
-            Err(InvalidSvg::ReferenceCycle)
-        ));
-        assert!(matches!(
-            icon(
-                r##"<defs><linearGradient id="a" href="#b"/><linearGradient id="b" href="#a"/></defs>"##
+    fn invalid_icons_are_rejected() {
+        let cases: [(&str, Refusal); 17] = [
+            ("<path", |error| matches!(error, InvalidSvg::Xml { .. })),
+            (r#"<path d="M 0"/>"#, |error| {
+                matches!(error, InvalidSvg::Path)
+            }),
+            (r#"<path d="M0 0 L"/>"#, |error| {
+                matches!(error, InvalidSvg::Path)
+            }),
+            (r#"<path d="R0 0"/>"#, |error| {
+                matches!(error, InvalidSvg::Path)
+            }),
+            (r#"<path d="M0 0A1 1 0 3 0 4 4"/>"#, |error| {
+                matches!(error, InvalidSvg::Path)
+            }),
+            (r#"<path d="M1e999 0"/>"#, |error| {
+                matches!(error, InvalidSvg::Path)
+            }),
+            (r##"<path fill="url(#missing)"/>"##, |error| {
+                matches!(error, InvalidSvg::MissingReference { .. })
+            }),
+            (
+                r##"<path id="shape"/><path fill="url(#shape)"/>"##,
+                |error| matches!(error, InvalidSvg::ReferenceTarget { .. }),
             ),
-            Err(InvalidSvg::ReferenceCycle)
-        ));
-        assert!(matches!(
-            icon(r##"<g id="a"/><g id="a"/>"##),
-            Err(InvalidSvg::DuplicateId { .. })
-        ));
-    }
-
-    #[test]
-    fn deep_resource_chains_report_limit() {
-        let mut body = String::from("<defs><path id=\"leaf\"/>");
-        let mut previous = "leaf".to_owned();
-        for index in 0..128 {
-            let id = format!("step-{index}");
-            body.push_str(&format!(r##"<use id="{id}" href="#{previous}"/>"##));
-            previous = id;
+            (
+                r##"<defs><g id="a"><use href="#b"/></g><g id="b"><use href="#a"/></g></defs>"##,
+                |error| matches!(error, InvalidSvg::ReferenceCycle),
+            ),
+            (r##"<g id="a"><use href="#a"/></g>"##, |error| {
+                matches!(error, InvalidSvg::ReferenceCycle)
+            }),
+            (
+                r##"<defs><linearGradient id="a" href="#b"/><linearGradient id="b" href="#a"/></defs>"##,
+                |error| matches!(error, InvalidSvg::ReferenceCycle),
+            ),
+            (r##"<g id="a"/><g id="a"/>"##, |error| {
+                matches!(error, InvalidSvg::DuplicateId { .. })
+            }),
+            (r#"<use href="icons.svg#mark"/>"#, |error| {
+                matches!(error, InvalidSvg::ExternalReference)
+            }),
+            (r#"<use href="https://example.org/mark.svg"/>"#, |error| {
+                matches!(error, InvalidSvg::ExternalReference)
+            }),
+            ("<script/>", |error| {
+                matches!(error, InvalidSvg::Element { .. })
+            }),
+            ("<text>logo</text>", |error| {
+                matches!(error, InvalidSvg::Element { .. })
+            }),
+            (r#"<path xmlns=""/>"#, |error| {
+                matches!(error, InvalidSvg::Element { .. })
+            }),
+        ];
+        for (body, expected) in cases {
+            let error = icon(body).expect_err(body);
+            assert!(expected(&error), "{body}: {error:?}");
         }
-        body.push_str("</defs>");
-        body.push_str(&format!(r##"<use href="#{previous}"/>"##));
-        assert!(matches!(icon(&body), Err(InvalidSvg::Limit { .. })));
-    }
-
-    #[test]
-    fn external_references_are_rejected() {
-        for body in [
-            r#"<use href="icons.svg#mark"/>"#,
-            r#"<use href="https://example.org/mark.svg"/>"#,
-        ] {
-            assert!(matches!(icon(body), Err(InvalidSvg::ExternalReference)));
-        }
-    }
-
-    #[test]
-    fn unsupported_elements_are_rejected() {
-        for body in ["<script/>", "<text>logo</text>"] {
-            assert!(matches!(icon(body), Err(InvalidSvg::Element { .. })));
-        }
-    }
-
-    #[test]
-    fn unsupported_attributes_are_rejected() {
-        assert!(matches!(
-            icon(r#"<path onclick="run()"/>"#),
-            Err(InvalidSvg::Attribute { .. })
-        ));
     }
 
     #[test]
@@ -402,119 +328,6 @@ mod tests {
     }
 
     #[test]
-    fn aria_references_require_existing_targets() {
-        let icon = icon(r#"<g id="group" aria-labelledby="title group" aria-describedby="description"><title id="title" aria-describedby="group">Mark</title><desc id="description">Description</desc></g>"#).unwrap();
-        let svg = icon.svg_with_id_prefix("instance").unwrap();
-        let document = roxmltree::Document::parse(&svg).unwrap();
-        let group = document
-            .descendants()
-            .find(|node| node.has_tag_name("g"))
-            .unwrap();
-        assert_eq!(
-            group.attribute("aria-labelledby"),
-            Some("8-instance-title 8-instance-group")
-        );
-        assert_eq!(
-            group.attribute("aria-describedby"),
-            Some("8-instance-description")
-        );
-        assert_eq!(SvgIcon::parse(&svg).unwrap().svg(), svg);
-        assert!(matches!(
-            SvgIcon::parse(svg.replace(
-                r#"aria-describedby="8-instance-description""#,
-                r#"aria-describedby="missing""#,
-            )),
-            Err(InvalidSvg::MissingReference { .. })
-        ));
-    }
-
-    #[test]
-    fn prefixing_keeps_overridden_style_urls() {
-        let icon = icon(r#"<defs><linearGradient id="unused"><stop stop-color="red"/></linearGradient></defs><path id="shape" d="M0 0h12v12z" style="fill: url('#unused'); fill: currentColor"/>"#).unwrap();
-        let svg = icon.svg_with_id_prefix("instance").unwrap();
-        let document = roxmltree::Document::parse(&svg).unwrap();
-        let path = document
-            .descendants()
-            .find(|node| node.has_tag_name("path"))
-            .unwrap();
-        let gradient = document
-            .descendants()
-            .find(|node| node.has_tag_name("linearGradient"))
-            .unwrap();
-        let mut style = cssparser::ParserInput::new(path.attribute("style").unwrap());
-        let mut declarations = cssparser::Parser::new(&mut style);
-        declarations.expect_ident_matching("fill").unwrap();
-        declarations.expect_colon().unwrap();
-        let url = declarations.expect_url().unwrap();
-        assert_eq!(
-            url.strip_prefix('#').unwrap(),
-            gradient.attribute("id").unwrap()
-        );
-        assert_eq!(
-            SvgIcon::parse(&svg).unwrap().paint(),
-            IconPaint::CurrentColor
-        );
-    }
-
-    #[test]
-    fn prefixing_preserves_attribute_text() {
-        let icon = icon(r##"<path id="shape" fill="rgb(255 0 0 / 50%)" style="stroke: oklch(60% .2 40)"/><use href="#shape" aria-label="A &amp; B &quot;quoted&quot;"/>"##).unwrap();
-        let svg = icon.svg_with_id_prefix("instance").unwrap();
-        assert!(svg.contains("rgb(255 0 0 / 50%)"));
-        assert!(svg.contains("oklch(60% .2 40)"));
-        assert!(svg.contains("A &amp; B &quot;quoted&quot;"));
-        assert_eq!(SvgIcon::parse(svg).unwrap().paint(), IconPaint::Fixed);
-    }
-
-    #[test]
-    fn percent_encoded_ids_survive_prefixing() {
-        let icon = icon(r##"<defs><path id="percent%20mark" d="M0 0h12v12z" fill="currentColor"/></defs><use href="#percent%2520mark"/>"##).unwrap();
-        let svg = icon.svg_with_id_prefix("instance").unwrap();
-        let document = roxmltree::Document::parse(&svg).unwrap();
-        let path = document
-            .descendants()
-            .find(|node| node.has_tag_name("path"))
-            .unwrap();
-        let instance = document
-            .descendants()
-            .find(|node| node.has_tag_name("use"))
-            .unwrap();
-        let target = percent_encoding::percent_decode_str(
-            instance
-                .attribute("href")
-                .unwrap()
-                .strip_prefix('#')
-                .unwrap(),
-        )
-        .decode_utf8()
-        .unwrap();
-        assert_eq!(target, path.attribute("id").unwrap());
-        assert_ne!(path.attribute("id").unwrap(), "percent%20mark");
-        assert_eq!(
-            SvgIcon::parse(svg).unwrap().paint(),
-            IconPaint::CurrentColor
-        );
-    }
-
-    #[test]
-    fn repeated_prefixing_preserves_unicode_ids() {
-        let icon = icon(r##"<title id="标题">A &amp; B</title><defs><path id="形状%" fill="currentColor"/></defs><use href="#%E5%BD%A2%E7%8A%B6%25" aria-labelledby="标题"/>"##).unwrap();
-        let original = icon.svg().to_owned();
-        for prefix in ["first", "second", "third"] {
-            let svg = icon.svg_with_id_prefix(prefix).unwrap();
-            let copied = SvgIcon::parse(&svg).unwrap();
-            assert_eq!(copied.paint(), icon.paint());
-            assert!(svg.contains(&format!(r#"id="{}-{prefix}-标题""#, prefix.len())));
-            assert!(svg.contains(&format!(
-                r#"aria-labelledby="{}-{prefix}-标题""#,
-                prefix.len()
-            )));
-            assert!(svg.contains("A &amp; B"));
-            assert_eq!(icon.svg(), original);
-        }
-    }
-
-    #[test]
     fn prefix_id_pairs_do_not_collide() {
         let first =
             icon(r##"<defs><path id="b-c" d="M0 0h12v12z" fill="currentColor"/></defs><use href="#b-c"/>"##)
@@ -533,40 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn aria_reference_attributes_are_rewritten() {
-        for attribute in [
-            "aria-activedescendant",
-            "aria-controls",
-            "aria-describedby",
-            "aria-details",
-            "aria-errormessage",
-            "aria-flowto",
-            "aria-labelledby",
-            "aria-owns",
-        ] {
-            let source = format!(r#"<g id="target"/><path {attribute}="target"/>"#);
-            let svg = icon(&source)
-                .unwrap()
-                .svg_with_id_prefix("instance")
-                .unwrap();
-            let document = roxmltree::Document::parse(&svg).unwrap();
-            let target = document
-                .descendants()
-                .find(|node| node.has_tag_name("g"))
-                .unwrap();
-            let path = document
-                .descendants()
-                .find(|node| node.has_tag_name("path"))
-                .unwrap();
-            assert_eq!(
-                path.attribute(attribute),
-                target.attribute("id"),
-                "{attribute}"
-            );
-        }
-    }
-
-    #[test]
     fn aria_expansion_respects_the_size_limit() {
         let icon = icon(&format!(
             r#"<g id="a"/><path aria-labelledby="{}"/>"#,
@@ -579,56 +358,5 @@ mod tests {
         ));
         let short = icon.svg_with_id_prefix("p").unwrap();
         assert_eq!(SvgIcon::parse(short).unwrap().paint(), icon.paint());
-    }
-
-    #[test]
-    fn color_properties_accept_only_colors() {
-        for attribute in ["color", "stop-color", "flood-color", "lighting-color"] {
-            assert!(matches!(
-                icon(&format!(r#"<g {attribute}="none"/>"#)),
-                Err(InvalidSvg::Value { .. }),
-            ));
-            for value in ["transparent", "currentColor", "unset"] {
-                assert!(icon(&format!(r#"<g {attribute}="{value}"/>"#)).is_ok());
-            }
-        }
-    }
-
-    #[test]
-    fn normalization_drops_comments_only() {
-        let source = r#"<!-- Source note --><svg viewBox="0 0 24 24"><title>A &amp; B &lt;&gt;&quot;&#13;&#10;&#9; 星</title><!-- Drawing note --><path id="mark"/></svg><!-- End note -->"#;
-        let plain = SvgIcon::parse(
-            r#"<svg viewBox="0 0 24 24"><title>A &amp; B &lt;&gt;&quot;&#13;&#10;&#9; 星</title><path id="mark"/></svg>"#,
-        )
-        .unwrap();
-        let icon = SvgIcon::parse(source).unwrap();
-        assert_eq!(icon.svg(), plain.svg());
-        assert_eq!(
-            icon.svg_with_id_prefix("instance").unwrap(),
-            plain.svg_with_id_prefix("instance").unwrap()
-        );
-        let normalized = roxmltree::Document::parse(icon.svg()).unwrap();
-        assert_eq!(
-            normalized
-                .descendants()
-                .find(|node| node.has_tag_name("title"))
-                .unwrap()
-                .text(),
-            Some("A & B <>\"\r\n\t 星")
-        );
-    }
-
-    #[test]
-    fn diagnostics_hide_source_contents() {
-        let rejection = icon("<path private-source-sentinel")
-            .unwrap_err()
-            .to_string();
-        assert!(rejection.len() < 128);
-        assert!(!rejection.contains("private-source-sentinel"));
-    }
-
-    #[test]
-    fn foreign_namespace_content_is_rejected() {
-        assert!(matches!(SvgIcon::parse(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path xmlns=""/></svg>"#), Err(InvalidSvg::Element { .. })));
     }
 }

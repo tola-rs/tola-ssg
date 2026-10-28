@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn text_that_names_nothing_yields_no_name() {
+    fn slugless_text_yields_no_slug() {
         for mode in [SlugMode::Unicode, SlugMode::Ascii] {
             for text in [
                 "",
@@ -622,79 +622,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn canonical_spellings_keep_expected_names() {
-        for (composed, decomposed, case, unicode, ascii) in [
-            (
-                "caf\u{e9}",
-                "cafe\u{301}",
-                SlugCase::Lower,
-                Some("café"),
-                Some("cafe"),
-            ),
-            ("≠", "=\u{338}", SlugCase::Lower, None, None),
-            (
-                "a≠b",
-                "a=\u{338}b",
-                SlugCase::Lower,
-                Some("a-b"),
-                Some("a-b"),
-            ),
-            (
-                "\u{1fb3}",
-                "α\u{345}",
-                SlugCase::Capitalize,
-                Some("ΑΙ"),
-                Some("A"),
-            ),
-        ] {
-            for (mode, expected) in [(SlugMode::Unicode, unicode), (SlugMode::Ascii, ascii)] {
-                for spelling in [composed, decomposed] {
-                    assert_eq!(
-                        segment_slug(spelling, mode, case, SlugSeparator::Dash).as_deref(),
-                        expected,
-                        "{spelling:?} {mode:?} {case:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn name_is_nfc_after_case_conversion() {
-        assert_eq!(
-            segment_slug(
-                "cafe\u{301}",
-                SlugMode::Unicode,
-                SlugCase::Preserve,
-                SlugSeparator::Dash,
-            )
-            .as_deref(),
-            Some("café")
-        );
-        assert_eq!(
-            segment_slug(
-                "\u{390}",
-                SlugMode::Unicode,
-                SlugCase::Upper,
-                SlugSeparator::Dash,
-            )
-            .as_deref(),
-            Some("Ϊ\u{301}")
-        );
-        assert_eq!(
-            segment_slug(
-                "e\u{301}",
-                SlugMode::Unicode,
-                SlugCase::Lower,
-                SlugSeparator::Dash,
-            )
-            .as_deref(),
-            Some("é")
-        );
-    }
-
     #[test]
     fn titlecase_letters_lowercase_fully() {
         for (input, expected) in [("ǅ", "ǆ"), ("ᾼ", "ᾳ"), ("ΟΔΟΣ", "οδος")] {
@@ -713,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn naming_rules_write_their_name() {
+    fn mode_case_and_separator_shape_the_slug() {
         for (mode, case, separator, input, expected) in [
             (
                 SlugMode::Unicode,

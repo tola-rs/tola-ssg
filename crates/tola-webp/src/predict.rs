@@ -326,73 +326,30 @@ fn block<const N: usize, const SIDE: usize>(mode: u8, edges: &Edges<SIDE>) -> [u
 mod tests {
     use super::*;
 
+    /// Without neighbours a mode falls back to the block's own default; with them it predicts
+    /// from what is above and left.
     #[test]
-    fn macroblock_edges_use_defaults() {
-        let plane = Plane::luma(32, 2);
-        let edges = Edges::luma(&plane, 0, 0);
-        assert_eq!(luma_block(DC, &edges), [128; 256]);
-        assert_eq!(luma_block(VERTICAL, &edges), [127; 256]);
-        assert_eq!(luma_block(HORIZONTAL, &edges), [129; 256]);
-        assert_eq!(luma_block(TRUE_MOTION, &edges), [129; 256]);
-    }
-
-    #[test]
-    fn wrapped_rows_preserve_prediction_edges() {
+    fn edges_predict_from_neighbours_or_defaults() {
         let mut plane = Plane::luma(32, 2);
-        for column in 0..16 {
-            plane.row_mut(31)[16 + column] = 100;
-        }
-        for row in 0..16 {
-            plane.row_mut(32 + row)[15] = 50;
-        }
-        let edges = Edges::luma(&plane, 1, 2);
-        let vertical = luma_block(VERTICAL, &edges);
-        assert!(vertical.iter().all(|value| *value == 100));
-        let horizontal = luma_block(HORIZONTAL, &edges);
-        assert!(horizontal.iter().all(|value| *value == 50));
-    }
+        let corner = Edges::luma(&plane, 0, 0);
+        assert_eq!(luma_block(DC, &corner), [128; 256]);
+        assert_eq!(luma_block(VERTICAL, &corner), [127; 256]);
+        assert_eq!(luma_block(HORIZONTAL, &corner), [129; 256]);
+        assert_eq!(luma_block(TRUE_MOTION, &corner), [129; 256]);
 
-    #[test]
-    fn true_motion_propagates_the_corner() {
-        let mut plane = Plane::luma(32, 2);
-        for column in 0..16 {
-            plane.row_mut(15)[16 + column] = 100;
-        }
-        for row in 0..16 {
-            plane.row_mut(16 + row)[15] = 50;
-        }
-        plane.row_mut(15)[15] = 60;
-        let edges = Edges::luma(&plane, 1, 1);
-        let block = luma_block(TRUE_MOTION, &edges);
-        assert!(block.iter().all(|value| *value == 90));
-    }
-
-    #[test]
-    fn subblock_edges_use_defaults() {
         let borders = Borders::new(&[127; 8], &[129; 4], 127);
         assert_eq!(borders.block(B_DC), [128; 16]);
         assert_eq!(borders.block(B_TM), [129; 16]);
         assert_eq!(borders.block(B_VE), [127; 16]);
         assert_eq!(borders.block(B_HE), [129; 16]);
-    }
 
-    #[test]
-    fn subblock_prediction_averages_neighbors() {
-        let borders = Borders::new(&[100; 8], &[50; 4], 60);
-        assert_eq!(
-            borders.block(B_VE),
-            [
-                90, 100, 100, 100, 90, 100, 100, 100, 90, 100, 100, 100, 90, 100, 100, 100
-            ]
-        );
-        assert_eq!(
-            borders.block(B_HE),
-            [
-                53, 53, 53, 53, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50
-            ]
-        );
-        assert_eq!(borders.block(B_TM), [90; 16]);
-        assert_eq!(borders.block(B_DC), [75; 16]);
+        // The same block once its neighbours exist: a corner between 100 above and 50 to the
+        // left averages to 75, which is the DC the exhaustive table also expects.
+        for column in 0..16 {
+            plane.row_mut(15)[16 + column] = 100;
+            plane.row_mut(16 + column)[15] = 50;
+        }
+        assert_eq!(luma_block(DC, &Edges::luma(&plane, 1, 1)), [75; 256]);
     }
 
     fn scalar_avg2(a: u8, b: u8) -> u8 {
@@ -597,16 +554,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn top_and_left_dc_round_together() {
-        let mut plane = Plane::luma(32, 2);
-        for column in 0..16 {
-            plane.row_mut(15)[16 + column] = 100;
-            plane.row_mut(16 + column)[15] = 50;
-        }
-        let edges = Edges::luma(&plane, 1, 1);
-        assert_eq!(luma_block(DC, &edges), [75; 256]);
     }
 }

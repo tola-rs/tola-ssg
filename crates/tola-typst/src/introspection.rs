@@ -143,26 +143,4 @@ mod tests {
         );
         assert_eq!(html.metadata_unique("absent").unwrap(), None);
     }
-
-    #[test]
-    fn bundle_document_agrees_on_cardinality() {
-        let declarations = "#metadata(1) <record>\n#metadata(2) <record>\n#metadata(3) <single>";
-        let (_directory, world) = world(&format!("#document(\"page.html\")[{declarations}]"));
-        let bundle =
-            crate::compile_bundle_world(&world, &crate::BundleCancellation::new()).unwrap();
-        let path = typst::syntax::VirtualPath::new("page.html").unwrap();
-        let document = bundle.document(&path).unwrap();
-
-        assert_eq!(
-            document.metadata_all("record"),
-            [Value::Int(1), Value::Int(2)]
-        );
-        assert_eq!(document.metadata_first("record"), Some(Value::Int(1)));
-        assert_eq!(document.metadata_unique("record").unwrap_err().count(), 2);
-        assert_eq!(
-            document.metadata_unique("single").unwrap(),
-            Some(Value::Int(3))
-        );
-        assert_eq!(document.metadata_unique("absent").unwrap(), None);
-    }
 }

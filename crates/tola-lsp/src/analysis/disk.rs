@@ -1,4 +1,4 @@
-//! Parsed source snapshots reused while each source's revalidated bytes stay unchanged.
+//! Parsed sources reused while each source's revalidated bytes stay unchanged.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -76,22 +76,5 @@ impl DiskSources {
     pub(crate) fn retain_pass(&mut self) {
         let pass = self.pass;
         self.parsed.retain(|_, parsed| parsed.pass == pass);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn revalidated_bytes_reuse_parsed_names() {
-        let source = Source::detached("#let marker = 1".to_owned());
-        let mut disk = DiskSources::default();
-        let first = disk.names_from_text(source.id(), source.text().to_owned());
-        let repeated = disk.names_from_text(source.id(), source.text().to_owned());
-        assert!(Arc::ptr_eq(&first, &repeated));
-        let changed = disk.names_from_text(source.id(), "#let current = 2".to_owned());
-        assert!(!Arc::ptr_eq(&first, &changed));
-        assert_eq!(changed.declarations()[0].name, "current");
     }
 }

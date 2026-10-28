@@ -625,12 +625,8 @@ fn response_media_type(format: ImageFormat) -> ResponseMediaType {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::fs;
     use std::io::Cursor;
-    use tola_image::{OutputFormat, ResizeFilter, ResizeOperation, ResizeOptions};
-    use typst::foundations::PathOrStr;
-    use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
     use super::*;
     use crate::build::{
@@ -668,42 +664,6 @@ mod tests {
             ),
         )
         .unwrap();
-    }
-
-    /// One published derivative's encoded bytes, selected by file extension.
-    fn derivative_bytes(build: &crate::build::SiteBuild, extension: &str) -> Vec<u8> {
-        let derivative = derivative_paths(build)
-            .into_iter()
-            .find(|path| path.ends_with(extension))
-            .unwrap_or_else(|| panic!("the build published a {extension} derivative"));
-        build
-            .graph()
-            .outputs()
-            .iter()
-            .find(|output| output.path().as_str() == derivative)
-            .expect("the build published the derivative")
-            .bytes()
-            .to_vec()
-    }
-
-    fn recipe(
-        metadata: &ImageMetadata,
-        width: u32,
-        height: u32,
-        format: OutputFormat,
-    ) -> ImageRecipe {
-        ImageRecipe::resolve(
-            metadata,
-            ResizeOptions {
-                width: Some(width),
-                height: Some(height),
-                operation: ResizeOperation::Scale,
-                format,
-                filter: ResizeFilter::Triangle,
-                ..ResizeOptions::default()
-            },
-        )
-        .unwrap()
     }
 
     /// Keep an encoded PNG's structure while removing its pixel data, so reading the image
@@ -836,21 +796,6 @@ mod tests {
             .collect()
     }
 
-    /// Every derivative's width and first pixel, decoded, as a set.
-    fn rendered_derivatives(
-        build: &crate::build::SiteBuild,
-    ) -> std::collections::BTreeSet<(u32, [u8; 4])> {
-        derivative_outputs(build)
-            .iter()
-            .map(|output| {
-                let image = ::image::load_from_memory(output.bytes())
-                    .unwrap()
-                    .to_rgba8();
-                (image.width(), image.get_pixel(0, 0).0)
-            })
-            .collect()
-    }
-
     /// The sole diagnostic a production build fails with.
     fn only_diagnostic(site_config: &OwnedSiteConfig) -> crate::diagnostic::Diagnostic {
         let error = match crate::build::build_site(&site_config.config, BuildMode::Production) {
@@ -875,10 +820,10 @@ mod tests {
         std::str::from_utf8(page.bytes()).unwrap()
     }
 
-    /// One `image-srcset` call publishes one derivative per distinct width, and its `srcset` names
-    /// them in ascending order.
+    /// `image-srcset` publishes one derivative per distinct width and names each in its `srcset`;
+    /// a width that cannot be a pixel count fails the build.
     #[test]
-    fn image_srcset_publishes_each_width_once() {
+    fn srcset_publishes_each_width_once() {
         let site_config = config_with_program(
             r#"#import "@tola/image:0.0.0": image-srcset
 #let photo = image-srcset("photo.png", widths: (4, 2, 4))
@@ -902,22 +847,21 @@ mod tests {
         let page = page_text(&built, "index.html");
         assert_eq!(page.matches(" 2w").count(), 1, "{page}");
         assert_eq!(page.matches(" 4w").count(), 1, "{page}");
-    }
 
-    /// A width that cannot be a pixel count fails the build, and the diagnostic names `widths`.
-    #[test]
-    fn image_srcset_reports_impossible_width() {
-        let site_config = config_with_program(
+        let impossible = config_with_program(
             r#"#import "@tola/image:0.0.0": image-srcset
 #let photo = image-srcset("photo.png", widths: (4, 0))
 #document("index.html")[#html.img(src: photo.url, alt: "Photo")]"#,
         );
         png(
-            &site_config.config.get_root().join("photo.png"),
+            &impossible.config.get_root().join("photo.png"),
             [30, 60, 90],
         );
-        let diagnostic = only_diagnostic(&site_config);
-        assert!(diagnostic.message.contains("widths"), "{diagnostic:#?}");
+        let diagnostic = only_diagnostic(&impossible);
+        assert!(
+            diagnostic.message.contains("widths"),
+            "the failure names the option: {diagnostic:#?}"
+        );
     }
 
     /// The renderer writes the attributes an `<img>` needs, and the page carries its own values.
@@ -970,294 +914,55 @@ mod tests {
         assert!(!page.contains("sizes="), "{page}");
     }
 
-    /// An attribute the renderer owns is refused, and the failure names the key.
+    /// A request the image package refuses fails the build, and the failure names what to change.
     #[test]
-    fn img_refuses_owned_attribute() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": img
+    fn refused_image_requests_name_the_reason() {
+        for (program, expected) in [
+            (
+                r#"#import "@tola/image:0.0.0": img
 #document("index.html")[#img("photo.png", attrs: (src: "photo.png"))]"#,
-        );
-        png(
-            &site_config.config.get_root().join("photo.png"),
-            [30, 60, 90],
-        );
-        let diagnostic = only_diagnostic(&site_config);
-        assert!(diagnostic.message.contains("src"), "{diagnostic:#?}");
-    }
-
-    /// The renderer and the data export share their encoding defaults, so one image yields one
-    /// derivative whichever entry point requested it.
-    #[test]
-    fn img_and_image_srcset_share_their_derivatives() {
-        let renderer = config_with_program(
-            r#"#import "@tola/image:0.0.0": img
-#document("index.html")[#img("photo.png", widths: (2, 4), alt: "Photo")]"#,
-        );
-        png(&renderer.config.get_root().join("photo.png"), [30, 60, 90]);
-        let data = config_with_program(
-            r#"#import "@tola/image:0.0.0": image-srcset
-#let photo = image-srcset("photo.png", widths: (2, 4))
-#document("index.html")[#html.img(src: photo.url, alt: "Photo")]"#,
-        );
-        png(&data.config.get_root().join("photo.png"), [30, 60, 90]);
-        assert_eq!(
-            derivative_paths(&cold_build(Arc::new(renderer.config))),
-            derivative_paths(&cold_build(Arc::new(data.config)))
-        );
-    }
-
-    /// Both JPEG spellings name one format, so they share one derivative.
-    #[test]
-    fn jpeg_spelling_shares_one_derivative() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
-#let jpg = resize-image("photo.png", width: 4, op: "fit-width", format: "jpg")
-#let jpeg = resize-image("photo.png", width: 4, op: "fit-width", format: "jpeg")
-#assert.eq(jpg.url, jpeg.url)
-#document("index.html")[#html.img(src: jpg.url, alt: "JPG") #html.img(src: jpeg.url, alt: "JPEG")]"#,
-        );
-        png(
-            &site_config.config.get_root().join("photo.png"),
-            [30, 60, 90],
-        );
-        let derivatives = derivative_paths(&cold_build(Arc::new(site_config.config.clone())));
-        let [derivative] = derivatives.as_slice() else {
-            panic!("expected one derivative: {derivatives:#?}")
-        };
-        assert!(derivative.ends_with(".jpg"), "{derivative}");
-    }
-
-    /// A raster passed through `read()` publishes the same derivative as its file path.
-    #[test]
-    fn raster_bytes_source_matches_file_source() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
-#let from_file = resize-image("photo.png", width: 4, op: "fit-width", format: "png")
-#let from_bytes = resize-image(read("photo.png", encoding: none), width: 4, op: "fit-width", format: "png")
-#assert.eq(from_file.url, from_bytes.url)
-#assert.eq(from_file.width, from_bytes.width)
-#document("index.html")[#html.img(src: from_bytes.url, alt: "Photo")]"#,
-        );
-        png(
-            &site_config.config.get_root().join("photo.png"),
-            [30, 60, 90],
-        );
-        let derivatives = derivative_paths(&cold_build(Arc::new(site_config.config.clone())));
-        assert!(!derivatives.is_empty(), "the build published no derivative");
-        // Both calls request the same derivative: one output path, recorded twice.
-        assert!(
-            derivatives
-                .iter()
-                .all(|derivative| derivative == &derivatives[0]),
-            "{derivatives:#?}"
-        );
-        assert!(derivatives[0].ends_with(".png"), "{derivatives:?}");
-    }
-
-    /// An SVG passed as bytes publishes the same raster derivative as an SVG file.
-    #[test]
-    fn svg_bytes_source_publishes_raster_derivative() {
-        let site_config = config_with_program(
-            r##"#import "@tola/image:0.0.0": resize-image
-#let resized = resize-image(bytes("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"4\"><rect width=\"8\" height=\"4\" fill=\"#ff0000\"/></svg>"), width: 4, op: "fit-width", format: "png")
-#assert.eq(resized.width, 4)
-#assert.eq(resized.height, 2)
-#document("index.html")[#html.img(src: resized.url, width: resized.width, height: resized.height, alt: "Logo")]"##,
-        );
-        let decoded = ::image::load_from_memory(&derivative_bytes(
-            &cold_build(Arc::new(site_config.config.clone())),
-            ".png",
-        ))
-        .unwrap()
-        .to_rgba8();
-        assert_eq!(decoded.dimensions(), (4, 2));
-        let pixel = decoded.get_pixel(0, 0);
-        assert!(
-            pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60,
-            "{pixel:?}"
-        );
-    }
-
-    /// An SVG source publishes a raster derivative at the requested size.
-    #[test]
-    fn svg_source_publishes_raster_derivative() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
-#let resized = resize-image("logo.svg", width: 4, op: "fit-width", format: "png")
-#assert.eq(resized.width, 4)
-#assert.eq(resized.height, 2)
-#document("index.html")[#html.img(src: resized.url, width: resized.width, height: resized.height, alt: "Logo")]"#,
-        );
-        svg(
-            &site_config.config.get_root().join("logo.svg"),
-            8,
-            4,
-            r##"<rect width="8" height="4" fill="#ff0000"/>"##,
-        );
-        let decoded = ::image::load_from_memory(&derivative_bytes(
-            &cold_build(Arc::new(site_config.config.clone())),
-            ".png",
-        ))
-        .unwrap()
-        .to_rgba8();
-        assert_eq!(decoded.dimensions(), (4, 2));
-        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 255]);
-    }
-
-    /// An SVG's transparent areas survive PNG encoding.
-    #[test]
-    fn svg_source_preserves_transparency() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
-#let resized = resize-image("edge.svg", width: 8, height: 4, op: "scale", format: "png")
-#document("index.html")[#html.img(src: resized.url, alt: "Edge")]"#,
-        );
-        svg(
-            &site_config.config.get_root().join("edge.svg"),
-            8,
-            4,
-            r##"<rect width="4" height="4" fill="#ff0000"/>"##,
-        );
-        let decoded = ::image::load_from_memory(&derivative_bytes(
-            &cold_build(Arc::new(site_config.config.clone())),
-            ".png",
-        ))
-        .unwrap()
-        .to_rgba8();
-        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 255]);
-        assert_eq!(decoded.get_pixel(7, 0).0[3], 0);
-    }
-
-    /// JPEG encoding flattens an SVG's transparency onto the requested background.
-    #[test]
-    fn svg_source_flattens_transparency_for_jpeg() {
-        let site_config = config_with_program(
-            r##"#import "@tola/image:0.0.0": resize-image
-#let resized = resize-image("edge.svg", width: 8, height: 4, op: "scale", format: "jpg", background: rgb("#ffffff"))
-#document("index.html")[#html.img(src: resized.url, alt: "Edge")]"##,
-        );
-        svg(
-            &site_config.config.get_root().join("edge.svg"),
-            8,
-            4,
-            r##"<rect width="4" height="4" fill="#ff0000"/>"##,
-        );
-        let decoded = ::image::load_from_memory(&derivative_bytes(
-            &cold_build(Arc::new(site_config.config.clone())),
-            ".jpg",
-        ))
-        .unwrap()
-        .to_rgb8();
-        // One 4:2:0 chroma block covers an image this small, so the background's level shifts
-        // near the red edge; the contract is white rather than black, not an exact level.
-        assert!(
-            decoded
-                .get_pixel(7, 0)
-                .0
-                .iter()
-                .all(|channel| *channel > 230),
-            "{decoded:?}"
-        );
-        assert!(decoded.get_pixel(0, 0).0[0] > 240);
-    }
-
-    /// `fill` keeps the centered part by default, and the anchored part when asked.
-    #[test]
-    fn svg_source_fills_at_its_anchor() {
-        for (anchor, first, second) in [
-            ("", [255, 0, 0, 255], [0, 0, 255, 255]),
-            (r#", anchor: "right""#, [0, 0, 255, 255], [0, 0, 255, 255]),
-        ] {
-            let site_config = config_with_program(&format!(
+                "src",
+            ),
+            (
                 r#"#import "@tola/image:0.0.0": resize-image
-#let resized = resize-image("halves.svg", width: 2, height: 4, op: "fill"{anchor}, format: "png")
-#document("index.html")[#html.img(src: resized.url, alt: "Halves")]"#
-            ));
-            svg(
-                &site_config.config.get_root().join("halves.svg"),
-                8,
-                4,
-                r##"<rect width="4" height="4" fill="#ff0000"/><rect x="4" width="4" height="4" fill="#0000ff"/>"##,
-            );
-            let decoded = ::image::load_from_memory(&derivative_bytes(
-                &cold_build(Arc::new(site_config.config.clone())),
-                ".png",
-            ))
-            .unwrap()
-            .to_rgba8();
-            assert_eq!(decoded.dimensions(), (2, 4));
-            assert_eq!(decoded.get_pixel(0, 0).0, first, "{anchor:?}");
-            assert_eq!(decoded.get_pixel(1, 0).0, second, "{anchor:?}");
-        }
-    }
-
-    /// An SVG request without an explicit raster format fails and names the choice.
-    #[test]
-    fn svg_source_requires_explicit_format() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
 #let resized = resize-image("logo.svg", width: 4)
 #document("index.html")[#html.img(src: resized.url, alt: "Logo")]"#,
-        );
-        svg(
-            &site_config.config.get_root().join("logo.svg"),
-            8,
-            4,
-            r##"<rect width="8" height="4" fill="#ff0000"/>"##,
-        );
-        let diagnostic = only_diagnostic(&site_config);
-        assert!(
-            diagnostic
-                .message
-                .contains("cannot choose a format for an SVG"),
-            "{diagnostic:#?}"
-        );
-    }
-
-    /// A linked image would be read outside the request's evidence, so the build refuses it.
-    #[test]
-    fn svg_source_refuses_linked_image() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
+                "cannot choose a format for an SVG",
+            ),
+            (
+                r#"#import "@tola/image:0.0.0": resize-image
 #let resized = resize-image("linked.svg", width: 4, op: "fit-width", format: "png")
 #document("index.html")[#html.img(src: resized.url, alt: "Linked")]"#,
-        );
-        svg(
-            &site_config.config.get_root().join("linked.svg"),
-            8,
-            4,
-            r##"<image href="photo.png"/>"##,
-        );
-        let diagnostic = only_diagnostic(&site_config);
-        assert!(
-            diagnostic
-                .message
-                .contains("inline the image as a data URI"),
-            "{diagnostic:#?}"
-        );
-    }
-
-    /// A responsive set is not derived from a vector source.
-    #[test]
-    fn responsive_set_refuses_svg() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": image-srcset
+                "inline the image as a data URI",
+            ),
+            (
+                r#"#import "@tola/image:0.0.0": image-srcset
 #let photo = image-srcset("logo.svg")
 #document("index.html")[#html.img(src: photo.url, alt: "Logo")]"#,
-        );
-        svg(
-            &site_config.config.get_root().join("logo.svg"),
-            8,
-            4,
-            r##"<rect width="8" height="4" fill="#ff0000"/>"##,
-        );
-        let diagnostic = only_diagnostic(&site_config);
-        assert!(
-            diagnostic
-                .message
-                .contains("responsive set cannot be derived from an SVG"),
-            "{diagnostic:#?}"
-        );
+                "responsive set cannot be derived from an SVG",
+            ),
+        ] {
+            let site_config = config_with_program(program);
+            let root = site_config.config.get_root().to_path_buf();
+            png(&root.join("photo.png"), [30, 60, 90]);
+            svg(
+                &root.join("logo.svg"),
+                8,
+                4,
+                r##"<rect width="8" height="4" fill="#ff0000"/>"##,
+            );
+            svg(
+                &root.join("linked.svg"),
+                8,
+                4,
+                r##"<image href="photo.png"/>"##,
+            );
+            let diagnostic = only_diagnostic(&site_config);
+            assert!(
+                diagnostic.message.contains(expected),
+                "{expected:?} missing from {diagnostic:#?}"
+            );
+        }
     }
 
     /// Damaged stored bytes are a miss rather than a different image.
@@ -1329,89 +1034,21 @@ mod tests {
         assert!(derivative_outputs(&built).is_empty());
     }
 
-    /// A source edit invalidates the retained derivative, and the changed build matches a cold one.
-    #[test]
-    fn retained_rebuild_matches_cold_after_source_edit() {
-        let cover = config_with_program(
-            r#"#import "@tola/source:0.0.0": all-sources
-#let cover = all-sources().first().meta.cover
-#for output in ("index.html", "second.html") {
-  document(output)[#html.img(src: cover.url, width: cover.width, height: cover.height, alt: "Photo")]
-}"#,
-        );
-        let root = cover.config.get_root();
-        let source = cover.config.build.content_dir.join("post.typ");
-        let photo = cover.config.build.content_dir.join("photo.png");
-        png(&photo, [20, 100, 200]);
-        fs::write(
-            &source,
-            r#"#import "@tola/image:0.0.0": resize-image
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((cover: resize-image("photo.png", width: 4, op: "fit-width", format: "png"),))"#,
-        )
-        .unwrap();
-        let config = Arc::new(cover.config.clone());
-        let mut session = BuildSession::new();
-        let first = session
-            .prepare(
-                Arc::clone(&config),
-                BuildRequest::new(BuildMode::Development),
-            )
-            .run()
-            .unwrap();
-        let images = derivative_outputs(&first);
-        assert_eq!(images.len(), 1);
-        let decoded = ::image::load_from_memory(images[0].bytes()).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (4, 2));
-        let original_image = images[0].path().clone();
-        let href = format!("/docs/{}", original_image.as_str());
-        for name in ["index.html", "second.html"] {
-            let page = first
-                .graph()
-                .outputs()
-                .iter()
-                .find(|output| output.path().as_str() == name)
-                .unwrap();
-            assert!(std::str::from_utf8(page.bytes()).unwrap().contains(&href));
-        }
-        let initial_hashes = hashes(&first);
-        install(&mut session, first);
-        let retained = session
-            .prepare(Arc::clone(&config), request(Vec::new()))
-            .run()
-            .unwrap();
-        assert_eq!(hashes(&retained), initial_hashes);
-        install(&mut session, retained);
-
-        let modified = fs::metadata(&photo).unwrap().modified().unwrap();
-        png(&photo, [200, 50, 20]);
-        fs::File::options()
-            .write(true)
-            .open(&photo)
-            .unwrap()
-            .set_times(fs::FileTimes::new().set_modified(modified))
-            .unwrap();
-        let changed = session
-            .prepare(Arc::clone(&config), request(vec![photo.clone()]))
-            .run()
-            .unwrap();
-        assert!(
-            !changed
-                .graph()
-                .outputs()
-                .iter()
-                .any(|output| output.path() == &original_image)
-        );
-        let authoritative = cold_build(config);
-        assert_eq!(hashes(&changed), hashes(&authoritative));
-        assert!(!root.join("public").exists());
+    /// One image program, the source it reads, and the edit that replaces it.
+    struct RebuildCase {
+        program: &'static str,
+        sources: &'static [(&'static str, [u8; 3])],
+        edit: (&'static str, [u8; 3]),
+        /// The derivatives a cold build publishes; `None` where a `context` query decides it.
+        derivatives: Option<usize>,
     }
 
-    /// A width a `context` query decides resolves like the cold build.
+    /// A rebuild of an edited source publishes the same outputs a cold build does.
     #[test]
-    fn contextual_width_matches_cold_build() {
-        let contextual = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
+    fn retained_build_matches_cold() {
+        let cases = [
+            RebuildCase {
+                program: r#"#import "@tola/image:0.0.0": resize-image
 #document("index.html")[
   #context {
     let width = if query(heading).len() == 0 { 2 } else { 4 }
@@ -1420,61 +1057,13 @@ mod tests {
   }
   = Heading
 ]"#,
-        );
-        png(
-            &contextual.config.get_root().join("photo.png"),
-            [40, 90, 180],
-        );
-        let config = Arc::new(contextual.config.clone());
-        let mut session = BuildSession::new();
-        let first = session
-            .prepare(
-                Arc::clone(&config),
-                BuildRequest::new(BuildMode::Development),
-            )
-            .run()
-            .unwrap();
-        let expected = hashes(&first);
-        install(&mut session, first);
-        let reused = session
-            .prepare(Arc::clone(&config), request(Vec::new()))
-            .run()
-            .unwrap();
-        assert_eq!(hashes(&reused), expected);
-        let cold = cold_build(config);
-        assert_eq!(hashes(&cold), expected);
-    }
-
-    /// Requests that resolve to one recipe share one derivative, whatever call site asked.
-    #[test]
-    fn equivalent_recipes_share_one_derivative() {
-        let equivalent = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
-#import "templates/process.typ": process
-#let first = resize-image("one.png", width: 4, op: "fit-width", format: "png", quality: 10)
-#let second = process(path("two.png"))
-#assert.eq(first.url, second.url)
-#document("index.html")[#html.img(src: first.url, alt: "One") #html.img(src: second.url, alt: "Two")]"#,
-        );
-        fs::create_dir_all(equivalent.config.get_root().join("templates")).unwrap();
-        fs::write(equivalent.config.get_root().join("templates/process.typ"), r#"#import "@tola/image:0.0.0": resize-image
-#let process(source) = resize-image(source, width: 4, height: 2, op: "scale", format: "png", quality: 90)"#).unwrap();
-        png(&equivalent.config.get_root().join("one.png"), [10, 40, 90]);
-        fs::copy(
-            equivalent.config.get_root().join("one.png"),
-            equivalent.config.get_root().join("two.png"),
-        )
-        .unwrap();
-        let built = crate::build::build_site(&equivalent.config, BuildMode::Production).unwrap();
-        assert_eq!(derivative_outputs(&built).len(), 1);
-    }
-
-    /// Each source publishes its own variants, and a cold build publishes the same set.
-    #[test]
-    fn per_source_variants_match_cold_build() {
-        let variants = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
-#let variants = ("one.png", "two.png", "three.png").map(source => (
+                sources: &[("photo.png", [40, 90, 180])],
+                edit: ("photo.png", [180, 90, 40]),
+                derivatives: None,
+            },
+            RebuildCase {
+                program: r#"#import "@tola/image:0.0.0": resize-image
+#let variants = ("one.png", "two.png").map(source => (
   resize-image(source, width: 4, op: "fit-width", format: "png"),
   resize-image(source, width: 2, op: "fit-width", format: "png"),
 ))
@@ -1483,199 +1072,69 @@ mod tests {
     for variant in pair { html.img(src: variant.url, alt: "Variant") }
   }
 ]"#,
-        );
-        for (name, color) in [
-            ("one.png", [200, 20, 20]),
-            ("two.png", [20, 200, 20]),
-            ("three.png", [20, 20, 200]),
-        ] {
-            png(&variants.config.get_root().join(name), color);
-        }
-        let built = crate::build::build_site(&variants.config, BuildMode::Production).unwrap();
-        let rendered = rendered_derivatives(&built);
-        assert_eq!(
-            rendered,
-            BTreeSet::from([
-                (4, [200, 20, 20, 255]),
-                (2, [200, 20, 20, 255]),
-                (4, [20, 200, 20, 255]),
-                (2, [20, 200, 20, 255]),
-                (4, [20, 20, 200, 255]),
-                (2, [20, 20, 200, 255]),
-            ])
-        );
-    }
-
-    #[test]
-    fn geometry_hits_skip_decode() {
-        let bytes = png_bytes([30, 60, 90]);
-        let source = SourceImage {
-            digest: ContentDigest::of(&bytes),
-            metadata: inspect(&bytes).unwrap(),
-            bytes: Bytes::new(bytes),
-            svg: None,
-        };
-        let recipes = [
-            recipe(&source.metadata, 4, 2, OutputFormat::Png),
-            recipe(&source.metadata, 4, 2, OutputFormat::WebP),
-        ];
-        let geometry = RenderGeometry {
-            pixels: recipes[0].pixels(),
-            renders: vec![0, 1],
-        };
-        let cache = PixelCache::default();
-        let cancellation = BuildCancellation::new();
-        let decoded = DecodedSource::open(source.bytes.as_slice(), &cancellation).unwrap();
-        cache.retain_resampled(
-            source.digest,
-            geometry.pixels,
-            Arc::new(decoded.pixels(geometry.pixels, &cancellation).unwrap()),
-        );
-        drop(decoded);
-
-        let mut pending = Vec::new();
-        let mut claims = BTreeMap::new();
-        for recipe in recipes {
-            let request = ImageRequest::new(
-                DataSource::Path(PathOrStr::Str("/photo.png".into())),
-                RootedPath::new(
-                    VirtualRoot::Project,
-                    VirtualPath::new("/photo.png").unwrap(),
-                ),
-                source.digest,
-                recipe,
-            );
-            pending.push(PendingRender {
-                output: request.output_path(),
-                source: 0,
-                source_id: FileId::new(request.origin().clone()),
-                key: request.key(),
-            });
-            claims.insert(
-                request.output_path(),
-                VariantClaim {
-                    source_digest: source.digest,
-                    recipe: request.recipe().clone(),
-                },
-            );
-        }
-        let group = SourceGroup {
-            source: 0,
-            geometries: vec![geometry],
-        };
-        let outcomes = group
-            .render(&source, &pending, &claims, &cache, &cancellation)
-            .into_iter()
-            .map(|outcome| (outcome.index, outcome.bytes.unwrap()))
-            .collect::<BTreeMap<_, _>>();
-        for index in 0..pending.len() {
-            let output = ::image::load_from_memory(&outcomes[&index])
-                .unwrap()
-                .to_rgba8();
-            assert_eq!(output.dimensions(), (4, 2));
-            assert!(output.pixels().all(|pixel| pixel.0 == [30, 60, 90, 255]));
-        }
-        assert!(cache.decoded(source.digest).is_none());
-    }
-
-    #[test]
-    fn source_batches_respect_limits() {
-        let sources = [
-            (8, 4),
-            (6000, 4000),
-            (6000, 4000),
-            (10000, 10000),
-            (8, 4),
-            (8, 4),
-            (8, 4),
-            (8, 4),
-            (8, 4),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (width, height))| SourceImage {
-            bytes: Bytes::new(Vec::new()),
-            digest: ContentDigest::of(&[index as u8]),
-            metadata: ImageMetadata {
-                width,
-                height,
-                format: ImageFormat::Png,
-                has_alpha: false,
-                is_lossy: false,
+                sources: &[("one.png", [200, 20, 20]), ("two.png", [20, 200, 20])],
+                edit: ("two.png", [20, 20, 200]),
+                derivatives: Some(4),
             },
-            svg: None,
-        })
-        .collect::<Vec<_>>();
-        let groups = sources
-            .iter()
-            .enumerate()
-            .map(|(index, source)| SourceGroup {
-                source: index,
-                geometries: vec![RenderGeometry {
-                    pixels: recipe(
-                        &source.metadata,
-                        source.metadata.width,
-                        source.metadata.height,
-                        OutputFormat::Png,
-                    )
-                    .pixels(),
-                    renders: vec![index],
-                }],
-            })
-            .collect::<Vec<_>>();
-        for workers in [1, 4] {
-            let mut remaining = groups.as_slice();
-            while !remaining.is_empty() {
-                let admitted = source_batch_len(remaining, &sources, workers);
-                assert!((1..=workers).contains(&admitted));
-                let (batch, next) = remaining.split_at(admitted);
-                let bytes = batch
-                    .iter()
-                    .map(|group| group.admission_bytes(&sources[group.source]))
-                    .sum::<u64>();
-                assert!(
-                    bytes <= SOURCE_BATCH_BYTES || admitted == 1,
-                    "{workers} {bytes}"
-                );
-                remaining = next;
-            }
-        }
-    }
-
-    #[test]
-    fn content_alias_edits_change_outputs() {
-        let site_config = config_with_program(
-            r#"#import "@tola/image:0.0.0": resize-image
+            RebuildCase {
+                program: r#"#import "@tola/image:0.0.0": resize-image
 #let wide = resize-image("one.png", width: 4, op: "fit-width", format: "png")
 #let narrow = resize-image("two.png", width: 2, op: "fit-width", format: "png")
 #document("index.html")[
   #html.img(src: wide.url, alt: "Wide")
   #html.img(src: narrow.url, alt: "Narrow")
 ]"#,
-        );
-        let root = site_config.config.get_root();
-        png(&root.join("one.png"), [200, 20, 20]);
-        fs::copy(root.join("one.png"), root.join("two.png")).unwrap();
-        let config = Arc::new(site_config.config.clone());
-        let mut session = BuildSession::new();
-        let original = session
-            .prepare(
-                Arc::clone(&config),
-                BuildRequest::new(BuildMode::Development),
-            )
-            .run()
-            .unwrap();
-        install(&mut session, original);
+                sources: &[("one.png", [200, 20, 20]), ("two.png", [200, 20, 20])],
+                edit: ("two.png", [20, 20, 200]),
+                derivatives: Some(2),
+            },
+        ];
+        for case in cases {
+            let site_config = config_with_program(case.program);
+            let root = site_config.config.get_root().to_path_buf();
+            for (name, color) in case.sources {
+                png(&root.join(name), *color);
+            }
+            let config = Arc::new(site_config.config.clone());
+            let mut session = BuildSession::new();
+            let first = session
+                .prepare(
+                    Arc::clone(&config),
+                    BuildRequest::new(BuildMode::Development),
+                )
+                .run()
+                .unwrap();
+            if let Some(derivatives) = case.derivatives {
+                assert_eq!(
+                    derivative_outputs(&first).len(),
+                    derivatives,
+                    "{}",
+                    case.program
+                );
+            }
+            let initial = hashes(&first);
+            install(&mut session, first);
 
-        png(&root.join("two.png"), [20, 20, 200]);
-        let changed = session
-            .prepare(config, request(vec![root.join("two.png")]))
-            .run()
-            .unwrap();
-        let pixels = rendered_derivatives(&changed);
-        assert_eq!(
-            pixels,
-            BTreeSet::from([(4, [200, 20, 20, 255]), (2, [20, 20, 200, 255])])
-        );
+            let retained = session
+                .prepare(Arc::clone(&config), request(Vec::new()))
+                .run()
+                .unwrap();
+            assert_eq!(hashes(&retained), initial, "{}", case.program);
+            install(&mut session, retained);
+
+            let (edited, color) = case.edit;
+            png(&root.join(edited), color);
+            let changed = session
+                .prepare(Arc::clone(&config), request(vec![root.join(edited)]))
+                .run()
+                .unwrap();
+            assert_eq!(
+                hashes(&changed),
+                hashes(&cold_build(config)),
+                "{}",
+                case.program
+            );
+            assert!(!root.join("public").exists());
+        }
     }
 }

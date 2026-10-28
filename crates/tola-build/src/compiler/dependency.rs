@@ -738,17 +738,17 @@ fn read_locator_display(locator: &ReadLocator) -> String {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::BTreeMap;
+
     use super::*;
     use crate::compiler::tests::compiler_host;
     use tola_typst::ReadLocator;
+
     fn retained_dependencies(
         root: &Path,
         content_sources: impl IntoIterator<Item = PathBuf>,
         bundle_entries: impl IntoIterator<Item = PathBuf>,
-        reader_evidence: std::collections::BTreeMap<
-            TypstDependencyReader,
-            DependencyReaderEvidence,
-        >,
+        reader_evidence: BTreeMap<TypstDependencyReader, DependencyReaderEvidence>,
         package_checks: Vec<tola_typst::PackageCheck>,
     ) -> CompilationDependencies {
         let root = crate::filesystem::normalize_path(root);
@@ -835,7 +835,7 @@ mod tests {
                     },
                 )
             })
-            .collect::<std::collections::BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
         retained_dependencies(
             &root,
             content_sources,
@@ -877,10 +877,15 @@ mod tests {
         )
     }
 
+    /// A changed path selects exactly the readers that read it, and the decision names them.
+    ///
+    /// One row per read shape: a path two readers share, an asset only the site program reads,
+    /// a package file beneath its directory, and a source that is itself an input.
     #[test]
-    fn changed_root_file_selects_its_readers() {
+    fn changed_paths_select_their_readers() {
+        let root = Path::new("/site");
         let snapshot = snapshot(
-            Path::new("/site"),
+            root,
             [PathBuf::from("/site/content/post.typ")],
             Path::new("/site/site.typ"),
             vec![
@@ -890,99 +895,236 @@ mod tests {
             vec![evidence("site.typ"), evidence("templates/document.typ")],
         );
 
-        assert_eq!(
-            snapshot.readers_of_paths(&[PathBuf::from("/site/templates/document.typ")]),
-            vec![
-                TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
-                TypstDependencyReader::SiteProgram
-            ]
-        );
-        assert!(
-            snapshot
-                .readers_of_paths(&[PathBuf::from("/site/assets/unread.svg")])
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn asset_read_touches_only_the_program() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        std::fs::create_dir_all(root.join("templates")).unwrap();
-        std::fs::create_dir_all(root.join("assets")).unwrap();
-        for path in [
-            "templates/document.typ",
-            "templates/note.typ",
-            "site.typ",
-            "assets/a.svg",
-        ] {
-            std::fs::write(root.join(path), path).unwrap();
-        }
-        let snapshot = dependencies(
-            root,
-            [root.join("content/a.typ"), root.join("content/b.typ")],
-            &root.join("site.typ"),
-            [
-                (
-                    TypstDependencyReader::ContentSource(root.join("content/a.typ")),
-                    vec![evidence("templates/document.typ")],
-                ),
-                (
-                    TypstDependencyReader::ContentSource(root.join("content/b.typ")),
-                    vec![evidence("templates/note.typ")],
-                ),
-                (
+        for (changed, readers) in [
+            (
+                "/site/templates/document.typ",
+                vec![
+                    TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
                     TypstDependencyReader::SiteProgram,
-                    vec![evidence("site.typ"), evidence("assets/a.svg")],
-                ),
-            ],
-        );
-
-        assert_eq!(
-            snapshot.readers_of_paths(&[root.join("templates/document.typ")]),
-            vec![TypstDependencyReader::ContentSource(
-                root.join("content/a.typ")
-            )]
-        );
-        assert_eq!(
-            snapshot.readers_of_paths(&[root.join("assets/a.svg")]),
-            vec![TypstDependencyReader::SiteProgram]
-        );
-
-        let decision =
-            RebuildDecision::for_paths(Some(&snapshot), &[root.join("assets/a.svg")], false);
-        assert_eq!(decision.source_analysis, RebuildPriority::Unchanged);
-        assert_eq!(decision.site_program, RebuildPriority::Affected);
-        assert!(decision.direct_readers.is_empty());
-        assert_eq!(
-            decision.affected_readers,
-            vec![TypstDependencyReader::SiteProgram]
-        );
+                ],
+            ),
+            ("/site/site.typ", vec![TypstDependencyReader::SiteProgram]),
+            ("/site/assets/unread.svg", Vec::new()),
+            (
+                "/site/templates",
+                vec![
+                    TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
+                    TypstDependencyReader::SiteProgram,
+                ],
+            ),
+            ("/site/templates-old", Vec::new()),
+        ] {
+            assert_eq!(
+                snapshot.readers_of_paths(&[PathBuf::from(changed)]),
+                readers,
+                "{changed}"
+            );
+        }
     }
 
+    /// A changed path's priority follows what read it: an input rebuilds the analysis directly,
+    /// a read it depends on marks it affected, and a source's own change is direct.
     #[test]
-    fn directory_change_hits_reads_beneath_it() {
+    fn changed_paths_set_rebuild_priority() {
         let snapshot = snapshot(
             Path::new("/site"),
-            std::iter::empty(),
-            Path::new("/site/site.typ"),
+            [PathBuf::from("/site/content/post.typ")],
+            Path::new("/site/program.typ"),
             vec![evidence("templates/document.typ")],
             vec![evidence("site.typ")],
         );
 
+        for (changed, source_analysis, site_program, affected) in [
+            (
+                "/site/content/post.typ",
+                RebuildPriority::Direct,
+                RebuildPriority::Affected,
+                vec![TypstDependencyReader::SiteProgram],
+            ),
+            (
+                "/site/templates/document.typ",
+                RebuildPriority::Affected,
+                RebuildPriority::Affected,
+                vec![
+                    TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
+                    TypstDependencyReader::SiteProgram,
+                ],
+            ),
+        ] {
+            let decision =
+                RebuildDecision::for_paths(Some(&snapshot), &[PathBuf::from(changed)], false);
+            assert_eq!(decision.source_analysis, source_analysis, "{changed}");
+            assert_eq!(decision.site_program, site_program, "{changed}");
+            assert_eq!(decision.affected_readers, affected, "{changed}");
+        }
+
+        // A parent directory rebuilds the sources beneath it, while a sibling prefix does not.
+        let parent =
+            RebuildDecision::for_paths(Some(&snapshot), &[PathBuf::from("/site/content")], false);
+        assert_eq!(parent.source_analysis, RebuildPriority::Direct);
         assert_eq!(
-            snapshot.readers_of_paths(&[PathBuf::from("/site/templates")]),
-            vec![TypstDependencyReader::ContentSource(PathBuf::from(
-                "/site/content/source.typ"
+            parent.direct_readers,
+            vec![TypstDependencyReader::ContentSource(reader_path(
+                "/site/content/post.typ"
             ))]
         );
+
+        // An inventory change rebuilds the analysis without naming any reader of a changed path.
+        let inventory = RebuildDecision::for_paths(
+            Some(&snapshot),
+            &[PathBuf::from("/site/content/added.typ")],
+            true,
+        );
+        assert_eq!(inventory.source_analysis, RebuildPriority::Direct);
+        assert!(inventory.direct_readers.is_empty());
+    }
+
+    /// Physical reads are fresh while their bytes and targets are unchanged, and stale as soon as
+    /// either moves: an edit, a removal, or a symlink retarget with the same bytes.
+    #[test]
+    fn physical_reads_turn_stale_on_change() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let template = root.join("template.typ");
+        std::fs::write(&template, "#let helper = 1").unwrap();
+        let snapshot = snapshot(
+            root,
+            std::iter::empty(),
+            &root.join("site.typ"),
+            Vec::new(),
+            vec![ReadEvidence::new(
+                ReadLocator::Root("template.typ".into()),
+                b"#let helper = 1",
+            )],
+        );
+        let boundary = tola_typst::SourceBoundary::default();
+        let cancellation = BuildCancellation::default();
+        let fresh = || {
+            snapshot
+                .physical_reads_are_fresh(&boundary, &cancellation)
+                .unwrap()
+        };
+
+        assert!(fresh());
+        assert!(RebuildDecision::for_paths(Some(&snapshot), &[], false).reuses_site_program());
+
+        std::fs::write(&template, "#let helper = 2").unwrap();
+        assert!(!fresh(), "an edited read is stale");
+
+        std::fs::remove_file(&template).unwrap();
+        assert!(!fresh(), "a removed read is stale");
+    }
+
+    /// The same bytes reached through a different target are still stale: identity is the target,
+    /// not the content.
+    #[cfg(unix)]
+    #[test]
+    fn retargeted_read_is_stale() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let first = root.join("first.typ");
+        let second = root.join("second.typ");
+        let logical = root.join("template.typ");
+        std::fs::write(&first, b"same bytes").unwrap();
+        std::fs::write(&second, b"same bytes").unwrap();
+        symlink(&first, &logical).unwrap();
+        let snapshot = snapshot(
+            root,
+            std::iter::empty(),
+            &root.join("site.typ"),
+            Vec::new(),
+            vec![ReadEvidence::new(
+                ReadLocator::Root("template.typ".into()),
+                b"same bytes",
+            )],
+        );
+        let boundary = tola_typst::SourceBoundary::default();
+        let cancellation = BuildCancellation::default();
+
         assert!(
             snapshot
-                .readers_of_paths(&[PathBuf::from("/site/templates-old")])
-                .is_empty()
+                .physical_reads_are_fresh(&boundary, &cancellation)
+                .unwrap()
+        );
+        // A read is watched at both its logical path and the target it resolves to.
+        let watched = snapshot.physical_read_paths();
+        assert!(watched.contains(&crate::filesystem::normalize_path(root).join("template.typ")));
+        assert!(watched.contains(&std::fs::canonicalize(&first).unwrap()));
+
+        std::fs::remove_file(&logical).unwrap();
+        symlink(&second, &logical).unwrap();
+        assert!(
+            !snapshot
+                .physical_reads_are_fresh(&boundary, &cancellation)
+                .unwrap(),
+            "a retargeted read is stale even when the bytes match"
         );
     }
 
+    /// Two readers that observed different bytes for one path make the compilation stale.
+    #[test]
+    fn conflicting_reads_are_stale() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let template = root.join("template.typ");
+        std::fs::write(&template, "first").unwrap();
+        let boundary = tola_typst::SourceBoundary::default();
+        let cancellation = BuildCancellation::default();
+
+        let conflicting = snapshot(
+            root,
+            [root.join("content/post.typ")],
+            &root.join("site.typ"),
+            vec![ReadEvidence::new(
+                ReadLocator::Root("template.typ".into()),
+                b"first",
+            )],
+            vec![ReadEvidence::new(
+                ReadLocator::Root("template.typ".into()),
+                b"second",
+            )],
+        );
+        assert!(
+            !conflicting
+                .physical_reads_are_fresh(&boundary, &cancellation)
+                .unwrap(),
+            "readers that saw different bytes are stale"
+        );
+    }
+
+    /// A path several readers share is watched once.
+    #[test]
+    fn shared_read_is_watched_once() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let template = root.join("template.typ");
+        std::fs::write(&template, "first").unwrap();
+        let boundary = tola_typst::SourceBoundary::default();
+        let cancellation = BuildCancellation::default();
+
+        let read = || ReadEvidence::new(ReadLocator::Root("template.typ".into()), b"first");
+        let shared = snapshot(
+            root,
+            std::iter::empty(),
+            &root.join("site.typ"),
+            vec![read()],
+            vec![read()],
+        );
+        assert_eq!(
+            shared.physical_read_paths(),
+            vec![crate::filesystem::normalize_path(&template)]
+        );
+        assert!(
+            shared
+                .physical_reads_are_fresh(&boundary, &cancellation)
+                .unwrap()
+        );
+    }
+
+    /// A package file is watched through the physical file it resolves to, so a change inside
+    /// the package directory reaches the reader that read it.
     #[test]
     fn package_read_matches_its_physical_file() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -992,12 +1134,6 @@ mod tests {
         std::fs::create_dir_all(package_file.parent().unwrap()).unwrap();
         std::fs::write(&package_file, "#let helper = 1").unwrap();
 
-        let mut config = crate::config::tests::load_test_config(root, "");
-        config.build.entry = root.join("site.typ");
-        config.build.content_dir = root.join("content");
-        config.package_locations =
-            tola_typst::PackageLocations::from_absolute_roots(Some(package_root.clone()), None)
-                .unwrap();
         let package_read = ReadEvidence::new(
             ReadLocator::Package {
                 package: "@preview/demo:1.2.3".parse().unwrap(),
@@ -1010,7 +1146,7 @@ mod tests {
             root,
             std::iter::empty::<PathBuf>(),
             [root.join("site.typ")],
-            std::collections::BTreeMap::from([(
+            BTreeMap::from([(
                 reader.clone(),
                 DependencyReaderEvidence {
                     reads: vec![physical_read(&package_file, package_read)],
@@ -1024,213 +1160,95 @@ mod tests {
             snapshot.readers_of_paths(&[package_root.join("preview/demo")]),
             vec![reader]
         );
-        let decision = RebuildDecision::for_paths(Some(&snapshot), &[package_file], false);
-        assert_eq!(decision.source_analysis, RebuildPriority::Affected);
-    }
-
-    #[test]
-    fn changed_source_selects_the_analysis() {
-        let snapshot = snapshot(
-            Path::new("/site"),
-            [PathBuf::from("/site/content/post.typ")],
-            Path::new("/site/program.typ"),
-            Vec::new(),
-            Vec::new(),
-        );
-        let decision = RebuildDecision::for_paths(
-            Some(&snapshot),
-            &[PathBuf::from("/site/content/post.typ")],
-            false,
-        );
-        assert_eq!(decision.source_analysis, RebuildPriority::Direct);
-        assert_eq!(decision.site_program, RebuildPriority::Affected);
         assert_eq!(
-            decision.direct_readers,
-            vec![TypstDependencyReader::ContentSource(reader_path(
-                "/site/content/post.typ"
-            ))]
-        );
-        assert_eq!(
-            decision.affected_readers,
-            vec![TypstDependencyReader::SiteProgram]
+            RebuildDecision::for_paths(Some(&snapshot), &[package_file], false).source_analysis,
+            RebuildPriority::Affected
         );
     }
 
+    /// Two locators that read the same bytes are one read: the compilation stays fresh while
+    /// both agree.
     #[test]
-    fn parent_directory_rebuilds_its_sources() {
-        let snapshot = snapshot(
-            Path::new("/site"),
+    fn same_bytes_from_two_locators_agree() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let file = root.join("shared.typ");
+        std::fs::write(&file, "Shared").unwrap();
+        let boundary = tola_typst::SourceBoundary::default();
+        let cancellation = BuildCancellation::default();
+
+        let reads = [
+            ReadLocator::Root("shared.typ".into()),
+            ReadLocator::ProvidedRoot("mapped.typ".into()),
+        ]
+        .into_iter()
+        .map(|locator| physical_read(&file, ReadEvidence::new(locator, b"Shared")))
+        .collect();
+        let shared = retained_dependencies(
+            root,
+            [],
+            [],
+            BTreeMap::from([(
+                TypstDependencyReader::SiteProgram,
+                DependencyReaderEvidence {
+                    reads,
+                    package_checks: Vec::new(),
+                },
+            )]),
+            Vec::new(),
+        );
+        assert!(
+            shared
+                .physical_reads_are_fresh(&boundary, &cancellation)
+                .unwrap(),
+            "distinct locators over the same bytes agree"
+        );
+    }
+
+    /// An asset only the site program reads leaves the source analysis alone.
+    #[test]
+    fn asset_read_leaves_source_analysis_alone() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        for path in [
+            "templates/document.typ",
+            "site.typ",
+            "assets/a.svg",
+            "content/a.typ",
+        ] {
+            let file = root.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, path).unwrap();
+        }
+        let asset_snapshot = dependencies(
+            root,
+            [root.join("content/a.typ")],
+            &root.join("site.typ"),
             [
-                PathBuf::from("/site/content/post.typ"),
-                PathBuf::from("/site/content-other/post.typ"),
+                (
+                    TypstDependencyReader::ContentSource(root.join("content/a.typ")),
+                    vec![evidence("templates/document.typ")],
+                ),
+                (
+                    TypstDependencyReader::SiteProgram,
+                    vec![evidence("site.typ"), evidence("assets/a.svg")],
+                ),
             ],
-            Path::new("/site/program/site.typ"),
-            Vec::new(),
-            Vec::new(),
         );
-
-        let content_decision = RebuildDecision::for_paths(
-            Some(&snapshot),
-            &[
-                PathBuf::from("/site/content"),
-                PathBuf::from("/site/content/post.typ"),
-                PathBuf::from("/site/content"),
-            ],
-            false,
-        );
-        assert_eq!(content_decision.source_analysis, RebuildPriority::Direct);
-        assert_eq!(content_decision.site_program, RebuildPriority::Affected);
-        assert_eq!(
-            content_decision.direct_readers,
-            vec![TypstDependencyReader::ContentSource(reader_path(
-                "/site/content/post.typ"
-            )),]
-        );
-
-        let site_decision =
-            RebuildDecision::for_paths(Some(&snapshot), &[PathBuf::from("/site/program")], false);
-        assert_eq!(site_decision.site_program, RebuildPriority::Direct);
-    }
-
-    #[test]
-    fn analysis_change_reaches_the_site_program() {
-        let snapshot = snapshot(
-            Path::new("/site"),
-            [PathBuf::from("/site/content/post.typ")],
-            Path::new("/site/program.typ"),
-            vec![evidence("templates/document.typ")],
-            vec![evidence("site.typ")],
-        );
-        let decision = RebuildDecision::for_paths(
-            Some(&snapshot),
-            &[PathBuf::from("/site/templates/document.typ")],
-            false,
-        );
-        assert_eq!(decision.source_analysis, RebuildPriority::Affected);
+        let decision =
+            RebuildDecision::for_paths(Some(&asset_snapshot), &[root.join("assets/a.svg")], false);
+        assert_eq!(decision.source_analysis, RebuildPriority::Unchanged);
         assert_eq!(decision.site_program, RebuildPriority::Affected);
         assert!(decision.direct_readers.is_empty());
         assert_eq!(
             decision.affected_readers,
-            vec![
-                TypstDependencyReader::ContentSource(PathBuf::from("/site/content/post.typ")),
-                TypstDependencyReader::SiteProgram,
-            ]
-        );
-    }
-
-    #[test]
-    fn source_set_membership_change_rebuilds_it() {
-        let decision = |inventory: &[&str], changed: &str| {
-            let snapshot = snapshot(
-                Path::new("/site"),
-                inventory.iter().map(|path| PathBuf::from(*path)),
-                Path::new("/site/program.typ"),
-                Vec::new(),
-                Vec::new(),
-            );
-            RebuildDecision::for_paths(Some(&snapshot), &[PathBuf::from(changed)], true)
-        };
-
-        let added = decision(&["/site/content/a.typ"], "/site/content/b.typ");
-        assert_eq!(added.source_analysis, RebuildPriority::Direct);
-        assert_eq!(added.site_program, RebuildPriority::Affected);
-        assert!(added.direct_readers.is_empty());
-        assert!(added.affected_readers.is_empty());
-
-        let deleted = decision(
-            &["/site/content/a.typ", "/site/content/b.typ"],
-            "/site/content/b.typ",
-        );
-        assert_eq!(deleted.source_analysis, RebuildPriority::Direct);
-        assert_eq!(deleted.site_program, RebuildPriority::Affected);
-        assert_eq!(
-            deleted.direct_readers,
-            vec![TypstDependencyReader::ContentSource(reader_path(
-                "/site/content/b.typ"
-            ))]
-        );
-        assert_eq!(
-            deleted.affected_readers,
             vec![TypstDependencyReader::SiteProgram]
         );
     }
 
+    /// A package check follows the packages it selected, through a better root or a retarget.
     #[test]
-    fn root_read_event_selects_the_program() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "#let helper = 1").unwrap();
-        let snapshot = snapshot(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            Vec::new(),
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"#let helper = 1",
-            )],
-        );
-
-        let background = RebuildDecision::for_paths(Some(&snapshot), &[], false);
-        assert!(background.reuses_site_program());
-        let changed = RebuildDecision::for_paths(Some(&snapshot), &[template], false);
-        assert_eq!(changed.site_program, RebuildPriority::Affected);
-    }
-
-    #[test]
-    fn mutation_makes_physical_reads_stale() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "#let helper = 1").unwrap();
-        let snapshot = snapshot(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            vec![ReadEvidence::new(
-                ReadLocator::ProvidedRoot("volatile.typ".into()),
-                b"virtual",
-            )],
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"#let helper = 1",
-            )],
-        );
-
-        assert!(
-            snapshot
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-        let decision = RebuildDecision::for_paths(Some(&snapshot), &[], false);
-        assert_eq!(decision.source_analysis, RebuildPriority::Affected);
-
-        std::fs::write(&template, "#let helper = 2").unwrap();
-        assert!(
-            !snapshot
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-        std::fs::remove_file(template).unwrap();
-        assert!(
-            !snapshot
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn package_check_notices_better_root() {
+    fn package_checks_follow_their_selection() {
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
         let data = root.join("package-data");
@@ -1242,14 +1260,97 @@ mod tests {
         let store =
             tola_typst::PackageStore::new(locations, tola_typst::PackageFetchPolicy::LocalOnly);
         let package = "@preview/demo:1.0.0".parse().unwrap();
-        let prepared = store.prepare(&package).unwrap();
-        let checks = prepared.checks();
+        let checks = store.prepare(&package).unwrap().checks().to_vec();
 
         assert!(checks.iter().all(package_check_is_fresh));
+        // A site package root that now holds the package is a better answer than the cache.
         std::fs::create_dir_all(data.join("preview/demo/1.0.0")).unwrap();
         assert!(!checks.iter().all(package_check_is_fresh));
     }
 
+    /// A read the process cannot reproduce makes its producer rebuild; an owned observation
+    /// descriptor does not.
+    ///
+    /// That ownership is the whole classification, so one row per locator kind decides it.
+    #[test]
+    fn virtual_reads_classify_by_ownership() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let config = crate::config::tests::load_test_config(root, "");
+        let host = compiler_host(&config).unwrap();
+        let snapshot = |locator: ReadLocator| {
+            let process_stable = host.read_is_process_stable(&locator);
+            let reader_evidence = [(
+                TypstDependencyReader::SiteProgram,
+                DependencyReaderEvidence {
+                    reads: vec![DependencyReadEvidence::Virtual {
+                        evidence: ReadEvidence::new(locator, b"virtual"),
+                        process_stable,
+                    }],
+                    package_checks: Vec::new(),
+                },
+            )]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+            retained_dependencies(
+                config.get_root(),
+                std::iter::empty::<PathBuf>(),
+                [config.get_root().join("site.typ")],
+                reader_evidence,
+                Vec::new(),
+            )
+        };
+        let priority = |locator: ReadLocator| {
+            RebuildDecision::for_paths(Some(&snapshot(locator)), &[], false).site_program
+        };
+
+        for (locator, expected) in [
+            // A package file is immutable for the process.
+            (
+                ReadLocator::ProvidedPackage {
+                    package: "@tola/document:0.0.0".parse().unwrap(),
+                    path: "lib.typ".into(),
+                },
+                RebuildPriority::Unchanged,
+            ),
+            // Both source observations belong to `@tola/source`: the package-wide capability
+            // read and the per-file lexical identity read are immutable descriptors.
+            (
+                ReadLocator::ProvidedPackage {
+                    package: tola_packages::TolaPackage::Source.spec(),
+                    path: ".tola-capability".into(),
+                },
+                RebuildPriority::Unchanged,
+            ),
+            (
+                ReadLocator::ProvidedPackage {
+                    package: tola_packages::TolaPackage::Source.spec(),
+                    path: ".tola-source/content/document.typ".into(),
+                },
+                RebuildPriority::Unchanged,
+            ),
+            // The same path under another package is an ordinary unstable virtual read.
+            (
+                ReadLocator::ProvidedPackage {
+                    package: tola_packages::TolaPackage::Document.spec(),
+                    path: ".tola-source/content/document.typ".into(),
+                },
+                RebuildPriority::Affected,
+            ),
+            (
+                ReadLocator::ProvidedRoot("internal.typ".into()),
+                RebuildPriority::Affected,
+            ),
+            (
+                ReadLocator::NonPersistent("<generated>".into()),
+                RebuildPriority::Affected,
+            ),
+        ] {
+            assert_eq!(priority(locator.clone()), expected, "{locator:?}");
+        }
+    }
+
+    /// A reused unit keeps the package checks it was derived from, so its evidence survives.
     #[test]
     fn reused_unit_keeps_its_package_checks() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -1273,7 +1374,6 @@ mod tests {
             .checks()[0]
             .clone();
         let source_unit = TypstDependencyReader::ContentSource(root.join("content/post.typ"));
-        let program_unit = TypstDependencyReader::SiteProgram;
         let reader_evidence = [
             (
                 source_unit.clone(),
@@ -1283,22 +1383,21 @@ mod tests {
                 },
             ),
             (
-                program_unit.clone(),
+                TypstDependencyReader::SiteProgram,
                 DependencyReaderEvidence {
                     reads: Vec::new(),
-                    package_checks: vec![second.clone()],
+                    package_checks: vec![second],
                 },
             ),
         ]
         .into_iter()
-        .collect::<std::collections::BTreeMap<_, _>>();
-        let package_checks = vec![first.clone(), second];
+        .collect::<BTreeMap<_, _>>();
         let previous = retained_dependencies(
             root,
             std::iter::empty::<PathBuf>(),
             std::iter::empty::<PathBuf>(),
             reader_evidence,
-            package_checks,
+            vec![first.clone()],
         );
         let config = crate::config::tests::load_test_config(root, "");
         let host = compiler_host(&config).unwrap();
@@ -1307,10 +1406,7 @@ mod tests {
             root,
             std::iter::empty(),
             std::iter::empty(),
-            [
-                (source_unit.clone(), Vec::new(), vec![first.clone()]),
-                (program_unit, Vec::new(), Vec::new()),
-            ],
+            [(source_unit.clone(), Vec::new(), vec![first.clone()])],
             std::iter::once(first.clone()),
             &host,
             Some(ReusedDependencyReaders::new(
@@ -1327,241 +1423,10 @@ mod tests {
         assert_eq!(package_checks, vec![first]);
     }
 
-    #[cfg(unix)]
+    /// An icon read is matched against the bytes the host currently holds, and its membership
+    /// list against the names the collection carries.
     #[test]
-    fn package_check_notices_symlink_retarget() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let data = root.join("package-data");
-        let first = root.join("first");
-        let second = root.join("second");
-        std::fs::create_dir_all(data.join("preview/demo")).unwrap();
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-        let selected = data.join("preview/demo/1.0.0");
-        symlink(&first, &selected).unwrap();
-        let locations =
-            tola_typst::PackageLocations::from_absolute_roots(Some(data), None).unwrap();
-        let store =
-            tola_typst::PackageStore::new(locations, tola_typst::PackageFetchPolicy::LocalOnly);
-        let package = "@preview/demo:1.0.0".parse().unwrap();
-        let prepared = store.prepare(&package).unwrap();
-        let checks = prepared.checks();
-
-        assert!(checks.iter().all(package_check_is_fresh));
-        std::fs::remove_file(&selected).unwrap();
-        symlink(&second, &selected).unwrap();
-        assert!(!checks.iter().all(package_check_is_fresh));
-    }
-
-    #[test]
-    fn every_physical_read_gates_the_write() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let source = root.join("source-dependency.typ");
-        let program = root.join("program-dependency.typ");
-        std::fs::write(&source, "source").unwrap();
-        std::fs::write(&program, "program").unwrap();
-        let source_unit = TypstDependencyReader::ContentSource(root.join("content/post.typ"));
-        let evidence = || {
-            [
-                (
-                    source_unit.clone(),
-                    vec![ReadEvidence::new(
-                        ReadLocator::Root("source-dependency.typ".into()),
-                        b"source",
-                    )],
-                ),
-                (
-                    TypstDependencyReader::SiteProgram,
-                    vec![ReadEvidence::new(
-                        ReadLocator::Root("program-dependency.typ".into()),
-                        b"program",
-                    )],
-                ),
-            ]
-        };
-        let published = dependencies(
-            root,
-            [root.join("content/post.typ")],
-            &root.join("site.typ"),
-            evidence(),
-        );
-
-        assert!(
-            published
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-
-        let shared = published.clone();
-        assert!(Arc::ptr_eq(&shared.0, &published.0));
-
-        std::fs::write(&source, "changed source").unwrap();
-        assert!(
-            !shared
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-        std::fs::write(&source, "source").unwrap();
-        std::fs::write(&program, "changed program").unwrap();
-        assert!(
-            !published
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn shared_bytes_allow_distinct_locators() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let file = root.join("shared.typ");
-        std::fs::write(&file, "Shared").unwrap();
-        let reads = [
-            ReadLocator::Root("shared.typ".into()),
-            ReadLocator::ProvidedRoot("mapped.typ".into()),
-        ]
-        .into_iter()
-        .map(|locator| physical_read(&file, ReadEvidence::new(locator, b"Shared")))
-        .collect();
-        let dependencies = retained_dependencies(
-            root,
-            [],
-            [],
-            std::collections::BTreeMap::from([(
-                TypstDependencyReader::SiteProgram,
-                DependencyReaderEvidence {
-                    reads,
-                    package_checks: Vec::new(),
-                },
-            )]),
-            Vec::new(),
-        );
-        assert!(
-            dependencies
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default(),
-                )
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn conflicting_bytes_make_reads_stale() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "first").unwrap();
-        let snapshot = snapshot(
-            root,
-            [root.join("content/post.typ")],
-            &root.join("site.typ"),
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"first",
-            )],
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"second",
-            )],
-        );
-
-        assert!(
-            !snapshot
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_retarget_alone_is_stale() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let first = root.join("first.typ");
-        let second = root.join("second.typ");
-        let logical = root.join("template.typ");
-        std::fs::write(&first, b"same bytes").unwrap();
-        std::fs::write(&second, b"same bytes").unwrap();
-        symlink(&first, &logical).unwrap();
-        let snapshot = snapshot(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            Vec::new(),
-            vec![ReadEvidence::new(
-                ReadLocator::Root("template.typ".into()),
-                b"same bytes",
-            )],
-        );
-
-        assert!(
-            snapshot
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-        let watched = snapshot.physical_read_paths();
-        let normalized_root = crate::filesystem::normalize_path(root);
-        assert!(watched.contains(&normalized_root.join("template.typ")));
-        assert!(watched.contains(&std::fs::canonicalize(&first).unwrap()));
-
-        std::fs::remove_file(&logical).unwrap();
-        symlink(&second, &logical).unwrap();
-        assert!(
-            !snapshot
-                .physical_reads_are_fresh(
-                    &tola_typst::SourceBoundary::default(),
-                    &BuildCancellation::default()
-                )
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn shared_reads_yield_one_watch_path() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let template = root.join("template.typ");
-        std::fs::write(&template, "#let helper = 1").unwrap();
-        let read =
-            || ReadEvidence::new(ReadLocator::Root("template.typ".into()), b"#let helper = 1");
-        let snapshot = snapshot(
-            root,
-            std::iter::empty(),
-            &root.join("site.typ"),
-            vec![read()],
-            vec![read()],
-        );
-
-        assert_eq!(
-            snapshot.physical_read_paths(),
-            vec![crate::filesystem::normalize_path(&template)]
-        );
-    }
-
-    #[test]
-    fn icon_read_matches_current_bytes() {
+    fn icon_reads_follow_their_current_bytes() {
         let directory = tempfile::TempDir::new().unwrap();
         let config = crate::config::tests::load_test_config(directory.path(), "");
         let host = compiler_host(&config).unwrap();
@@ -1589,7 +1454,6 @@ mod tests {
             vec![read],
         );
         let cancellation = BuildCancellation::default();
-        assert!(RebuildDecision::for_paths(Some(&dependencies), &[], false).reuses_site_program());
         let matches = |host: &crate::compiler::TypstHost| {
             dependencies
                 .virtual_reads_match(
@@ -1599,17 +1463,13 @@ mod tests {
                 .unwrap()
         };
         assert!(matches(&original_host));
+        // An unused icon changing does not invalidate the reader.
         assert!(matches(&host.with_icons(collections("red", "green"))));
         assert!(!matches(&host.with_icons(collections("tan", "blue"))));
         assert!(!matches(&host.with_icons(Arc::default())));
-    }
 
-    #[test]
-    fn icon_name_reads_follow_membership() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let host = compiler_host(&config).unwrap();
-        let collections = |names: &[&str]| {
+        // The name list is its own observation: a changed membership invalidates, as does none.
+        let named = |names: &[&str]| {
             let mut collection = tola_icons::IconCollection::new();
             for name in names {
                 collection
@@ -1620,122 +1480,33 @@ mod tests {
             collections.mount("brand", collection).unwrap();
             Arc::new(collections)
         };
-        let original = collections(&["palette"]);
         let package = tola_packages::TolaPackage::Icon.spec();
         let path = std::path::Path::new(".tola-icon/brand/.names");
         let bytes = tola_packages::icon_collection_names_bytes(&original, &package, path).unwrap();
-        let read = ReadEvidence::new(
-            ReadLocator::ProvidedPackage {
-                package,
-                path: path.into(),
-            },
-            &bytes,
-        );
         let dependencies = snapshot(
             config.get_root(),
             std::iter::empty(),
             &config.build.entry,
             Vec::new(),
-            vec![read],
+            vec![ReadEvidence::new(
+                ReadLocator::ProvidedPackage {
+                    package,
+                    path: path.into(),
+                },
+                &bytes,
+            )],
         );
         let matches = |collections| {
             let current = host.with_icons(collections);
             dependencies
                 .virtual_reads_match(
                     |evidence| current.virtual_read_matches(evidence),
-                    &BuildCancellation::default(),
+                    &cancellation,
                 )
                 .unwrap()
         };
         assert!(matches(Arc::clone(&original)));
-        assert!(!matches(collections(&["palette", "paints"])));
-        assert!(!matches(collections(&[])));
-    }
-
-    #[test]
-    fn unstable_virtual_reads_force_rebuild() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path();
-        let config = crate::config::tests::load_test_config(root, "");
-        let host = compiler_host(&config).unwrap();
-        let snapshot = |locator: ReadLocator| {
-            let process_stable = host.read_is_process_stable(&locator);
-            let reader_evidence = [(
-                TypstDependencyReader::SiteProgram,
-                DependencyReaderEvidence {
-                    reads: vec![DependencyReadEvidence::Virtual {
-                        evidence: ReadEvidence::new(locator, b"virtual"),
-                        process_stable,
-                    }],
-                    package_checks: Vec::new(),
-                },
-            )]
-            .into_iter()
-            .collect::<std::collections::BTreeMap<_, _>>();
-            retained_dependencies(
-                config.get_root(),
-                std::iter::empty::<PathBuf>(),
-                [config.get_root().join("site.typ")],
-                reader_evidence,
-                Vec::new(),
-            )
-        };
-
-        let priority = |snapshot: CompilationDependencies| {
-            RebuildDecision::for_paths(Some(&snapshot), &[], false).site_program
-        };
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedPackage {
-                package: "@tola/document:0.0.0".parse().unwrap(),
-                path: "lib.typ".into(),
-            })),
-            RebuildPriority::Unchanged
-        );
-        // Every source observation belongs to `@tola/source`: the package-wide capability
-        // read and the per-file lexical identity read. Both are immutable descriptors, so
-        // neither forces its producer to rebuild.
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Source.spec(),
-                path: ".tola-capability".into(),
-            })),
-            RebuildPriority::Unchanged
-        );
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Source.spec(),
-                path: ".tola-source/content/document.typ".into(),
-            })),
-            RebuildPriority::Unchanged
-        );
-        // The same path under `@tola/document` is not an observation, so it is an ordinary
-        // unstable virtual read. Ownership of the descriptor is what makes the difference,
-        // and an import-only package file is not a source observation either.
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Document.spec(),
-                path: ".tola-source/content/document.typ".into(),
-            })),
-            RebuildPriority::Affected
-        );
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Document.spec(),
-                path: "lib.typ".into(),
-            })),
-            RebuildPriority::Unchanged
-        );
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedRoot("internal.typ".into()))),
-            RebuildPriority::Affected
-        );
-        assert_eq!(
-            priority(snapshot(ReadLocator::ProvidedRoot("unknown.typ".into()))),
-            RebuildPriority::Affected
-        );
-        assert_eq!(
-            priority(snapshot(ReadLocator::NonPersistent("<generated>".into()))),
-            RebuildPriority::Affected
-        );
+        assert!(!matches(named(&["palette", "paints"])));
+        assert!(!matches(named(&[])));
     }
 }

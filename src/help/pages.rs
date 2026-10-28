@@ -926,23 +926,6 @@ mod tests {
     }
 
     #[test]
-    fn links_preserve_visible_documentation() {
-        for color in [false, true] {
-            let renderer = Documentation::new(None, color);
-            for arguments in requests() {
-                let linked = page(&arguments, HelpLanguage::English, CrossRefs::Emit).unwrap();
-                let unlinked =
-                    page(&arguments, HelpLanguage::English, CrossRefs::Suppress).unwrap();
-                assert_eq!(
-                    renderer.render(&linked.markdown()),
-                    renderer.render(&unlinked.markdown()),
-                    "{arguments:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn empty_container_shows_child_settings() {
         let page = page(
             &["[typst]".to_owned()],

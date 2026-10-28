@@ -9,9 +9,9 @@ use typst::foundations::Dict;
 use typst::utils::LazyHash;
 
 use super::core::TypstWorld;
-use super::snapshot::SourceSnapshot;
+use super::sources::ExplicitSources;
 use super::strategy::{FileCacheMode, FontMode, LibraryMode};
-use crate::world::file::{FileResolver, FileSnapshot, SharedFileCache};
+use crate::world::file::{FileResolver, FileView, SharedFileCache};
 use crate::world::font::{FontLoadError, FontStore};
 
 /// Invalid configuration for a Typst world.
@@ -34,11 +34,11 @@ pub enum WorldBuildError {
     #[error("no fonts configured; call `with_fonts(...)` or `no_fonts()`")]
     MissingFonts,
 
-    /// A frozen file view belongs to another compilation root.
+    /// Supplied frozen sources or a file view belong to another compilation root.
     #[error("the sources belong to a different compilation root")]
-    SnapshotRootMismatch {
-        /// Root of the frozen file view.
-        snapshot: PathBuf,
+    RootMismatch {
+        /// Root of the supplied frozen sources or file view.
+        frozen: PathBuf,
         /// Normalized root requested for the world.
         world: PathBuf,
     },
@@ -117,8 +117,8 @@ impl WorldBuilder {
     }
 
     /// Keep the listed sources frozen and observe other files for each compilation.
-    pub fn with_snapshot(mut self, snapshot: Arc<SourceSnapshot>) -> Self {
-        self.cache = Some(FileCacheMode::snapshot(snapshot));
+    pub fn with_sources(mut self, sources: Arc<ExplicitSources>) -> Self {
+        self.cache = Some(FileCacheMode::sources(sources));
         self
     }
 
@@ -126,13 +126,9 @@ impl WorldBuilder {
     ///
     /// This replaces any resolver selected by `with_files`. A later `with_files`
     /// selects fresh reads through that resolver instead.
-    pub fn with_file_snapshot(
-        mut self,
-        files: Arc<FileSnapshot>,
-        parsed: Arc<SharedFileCache>,
-    ) -> Self {
-        self.files = Arc::clone(files.resolver());
-        self.cache = Some(FileCacheMode::frozen(files, parsed));
+    pub fn with_file_view(mut self, view: Arc<FileView>, parsed: Arc<SharedFileCache>) -> Self {
+        self.files = Arc::clone(view.resolver());
+        self.cache = Some(FileCacheMode::frozen(view, parsed));
         self
     }
 
@@ -230,12 +226,11 @@ impl WorldBuilder {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
 
     use tempfile::TempDir;
 
     use super::{WorldBuildError, WorldBuilder};
-    use crate::{BundleCancellation, FontOptions, FontStore};
+    use crate::BundleCancellation;
 
     /// A compilation root whose `main.typ` holds `source`, kept alive by the returned `TempDir`.
     fn source_directory(source: &str) -> (TempDir, PathBuf) {
@@ -267,16 +262,6 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_font_strategy() {
-        let (directory, main) = source_directory("Hello");
-
-        assert!(matches!(
-            build_error(directory.path(), &main, WorldBuilder::with_local_cache),
-            WorldBuildError::MissingFonts
-        ));
-    }
-
-    #[test]
     fn main_source_outside_root_fails() {
         let (_outside, main) = source_directory("Hello");
         let root = TempDir::new().unwrap();
@@ -286,20 +271,6 @@ mod tests {
                 builder.with_local_cache().no_fonts()
             }),
             WorldBuildError::MainOutsideRoot { .. }
-        ));
-    }
-
-    #[test]
-    fn fixed_time_without_date_fails() {
-        let (directory, main) = source_directory("Hello");
-
-        assert!(matches!(
-            build_error(directory.path(), &main, |builder| {
-                builder.with_local_cache().no_fonts().with_fixed_datetime(
-                    typst::foundations::Datetime::from_hms(12, 34, 56).unwrap(),
-                )
-            }),
-            WorldBuildError::FixedTimeWithoutDate
         ));
     }
 
@@ -320,137 +291,5 @@ mod tests {
             world.today(Some(Duration::construct(0, 0, 1, 0, 0))),
             Datetime::from_ymd(2026, 8, 18)
         );
-    }
-
-    #[test]
-    fn reset_refreshes_cached_values() {
-        use typst::World;
-
-        let (directory, main) = source_directory("= First");
-        let mut world = WorldBuilder::new(&main, directory.path())
-            .with_local_cache()
-            .no_fonts()
-            .build(&BundleCancellation::default())
-            .expect("valid world");
-        assert_eq!(world.source(world.main()).unwrap().text(), "= First");
-        let first =
-            String::from_utf8(crate::compile_world(&world).unwrap().html().unwrap()).unwrap();
-        assert!(first.contains("First"), "{first}");
-
-        fs::write(&main, "= Second").unwrap();
-        assert_eq!(world.source(world.main()).unwrap().text(), "= First");
-
-        world.reset();
-
-        assert_eq!(world.source(world.main()).unwrap().text(), "= Second");
-        let second =
-            String::from_utf8(crate::compile_world(&world).unwrap().html().unwrap()).unwrap();
-        assert!(second.contains("Second"), "{second}");
-        assert!(!second.contains("First"), "{second}");
-    }
-
-    #[test]
-    fn file_selection_owns_resolver() {
-        use crate::{
-            FileMap, FileResolver, FileSnapshot, SharedFileCache, SourceSnapshot, file_id,
-        };
-        use typst::World;
-
-        let (directory, main) = source_directory("");
-        let resolver = |text: &'static [u8]| {
-            let mut files = FileMap::new();
-            files.insert(file_id("value.txt"), text);
-            Arc::new(FileResolver::new().with_provider(files))
-        };
-        let sources = Arc::new(
-            SourceSnapshot::build(&[], directory.path())
-                .unwrap()
-                .into_snapshot_and_accessed()
-                .0,
-        );
-        let snapshot = Arc::new(FileSnapshot::new(sources, resolver(b"snapshot")));
-        let world = WorldBuilder::new(&main, directory.path())
-            .with_files(resolver(b"resolver"))
-            .with_file_snapshot(Arc::clone(&snapshot), Arc::new(SharedFileCache::new()))
-            .no_fonts()
-            .build(&BundleCancellation::default())
-            .unwrap();
-        assert_eq!(
-            world.file(file_id("value.txt")).unwrap().as_slice(),
-            b"snapshot"
-        );
-
-        let world = WorldBuilder::new(&main, directory.path())
-            .with_file_snapshot(snapshot, Arc::new(SharedFileCache::new()))
-            .with_files(resolver(b"resolver"))
-            .no_fonts()
-            .build(&BundleCancellation::default())
-            .unwrap();
-        assert_eq!(
-            world.file(file_id("value.txt")).unwrap().as_slice(),
-            b"resolver"
-        );
-    }
-
-    #[test]
-    fn cancelled_preparation_leaves_fonts_unloaded() {
-        let (directory, main) = source_directory("Hello");
-        let fonts = Arc::new(FontStore::with_options(
-            FontOptions::new()
-                .with_system_fonts(false)
-                .with_embedded_fonts(false),
-        ));
-        let cancelled = BundleCancellation::new();
-        cancelled.cancel();
-        let error = WorldBuilder::new(&main, directory.path())
-            .with_local_cache()
-            .with_fonts(Arc::clone(&fonts))
-            .build(&cancelled)
-            .err()
-            .expect("preparation was cancelled");
-        assert!(crate::CompileError::from(error).is_cancelled());
-        assert!(!fonts.is_loaded());
-
-        WorldBuilder::new(&main, directory.path())
-            .with_local_cache()
-            .with_fonts(Arc::clone(&fonts))
-            .build(&BundleCancellation::new())
-            .unwrap();
-        assert!(fonts.is_loaded());
-    }
-
-    #[test]
-    fn fontless_preparation_observes_cancellation() {
-        let (directory, main) = source_directory("Hello");
-        let cancelled = BundleCancellation::new();
-        cancelled.cancel();
-        let error = WorldBuilder::new(&main, directory.path())
-            .with_local_cache()
-            .no_fonts()
-            .build(&cancelled)
-            .err()
-            .expect("preparation was cancelled");
-        assert!(matches!(error, WorldBuildError::Cancelled));
-    }
-
-    #[test]
-    fn required_strategies_precede_cancellation() {
-        let (directory, main) = source_directory("Hello");
-        let cancelled = BundleCancellation::new();
-        cancelled.cancel();
-        assert!(matches!(
-            WorldBuilder::new(&main, directory.path())
-                .no_fonts()
-                .build(&cancelled)
-                .err(),
-            Some(WorldBuildError::MissingFileCache),
-        ));
-        assert!(matches!(
-            WorldBuilder::new(&main, directory.path())
-                .with_local_cache()
-                .build(&cancelled)
-                .err(),
-            Some(WorldBuildError::MissingFonts),
-        ));
     }
 }

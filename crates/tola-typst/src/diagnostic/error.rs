@@ -6,7 +6,7 @@ use typst::World;
 
 use super::collection::Diagnostics;
 use crate::world::font::FontLoadError;
-use crate::world::{SnapshotError, WorldBuildError};
+use crate::world::{SourceLoadError, WorldBuildError};
 
 /// Typst compilation and export failures with structured diagnostics.
 ///
@@ -71,9 +71,9 @@ pub enum CompileError {
         message: String,
     },
 
-    /// Snapshot build error.
+    /// Source load error.
     #[error("could not read the site's sources")]
-    Snapshot(#[source] SnapshotError),
+    SourceLoad(#[source] SourceLoadError),
 
     /// Typst world configuration error.
     #[error("could not prepare the compiler")]
@@ -115,11 +115,11 @@ impl From<WorldBuildError> for CompileError {
     }
 }
 
-impl From<SnapshotError> for CompileError {
-    fn from(error: SnapshotError) -> Self {
+impl From<SourceLoadError> for CompileError {
+    fn from(error: SourceLoadError) -> Self {
         match error {
-            SnapshotError::Cancelled => Self::Cancelled,
-            error => Self::Snapshot(error),
+            SourceLoadError::Cancelled => Self::Cancelled,
+            error => Self::SourceLoad(error),
         }
     }
 }

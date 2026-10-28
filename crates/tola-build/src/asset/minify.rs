@@ -332,47 +332,48 @@ mod tests {
 
     #[test]
     fn unminifiable_source_keeps_its_bytes() {
-        let (bytes, warnings) = rendered("app.js", b"function =");
-        assert_eq!(&*bytes, b"function =");
-        let [warning] = &warnings[..] else {
-            panic!("expected one warning, got {warnings:?}");
-        };
-        let diagnostic = warning.diagnostic();
-        assert_eq!(diagnostic.code, "build.minify");
-        assert_eq!(diagnostic.severity, Severity::Warning);
-        assert_eq!(diagnostic.message, "`app.js` has a syntax error");
-        assert_eq!(diagnostic.location.as_ref().unwrap().line, Some(1));
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note == "Tola published it unchanged")
-        );
-        assert!(
-            diagnostic
-                .help
-                .iter()
-                .any(|help| help.message.contains("build.minify.javascript")),
-            "{:?}",
-            diagnostic.help
-        );
-    }
-
-    #[test]
-    fn non_utf8_source_keeps_its_bytes() {
-        let (bytes, warnings) = rendered("app.css", &[0xff, 0xfe]);
-        assert_eq!(&*bytes, &[0xff, 0xfe]);
-        let [warning] = &warnings[..] else {
-            panic!("expected one warning, got {warnings:?}");
-        };
-        let diagnostic = warning.diagnostic();
-        assert_eq!(diagnostic.message, "`app.css` is not UTF-8 text");
-        assert!(
-            diagnostic
-                .notes
-                .iter()
-                .any(|note| note == "Tola published it unchanged")
-        );
+        for (path, source, message, help, line) in [
+            (
+                "app.js",
+                b"function =".as_slice(),
+                "`app.js` has a syntax error",
+                "build.minify.javascript",
+                Some(1),
+            ),
+            (
+                "app.css",
+                &[0xff, 0xfe][..],
+                "`app.css` is not UTF-8 text",
+                "build.minify.css",
+                None,
+            ),
+        ] {
+            let (bytes, warnings) = rendered(path, source);
+            assert_eq!(&*bytes, source, "{path}");
+            let [warning] = &warnings[..] else {
+                panic!("{path}: expected one warning, got {warnings:?}");
+            };
+            let diagnostic = warning.diagnostic();
+            assert_eq!(diagnostic.code, "build.minify", "{path}");
+            assert_eq!(diagnostic.severity, Severity::Warning, "{path}");
+            assert_eq!(diagnostic.message, message, "{path}");
+            assert_eq!(diagnostic.location.as_ref().unwrap().line, line, "{path}");
+            assert!(
+                diagnostic
+                    .notes
+                    .iter()
+                    .any(|note| note == "Tola published it unchanged"),
+                "{path}"
+            );
+            assert!(
+                diagnostic
+                    .help
+                    .iter()
+                    .any(|help_note| help_note.message.contains(help)),
+                "{path}: {:?}",
+                diagnostic.help
+            );
+        }
     }
 
     #[test]

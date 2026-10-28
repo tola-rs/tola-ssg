@@ -72,18 +72,33 @@ mod tests {
         assert!(definition.is_none(), "{definition:?}");
     }
 
+    /// A definition inside a package answers the package's own source, whether the cursor rests on
+    /// the import or on a name it bound.
     #[test]
     fn definitions_point_at_package_sources() {
         let mut site = QuerySession::new();
-        let definition = site.reply(
-            "textDocument/definition",
-            r#"#import "@tola/document:0.0.0": current-document as identity
+        let alias_use = r#"#import "@tola/document:0.0.0": current-document as identity
     #let value = ident|ity
+    Body"#;
+        for (marked, expected) in [
+            (alias_use, "tola-package:/tola/document/0.0.0/lib.typ"),
+            (
+                r#"#import "@tola/doc|ument:0.0.0": current-document
     Body"#,
-        );
-        let uri = definition["uri"].as_str().unwrap();
-        assert_eq!(uri, "tola-package:/tola/document/0.0.0/lib.typ");
-        let uri: lsp_types::Uri = uri.parse().unwrap();
+                "tola-package:/tola/document/0.0.0/lib.typ",
+            ),
+            (
+                r#"#import "@tola/ho|st:0.0.0": all-sources
+    Body"#,
+                "tola-package:/tola/host/0.0.0/lib.typ",
+            ),
+        ] {
+            let definition = site.reply("textDocument/definition", marked);
+            assert_eq!(definition["uri"], expected, "{marked:?}");
+        }
+
+        let definition = site.reply("textDocument/definition", alias_use);
+        let uri: lsp_types::Uri = definition["uri"].as_str().unwrap().parse().unwrap();
         let virtual_source = package_source(&uri).unwrap();
         let id = crate::identity::file_id(&uri, site.config.get_root()).unwrap();
         assert_eq!(
@@ -101,22 +116,12 @@ mod tests {
             r#"#import "@tola/doc|ument:0.0.0": current-document
     Body"#,
         );
-        assert_eq!(import["uri"], uri.as_str());
         assert_eq!(
             import["range"]["start"],
             json!({ "line": 0, "character": 0 })
         );
     }
 
-    #[test]
-    fn internal_package_imports_resolve() {
-        let mut site = QuerySession::new();
-        let definition = site.reply(
-            "textDocument/definition",
-            "#import \"@tola/ho|st:0.0.0\": all-sources\nBody",
-        );
-        assert_eq!(definition["uri"], "tola-package:/tola/host/0.0.0/lib.typ");
-    }
     /// A program the site cannot compile still answers a definition inside it.
     #[test]
     fn broken_programs_still_answer_definitions() {

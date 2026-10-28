@@ -14,11 +14,11 @@ mod boundary;
 mod builder;
 mod core;
 mod path;
-mod snapshot;
+mod sources;
 mod strategy;
 
 pub use boundary::{SourceBoundary, SourceRefusal};
 pub use builder::{WorldBuildError, WorldBuilder};
 pub use core::TypstWorld;
 pub use path::normalize_path;
-pub use snapshot::{SnapshotError, SnapshotLoad, SnapshotLoadFailure, SourceSnapshot};
+pub use sources::{ExplicitSources, SourceLoad, SourceLoadError, SourceLoadFailure};

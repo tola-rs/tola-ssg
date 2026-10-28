@@ -1276,9 +1276,9 @@ mod tests {
         assert!(!labels.contains(&"from-unicode"), "{labels:?}");
     }
 
-    /// The largest value the standard library renders reaches a hover whole.
+    /// The largest value the standard library renders reaches a hover unabbreviated.
     #[test]
-    fn library_values_reach_hovers_whole() {
+    fn long_values_reach_hover_unabbreviated() {
         let library = Library::builder().build();
         let arrow = library
             .math

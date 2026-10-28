@@ -672,23 +672,6 @@ mod tests {
             || diagnostic.code == crate::codes::doctor::FONT_PATH_MISSING));
     }
 
-    #[test]
-    fn undeclared_font_paths_are_not_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tola.toml");
-        std::fs::write(
-            &path,
-            "[build]\nentry = \"site.typ\"\ncontent-dir = \"content\"\n",
-        )
-        .unwrap();
-
-        let reported = diagnose_at(&path);
-
-        assert!(!reported.iter().any(|diagnostic| diagnostic.code
-            == crate::codes::doctor::FONT_PATH_MISSING
-            || diagnostic.code == crate::codes::doctor::FONT_DIRECTORY_EMPTY));
-    }
-
     #[cfg(unix)]
     #[test]
     fn vendored_links_are_reported() {

@@ -234,8 +234,17 @@ mod tests {
         value ^ (value >> 31)
     }
 
+    /// The length model exists so a partition can be priced without writing it. It is only
+    /// correct when the number it predicts is the number of bytes the writer emits, measured
+    /// both mid-stream (where the pending byte is still unpadded) and after finishing.
     #[test]
-    fn length_model_tracks_every_probability() {
+    fn length_model_matches_written_bytes() {
+        assert_eq!(
+            LengthWriter::new().finish(),
+            BoolWriter::new().finish().len()
+        );
+
+        // Every probability, so no branch's arithmetic is left unpriced.
         for probability in 1..=u8::MAX {
             for seed in 0..4 {
                 let mut state = (u64::from(probability) << 32) | seed;
@@ -243,64 +252,74 @@ mod tests {
                 let mut length = LengthWriter::new();
                 for step in 0..=512 {
                     let value = splitmix(&mut state) & 1 != 0;
-                    writer.write_bool(probability, value);
-                    length.write_bool(probability, value);
-                    if step % 16 == 0 {
-                        assert_eq!(
-                            length.clone().finish(),
-                            writer.output.len() + 4,
-                            "probability {probability}, seed {seed}, step {step}"
-                        );
-                    }
+                    assert_length_tracks(
+                        &mut writer,
+                        &mut length,
+                        probability,
+                        value,
+                        step,
+                        "random bits",
+                    );
                 }
-                assert_eq!(length.finish(), writer.finish().len());
+                assert_eq!(
+                    length.finish(),
+                    writer.finish().len(),
+                    "probability {probability}, seed {seed}"
+                );
             }
         }
-    }
 
-    #[test]
-    fn length_model_tracks_carry_runs() {
-        let mut writer = BoolWriter::new();
-        let mut length = LengthWriter::new();
-        for _ in 0..10_000 {
-            writer.write_bool(u8::MAX, true);
-            length.write_bool(u8::MAX, true);
-        }
-        let bytes = writer.finish();
-        assert_eq!(length.finish(), bytes.len());
-        assert!(bytes.iter().filter(|byte| **byte == u8::MAX).count() > 1_000);
-    }
-
-    #[test]
-    fn length_model_counts_finish_and_partitions() {
-        assert_eq!(
-            LengthWriter::new().finish(),
-            BoolWriter::new().finish().len()
-        );
-        for (partition, count) in [1, 7, 8, 9, 23, 24, 25, 100, 1_000].into_iter().enumerate() {
-            let mut state = count as u64 ^ ((partition as u64) << 40);
+        // A finished stream, across every byte boundary a partition is priced at.
+        for count in [1, 7, 8, 9, 23, 24, 25, 100, 1_000] {
+            let mut state = count as u64;
             let mut writer = BoolWriter::new();
             let mut length = LengthWriter::new();
-            for _ in 0..count {
+            for step in 0..count {
                 let value = splitmix(&mut state) & 1 != 0;
-                writer.write_bool(128, value);
-                length.write_bool(128, value);
+                assert_length_tracks(
+                    &mut writer,
+                    &mut length,
+                    128,
+                    value,
+                    step,
+                    "finished stream",
+                );
             }
             assert_eq!(length.finish(), writer.finish().len(), "count {count}");
         }
-    }
 
-    #[test]
-    fn length_model_tracks_literals() {
+        // A literal, written as eight equiprobable bits.
         let mut writer = BoolWriter::new();
         let mut length = LengthWriter::new();
         for value in 0..=255 {
             writer.write_literal(value, 8);
             for shift in (0..8).rev() {
-                length.write_bool(128, value & (1 << shift) != 0);
+                let bit = value & (1 << shift) != 0;
+                length.write_bool(128, bit);
+                assert_eq!(length.clone().finish(), writer.output.len() + 4);
             }
-            assert_eq!(length.clone().finish(), writer.output.len() + 4);
         }
         assert_eq!(length.finish(), writer.finish().len());
+    }
+
+    /// A bit written when the pending byte is not yet flushed costs the four bytes the encoder
+    /// still holds, so the running length is the emitted bytes plus the pending word.
+    fn assert_length_tracks(
+        writer: &mut BoolWriter,
+        length: &mut LengthWriter,
+        probability: u8,
+        value: bool,
+        step: usize,
+        label: &str,
+    ) {
+        writer.write_bool(probability, value);
+        length.write_bool(probability, value);
+        if step.is_multiple_of(16) {
+            assert_eq!(
+                length.clone().finish(),
+                writer.output.len() + 4,
+                "{label} probability {probability}, step {step}"
+            );
+        }
     }
 }

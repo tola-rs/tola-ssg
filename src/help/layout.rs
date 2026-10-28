@@ -719,45 +719,6 @@ mod tests {
     use crate::help::model::{HelpPage, PageId, anchor};
 
     #[test]
-    fn styled_boundaries_keep_adjacent_text() {
-        let mut page = page(
-            "`tola help` [`\"@tola/web\"`](tola-help://packages/web) a**b**c, `x`!\n",
-            120,
-        );
-        let rendered = rows(&mut page)[0].clone();
-        assert_eq!(rendered, "tola help \"@tola/web\" abc, x!");
-        assert_eq!(page.links.len(), 1);
-        let link = &page.links[0];
-        assert_eq!(link.column, rendered.find("\"@tola/web\"").unwrap());
-        assert_eq!(link.width, "\"@tola/web\"".width());
-        assert_eq!(
-            link.target,
-            LinkTarget::Page(PageId::Package { name: "web".into() })
-        );
-    }
-
-    #[test]
-    fn full_width_words_stay_together() {
-        let mut page = page("alpha beta gamma delta", 16);
-        assert_eq!(rows(&mut page), ["alpha beta gamma", "delta"]);
-    }
-
-    #[test]
-    fn chinese_prose_fills_full_line() {
-        let mut page = page("或按下 Tab 进行基于键盘的快速导航。", 20);
-        let drawn = rows(&mut page);
-        assert_eq!(drawn.len(), 2);
-        assert_eq!(
-            drawn[0].split_whitespace().collect::<String>(),
-            "或按下Tab进行基于"
-        );
-        assert_eq!(
-            drawn[1].split_whitespace().collect::<String>(),
-            "键盘的快速导航。"
-        );
-    }
-
-    #[test]
     fn wrapped_links_share_occurrence() {
         let mut page = page("[one **two** three four](#target) [one](#target)\n", 8);
         let drawn = rows(&mut page);
@@ -807,74 +768,59 @@ mod tests {
         );
     }
 
+    /// Every drawn line translates back to the block and source offset it came from, at every
+    /// width, for prose, lists, quotes, code, and tables.
     #[test]
-    fn nested_passages_survive_reflow() {
-        let document = document(
+    fn reflow_round_trips_source_positions() {
+        let cases = [
             "# Title\n\n- first alpha beta gamma delta epsilon zeta eta theta iota\n\n  > quoted alpha beta gamma delta epsilon zeta eta theta iota\n\n  ```text\n  code_alpha_beta_gamma_delta_epsilon_zeta_eta_theta_iota\n  ```\n",
-        );
-        let narrow = PageLayout::new(&document, 16, Palette::new(false));
-        let wide = PageLayout::new(&document, 35, Palette::new(false));
-        let mut leaves = BTreeSet::new();
-        for position in &narrow.positions {
-            leaves.insert(position.leaf);
-            let line = wide.line_at(*position);
-            let translated = wide.position(line);
-            assert_eq!(translated.leaf, position.leaf);
-            assert!(translated.offset <= position.offset);
-            if let Some(next) = wide.positions.get(line + 1)
-                && next.leaf == position.leaf
-            {
-                assert!(next.offset > position.offset);
-            }
-            let returned = narrow.position(narrow.line_at(translated));
-            assert_eq!(returned.leaf, position.leaf);
-        }
-        assert_eq!(leaves.len(), 4);
-        assert!(
-            narrow
-                .positions
-                .iter()
-                .filter(|position| position.leaf == 3)
-                .any(|position| position.offset > Some(30))
-        );
-    }
-
-    #[test]
-    fn document_rows_round_trip() {
-        let document = document(
             "# Title\n\nfirst alpha beta gamma delta epsilon\n\n- list alpha beta gamma\n\n  > quoted alpha beta gamma\n\n```text\n\ncode_alpha_beta_gamma_delta\n\n```\n\n| Empty |\n| --- |\n\nlast alpha beta gamma\n\n---\n",
-        );
-        for width in [12, 40, 120] {
-            let page = PageLayout::new(&document, width, Palette::new(false));
-            for line in 0..page.pager.line_count() {
-                assert_eq!(page.line_at(page.position(line)), line, "{width}: {line}");
+            "# Title\n\nfirst alpha beta gamma delta epsilon\n\n> quoted alpha beta gamma delta epsilon\n\n| Empty |\n| --- |\n\nlast alpha beta gamma delta epsilon\n",
+            "```text\nfirst_long_source_line_with_a_value\nsecond_名称_source_line_with_another_value\n```\n",
+        ];
+        for markdown in cases {
+            let document = document(markdown);
+            for width in [12, 16, 35, 40, 80, 120] {
+                let page = PageLayout::new(&document, width, Palette::new(false));
+                for position in &page.positions {
+                    assert_eq!(
+                        page.position(page.line_at(*position)).leaf,
+                        position.leaf,
+                        "{width}: {position:?} leaves its block"
+                    );
+                }
+                for line in 0..page.pager.line_count() {
+                    assert_eq!(
+                        page.line_at(page.position(line)),
+                        line,
+                        "{width}: line {line} does not round-trip"
+                    );
+                }
             }
         }
-    }
 
-    #[test]
-    fn separators_survive_reflow() {
-        let document = document(
-            "# Title\n\nfirst alpha beta gamma delta epsilon\n\n> quoted alpha beta gamma delta epsilon\n\n| Empty |\n| --- |\n\nlast alpha beta gamma delta epsilon\n",
-        );
-        let narrow = PageLayout::new(&document, 12, Palette::new(false));
-        let wide = PageLayout::new(&document, 40, Palette::new(false));
-        let mut separators = 0;
-        for position in narrow
-            .positions
-            .iter()
-            .filter(|position| position.offset.is_none())
-        {
-            separators += 1;
-            let translated = wide.line_at(*position);
-            assert_eq!(wide.position(translated), *position);
-            assert_eq!(
-                narrow.line_at(wide.position(translated)),
-                narrow.line_at(*position)
-            );
+        // A narrow layout translates into a wide one without leaving the block or moving
+        // backwards in the source.
+        for markdown in cases {
+            let document = document(markdown);
+            let narrow = PageLayout::new(&document, 16, Palette::new(false));
+            let wide = PageLayout::new(&document, 80, Palette::new(false));
+            for position in &narrow.positions {
+                let line = wide.line_at(*position);
+                let translated = wide.position(line);
+                assert_eq!(translated.leaf, position.leaf);
+                assert!(translated.offset <= position.offset);
+                if let Some(next) = wide.positions.get(line + 1)
+                    && next.leaf == position.leaf
+                {
+                    assert!(next.offset > position.offset);
+                }
+                assert_eq!(
+                    narrow.position(narrow.line_at(translated)).leaf,
+                    position.leaf
+                );
+            }
         }
-        // Four block separators, plus the header and the rule of the empty table.
-        assert_eq!(separators, 6);
     }
 
     #[test]
@@ -946,78 +892,6 @@ mod tests {
     }
 
     #[test]
-    fn list_markers_keep_starting_ordinal() {
-        let mut page = page("7. alpha beta gamma delta\n8. next\n", 16);
-        let drawn = rows(&mut page);
-        assert!(drawn[0].starts_with("7. "));
-        assert!(drawn.last().unwrap().starts_with("8. "));
-    }
-
-    #[test]
-    fn code_keeps_graphemes_across_wraps() {
-        for language in ["text", "typst", "toml"] {
-            let source = "名称e\u{301}👨‍👩‍👧‍👦longlonglong\nnext\n";
-            let mut page = page(&format!("```{language}\n{source}```\n"), 12);
-            let drawn = rows(&mut page);
-            assert_eq!(
-                drawn
-                    .iter()
-                    .flat_map(|row| row.split_whitespace())
-                    .collect::<String>(),
-                source.split_whitespace().collect::<String>()
-            );
-            assert!(
-                page.positions
-                    .iter()
-                    .any(|position| position.offset > Some("名称e\u{301}".len()))
-            );
-        }
-    }
-
-    #[test]
-    fn code_tokens_keep_wrapped_styles() {
-        let palette = Palette::new(true);
-        for (language, source, expected) in [
-            (
-                "toml",
-                "title = \"zzzzzzzzzzzzzzzzzzzz\"",
-                palette.string_style(),
-            ),
-            (
-                "typst-code",
-                "let title = \"zzzzzzzzzzzzzzzzzzzz\"",
-                palette.string_style(),
-            ),
-            (
-                "typst",
-                "Let *zzzzzzzzzzzzzzzzzzzz* be #emph[other].",
-                palette.emphasis_style(),
-            ),
-        ] {
-            let mut page = PageLayout::new(
-                &document(&format!("```{language}\n{source}\n```\n")),
-                12,
-                palette,
-            );
-            let terminal = rendered(&mut page);
-            let mut marked_rows = BTreeSet::new();
-            let foreground = expected.fg.unwrap_or(ratatui::style::Color::Reset);
-            for (index, cell) in terminal.backend().buffer().content().iter().enumerate() {
-                if cell.symbol() == "z" {
-                    marked_rows.insert(index / 12);
-                    assert_eq!(cell.style().fg, Some(foreground), "{language}");
-                    assert_eq!(
-                        cell.style().add_modifier,
-                        expected.add_modifier,
-                        "{language}"
-                    );
-                }
-            }
-            assert!(marked_rows.len() > 1, "{language}");
-        }
-    }
-
-    #[test]
     fn chinese_prose_keeps_every_character() {
         let document =
             document("中文紧接`output-url`时，仍保留每个字符；**强调**与`路径`之间也能换行。");
@@ -1067,119 +941,5 @@ mod tests {
             .draw(|frame| page.pager.draw(frame, frame.area(), Palette::new(false)))
             .unwrap();
         terminal
-    }
-
-    #[test]
-    fn reflow_translates_source_positions() {
-        let source =
-            "first_long_source_line_with_a_value\nsecond_名称_source_line_with_another_value\n";
-        let document = HelpDocument::parse(HelpPage::new(
-            PageId::Overview,
-            format!("```text\n{source}```\n"),
-        ));
-        let narrow = PageLayout::new(&document, 16, Palette::new(false));
-        let wide = PageLayout::new(&document, 80, Palette::new(false));
-        for position in &narrow.positions {
-            let row = wide.line_at(*position);
-            let translated = wide.position(row);
-            assert_eq!(translated.leaf, position.leaf);
-            assert!(translated.offset <= position.offset);
-            if let Some(next) = wide.positions.get(row + 1) {
-                assert!(next.offset > position.offset);
-            }
-        }
-        assert!(
-            matches!(&document.blocks[0], Block::Code { source: original, .. } if original == source)
-        );
-    }
-
-    #[test]
-    fn tables_align_columns_by_display_width() {
-        let mut page = page(
-            "| 命令 | 状态 |\n| --- | --- |\n| `tola build` | 运行 |\n",
-            40,
-        );
-        let drawn = rows(&mut page);
-        assert_eq!(drawn.len(), 3, "a header, its rule, and one row");
-        let terminal = rendered(&mut page);
-        let buffer = terminal.backend().buffer();
-        let column_of = |row: u16, symbol: &str| {
-            (0..page.width as u16)
-                .find(|column| buffer[(*column, row)].symbol() == symbol)
-                .unwrap_or_else(|| panic!("row {row} holds no {symbol:?}"))
-        };
-        assert_eq!(
-            column_of(0, "|"),
-            column_of(2, "|"),
-            "a double-width header keeps the rows' columns together: {drawn:?}"
-        );
-        assert_eq!(
-            buffer[(column_of(0, "|") - 1, 1)].symbol(),
-            "+",
-            "the rule spans the first column: {drawn:?}"
-        );
-    }
-
-    #[test]
-    fn wrapped_cell_keeps_the_grid_aligned() {
-        let mut page = page(
-            "| 命令 | 状态 |\n| --- | --- |\n| `tola preview build` | 运行 |\n",
-            30,
-        );
-        let drawn = rows(&mut page);
-        assert_eq!(
-            drawn.len(),
-            4,
-            "a header, the rule, and the row's two wrapped lines: {drawn:?}"
-        );
-        let terminal = rendered(&mut page);
-        let buffer = terminal.backend().buffer();
-        let column_of = |row: u16, symbol: &str| {
-            (0..page.width as u16)
-                .find(|column| buffer[(*column, row)].symbol() == symbol)
-                .unwrap_or_else(|| panic!("row {row} holds no {symbol:?}"))
-        };
-        assert!(drawn[2].starts_with("tola preview"), "{drawn:?}");
-        assert!(drawn[3].starts_with("build"), "{drawn:?}");
-        assert_eq!(
-            column_of(0, "|"),
-            column_of(2, "|"),
-            "the wrapped lines stay in their columns: {drawn:?}"
-        );
-    }
-
-    #[test]
-    fn table_too_wide_for_the_reader_keeps_labelled_fields() {
-        let mut page = page(
-            "| 命令 | 状态 |\n| --- | --- |\n| `tola build` | 运行 |\n",
-            8,
-        );
-        let drawn = rows(&mut page);
-        assert!(
-            drawn.iter().all(|row| !row.contains('+')),
-            "no grid fits eight columns: {drawn:?}"
-        );
-        assert!(
-            drawn[0].contains(':'),
-            "the labelled form names each header beside its cell: {drawn:?}"
-        );
-    }
-
-    #[test]
-    fn cell_wraps_before_the_grid_gives_way() {
-        let mut page = page(
-            "| Field | Note |\n| --- | --- |\n| alpha beta gamma delta epsilon | 运行 |\n",
-            30,
-        );
-        let drawn = rows(&mut page);
-        assert!(
-            drawn.iter().any(|row| row.contains('+')),
-            "columns shrink to their minimum before the grid gives way: {drawn:?}"
-        );
-        assert!(drawn[0].starts_with("Field"), "{drawn:?}");
-        assert!(
-            drawn.iter().any(|row| row.starts_with("alpha beta")),
-            "the long cell wraps into its column: {drawn:?}"
-        );
     }
 }

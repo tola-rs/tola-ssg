@@ -33,7 +33,7 @@ pub(super) struct PublishedIndex {
 }
 
 impl PublishedIndex {
-    pub(super) fn snapshot(
+    pub(super) fn published_packages(
         &mut self,
         resources: &BuildResources,
         locations: &PackageLocations,
@@ -156,7 +156,11 @@ mod tests {
             };
             let resources = BuildResources::new().with_input_scope(scope);
             let locations = PackageLocations::from_absolute_roots(None, cache).unwrap();
-            assert!(index.snapshot(&resources, &locations, false).is_empty());
+            assert!(
+                index
+                    .published_packages(&resources, &locations, false)
+                    .is_empty()
+            );
         }
     }
 

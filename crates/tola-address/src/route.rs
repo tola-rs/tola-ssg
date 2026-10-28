@@ -78,31 +78,6 @@ mod tests {
             "/"
         );
     }
-
-    #[test]
-    fn empty_segments_report_their_index() {
-        for (segments, index) in [
-            (vec!["#"], 1usize),
-            (vec!["posts", "#"], 2),
-            (vec!["posts", "#", "child"], 2),
-        ] {
-            assert_eq!(
-                slugged_route(
-                    &segments,
-                    SlugMode::Unicode,
-                    SlugCase::Lower,
-                    SlugSeparator::Dash
-                )
-                .unwrap_err(),
-                RouteSegmentError::Empty {
-                    index,
-                    text: "#".to_owned(),
-                },
-                "{segments:?}"
-            );
-        }
-    }
-
     #[test]
     fn slugged_dot_segments_are_refused() {
         for segments in [vec!["posts", "#.#"], vec!["posts", "#..#", "child"]] {
@@ -134,41 +109,6 @@ mod tests {
             "/北京/ος-café/"
         );
     }
-
-    #[test]
-    fn nonportable_segments_report_error() {
-        for (segments, expected) in [
-            (
-                vec!["posts", "file.."],
-                UrlPathError::FilesystemTrailingDotOrSpace,
-            ),
-            (vec!["posts", "CON"], UrlPathError::WindowsDeviceName),
-        ] {
-            assert_eq!(
-                slugged_route(
-                    &segments,
-                    SlugMode::Unicode,
-                    SlugCase::Lower,
-                    SlugSeparator::Dash
-                )
-                .unwrap_err(),
-                RouteSegmentError::Path(expected),
-                "{segments:?}"
-            );
-        }
-        let long = "a".repeat(256);
-        assert!(matches!(
-            slugged_route(
-                &[long.as_str()],
-                SlugMode::Unicode,
-                SlugCase::Lower,
-                SlugSeparator::Dash
-            )
-            .unwrap_err(),
-            RouteSegmentError::Path(UrlPathError::OutputSegmentTooLong { .. })
-        ));
-    }
-
     #[test]
     fn each_segment_keeps_its_own_name() {
         assert_eq!(

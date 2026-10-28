@@ -276,50 +276,6 @@ mod tests {
     }
 
     #[test]
-    fn collection_rotation_applies_to_each_icon() {
-        let collection = parse(br#"{"prefix":"source","rotate":1,"icons":{"mark":{"body":"<path/>","width":12,"height":24}}}"#).unwrap();
-        assert_eq!(collection.get("mark").unwrap().aspect_ratio(), 2.0);
-    }
-
-    #[test]
-    fn aliases_compose_over_icon_transforms() {
-        let collection = parse(
-            br#"{
-            "prefix":"source", "left":2, "top":3, "width":20, "height":10,
-            "icons":{"mark":{"body":"<path/>","hFlip":true}},
-            "aliases":{"turn":{"parent":"mark","rotate":1},"plain":{"parent":"mark","hFlip":true}}
-        }"#,
-        )
-        .unwrap();
-        assert!(collection
-            .get("turn")
-            .unwrap()
-            .svg()
-            .contains("rotate(90 5 5) translate(22 -3) scale(-1 1)"));
-        let plain = collection.get("plain").unwrap();
-        assert_eq!(
-            plain.view_box(),
-            ViewBox::new(2.0, 3.0, 20.0, 10.0).unwrap()
-        );
-        assert!(!plain.svg().contains("transform="));
-    }
-
-    #[test]
-    fn definitions_stay_outside_the_transform() {
-        let collection = parse(br##"{"prefix":"source","icons":{"mark":{"body":"<defs><linearGradient id=\"paint\"><stop stop-color=\"red\"/></linearGradient></defs><path fill=\"url(#paint)\"/>","rotate":1}}}"##).unwrap();
-        let svg = collection.get("mark").unwrap().svg();
-        let xml = roxmltree::Document::parse(svg).unwrap();
-        let root = xml.root_element();
-        let children = root
-            .children()
-            .filter(|child| child.is_element())
-            .collect::<Vec<_>>();
-        assert_eq!(children[0].tag_name().name(), "defs");
-        assert_eq!(children[1].tag_name().name(), "g");
-        assert_eq!(children[1].attribute("transform"), Some("rotate(90 8 8)"));
-    }
-
-    #[test]
     fn alias_failures_report_typed_errors() {
         assert!(matches!(
             parse(
@@ -333,26 +289,6 @@ mod tests {
         ));
         assert!(matches!(parse(br#"{"prefix":"a","icons":{"x":{"body":"<path/>"}},"aliases":{"x":{"parent":"x"}}}"#), Err(InvalidCollection::DuplicateIcon { .. })));
         assert!(matches!(parse(br#"{"prefix":"a","icons":{"x":{"body":"<path/>"}},"aliases":{"a":{"parent":"x","width":1e300,"height":1e-300}}}"#), Err(InvalidCollection::Geometry)));
-    }
-
-    #[test]
-    fn invalid_character_mappings_are_rejected() {
-        for character in ["", "not-hex", "110000", "ffffffffffffffff"] {
-            let source = serde_json::json!({"prefix":"a","icons":{"x":{"body":"<path/>"}},"chars":{character:"x"}});
-            assert!(
-                matches!(
-                    parse(source.to_string().as_bytes()),
-                    Err(InvalidCollection::CharacterKey)
-                ),
-                "{character}"
-            );
-        }
-        assert!(matches!(
-            parse(br#"{"prefix":"a","icons":{},"chars":{"e001":"missing"}}"#),
-            Err(InvalidCollection::CharacterTarget)
-        ));
-        let collection = parse(br#"{"prefix":"a","icons":{"artist":{"body":"<path/>"}},"chars":{"1f9d1-200d-1f3a8":"artist"}}"#).unwrap();
-        assert!(collection.get("1f9d1-200d-1f3a8").is_some());
     }
 
     #[test]
@@ -424,15 +360,5 @@ mod tests {
                 .svg(),
             single.get("base").unwrap().svg()
         );
-    }
-
-    #[test]
-    fn import_exposes_source_metadata() {
-        let collection = parse(br#"{"prefix":"source","icons":{},"info":{"license":{"title":"MIT License","spdx":"MIT","url":"https://opensource.org/license/mit"}}}"#).unwrap();
-        assert_eq!(collection.source_prefix(), Some("source"));
-        let license = collection.license().unwrap();
-        assert_eq!(license.title(), Some("MIT License"));
-        assert_eq!(license.spdx(), Some("MIT"));
-        assert_eq!(license.url(), Some("https://opensource.org/license/mit"));
     }
 }

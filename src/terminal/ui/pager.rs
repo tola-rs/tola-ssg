@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn movement_hints_follow_viewport_and_top() {
+    fn only_reachable_scrolls_are_offered() {
         let mut pager = page();
         pager.resize(20);
         assert!(!pager.can_page_by(1));

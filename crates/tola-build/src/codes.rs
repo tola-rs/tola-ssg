@@ -157,7 +157,7 @@ pub mod typst {
     pub const INPUT: DiagnosticCode = DiagnosticCode::new("typst.input");
     /// A file this build reads could not be read.
     pub const IO: DiagnosticCode = DiagnosticCode::new("typst.io");
-    /// A source snapshot failed.
+    /// A source load failed.
     pub const SNAPSHOT: DiagnosticCode = DiagnosticCode::new("typst.snapshot");
     /// Source analysis failed.
     pub const SOURCE_ANALYSIS: DiagnosticCode = DiagnosticCode::new("typst.source_analysis");

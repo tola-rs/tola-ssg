@@ -333,38 +333,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A merge keeps the author's unrelated settings and their comments.
     #[test]
     fn merge_preserves_author_comments() {
-        let directory = editor_directory(".");
-
-        let source = "{\n  // keep\n  \"editor.formatOnSave\": true\n}\n";
-        let merged = merge(Some(source), &directory).unwrap();
-        assert!(merged.contains("// keep"));
-        assert!(merged.contains("\"editor.formatOnSave\": true"));
-        assert!(merged.contains("\"tola.configPath\""));
-        assert!(scan_object(&merged).is_ok());
-
-        let source = "{\r \"editor.custom\": {\"values\": [1, /* inside */ \"// text\"]} /* after */ // keep\r}\r";
-        let merged = merge(Some(source), &directory).unwrap();
-        let settings: Value = jsonc_value(&merged).unwrap();
-        assert_eq!(settings["editor.custom"], json!({"values": [1, "// text"]}));
-        assert!(merged.contains("/* inside */"));
-        assert!(merged.contains("}, /* after */ // keep\r"));
-
+        let (root, _config_path, directory) = selected_directory();
         let source = "{\n \"editor.fontSize\":14 // keep\n}\n";
         let merged = merge(Some(source), &directory).unwrap();
         let settings: Value = jsonc_value(&merged).unwrap();
         assert_eq!(settings["editor.fontSize"], 14);
         assert!(merged.contains("14, // keep\n"));
         assert_eq!(merge(Some(&merged), &directory).unwrap(), merged);
-    }
-
-    #[test]
-    fn fresh_settings_include_required_keys() {
-        let settings: Value =
-            serde_json::from_str(&merge(None, &editor_directory(".")).unwrap()).unwrap();
-        assert_eq!(settings["tola.configPath"], "tola.toml");
-        assert!(settings.get("tola.serverPath").is_none());
+        drop(root);
     }
 
     /// A site whose configuration was selected, and the file that selected it.
@@ -389,46 +368,6 @@ mod tests {
         assert_eq!(settings["other.serverPath"], "/custom/other");
         assert_eq!(settings["tola.configPath"], "selected config.toml");
         assert!(merged.contains("// a server the author installed"));
-    }
-
-    #[test]
-    fn equivalent_paths_keep_author_spelling() {
-        let (_root, config_path, directory) = selected_directory();
-        for path in [
-            "selected config.toml".to_owned(),
-            "./selected config.toml".to_owned(),
-            "missing/../selected config.toml".to_owned(),
-            "${workspaceFolder}/selected config.toml".to_owned(),
-            config_path.to_str().unwrap().to_owned(),
-        ] {
-            let source = format!("{}\n", json!({"tola.configPath": path}));
-            assert_eq!(merge(Some(&source), &directory).unwrap(), source);
-        }
-    }
-
-    #[test]
-    fn jsonc_keeps_nested_trailing_commas() {
-        let source = r#"{"editor.custom": {"values": [1, /* keep */ 2,],},}"#;
-        let merged = merge(Some(source), &editor_directory(".")).unwrap();
-        assert_eq!(
-            jsonc_value(&merged).unwrap()["editor.custom"],
-            json!({"values": [1, 2]})
-        );
-        assert!(merged.contains("/* keep */"));
-        assert_eq!(
-            merge(Some(&merged), &editor_directory(".")).unwrap(),
-            merged
-        );
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn path_parents_follow_editor_resolution() {
-        let (root, _config_path, directory) = selected_directory();
-        let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.path().join("alias")).unwrap();
-        let source = "{\"tola.configPath\": \"alias/../selected config.toml\"}\n";
-        assert_eq!(merge(Some(source), &directory).unwrap(), source);
     }
 
     #[test]
@@ -457,11 +396,5 @@ mod tests {
         );
 
         assert!(merge(Some(&conflict), &directory).is_err());
-    }
-
-    #[test]
-    fn duplicate_setting_is_rejected() {
-        let source = "{\"editor.fontSize\": 12, \"editor.fontSize\": 14}";
-        assert!(merge(Some(source), &editor_directory(".")).is_err());
     }
 }

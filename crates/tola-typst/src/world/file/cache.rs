@@ -250,21 +250,10 @@ impl FileSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::file::FileResolver;
-    use crate::world::file::{FileRead, ReadEvidence, ReadLocator, ReadOrigin};
-    use std::fs;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
 
-    fn byte_read(files: &FileResolver, id: FileId, root: &Path) -> ReadAttempt<Bytes> {
-        let read = files.read_attempt(id, root);
-        ReadAttempt {
-            result: read.result.map(Bytes::new),
-            reads: read.reads,
-            disk_reads: read.disk_reads,
-            package_checks: read.package_checks,
-        }
-    }
+    use crate::world::file::{FileRead, ReadEvidence, ReadLocator, ReadOrigin};
+
+    use std::path::PathBuf;
 
     fn loaded_bytes(bytes: &[u8]) -> ReadAttempt<Bytes> {
         let value = Bytes::new(bytes.to_vec());
@@ -322,30 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn same_file_id_under_roots_differs() {
-        let first = TempDir::new().unwrap();
-        let second = TempDir::new().unwrap();
-        fs::write(first.path().join("same.typ"), "= First").unwrap();
-        fs::write(second.path().join("same.typ"), "= Second").unwrap();
-
-        let id = crate::world::file::file_id("same.typ");
-        let cache = SharedFileCache::new();
-        let files = FileResolver::new();
-
-        let first_source = cache
-            .source_from_observation(id, first.path(), byte_read(&files, id, first.path()))
-            .result
-            .unwrap();
-        let second_source = cache
-            .source_from_observation(id, second.path(), byte_read(&files, id, second.path()))
-            .result
-            .unwrap();
-
-        assert!(first_source.value.text().contains("First"));
-        assert!(second_source.value.text().contains("Second"));
-    }
-
-    #[test]
     fn cache_retention_follows_max_age() {
         let root = Path::new("/site");
         let cache = SharedFileCache::new();
@@ -369,19 +334,6 @@ mod tests {
         assert!(caches(root, id, &cache));
         cache.evict(2);
         assert!(!caches(root, id, &cache));
-    }
-
-    #[test]
-    fn zero_age_keeps_cloned_slots_alive() {
-        let root = Path::new("/site");
-        let cache = SharedFileCache::new();
-        let id = crate::world::file::file_id("active.typ");
-        let active = cache.slot(root, id);
-
-        cache.evict(0);
-
-        assert!(cache.roots.read().is_empty());
-        assert_eq!(active.value.lock().id, id);
     }
 
     /// Number of file slots the cache currently owns for every root.

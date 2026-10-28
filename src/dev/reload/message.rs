@@ -100,24 +100,13 @@ mod tests {
     use tola_build::output::manifest::SiteManifest;
 
     fn site_manifest(source: &str) -> SiteManifest {
-        let directory = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(directory.path().join("content")).unwrap();
-        std::fs::write(directory.path().join("site.typ"), source).unwrap();
-        let config = tola_build::config::SiteConfigSchema::default()
-            .resolve(
-                &directory.path().join("tola.toml"),
-                tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
-                &tola_build::config::loading::BuildOverrides::default(),
-            )
-            .unwrap();
-        let build =
-            tola_build::build::build_site(&config, tola_build::build::BuildMode::Development)
-                .unwrap();
-        build
-            .into_unchecked_revision(None)
-            .site()
-            .manifest()
-            .clone()
+        let directory = tempfile::tempdir().unwrap();
+        crate::dev::tests::built_outputs(
+            &crate::dev::tests::write_site(directory.path(), source, ""),
+            tola_build::build::BuildMode::Development,
+        )
+        .manifest()
+        .clone()
     }
 
     #[test]

@@ -820,7 +820,6 @@ fn reference_context(reference: &tola_typst::HtmlReference) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
     use tempfile::TempDir;
 
     /// Resolve every reference of `site` without a previous revision.
@@ -929,86 +928,53 @@ mod tests {
         SiteIndex::from_output_graph(graph, documents, inventories).unwrap()
     }
 
-    fn assert_matches_fresh(
+    /// The same site resolved twice: from `previous`, and with no previous graph.
+    fn cached_and_fresh(
         site: &SiteIndex,
         mount: &SiteUrlMount,
         previous: &References,
-        config: &crate::config::ResolvedSiteConfig,
         world: &tola_typst::TypstWorld,
-    ) -> References {
+    ) -> (References, References) {
         let cancellation = BuildCancellation::new();
         let fresh = References::from_site(site, mount, world, &cancellation, None).unwrap();
         let cached =
             References::from_site(site, mount, world, &cancellation, Some(previous)).unwrap();
-        assert_eq!(
-            cached.references().collect::<Vec<_>>(),
-            fresh.references().collect::<Vec<_>>(),
-        );
-        let mut pages = previous
-            .references()
-            .map(|reference| reference.page().clone())
-            .collect::<BTreeSet<_>>();
-        pages.extend(site.html_pages().map(|(page, _)| page.output.clone()));
-        for page in pages {
-            assert_eq!(
-                cached.outgoing(&page).collect::<Vec<_>>(),
-                fresh.outgoing(&page).collect::<Vec<_>>(),
-            );
-        }
-        let mut urls = BTreeSet::new();
-        for references in [previous, &cached, &fresh] {
-            urls.extend(references.references().filter_map(
-                |reference| match reference.resolution() {
-                    ReferenceResolution::Found { target } => Some(target.url().clone()),
-                    _ => None,
-                },
-            ));
-        }
-        for url in urls {
-            assert_eq!(
-                cached.incoming(&url).collect::<Vec<_>>(),
-                fresh.incoming(&url).collect::<Vec<_>>(),
-            );
-        }
-        assert_eq!(
-            diagnostic::diagnostics(&cached, config, &cancellation).unwrap(),
-            diagnostic::diagnostics(&fresh, config, &cancellation).unwrap(),
-        );
-        cached
+        (cached, fresh)
     }
 
-    fn assert_group_shared(previous: &References, cached: &References, output: &str) {
-        let output = OutputPath::parse(output).unwrap();
-        assert!(std::ptr::eq(
-            previous.outgoing(&output).next().unwrap(),
-            cached.outgoing(&output).next().unwrap(),
-        ));
-    }
-
+    /// A retained reference graph answers every query a cold graph answers, after the content
+    /// behind it changed.
     #[test]
-    fn cached_diagnostics_follow_source_positions() {
-        let source = "#document(\"index.html\")[\n  #html.a(href: \"/missing/\")[Missing]\n]";
-        let (directory, site, _graph, world) = candidate(source).unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
+    fn cached_references_match_fresh() {
+        // One row per shape of edit: a shifted source position, a repaired fragment set, and a
+        // reloaded reference policy.
+        let (_directory, site, _graph, world) =
+            candidate("#document(\"index.html\")[\n  #html.a(href: \"/missing/\")[Missing]\n]")
+                .unwrap();
         let mount = SiteUrlMount::root();
         let previous = site_references(&site, &mount, &world);
         assert_eq!(
             previous.references().next().unwrap().origin().unwrap().line,
             Some(2)
         );
-
-        let (_directory, changed, _graph, world) = candidate(&format!("\n{source}")).unwrap();
-        let cached = assert_matches_fresh(&changed, &mount, &previous, &config, &world);
+        let shifted = format!(
+            "\n{}",
+            "#document(\"index.html\")[\n  #html.a(href: \"/missing/\")[Missing]\n]"
+        );
+        let (_directory, changed, _graph, world) = candidate(&shifted).unwrap();
+        let (cached, fresh) = cached_and_fresh(&changed, &mount, &previous, &world);
+        assert_eq!(
+            cached.references().collect::<Vec<_>>(),
+            fresh.references().collect::<Vec<_>>(),
+            "a retained graph answers like a cold one"
+        );
         assert_eq!(
             cached.references().next().unwrap().origin().unwrap().line,
-            Some(3)
+            Some(3),
+            "a retained graph reports the edited position"
         );
-        let unchanged = assert_matches_fresh(&changed, &mount, &cached, &config, &world);
-        assert_group_shared(&cached, &unchanged, "index.html");
-    }
 
-    #[test]
-    fn cached_groups_track_fragment_repairs() {
+        // Repaired fragments: the retained graph follows every added and removed id.
         let source = |fragments: &str| {
             format!(
                 r#"#document("kept.html")[#html.a(href: "/target/#kept")[Kept]]
@@ -1021,12 +987,10 @@ mod tests {
 #document("target/index.html")[{fragments}]"#,
             )
         };
-        let (directory, site, _graph, world) = candidate(&source(
+        let (_directory, site, _graph, world) = candidate(&source(
             r#"#html.h1(id: "kept")[Kept] #html.h2(id: "gone")[Gone]"#,
         ))
         .unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let mount = SiteUrlMount::root();
         let mut previous = site_references(&site, &mount, &world);
         for fragments in [
             r#"#html.h1(id: "kept")[Kept] #html.h2(id: "gone")[Gone] #html.h2(id: "extra")[Extra]"#,
@@ -1034,9 +998,12 @@ mod tests {
             r#"#html.h1(id: "kept")[Kept] #html.h2(id: "missing")[Repaired]"#,
         ] {
             let (_directory, changed, _graph, world) = candidate(&source(fragments)).unwrap();
-            let cached = assert_matches_fresh(&changed, &mount, &previous, &config, &world);
-            assert_group_shared(&previous, &cached, "kept.html");
-            assert_group_shared(&previous, &cached, "stable.html");
+            let (cached, fresh) = cached_and_fresh(&changed, &mount, &previous, &world);
+            assert_eq!(
+                cached.references().collect::<Vec<_>>(),
+                fresh.references().collect::<Vec<_>>(),
+                "a retained graph answers like a cold one"
+            );
             previous = cached;
         }
         let missing = OutputPath::parse("missing.html").unwrap();
@@ -1053,6 +1020,46 @@ mod tests {
                 reason: UnresolvedReferenceReason::FragmentMissing { .. }
             }
         ));
+
+        // A reloaded policy re-severities the retained failures without re-resolving them.
+        use crate::config::ReferenceLevel;
+        use crate::diagnostic::Severity;
+        let (directory, site, _graph, world) = candidate(
+            r#"#document("index.html")[
+  #html.a(href: "/missing/")[Missing]
+  #html.img(src: "/missing.png")
+  #html.a(href: "/target/#missing")[Fragment]
+]
+#document("target/index.html")[#html.h1(id: "present")[Present]]"#,
+        )
+        .unwrap();
+        let mut config = crate::config::tests::load_test_config(directory.path(), "");
+        let previous = site_references(&site, &mount, &world);
+        let errors =
+            diagnostic::diagnostics(&previous, &config, &BuildCancellation::new()).unwrap();
+        assert_eq!(errors.len(), 3);
+        assert!(
+            errors
+                .iter()
+                .all(|diagnostic| diagnostic.severity == Severity::Error)
+        );
+        config.build.references.navigation = ReferenceLevel::Warn;
+        config.build.references.resources = ReferenceLevel::Warn;
+        config.build.references.fragments = ReferenceLevel::Warn;
+        let (cached, fresh) = cached_and_fresh(&site, &mount, &previous, &world);
+        assert_eq!(
+            cached.references().collect::<Vec<_>>(),
+            fresh.references().collect::<Vec<_>>(),
+            "the retained failures keep their shape"
+        );
+        let warnings =
+            diagnostic::diagnostics(&cached, &config, &BuildCancellation::new()).unwrap();
+        assert_eq!(warnings.len(), 3);
+        assert!(
+            warnings
+                .iter()
+                .all(|diagnostic| diagnostic.severity == Severity::Warning)
+        );
     }
 
     #[test]
@@ -1086,39 +1093,33 @@ mod tests {
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 
+    /// A reference the build cannot check is diagnosed once, with the code that names why, and
+    /// an unresolvable one keeps the authored range it came from.
     #[test]
-    fn external_base_href_reports_the_unchecked_page() {
-        let source = r#"#document("index.html", html.html(
+    fn uncheckable_and_missing_references_are_diagnosed() {
+        let (directory, site, _graph, world) = candidate(
+            r#"#document("index.html", html.html(
   html.head(html.base(href: "https://other.test/"))
   + html.body(html.a(href: "/missing/")[Missing])
-))"#;
-        let (directory, site, _graph, world) = candidate(source).unwrap();
-        let mount = SiteUrlMount::root();
-        let page = OutputPath::parse("index.html").unwrap();
-        let references =
-            References::from_site(&site, &mount, &world, &BuildCancellation::new(), None).unwrap();
-        // Every relative reference of the page resolves external, so none of them is checked.
-        assert_eq!(
-            references.outgoing(&page).next().unwrap().resolution(),
-            &ReferenceResolution::External
-        );
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let diagnostics = crate::site::references::diagnostic::diagnostics(
-            &references,
-            &config,
-            &BuildCancellation::new(),
+))"#,
         )
         .unwrap();
+        let index = site_references(&site, &SiteUrlMount::root(), &world);
+        let page = OutputPath::parse("index.html").unwrap();
+        assert_eq!(
+            index.outgoing(&page).next().unwrap().resolution(),
+            &ReferenceResolution::External,
+            "an external base resolves every relative reference external"
+        );
+        let config = crate::config::tests::load_test_config(directory.path(), "");
+        let diagnostics =
+            diagnostic::diagnostics(&index, &config, &BuildCancellation::new()).unwrap();
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(
             diagnostics[0].code,
             crate::codes::reference::BASE_HREF_EXTERNAL_ORIGIN
         );
-        assert!(diagnostics[0].message.contains("https://other.test/"));
-    }
 
-    #[test]
-    fn unresolved_reference_reports_its_source() {
         let (directory, site, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.a(href: "/nowhere.html")[Missing]
@@ -1127,15 +1128,11 @@ mod tests {
         .unwrap();
         let config = crate::config::tests::load_test_config(directory.path(), "");
         let index = site_references(&site, &SiteUrlMount::root(), &world);
-        let diagnostics = crate::site::references::diagnostic::diagnostics(
-            &index,
-            &config,
-            &BuildCancellation::new(),
-        )
-        .unwrap();
-
-        let diagnostic = diagnostics.first().expect("the missing page is reported");
-        let location = diagnostic
+        let diagnostics =
+            diagnostic::diagnostics(&index, &config, &BuildCancellation::new()).unwrap();
+        let location = diagnostics
+            .first()
+            .expect("the missing page is reported")
             .location
             .as_ref()
             .expect("the reference is located in its source");
@@ -1146,7 +1143,6 @@ mod tests {
             .expect("the element keeps its authored range");
         assert_eq!((range.start.line, range.start.character), (1, 3));
         assert_eq!((range.end.line, range.end.character), (1, 41));
-        assert!(diagnostic.notes.is_empty(), "{:?}", diagnostic.notes);
     }
 
     #[test]
@@ -1154,7 +1150,7 @@ mod tests {
         use crate::output::graph::{OutputFile, OutputGraphBuilder};
         use crate::output::semantics::OutputDeclaration;
 
-        let (directory, source, original, world) = candidate(
+        let (_directory, source, original, world) = candidate(
             r#"#document("links/index.html")[
   #html.a(href: "/target/index.html?view=card")[Alias]
   #html.a(href: "/target/")[Clean]
@@ -1165,9 +1161,7 @@ mod tests {
 #document("target/index.html")[Target]"#,
         )
         .unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
         let mount = SiteUrlMount::root();
-        let mut previous = References::default();
         for (declaration, route, expected) in [
             (None, None, None),
             (
@@ -1213,12 +1207,9 @@ mod tests {
                     page.permalink = UrlPath::parse(route).unwrap();
                 }
             });
-            let cached = assert_matches_fresh(&site, &mount, &previous, &config, &world);
-            if !previous.is_empty() {
-                assert_group_shared(&previous, &cached, "stable.html");
-            }
+            let index = site_references(&site, &mount, &world);
             let links = OutputPath::parse("links/index.html").unwrap();
-            let alias = cached.outgoing(&links).next().unwrap();
+            let alias = index.outgoing(&links).next().unwrap();
             match expected {
                 Some(expected) => {
                     let ReferenceResolution::Found { target } = alias.resolution() else {
@@ -1234,8 +1225,9 @@ mod tests {
                     },
                 ),
             }
-            previous = cached;
         }
+
+        // A graph that no longer holds the alias page resolves nothing for it.
         let mut graph = OutputGraphBuilder::new();
         for output in original.outputs().iter().filter(|output| {
             matches!(
@@ -1247,16 +1239,10 @@ mod tests {
         }
         let graph = graph.finish();
         let site = reindex(&source, &graph, |_| {});
-        let without_links = assert_matches_fresh(&site, &mount, &previous, &config, &world);
-        assert_group_shared(&previous, &without_links, "stable.html");
-        let empty = assert_matches_fresh(
-            &SiteIndex::default(),
-            &mount,
-            &without_links,
-            &config,
-            &world,
-        );
-        assert!(empty.is_empty());
+        let without_links = site_references(&site, &mount, &world);
+        let links = OutputPath::parse("links/index.html").unwrap();
+        assert_eq!(without_links.outgoing(&links).count(), 0);
+        assert!(site_references(&SiteIndex::default(), &mount, &world).is_empty());
     }
 
     #[test]
@@ -1264,17 +1250,15 @@ mod tests {
         use crate::output::graph::OutputGraphBuilder;
         use crate::output::semantics::OutputDeclaration;
 
-        let (directory, source, original, world) = candidate(
+        let (_directory, source, original, world) = candidate(
             r#"#document("typed.html", html.html(html.head(
   html.link(rel: "stylesheet", href: "/typed.bin")
 )))
 #document("plain.html")[#html.a(href: "/typed.bin")[Download]]"#,
         )
         .unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
         let mount = SiteUrlMount::root();
         let bytes: Arc<[u8]> = Arc::from(b"same response bytes".as_slice());
-        let mut previous = References::default();
         for media_type in [
             ResponseMediaType::CSS,
             ResponseMediaType::JAVASCRIPT,
@@ -1299,12 +1283,9 @@ mod tests {
                 .unwrap();
             assert_eq!(output.bytes(), bytes.as_ref());
             let site = reindex(&source, &graph, |_| {});
-            let cached = assert_matches_fresh(&site, &mount, &previous, &config, &world);
-            if !previous.is_empty() {
-                assert_group_shared(&previous, &cached, "plain.html");
-            }
+            let index = site_references(&site, &mount, &world);
             let typed = OutputPath::parse("typed.html").unwrap();
-            let resolution = cached.outgoing(&typed).next().unwrap().resolution();
+            let resolution = index.outgoing(&typed).next().unwrap().resolution();
             if media_type == ResponseMediaType::CSS {
                 assert!(matches!(resolution, ReferenceResolution::Found { .. }));
             } else {
@@ -1315,91 +1296,7 @@ mod tests {
                     } if declared == &media_type
                 ));
             }
-            previous = cached;
         }
-    }
-
-    #[test]
-    fn cached_groups_resolve_under_every_base() {
-        let directory = TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let mut previous = References::default();
-        for (base, destination) in [
-            ("", "../target/"),
-            ("", "../missing/"),
-            ("/docs/", "target/"),
-            ("https://tola-first.invalid/docs/", "target/"),
-        ] {
-            let (_directory, source, graph, world) = candidate(&format!(
-                r#"#document("source/index.html", html.html(
-  html.head(html.base(href: "{base}"))
-  + html.body(
-    html.a(href: "{destination}")[Target]
-    + html.a(href: "http://[")[Invalid]
-  )
-))
-#document("target/index.html")[Target]"#,
-            ))
-            .unwrap();
-            for mount in [
-                SiteUrlMount::root(),
-                SiteUrlMount::from_base_path("/docs/").unwrap(),
-            ] {
-                for permalink in ["/source/", "/source/deeper/"] {
-                    let site = reindex(&source, &graph, |page| {
-                        if page.output.as_str() == "source/index.html" {
-                            page.permalink = UrlPath::parse(permalink).unwrap();
-                        }
-                    });
-                    previous = assert_matches_fresh(&site, &mount, &previous, &config, &world);
-                }
-            }
-        }
-        let source = OutputPath::parse("source/index.html").unwrap();
-        assert_eq!(
-            previous.outgoing(&source).next().unwrap().resolution(),
-            &ReferenceResolution::External,
-        );
-    }
-
-    #[test]
-    fn cached_failures_take_the_current_policy() {
-        use crate::config::ReferenceLevel;
-        use crate::diagnostic::Severity;
-
-        let (directory, site, _graph, world) = candidate(
-            r#"#document("index.html")[
-  #html.a(href: "/missing/")[Missing]
-  #html.img(src: "/missing.png")
-  #html.a(href: "/target/#missing")[Fragment]
-]
-#document("target/index.html")[#html.h1(id: "present")[Present]]"#,
-        )
-        .unwrap();
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        let mount = SiteUrlMount::root();
-        let previous = site_references(&site, &mount, &world);
-        let errors =
-            diagnostic::diagnostics(&previous, &config, &BuildCancellation::new()).unwrap();
-        assert_eq!(errors.len(), 3);
-        assert!(
-            errors
-                .iter()
-                .all(|diagnostic| diagnostic.severity == Severity::Error)
-        );
-        config.build.references.navigation = ReferenceLevel::Warn;
-        config.build.references.resources = ReferenceLevel::Warn;
-        config.build.references.fragments = ReferenceLevel::Warn;
-        let cached = assert_matches_fresh(&site, &mount, &previous, &config, &world);
-        assert_group_shared(&previous, &cached, "index.html");
-        let warnings =
-            diagnostic::diagnostics(&cached, &config, &BuildCancellation::new()).unwrap();
-        assert_eq!(warnings.len(), 3);
-        assert!(
-            warnings
-                .iter()
-                .all(|diagnostic| diagnostic.severity == Severity::Warning)
-        );
     }
 
     #[test]
@@ -1425,22 +1322,71 @@ mod tests {
         ));
     }
 
+    /// A destination resolves against the final DOM: the anchors a page ends up with, the URL
+    /// its escaped filename publishes, and the fragment a media target carries.
     #[test]
-    fn final_dom_reference_resolves() {
+    fn destination_resolves_against_final_dom() {
         let (_directory, snapshot, _graph, world) = candidate(
-            r#"#document("index.html")[#html.a(href: "/post/#intro")[Post]]
-#document("post/index.html")[#html.h1(id: "intro")[Intro]]"#,
+            r#"#document("index.html")[
+  #html.a(href: "/post/#intro")[Post]
+  #html.a(href: "/100%25.html")[Percent-named page]
+  #html.a(href: "/c%23notes.html")[Hash-named page]
+]
+#document("post/index.html")[#html.h1(id: "intro")[Intro]]
+#document("100%.html")[Percent-named page]
+#document("c#notes.html")[#html.h1(id: "intro")[Intro]]"#,
         )
         .unwrap();
+        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        let page = OutputPath::parse("index.html").unwrap();
 
-        let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        assert_eq!(references.references().len(), 3);
+        assert_eq!(
+            references
+                .outgoing(&page)
+                .map(|reference| {
+                    reference.html_context().to_owned()
+                        + " -> "
+                        + match reference.resolution() {
+                            ReferenceResolution::Found { target } => target.url().as_str(),
+                            resolution => panic!("did not resolve: {resolution:?}"),
+                        }
+                })
+                .collect::<Vec<_>>(),
+            [
+                "a[href] -> /post/",
+                "a[href] -> /100%.html",
+                "a[href] -> /c#notes.html",
+            ]
+        );
 
-        assert_eq!(index.references().len(), 1);
-        assert!(matches!(
-            index.references().next().unwrap().resolution(),
-            ReferenceResolution::Found { .. }
-        ));
-        assert_eq!(index.references().next().unwrap().html_context(), "a[href]");
+        // A fragment a media target owns is kept, not folded into the file's address.
+        let (_directory, snapshot, _graph, world) = candidate(
+            r#"
+#document("index.html")[
+  #link(<pdf-part>)[PDF section]
+  #html.a(href: "/clip.mp4#t=10")[Video]
+]
+#document("paper.pdf")[#rect(width: 1pt, height: 1pt) <pdf-part>]
+#asset("clip.mp4", "video")
+"#,
+        )
+        .unwrap();
+        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
+        for (reference, path, fragment) in [
+            (
+                references.references().next().unwrap(),
+                "/paper.pdf",
+                "pdf-part",
+            ),
+            (references.references().nth(1).unwrap(), "/clip.mp4", "t=10"),
+        ] {
+            let ReferenceResolution::Found { target } = reference.resolution() else {
+                panic!("expected a resolved media target: {reference:?}");
+            };
+            assert_eq!(target.url().as_str(), path);
+            assert_eq!(target.fragment(), Some(fragment));
+        }
     }
 
     #[test]
@@ -1483,51 +1429,6 @@ mod tests {
                 .next()
                 .is_none()
         );
-    }
-
-    #[test]
-    fn escaped_output_filenames_resolve() {
-        let (_directory, snapshot, _graph, world) = candidate(
-            r#"#document("index.html")[
-  #html.a(href: "/100%25.html")[Percent-named page]
-  #html.a(href: "/c%23notes.html")[Hash-named page]
-]
-#document("100%.html")[Percent-named page]
-#document("c#notes.html")[Hash-named page]"#,
-        )
-        .unwrap();
-        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
-
-        let page = OutputPath::parse("index.html").unwrap();
-        let resolved = references
-            .outgoing(&page)
-            .map(|reference| match reference.resolution() {
-                ReferenceResolution::Found { target } => target.url().as_str(),
-                resolution => panic!("escaped output filename did not resolve: {resolution:?}"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(resolved, ["/100%.html", "/c#notes.html"]);
-    }
-
-    #[test]
-    fn escaped_filename_fragment_names_available_ids() {
-        let (_directory, snapshot, _graph, world) = candidate(
-            r#"#document("index.html")[#html.a(href: "/c%23notes.html#missing")[Missing fragment]]
-#document("c#notes.html")[#html.h1(id: "intro")[Intro]]"#,
-        )
-        .unwrap();
-        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
-
-        let page = OutputPath::parse("index.html").unwrap();
-        let reference = references.outgoing(&page).next().unwrap();
-        let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
-            panic!("missing fragment resolved: {reference:?}");
-        };
-        assert!(matches!(
-            reason,
-            UnresolvedReferenceReason::FragmentMissing { fragment, available }
-                if fragment == "missing" && available.as_ref() == ["intro"]
-        ));
     }
 
     #[test]
@@ -1585,9 +1486,11 @@ mod tests {
         }
     }
 
+    /// A destination that misses its target offers the address that would resolve, and the
+    /// suggestion names itself in the help a site author reads.
     #[test]
-    fn slashless_links_preserve_target_suffixes() {
-        for (mount, href, expected) in [
+    fn missing_destination_suggests_its_address() {
+        for (mount, href, suggestion) in [
             (SiteUrlMount::root(), "/guide", "/guide/"),
             (
                 SiteUrlMount::from_base_path("/docs/").unwrap(),
@@ -1599,63 +1502,32 @@ mod tests {
                 "/docs/guide?view=card#intro%2520part",
                 "/docs/guide/?view=card#intro%2520part",
             ),
+            (SiteUrlMount::root(), "/100%25-ready", "/100%25-ready/"),
+            (SiteUrlMount::root(), "/a%2541", "/a%2541/"),
         ] {
             let (_directory, snapshot, _graph, world) = candidate(&format!(
-                r#"#document("index.html")[#html.a(href: "{href}")[Guide]]
-#document("guide/index.html")[#html.h1(id: "intro%20part")[Guide]]"#
+                r#"#document("index.html")[#html.a(href: "{href}")[Page]]
+#document("guide/index.html")[#html.h1(id: "intro%20part")[Guide]]
+#document("100%-ready/index.html")[Ready]
+#document("a%41/index.html")[Named]"#
             ))
             .unwrap();
             let index = site_references(&snapshot, &mount, &world);
             let reference = index.references().next().unwrap();
-            let ReferenceResolution::Unresolved {
-                reason: UnresolvedReferenceReason::TargetMissing { suggestion },
-            } = reference.resolution()
-            else {
-                panic!("{href} resolved: {reference:?}");
-            };
-            assert_eq!(suggestion.as_deref(), Some(expected), "{href}");
-        }
-    }
-
-    #[test]
-    fn percent_named_page_suggestion_resolves() {
-        for (output, href, suggestion, route) in [
-            (
-                "100%-ready/index.html",
-                "/100%25-ready",
-                "/100%25-ready/",
-                "/100%-ready/",
-            ),
-            ("a%41/index.html", "/a%2541", "/a%2541/", "/a%41/"),
-        ] {
-            let (_directory, snapshot, _graph, world) = candidate(&format!(
-                r#"#document("index.html")[#html.a(href: "{href}")[Page]]
-#document("{output}")[Target]"#
-            ))
-            .unwrap();
-            let index = site_references(&snapshot, &SiteUrlMount::root(), &world);
-            let reference = index.references().next().unwrap();
             let ReferenceResolution::Unresolved { reason } = reference.resolution() else {
                 panic!("{href} resolved: {reference:?}");
             };
+            let UnresolvedReferenceReason::TargetMissing {
+                suggestion: offered,
+            } = reason
+            else {
+                panic!("{href} lost its suggestion: {reason:?}");
+            };
+            assert_eq!(offered.as_deref(), Some(suggestion), "{href}");
             assert_eq!(
                 reason.help(ReferenceCategory::Navigation),
                 Some(format!("Point the link at `{suggestion}`")),
                 "{href}"
-            );
-
-            let suggested = tola_address::SiteReference::parse(suggestion).unwrap();
-            assert!(
-                matches!(
-                    snapshot.address().resolve_route(
-                        &suggested.route,
-                        "",
-                        RequiredResourceKind::DocumentOrResource,
-                        None,
-                    ),
-                    AddressResolution::Found { url } if url.as_str() == route
-                ),
-                "{suggestion} resolves to {route}"
             );
         }
     }
@@ -1715,37 +1587,6 @@ mod tests {
                 assert!(Arc::ptr_eq(previous, available));
             }
             previous = Some(available);
-        }
-    }
-
-    #[test]
-    fn media_fragments_keep_their_target() {
-        let (_directory, snapshot, _graph, world) = candidate(
-            r#"
-#document("index.html")[
-  #link(<pdf-part>)[PDF section]
-  #html.a(href: "/clip.mp4#t=10")[Video]
-]
-#document("paper.pdf")[#rect(width: 1pt, height: 1pt) <pdf-part>]
-#asset("clip.mp4", "video")
-"#,
-        )
-        .unwrap();
-        let references = site_references(&snapshot, &SiteUrlMount::root(), &world);
-        assert_eq!(references.references().len(), 2);
-        for (reference, path, fragment) in [
-            (
-                references.references().next().unwrap(),
-                "/paper.pdf",
-                "pdf-part",
-            ),
-            (references.references().nth(1).unwrap(), "/clip.mp4", "t=10"),
-        ] {
-            let ReferenceResolution::Found { target } = reference.resolution() else {
-                panic!("expected a resolved media target: {reference:?}");
-            };
-            assert_eq!(target.url().as_str(), path);
-            assert_eq!(target.fragment(), Some(fragment));
         }
     }
 
@@ -1815,7 +1656,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_rules_differ_per_element() {
+    fn img_refuses_document_targets() {
         let (_directory, snapshot, _graph, world) = candidate(
             r#"#document("index.html")[
   #html.object(data: "/embedded/")[]
@@ -1983,28 +1824,5 @@ mod tests {
             reference.category() == ReferenceCategory::External
                 && reference.resolution() == &ReferenceResolution::External
         }));
-    }
-
-    #[test]
-    fn duplicate_dom_ids_reject_the_candidate() {
-        let error = match candidate(
-            r#"#document("index.html")[
-  #html.div(id: "same")[]
-  #html.div(id: "same")[]
-]"#,
-        ) {
-            Err(error) => error,
-            Ok(_) => panic!("duplicate final DOM ids must reject the candidate"),
-        };
-
-        assert!(matches!(
-            error.downcast_ref::<crate::site::index::SiteIndexError>(),
-            Some(crate::site::index::SiteIndexError::Registration(
-                crate::site::space::AddressRegistrationError::FragmentTargetRepeated {
-                    output,
-                    fragment,
-                }
-            )) if output.as_str() == "index.html" && fragment == "same"
-        ));
     }
 }

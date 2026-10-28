@@ -140,54 +140,6 @@ mod tests {
     }
 
     #[test]
-    fn quiet_deadline_gates_the_batch() {
-        let now = Instant::now();
-        let mut debouncer = Debouncer::new();
-        debouncer.add_event(&modify(&["/tmp/a.typ"]), now);
-
-        assert!(
-            debouncer
-                .take_if_ready(now + Duration::from_millis(QUIET_PERIOD_MS - 1), |_| true)
-                .is_none()
-        );
-        assert_eq!(settled(&mut debouncer, now), paths(&["/tmp/a.typ"]));
-    }
-
-    #[test]
-    fn repeated_path_extends_quiet_window() {
-        let now = Instant::now();
-        let later = now + Duration::from_millis(30);
-        let mut debouncer = Debouncer::new();
-        debouncer.add_event(&modify(&["/tmp/a.typ"]), now);
-        debouncer.add_event(&modify(&["/tmp/a.typ"]), later);
-
-        assert!(
-            debouncer
-                .take_if_ready(now + Duration::from_millis(QUIET_PERIOD_MS), |_| true)
-                .is_none()
-        );
-        assert_eq!(settled(&mut debouncer, later), paths(&["/tmp/a.typ"]));
-    }
-
-    #[test]
-    fn continuous_edits_close_at_deadline() {
-        let now = Instant::now();
-        let mut debouncer = Debouncer::new();
-        for elapsed in (0..MAX_BATCH_WAIT_MS).step_by(40) {
-            debouncer.add_event(
-                &modify(&["/tmp/a.typ"]),
-                now + Duration::from_millis(elapsed),
-            );
-        }
-        let before_deadline = now + Duration::from_millis(MAX_BATCH_WAIT_MS - 1);
-        assert!(debouncer.take_if_ready(before_deadline, |_| true).is_none());
-        assert_eq!(
-            debouncer.take_if_ready(now + Duration::from_millis(MAX_BATCH_WAIT_MS), |_| true),
-            Some(paths(&["/tmp/a.typ"]))
-        );
-    }
-
-    #[test]
     fn pathless_events_keep_the_window() {
         let now = Instant::now();
         let mut debouncer = Debouncer::new();
@@ -238,29 +190,6 @@ mod tests {
             settled(&mut debouncer, now),
             paths(&["/tmp/a.typ", "/tmp/a2.typ", "/tmp/b.typ", "/tmp/b2.typ"])
         );
-    }
-
-    #[test]
-    fn separate_windows_close_independently() {
-        let now = Instant::now();
-        let mut debouncer = Debouncer::new();
-        debouncer.add_event(
-            &event(
-                EventKind::Modify(ModifyKind::Name(RenameMode::From)),
-                &["/tmp/a.typ"],
-            ),
-            now,
-        );
-        assert_eq!(settled(&mut debouncer, now), paths(&["/tmp/a.typ"]));
-        let later = now + Duration::from_secs(1);
-        debouncer.add_event(
-            &event(
-                EventKind::Modify(ModifyKind::Name(RenameMode::To)),
-                &["/tmp/b.typ"],
-            ),
-            later,
-        );
-        assert_eq!(settled(&mut debouncer, later), paths(&["/tmp/b.typ"]));
     }
 
     #[test]

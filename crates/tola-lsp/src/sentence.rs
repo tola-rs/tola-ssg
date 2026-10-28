@@ -37,7 +37,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn listed_counts_the_names_beyond_the_limit() {
+    fn listed_reports_the_omitted_count() {
         for (names, expected) in [
             (vec![], ("", 0)),
             (vec!["a"], ("a", 0)),

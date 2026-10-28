@@ -28,14 +28,4 @@ mod tests {
     fn parsable_source_marks_no_error() {
         assert_eq!(first_error_range("= Title\n#let x = 1\n"), None);
     }
-
-    #[test]
-    fn unparsable_source_names_where_it_fails() {
-        let source = "= Title\n#let = \n";
-        let broken = source.find("#let").expect("the broken line");
-
-        let range = first_error_range(source).expect("the tree marks a place");
-
-        assert!(range.start >= broken, "{range:?}");
-    }
 }

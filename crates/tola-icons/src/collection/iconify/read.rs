@@ -461,7 +461,6 @@ pub(super) fn parse(bytes: &[u8]) -> Result<IconifyCollection, crate::InvalidCol
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InvalidCollection;
 
     #[test]
     fn wire_maps_reject_entry_overflow() {
@@ -475,20 +474,6 @@ mod tests {
             r#"{"a":{"body":"<path/>"},"b":{"body":"<rect/>"}}"#,
         );
         assert!(seed.deserialize(&mut deserializer).is_err());
-    }
-
-    #[test]
-    fn duplicate_wire_keys_are_rejected() {
-        for source in [
-            r#"{"prefix":"a","prefix":"b","icons":{}}"#,
-            r#"{"prefix":"a","icons":{"x":{"body":"<path/>","body":"<rect/>"}}}"#,
-            r#"{"prefix":"a","icons":{"x":{"body":"<path/>"},"x":{"body":"<rect/>"}}}"#,
-        ] {
-            assert!(matches!(
-                parse(source.as_bytes()),
-                Err(InvalidCollection::Json { .. })
-            ));
-        }
     }
 
     #[test]

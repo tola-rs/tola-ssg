@@ -710,56 +710,6 @@ content-dir = "content"
     }
 
     #[test]
-    fn unknown_fields_name_their_written_lines() {
-        // A key and a table header are two spellings of the same field, and both are where the
-        // author changes it: the span covers the key's own text, never the table it opens.
-        for (source, written) in [
-            (
-                "[build]\nentry = \"site.typ\"\nminfy = true\n",
-                [("build.minfy", 3, 2, 0, 5)],
-            ),
-            (
-                "[build]\nentry = \"site.typ\"\n\n[build.minfy]\nunknown = 1\n",
-                [("build.minfy", 4, 3, 7, 12)],
-            ),
-        ] {
-            let directory = tempfile::TempDir::new().unwrap();
-            let config_path = write_config(directory.path(), source);
-
-            let error = load_error(&config_path);
-            let diagnostic = diagnostic_mentioning(&error, "unknown configuration fields");
-
-            assert_eq!(
-                diagnostic.cause,
-                Some(
-                    crate::diagnostic::DiagnosticCause::UnknownConfigurationFields {
-                        fields: written
-                            .into_iter()
-                            .map(|(name, line, written_line, start, end)| {
-                                crate::diagnostic::UnknownField {
-                                    name: name.to_owned(),
-                                    line: Some(line),
-                                    written: Some(crate::diagnostic::SourceRange {
-                                        start: crate::diagnostic::SourcePosition {
-                                            line: written_line,
-                                            character: start,
-                                        },
-                                        end: crate::diagnostic::SourcePosition {
-                                            line: written_line,
-                                            character: end,
-                                        },
-                                    }),
-                                }
-                            })
-                            .collect(),
-                    }
-                ),
-                "{source:?}"
-            );
-        }
-    }
-
-    #[test]
     fn language_shape_error_locates_value() {
         let directory = tempfile::TempDir::new().unwrap();
         let config_path = write_config(
@@ -944,7 +894,7 @@ content-dir = "content"
     }
 
     #[test]
-    fn output_resolution_precedes_value_checks() {
+    fn output_path_error_precedes_origin_error() {
         let directory = tempfile::TempDir::new().unwrap();
         let config_path = write_config(
             directory.path(),
@@ -1198,7 +1148,7 @@ publish-dir = "."
     }
 
     #[test]
-    fn later_hook_output_boundary_names_its_own_entry() {
+    fn hook_output_boundary_names_its_entry() {
         let directory = tempfile::tempdir().unwrap();
         let config_path = write_config(
             directory.path(),

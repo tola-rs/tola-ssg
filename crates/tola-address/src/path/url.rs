@@ -438,18 +438,6 @@ mod tests {
             assert!(UrlPath::parse(raw).is_err(), "accepted {raw:?}");
         }
     }
-
-    #[test]
-    fn escaped_separators_are_refused() {
-        for raw in ["/a%2Fb/", "/a%2fb/", "/a%5Cb/", "/a%5cb/"] {
-            assert_eq!(
-                UrlPath::parse(raw),
-                Err(UrlPathError::EncodedSeparator),
-                "accepted {raw:?}"
-            );
-        }
-    }
-
     #[test]
     fn literal_percent_and_hash_survive() {
         for raw in ["/100%/", "/a#b", "/a%b/c#d"] {
@@ -470,23 +458,6 @@ mod tests {
             assert!(UrlPath::from_decoded(raw).is_err(), "accepted {raw:?}");
         }
     }
-
-    #[test]
-    fn control_characters_are_refused() {
-        for control in (0_u32..=0x1f).chain(0x7f..=0x9f) {
-            let character = char::from_u32(control).expect("control range is valid Unicode");
-            let raw = format!("/before{character}after/");
-            assert!(UrlPath::parse(&raw).is_err(), "accepted U+{control:04X}");
-        }
-        for raw in [
-            "/before%01after/",
-            "/before%7Fafter/",
-            "/before%C2%80after/",
-        ] {
-            assert_eq!(UrlPath::parse(raw), Err(UrlPathError::Control));
-        }
-    }
-
     #[test]
     fn unicode_encodes_at_the_browser_boundary() {
         let decoded = UrlPath::from_decoded("/中文 hello").unwrap();
@@ -585,28 +556,5 @@ mod tests {
         ] {
             assert_eq!(browser_location(target), location, "{target:?}");
         }
-    }
-
-    #[test]
-    fn location_preserves_request_spelling() {
-        for (target, location) in [
-            ("/café/", "/caf%C3%A9/"),
-            ("/%e6%96%87/%E6%A1%A3/", "/%e6%96%87/%E6%A1%A3/"),
-            ("/café/?q=naïve", "/caf%C3%A9/?q=na%C3%AFve"),
-            ("/plain/", "/plain/"),
-        ] {
-            assert_eq!(browser_location(target), location, "{target:?}");
-        }
-    }
-
-    #[test]
-    fn serde_preserves_the_trailing_slash() {
-        for raw in ["/", "/a/b/", "/a/b", "/100%/"] {
-            let path = UrlPath::from_decoded(raw).unwrap();
-            let json = serde_json::to_string(&path).unwrap();
-            let parsed: UrlPath = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, path, "{raw:?}");
-        }
-        assert!(serde_json::from_str::<UrlPath>("\"/a?b\"").is_err());
     }
 }

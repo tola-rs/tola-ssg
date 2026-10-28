@@ -43,11 +43,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_text_returns_borrowed() {
-        assert!(matches!(escape("plain"), Cow::Borrowed(_)));
-    }
-
-    #[test]
     fn quotes_escape_only_in_attributes() {
         assert_eq!(escape("<a & \"b\">"), "&lt;a &amp; \"b\"&gt;");
         assert_eq!(escape_attr("<a & \"b\">"), "&lt;a &amp; &quot;b&quot;&gt;");

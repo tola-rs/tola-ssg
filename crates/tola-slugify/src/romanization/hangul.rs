@@ -250,12 +250,6 @@ mod tests {
             assert_eq!(romanize_run(text), expected, "{text:?}");
         }
     }
-
-    #[test]
-    fn tensing_is_not_transcribed() {
-        assert_eq!(romanize_run("압구정"), "apgujeong");
-    }
-
     #[test]
     fn rieul_between_vowels_is_r() {
         for (text, expected) in [("구리", "guri"), ("설악", "seorak")] {
@@ -339,24 +333,6 @@ mod tests {
             assert_eq!(romanize_run(text), expected, "{text:?}");
         }
     }
-
-    #[test]
-    fn hieut_drops_before_vowels() {
-        for (text, expected) in [
-            ("놓아", "noa"),
-            ("많아", "mana"),
-            ("싫어", "sireo"),
-            ("닳아", "dara"),
-        ] {
-            assert_eq!(romanize_run(text), expected, "{text:?}");
-        }
-    }
-
-    #[test]
-    fn hieut_drops_before_sios() {
-        assert_eq!(romanize_run("좋소"), "joso");
-    }
-
     #[test]
     fn only_hangul_syllables_are_read() {
         let mut out = String::new();

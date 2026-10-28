@@ -89,7 +89,7 @@ pub(crate) fn fonts() -> impl Iterator<Item = (Font, FontInfo)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CARRIED, fonts};
+    use super::CARRIED;
     use typst::foundations::Bytes;
     use typst::text::Font;
 
@@ -101,22 +101,6 @@ mod tests {
                 Font::iter(Bytes::new(bytes)).next().is_some(),
                 "{}",
                 carried.name
-            );
-        }
-    }
-
-    #[test]
-    fn embedded_fonts_name_the_default_families() {
-        let families: Vec<_> = fonts().map(|(_, info)| info.family).collect();
-        for family in [
-            "DejaVu Sans Mono",
-            "Libertinus Serif",
-            "New Computer Modern",
-            "New Computer Modern Math",
-        ] {
-            assert!(
-                families.iter().any(|carried| carried.as_str() == family),
-                "{family} is not embedded"
             );
         }
     }

@@ -4,14 +4,14 @@ use anyhow::Result;
 
 use crate::config::ResolvedSiteConfig;
 use crate::filesystem::SourceOverrides;
-use crate::icon::IconSnapshot;
+use crate::icon::IconInventory;
 
 use crate::cancellation::BuildCancellation;
 use crate::resources::BuildResources;
 
 /// Immutable producer values exposed through package bindings.
 pub(crate) struct PackageInputs {
-    pub(crate) icons: IconSnapshot,
+    pub(crate) icons: IconInventory,
 }
 
 /// Each reusable resource is accepted after its own successful preparation.
@@ -20,7 +20,7 @@ pub(crate) fn prepare_package_inputs(
     config: &ResolvedSiteConfig,
     resources: &BuildResources,
     cancellation: &BuildCancellation,
-    retained_icons: &mut Option<IconSnapshot>,
+    retained_icons: &mut Option<IconInventory>,
     overrides: &SourceOverrides,
 ) -> Result<PackageInputs> {
     let icons = prepare_icons(config, resources, cancellation, retained_icons, overrides)?;
@@ -31,9 +31,9 @@ pub(crate) fn prepare_icons(
     config: &ResolvedSiteConfig,
     resources: &BuildResources,
     cancellation: &BuildCancellation,
-    retained_icons: &mut Option<IconSnapshot>,
+    retained_icons: &mut Option<IconInventory>,
     overrides: &SourceOverrides,
-) -> Result<IconSnapshot> {
+) -> Result<IconInventory> {
     cancellation.ensure_active()?;
     let started = std::time::Instant::now();
     let icons = crate::icon::prepare(

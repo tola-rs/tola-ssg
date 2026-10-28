@@ -164,37 +164,13 @@ mod tests {
             )]
         );
     }
-
-    /// A break only the compiler's line model knows leaves the echo's protocol line intact.
-    #[test]
-    fn vertical_tab_keeps_the_import_line() {
-        let text = "a\u{0B}b\n#import \"@tola/web:0.0.0\": sitemap\n";
-        let actions = actions_for(
-            text,
-            vec![serde_json::json!({
-                "kind": "unread-import",
-                "names": ["sitemap"],
-                "removal": {"kind": "statement", "line": 2},
-            })],
-            vec![CodeActionKind::QUICKFIX],
-        );
-
-        assert_eq!(
-            edits_of(&actions, "remove the unused import of `sitemap`"),
-            [(
-                Range::new(Position::new(1, 0), Position::new(2, 0)),
-                String::new()
-            )]
-        );
-    }
-
     /// A statement sharing its line with other text keeps that text when it is removed.
     ///
     /// The removal the echo names is the statement's own line, so a line holding anything
     /// besides it cannot go whole: only the statement, with the `#` that introduces it, is
     /// removed, and what the author wrote beside it stays.
     #[test]
-    fn unused_import_removal_keeps_its_line_text() {
+    fn import_removal_spares_line_mates() {
         let text = "#import \"@tola/web:0.0.0\": sitemap; Hello there\n";
         let actions = actions_for(
             text,

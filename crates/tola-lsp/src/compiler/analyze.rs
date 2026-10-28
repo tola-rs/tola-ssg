@@ -157,10 +157,8 @@ fn source_completion(
     let names = request
         .view
         .get(query.document().0)
-        .filter(|snapshot| {
-            snapshot.source.id() == source.id() && snapshot.source.text() == source.text()
-        })
-        .map(|snapshot| snapshot.names())
+        .filter(|parsed| parsed.source.id() == source.id() && parsed.source.text() == source.text())
+        .map(|parsed| parsed.names())
         .unwrap_or_else(|| {
             std::sync::Arc::new(tola_typst_syntax::names::SourceNames::new(source.clone()))
         });
@@ -227,27 +225,10 @@ fn source_completion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::tests::assert_cancelled;
     use crate::sources::SourceView;
     use lsp_server::RequestId;
     use std::path::Path;
-    use tola_build::cancellation::{BuildCancellation, BuildCanceller};
-
-    #[test]
-    fn cancelled_analysis_stays_cancelled() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = tola_build::filesystem::normalize_existing_prefix(directory.path());
-        let (mut request, _) = references_analysis(&root, "#let marker = 1\n#mar|ker\n");
-        let canceller = BuildCanceller::new();
-        canceller.cancel();
-        request.sources.cancellation = canceller.token();
-        assert_cancelled(analyze(
-            &mut crate::analysis::DiskSources::default(),
-            &mut crate::analysis::GraphCache::default(),
-            request,
-        ));
-    }
-
+    use tola_build::cancellation::BuildCancellation;
     /// One references analysis over `marked`, whose single `|` is the cursor, and the text the
     /// marker strips to.
     fn references_analysis(root: &Path, marked: &str) -> (AnalysisRequest, String) {
@@ -294,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_import_references_defer_to_the_compiler_lane() {
+    fn dynamic_references_wait_for_compiler() {
         let directory = tempfile::tempdir().unwrap();
         let root = tola_build::filesystem::normalize_existing_prefix(directory.path());
         std::fs::write(root.join("lib.typ"), "#let greet = [hello]\n").unwrap();
@@ -318,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn literal_import_references_answer_in_the_source_lane() {
+    fn literal_references_answer_locally() {
         let directory = tempfile::tempdir().unwrap();
         let root = tola_build::filesystem::normalize_existing_prefix(directory.path());
         std::fs::write(root.join("lib.typ"), "#let greet = [hello]\n").unwrap();

@@ -82,6 +82,9 @@ pub(crate) mod tests {
 
     /// One site on disk with the documents a test opens, and the reports its client was sent.
     pub(crate) struct Site {
+        /// Keeps the site's directory alive for as long as the test holds it. Only the unix
+        /// symlink test reads the path, so other targets see the handle as unused.
+        #[allow(dead_code)]
         pub(crate) root: tempfile::TempDir,
         /// The root as the server spells it: the filesystem's own spelling, symlinks followed.
         pub(crate) physical: PathBuf,
@@ -125,23 +128,6 @@ pub(crate) mod tests {
                 ))
                 .unwrap();
         }
-
-        pub(crate) fn changed(&mut self, paths: &[&str]) {
-            let changes: Vec<lsp_types::FileEvent> = paths
-                .iter()
-                .map(|path| lsp_types::FileEvent {
-                    uri: crate::uri::from_file_path(&self.physical.join(path)).unwrap(),
-                    typ: lsp_types::FileChangeType::CHANGED,
-                })
-                .collect();
-            self.open
-                .apply(Notification::new(
-                    lsp_types::notification::DidChangeWatchedFiles::METHOD.into(),
-                    lsp_types::DidChangeWatchedFilesParams { changes },
-                ))
-                .unwrap();
-        }
-
         pub(crate) fn check(&mut self) {
             self.publish(Vec::new());
         }

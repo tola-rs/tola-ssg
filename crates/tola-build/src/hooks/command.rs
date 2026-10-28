@@ -267,7 +267,7 @@ mod tests {
         };
         let invocation = HookInvocation::new(
             &crate::build::tests::hook_child_command(
-                "hooks::command::tests::hook_environment_child",
+                "hooks::command::tests::child_hook_environment",
             ),
             HookCall {
                 site_root: &root,
@@ -284,7 +284,7 @@ mod tests {
     /// Asserts the environment Tola built for it, against the expectations the scene
     /// inherited as ordinary environment values.
     #[test]
-    fn hook_environment_child() {
+    fn child_hook_environment() {
         let Some(stage) = std::env::var_os("TOLA_HOOK_SCENE_STAGE") else {
             return;
         };

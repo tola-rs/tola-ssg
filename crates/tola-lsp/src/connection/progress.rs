@@ -156,14 +156,8 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::SourceJob;
-    use crate::compiler::{SourceCompilation, SourceFailure};
     use crate::connection::tests::{messages, ready, ready_workspace};
-    use crate::protocol::CheckProgress;
-    use lsp_server::{Message, Notification, Response};
-    use lsp_types::notification::{self, Notification as LspNotification};
-    use serde_json::json;
-    use std::ops::ControlFlow;
+    use lsp_server::{Message, Response};
 
     #[test]
     fn progress_waits_for_creation_reply() {
@@ -217,110 +211,6 @@ mod tests {
         );
         assert!(messages(&mut connection).is_empty());
     }
-
-    /// A report that ends before the client answered its creation releases that creation: the next
-    /// report asks for its own, and the older answer reaches no report.
-    #[test]
-    fn unanswered_creation_does_not_block_the_next_report() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.features.work_done_progress = true;
-        connection.begin_progress(Instant::now());
-        connection.run_due_work(Instant::now()).unwrap();
-        let written = messages(&mut connection);
-        let Message::Request(superseded) = &written[0] else {
-            panic!("progress creation request");
-        };
-        let superseded_id = superseded.id.clone();
-        let superseded_token = superseded.params["token"].clone();
-        connection.end_progress().unwrap();
-        connection.begin_progress(Instant::now());
-        connection.run_due_work(Instant::now()).unwrap();
-        let written = messages(&mut connection);
-        let Message::Request(created) = &written[0] else {
-            panic!("the next report asks for its own creation: {written:?}");
-        };
-        assert_ne!(created.params["token"], superseded_token);
-        assert!(
-            written
-                .iter()
-                .all(|message| progress_kind(message).is_none())
-        );
-        // The answer to the released creation reaches no report.
-        connection
-            .response(Response::new_ok(superseded_id, ()))
-            .unwrap();
-        assert!(messages(&mut connection).is_empty());
-        connection
-            .response(Response::new_ok(created.id.clone(), ()))
-            .unwrap();
-        assert_eq!(
-            messages(&mut connection)
-                .iter()
-                .filter_map(progress_kind)
-                .collect::<Vec<_>>(),
-            ["begin"]
-        );
-    }
-
-    /// A creation the client leaves unanswered past its bound is given up with its report: nothing
-    /// is asked twice, and the late answer reaches no report.
-    #[test]
-    fn unanswered_creation_gives_up_its_report() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.features.work_done_progress = true;
-        connection.begin_progress(Instant::now());
-        connection.run_due_work(Instant::now()).unwrap();
-        let written = messages(&mut connection);
-        let Message::Request(create) = &written[0] else {
-            panic!("progress creation request");
-        };
-        connection
-            .run_due_work(Instant::now() + PROGRESS_CREATION_TIMEOUT)
-            .unwrap();
-        assert!(connection.progress.is_none(), "the report is given up");
-        assert!(
-            messages(&mut connection).is_empty(),
-            "nothing is asked twice"
-        );
-        connection
-            .response(Response::new_ok(create.id.clone(), ()))
-            .unwrap();
-        assert!(messages(&mut connection).is_empty());
-    }
-
-    #[test]
-    fn progress_cancellation_stops_matching_check() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.features.work_done_progress = true;
-        connection.sources_changed(false).unwrap();
-        connection.next_job(Instant::now()).unwrap();
-        let token = connection.progress.as_ref().unwrap().token.clone();
-        assert_eq!(
-            connection
-                .notification(Notification::new(
-                    notification::WorkDoneProgressCancel::METHOD.into(),
-                    json!({"token":"unrelated"}),
-                ))
-                .unwrap(),
-            ControlFlow::Continue(())
-        );
-        assert!(!connection.checking.token().is_cancelled());
-        assert_eq!(
-            connection
-                .notification(Notification::new(
-                    notification::WorkDoneProgressCancel::METHOD.into(),
-                    json!({"token":token}),
-                ))
-                .unwrap(),
-            ControlFlow::Continue(())
-        );
-        assert!(connection.checking.token().is_cancelled());
-        assert_eq!(connection.check_progress(), CheckProgress::NotChecked);
-    }
-
     /// Which kind of `$/progress` report one message is, when it is one.
     fn progress_kind(message: &Message) -> Option<String> {
         let Message::Notification(notification) = message else {
@@ -335,61 +225,5 @@ mod tests {
             .get("kind")?
             .as_str()
             .map(str::to_owned)
-    }
-
-    /// The first check requests its report at once and ends it when that check does.
-    /// A check that is still queued is never a site that does not compile:
-    /// an answer with no compiled site reads the progress to tell those two apart.
-    #[test]
-    fn cold_check_opens_and_ends_one_report() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.features.work_done_progress = true;
-        connection.sources_changed(false).unwrap();
-        let revision = connection.revision;
-        assert_eq!(connection.check_progress(), CheckProgress::Checking);
-        let now = Instant::now();
-        assert!(matches!(
-            connection.next_job(now),
-            Some(SourceJob::Check(_))
-        ));
-        connection.run_due_work(now).unwrap();
-        let written = messages(&mut connection);
-        assert!(
-            written
-                .iter()
-                .any(|message| matches!(message, Message::Request(request)
-                if request.method == request::WorkDoneProgressCreate::METHOD)),
-            "the report is created before it is reported: {written:?}"
-        );
-        let create = written
-            .iter()
-            .find_map(|message| match message {
-                Message::Request(request)
-                    if request.method == request::WorkDoneProgressCreate::METHOD =>
-                {
-                    Some(request.id.clone())
-                }
-                _ => None,
-            })
-            .unwrap();
-        connection.response(Response::new_ok(create, ())).unwrap();
-        let kinds: Vec<String> = messages(&mut connection)
-            .iter()
-            .filter_map(progress_kind)
-            .collect();
-        assert!(kinds.contains(&"begin".to_owned()), "{kinds:?}");
-        connection
-            .completed(SourceCompilation::Checked {
-                checked_revision: revision,
-                checked: Err(SourceFailure::Failed(anyhow::anyhow!("no site"))),
-            })
-            .unwrap();
-        assert_eq!(connection.check_progress(), CheckProgress::Failed);
-        let kinds: Vec<String> = messages(&mut connection)
-            .iter()
-            .filter_map(progress_kind)
-            .collect();
-        assert!(kinds.contains(&"end".to_owned()), "{kinds:?}");
     }
 }

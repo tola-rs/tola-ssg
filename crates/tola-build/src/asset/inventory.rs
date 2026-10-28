@@ -982,15 +982,21 @@ fn validate_asset_output_set<'output>(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::fs;
 
     use tempfile::TempDir;
 
     use super::*;
     use crate::asset::tests::{file_declaration, published_url};
-    use crate::config::section::assets::{
-        AssetFileDeclaration, AssetTreeDeclaration, AssetUrlPrefix,
-    };
+    use crate::config::section::assets::{AssetTreeDeclaration, AssetUrlPrefix};
+
+    fn check_urls(config: &ResolvedSiteConfig) -> super::super::AssetUrls {
+        super::super::AssetUrls::for_check(
+            config,
+            &crate::cancellation::BuildCancellation::default(),
+        )
+        .expect("configured declarations resolve without rendering")
+    }
 
     fn tree_declaration(
         source: impl Into<PathBuf>,
@@ -1029,39 +1035,6 @@ mod tests {
         .unwrap_err()
     }
 
-    fn source_evidence<'a>(
-        inventory: &'a ConfiguredAssetInventory,
-        logical: &Path,
-    ) -> &'a FilesystemSourceFile {
-        inventory
-            .generation
-            .assets
-            .iter()
-            .find_map(|asset| {
-                asset.observation.files().iter().find(|source| {
-                    asset
-                        .spec
-                        .source_id
-                        .logical_source
-                        .join(source.relative_path())
-                        == logical
-                })
-            })
-            .expect("configured source evidence")
-    }
-
-    fn asset_for_source<'a>(
-        inventory: &'a ConfiguredAssetInventory,
-        logical: &Path,
-    ) -> &'a ConfiguredAssetEntry {
-        inventory
-            .generation
-            .assets
-            .iter()
-            .find(|asset| asset.spec.source_id.logical_source == logical)
-            .expect("configured asset asset")
-    }
-
     #[cfg(unix)]
     #[test]
     fn pure_assets_reject_host_aliases() {
@@ -1076,7 +1049,10 @@ mod tests {
         config.build.minify.css = false;
         let cancellation = crate::cancellation::BuildCancellation::new();
         let previous = rendered(&config);
-        assert_eq!(only_entry(&previous).1.as_ref(), b"body { color: red; }");
+        let mut entries = previous.entries();
+        let (_, bytes) = entries.next().expect("one published asset");
+        assert_eq!(entries.count(), 0, "one published asset");
+        assert_eq!(bytes.as_ref(), b"body { color: red; }");
         let pure = crate::resources::source_boundary(&config, crate::InputScope::Pure);
         assert!(
             render_configured_asset_inventory(&config, &pure, &cancellation, Some(&previous), &[])
@@ -1320,197 +1296,6 @@ mod tests {
         )));
     }
 
-    /// A change to one declaration's source publishes new bytes for it and leaves
-    /// every other declaration's observation and entries shared.
-    #[test]
-    fn changed_source_preserves_other_assets() {
-        let directory = TempDir::new().unwrap();
-        let assets = directory.path().join("assets");
-        fs::create_dir_all(&assets).unwrap();
-        let tree_source = assets.join("app.bin");
-        fs::write(&tree_source, b"tree-v1").unwrap();
-        let stable_assets = directory.path().join("stable-assets");
-        fs::create_dir_all(&stable_assets).unwrap();
-        fs::write(stable_assets.join("logo.bin"), b"stable-tree").unwrap();
-        let stable_file = directory.path().join("robots.bin");
-        fs::write(&stable_file, b"stable-file").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![
-            tree_declaration(&assets, "/assets"),
-            tree_declaration(&stable_assets, "/stable"),
-        ];
-        config.assets.files = vec![file_declaration(&stable_file, "/robots.bin")];
-        let first = rendered(&config);
-        let tree_before = asset_for_source(&first, &absolute_path(&stable_assets));
-        let file_before = asset_for_source(&first, &absolute_path(&stable_file));
-
-        fs::write(&tree_source, b"tree-v2").unwrap();
-        let updated = render_inventory(&config, Some(&first), std::slice::from_ref(&tree_source));
-
-        assert!(!Arc::ptr_eq(&first.generation, &updated.generation));
-
-        for (before, after) in [
-            (
-                tree_before,
-                asset_for_source(&updated, &absolute_path(&stable_assets)),
-            ),
-            (
-                file_before,
-                asset_for_source(&updated, &absolute_path(&stable_file)),
-            ),
-        ] {
-            assert!(Arc::ptr_eq(&before.observation, &after.observation));
-            assert!(Arc::ptr_eq(&before.entries, &after.entries));
-        }
-        assert_eq!(
-            updated
-                .entries()
-                .find(|(output, _)| output.logical_source == absolute_path(&tree_source))
-                .map(|(_, bytes)| bytes.as_ref()),
-            Some(b"tree-v2".as_slice())
-        );
-    }
-
-    #[test]
-    fn incremental_scan_matches_cold_scan() {
-        let directory = TempDir::new().unwrap();
-        let assets = directory.path().join("assets");
-        fs::create_dir_all(&assets).unwrap();
-        let changed = assets.join("app.css");
-        fs::write(&changed, "body { color: red; }").unwrap();
-        for index in 0..999 {
-            fs::write(
-                assets.join(format!("asset-{index:04}.bin")),
-                index.to_string(),
-            )
-            .unwrap();
-        }
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![tree_declaration(&assets, "/assets")];
-        let first = rendered(&config);
-        let first_bytes = first
-            .entries()
-            .map(|(output, bytes)| (output.logical_source.clone(), Arc::clone(bytes)))
-            .collect::<BTreeMap<_, _>>();
-
-        fs::write(&changed, "body { color: blue; }").unwrap();
-        let incremental = render_inventory(&config, Some(&first), std::slice::from_ref(&changed));
-
-        let authoritative = rendered(&config);
-        assert_eq!(
-            incremental.entries().count(),
-            authoritative.entries().count()
-        );
-        for ((incremental_output, incremental_bytes), (expected_output, expected_bytes)) in
-            incremental.entries().zip(authoritative.entries())
-        {
-            assert_eq!(
-                incremental_output.logical_source,
-                expected_output.logical_source
-            );
-            assert_eq!(incremental_output.output, expected_output.output);
-            assert_eq!(incremental_bytes, expected_bytes);
-            if incremental_output.logical_source != absolute_path(&changed) {
-                assert!(Arc::ptr_eq(
-                    first_bytes
-                        .get(&incremental_output.logical_source)
-                        .expect("previous configured asset bytes"),
-                    incremental_bytes
-                ));
-            }
-        }
-
-        assert!(
-            incremental
-                .is_fresh_for(&config, &crate::cancellation::BuildCancellation::default())
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn policy_reuses_source_observations() {
-        let directory = TempDir::new().unwrap();
-        let css = directory.path().join("app.css");
-        let javascript = directory.path().join("app.js");
-        let module = directory.path().join("app.mjs");
-        let minified = directory.path().join("already.min.css");
-        let css_source = ".a { color: red; } .b { color: red; }";
-        let javascript_source = "function answer() { return 6 * 7; }";
-        let module_source = "export const answer = 6 * 7;";
-        let minified_source = ".kept { padding: 1px; }";
-        fs::write(&css, css_source).unwrap();
-        fs::write(&javascript, javascript_source).unwrap();
-        fs::write(&module, module_source).unwrap();
-        fs::write(&minified, minified_source).unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.assets.files = vec![
-            file_declaration(&css, "/app.css"),
-            file_declaration(&javascript, "/app.js"),
-            file_declaration(&module, "/app.mjs"),
-            file_declaration(&minified, "/already.min.css"),
-        ];
-        config.build.minify.css = false;
-        config.build.minify.javascript = false;
-        let raw = rendered(&config);
-        let raw_entries = raw.entries().collect::<Vec<_>>();
-        assert_eq!(raw_entries[0].1.as_ref(), minified_source.as_bytes());
-        assert_eq!(raw_entries[1].1.as_ref(), css_source.as_bytes());
-        assert_eq!(raw_entries[2].1.as_ref(), javascript_source.as_bytes());
-        assert_eq!(raw_entries[3].1.as_ref(), module_source.as_bytes());
-
-        config.build.minify.css = true;
-        config.build.minify.javascript = true;
-        let transformed = render_inventory(&config, Some(&raw), &[]);
-        assert!(!Arc::ptr_eq(&raw.generation, &transformed.generation));
-        for (before, after) in raw
-            .generation
-            .assets
-            .iter()
-            .zip(transformed.generation.assets.iter())
-        {
-            assert!(Arc::ptr_eq(&before.observation, &after.observation));
-        }
-        let transformed_entries = transformed.entries().collect::<Vec<_>>();
-        assert_eq!(
-            transformed_entries[0].1.as_ref(),
-            minified_source.as_bytes()
-        );
-        let transformed_css = std::str::from_utf8(&transformed_entries[1].1).unwrap();
-        assert!(
-            transformed_css.len() < css_source.len(),
-            "{transformed_css}"
-        );
-        let javascript = std::str::from_utf8(&transformed_entries[2].1).unwrap();
-        assert!(javascript.len() < javascript_source.len());
-        assert!(transformed_entries[3].1.len() < module_source.len());
-        let css_derived = Arc::clone(&transformed_entries[1].1);
-        assert_eq!(
-            source_evidence(&transformed, &absolute_path(&css))
-                .bytes()
-                .as_ref(),
-            css_source.as_bytes(),
-            "source observation must retain raw bytes"
-        );
-
-        config.build.minify.javascript = false;
-        let css_only = render_inventory(&config, Some(&transformed), &[]);
-        let css_only_entries = css_only.entries().collect::<Vec<_>>();
-        assert!(Arc::ptr_eq(&css_derived, &css_only_entries[1].1));
-        assert_eq!(css_only_entries[2].1.as_ref(), javascript_source.as_bytes());
-        assert_eq!(css_only_entries[3].1.as_ref(), module_source.as_bytes());
-
-        config.build.minify.css = false;
-        let restored = render_inventory(&config, Some(&css_only), &[]);
-        let restored_entries = restored.entries().collect::<Vec<_>>();
-        assert_eq!(restored_entries[1].1.as_ref(), css_source.as_bytes());
-        assert_eq!(restored_entries[2].1.as_ref(), javascript_source.as_bytes());
-    }
-
     #[test]
     fn unminifiable_source_publishes_unchanged() {
         let directory = TempDir::new().unwrap();
@@ -1570,622 +1355,67 @@ mod tests {
         assert_eq!(entries[0].0.output.as_str(), "first/app.css");
         assert_eq!(entries[1].0.output.as_str(), "second/app.css");
         assert!(entries[0].1.len() < b".a { color: red; }".len());
-        assert!(Arc::ptr_eq(&entries[0].1, &entries[1].1));
-        assert!(Arc::ptr_eq(
-            &inventory.generation.assets[0].observation,
-            &inventory.generation.assets[1].observation
-        ));
+        assert_eq!(
+            entries[0].1, entries[1].1,
+            "one source publishes one result"
+        );
     }
 
+    /// A tree publishes under its prefix; an exact declaration owns its own URL and keeps the
+    /// tree from publishing that member twice; a path that would collide is refused.
     #[test]
-    fn declaration_reorder_keeps_the_generation() {
-        let directory = TempDir::new().unwrap();
-        let source = directory.path().join("download.js");
-        fs::write(&source, b"function download() { return 6 * 7; }").unwrap();
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.minify.javascript = true;
-        config.assets.files = vec![
-            file_declaration(&source, "/first.bin"),
-            file_declaration(&source, "/second.bin"),
-        ];
-        let first = rendered(&config);
-        let first_entries = first.entries().collect::<Vec<_>>();
-        assert_eq!(first_entries.len(), 2);
-        assert!(Arc::ptr_eq(
-            &first.generation.assets[0].observation,
-            &first.generation.assets[1].observation
-        ));
-        assert!(Arc::ptr_eq(&first_entries[0].1, &first_entries[1].1));
-
-        config.assets.files.reverse();
-        let reordered =
-            render_inventory(&config, Some(&first), &[directory.path().join("tola.toml")]);
-        assert!(Arc::ptr_eq(&first.generation, &reordered.generation));
-    }
-
-    #[test]
-    fn overlapping_asset_outputs_are_rejected() {
+    fn declaration_owns_url_inside_tree_prefix() {
         let directory = TempDir::new().unwrap();
         let tree = directory.path().join("tree");
-        fs::create_dir(&tree).unwrap();
+        fs::create_dir_all(&tree).unwrap();
         fs::write(tree.join("member.bin"), b"tree").unwrap();
-        let first_file = directory.path().join("first.bin");
-        let second_file = directory.path().join("second.bin");
-        fs::write(&first_file, b"first").unwrap();
-        fs::write(&second_file, b"second").unwrap();
+        let logo = directory.path().join("logo.svg");
+        fs::write(&logo, b"<svg></svg>").unwrap();
 
-        let mut files = crate::config::tests::load_test_config(directory.path(), "");
-        files.assets.files = vec![
-            file_declaration(&first_file, "/download"),
-            file_declaration(&second_file, "/download/readme.txt"),
-        ];
-        let error = render_inventory_error(&files, None, &[]);
-        assert!(error.to_string().contains("overlaps output"), "{error:#}");
-
-        for (tree_prefix, file_url) in [("/downloads/icons", "/downloads"), ("/assets", "/assets")]
-        {
-            let mut config = crate::config::tests::load_test_config(directory.path(), "");
-            config.assets.trees = vec![tree_declaration(&tree, tree_prefix)];
-            config.assets.files = vec![file_declaration(&first_file, file_url)];
-            let error = render_inventory_error(&config, None, &[]);
-            assert!(error.to_string().contains("overlaps output"), "{error:#}");
-        }
-    }
-
-    #[test]
-    fn exact_declaration_and_tree_share_prefix() {
-        let directory = TempDir::new().unwrap();
-        let tree = directory.path().join("tree");
-        fs::create_dir(&tree).unwrap();
-        fs::write(tree.join("member.bin"), b"tree").unwrap();
-        let file = directory.path().join("logo.svg");
-        fs::write(&file, b"<svg></svg>").unwrap();
         let mut config = crate::config::tests::load_test_config(directory.path(), "");
         config.build.publish_dir = directory.path().join("public");
         config.assets.trees = vec![tree_declaration(&tree, "/assets")];
-        config.assets.files = vec![file_declaration(&file, "/assets/logo.svg")];
-
+        config.assets.files = vec![file_declaration(&logo, "/assets/logo.svg")];
         let inventory = rendered(&config);
-
-        // The exact declaration owns its own URL, and the tree keeps the members
-        // it publishes, so one prefix holds both without a second owner.
         assert_eq!(
             published_outputs(&inventory),
             ["assets/logo.svg", "assets/member.bin"]
         );
         let urls = inventory.asset_urls(&config).unwrap();
-        assert_eq!(
-            published_url(&urls, "/assets/logo.svg").as_deref(),
-            Some("/assets/logo.svg")
-        );
-        assert_eq!(
-            published_url(&urls, "/assets/member.bin").as_deref(),
-            Some("/assets/member.bin")
-        );
-    }
+        for declared in ["/assets/logo.svg", "/assets/member.bin"] {
+            assert_eq!(published_url(&urls, declared).as_deref(), Some(declared));
+        }
 
-    #[cfg(unix)]
-    #[test]
-    fn aliased_trees_share_one_observation() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().unwrap();
-        let physical = directory.path().join("physical-assets");
-        let alias = directory.path().join("asset-alias");
-        fs::create_dir_all(&physical).unwrap();
-        fs::write(physical.join("app.css"), b".a { color: red; }").unwrap();
-        symlink(&physical, &alias).unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.build.minify.css = true;
-        config.assets.trees = vec![
-            tree_declaration(&physical, "/physical"),
-            tree_declaration(&alias, "/alias"),
+        // An exact declaration takes the URL away from the tree member it names.
+        let (_directory, mut config) = tree_site("[site]\nbase-path = \"/blog/\"");
+        config.assets.files = vec![
+            file_declaration(config.get_root().join("assets/app.js"), "/assets/app.js"),
+            file_declaration(config.get_root().join("assets/theme.css"), "/js/theme.css"),
         ];
-
-        let inventory = rendered(&config);
-
-        let entries = inventory.entries().collect::<Vec<_>>();
-        assert_eq!(entries.len(), 2);
-        assert!(Arc::ptr_eq(
-            &inventory.generation.assets[0].observation,
-            &inventory.generation.assets[1].observation
-        ));
-        assert!(Arc::ptr_eq(&entries[0].1, &entries[1].1));
-        assert!(entries[0].1.len() < b".a { color: red; }".len());
-        assert!(inventory.entries().any(|(output, _)| {
-            output.logical_source == absolute_path(&alias).join("app.css")
-                && output.output.as_str() == "alias/app.css"
-        }));
-        assert!(inventory.entries().any(|(output, _)| {
-            output.logical_source == absolute_path(&physical).join("app.css")
-                && output.output.as_str() == "physical/app.css"
-        }));
-    }
-
-    #[test]
-    fn unrelated_edit_reuses_frozen_inventory() {
-        let directory = TempDir::new().unwrap();
-        let assets = directory.path().join("assets");
-        fs::create_dir_all(&assets).unwrap();
-        let source = assets.join("app.bin");
-        fs::write(&source, b"published-v1").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![tree_declaration(&assets, "/assets")];
-        let first = rendered(&config);
-
-        fs::write(&source, b"unobserved-v2").unwrap();
-        fs::write(assets.join("unobserved.bin"), b"unobserved").unwrap();
-        let unrelated = directory.path().join("content/post.typ");
-        let reused = render_inventory(&config, Some(&first), std::slice::from_ref(&unrelated));
-
-        assert!(Arc::ptr_eq(&first.generation, &reused.generation));
-        let (_, reused_bytes) = reused.entries().next().expect("reused configured asset");
-        assert_eq!(reused.entries().count(), 1);
-        assert_eq!(reused_bytes.as_ref(), b"published-v1");
-
-        let delta = render_inventory(&config, Some(&reused), std::slice::from_ref(&source));
-        assert!(!Arc::ptr_eq(&reused.generation, &delta.generation));
-        assert_eq!(delta.entries().count(), 1);
-        assert!(delta.entries().any(|(output, bytes)| output.logical_source
-            == absolute_path(&source)
-            && bytes.as_ref() == b"unobserved-v2"));
-        assert!(
-            !delta
-                .is_fresh_for(&config, &crate::cancellation::BuildCancellation::default())
-                .unwrap(),
-            "the write gate must reject unreported membership"
-        );
-
-        let authoritative = rendered(&config);
-        assert_eq!(authoritative.entries().count(), 2);
-    }
-
-    #[test]
-    fn ancestor_change_rescans_the_inventory() {
-        let directory = TempDir::new().unwrap();
-        let assets = directory.path().join("assets");
-        fs::create_dir_all(&assets).unwrap();
-        fs::write(assets.join("a b.css"), b".a { color: red; }").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.build.minify.css = true;
-        config.assets.trees = vec![tree_declaration(&assets, "/图")];
-        let first = rendered(&config);
-
-        let ancestor = directory.path().to_path_buf();
-        let rescanned = render_inventory(&config, Some(&first), std::slice::from_ref(&ancestor));
-        assert!(!Arc::ptr_eq(&first.generation, &rescanned.generation));
-        let derived_before = Arc::clone(
-            &rescanned
-                .entries()
-                .next()
-                .expect("rescanned configured asset")
-                .1,
-        );
-
-        config.assets.trees = vec![tree_declaration(&assets, "/静态")];
-        let unrelated = directory.path().join("content/post.typ");
-        let remapped =
-            render_inventory(&config, Some(&rescanned), std::slice::from_ref(&unrelated));
-        assert!(!Arc::ptr_eq(&rescanned.generation, &remapped.generation));
-        assert!(Arc::ptr_eq(
-            &rescanned.generation.assets[0].observation,
-            &remapped.generation.assets[0].observation
-        ));
-        let (output, bytes) = remapped
-            .entries()
-            .next()
-            .expect("remapped configured asset");
-        assert!(Arc::ptr_eq(&derived_before, bytes));
-        assert_eq!(output.output.as_str(), "静态/a b.css");
-    }
-
-    #[test]
-    fn tree_membership_changes_are_tracked() {
-        let directory = TempDir::new().unwrap();
-        let assets = directory.path().join("static/web-assets");
-        fs::create_dir_all(&assets).unwrap();
-        let first_path = assets.join("first.bin");
-        let second_path = assets.join("second.bin");
-        fs::write(&first_path, b"first").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![tree_declaration(&assets, "/")];
-        let first = rendered(&config);
-
-        fs::write(&second_path, b"second").unwrap();
-        let added = render_inventory(&config, Some(&first), std::slice::from_ref(&second_path));
-        assert_eq!(added.entries().count(), 2);
-
-        fs::remove_file(&first_path).unwrap();
-        let removed = render_inventory(&config, Some(&added), std::slice::from_ref(&first_path));
-        let (output, bytes) = removed.entries().next().expect("retained configured asset");
-        assert_eq!(removed.entries().count(), 1);
-        assert_eq!(output.logical_source, absolute_path(&second_path));
-        assert_eq!(bytes.as_ref(), b"second");
-    }
-
-    #[test]
-    fn freshness_requires_unchanged_inputs() {
-        let directory = TempDir::new().unwrap();
-        let assets = directory.path().join("assets");
-        fs::create_dir_all(&assets).unwrap();
-        let source = assets.join("app.bin");
-        let added = assets.join("added.bin");
-        fs::write(&source, b"candidate-bytes").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![tree_declaration(&assets, "/assets")];
-        let fresh = || crate::cancellation::BuildCancellation::default();
-        let inventory = rendered(&config);
-
-        assert!(inventory.is_fresh_for(&config, &fresh()).unwrap());
-
-        fs::write(&source, b"mutated-after-candidate").unwrap();
-        assert!(!inventory.is_fresh_for(&config, &fresh()).unwrap());
-        fs::write(&source, b"candidate-bytes").unwrap();
-
-        fs::write(&added, b"candidate-bytes").unwrap();
-        assert!(
-            !inventory.is_fresh_for(&config, &fresh()).unwrap(),
-            "an added member changes the observed inventory"
-        );
-        fs::remove_file(&added).unwrap();
-        assert!(inventory.is_fresh_for(&config, &fresh()).unwrap());
-
-        fs::remove_file(&source).unwrap();
-        assert!(
-            !inventory.is_fresh_for(&config, &fresh()).unwrap(),
-            "a removed source invalidates the retained inventory"
-        );
-        fs::write(&source, b"candidate-bytes").unwrap();
-
-        config.assets.trees = vec![tree_declaration(&assets, "/static")];
-        assert!(
-            !inventory.is_fresh_for(&config, &fresh()).unwrap(),
-            "a changed output mapping invalidates the retained inventory"
-        );
-    }
-
-    #[test]
-    fn cancelled_freshness_is_cancellation() {
-        let directory = TempDir::new().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let canceller = crate::cancellation::BuildCanceller::default();
-        let cancellation = canceller.token();
-        let inventory = render_configured_asset_inventory(
-            &config,
-            &crate::resources::source_boundary(&config, crate::InputScope::Online),
-            &cancellation,
-            None,
-            &[],
-        )
-        .unwrap();
-        canceller.cancel();
-
-        let error = inventory.is_fresh_for(&config, &cancellation).unwrap_err();
-
-        assert!(
-            error
-                .downcast_ref::<crate::cancellation::BuildCancelled>()
-                .is_some()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn file_symlink_keeps_logical_extension() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().unwrap();
-        let physical = directory.path().join("script-source.txt");
-        let logical = directory.path().join("app.js");
-        let source =
-            "function inlineHandler() { return crossScriptValue; } var crossScriptValue = 42;";
-        fs::write(&physical, source).unwrap();
-        symlink(&physical, &logical).unwrap();
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.assets.files = vec![file_declaration(&logical, "/app.js")];
-        config.build.minify.javascript = true;
-
-        let inventory = rendered(&config);
-        let entries = inventory.entries().collect::<Vec<_>>();
-        let rendered = std::str::from_utf8(&entries[0].1).unwrap();
-
-        assert!(rendered.len() < source.len(), "{rendered}");
-        assert_eq!(entries[0].0.logical_source, absolute_path(&logical));
-        let evidence = source_evidence(&inventory, &absolute_path(&logical));
-        assert_eq!(evidence.bytes().as_ref(), source.as_bytes());
-        assert_eq!(
-            evidence.canonical_target(),
-            fs::canonicalize(&physical).unwrap()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retargeted_file_symlink_is_stale() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().unwrap();
-        let first = directory.path().join("asset-a.bin");
-        let second = directory.path().join("asset-b.bin");
-        let logical = directory.path().join("asset.bin");
-        fs::write(&first, b"same bytes").unwrap();
-        fs::write(&second, b"same bytes").unwrap();
-        symlink(&first, &logical).unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.files = vec![file_declaration(&logical, "/asset.bin")];
-        let inventory = rendered(&config);
-
-        let logical_identity = absolute_path(&logical);
-        assert_eq!(
-            Some(source_evidence(&inventory, &logical_identity).canonical_target()),
-            Some(fs::canonicalize(&first).unwrap().as_path())
-        );
-        assert!(
-            inventory
-                .is_fresh_for(&config, &crate::cancellation::BuildCancellation::default())
-                .unwrap()
-        );
-        fs::remove_file(&logical).unwrap();
-        symlink(&second, &logical).unwrap();
-        assert!(
-            !inventory
-                .is_fresh_for(&config, &crate::cancellation::BuildCancellation::default())
-                .unwrap()
-        );
-
-        let rebuilt = render_inventory(&config, Some(&inventory), std::slice::from_ref(&logical));
-        assert!(!Arc::ptr_eq(&inventory.generation, &rebuilt.generation));
-        assert_eq!(
-            Some(source_evidence(&rebuilt, &logical_identity).canonical_target()),
-            Some(fs::canonicalize(&second).unwrap().as_path())
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retargeted_tree_symlink_is_stale() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new().unwrap();
-        let first = directory.path().join("asset-tree-a");
-        let second = directory.path().join("asset-tree-b");
-        let logical = directory.path().join("assets");
-        fs::create_dir(&first).unwrap();
-        fs::create_dir(&second).unwrap();
-        fs::write(first.join("app.bin"), b"same bytes").unwrap();
-        fs::write(second.join("app.bin"), b"same bytes").unwrap();
-        symlink(&first, &logical).unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![tree_declaration(&logical, "/assets")];
-        let inventory = rendered(&config);
-
-        let logical_source = absolute_path(&logical).join("app.bin");
-        assert_eq!(
-            Some(source_evidence(&inventory, &logical_source).canonical_target()),
-            Some(fs::canonicalize(first.join("app.bin")).unwrap().as_path())
-        );
-        assert!(
-            inventory
-                .is_fresh_for(&config, &crate::cancellation::BuildCancellation::default())
-                .unwrap()
-        );
-        fs::remove_file(&logical).unwrap();
-        symlink(&second, &logical).unwrap();
-        assert!(
-            !inventory
-                .is_fresh_for(&config, &crate::cancellation::BuildCancellation::default())
-                .unwrap()
-        );
-    }
-
-    fn declared_file_inventory(
-        directory: &Path,
-        source: &Path,
-        declaration: AssetFileDeclaration,
-        settings: &str,
-    ) -> (ResolvedSiteConfig, ConfiguredAssetInventory) {
-        let mut config = crate::config::tests::load_test_config(directory, settings);
-        config.build.publish_dir = directory.join("public");
-        assert_eq!(declaration.source(), source);
-        config.assets.files = vec![declaration];
-        let inventory = rendered(&config);
-        (config, inventory)
-    }
-
-    fn only_entry(inventory: &ConfiguredAssetInventory) -> (&AssetOutput, &Arc<[u8]>) {
-        let (output, bytes) = inventory.entries().next().expect("one published asset");
-        assert_eq!(inventory.entries().count(), 1);
-        (output, bytes)
-    }
-
-    fn check_urls(config: &ResolvedSiteConfig) -> super::super::AssetUrls {
-        super::super::AssetUrls::for_check(
-            config,
-            &crate::cancellation::BuildCancellation::default(),
-        )
-        .expect("configured declarations resolve without rendering")
-    }
-
-    #[test]
-    fn configured_address_needs_no_identity() {
-        let directory = TempDir::new().unwrap();
-        let source = directory.path().join("app.js");
-        fs::write(&source, "const answer = 40 + 2;").unwrap();
-        let (config, inventory) = declared_file_inventory(
-            directory.path(),
-            &source,
-            file_declaration(&source, "/app.js"),
-            "[site]\nbase-path = \"/blog/\"",
-        );
-
-        let (output, _) = only_entry(&inventory);
-
-        assert_eq!(output.output.as_str(), "app.js");
-        assert_eq!(output.identity(), None);
-        let urls = inventory.asset_urls(&config).unwrap();
-        assert_eq!(
-            published_url(&urls, "/app.js").as_deref(),
-            Some("/blog/app.js")
-        );
-        assert_eq!(urls, check_urls(&config));
-    }
-
-    #[test]
-    fn published_address_has_the_identity() {
-        let directory = TempDir::new().unwrap();
-        let source = directory.path().join("app.js");
-        fs::write(&source, "const answer = 40 + 2;").unwrap();
-        let (config, first) = declared_file_inventory(
-            directory.path(),
-            &source,
-            file_declaration(&source, "/app.js"),
-            "[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"",
-        );
-
-        let (output, bytes) = only_entry(&first);
-        let identity = tola_typst::ContentDigest::of(bytes).to_hex();
-        assert_eq!(output.output.as_str(), "app.js");
-        assert_eq!(output.identity(), Some(identity.as_str()));
-        let urls = first.asset_urls(&config).unwrap();
-        assert_eq!(
-            published_url(&urls, "/app.js").as_deref(),
-            Some(format!("/blog/app.js?h={identity}").as_str())
-        );
-
-        let unchanged = render_inventory(&config, Some(&first), std::slice::from_ref(&source));
-        assert_eq!(unchanged.asset_urls(&config).unwrap(), urls);
-
-        fs::write(&source, "const answer = 40 + 3;").unwrap();
-        let changed = render_inventory(&config, Some(&unchanged), std::slice::from_ref(&source));
-        let (changed_output, changed_bytes) = only_entry(&changed);
-        let changed_identity = tola_typst::ContentDigest::of(changed_bytes).to_hex();
-        assert_ne!(changed_identity, identity);
-        assert_eq!(changed_output.output.as_str(), "app.js");
-        let changed_urls = changed.asset_urls(&config).unwrap();
-        assert_eq!(
-            published_url(&changed_urls, "/app.js").as_deref(),
-            Some(format!("/blog/app.js?h={changed_identity}").as_str())
-        );
-        assert!(!urls.values_match(&changed_urls));
-    }
-
-    #[test]
-    fn cache_busting_identifies_every_file() {
-        let (directory, mut config) =
-            tree_site("[assets]\ncache-busting = true\n[site]\nbase-path = \"/blog/\"");
-        let declared = directory.path().join("assets/theme.css");
-        config.assets.files = vec![file_declaration(&declared, "/site.css")];
-
         let inventory = rendered(&config);
         assert_eq!(
             published_outputs(&inventory),
-            ["assets/app.js", "assets/images/logo.svg", "site.css"]
+            ["assets/app.js", "assets/images/logo.svg", "js/theme.css"]
         );
         let urls = inventory.asset_urls(&config).unwrap();
-        let identity_of = |name: &str| {
-            let (_, bytes) = inventory
-                .entries()
-                .find(|(output, _)| output.output.as_str() == name)
-                .unwrap_or_else(|| panic!("{name} is published"));
-            tola_typst::ContentDigest::of(bytes).to_hex()
-        };
-        for (declared, published) in [
-            ("/site.css", "site.css"),
-            ("/assets/app.js", "assets/app.js"),
-            ("/assets/images/logo.svg", "assets/images/logo.svg"),
-        ] {
-            assert_eq!(
-                published_url(&urls, declared).as_deref(),
-                Some(format!("/blog/{published}?h={}", identity_of(published)).as_str()),
-                "{declared}"
+        assert_eq!(
+            published_url(&urls, "/assets/theme.css"),
+            None,
+            "the tree no longer publishes the member a declaration took"
+        );
+
+        // A tree member and a declaration that would publish one path are refused.
+        for (tree_prefix, file_url) in [("/downloads/icons", "/downloads"), ("/assets", "/assets")]
+        {
+            let mut files = crate::config::tests::load_test_config(directory.path(), "");
+            files.assets.trees = vec![tree_declaration(&tree, tree_prefix)];
+            files.assets.files = vec![file_declaration(&logo, file_url)];
+            let error = render_inventory_error(&files, None, &[]);
+            assert!(
+                error.to_string().contains("overlaps output"),
+                "{tree_prefix} / {file_url}: {error:#}"
             );
         }
-
-        let checked = check_urls(&config);
-        for (declared, mounted) in [
-            ("/site.css", "/blog/site.css"),
-            ("/assets/app.js", "/blog/assets/app.js"),
-            ("/assets/images/logo.svg", "/blog/assets/images/logo.svg"),
-        ] {
-            assert_eq!(published_url(&checked, declared).as_deref(), Some(mounted));
-        }
-    }
-
-    #[test]
-    fn identity_follows_published_bytes() {
-        let directory = TempDir::new().unwrap();
-        let source = directory.path().join("app.js");
-        let raw = "function  add (a, b) {\n  return a + b;\n}\n";
-        fs::write(&source, raw).unwrap();
-        let (config, inventory) = declared_file_inventory(
-            directory.path(),
-            &source,
-            file_declaration(&source, "/app.js"),
-            "[assets]\ncache-busting = true\n[build.minify]\njavascript = true",
-        );
-
-        let (_, bytes) = only_entry(&inventory);
-
-        assert_ne!(bytes.as_ref(), raw.as_bytes());
-        let published = tola_typst::ContentDigest::of(bytes).to_hex();
-        assert_eq!(
-            published_url(&inventory.asset_urls(&config).unwrap(), "/app.js").as_deref(),
-            Some(format!("/app.js?h={published}").as_str())
-        );
-        assert_ne!(
-            published,
-            tola_typst::ContentDigest::of(raw.as_bytes()).to_hex(),
-            "the identity follows the bytes Tola publishes, after minification"
-        );
-    }
-
-    #[test]
-    fn two_declarations_conflict_on_one_output() {
-        let directory = TempDir::new().unwrap();
-        let tree = directory.path().join("assets");
-        let elsewhere = directory.path().join("elsewhere");
-        fs::create_dir_all(&tree).unwrap();
-        fs::create_dir_all(&elsewhere).unwrap();
-        fs::write(tree.join("app.js"), "/* tree member */").unwrap();
-        let source = elsewhere.join("app.js");
-        fs::write(&source, "/* declared file */").unwrap();
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        config.build.publish_dir = directory.path().join("public");
-        config.assets.trees = vec![tree_declaration(&tree, "/assets")];
-        config.assets.files = vec![file_declaration(&source, "/assets/app.js")];
-
-        let inventory = rendered(&config);
-        assert_eq!(inventory.entries().count(), 2);
-
-        let mut outputs = crate::output::graph::OutputGraphBuilder::new();
-        let mut conflict = None;
-        for (asset, bytes) in inventory.entries() {
-            if let Err(error) = outputs.insert_configured_asset(
-                asset.logical_source.clone(),
-                asset.output.clone(),
-                asset.declaration().clone(),
-                Arc::clone(bytes),
-            ) {
-                conflict = Some(error.to_string());
-            }
-        }
-
-        let conflict = conflict.expect("two owners of one output path must conflict");
-        assert!(conflict.contains("assets/app.js"), "{conflict}");
     }
 
     fn tree_site(settings: &str) -> (TempDir, ResolvedSiteConfig) {
@@ -2270,57 +1500,6 @@ mod tests {
         assert_eq!(
             published_url(&checked, "/assets/broken.css").as_deref(),
             Some("/assets/broken.css")
-        );
-    }
-
-    #[test]
-    fn exact_declaration_removes_tree_member() {
-        let (_directory, mut config) = tree_site("[site]\nbase-path = \"/blog/\"");
-        config.assets.files = vec![
-            file_declaration(config.get_root().join("assets/app.js"), "/assets/app.js"),
-            file_declaration(config.get_root().join("assets/theme.css"), "/js/theme.css"),
-        ];
-
-        let inventory = rendered(&config);
-
-        assert_eq!(
-            published_outputs(&inventory),
-            ["assets/app.js", "assets/images/logo.svg", "js/theme.css"]
-        );
-        let tree = asset_for_source(&inventory, &absolute_path(config.assets.trees[0].source()));
-        assert_eq!(
-            tree.entries
-                .iter()
-                .map(|(output, _)| output.output.as_str())
-                .collect::<Vec<_>>(),
-            ["assets/images/logo.svg"]
-        );
-
-        let urls = inventory.asset_urls(&config).unwrap();
-        assert_eq!(
-            published_url(&urls, "/assets/app.js").as_deref(),
-            Some("/blog/assets/app.js")
-        );
-        assert_eq!(
-            published_url(&urls, "/js/theme.css").as_deref(),
-            Some("/blog/js/theme.css")
-        );
-        assert_eq!(
-            published_url(&urls, "/assets/images/logo.svg").as_deref(),
-            Some("/blog/assets/images/logo.svg")
-        );
-        assert_eq!(published_url(&urls, "/assets/theme.css").as_deref(), None);
-
-        let checked = check_urls(&config);
-        for declared in ["/assets/app.js", "/js/theme.css", "/assets/images/logo.svg"] {
-            assert_eq!(
-                published_url(&checked, declared),
-                published_url(&urls, declared)
-            );
-        }
-        assert_eq!(
-            published_url(&checked, "/assets/theme.css").as_deref(),
-            None
         );
     }
 

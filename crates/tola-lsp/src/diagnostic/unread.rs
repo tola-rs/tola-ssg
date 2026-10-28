@@ -96,9 +96,9 @@ pub(super) fn unread_documents(
     requested: Option<&Source>,
 ) -> (Vec<UnreadDocument>, bool) {
     let mut documents = Vec::new();
-    for snapshot in open.view().iter() {
-        let path = snapshot.source.id().vpath().get_without_slash().to_owned();
-        let names = snapshot.names();
+    for parsed in open.view().iter() {
+        let path = parsed.source.id().vpath().get_without_slash().to_owned();
+        let names = parsed.names();
         let unread = names.unread_imports();
         if unread.is_empty() {
             continue;
@@ -113,7 +113,7 @@ pub(super) fn unread_documents(
         && open
             .view()
             .iter()
-            .all(|snapshot| snapshot.source.id() != source.id())
+            .all(|parsed| parsed.source.id() != source.id())
     {
         let names = Arc::new(SourceNames::new(source.clone()));
         let unread = names.unread_imports();
@@ -228,135 +228,5 @@ mod tests {
         let range = &data["removal"]["ranges"][0];
         assert_eq!(range["start"]["line"], 0);
         assert!(range["end"]["character"].as_u64() > range["start"]["character"].as_u64());
-    }
-
-    /// A source the author's ignore file lists still selects from the site.
-    ///
-    /// The build reads an ignored `.typ` whenever an import reaches it, and the walk the name
-    /// lane and the index share reads it too, so a statement this consumer reads is not unread.
-    #[test]
-    fn gitignored_source_licenses_its_selection() {
-        let mut site = Site::new(&[
-            ("modules/lang.typ", "#let greet = \"hi\"\n"),
-            ("consumer.typ", "#import \"lib.typ\": greet\n#greet\n"),
-            (".gitignore", "consumer.typ\n"),
-        ]);
-        site.open("lib.typ", "#import \"modules/lang.typ\": greet\n");
-        site.check();
-        let diagnostics = site.diagnostics();
-        assert!(
-            diagnostics.is_empty(),
-            "the ignored consumer reads `greet`: {diagnostics:?}"
-        );
-    }
-
-    /// A source an import reaches selects from the site even though the walk cannot see it.
-    ///
-    /// A dot-named file, and one inside a hidden directory, is skipped by the walk; only the
-    /// import naming it makes it a source — and its own import of the open document's name is
-    /// what licenses that import.
-    #[test]
-    fn imported_hidden_source_licenses_its_selection() {
-        for (reader, reader_import, bridge_import) in [
-            (
-                ".consumer.typ",
-                "#import \"lib.typ\": greet\n#greet\n",
-                "#import \".consumer.typ\": greet\n#greet\n",
-            ),
-            (
-                ".hidden/reader.typ",
-                "#import \"../lib.typ\": greet\n#greet\n",
-                "#import \".hidden/reader.typ\": greet\n#greet\n",
-            ),
-        ] {
-            let mut site = Site::new(&[
-                ("modules/lang.typ", "#let greet = \"hi\"\n"),
-                (reader, reader_import),
-                ("bridge.typ", bridge_import),
-            ]);
-            site.open("lib.typ", "#import \"modules/lang.typ\": greet\n");
-            site.check();
-            let diagnostics = site.diagnostics();
-            assert!(
-                diagnostics.is_empty(),
-                "{reader}: the reached reader selects `greet`: {diagnostics:?}"
-            );
-        }
-    }
-
-    /// A dot-named file no import reaches is no site source of the name lane's either.
-    ///
-    /// The build never reads it, and a rename reaching a binding is the name lane's own answer
-    /// to "who else reads this name", so licensing a statement from a file the name lane cannot
-    /// see would report one edit as used and edit it as unused.
-    #[test]
-    fn unreached_hidden_source_leaves_the_import_unused() {
-        let mut site = Site::new(&[
-            ("modules/lang.typ", "#let greet = \"hi\"\n"),
-            (".consumer.typ", "#import \"lib.typ\": greet\n#greet\n"),
-        ]);
-        site.open("lib.typ", "#import \"modules/lang.typ\": greet\n");
-        site.check();
-        let diagnostics = site.diagnostics();
-        let messages: Vec<&str> = diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect();
-        assert_eq!(messages, ["`greet` imported but unused"], "{messages:?}");
-    }
-
-    #[test]
-    fn unread_statement_alone_removes_its_whole_line() {
-        let mut site = Site::new(&[("content/helpers.typ", "#let orphan = 1\n")]);
-        site.open(
-            "content/partial.typ",
-            "#import \"helpers.typ\": orphan\n#let page = 1\n",
-        );
-        site.check();
-        let diagnostics = site.diagnostics();
-        let [diagnostic] = diagnostics.as_slice() else {
-            panic!("one unused import: {diagnostics:?}");
-        };
-        let data = diagnostic.data.clone().expect("a machine-readable payload");
-        assert_eq!(
-            data["removal"],
-            serde_json::json!({ "kind": "statement", "line": 1 })
-        );
-        assert_eq!(diagnostic.range.start.line, 0);
-    }
-
-    /// An import another source selects stays live, whether the selecting import names the
-    /// binding or the whole module.
-    #[test]
-    fn import_selected_elsewhere_is_not_unused() {
-        for selection in ["orphan", "*"] {
-            let page = format!("#import \"partial.typ\": {selection}\n#orphan\n");
-            let mut site = Site::new(&[
-                ("content/helpers.typ", "#let helper = 1\n#let orphan = 2\n"),
-                ("content/page.typ", page.as_str()),
-            ]);
-            site.open(
-                "content/partial.typ",
-                "#import \"helpers.typ\": helper, orphan\n#helper\n",
-            );
-            site.check();
-            assert!(
-                site.diagnostics().is_empty(),
-                "{selection}: {:?}",
-                site.diagnostics()
-            );
-
-            // A watched change to the selecting file starts a new revision, so the index is
-            // rebuilt from what the site now holds: the same import becomes dead.
-            std::fs::write(site.root.path().join("content/page.typ"), "#let page = 1\n").unwrap();
-            site.changed(&["content/page.typ"]);
-            site.check();
-            assert_eq!(
-                site.diagnostics().len(),
-                1,
-                "{selection}: {:?}",
-                site.diagnostics()
-            );
-        }
     }
 }

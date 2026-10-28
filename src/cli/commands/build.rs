@@ -1,23 +1,20 @@
-use crate::cancellation::Cancellation;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 
-use crate::cli::output::CommandOutput;
-use crate::cli::{BuildOverrideArgs, ConfigFileArgs, TypstPackageArgs};
 use crate::config::ConfigOverrides;
-use tola_build::InputScope;
 
-pub(in crate::cli) fn run(
-    config_file: ConfigFileArgs,
-    packages: TypstPackageArgs,
-    scope: InputScope,
-    build: BuildOverrideArgs,
-    resources: tola_build::BuildResources,
-    output: &CommandOutput,
-    cancellation: &Cancellation,
-) -> Result<()> {
+pub(in crate::cli) fn run(request: super::SiteRequest<'_>) -> Result<()> {
+    let super::SiteRequest {
+        config_file,
+        packages,
+        scope,
+        build,
+        resources,
+        output,
+        cancellation,
+    } = request;
     cancellation.token().ensure_active()?;
     let overrides = ConfigOverrides {
         build: crate::cli::config::build_overrides(&build),

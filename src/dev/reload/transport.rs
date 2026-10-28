@@ -871,52 +871,27 @@ mod tests {
 
     struct ReloadSite {
         _directory: tempfile::TempDir,
-        config: tola_build::config::ResolvedSiteConfig,
+        config: std::sync::Arc<tola_build::config::ResolvedSiteConfig>,
     }
 
     impl ReloadSite {
         fn new() -> Self {
-            let directory = tempfile::TempDir::new().unwrap();
-            std::fs::create_dir(directory.path().join("content")).unwrap();
-            let config = tola_build::config::SiteConfigSchema::default()
-                .resolve(
-                    &directory.path().join("tola.toml"),
-                    tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
-                    &tola_build::config::loading::BuildOverrides::default(),
-                )
-                .unwrap();
+            let directory = tempfile::tempdir().unwrap();
             Self {
+                config: crate::dev::tests::write_site(directory.path(), "", ""),
                 _directory: directory,
-                config,
             }
         }
 
         fn manifest(&self, body: Option<&[u8]>) -> tola_build::output::manifest::SiteManifest {
-            let build = build(&self.config, body);
-            build
-                .into_unchecked_revision(None)
-                .site()
-                .manifest()
-                .clone()
+            crate::dev::tests::write_source(&self.config, body);
+            crate::dev::tests::built_outputs(
+                &self.config,
+                tola_build::build::BuildMode::Development,
+            )
+            .manifest()
+            .clone()
         }
-    }
-
-    fn write_source(config: &tola_build::config::ResolvedSiteConfig, body: Option<&[u8]>) {
-        let source = if let Some(body) = body {
-            std::fs::write(config.get_root().join("body.txt"), body).unwrap();
-            r#"#document("index.html")[#read("body.txt")]"#
-        } else {
-            ""
-        };
-        std::fs::write(&config.build().entry, source).unwrap();
-    }
-
-    fn build(
-        config: &tola_build::config::ResolvedSiteConfig,
-        body: Option<&[u8]>,
-    ) -> tola_build::build::SiteBuild {
-        write_source(config, body);
-        tola_build::build::build_site(config, tola_build::build::BuildMode::Development).unwrap()
     }
 
     type TestClient = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -939,6 +914,17 @@ mod tests {
         HotReloadMessage::status(rebuilding, DiagnosticCounts::default())
     }
 
+    /// The wire frame a client parses for `rebuilding` with `errors` errors and `warnings`
+    /// warnings. One constructor keeps every status assertion spelling the same shape.
+    fn status_frame(rebuilding: bool, errors: usize, warnings: usize) -> serde_json::Value {
+        serde_json::json!({
+            "type": "status",
+            "rebuilding": rebuilding,
+            "errors": errors,
+            "warnings": warnings,
+        })
+    }
+
     #[tokio::test]
     async fn client_resyncs_after_first_revision() {
         let sites = CurrentSite::new();
@@ -955,10 +941,7 @@ mod tests {
             read_json(&mut client).await,
             serde_json::json!({"type": "awaiting"})
         );
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 1, "warnings": 0})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 1, 0));
 
         let revision = replace(&sites, &site.config, Some(b"Recovered"));
         transport.first_revision_ready(revision.clone(), &[]);
@@ -969,10 +952,7 @@ mod tests {
                 "type": "connected", "revision": revision.as_str(), "page_availability": "present",
             })
         );
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 0, "warnings": 0})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 0, 0));
         transport.shutdown().await.unwrap();
     }
 
@@ -984,18 +964,13 @@ mod tests {
         config: &tola_build::config::ResolvedSiteConfig,
         body: Option<&[u8]>,
     ) -> RevisionId {
-        write_source(config, body);
+        crate::dev::tests::write_source(config, body);
         let mut session = tola_build::build::BuildSession::new();
-        let attempt = session.prepare(
+        let (checked, _) = crate::dev::tests::checked_candidate(
+            &mut session,
             std::sync::Arc::new(config.clone()),
-            tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Development),
+            tola_build::build::BuildMode::Development,
         );
-        let candidate = attempt.run().unwrap().into_unchecked_revision(None);
-        let checked = candidate
-            .check(&tola_build::cancellation::BuildCancellation::new())
-            .unwrap()
-            .into_checked()
-            .unwrap();
         let (_, current) = sites.replace(&mut session, checked).unwrap();
         current.manifest().revision().clone()
     }
@@ -1091,21 +1066,17 @@ mod tests {
         read_json(&mut existing).await;
 
         let rebuilding = transport.begin_rebuild();
-        assert_eq!(
-            read_json(&mut existing).await,
-            serde_json::json!({"type": "status", "rebuilding": true, "errors": 0, "warnings": 0})
-        );
+        assert_eq!(read_json(&mut existing).await, status_frame(true, 0, 0));
 
         let mut connected_during_rebuild = connect(&transport).await;
         read_json(&mut connected_during_rebuild).await;
         assert_eq!(
             read_json(&mut connected_during_rebuild).await,
-            serde_json::json!({"type": "status", "rebuilding": true, "errors": 0, "warnings": 0})
+            status_frame(true, 0, 0)
         );
 
         drop(rebuilding);
-        let finished =
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 0, "warnings": 0});
+        let finished = status_frame(false, 0, 0);
         assert_eq!(read_json(&mut existing).await, finished);
         assert_eq!(read_json(&mut connected_during_rebuild).await, finished);
         transport.shutdown().await.unwrap();
@@ -1255,10 +1226,7 @@ mod tests {
         transport
             .diagnostics_sender()
             .after_publish_failed(&first, &hook_failure());
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 1, "warnings": 0})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 1, 0));
 
         // No round reports for the replacement, so only the publication can clear the failure.
         replace(&sites, &site.config, Some(b"same"));
@@ -1267,10 +1235,7 @@ mod tests {
         assert_eq!(first.manifest().revision(), second.manifest().revision());
         transport.revision_replaced(first.manifest().diff(second.manifest()), &[build_warning()]);
 
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 0, "warnings": 1})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 0, 1));
         transport.shutdown().await.unwrap();
     }
 
@@ -1294,10 +1259,7 @@ mod tests {
 
         let mut client = connect(&transport).await;
         assert_eq!(read_json(&mut client).await["type"], "connected");
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 0, "warnings": 1})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 0, 1));
         transport.shutdown().await.unwrap();
     }
 
@@ -1314,17 +1276,11 @@ mod tests {
         transport
             .diagnostics_sender()
             .after_publish_failed(&installed, &hook_failure());
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 1, "warnings": 0})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 1, 0));
 
         // The failed build publishes no revision, so the installed revision's failure stays.
         transport.replace_diagnostics(&[build_failure()]);
-        assert_eq!(
-            read_json(&mut client).await,
-            serde_json::json!({"type": "status", "rebuilding": false, "errors": 2, "warnings": 0})
-        );
+        assert_eq!(read_json(&mut client).await, status_frame(false, 2, 0));
         transport.shutdown().await.unwrap();
     }
 
@@ -1409,11 +1365,12 @@ mod tests {
         let diff = before.diff(after);
         let expected = HotReloadMessage::revision(&diff, PageAvailability::Empty).to_json();
         assert!(expected.len() > SERVER_WRITE_BUFFER_BYTES);
-        let (mut client, mut browser) = socket_pair(1024).await;
+        // A smaller pipe races `CLIENT_WRITE_TIMEOUT` and evicts the client instead.
+        let (mut client, mut browser) = socket_pair(expected.len() + 1024).await;
         client.delivered_revision = Some(before.revision().clone());
         let mut clients = ReloadClients::new();
         clients.insert(SocketAddr::from(([127, 0, 0, 1], 0)), client);
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(60), async {
             tokio::join!(
                 async {
                     broadcast_revision(
@@ -1438,12 +1395,7 @@ mod tests {
                         read_json(&mut browser).await,
                         serde_json::from_str::<serde_json::Value>(&expected).unwrap()
                     );
-                    assert_eq!(
-                        read_json(&mut browser).await,
-                        serde_json::json!({
-                            "type": "status", "rebuilding": false, "errors": 0, "warnings": 0,
-                        })
-                    );
+                    assert_eq!(read_json(&mut browser).await, status_frame(false, 0, 0));
                 }
             );
         })

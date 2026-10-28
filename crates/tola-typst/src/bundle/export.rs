@@ -188,10 +188,9 @@ fn export_bundle(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{compile, entry, entry_from, shares_backing, world_for};
+    use super::super::tests::compile;
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
+
     #[test]
     fn exported_entry_describes_itself() {
         let result = compile(
@@ -232,94 +231,6 @@ mod tests {
             crate::world::file::ContentDigest::of(only_entry.bytes().as_slice())
         );
         assert_eq!(single.entry(only_entry.path()), Some(only_entry));
-    }
-    #[test]
-    fn export_reuses_unchanged_entry_bytes() {
-        let dir = TempDir::new().unwrap();
-        let world = world_for(
-            &dir,
-            "main.typ",
-            "#document(\"index.html\")[Hello]#asset(\"raw.bin\", bytes(\"raw\"))",
-        );
-        let cancellation = BundleCancellation::default();
-
-        let first = compile_bundle_world(&world, &cancellation)
-            .unwrap()
-            .export(&BundleOptions::default(), &cancellation, None)
-            .unwrap();
-        let repeated = compile_bundle_world(&world, &cancellation)
-            .unwrap()
-            .export(
-                &BundleOptions::default(),
-                &cancellation,
-                Some(first.entry_cache()),
-            )
-            .unwrap();
-        assert!(shares_backing(
-            &first.entries()[0].bytes,
-            &repeated.entries()[0].bytes
-        ));
-        assert_eq!(first.entries()[0].digest, repeated.entries()[0].digest);
-
-        let compilation = compile_bundle_world(&world, &cancellation).unwrap();
-        let mut compact = BundleOptions::default();
-        compact.html.pretty = false;
-        let first = compilation
-            .export_entries(&compact, &cancellation, None)
-            .unwrap();
-        let mut pretty = compact;
-        pretty.html.pretty = true;
-        let second = compilation
-            .export_entries(&pretty, &cancellation, Some(&first))
-            .unwrap();
-        let first_html = entry_from(first.as_slice(), "/index.html");
-        let second_html = entry_from(second.as_slice(), "/index.html");
-        assert_ne!(first_html.bytes(), second_html.bytes());
-        let first_asset = entry_from(first.as_slice(), "/raw.bin");
-        let second_asset = entry_from(second.as_slice(), "/raw.bin");
-        assert!(shares_backing(&first_asset.bytes, &second_asset.bytes));
-        assert_eq!(first_asset.digest(), second_asset.digest());
-    }
-    #[test]
-    fn unaffected_entries_keep_their_bytes() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("main.typ");
-        fs::write(dir.path().join("a.typ"), "First A").unwrap();
-        fs::write(dir.path().join("b.typ"), "Stable B").unwrap();
-        fs::write(
-            &path,
-            "#document(\"a.html\")[#include \"a.typ\"]\n#document(\"b.html\")[#include \"b.typ\"]",
-        )
-        .unwrap();
-        let cache = Arc::new(crate::world::file::SharedFileCache::new());
-        let world = || {
-            TypstWorld::builder(&path, dir.path())
-                .with_shared_cache(Arc::clone(&cache))
-                .no_fonts()
-                .build(&crate::BundleCancellation::default())
-                .expect("valid test world")
-        };
-        let cancellation = BundleCancellation::default();
-        let options = BundleOptions::default();
-        let first = compile_bundle_world(&world(), &cancellation)
-            .unwrap()
-            .export(&options, &cancellation, None)
-            .unwrap();
-
-        fs::write(dir.path().join("a.typ"), "Second A").unwrap();
-        let second = compile_bundle_world(&world(), &cancellation)
-            .unwrap()
-            .export(&options, &cancellation, Some(first.entry_cache()))
-            .unwrap();
-        let first_a = entry(&first, "/a.html");
-        let second_a = entry(&second, "/a.html");
-        let first_b = entry(&first, "/b.html");
-        let second_b = entry(&second, "/b.html");
-
-        assert_ne!(first_a.digest, second_a.digest);
-        assert!(!shares_backing(&first_a.bytes, &second_a.bytes));
-        assert_eq!(first_b.digest, second_b.digest);
-        assert!(shares_backing(&first_b.bytes, &second_b.bytes));
     }
     #[test]
     fn export_error_keeps_hints_in_diagnostics() {

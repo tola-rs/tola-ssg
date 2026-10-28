@@ -107,11 +107,10 @@ mod tests {
         bytes
     }
 
-    /// A V5 header names its color space the way Windows writes it, and an embedded profile is
-    /// read from the offsets that header defines. A space Tola cannot read is reported here rather
-    /// than resized as if it were sRGB, and a profile that is present is handed on whole.
+    /// A V5 header names its color space the way Windows writes it: sRGB, an embedded profile, or
+    /// a space Tola cannot read.
     #[test]
-    fn v5_colour_space_and_profile_are_read() {
+    fn v5_colour_space_is_classified() {
         // Red, green, blue, and mid grey: the linear profile below moves the mid grey only.
         let pixels: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128];
 
@@ -136,9 +135,18 @@ mod tests {
             matches!(unreadable.color, SampleColor::Unsupported(_)),
             "a color space Tola cannot read is reported, not guessed"
         );
+    }
 
-        // The file itself decodes: a Windows-saved V5 header reaches the resampler rather than
-        // being refused, and the space it names as unreadable is refused before any decoding.
+    /// A Windows-saved V5 file reaches the resampler rather than being refused: its own pixels
+    /// come back unchanged under sRGB, its embedded profile moves them, and a space Tola cannot
+    /// read is refused.
+    #[test]
+    fn v5_profiled_bitmap_reaches_the_resampler() {
+        // Red, green, blue, and mid grey: the linear profile below moves the mid grey only.
+        let pixels: Vec<u8> = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 128, 128, 128];
+        let srgb_bytes = bmp_v5(&pixels, 2, 2, 0x7352_4742, &[]);
+        let embedded_bytes = bmp_v5(&pixels, 2, 2, 0x4d42_4544, &linear_profile());
+        let unreadable_bytes = bmp_v5(&pixels, 2, 2, 0, &[]);
         let resized = |source: &[u8]| {
             render(
                 source,

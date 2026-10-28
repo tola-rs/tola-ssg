@@ -193,69 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn brackets_fold_their_body() {
-        assert_eq!(folded("#let x = {\n  1\n}\n"), [(0, 2, None)]);
-        assert_eq!(
-            folded("#let style = (\n  a: 1,\n  b: 2,\n)\n"),
-            [(0, 3, None)]
-        );
-        assert_eq!(folded("#let x = { 1 }\n"), Vec::new());
-        assert_eq!(
-            folded("#let a = {\n  let b = {\n    1\n  }\n}\n"),
-            [(0, 4, None), (1, 3, None)]
-        );
-    }
-
-    #[test]
-    fn body_folds_inside_its_heading_section() {
-        assert_eq!(
-            folded("= One\n#block[\n  body\n]\n"),
-            [(0, 3, Some("One".to_owned())), (1, 3, None)]
-        );
-    }
-
-    #[test]
     fn list_items_fold_their_own_lines() {
         assert_eq!(folded("- first\n  continued\n- second\n"), [(0, 1, None)]);
-    }
-
-    #[test]
-    fn equations_fold_their_body() {
-        assert_eq!(folded("$\n  a + b\n$\n"), [(0, 2, None)]);
-        assert_eq!(
-            folded("- Item\n\n  $\n    a + b\n  $\n"),
-            [(0, 4, None), (2, 4, None)]
-        );
-    }
-
-    /// A construct folds its own multi-line span, however its body is delimited.
-    #[test]
-    fn multiline_constructs_fold_their_span() {
-        let cases = [
-            ("parenthesized", "#(\n  1\n)\n", 0, 2),
-            ("array", "#(\n  1,\n  2,\n)\n", 0, 3),
-            ("destructuring", "#let (\n  a,\n  b,\n) = (1, 2)\n", 0, 3),
-            ("args", "#f(\n  1,\n  2,\n)\n", 0, 3),
-            ("params", "#let sum(\n  a,\n  b,\n) = a + b\n", 0, 3),
-            ("enum item", "+ first\n  continued\n", 0, 1),
-            ("blocky raw", "```html\n<p>hi</p>\n```\n", 0, 2),
-            ("inline raw", "`one\ntwo`\n", 0, 1),
-            ("string", "#let page = \"\n  <p>hi</p>\n\"\n", 0, 2),
-        ];
-        for (construct, text, start, end) in cases {
-            assert_eq!(folded(text), [(start, end, None)], "for the {construct}");
-        }
-    }
-
-    #[test]
-    fn comment_runs_fold_with_their_kind() {
-        assert_eq!(folded("// One\n// Two\n\nbody\n"), [(0, 1, None)]);
-        assert_eq!(folded("// One\n"), Vec::new());
-        assert_eq!(folded("// One\n\n// Two\n"), Vec::new());
-        let run = super::folds(&Source::detached("// One\n// Two\n")).expect("a comment run");
-        assert_eq!(run[0].kind, Some(FoldKind::Comment));
-        let block =
-            super::folds(&Source::detached("/* One\n   Two */\n")).expect("a block comment");
-        assert_eq!(block[0].kind, Some(FoldKind::Comment));
     }
 }

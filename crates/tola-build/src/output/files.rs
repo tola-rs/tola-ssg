@@ -485,20 +485,13 @@ mod tests {
     }
 
     #[test]
-    fn command_stylesheet_keeps_bytes() {
+    fn non_bundle_stylesheet_keeps_its_bytes() {
         let source = ".a { color: red; }";
-        assert_eq!(
-            staged_stylesheet(OutputOwner::command(0, "stylesheets"), source),
-            source.as_bytes()
-        );
-    }
-
-    #[test]
-    fn configured_asset_keeps_bytes() {
-        let source = ".a { color: red; }";
-        assert_eq!(
-            staged_stylesheet(OutputOwner::configured_asset("assets/app.css"), source),
-            source.as_bytes()
-        );
+        for owner in [
+            OutputOwner::command(0, "stylesheets"),
+            OutputOwner::configured_asset("assets/app.css"),
+        ] {
+            assert_eq!(staged_stylesheet(owner, source), source.as_bytes());
+        }
     }
 }

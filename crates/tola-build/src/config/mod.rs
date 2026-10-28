@@ -173,16 +173,6 @@ pub(crate) mod tests {
         assert!(site_config.config.build.minify.javascript);
     }
 
-    #[test]
-    fn declared_minify_disables_every_language() {
-        let site_config =
-            OwnedSiteConfig::new("[build.minify]\nhtml = false\ncss = false\njavascript = false\n");
-
-        assert!(!site_config.config.build.minify.html);
-        assert!(!site_config.config.build.minify.css);
-        assert!(!site_config.config.build.minify.javascript);
-    }
-
     #[cfg(unix)]
     #[test]
     fn full_load_keeps_logical_input_paths() {
@@ -342,7 +332,7 @@ path = "icons"
     }
 
     #[test]
-    fn unknown_hook_field_names_allowed_fields_and_help() {
+    fn unknown_hook_field_lists_allowed_fields() {
         let content = config_source("[build.hooks]\nunknown_stage = true");
         let error = SiteConfigSchema::parse(
             Path::new("tola.toml"),
@@ -366,21 +356,6 @@ path = "icons"
             panic!("an unknown field has one help: {diagnostic:?}");
         };
         assert_eq!(help.message, UNKNOWN_FIELD_HELP);
-    }
-
-    #[test]
-    fn misspelled_site_field_is_reported() {
-        let content = r#"[site]
-title = "Test"
-titel = "misspelled"
-"#;
-        let error = SiteConfigSchema::parse(
-            Path::new("tola.toml"),
-            content,
-            crate::resources::InputScope::Online,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("site.titel"));
     }
 
     #[test]
@@ -418,7 +393,7 @@ content-dir = "content"
     }
 
     #[test]
-    fn url_mount_follows_the_site_base_path() {
+    fn base_path_decides_the_url_mount() {
         for (base_path, expected) in [("/", None), ("/docs/blog/", Some("docs/blog"))] {
             let site_config = resolved_config(
                 &format!("[site]\norigin = \"https://example.com\"\nbase-path = \"{base_path}\""),
@@ -492,7 +467,7 @@ content-dir = "content"
 
     #[cfg(all(unix, not(target_vendor = "apple")))]
     #[test]
-    fn non_utf8_root_survives_in_icon_source() {
+    fn non_utf8_root_reaches_icon_source() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
@@ -560,17 +535,22 @@ content-dir = "content"
     }
 
     #[test]
-    fn minify_override_controls_every_language() {
-        let build = BuildOverrides {
-            minify: Some(false),
-            ..Default::default()
-        };
+    fn either_source_disables_every_language() {
+        let declared =
+            OwnedSiteConfig::new("[build.minify]\nhtml = false\ncss = false\njavascript = false\n");
+        let overridden = resolved_config(
+            "",
+            BuildOverrides {
+                minify: Some(false),
+                ..Default::default()
+            },
+        );
 
-        let site_config = resolved_config("", build);
-
-        assert!(!site_config.config.build.minify.html);
-        assert!(!site_config.config.build.minify.css);
-        assert!(!site_config.config.build.minify.javascript);
+        for site_config in [declared, overridden] {
+            assert!(!site_config.config.build.minify.html);
+            assert!(!site_config.config.build.minify.css);
+            assert!(!site_config.config.build.minify.javascript);
+        }
     }
 
     #[test]

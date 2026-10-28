@@ -320,10 +320,19 @@ mod tests {
             ],
             "{hints:?}"
         );
-        // The viewport decides which imports are annotated.
+    }
+
+    /// The viewport decides which imports a hint annotates.
+    #[test]
+    fn version_hints_follow_the_viewport() {
+        let index = [published("cetz", "0.3.2")];
+        let source = Source::detached("#import \"@preview/cetz:0.3.1\": canvas\n");
+        let mut inside = Vec::new();
+        package_version_hints(&source, 0..source.text().len(), &index, &mut inside);
+        assert_eq!(inside.len(), 1, "{inside:?}");
         let mut outside = Vec::new();
         package_version_hints(&source, 0..0, &index, &mut outside);
-        assert!(outside.is_empty());
+        assert!(outside.is_empty(), "{outside:?}");
     }
 
     #[test]
@@ -369,36 +378,37 @@ mod tests {
         }
     }
 
-    #[test]
-    fn inlay_hint_names_the_filled_parameter() {
-        let mut site = QuerySession::new();
-        assert!(
-            site.inlay_hints("#align(center)[Body]|\n").is_empty(),
-            "a standard call with one argument names nothing"
-        );
-
-        // Delaying the call keeps the site valid while testing a contextual parameter hint.
-        let hints = site.inlay_hints(
-            "#import \"@tola/address:0.0.0\": join-route\n#let build(segments) = join-route(|segments)\n",
-        );
-        assert_eq!(hint_labels(&hints), ["segments:"], "{hints:?}");
-        assert_eq!(hints[0].position, Position::new(1, 34));
-    }
-
     /// A call names each positional argument it fills, in the parameter's own order, and a
-    /// variadic parameter only the first argument it takes.
+    /// variadic parameter only the first argument it takes. A standard call that documents its
+    /// parameters where the author can read them names nothing.
     #[test]
     fn inlay_hints_name_their_arguments() {
-        let cases: [(&str, &[&str]); 2] = [
-            ("#(calc.max(1, 2, 3))|\n", &["..values:"]),
-            ("#(calc.pow(2, 3))|\n", &["base:", "exponent:"]),
+        let cases: [(&str, &[&str], Option<Position>); 4] = [
+            (
+                "#(calc.max(1, 2, 3))|\n",
+                &["..values:"],
+                Some(Position::new(0, 11)),
+            ),
+            (
+                "#(calc.pow(2, 3))|\n",
+                &["base:", "exponent:"],
+                Some(Position::new(0, 11)),
+            ),
+            ("#align(center)[Body]|\n", &[], None),
+            (
+                "#import \"@tola/address:0.0.0\": join-route\n#let build(segments) = join-route(|segments)\n",
+                &["segments:"],
+                Some(Position::new(1, 34)),
+            ),
         ];
-        for (source, expected) in cases {
+        for (source, expected, position) in cases {
             let mut site = QuerySession::new();
+            let hints = site.inlay_hints(source);
+            assert_eq!(hint_labels(&hints), expected, "{source:?}");
             assert_eq!(
-                hint_labels(&site.inlay_hints(source)),
-                expected,
-                "{source:?}"
+                hints.first().map(|hint| hint.position),
+                position,
+                "{source:?}: {hints:?}"
             );
         }
     }

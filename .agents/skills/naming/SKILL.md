@@ -10,7 +10,7 @@ A name carries 3 facts: what represented, who owns it, when valid. Cannot answer
 
 ## Start from the domain
 
-Name the entity or invariant, not the storage technique: `SourceSnapshot` holds frozen source identity; `BytesBlob` says only how bytes are kept.
+Name the entity or invariant, not the storage technique: `ExplicitSources` holds frozen source identity; `BytesBlob` says only how bytes are kept.
 
 - Type: the entity or invariant it represents.
 - General term: earned by breadth carried, never by default — the precise word when several distinct things really share it (one `Diagnostic` for the record every producer emits; one `Source` for every file the compiler reads). Narrowed to one concrete thing, an earned word still describes it; an unearned one collapses — was filler all along.

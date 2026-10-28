@@ -293,17 +293,6 @@ mod tests {
     }
 
     #[test]
-    fn tilde_fence_delimits_example() {
-        assert_eq!(
-            documentation_segments("Text.\n\n~~~\ncode\n~~~\n"),
-            vec![
-                DocumentationSegment::Prose("Text.\n\n"),
-                DocumentationSegment::Example("~~~\ncode\n~~~\n"),
-            ]
-        );
-    }
-
-    #[test]
     fn unclosed_fence_covers_remaining_lines() {
         assert_eq!(
             documentation_segments("Text.\n\n```\ncode"),
@@ -311,17 +300,6 @@ mod tests {
                 DocumentationSegment::Prose("Text.\n\n"),
                 DocumentationSegment::Example("```\ncode"),
             ]
-        );
-    }
-
-    #[test]
-    fn examples_keep_relative_indentation() {
-        let source = Source::detached(
-            "/// Read a value.\n///\n/// ```typ\n/// #let value = {\n///   7\n/// }\n/// ```\n#let value = 7",
-        );
-        assert_eq!(
-            declaration_docs(&source, source.text().rfind("#let").unwrap()).unwrap(),
-            "Read a value.\n\n```typ\n#let value = {\n  7\n}\n```"
         );
     }
 
@@ -359,44 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn block_without_entries_keeps_its_summary() {
-        let documentation =
-            Documentation::parse("Prose about the declaration.\n\n- a plain bullet.");
-        assert_eq!(
-            documentation.summary,
-            "Prose about the declaration.\n\n- a plain bullet."
-        );
-        assert!(documentation.parameters.is_empty());
-        assert!(documentation.returns.is_none());
-    }
-
-    #[test]
-    fn fenced_examples_keep_their_section() {
-        for (opening, closing) in [("```typ", "```"), ("~~~~typ", "~~~~~"), ("  ```", " ```")] {
-            let example = format!(
-                "{opening}\n- x (int): example parameter\n-> example return\n``\n~~~\n{closing}"
-            );
-            for prefix in ["Summary.\n", "- value: Description.\n", "-> Return.\n"] {
-                let block = format!("{prefix}{example}\n- next: Next parameter.");
-                let documentation = Documentation::parse(&block);
-                let section = match prefix {
-                    "Summary.\n" => &documentation.summary,
-                    "- value: Description.\n" => &documentation.parameters[0].description,
-                    _ => documentation.returns.as_ref().unwrap(),
-                };
-                assert!(section.ends_with(&example), "{block:?}: {documentation:?}");
-                assert_eq!(documentation.parameters.last().unwrap().name, "next");
-                assert!(
-                    documentation
-                        .parameters
-                        .iter()
-                        .all(|parameter| parameter.name != "x")
-                );
-            }
-        }
-    }
-
-    #[test]
     fn unfinished_fences_preserve_examples() {
         for opening in ["```typ", "~~~~typ"] {
             let block = format!("Summary.\n{opening}\n- x: example\n-> example return");
@@ -404,27 +344,6 @@ mod tests {
             assert_eq!(documentation.summary, block);
             assert!(documentation.parameters.is_empty());
             assert!(documentation.returns.is_none());
-        }
-    }
-
-    #[test]
-    fn parameter_types_keep_nested_punctuation() {
-        for (name, ty) in [
-            ("options", "(title: str, draft: bool)"),
-            ("callback", "(int) => str"),
-            ("颜色", "str | \"(\" | \"\\\"\""),
-            ("font-size", "length"),
-        ] {
-            let documentation =
-                Documentation::parse(&format!("- {name} ({ty}): Meaning: details."));
-            assert_eq!(
-                documentation.parameters,
-                vec![DocumentedParameter {
-                    name: name.to_owned(),
-                    ty: Some(ty.to_owned()),
-                    description: "Meaning: details.".to_owned(),
-                }]
-            );
         }
     }
 

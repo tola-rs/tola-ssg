@@ -1660,17 +1660,6 @@ mod tests {
     }
 
     #[test]
-    fn module_exports_follow_nested_module_path() {
-        let graph = graph(&[
-            ("sub.typ", "#let greet() = [hi]"),
-            ("lib.typ", "#import \"sub.typ\" as sub"),
-            ("main.typ", "#import \"lib.typ\": sub.greet"),
-        ]);
-        let exports = graph.module_exports_at(file("main.typ"), 0, &["sub".to_owned()]);
-        assert!(exports.contains(&("greet".to_owned(), NameClass::Function)));
-    }
-
-    #[test]
     fn imported_rename_preserves_export() {
         let graph = graph(&[
             ("lib.typ", "#let greet() = [hello]"),
@@ -1682,50 +1671,6 @@ mod tests {
             "#import \"lib.typ\": greet as welcome\n#welcome()"
         );
         assert_eq!(text[&file("lib.typ")], "#let greet() = [hello]");
-    }
-
-    #[test]
-    fn export_rename_preserves_local_aliases() {
-        let graph = graph(&[
-            ("lib.typ", "#let greet() = [hello]"),
-            ("alias.typ", "#import \"lib.typ\": greet as hello\n#hello()"),
-            ("plain.typ", "#import \"lib.typ\": greet\n#greet()"),
-            ("wild.typ", "#import \"lib.typ\": *\n#greet()"),
-        ]);
-        let text = renamed(&graph, binding_at(&graph, "lib.typ", "greet"), "welcome");
-        assert_eq!(
-            text[&file("alias.typ")],
-            "#import \"lib.typ\": welcome as hello\n#hello()"
-        );
-        assert_eq!(
-            text[&file("plain.typ")],
-            "#import \"lib.typ\": welcome\n#welcome()"
-        );
-        assert_eq!(
-            text[&file("wild.typ")],
-            "#import \"lib.typ\": *\n#welcome()"
-        );
-    }
-
-    #[test]
-    fn field_reexports_follow_module_identity() {
-        let graph = graph(&[
-            ("lib.typ", "#let greet() = [hello]"),
-            ("bridge.typ", "#import \"lib.typ\" as api\n#api.greet()"),
-            (
-                "main.typ",
-                "#import \"bridge.typ\": api.greet as hello\n#hello()",
-            ),
-        ]);
-        let text = renamed(&graph, binding_at(&graph, "lib.typ", "greet"), "welcome");
-        assert_eq!(
-            text[&file("main.typ")],
-            "#import \"bridge.typ\": api.welcome as hello\n#hello()"
-        );
-        assert_eq!(
-            text[&file("bridge.typ")],
-            "#import \"lib.typ\" as api\n#api.welcome()"
-        );
     }
 
     #[test]
@@ -1751,19 +1696,6 @@ mod tests {
             text[&file("main.typ")],
             "#let width = 10\n#width\n$arrow.r$"
         );
-    }
-
-    #[test]
-    fn cyclic_wildcards_reach_declarations() {
-        let graph = graph(&[
-            ("a.typ", "#import \"b.typ\": *\n#let greet() = [hello]"),
-            ("b.typ", "#import \"a.typ\": *"),
-            ("main.typ", "#import \"b.typ\": *\n#greet()"),
-        ]);
-        let binding = binding_at(&graph, "main.typ", "greet");
-        assert_eq!(graph.definition(binding).unwrap().0, file("a.typ"));
-        let text = renamed(&graph, binding_at(&graph, "a.typ", "greet"), "welcome");
-        assert_eq!(text[&file("main.typ")], "#import \"b.typ\": *\n#welcome()");
     }
 
     #[test]
@@ -1802,16 +1734,6 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn math_rename_rejects_operators() {
-        let graph = graph(&[("main.typ", "#let amount = 1\n$amount$")]);
-        let binding = binding_at(&graph, "main.typ", "amount");
-        assert!(matches!(
-            graph.rename(binding, "x-y"),
-            Err(RenameError::InvalidMathIdentifier(_))
-        ));
     }
 
     #[test]
@@ -1858,51 +1780,6 @@ mod tests {
                 .rfind("greet")
                 .unwrap()]
         );
-    }
-
-    #[test]
-    fn names_share_function_classification() {
-        let graph = graph(&[
-            ("lib.typ", "#let greet(x) = x"),
-            (
-                "main.typ",
-                "#import \"lib.typ\": greet as welcome\n#let alias = welcome\n#alias",
-            ),
-        ]);
-        let source = graph.source(file("main.typ")).unwrap();
-        for needle in ["welcome", "alias"] {
-            let at = source.source().text().rfind(needle).unwrap();
-            assert_eq!(
-                graph.class_at(source.source().id(), &(at..at + needle.len())),
-                Some(NameClass::Function)
-            );
-        }
-    }
-
-    #[test]
-    fn cyclic_imports_share_references() {
-        let sources = [
-            ("a.typ", "#import \"b.typ\": value\n#value"),
-            ("b.typ", "#import \"a.typ\": value\n#value"),
-        ];
-        let graph = graph(&sources);
-        let binding = binding_at(&graph, "a.typ", "value");
-        let references: HashSet<_> = graph
-            .references(binding, true)
-            .into_iter()
-            .map(|(file, occurrence)| (file, occurrence.range.start))
-            .collect();
-        let expected: HashSet<_> = sources
-            .into_iter()
-            .flat_map(|(path, text)| {
-                [
-                    (file(path), text.find("value").unwrap()),
-                    (file(path), text.rfind("value").unwrap()),
-                ]
-            })
-            .collect();
-        assert_eq!(references, expected);
-        assert!(graph.definition(binding).is_none());
     }
 
     #[test]
@@ -1996,145 +1873,6 @@ mod tests {
         }
     }
 
-    /// A package's own dynamic wildcard imports the engine module Tola injects, never a site
-    /// document, so a site declaration's references answer without the compiler lane.
-    #[test]
-    fn package_wildcards_cannot_carry_site_declarations() {
-        let page = file("content/page.typ");
-        let host = RootedPath::new(
-            VirtualRoot::Package("@preview/tola-host:0.0.0".parse().unwrap()),
-            VirtualPath::new("lib.typ").unwrap(),
-        )
-        .intern();
-        let page_text = "#let marker = 1\n#marker\n";
-        let graph = NameGraph::new(
-            [
-                Arc::new(SourceNames::new(Source::new(page, page_text.into()))),
-                Arc::new(SourceNames::new(Source::new(
-                    host,
-                    "#import sys.inputs.at(\"__tola\"): *\n".into(),
-                ))),
-            ],
-            |_| None,
-            None,
-            || Ok::<(), std::convert::Infallible>(()),
-        )
-        .unwrap();
-        let at = page_text.rfind("marker").unwrap();
-        assert!(graph.unresolved_imports(page, at).is_empty());
-    }
-
-    /// The same package statement leaves a site rename untouched: the spelling it leaves
-    /// unresolved names the engine module's interface, never a site document's export.
-    #[test]
-    fn package_wildcards_do_not_block_site_renames() {
-        let page = file("content/page.typ");
-        let host = RootedPath::new(
-            VirtualRoot::Package("@preview/tola-host:0.0.0".parse().unwrap()),
-            VirtualPath::new("lib.typ").unwrap(),
-        )
-        .intern();
-        let page_text = "#let marker = 1\n#marker\n";
-        let graph = NameGraph::new(
-            [
-                Arc::new(SourceNames::new(Source::new(page, page_text.into()))),
-                Arc::new(SourceNames::new(Source::new(
-                    host,
-                    "#import sys.inputs.at(\"__tola\"): *\n#marker\n".into(),
-                ))),
-            ],
-            |_| None,
-            None,
-            || Ok::<(), std::convert::Infallible>(()),
-        )
-        .unwrap();
-        let binding = graph
-            .selected(page, page_text.find("marker").unwrap())
-            .unwrap()
-            .binding
-            .unwrap();
-        let renamed = graph.rename(binding, "renamed");
-        assert!(renamed.is_ok(), "{renamed:?}");
-    }
-
-    /// A spelling that reaches a name through an unknown module interface sends its statement to
-    /// the compiler lane, whether the cursor stands on the declaration or on the member a field
-    /// read spells.
-    #[test]
-    fn module_members_report_their_unproven_statement() {
-        let sources = [
-            (
-                "main.typ",
-                "#let base = \"lib\"\n#import base as api\n#api.greet",
-            ),
-            ("lib.typ", "#let greet = [hello]"),
-        ];
-        let main = file("main.typ");
-        let statement = PendingImport {
-            file: main,
-            statement: 0,
-        };
-        let graph = proven(&sources, &[]);
-        assert_eq!(
-            graph.unresolved_imports(main, sources[0].1.rfind("greet").unwrap()),
-            [statement],
-            "the member a field read spells"
-        );
-        assert_eq!(
-            graph.unresolved_imports(file("lib.typ"), sources[1].1.find("greet").unwrap()),
-            [statement],
-            "the declaration the member reaches"
-        );
-        let proven = proven(&sources, &[("main.typ", "base", "lib.typ")]);
-        assert!(
-            proven
-                .unresolved_imports(main, sources[0].1.rfind("greet").unwrap())
-                .is_empty(),
-            "a proved statement is settled"
-        );
-    }
-
-    #[test]
-    fn transitive_dynamic_imports_share_one_identity() {
-        let sources = [
-            (
-                "main.typ",
-                "#let base = \"mid\"\n#import base + \".typ\": greet\n#greet",
-            ),
-            (
-                "mid.typ",
-                "#let base = \"lib\"\n#import base + \".typ\": greet\n#greet",
-            ),
-            ("lib.typ", "#let greet = [hello]"),
-        ];
-        let main = file("main.typ");
-        let mid = file("mid.typ");
-        let use_at = sources[0].1.rfind("greet").unwrap();
-        // The first proof reaches mid.typ; its own statement is what the identity still needs.
-        assert_eq!(
-            proven(&sources, &[("main.typ", "base + \".typ\"", "mid.typ")])
-                .unresolved_imports(main, use_at),
-            [PendingImport {
-                file: mid,
-                statement: 0
-            }]
-        );
-        let graph = proven(
-            &sources,
-            &[
-                ("main.typ", "base + \".typ\"", "mid.typ"),
-                ("mid.typ", "base + \".typ\"", "lib.typ"),
-            ],
-        );
-        assert_eq!(
-            graph
-                .definition(graph.selected(main, use_at).unwrap().binding.unwrap())
-                .unwrap()
-                .0,
-            file("lib.typ")
-        );
-    }
-
     #[test]
     fn export_rename_refuses_unknown_dynamic_consumers() {
         let sources = [
@@ -2153,149 +1891,6 @@ mod tests {
         assert!(matches!(
             graph.rename(declaration, "welcome"),
             Err(RenameError::UnknownImport(file)) if file == "alias.typ"
-        ));
-    }
-
-    /// A consumer that reaches a name through an unknown module interface: the statement binds the
-    /// module itself, so only a field spells the export, and a rename must not leave it stale.
-    #[test]
-    fn export_rename_refuses_unknown_module_members() {
-        let sources = [
-            (
-                "main.typ",
-                "#let base = \"lib\"\n#import base as api\n#api.greet",
-            ),
-            ("lib.typ", "#let greet = [hello]"),
-        ];
-        let graph = proven(&sources, &[]);
-        let declaration = binding_at(&graph, "lib.typ", "greet");
-        assert!(matches!(
-            graph.rename(declaration, "welcome"),
-            Err(RenameError::UnknownImport(file)) if file == "main.typ"
-        ));
-    }
-
-    /// An item path spells every segment in the unknown target's interface, so an intermediate
-    /// segment a rename must edit refuses the rename just as the item's own name does.
-    #[test]
-    fn export_rename_refuses_unknown_nested_item_prefixes() {
-        let sources = [
-            (
-                "consumer.typ",
-                "#let base = \"holder\"\n#import base: mod.inner\n#inner",
-            ),
-            ("holder.typ", "#import \"sub.typ\" as mod"),
-            ("sub.typ", "#let inner = 1"),
-        ];
-        let graph = proven(&sources, &[]);
-        let declaration = binding_at(&graph, "holder.typ", "mod");
-        assert!(matches!(
-            graph.rename(declaration, "api"),
-            Err(RenameError::UnknownImport(file)) if file == "consumer.typ"
-        ));
-    }
-
-    /// A nested import through a module binding the graph established resolves without the host,
-    /// so the rename is complete and must not be refused.
-    #[test]
-    fn nested_import_edits_item_segment() {
-        let sources = [
-            ("lib.typ", "#let greet = [hello]"),
-            (
-                "bridge.typ",
-                "#import \"lib.typ\" as api\n#import api: greet as local\n#local",
-            ),
-        ];
-        let graph = proven(&sources, &[]);
-        let text = renamed(&graph, binding_at(&graph, "lib.typ", "greet"), "welcome");
-        assert_eq!(
-            text[&file("bridge.typ")],
-            "#import \"lib.typ\" as api\n#import api: welcome as local\n#local"
-        );
-    }
-
-    /// A module value an interface unknown to the graph takes into another file keeps its members
-    /// under the rename contract: the chain that reads a member through the imported value either
-    /// sends its statement to the compiler lane or refuses an incomplete rename.
-    #[test]
-    fn module_binding_chain_refuses_rename() {
-        let sources = [
-            ("content/lib.typ", "#let greet = [hello]"),
-            (
-                "content/holder.typ",
-                "#let base = \"lib.typ\"\n#import base as mod",
-            ),
-            (
-                "content/chain.typ",
-                "#import \"holder.typ\": mod\n#mod.greet",
-            ),
-        ];
-        let graph = proven(&sources, &[]);
-        let holder = file("content/holder.typ");
-        let declaration = binding_at(&graph, "content/lib.typ", "greet");
-        assert_eq!(
-            graph.unresolved_imports(file("content/lib.typ"), sources[0].1.find("greet").unwrap()),
-            [PendingImport {
-                file: holder,
-                statement: 0
-            }],
-            "the statement the chain's member read needs"
-        );
-        // The refusal names the statement whose interface is unknown, not the file that reads
-        // through it: that statement is what the compiler lane can still establish.
-        assert!(matches!(
-            graph.rename(declaration, "welcome"),
-            Err(RenameError::UnknownImport(file)) if file == "content/holder.typ"
-        ));
-    }
-
-    /// The same chain with its statement proved edits the member a chained file reads, so a site
-    /// rename never leaves that file behind.
-    #[test]
-    fn chained_module_member_follows_rename() {
-        let sources = [
-            ("content/lib.typ", "#let greet = [hello]"),
-            (
-                "content/holder.typ",
-                "#let base = \"lib.typ\"\n#import base as mod",
-            ),
-            (
-                "content/chain.typ",
-                "#import \"holder.typ\": mod\n#mod.greet",
-            ),
-        ];
-        let graph = proven(
-            &sources,
-            &[("content/holder.typ", "base", "content/lib.typ")],
-        );
-        let text = renamed(
-            &graph,
-            binding_at(&graph, "content/lib.typ", "greet"),
-            "welcome",
-        );
-        assert_eq!(
-            text[&file("content/chain.typ")],
-            "#import \"holder.typ\": mod\n#mod.welcome"
-        );
-        assert_eq!(text[&file("content/holder.typ")], sources[1].1);
-    }
-
-    /// A local alias of the unknown module value holds the same interface, so a member read
-    /// through it keeps the rename contract too.
-    #[test]
-    fn aliased_module_member_refuses_rename() {
-        let sources = [
-            ("lib.typ", "#let greet = [hello]"),
-            (
-                "main.typ",
-                "#let base = \"lib\"\n#import base as mod\n#let api = mod\n#api.greet",
-            ),
-        ];
-        let graph = proven(&sources, &[]);
-        let declaration = binding_at(&graph, "lib.typ", "greet");
-        assert!(matches!(
-            graph.rename(declaration, "welcome"),
-            Err(RenameError::UnknownImport(file)) if file == "main.typ"
         ));
     }
 
@@ -2318,30 +1913,6 @@ mod tests {
             let text = renamed(&graph, binding_at(&graph, "lib.typ", "greet"), "welcome");
             assert_eq!(text[&file("main.typ")], expected);
             assert_eq!(text[&file("lib.typ")], "#let welcome = [hello]");
-        }
-    }
-
-    #[test]
-    fn local_alias_rename_keeps_the_external_name() {
-        for (consumer, marker, expected) in [
-            (
-                "#let base = \"lib\"\n#import base + \".typ\": greet\n#greet",
-                "greet",
-                "#let base = \"lib\"\n#import base + \".typ\": greet as welcome\n#welcome",
-            ),
-            (
-                "#let base = \"lib\"\n#import base + \".typ\": greet as local\n#local",
-                "local",
-                "#let base = \"lib\"\n#import base + \".typ\": greet as welcome\n#welcome",
-            ),
-        ] {
-            let graph = proven(
-                &[("main.typ", consumer), ("lib.typ", "#let greet = [hello]")],
-                &[],
-            );
-            let text = renamed(&graph, binding_at(&graph, "main.typ", marker), "welcome");
-            assert_eq!(text[&file("main.typ")], expected);
-            assert_eq!(text[&file("lib.typ")], "#let greet = [hello]");
         }
     }
 

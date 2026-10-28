@@ -15,7 +15,7 @@ pub use crate::compile::{
 };
 pub use crate::session::AccessedDeps;
 pub use crate::svg::{SvgCrop, SvgError, SvgSource};
-pub use crate::world::SourceSnapshot;
+pub use crate::world::ExplicitSources;
 pub use typst_bundle::BundleOptions;
 
 #[cfg(feature = "scan")]
@@ -37,7 +37,7 @@ pub use crate::introspection::{MetadataCardinalityError, MetadataDeclaration};
 
 pub use crate::world::file::{
     ContentDigest, DiskReadPath, EmptyFiles, FileMap, FileProvider, FileRead, FileResolver,
-    FileSnapshot, FileTarget, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache, file_id,
+    FileTarget, FileView, ReadEvidence, ReadLocator, ReadOrigin, SharedFileCache, file_id,
     file_id_from_path, hash_length_prefixed, virtual_file_id,
 };
 

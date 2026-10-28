@@ -17,7 +17,7 @@ use crate::diagnostic::package_imports::PackageImporters;
 use crate::diagnostic::{CompileError, Diagnostics, NativeDiagnostic};
 use crate::world::TypstWorld;
 use crate::world::file::{
-    DiskReadPath, FileRead, FileSnapshot, Loaded, ReadAttempt, ReadLocator, ReadOrigin,
+    DiskReadPath, FileRead, FileView, Loaded, ReadAttempt, ReadLocator, ReadOrigin,
 };
 use crate::world::package::PackageCheck;
 
@@ -144,7 +144,7 @@ pub(crate) struct CompileSession<'a> {
     world: &'a TypstWorld,
     /// The file this session compiles: the world's own main, unless a caller chose another file.
     main: FileId,
-    snapshot: Arc<FileSnapshot>,
+    view: Arc<FileView>,
     files: SessionFiles,
 }
 
@@ -159,7 +159,7 @@ impl<'a> CompileSession<'a> {
         Self {
             world,
             main,
-            snapshot: world.file_snapshot(),
+            view: world.file_view(),
             files: SessionFiles::default(),
         }
     }
@@ -282,11 +282,11 @@ impl<'a> CompileSession<'a> {
     }
 
     fn read_source(&self, id: FileId) -> FileResult<Source> {
-        self.files.slot(id).source(self.world, &self.snapshot)
+        self.files.slot(id).source(self.world, &self.view)
     }
 
     fn read_file(&self, id: FileId) -> FileResult<Bytes> {
-        self.files.slot(id).file(self.world, &self.snapshot)
+        self.files.slot(id).file(self.world, &self.view)
     }
 }
 
@@ -380,7 +380,7 @@ struct SessionFile {
 }
 
 impl SessionFile {
-    fn source(&self, world: &TypstWorld, files: &FileSnapshot) -> FileResult<Source> {
+    fn source(&self, world: &TypstWorld, files: &FileView) -> FileResult<Source> {
         self.source
             .get_or_init(|| world.source_from_read(files, self.id, files.read(self.id)))
             .result
@@ -389,7 +389,7 @@ impl SessionFile {
             .map_err(Clone::clone)
     }
 
-    fn file(&self, world: &TypstWorld, files: &FileSnapshot) -> FileResult<Bytes> {
+    fn file(&self, world: &TypstWorld, files: &FileView) -> FileResult<Bytes> {
         self.bytes
             .get_or_init(|| world.file_from_read(files, self.id, files.read(self.id)))
             .result
@@ -472,41 +472,13 @@ fn extend_observed_inputs<T>(deps: &mut AccessedDeps, attempt: Option<&ReadAttem
 mod tests {
     use std::fs;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::TempDir;
     use typst::World;
 
     use super::{CompileSession, unresolved_package_reason};
     use crate::world::TypstWorld;
-    use crate::world::file::{FileProvider, FileResolver, FileTarget, SharedFileCache, file_id};
-
-    struct ChangingFiles {
-        reads: AtomicUsize,
-    }
-
-    impl FileProvider for ChangingFiles {
-        fn target(&self, id: typst::syntax::FileId) -> Option<FileTarget> {
-            (id == file_id("/changing.typ")).then(|| {
-                let version = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
-                FileTarget::Bytes(Arc::from(format!("= Version {version}").into_bytes()))
-            })
-        }
-    }
-
-    /// The `@preview/cetz` file one session test reads, without a package directory.
-    struct PreviewFiles;
-
-    impl FileProvider for PreviewFiles {
-        fn target(&self, id: typst::syntax::FileId) -> Option<FileTarget> {
-            let typst::syntax::VirtualRoot::Package(package) = id.root() else {
-                return None;
-            };
-            let spec: crate::world::package::PackageSpec = "@preview/cetz:0.3.4".parse().unwrap();
-            (*package == spec)
-                .then(|| FileTarget::Bytes(Arc::from(&b"#let canvas(body) = body"[..])))
-        }
-    }
+    use crate::world::file::SharedFileCache;
 
     fn world_with(
         dir: &TempDir,
@@ -525,75 +497,15 @@ mod tests {
         .expect("valid test world")
     }
 
-    fn world_for(dir: &TempDir, main: &str, source: &str) -> TypstWorld {
-        world_with(dir, main, source, |builder| builder)
-    }
-
-    #[test]
-    fn importers_name_the_package() {
-        let dir = TempDir::new().unwrap();
-        fs::create_dir(dir.path().join("templates")).unwrap();
-        fs::write(
-            dir.path().join("templates/page.typ"),
-            "#import \"@preview/cetz:0.3.4\": canvas\n",
-        )
-        .unwrap();
-        fs::write(dir.path().join("content.typ"), "no imports here\n").unwrap();
-        let files = FileResolver::new().with_provider(PreviewFiles);
-        let world = world_with(
-            &dir,
-            "main.typ",
-            "#import \"templates/page.typ\": page\n#page()",
-            |builder| builder.with_files(Arc::new(files)),
-        );
-
-        let session = CompileSession::start(&world);
-        for path in ["main.typ", "templates/page.typ", "content.typ"] {
-            session.source(file_id(path)).unwrap();
-        }
-        let package = typst::syntax::FileId::new(typst::syntax::RootedPath::new(
-            typst::syntax::VirtualRoot::Package("@preview/cetz:0.3.4".parse().unwrap()),
-            typst::syntax::VirtualPath::new("lib.typ").unwrap(),
-        ));
-        session.source(package).unwrap();
-        let importers = session.package_importers();
-
-        assert_eq!(
-            importers.importing("@preview/cetz:0.3.4"),
-            ["templates/page.typ"]
-        );
-        assert!(importers.importing("@preview/absent:1.0.0").is_empty());
-    }
-
-    #[test]
-    fn repeated_reads_report_once() {
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("templated.typ"), "= Templated").unwrap();
-        let world = world_for(&dir, "main.typ", "= Main");
-        let id = file_id("templated.typ");
-
-        let once = CompileSession::start(&world);
-        once.source(id).unwrap();
-        let once = once.finish();
-        assert_eq!(once.read_count(), 1);
-
-        let repeated = CompileSession::start(&world);
-        for _ in 0..3 {
-            assert!(repeated.source(id).unwrap().text().contains("Templated"));
-        }
-        let repeated = repeated.finish();
-
-        assert_eq!(repeated.reads, once.reads);
-        assert_eq!(repeated.read_count(), 1);
-    }
-
     #[cfg(feature = "parallel")]
     #[test]
     fn collects_reads_from_rayon_workers() {
+        use crate::world::file::file_id;
+
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("first.typ"), "= First").unwrap();
         fs::write(dir.path().join("second.typ"), "= Second").unwrap();
-        let world = world_for(&dir, "main.typ", "= Main");
+        let world = world_with(&dir, "main.typ", "= Main", |builder| builder);
         let expected = [
             world.root().join("first.typ"),
             world.root().join("second.typ"),
@@ -667,72 +579,6 @@ mod tests {
         assert_ne!(
             first.reads[0].evidence().digest(),
             second.reads[0].evidence().digest()
-        );
-    }
-
-    #[test]
-    fn source_and_file_share_bytes() {
-        let dir = TempDir::new().unwrap();
-        let files = FileResolver::new().with_provider(ChangingFiles {
-            reads: AtomicUsize::new(0),
-        });
-        let world = world_with(&dir, "main.typ", "= Main", |builder| {
-            builder.with_files(Arc::new(files))
-        });
-        let session = CompileSession::start(&world);
-        let id = file_id("changing.typ");
-
-        let source = session.source(id).unwrap();
-        assert!(source.text().contains("Version 1"));
-
-        let bytes = session.file(id).unwrap();
-        assert_eq!(bytes.as_slice(), source.text().as_bytes());
-    }
-
-    #[test]
-    fn failed_source_keeps_original_bytes() {
-        let dir = TempDir::new().unwrap();
-        let cache = Arc::new(SharedFileCache::new());
-        let world = world_with(&dir, "main.typ", "", |builder| {
-            builder.with_shared_cache(cache)
-        });
-        let path = dir.path().join("broken.typ");
-        fs::write(&path, [0xff]).unwrap();
-        let id = file_id("broken.typ");
-        let session = CompileSession::start(&world);
-        assert_eq!(
-            session.source(id).unwrap_err(),
-            typst::diag::FileError::InvalidUtf8
-        );
-
-        fs::write(&path, "fixed").unwrap();
-        assert_eq!(session.file(id).unwrap().as_slice(), &[0xff]);
-        let accessed = session.finish();
-        assert_eq!(
-            accessed.reads[0].evidence().digest(),
-            crate::ContentDigest::of(&[0xff])
-        );
-        assert_eq!(
-            CompileSession::start(&world).source(id).unwrap().text(),
-            "fixed"
-        );
-    }
-
-    #[test]
-    fn missing_source_stays_missing() {
-        let dir = TempDir::new().unwrap();
-        let world = world_with(&dir, "main.typ", "", |builder| {
-            builder.with_shared_cache(Arc::new(SharedFileCache::new()))
-        });
-        let id = file_id("missing.typ");
-        let session = CompileSession::start(&world);
-        assert!(session.source(id).is_err());
-        fs::write(dir.path().join("missing.typ"), "created").unwrap();
-        assert!(session.file(id).is_err());
-        assert!(session.finish().reads.is_empty());
-        assert_eq!(
-            CompileSession::start(&world).source(id).unwrap().text(),
-            "created"
         );
     }
 

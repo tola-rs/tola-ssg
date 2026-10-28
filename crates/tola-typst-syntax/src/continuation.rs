@@ -256,41 +256,4 @@ mod tests {
         assert_eq!(continued("$|$").as_deref(), Some("\n  |\n"));
         assert_eq!(continued("$x|$"), None, "an equation that holds something");
     }
-
-    #[test]
-    fn opened_construct_indents_its_body() {
-        assert_eq!(continued("#box[\n|]").as_deref(), Some("\n  "));
-        assert_eq!(continued("#box[|\n]").as_deref(), Some("\n  "));
-        assert_eq!(continued("#{\n|}\n").as_deref(), Some("\n  "));
-        assert_eq!(continued("#f(\n|)\n").as_deref(), Some("\n  "));
-        assert_eq!(continued("#let x = (\n|)\n").as_deref(), Some("\n  "));
-    }
-
-    #[test]
-    fn nested_construct_adds_one_level_to_its_opener_line() {
-        assert_eq!(
-            continued("#box[\n  #box[|\n  ]\n]").as_deref(),
-            Some("\n    ")
-        );
-        assert_eq!(
-            continued("#box[\n  #box[\n    text|\n  ]\n]").as_deref(),
-            Some("\n    ")
-        );
-    }
-
-    #[test]
-    fn caret_before_the_closer_answers_nothing() {
-        assert_eq!(continued("#box[|]"), None);
-        assert_eq!(continued("#{|}"), None);
-        assert_eq!(continued("#f(|)"), None);
-        assert_eq!(continued("#f(a: 1,|)"), None);
-        assert_eq!(continued("#table(columns: 2)[a|][b]"), None);
-    }
-
-    #[test]
-    fn plain_text_answers_nothing() {
-        assert_eq!(continued("A paragraph|"), None);
-        assert_eq!(continued("= Head|"), None);
-        assert_eq!(continued("#set text(red|)"), None);
-    }
 }

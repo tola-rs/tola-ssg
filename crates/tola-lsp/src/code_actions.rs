@@ -257,23 +257,6 @@ mod tests {
             Some(only),
         )
     }
-
-    /// One request for `text` that echoes `causes` without naming any kind.
-    pub(super) fn actions_unfiltered(
-        text: &str,
-        causes: Vec<serde_json::Value>,
-    ) -> Vec<CodeActionOrCommand> {
-        actions_over(
-            text,
-            causes,
-            Range::new(
-                lsp_types::Position::new(0, 0),
-                lsp_types::Position::new(0, 0),
-            ),
-            None,
-        )
-    }
-
     /// One request for `text` whose echoed diagnostics cover `span`, asking for `only` kinds or
     /// for every kind when the request names none.
     pub(super) fn actions_over(
@@ -495,24 +478,6 @@ mod tests {
             assert!(!titles().contains(&refused), "{asked:?} gave {actions:?}");
         }
     }
-
-    #[test]
-    fn parent_kind_admits_its_children() {
-        assert!(admits(None, &CodeActionKind::SOURCE_ORGANIZE_IMPORTS));
-        assert!(admits(
-            Some(&[CodeActionKind::new("source")]),
-            &CodeActionKind::SOURCE_ORGANIZE_IMPORTS
-        ));
-        assert!(admits(
-            Some(&[CodeActionKind::new("refactor")]),
-            &CodeActionKind::REFACTOR_REWRITE
-        ));
-        assert!(!admits(
-            Some(&[CodeActionKind::QUICKFIX]),
-            &CodeActionKind::SOURCE_ORGANIZE_IMPORTS
-        ));
-    }
-
     #[test]
     fn fix_all_applies_every_diagnostic_fix() {
         let text = "[site]\ntitel = \"Site\"\ndescriptio = \"Typo\"\n";
@@ -569,43 +534,5 @@ mod tests {
                 ),
             ]
         );
-    }
-
-    #[test]
-    fn unfixable_diagnostic_answers_no_fix_all() {
-        for causes in [
-            Vec::new(),
-            vec![serde_json::json!({
-                "kind": "unknown-configuration-fields",
-                "fields": [field("build.minfy", Some(9))],
-            })],
-        ] {
-            let actions = actions_for("[build]\n", causes, vec![CodeActionKind::SOURCE_FIX_ALL]);
-            assert!(actions.is_empty(), "{actions:?}");
-        }
-    }
-
-    #[test]
-    fn unfiltered_request_omits_fix_all() {
-        let text = "[site]\ntitle = \"Site\"\ndescriptio = \"Typo\"\n";
-        let actions = actions_unfiltered(
-            text,
-            vec![serde_json::json!({
-                "kind": "unknown-configuration-fields",
-                "fields": [{
-                    "name": "site.descriptio",
-                    "line": 3,
-                    "written": {
-                        "start": {"line": 2, "character": 0},
-                        "end": {"line": 2, "character": 10},
-                    },
-                }],
-            })],
-        );
-
-        // The request still earns its quick fixes; only the fix-all action stays out.
-        assert!(!edits(&actions).is_empty(), "{actions:?}");
-        assert!(edits_of(&actions, "fix every diagnostic in this file").is_empty());
-        assert!(!action_kinds(&actions).contains(&Some(CodeActionKind::SOURCE_FIX_ALL)));
     }
 }

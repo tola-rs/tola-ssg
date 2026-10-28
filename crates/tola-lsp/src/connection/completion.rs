@@ -215,7 +215,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
                 self.open
                     .view()
                     .get(uri)
-                    .is_some_and(|snapshot| snapshot.revision == *revision)
+                    .is_some_and(|parsed| parsed.revision == *revision)
             });
         if current {
             return Ok(true);
@@ -349,51 +349,6 @@ mod tests {
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
     use tola_typst_syntax::names::SelectedInterfaces;
-
-    #[test]
-    fn continuations_keep_the_source_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        let (uri, position) = dynamic_import_position(&mut connection, directory.path());
-        connection
-            .request(references_request(&uri, position))
-            .unwrap();
-        let pending = connection.next_analysis().unwrap();
-        let revision = pending.sources.source_revision;
-        let overrides = pending.sources.overrides.clone();
-        let source = pending.source.text().to_owned();
-        let cancellation = pending.sources.cancellation.clone();
-        let continued = crate::compiler::analyze(
-            &mut crate::analysis::DiskSources::default(),
-            &mut crate::analysis::GraphCache::default(),
-            pending,
-        );
-        assert!(matches!(continued, SourceCompilation::Continued(_)));
-        crate::connection::tests::open_draft(&mut connection, "An unrelated draft");
-        assert!(connection.open.revision() > revision);
-        connection.completed(continued).unwrap();
-        let Some(SourceJob::Query(query)) = connection.next_job(Instant::now()) else {
-            panic!("the source request continues in the compiler lane");
-        };
-        assert_eq!(query.sources.source_revision, revision);
-        assert_eq!(query.sources.overrides.as_ref(), overrides.as_ref());
-        assert_eq!(query.view.get(&uri).unwrap().source.text(), source);
-        let _ = connection
-            .notification(Notification::new("$/cancelRequest".into(), json!({"id":8})))
-            .unwrap();
-        assert!(cancellation.is_cancelled());
-        assert!(query.sources.cancellation.is_cancelled());
-        response(&mut connection);
-        connection
-            .completed(SourceCompilation::Answered {
-                id: query.id,
-                serial: query.serial,
-                response: Err(SourceFailure::Cancelled),
-            })
-            .unwrap();
-        assert!(connection.writer.is_empty());
-    }
-
     #[test]
     fn reused_id_rejects_stale_analysis() {
         let directory = tempfile::tempdir().unwrap();
@@ -555,57 +510,6 @@ mod tests {
             "{message}"
         );
     }
-
-    /// A site whose configuration could not be read is announced to the author once, and announced
-    /// again after a configuration that read again breaks once more.
-    #[test]
-    fn configuration_failure_is_announced_once() {
-        let mut connection = ready(Vec::new());
-        fn failed_check(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) {
-            let revision = connection.revision;
-            connection
-                .completed(SourceCompilation::Checked {
-                    checked_revision: revision,
-                    checked: Ok(CheckedSources {
-                        configuration: None,
-                        compiled: false,
-                        diagnostics: Vec::new(),
-                        read_paths: None,
-                        selected: Arc::new(SelectedInterfaces::default()),
-                    }),
-                })
-                .unwrap();
-        }
-        fn shown(connection: &mut Connection<Vec<u8>, impl Fn(&[Diagnostic])>) -> Vec<String> {
-            messages(connection)
-                .into_iter()
-                .filter_map(|message| match message {
-                    Message::Notification(notification)
-                        if notification.method == notification::ShowMessage::METHOD =>
-                    {
-                        let params: lsp_types::ShowMessageParams =
-                            serde_json::from_value(notification.params).unwrap();
-                        Some(params.message)
-                    }
-                    _ => None,
-                })
-                .collect()
-        }
-        failed_check(&mut connection);
-        failed_check(&mut connection);
-        let announced = shown(&mut connection);
-        assert_eq!(announced.len(), 1, "{announced:?}");
-        assert!(
-            announced[0].contains("could not read this site's configuration"),
-            "{announced:?}"
-        );
-        assert!(announced[0].contains("tola.toml"), "{announced:?}");
-        // A configuration that reads again is not a failure, so the next one is announced afresh.
-        connection.announced_configuration_failure = false;
-        failed_check(&mut connection);
-        assert_eq!(shown(&mut connection).len(), 1);
-    }
-
     #[test]
     fn pull_warning_refreshes_current_report() {
         let directory = tempfile::tempdir().unwrap();

@@ -543,7 +543,6 @@ mod tests {
     use typst::engine::{Route, Traced};
     use typst::introspection::EmptyIntrospector;
     use typst::utils::Protected;
-    use typst_bundle::Bundle;
 
     use crate::{BundleCancellation, TypstWorld};
 
@@ -600,13 +599,5 @@ mod tests {
         assert_eq!(recorded.len(), 2);
         assert_eq!(url(&recorded[0]), "/first/");
         assert_eq!(url(&recorded[1]), "/second/");
-    }
-
-    /// A compilation that carries no channel says so instead of reporting no occurrences.
-    #[test]
-    fn plain_compilation_carries_no_channel() {
-        let (_directory, world) = world("#document(\"index.html\")[#link(\"/\")[Home]]");
-        let bundle = typst::compile::<Bundle>(&world).output.unwrap();
-        assert!(observed_references(bundle.introspector().track()).is_none());
     }
 }

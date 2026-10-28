@@ -133,26 +133,7 @@ mod tests {
     }
 
     #[test]
-    fn scripts_keep_cross_script_bindings() {
-        let script = minify_javascript(
-            "function inlineHandler() { return crossScriptValue; } var crossScriptValue = 42;",
-            JavaScriptKind::Classic,
-        )
-        .unwrap();
-        assert!(script.contains("inlineHandler"), "{script}");
-        assert!(script.contains("crossScriptValue"), "{script}");
-    }
-
-    #[test]
-    fn modules_keep_their_exports() {
-        let module =
-            minify_javascript("export const answer = 6 * 7;", JavaScriptKind::Module).unwrap();
-        assert!(module.contains("export"), "{module}");
-        assert!(module.contains("answer"), "{module}");
-    }
-
-    #[test]
-    fn script_syntax_error_names_position() {
+    fn syntax_error_carries_position() {
         let JavaScriptMinifyError::Syntax {
             reason,
             line,

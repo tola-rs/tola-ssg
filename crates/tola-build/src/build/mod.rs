@@ -143,7 +143,7 @@ pub(crate) mod tests {
 
     /// Re-executed by hook environment tests as the command's child process.
     #[test]
-    fn records_hook_environment() {
+    fn child_records_hook_environment() {
         if std::env::var_os("TOLA_HOOK_CACHE_DIR").is_none() {
             return;
         }
@@ -160,13 +160,6 @@ pub(crate) mod tests {
     /// The build mode the last recorded hook run reported.
     pub(crate) fn recorded_build_mode(root: &std::path::Path) -> String {
         std::fs::read_to_string(root.join(RECORDED_BUILD_MODE)).unwrap()
-    }
-
-    /// The temporary directory the last recorded hook run reported.
-    pub(crate) fn recorded_temporary_directory(root: &std::path::Path) -> std::path::PathBuf {
-        std::fs::read_to_string(root.join(RECORDED_TEMPORARY_DIRECTORY))
-            .unwrap()
-            .into()
     }
 
     /// Check one unchecked revision that is known to match its inputs.

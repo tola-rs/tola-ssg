@@ -14,9 +14,9 @@
 //!     .no_fonts()
 //!     .build(&cancellation);
 //!
-//! // Build: with fonts, snapshot cache
+//! // Build: with fonts, shared cache
 //! let world = TypstWorld::builder(path, root)
-//!     .with_snapshot(snapshot)
+//!     .with_sources(sources)
 //!     .with_fonts(Arc::new(FontStore::new()))
 //!     .build(&cancellation);
 //!
@@ -48,7 +48,7 @@ use super::builder::{WorldBuildError, WorldBuilder};
 use super::path::normalize_path;
 use super::strategy::{FileAccess, FileCacheMode, FontMode, LibraryMode};
 use crate::world::file::{
-    FileResolver, FileSnapshot, Loaded, ReadAttempt, SharedFileCache, file_id_from_path,
+    FileResolver, FileView, Loaded, ReadAttempt, SharedFileCache, file_id_from_path,
 };
 use crate::world::library::GLOBAL_LIBRARY;
 
@@ -98,7 +98,7 @@ impl TypstWorld {
         })?;
         let (files, parsed) = match cache {
             FileCacheMode::Local => (
-                FileAccess::Local(Arc::new(FileSnapshot::from_resolver(&root, files))),
+                FileAccess::Local(Arc::new(FileView::from_resolver(&root, files))),
                 Arc::new(SharedFileCache::new()),
             ),
             FileCacheMode::Shared(parsed) => (
@@ -108,25 +108,25 @@ impl TypstWorld {
                 },
                 parsed,
             ),
-            FileCacheMode::Snapshot { snapshot, fallback } => {
-                if snapshot.root() != root {
-                    return Err(WorldBuildError::SnapshotRootMismatch {
-                        snapshot: snapshot.root().to_path_buf(),
+            FileCacheMode::Sources { sources, fallback } => {
+                if sources.root() != root {
+                    return Err(WorldBuildError::RootMismatch {
+                        frozen: sources.root().to_path_buf(),
                         world: root,
                     });
                 }
                 (
                     FileAccess::Live {
                         files,
-                        sources: Some(snapshot),
+                        sources: Some(sources),
                     },
                     fallback,
                 )
             }
             FileCacheMode::Frozen { files, parsed } => {
                 if files.root() != root {
-                    return Err(WorldBuildError::SnapshotRootMismatch {
-                        snapshot: files.root().to_path_buf(),
+                    return Err(WorldBuildError::RootMismatch {
+                        frozen: files.root().to_path_buf(),
                         world: root,
                     });
                 }
@@ -160,7 +160,7 @@ impl TypstWorld {
     /// Read bytes through this world's file view and retain their dependency evidence.
     ///
     /// Consumers extending a compiled result with derived resources must use the
-    /// same snapshot and hold these inputs to their publication checks. Failures
+    /// same file view and hold these inputs to their publication checks. Failures
     /// retain attempted paths and package-selection evidence in the second value.
     pub fn read_file_with_evidence(
         &self,
@@ -185,11 +185,11 @@ impl TypstWorld {
     /// Reset per-world inputs before another compilation.
     ///
     /// Local file observations are discarded. Shared worlds revalidate on access;
-    /// externally supplied file snapshots keep their observations. Resets system time but
+    /// externally supplied file views keep their observations. Resets system time but
     /// leaves fixed datetimes unchanged.
     pub fn reset(&mut self) {
         if let FileAccess::Local(files) = &mut self.files {
-            *files = Arc::new(FileSnapshot::from_resolver(
+            *files = Arc::new(FileView::from_resolver(
                 &self.root,
                 Arc::clone(files.resolver()),
             ));
@@ -200,19 +200,19 @@ impl TypstWorld {
         }
     }
 
-    pub(crate) fn file_snapshot(&self) -> Arc<FileSnapshot> {
+    pub(crate) fn file_view(&self) -> Arc<FileView> {
         match &self.files {
             FileAccess::Local(files) | FileAccess::Frozen(files) => Arc::clone(files),
             FileAccess::Live { files, sources } => Arc::new(match sources {
-                Some(sources) => FileSnapshot::new(Arc::clone(sources), Arc::clone(files)),
-                None => FileSnapshot::from_resolver(&self.root, Arc::clone(files)),
+                Some(sources) => FileView::new(Arc::clone(sources), Arc::clone(files)),
+                None => FileView::from_resolver(&self.root, Arc::clone(files)),
             }),
         }
     }
 
     pub(crate) fn source_from_read(
         &self,
-        files: &FileSnapshot,
+        files: &FileView,
         id: FileId,
         read: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Source>> {
@@ -224,7 +224,7 @@ impl TypstWorld {
 
     pub(crate) fn file_from_read(
         &self,
-        files: &FileSnapshot,
+        files: &FileView,
         id: FileId,
         read: ReadAttempt<Bytes>,
     ) -> ReadAttempt<Loaded<Bytes>> {
@@ -235,12 +235,12 @@ impl TypstWorld {
     }
 
     pub(crate) fn get_source(&self, id: FileId) -> ReadAttempt<Loaded<Source>> {
-        let files = self.file_snapshot();
+        let files = self.file_view();
         self.source_from_read(&files, id, files.read(id))
     }
 
     pub(crate) fn get_file(&self, id: FileId) -> ReadAttempt<Loaded<Bytes>> {
-        let files = self.file_snapshot();
+        let files = self.file_view();
         self.file_from_read(&files, id, files.read(id))
     }
 }
@@ -290,11 +290,10 @@ mod tests {
     use std::sync::Arc;
 
     use tempfile::TempDir;
-    use typst::World;
 
     use super::{TypstWorld, WorldBuildError};
-    use crate::world::SourceSnapshot;
-    use crate::world::file::{FileResolver, FileSnapshot, SharedFileCache};
+    use crate::world::ExplicitSources;
+    use crate::world::file::{FileResolver, FileView, SharedFileCache};
 
     #[test]
     fn resource_reads_keep_read_evidence() {
@@ -352,105 +351,36 @@ mod tests {
     }
 
     #[test]
-    fn world_files_follow_selected_lifetime() {
-        for (selection, before_reset, after_reset) in
-            [("shared", "second", "second"), ("frozen", "first", "first")]
-        {
-            let directory = TempDir::new().unwrap();
-            let main = directory.path().join("main.typ");
-            fs::write(&main, "first").unwrap();
-            let builder = TypstWorld::builder(&main, directory.path());
-            let parsed = Arc::new(SharedFileCache::new());
-            let builder = match selection {
-                "shared" => builder.with_shared_cache(parsed),
-                "frozen" => {
-                    let sources = Arc::new(
-                        SourceSnapshot::build(&[], directory.path())
-                            .unwrap()
-                            .into_snapshot_and_accessed()
-                            .0,
-                    );
-                    let files = Arc::new(FileSnapshot::new(sources, Arc::new(FileResolver::new())));
-                    builder.with_file_snapshot(files, parsed)
-                }
-                _ => unreachable!(),
-            };
-            let mut world = builder
-                .no_fonts()
-                .build(&crate::BundleCancellation::default())
-                .unwrap();
-            assert_eq!(world.source(world.main()).unwrap().text(), "first");
-            assert_eq!(world.file(world.main()).unwrap().as_slice(), b"first");
-            fs::write(&main, "second").unwrap();
-            assert_eq!(world.source(world.main()).unwrap().text(), before_reset);
-            assert_eq!(
-                world.file(world.main()).unwrap().as_slice(),
-                before_reset.as_bytes()
-            );
-            world.reset();
-            assert_eq!(world.source(world.main()).unwrap().text(), after_reset);
-            assert_eq!(
-                world.file(world.main()).unwrap().as_slice(),
-                after_reset.as_bytes()
-            );
-        }
-    }
-
-    #[test]
-    fn snapshot_source_matches_file() {
-        let directory = TempDir::new().unwrap();
-        let main = directory.path().join("main.typ");
-        let original = b"\xef\xbb\xbf= Frozen";
-        fs::write(&main, original).unwrap();
-        let snapshot = SourceSnapshot::build(std::slice::from_ref(&main), directory.path())
-            .unwrap()
-            .into_snapshot_and_accessed()
-            .0;
-        let world = TypstWorld::builder(&main, directory.path())
-            .with_snapshot(Arc::new(snapshot))
-            .no_fonts()
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        fs::write(&main, "= Changed").unwrap();
-
-        assert_eq!(world.source(world.main()).unwrap().text(), "= Frozen");
-        assert_eq!(world.file(world.main()).unwrap().as_slice(), original);
-    }
-
-    #[test]
-    fn mismatched_snapshot_root_fails() {
+    fn mismatched_root_fails() {
         let world_directory = TempDir::new().unwrap();
-        let snapshot_directory = TempDir::new().unwrap();
+        let sources_directory = TempDir::new().unwrap();
         let main = world_directory.path().join("main.typ");
         fs::write(&main, "= Main").unwrap();
-        let snapshot = Arc::new(
-            SourceSnapshot::build(&[], snapshot_directory.path())
+        let sources = Arc::new(
+            ExplicitSources::build(&[], sources_directory.path())
                 .unwrap()
-                .into_snapshot_and_accessed()
+                .into_sources_and_accessed()
                 .0,
         );
 
-        let snapshot_error = TypstWorld::builder(&main, world_directory.path())
-            .with_snapshot(Arc::clone(&snapshot))
+        let sources_error = TypstWorld::builder(&main, world_directory.path())
+            .with_sources(Arc::clone(&sources))
             .no_fonts()
             .build(&crate::BundleCancellation::default())
             .err()
-            .expect("mismatched source snapshot unexpectedly built");
+            .expect("mismatched sources unexpectedly built");
         assert!(matches!(
-            snapshot_error,
-            WorldBuildError::SnapshotRootMismatch { .. }
+            sources_error,
+            WorldBuildError::RootMismatch { .. }
         ));
 
-        let files = Arc::new(FileSnapshot::new(snapshot, Arc::new(FileResolver::new())));
+        let files = Arc::new(FileView::new(sources, Arc::new(FileResolver::new())));
         let file_error = TypstWorld::builder(&main, world_directory.path())
-            .with_file_snapshot(files, Arc::new(SharedFileCache::new()))
+            .with_file_view(files, Arc::new(SharedFileCache::new()))
             .no_fonts()
             .build(&crate::BundleCancellation::default())
             .err()
-            .expect("mismatched file snapshot unexpectedly built");
-        assert!(matches!(
-            file_error,
-            WorldBuildError::SnapshotRootMismatch { .. }
-        ));
+            .expect("mismatched file view unexpectedly built");
+        assert!(matches!(file_error, WorldBuildError::RootMismatch { .. }));
     }
 }

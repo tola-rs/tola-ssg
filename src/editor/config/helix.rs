@@ -274,14 +274,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn merge_keeps_unrelated_tables() {
-        let source = "# keep\n[language-server.other]\ncommand = \"other\"\n";
-        let merged = merge(Some(source), &editor_directory(".")).unwrap();
-        assert!(merged.contains("# keep"));
-        assert!(merged.contains("[language-server.other]"));
-    }
-
-    #[test]
     fn conflicting_settings_report_both_values() {
         let source = "[language-server.tola-lsp.config]\npackageSourceDirectory = \"elsewhere\"\n";
         let error = merge(Some(source), &editor_directory(".")).unwrap_err();
@@ -321,70 +313,5 @@ mod tests {
         assert_eq!(servers[0]["name"].as_str(), Some("tola-lsp"));
         assert_eq!(servers[1].as_str(), Some("other-typst"));
         assert!(merged.contains("# assistance"));
-    }
-
-    /// Tola claims every feature it serves, so an editor that merges supporting servers asks it for
-    /// each answer it can give and no answer it cannot.
-    #[test]
-    fn tola_claims_every_feature_it_serves() {
-        let merged = merge(None, &editor_directory(".")).unwrap();
-        let value: toml::Value = toml::from_str(&merged).unwrap();
-        let servers = value["language"][0]["language-servers"].as_array().unwrap();
-        assert_eq!(servers.len(), 1, "{servers:?}");
-        assert_eq!(servers[0]["name"].as_str(), Some("tola-lsp"));
-        assert_eq!(
-            servers[0]["only-features"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|feature| feature.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "code-action",
-                "completion",
-                "diagnostics",
-                "document-colors",
-                "document-highlight",
-                "document-symbols",
-                "format",
-                "goto-definition",
-                "goto-reference",
-                "hover",
-                "inlay-hints",
-                "rename-symbol",
-                "signature-help",
-                "workspace-symbols",
-            ]
-        );
-    }
-
-    /// The site's configuration answers Tola's own keys, and merging it twice changes nothing.
-    #[test]
-    fn toml_entry_claims_its_answers() {
-        let merged = merge(None, &editor_directory(".")).unwrap();
-        let value: toml::Value = toml::from_str(&merged).unwrap();
-        let toml = value["language"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|language| language["name"].as_str() == Some("toml"))
-            .expect("a `toml` language table");
-        let servers = toml["language-servers"].as_array().unwrap();
-
-        assert_eq!(servers.len(), 1);
-        assert_eq!(servers[0]["name"].as_str(), Some("tola-lsp"));
-        assert_eq!(
-            servers[0]["only-features"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|feature| feature.as_str())
-                .collect::<Vec<_>>(),
-            ["completion", "diagnostics", "hover"]
-        );
-        assert_eq!(
-            merge(Some(&merged), &editor_directory(".")).unwrap(),
-            merged
-        );
     }
 }

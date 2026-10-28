@@ -507,7 +507,7 @@ mod tests {
             .after_publish
             .push(AfterPublishHookConfig {
                 name: "failing-consumer".into(),
-                command: hook_child_command("build::revision::tests::fails_after_publish"),
+                command: hook_child_command("build::revision::tests::child_fails_after_publish"),
                 ..AfterPublishHookConfig::default()
             });
 
@@ -638,7 +638,9 @@ mod tests {
             .after_publish
             .push(AfterPublishHookConfig {
                 name: "capture-output".into(),
-                command: hook_child_command("build::revision::tests::copies_after_publish_output"),
+                command: hook_child_command(
+                    "build::revision::tests::child_copies_after_publish_output",
+                ),
                 ..AfterPublishHookConfig::default()
             });
         let first = build_site(&config, BuildMode::Production).unwrap();
@@ -648,7 +650,7 @@ mod tests {
 
         fs::write(&entry, "#document(\"index.html\")[Second publication]").unwrap();
         config.build.hooks.after_publish[0].command =
-            hook_child_command("build::revision::tests::fails_after_publish");
+            hook_child_command("build::revision::tests::child_fails_after_publish");
         let second = build_site(&config, BuildMode::Production).unwrap();
         write_site(&second).unwrap();
         published
@@ -663,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn copies_after_publish_output() {
+    fn child_copies_after_publish_output() {
         if !is_hook_child_for("after-publish") {
             return;
         }
@@ -672,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn fails_after_publish() {
+    fn child_fails_after_publish() {
         if !is_hook_child_for("after-publish") {
             return;
         }

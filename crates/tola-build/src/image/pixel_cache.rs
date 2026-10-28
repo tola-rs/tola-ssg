@@ -19,13 +19,32 @@ const LARGEST_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 ///
 /// Clones of one [`BuildResources`](crate::BuildResources) share the same retention, so an
 /// author tuning one image reuses every plane the earlier requests already computed.
-#[derive(Default)]
 pub(crate) struct PixelCache {
     retained: Mutex<Retained>,
 }
 
-#[derive(Default)]
+impl Default for PixelCache {
+    fn default() -> Self {
+        Self::with_budget(RETENTION_BYTES)
+    }
+}
+
+impl PixelCache {
+    /// A cache retaining at most `budget` bytes of planes.
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            retained: Mutex::new(Retained {
+                budget,
+                planes: Vec::new(),
+                bytes: 0,
+            }),
+        }
+    }
+}
+
 struct Retained {
+    /// The bytes this cache may hold.
+    budget: usize,
     /// Least recently used first.
     planes: Vec<RetainedPlane>,
     bytes: usize,
@@ -109,7 +128,7 @@ impl PixelCache {
         }
         retained.bytes += bytes;
         retained.planes.push(plane);
-        while retained.bytes > RETENTION_BYTES && retained.planes.len() > 1 {
+        while retained.bytes > retained.budget && retained.planes.len() > 1 {
             let oldest = retained.planes.remove(0);
             retained.bytes -= oldest.bytes();
         }
@@ -205,18 +224,27 @@ mod tests {
         .pixels()
     }
 
-    /// Twenty-four 8 MiB planes fill the limit exactly; one more evicts the plane that was not
-    /// used since, and the plane used most recently stays.
+    /// Bytes one decoded plane of `width` × `height` pixels costs the budget.
+    const fn plane_bytes(width: u32, height: u32) -> usize {
+        width as usize * height as usize * 4
+    }
+
+    /// Planes fill a small budget exactly; one more evicts the least recently used, and the plane
+    /// used since then stays.
     #[test]
-    fn budget_evicts_the_least_recently_used() {
-        let cache = PixelCache::default();
-        for index in 0..24u8 {
-            cache.retain_decoded(source(index), decoded(2048, 1024));
+    fn eviction_drops_oldest_plane() {
+        let plane = plane_bytes(8, 8);
+        let cache = PixelCache::with_budget(plane * 3);
+        for index in 0..3u8 {
+            cache.retain_decoded(source(index), decoded(8, 8));
         }
-        assert!(cache.decoded(source(0)).is_some());
-        cache.retain_decoded(source(24), decoded(2048, 1024));
-        assert!(cache.decoded(source(0)).is_some());
-        assert!(cache.decoded(source(1)).is_none());
+        assert!(cache.decoded(source(0)).is_some(), "a hit keeps the plane");
+        cache.retain_decoded(source(3), decoded(8, 8));
+        assert!(cache.decoded(source(0)).is_some(), "the reused plane stays");
+        assert!(
+            cache.decoded(source(1)).is_none(),
+            "the oldest plane leaves"
+        );
     }
 
     /// A plane beyond the largest retained size is refused, so one huge source cannot empty

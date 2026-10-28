@@ -19,6 +19,18 @@ pub(super) mod vendor;
 use crate::cancellation::Cancellation;
 use crate::cli::output::CommandOutput;
 
+/// What every site command receives from the command line: the site it acts on, and the run's
+/// borrowed context. Bundling them keeps each command's signature to what it adds on top.
+pub(in crate::cli) struct SiteRequest<'a> {
+    pub config_file: crate::cli::ConfigFileArgs,
+    pub packages: crate::cli::TypstPackageArgs,
+    pub scope: tola_build::InputScope,
+    pub build: crate::cli::BuildOverrideArgs,
+    pub resources: tola_build::BuildResources,
+    pub output: &'a CommandOutput,
+    pub cancellation: &'a Cancellation,
+}
+
 /// Build one complete production candidate while holding the cross-process site build lock.
 ///
 /// The returned guard keeps the lock: a publishing caller writes through it, and a

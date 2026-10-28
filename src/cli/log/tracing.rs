@@ -404,39 +404,54 @@ mod tests {
         std::fs::read_to_string(&path).unwrap()
     }
 
+    /// Tracing's file layer and the command log write one envelope: a plain event reaches the
+    /// line either producer writes, and a record a span names carries the span around its fields.
     #[test]
-    fn tracing_record_keeps_envelope_bytes() {
-        let source = recorded_file(|| {
-            tracing::info!(target: "tola::test", detail = "value", "pinned event");
-        });
-        let line = normalized_record(source.as_bytes());
-        assert_eq!(
-            line,
-            "{\"timestamp\":\"<timestamp>\",\"level\":\"INFO\",\"target\":\"tola::test\",\"pid\":<pid>,\"fields\":{\"detail\":\"value\",\"message\":\"pinned event\"}}\n"
-        );
-        // Both producers share one envelope, so the command record of the same event writes the
-        // same bytes tracing's file layer did.
-        assert_eq!(
-            line,
-            normalized_record(&record_bytes(
-                "INFO",
-                "tola::test",
-                serde_json::json!({"detail": "value", "message": "pinned event"}),
-            ))
-        );
-    }
-
-    #[test]
-    fn spanned_record_keeps_envelope_bytes() {
-        let source = recorded_file(|| {
-            let span = tracing::debug_span!(target: "tola::compile", "build", revision = "one");
-            let _entered = span.enter();
-            tracing::debug!(target: "tola::compile", reused = true, "pinned event");
-        });
-        assert_eq!(
-            normalized_record(source.as_bytes()),
-            "{\"timestamp\":\"<timestamp>\",\"level\":\"DEBUG\",\"target\":\"tola::compile\",\"pid\":<pid>,\"span\":{\"revision\":\"one\"},\"spans\":[{\"revision\":\"one\"}],\"fields\":{\"message\":\"pinned event\",\"reused\":true}}\n"
-        );
+    fn records_share_one_envelope() {
+        type Case = (&'static str, Box<dyn FnOnce() -> String>, &'static str);
+        let cases: [Case; 3] = [
+            (
+                "tracing event",
+                Box::new(|| {
+                    normalized_record(
+                        recorded_file(|| {
+                            tracing::info!(target: "tola::test", detail = "value", "pinned event");
+                        })
+                        .as_bytes(),
+                    )
+                }),
+                "{\"timestamp\":\"<timestamp>\",\"level\":\"INFO\",\"target\":\"tola::test\",\"pid\":<pid>,\"fields\":{\"detail\":\"value\",\"message\":\"pinned event\"}}\n",
+            ),
+            (
+                "command record",
+                Box::new(|| {
+                    normalized_record(&record_bytes(
+                        "INFO",
+                        "tola::test",
+                        serde_json::json!({"detail": "value", "message": "pinned event"}),
+                    ))
+                }),
+                "{\"timestamp\":\"<timestamp>\",\"level\":\"INFO\",\"target\":\"tola::test\",\"pid\":<pid>,\"fields\":{\"detail\":\"value\",\"message\":\"pinned event\"}}\n",
+            ),
+            (
+                "spanned record",
+                Box::new(|| {
+                    normalized_record(
+                        recorded_file(|| {
+                            let span =
+                                tracing::debug_span!(target: "tola::compile", "build", revision = "one");
+                            let _entered = span.enter();
+                            tracing::debug!(target: "tola::compile", reused = true, "pinned event");
+                        })
+                        .as_bytes(),
+                    )
+                }),
+                "{\"timestamp\":\"<timestamp>\",\"level\":\"DEBUG\",\"target\":\"tola::compile\",\"pid\":<pid>,\"span\":{\"revision\":\"one\"},\"spans\":[{\"revision\":\"one\"}],\"fields\":{\"message\":\"pinned event\",\"reused\":true}}\n",
+            ),
+        ];
+        for (label, produce, expected) in cases {
+            assert_eq!(produce(), expected, "{label}");
+        }
     }
 
     #[test]

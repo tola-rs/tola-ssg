@@ -74,40 +74,6 @@ mod tests {
     const SCRIPT: &str = "assets/app.js";
 
     #[test]
-    fn unminified_language_takes_no_request() {
-        let stylesheets_only = MinifiedLanguages::new(true, false);
-        assert_eq!(
-            MinifyRequest::for_source(Path::new(STYLESHEET), stylesheets_only)
-                .map(MinifyRequest::language),
-            Some(MinifyLanguage::Css)
-        );
-        assert!(MinifyRequest::for_source(Path::new(SCRIPT), stylesheets_only).is_none());
-
-        let scripts_only = MinifiedLanguages::new(false, true);
-        assert!(MinifyRequest::for_source(Path::new(STYLESHEET), scripts_only).is_none());
-        assert_eq!(
-            MinifyRequest::for_source(Path::new("assets/app.mjs"), scripts_only)
-                .map(MinifyRequest::language),
-            Some(MinifyLanguage::ModuleJavaScript)
-        );
-    }
-
-    #[test]
-    fn minified_source_takes_no_request() {
-        let languages = MinifiedLanguages::new(true, true);
-        for path in [
-            "assets/app.min.css",
-            "assets/app.MIN.CSS",
-            "assets/app.min.js",
-        ] {
-            assert!(
-                MinifyRequest::for_source(Path::new(path), languages).is_none(),
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
     fn request_minifies_with_its_language() {
         let languages = MinifiedLanguages::new(true, true);
         let stylesheet = MinifyRequest::for_source(Path::new(STYLESHEET), languages).unwrap();

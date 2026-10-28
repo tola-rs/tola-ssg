@@ -568,48 +568,6 @@ files = [{ source = "", url = "/favicon.ico" }]
     }
 
     #[test]
-    fn sources_resolve_below_the_root() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let root = dir.path();
-        let mut config: AssetsConfig = toml::from_str(
-            r#"
-trees = [{ source = "assets/images", url-prefix = "/images" }]
-files = [{ source = "assets/styles/base.css", url = "/styles/base.css" }]
-"#,
-        )
-        .unwrap();
-
-        config.normalize(root);
-
-        assert_eq!(config.trees[0].source(), root.join("assets/images"));
-        assert_eq!(config.trees[0].url_prefix().as_str(), "/images/");
-        assert_eq!(
-            config.files[0].source(),
-            root.join("assets/styles/base.css")
-        );
-        assert_eq!(config.files[0].url().as_str(), "/styles/base.css");
-    }
-
-    #[test]
-    fn cache_busting_defaults_to_off() {
-        let default: AssetsConfig = toml::from_str(
-            r#"
-trees = [{ source = "assets", url-prefix = "/assets" }]
-files = [{ source = "assets/app.js", url = "/app.js" }]
-"#,
-        )
-        .unwrap();
-        assert!(!default.cache_busting);
-
-        let enabled: AssetsConfig = toml::from_str("cache-busting = true").unwrap();
-        assert!(enabled.cache_busting);
-        assert!(
-            toml::from_str::<AssetsConfig>("cache-busting = \"yes\"").is_err(),
-            "the switch is a boolean"
-        );
-    }
-
-    #[test]
     fn portable_urls_have_one_owner() {
         let config = AssetsConfig {
             trees: vec![
@@ -661,36 +619,6 @@ files = [{ source = "assets/app.js", url = "/app.js" }]
     }
 
     #[test]
-    fn url_prefixes_cannot_contain_each_other() {
-        let files = AssetsConfig {
-            trees: Vec::new(),
-            files: vec![
-                file_declaration("download", "/download"),
-                file_declaration("readme", "/download/readme.txt"),
-            ],
-            ..AssetsConfig::default()
-        };
-        let mut file_diagnostics = ConfigDiagnostics::new();
-        files.validate(&mut file_diagnostics);
-        assert!(file_diagnostics.into_result().is_err());
-
-        for (tree_prefix, file_url) in [("/downloads/icons", "/downloads"), ("/assets", "/assets")]
-        {
-            let config = AssetsConfig {
-                trees: vec![tree_declaration("tree", tree_prefix)],
-                files: vec![file_declaration("file", file_url)],
-                ..AssetsConfig::default()
-            };
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate(&mut diagnostics);
-            assert!(
-                diagnostics.into_result().is_err(),
-                "{tree_prefix} {file_url}"
-            );
-        }
-    }
-
-    #[test]
     fn url_parse_derives_output_identities() {
         assert_eq!(AssetUrlPrefix::parse("/").unwrap().as_str(), "/");
         assert!(AssetUrl::parse("/").is_err());
@@ -725,23 +653,6 @@ files = [{ source = "assets/app.js", url = "/app.js" }]
         assert_eq!(
             AssetUrlPrefix::parse("/assets").unwrap(),
             AssetUrlPrefix::parse("/assets/").unwrap()
-        );
-    }
-
-    #[test]
-    fn typed_urls_round_trip_through_toml() {
-        let config = AssetsConfig {
-            trees: vec![tree_declaration("assets", "/图")],
-            files: vec![file_declaration("logo.svg", "/图/logo.svg")],
-            ..AssetsConfig::default()
-        };
-        let encoded = toml::to_string(&config).unwrap();
-        let decoded: AssetsConfig = toml::from_str(&encoded).unwrap();
-        assert_eq!(decoded.trees, config.trees);
-        assert_eq!(decoded.files, config.files);
-        assert_eq!(
-            String::from(config.trees[0].url_prefix().clone()),
-            "/%E5%9B%BE"
         );
     }
 

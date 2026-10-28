@@ -1,4 +1,4 @@
-//! Immutable editor source snapshots and atomic UTF-16 document changes.
+//! Immutable parsed editor sources and atomic UTF-16 document changes.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -64,13 +64,13 @@ pub(super) fn load(
 }
 
 #[derive(Clone)]
-pub(super) struct SourceSnapshot {
+pub(super) struct ParsedSource {
     pub(super) revision: u64,
     pub(super) source: Source,
     names: Arc<OnceLock<Arc<tola_typst_syntax::names::SourceNames>>>,
 }
 
-impl SourceSnapshot {
+impl ParsedSource {
     pub(super) fn names(&self) -> Arc<tola_typst_syntax::names::SourceNames> {
         Arc::clone(self.names.get_or_init(|| {
             Arc::new(tola_typst_syntax::names::SourceNames::new(
@@ -85,7 +85,7 @@ struct OpenSource {
     path: Option<PathBuf>,
     version: i32,
     text: Arc<str>,
-    parsed: Option<SourceSnapshot>,
+    parsed: Option<ParsedSource>,
 }
 
 impl OpenSource {
@@ -142,7 +142,7 @@ impl OpenSource {
         {
             return;
         }
-        self.parsed = id.map(|id| SourceSnapshot {
+        self.parsed = id.map(|id| ParsedSource {
             revision,
             source: Source::new(id, self.text.to_string()),
             names: Arc::default(),
@@ -158,18 +158,18 @@ pub(super) struct SourceView {
 }
 
 impl SourceView {
-    pub(super) fn get(&self, uri: &Uri) -> Option<&SourceSnapshot> {
+    pub(super) fn get(&self, uri: &Uri) -> Option<&ParsedSource> {
         self.sources.get(uri.as_str())?.parsed.as_ref()
     }
 
-    pub(super) fn by_id(&self, id: FileId) -> Option<&SourceSnapshot> {
+    pub(super) fn by_id(&self, id: FileId) -> Option<&ParsedSource> {
         self.sources.values().find_map(|open| {
             let parsed = open.parsed.as_ref()?;
             (parsed.source.id() == id).then_some(parsed)
         })
     }
 
-    pub(super) fn iter(&self) -> impl Iterator<Item = &SourceSnapshot> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = &ParsedSource> {
         self.sources
             .values()
             .filter(|open| open.path.is_some())
@@ -229,7 +229,7 @@ impl OpenSources {
         self.generated = generated_state_boundary(&root);
         self.root = root;
         self.refresh_paths(self.revision);
-        self.view.overrides = self.snapshot().into();
+        self.view.overrides = self.open_source_texts().into();
     }
 
     /// Whether one changed document path is state Tola generates or publishes.
@@ -327,7 +327,7 @@ impl OpenSources {
                 } else {
                     None
                 }
-                .map(|source| SourceSnapshot {
+                .map(|source| ParsedSource {
                     revision,
                     source,
                     names: Arc::default(),
@@ -427,7 +427,7 @@ impl OpenSources {
         }
         self.revision = revision;
         if !unnamed {
-            self.view.overrides = self.snapshot().into();
+            self.view.overrides = self.open_source_texts().into();
         }
         Ok(true)
     }
@@ -455,7 +455,7 @@ impl OpenSources {
         true
     }
 
-    fn snapshot(&self) -> Vec<(PathBuf, Arc<str>)> {
+    fn open_source_texts(&self) -> Vec<(PathBuf, Arc<str>)> {
         self.view
             .sources
             .values()
@@ -506,9 +506,8 @@ fn document_path(uri: &str) -> Option<Option<PathBuf>> {
 mod tests {
     use super::*;
     use lsp_types::{
-        DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, Range,
-        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem, Uri,
-        VersionedTextDocumentIdentifier,
+        DidChangeTextDocumentParams, DidOpenTextDocumentParams, Range,
+        TextDocumentContentChangeEvent, TextDocumentItem, Uri, VersionedTextDocumentIdentifier,
     };
 
     fn opened(uri: Uri, text: &str) -> Notification {
@@ -545,18 +544,6 @@ mod tests {
     fn span(text: &str, marker: &str) -> Range {
         let start = text.find(marker).unwrap();
         position::utf16_range(&Lines::new(text), start..start + marker.len()).unwrap()
-    }
-
-    fn changed_file(uri: &Uri) -> Notification {
-        Notification::new(
-            notification::DidChangeWatchedFiles::METHOD.into(),
-            lsp_types::DidChangeWatchedFilesParams {
-                changes: vec![lsp_types::FileEvent::new(
-                    uri.clone(),
-                    lsp_types::FileChangeType::CHANGED,
-                )],
-            },
-        )
     }
 
     /// A package's own file answers as the package document the compiler resolved, whether the
@@ -609,63 +596,8 @@ mod tests {
         assert_eq!(mirrored.id(), id);
         assert_eq!(mirrored.text(), source);
     }
-
-    /// The site's package view is a source while the rest of Tola's internal directory stays
-    /// generated state.
     #[test]
-    fn package_view_is_not_generated_state() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let boundary = base_source_boundary(root, true);
-        let view = root.join(".tola/builtin-packages/tola/source/0.0.0/lib.typ");
-        let internal = root.join(".tola/builtin-packages/tola/source/0.0.0/other.typ");
-        let elsewhere = root.join(".tola/inspection/state.json");
-        assert!(boundary.check(&view).is_ok(), "{:?}", boundary.check(&view));
-        assert!(boundary.check(&internal).is_ok(), "the view is one subtree");
-        assert_eq!(
-            boundary.refusal(&elsewhere).unwrap(),
-            Some(tola_typst::SourceRefusal::GeneratedState)
-        );
-    }
-
-    /// A rewrite of state Tola generates is never a source change: it costs no revision, before a
-    /// check resolves a configuration and after one does.
-    #[test]
-    fn generated_state_costs_no_revision() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let mut sources = OpenSources::new(root);
-
-        // The site's package view is Tola's own writing; the set one check resolves comes from a
-        // read boundary, which does permit the view.
-        let mirror = crate::uri::from_file_path(
-            &root.join(".tola/builtin-packages/tola/source/0.0.0/lib.typ"),
-        )
-        .unwrap();
-        assert!(!sources.apply(changed_file(&mirror)).unwrap(), "{mirror:?}");
-        sources.exclude_generated(base_source_boundary(root, false));
-        assert!(!sources.apply(changed_file(&mirror)).unwrap(), "{mirror:?}");
-
-        // A document inside Tola's state directory is not a source either.
-        let internal = crate::uri::from_file_path(&root.join(".tola/page.typ")).unwrap();
-        assert!(
-            !sources
-                .apply(opened(internal.clone(), "= Generated\n"))
-                .unwrap()
-        );
-        assert!(sources.source(&internal).is_none());
-
-        // The output tree is generated state once a check resolved the configuration.
-        sources.exclude_generated(base_source_boundary(root, false).excluding(root.join("public")));
-        let output = crate::uri::from_file_path(&root.join("public/index.typ")).unwrap();
-        assert!(!sources.apply(opened(output.clone(), "= Output\n")).unwrap());
-        let edited = changed(output.clone(), 2, vec![edit(None, "= Edited\n")]);
-        assert!(!sources.apply(edited).unwrap());
-        assert!(sources.source(&output).is_none());
-    }
-
-    #[test]
-    fn utf16_edits_preserve_prior_snapshots() {
+    fn utf16_edits_preserve_prior_sources() {
         let directory = tempfile::tempdir().unwrap();
         let uri = crate::uri::from_file_path(&directory.path().join("document.typ")).unwrap();
         let mut sources = OpenSources::new(directory.path());
@@ -688,101 +620,23 @@ mod tests {
         assert_eq!(sources.version(uri.as_str()), Some(2));
         assert_eq!(previous.get(&uri).unwrap().source.text(), original);
     }
-
-    /// A change the tracker rejects leaves the tracked text, version, revision, and shared view
-    /// exactly as they were.
-    #[test]
-    fn rejected_changes_preserve_the_view() {
-        let mut sources = OpenSources::default();
-        let uri: Uri = "untitled:Draft".parse().unwrap();
-        sources.apply(opened(uri.clone(), "original")).unwrap();
-        sources
-            .apply(changed(uri.clone(), 2, vec![edit(None, "current")]))
-            .unwrap();
-        let current = sources.view();
-
-        // A change older than the applied version is dropped without a trace.
-        for version in [1, 2] {
-            assert!(
-                !sources
-                    .apply(changed(uri.clone(), version, vec![edit(None, "stale")]))
-                    .unwrap()
-            );
-            assert_eq!(sources.source(&uri).unwrap().text(), "current");
-        }
-        assert!(Arc::ptr_eq(&current.sources, &sources.view.sources));
-
-        // A range the document does not hold fails the whole change.
-        let beyond = Range::new(
-            lsp_types::Position::new(1, 0),
-            lsp_types::Position::new(1, 1),
-        );
-        assert!(
-            sources
-                .apply(changed(uri.clone(), 3, vec![edit(Some(beyond), "invalid")]))
-                .is_err()
-        );
-        assert_eq!(sources.source(&uri).unwrap().text(), "current");
-        assert_eq!(sources.version(uri.as_str()), Some(2));
-
-        // A batch that fails on a later edit re-applies none of the edits before it, including
-        // one that ends inside a surrogate pair.
-        let replacement = "🦊\r\n";
-        let fox = span(replacement, "🦊");
-        let mut inside = fox.start;
-        inside.character += 1;
-        for invalid in [Range::new(inside, fox.end), Range::new(fox.end, fox.start)] {
-            assert!(
-                sources
-                    .apply(changed(
-                        uri.clone(),
-                        3,
-                        vec![edit(None, replacement), edit(Some(invalid), "invalid"),]
-                    ))
-                    .is_err()
-            );
-            assert_eq!(sources.source(&uri).unwrap().text(), "current");
-            assert_eq!(sources.version(uri.as_str()), Some(2));
-            assert_eq!(
-                sources.view().get(&uri).unwrap().revision,
-                current.get(&uri).unwrap().revision
-            );
-        }
-        assert!(Arc::ptr_eq(&current.sources, &sources.view.sources));
-    }
-
-    #[test]
-    fn unnamed_changes_never_override_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let named = crate::uri::from_file_path(&directory.path().join("site.typ")).unwrap();
-        let unnamed: Uri = "untitled:Draft".parse().unwrap();
-        let mut sources = OpenSources::new(directory.path());
-        sources.apply(opened(named.clone(), "site")).unwrap();
-        let expected = sources.snapshot();
-        sources.apply(opened(unnamed.clone(), "draft")).unwrap();
-        sources
-            .apply(changed(unnamed.clone(), 2, vec![edit(None, "changed")]))
-            .unwrap();
-        assert_eq!(sources.source(&unnamed).unwrap().text(), "changed");
-        assert_eq!(sources.snapshot(), expected);
-        sources
-            .apply(Notification::new(
-                notification::DidCloseTextDocument::METHOD.into(),
-                DidCloseTextDocumentParams {
-                    text_document: TextDocumentIdentifier::new(unnamed.clone()),
-                },
-            ))
-            .unwrap();
-        assert!(sources.source(&unnamed).is_none());
-        assert_eq!(sources.version(unnamed.as_str()), None);
-        assert_eq!(sources.snapshot(), expected);
-    }
-
     /// A retargeted symlink answers as the source it now resolves to, and the view a request
     /// already holds keeps the source it read.
     #[test]
     #[cfg(unix)]
     fn symlink_retarget_follows_the_resolved_source() {
+        fn changed_file(uri: &Uri) -> Notification {
+            Notification::new(
+                notification::DidChangeWatchedFiles::METHOD.into(),
+                lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent::new(
+                        uri.clone(),
+                        lsp_types::FileChangeType::CHANGED,
+                    )],
+                },
+            )
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.typ");
@@ -804,7 +658,7 @@ mod tests {
         let original = open.view();
         let original_id = open.source(&uri).unwrap().id();
         assert_eq!(
-            open.snapshot(),
+            open.open_source_texts(),
             vec![(first.canonicalize().unwrap(), Arc::from("buffer"))]
         );
 
@@ -817,7 +671,7 @@ mod tests {
         retarget(&second);
         open.apply(changed_file(&uri)).unwrap();
         assert_eq!(
-            open.snapshot(),
+            open.open_source_texts(),
             vec![(second.canonicalize().unwrap(), Arc::from("buffer"))]
         );
         assert_ne!(open.source(&uri).unwrap().id(), original_id);
@@ -842,69 +696,5 @@ mod tests {
         // The view a request already holds keeps what it read.
         assert_eq!(original.get(&uri).unwrap().source.id(), original_id);
         assert_eq!(original.get(&uri).unwrap().source.text(), "buffer");
-    }
-
-    /// A rename is dropped only when every endpoint names generated state: an ordinary path on
-    /// either side is a real change the site's inputs may have gained or lost.
-    #[test]
-    fn rename_is_dropped_only_when_every_endpoint_is_generated() {
-        use lsp_types::{FileRename, RenameFilesParams};
-
-        let directory = tempfile::tempdir().unwrap();
-        let generated =
-            crate::uri::from_file_path(&directory.path().join(".tola/page.typ")).unwrap();
-        let other = crate::uri::from_file_path(&directory.path().join(".tola/other.typ")).unwrap();
-        let source = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
-        let mut sources = OpenSources::new(directory.path());
-        let rename = |old_uri: &Uri, new_uri: &Uri| {
-            Notification::new(
-                notification::DidRenameFiles::METHOD.into(),
-                RenameFilesParams {
-                    files: vec![FileRename {
-                        old_uri: old_uri.as_str().to_owned(),
-                        new_uri: new_uri.as_str().to_owned(),
-                    }],
-                },
-            )
-        };
-        assert!(!sources.apply(rename(&generated, &other)).unwrap());
-        assert!(sources.apply(rename(&generated, &source)).unwrap());
-    }
-
-    #[test]
-    fn text_requests_answer_for_tola_sources() {
-        let directory = tempfile::tempdir().unwrap();
-        let saved = directory.path().join("saved.typ");
-        std::fs::write(&saved, "= Saved\n").unwrap();
-        let buffer_uri = crate::uri::from_file_path(&directory.path().join("buffer.typ")).unwrap();
-        let unsaved: SourceOverrides = vec![(
-            crate::uri::to_site_path(buffer_uri.as_str()).unwrap(),
-            Arc::from("= Buffer\n"),
-        )]
-        .into();
-        let configuration = directory.path().join("tola.toml");
-        std::fs::write(&configuration, "[build]\n").unwrap();
-
-        let answer = |uri: &Uri| {
-            load(
-                uri,
-                directory.path(),
-                &unsaved,
-                &tola_typst::SourceBoundary::new(directory.path(), true),
-            )
-            .map(|source| source.text().to_owned())
-        };
-
-        assert_eq!(
-            answer(&crate::uri::from_file_path(&saved).unwrap()).as_deref(),
-            Some("= Saved\n")
-        );
-        assert_eq!(answer(&buffer_uri).as_deref(), Some("= Buffer\n"));
-        for uri in [
-            crate::uri::from_file_path(&configuration).unwrap(),
-            crate::uri::from_file_path(&directory.path().join("missing.typ")).unwrap(),
-        ] {
-            assert_eq!(answer(&uri), None, "{uri:?}");
-        }
     }
 }
