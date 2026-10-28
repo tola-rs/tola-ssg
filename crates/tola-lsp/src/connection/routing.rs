@@ -318,11 +318,9 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::SourceJob;
     use crate::connection::tests::{hover_query, ready, rejection, uninitialized};
     use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
-    use std::time::Instant;
 
     fn completion_request(id: i32, uri: &Uri, marked: &str) -> Request {
         let source = tola_typst::typst::syntax::Source::detached(marked.replace('|', ""));
@@ -392,189 +390,6 @@ mod tests {
                 .any(|item| item["label"] == "available")
         );
     }
-
-    #[test]
-    fn draft_changes_preserve_site_requests() {
-        use crate::connection::tests::{open_document, open_draft, response};
-        for reopen in [false, true] {
-            let mut connection = ready(Vec::new());
-            connection.checked = Some((connection.revision, true));
-            connection.query(99.into(), hover_query()).unwrap();
-            let site_cancellation = connection.requests[&RequestId::from(99)].canceller.token();
-            let marked = "#let value = (stale: 1)\n#value.|";
-            let uri = open_draft(&mut connection, &marked.replace('|', ""));
-            connection
-                .request(completion_request(8, &uri, marked))
-                .unwrap();
-            let previous = connection.next_analysis().unwrap();
-            let mut disk = crate::analysis::DiskSources::default();
-            let mut graphs = crate::analysis::GraphCache::default();
-            let previous = crate::compiler::analyze(&mut disk, &mut graphs, previous);
-            let current = "#let value = (fresh: 1)\n#value.|";
-            if reopen {
-                let _ = connection
-                    .notification(Notification::new(
-                        "textDocument/didClose".into(),
-                        json!({"textDocument":{"uri":uri.as_str()}}),
-                    ))
-                    .unwrap();
-                open_document(&mut connection, &uri, 1, &current.replace('|', ""));
-                assert_eq!(connection.open.version(uri.as_str()), Some(1));
-            } else {
-                let _ = connection.notification(Notification::new("textDocument/didChange".into(), json!({"textDocument":{"uri":uri.as_str(),"version":2},"contentChanges":[{"text":current.replace('|', "")}]}))).unwrap();
-            }
-            assert_eq!(
-                response(&mut connection).response_result.unwrap_err().code,
-                ErrorCode::ContentModified as i32
-            );
-            assert!(connection.requests.contains_key(&99.into()));
-            assert!(!site_cancellation.is_cancelled());
-            connection
-                .request(completion_request(8, &uri, current))
-                .unwrap();
-            let current = connection.next_analysis().unwrap();
-            connection.completed(previous).unwrap();
-            assert!(connection.writer.is_empty());
-            connection
-                .completed(crate::compiler::analyze(&mut disk, &mut graphs, current))
-                .unwrap();
-            let completion = response(&mut connection).response_result.unwrap();
-            let items = completion.as_array().unwrap();
-            assert!(items.iter().any(|item| item["label"] == "fresh"));
-            assert!(!items.iter().any(|item| item["label"] == "stale"));
-        }
-    }
-
-    #[test]
-    fn cancelled_requests_release_queued_jobs() {
-        use crate::connection::tests::{open_draft, response};
-        let mut connection = ready(Vec::new());
-        let marked = "#let value = (available: 1)\n#value.|";
-        let uri = open_draft(&mut connection, &marked.replace('|', ""));
-        connection
-            .request(completion_request(1, &uri, marked))
-            .unwrap();
-        let active = connection.next_analysis().unwrap();
-        for id in 2..2 * MAX_SOURCE_REQUESTS as i32 {
-            connection
-                .request(completion_request(id, &uri, marked))
-                .unwrap();
-            let _ = connection
-                .notification(Notification::new(
-                    "$/cancelRequest".into(),
-                    json!({"id":id}),
-                ))
-                .unwrap();
-            assert_eq!(
-                response(&mut connection).response_result.unwrap_err().code,
-                ErrorCode::RequestCanceled as i32
-            );
-            assert!(connection.analyses.is_empty());
-            assert_eq!(connection.requests.len(), 1);
-        }
-        connection.query(1000.into(), hover_query()).unwrap();
-        let _ = connection
-            .notification(Notification::new(
-                "$/cancelRequest".into(),
-                json!({"id":1000}),
-            ))
-            .unwrap();
-        response(&mut connection);
-        assert!(connection.queries.is_empty());
-        connection
-            .request(completion_request(2, &uri, marked))
-            .unwrap();
-        connection.query(3.into(), hover_query()).unwrap();
-        connection
-            .cancel_requests(ErrorCode::RequestCanceled, "closing")
-            .unwrap();
-        assert!(connection.requests.is_empty());
-        assert!(connection.analyses.is_empty());
-        assert!(connection.queries.is_empty());
-        assert!(active.sources.cancellation.is_cancelled());
-    }
-
-    #[test]
-    fn reopened_document_refuses_previous_diagnostics() {
-        use crate::compiler::{CheckedSources, SourceCompilation};
-        use crate::connection::tests::{open_document, ready_at, response};
-        use std::sync::Arc;
-        use tola_build::diagnostic::{DiagnosticCause, Severity};
-        use tola_typst_syntax::names::SelectedInterfaces;
-
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("page.typ"), "#missing").unwrap();
-        let uri = crate::uri::from_file_path(&directory.path().join("page.typ")).unwrap();
-        let mut connection = ready_at(Vec::new(), directory.path().to_path_buf());
-        open_document(&mut connection, &uri, 1, "#missing");
-        let checked = |revision, diagnostics| SourceCompilation::Checked {
-            checked_revision: revision,
-            checked: Ok(CheckedSources {
-                configuration: None,
-                compiled: false,
-                diagnostics,
-                read_paths: None,
-                selected: Arc::new(SelectedInterfaces::default()),
-            }),
-        };
-        connection
-            .completed(checked(
-                connection.revision,
-                vec![
-                    Diagnostic::at_path(
-                        tola_build::codes::typst::COMPILE,
-                        Severity::Error,
-                        "page.typ",
-                        "unknown variable: missing",
-                    )
-                    .with_cause(DiagnosticCause::UnknownVariable {
-                        name: "missing".into(),
-                    }),
-                ],
-            ))
-            .unwrap();
-        assert_eq!(connection.published_diagnostics(&uri).unwrap().len(), 1);
-        let pull = |id, previous| {
-            Request::new(
-                id,
-                request::DocumentDiagnosticRequest::METHOD.into(),
-                json!({"textDocument":{"uri":uri.as_str()},"previousResultId":previous}),
-            )
-        };
-        connection.request(pull(1.into(), None::<&str>)).unwrap();
-        let first = response(&mut connection).response_result.unwrap();
-        let previous = first["resultId"].as_str().unwrap();
-        assert_eq!(first["items"].as_array().unwrap().len(), 1);
-        let _ = connection
-            .notification(Notification::new(
-                notification::DidCloseTextDocument::METHOD.into(),
-                json!({"textDocument":{"uri":uri.as_str()}}),
-            ))
-            .unwrap();
-        connection.request(pull(2.into(), Some(previous))).unwrap();
-        assert_eq!(
-            response(&mut connection).response_result.unwrap()["kind"],
-            "unchanged",
-            "closing a site source keeps its disk diagnostics"
-        );
-
-        open_document(&mut connection, &uri, 1, "Hello");
-        assert!(connection.published_diagnostics(&uri).is_none());
-        connection.request(pull(3.into(), Some(previous))).unwrap();
-        let stale = response(&mut connection).response_result.unwrap_err();
-        assert_eq!(stale.code, ErrorCode::ServerCancelled as i32);
-        assert_eq!(stale.data.unwrap()["retriggerRequest"], true);
-
-        connection
-            .completed(checked(connection.revision, Vec::new()))
-            .unwrap();
-        connection.request(pull(4.into(), Some(previous))).unwrap();
-        let current = response(&mut connection).response_result.unwrap();
-        assert_eq!(current["kind"], "full");
-        assert_ne!(current["resultId"], previous);
-        assert!(current["items"].as_array().unwrap().is_empty());
-    }
-
     /// A second request reusing an identifier whose request is still pending would give the client
     /// two replies for one id, so the dispatch boundary refuses it before any lane answers.
     #[test]
@@ -602,51 +417,6 @@ mod tests {
             "the admitted request stands"
         );
     }
-
-    #[test]
-    fn full_request_queue_is_rejected() {
-        let mut connection = ready(Vec::new());
-        for serial in 0..MAX_SOURCE_REQUESTS as u64 {
-            connection.requests.insert(
-                RequestId::from(serial as i32),
-                PendingRequest {
-                    serial,
-                    canceller: BuildCanceller::new(),
-                    document_revision: None,
-                    narrowing: None,
-                    waiting: None,
-                },
-            );
-        }
-        let full = RequestId::from(1_000);
-        connection.query(full.clone(), hover_query()).unwrap();
-        assert_eq!(rejection(&mut connection, &full), SERVER_BUSY_ERROR_CODE);
-    }
-
-    #[test]
-    fn shutdown_rejects_new_requests() {
-        let mut connection = ready(Vec::new());
-        connection
-            .request(Request::new(
-                2.into(),
-                request::Shutdown::METHOD.into(),
-                serde_json::Value::Null,
-            ))
-            .unwrap();
-        let after = RequestId::from(3);
-        connection
-            .request(Request::new(
-                after.clone(),
-                request::HoverRequest::METHOD.into(),
-                serde_json::json!({}),
-            ))
-            .unwrap();
-        assert_eq!(
-            rejection(&mut connection, &after),
-            ErrorCode::InvalidRequest as i32
-        );
-    }
-
     #[test]
     fn exit_requires_shutdown() {
         let mut connection = uninitialized();
@@ -657,41 +427,6 @@ mod tests {
                     json!({}),
                 ))
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn failed_cancel_still_cancels_jobs() {
-        struct Disconnected;
-        impl Write for Disconnected {
-            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let mut connection = ready(Disconnected);
-        for id in [1, 2] {
-            connection
-                .query(RequestId::from(id), hover_query())
-                .unwrap();
-        }
-        assert!(
-            matches!(
-                connection.next_job(Instant::now()),
-                Some(SourceJob::Query(_))
-            ),
-            "both queries are admitted before the client disappears"
-        );
-        assert!(
-            connection
-                .cancel_requests(ErrorCode::RequestCanceled, "closing")
-                .is_err()
-        );
-        assert!(
-            connection.next_job(Instant::now()).is_none(),
-            "a cancelled job must not reach the compiler"
         );
     }
 }

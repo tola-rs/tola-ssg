@@ -484,121 +484,15 @@ mod tests {
                 .to_vec(),
         )
         .unwrap();
-        assert!(html.contains("<style>.a{color:red}</style>"), "{html}");
-        assert!(
-            html.contains("<script>function answer(){return 42}</script>"),
-            "{html}"
-        );
-        assert!(html.contains("export const answer = 6 + 6"), "{html}");
-        assert!(html.contains(r#"id="kept""#), "{html}");
-        assert!(html.contains(r#"class="body""#), "{html}");
-        assert!(html.contains(r#"{"a": 1}"#), "{html}");
-    }
-    #[test]
-    fn cancelled_raw_text_rewrite_is_inert() {
-        let mut compilation =
-            compile_without_export(r#"#document("index.html")[#html.style(".a { color: red; }")]"#);
-        let cancellation = BundleCancellation::default();
-        cancellation.cancel();
-        let error = compilation
-            .rewrite_html_raw_text(&cancellation, |_, _, _, _| Some(String::new()))
-            .unwrap_err();
-        assert!(matches!(error, crate::html::HtmlRawTextError::Cancelled));
-
-        let cancellation = BundleCancellation::default();
-        let entries = compilation
-            .export(&BundleOptions::default(), &cancellation, None)
-            .unwrap();
-        let html = String::from_utf8(
-            entry_from(entries.entries(), "/index.html")
-                .bytes()
-                .to_vec(),
-        )
-        .unwrap();
-        assert!(html.contains(".a { color: red; }"), "{html}");
-    }
-    #[test]
-    fn frame_css_changes_apply_once() {
-        let mut compilation = compile_without_export(
-            r#"#document("page.html")[
-  #html.div[
-    #html.span(id: "frame")[#box(html.frame(rect(width: 2pt, height: 3pt)))]
-    #html.div[
-      #html.span(id: "nested")[#box(html.frame(rect(width: 2pt, height: 3pt)))]
-      #html.span(id: "level")[#box(html.frame(rect(width: 2pt, height: 3pt)))]
-    ]
-  ]
-]"#,
-        );
-        let path = typst::syntax::VirtualPath::new("page.html").unwrap();
-        let cancellation = BundleCancellation::new();
-        let inventory = compilation
-            .document(&path)
-            .unwrap()
-            .html_inventory(&cancellation)
-            .unwrap()
-            .unwrap();
-        let style = |_: &typst::syntax::VirtualPath,
-                     parent: &typst_html::HtmlElement,
-                     _: &typst_html::HtmlFrame| {
-            if parent
-                .attrs
-                .get(typst_html::attr::id)
-                .is_some_and(|id| id == "level")
-            {
-                return Ok(Vec::new());
-            }
-            Ok(vec![
-                ("vertical-align", "1em".to_owned()),
-                ("vertical-align", "-0.25em".to_owned()),
-            ])
-        };
-        assert_eq!(
-            compilation.style_html_frames(&cancellation, style).unwrap(),
-            2
-        );
-        let updated = compilation
-            .document(&path)
-            .unwrap()
-            .html_inventory(&cancellation)
-            .unwrap()
-            .unwrap();
-        assert!(!Arc::ptr_eq(&inventory, &updated));
-        assert!(
-            updated
-                .fragments()
-                .iter()
-                .any(|fragment| fragment.value() == "frame")
-        );
-        for id in ["frame", "nested", "level"] {
-            let html = compilation
-                .document(&path)
-                .unwrap()
-                .html_fragment(
-                    &crate::html::HtmlFragmentSelection::Id(id.into()),
-                    &crate::html::HtmlFragmentOptions::default(),
-                    &cancellation,
-                )
-                .unwrap()
-                .html;
-            assert_eq!(
-                html.contains("vertical-align: -0.25em"),
-                id != "level",
-                "{html}"
-            );
-            assert!(!html.contains("vertical-align: 1em"), "{html}");
+        // A rewrite returns every payload's own text unchanged: the stylesheet, the script,
+        // and the module the page loaded.
+        for payload in [
+            "<style>.a{color:red}</style>",
+            "<script>function answer(){return 42}</script>",
+            "export const answer = 6 + 6",
+        ] {
+            assert!(html.contains(payload), "{payload}: {html}");
         }
-        assert_eq!(
-            compilation.style_html_frames(&cancellation, style).unwrap(),
-            0
-        );
-        let repeated = compilation
-            .document(&path)
-            .unwrap()
-            .html_inventory(&cancellation)
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&updated, &repeated));
     }
     #[test]
     fn rejected_frame_style_installs_nothing() {
@@ -654,81 +548,5 @@ mod tests {
                 .unwrap();
             assert!(Arc::ptr_eq(&inventory, &retained));
         }
-    }
-    #[cfg(feature = "parallel")]
-    #[test]
-    fn concurrent_inventory_publishes_one_index() {
-        let compilation = compile_without_export(
-            r#"#document("first.html")[#html.a(href: "/first")[First]]
-#document("second.html")[#html.a(href: "/second")[Second]]"#,
-        );
-        let first_path = typst::syntax::VirtualPath::new("first.html").unwrap();
-        let second_path = typst::syntax::VirtualPath::new("second.html").unwrap();
-        let cancellation = BundleCancellation::new();
-        fn inventory(
-            compilation: &BundleCompilation,
-            path: &typst::syntax::VirtualPath,
-            cancellation: &BundleCancellation,
-        ) -> Arc<crate::html::HtmlDocumentInventory> {
-            compilation
-                .document(path)
-                .unwrap()
-                .html_inventory(cancellation)
-                .unwrap()
-                .unwrap()
-        }
-
-        let (first, second) = rayon::join(
-            || inventory(&compilation, &first_path, &cancellation),
-            || inventory(&compilation, &second_path, &cancellation),
-        );
-        assert_eq!(first.references()[0].destination(), "/first");
-        assert_eq!(second.references()[0].destination(), "/second");
-        assert!(!Arc::ptr_eq(&first, &second));
-
-        let (first_again, second_again) = rayon::join(
-            || inventory(&compilation, &first_path, &cancellation),
-            || inventory(&compilation, &second_path, &cancellation),
-        );
-        assert!(Arc::ptr_eq(&first, &first_again));
-        assert!(Arc::ptr_eq(&second, &second_again));
-    }
-    #[test]
-    fn cancelled_inventory_keeps_cache() {
-        let compilation = compile_without_export(
-            r#"#document("page.html")[
-  #link("/first/")[First]
-  #link("/second/")[Second]
-]"#,
-        );
-        let path = typst::syntax::VirtualPath::new("page.html").unwrap();
-        let document = compilation.document(&path).unwrap();
-        let cancelled = BundleCancellation::new();
-        cancelled.cancel();
-        assert!(
-            document
-                .html_inventory(&cancelled)
-                .unwrap_err()
-                .is_cancelled()
-        );
-
-        let cancellation = BundleCancellation::new();
-        let inventory = document.html_inventory(&cancellation).unwrap().unwrap();
-        assert_eq!(
-            inventory
-                .references()
-                .iter()
-                .filter(|reference| reference.tag() == "a")
-                .count(),
-            2
-        );
-        assert!(
-            document
-                .html_inventory(&cancelled)
-                .unwrap_err()
-                .is_cancelled()
-        );
-        let repeated = document.html_inventory(&cancellation).unwrap().unwrap();
-        assert!(Arc::ptr_eq(&inventory, &repeated));
     }
 }

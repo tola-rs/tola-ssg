@@ -197,11 +197,9 @@ mod tests {
         );
     }
 
-    /// A call's signature help reads as the shared model renders it: one line naming each
-    /// parameter's type, each parameter labelled by its own name, and an element's own type as
-    /// the value it returns.
+    /// A signature names the parameters a local declaration takes, each labelled by its own name.
     #[test]
-    fn signature_help_names_its_declaration_label() {
+    fn local_call_labels_its_signature() {
         let mut site = QuerySession::new();
         let signature = site
             .signature("#let write(body, depth: 0) = body\n#write(|\"\")\n")
@@ -218,7 +216,12 @@ mod tests {
                 .collect::<Vec<_>>()),
             Some(vec!["body:", "depth:"])
         );
+    }
 
+    /// A library call's signature names the element's own type as the value it returns.
+    #[test]
+    fn library_call_labels_its_return() {
+        let mut site = QuerySession::new();
         let signature = site.signature("#text(|\"\")\n").expect("a signature");
         let label = &signature.signatures[0].label;
         assert!(

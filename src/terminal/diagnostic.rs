@@ -264,7 +264,7 @@ mod tests {
     /// A located help states what is wrong at the location it points at, so its text belongs on the
     /// code a reader compares, not only in the headline.
     #[test]
-    fn located_help_keeps_its_text() {
+    fn located_help_draws_its_text() {
         let mut diagnostic = Diagnostic::at_location(
             COMPILE,
             Severity::Error,
@@ -314,7 +314,7 @@ mod tests {
     /// Escaping a source line for display never moves a caret: what replaces a control has the
     /// byte length of the character it hides, and a wide character keeps its width.
     #[test]
-    fn escapes_keep_every_caret_on_its_character() {
+    fn escapes_preserve_caret_offsets() {
         for line in ["let x = \"a\u{1b}z\";", "\"界\u{7}z\""] {
             let highlighted = line.find('z').expect("the excerpt marks `z`");
             let mut location = snippet(1, line);
@@ -351,8 +351,10 @@ mod tests {
 
     /// A failing hook's output is text Tola did not write: the drawn diagnostic drops the escape
     /// sequences that colored it and shows the carriage return it has instead of obeying it.
+    /// Text Tola did not write — a failing hook's stderr — reaches the reader without its
+    /// terminal controls, and a styled render adds none of its own for it.
     #[test]
-    fn hook_note_controls_stay_visible() {
+    fn foreign_note_text_loses_its_controls() {
         let diagnostic = Diagnostic::new(
             COMMAND,
             Severity::Error,
@@ -362,7 +364,6 @@ mod tests {
         .with_note(
             "stderr:\nplain-err fail\n\u{1b}[32mansi-err\u{1b}[0m\ncr-err cccc\rdddd\neeee\n",
         );
-
         let rendered = render(&diagnostic, None, false);
         assert!(
             !rendered.contains(['\u{1b}', '\r', '\u{7}']),
@@ -371,22 +372,13 @@ mod tests {
         assert!(rendered.contains("plain-err fail"), "{rendered:?}");
         assert!(rendered.contains("ansi-err"), "{rendered:?}");
         assert!(rendered.contains("cr-err cccc\\rdddd"), "{rendered:?}");
-    }
 
-    /// Only Tola's own styling reaches the terminal as an escape; the hook's text adds none.
-    #[test]
-    fn foreign_text_adds_no_raw_escape() {
-        let diagnostic = |note: &str| {
+        let note = |text: &str| {
             Diagnostic::new(COMMAND, Severity::Error, "the `styles` hook failed")
-                .with_note(note.to_owned())
+                .with_note(text.to_owned())
         };
-        let foreign = render(
-            &diagnostic("stderr:\n\u{1b}[32mansi-err\u{1b}[0m\n"),
-            None,
-            true,
-        );
-        let plain = render(&diagnostic("stderr:\nansi-err\n"), None, true);
-
+        let foreign = render(&note("stderr:\n\u{1b}[32mansi-err\u{1b}[0m\n"), None, true);
+        let plain = render(&note("stderr:\nansi-err\n"), None, true);
         assert!(
             plain.contains('\u{1b}'),
             "a styled render styles with escapes: {plain:?}"
@@ -394,95 +386,97 @@ mod tests {
         assert_eq!(foreign, plain, "{foreign:?}");
     }
 
+    /// A trace frame whose location spans many source lines draws as one marked line, and never
+    /// carries the note a shortened source excerpt gets.
     #[test]
-    fn multiline_trace_stays_compact() {
-        let mut diagnostic = Diagnostic::at_location(
-            COMPILE,
-            Severity::Error,
-            snippet(1, "#panic(\"missing home page\")"),
-            "missing home page",
-        );
-        let mut location = snippet(4, "#page-shell[");
-        location.column = Some(2);
-        location.range = Some(SourceRange {
-            start: SourcePosition {
-                line: 3,
-                character: 1,
-            },
-            end: SourcePosition {
-                line: 14,
-                character: 1,
-            },
-        });
-        location.source_lines.extend((5..15).map(|line| SourceLine {
-            line,
-            text: "  page body must stay out of the trace".to_owned(),
-            start_column: 0,
-            start_character: 0,
-            ends_line: true,
-            highlight: None,
-        }));
-        location.source_lines.push(SourceLine {
-            line: 15,
-            text: "]".to_owned(),
-            start_column: 0,
-            start_character: 0,
-            ends_line: true,
-            highlight: Some((0, 1)),
-        });
-        let frame = TraceFrame {
-            message: "while calling `page-shell`".to_owned(),
-            location: Some(location),
-        };
-        diagnostic.trace.extend([frame.clone(), frame]);
+    fn trace_truncates_to_one_line() {
+        {
+            let mut diagnostic = Diagnostic::at_location(
+                COMPILE,
+                Severity::Error,
+                snippet(1, "#panic(\"missing home page\")"),
+                "missing home page",
+            );
+            let mut location = snippet(4, "#page-shell[");
+            location.column = Some(2);
+            location.range = Some(SourceRange {
+                start: SourcePosition {
+                    line: 3,
+                    character: 1,
+                },
+                end: SourcePosition {
+                    line: 14,
+                    character: 1,
+                },
+            });
+            location.source_lines.extend((5..15).map(|line| SourceLine {
+                line,
+                text: "  page body must stay out of the trace".to_owned(),
+                start_column: 0,
+                start_character: 0,
+                ends_line: true,
+                highlight: None,
+            }));
+            location.source_lines.push(SourceLine {
+                line: 15,
+                text: "]".to_owned(),
+                start_column: 0,
+                start_character: 0,
+                ends_line: true,
+                highlight: Some((0, 1)),
+            });
+            let frame = TraceFrame {
+                message: "while calling `page-shell`".to_owned(),
+                location: Some(location),
+            };
+            diagnostic.trace.extend([frame.clone(), frame]);
 
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("page-shell[…]"), "{rendered}");
-        assert_eq!(
-            rendered.matches("while calling `page-shell`").count(),
-            2,
-            "{rendered}"
-        );
-        assert_eq!(rendered.matches("site.typ:4:1").count(), 2, "{rendered}");
-        assert!(!rendered.contains("page body"), "{rendered}");
-        assert!(
-            !rendered.contains("source excerpts are shortened"),
-            "{rendered}"
-        );
+            let rendered = render(&diagnostic, None, false);
+            assert!(rendered.contains("page-shell[…]"), "{rendered}");
+            assert_eq!(
+                rendered.matches("while calling `page-shell`").count(),
+                2,
+                "{rendered}"
+            );
+            assert_eq!(rendered.matches("site.typ:4:1").count(), 2, "{rendered}");
+            assert!(!rendered.contains("page body"), "{rendered}");
+            assert!(
+                !rendered.contains("source excerpts are shortened"),
+                "{rendered}"
+            );
+        }
+        {
+            let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page");
+            let mut location = snippet(3, "#🦊 + 页面[界👩‍💻e\u{301}\u{1b}");
+            location.column = Some(6);
+            location.range = Some(SourceRange {
+                start: SourcePosition {
+                    line: 2,
+                    character: 6,
+                },
+                end: SourcePosition {
+                    line: 20,
+                    character: 1,
+                },
+            });
+            diagnostic.trace.push(TraceFrame {
+                message: "while calling `页面`".to_owned(),
+                location: Some(location),
+            });
+
+            let rendered = render(&diagnostic, None, false);
+            assert!(rendered.contains("页面[界👩‍💻e\u{301}?…"), "{rendered}");
+            assert!(!rendered.contains("?…]"), "{rendered}");
+            assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
+            assert!(
+                !rendered.contains("source excerpts are shortened"),
+                "{rendered}"
+            );
+        }
     }
 
     #[test]
-    fn compact_trace_marks_missing_endpoint() {
-        let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page");
-        let mut location = snippet(3, "#🦊 + 页面[界👩‍💻e\u{301}\u{1b}");
-        location.column = Some(6);
-        location.range = Some(SourceRange {
-            start: SourcePosition {
-                line: 2,
-                character: 6,
-            },
-            end: SourcePosition {
-                line: 20,
-                character: 1,
-            },
-        });
-        diagnostic.trace.push(TraceFrame {
-            message: "while calling `页面`".to_owned(),
-            location: Some(location),
-        });
-
-        let rendered = render(&diagnostic, None, false);
-        assert!(rendered.contains("页面[界👩‍💻e\u{301}?…"), "{rendered}");
-        assert!(!rendered.contains("?…]"), "{rendered}");
-        assert!(!rendered.contains('\u{1b}'), "{rendered:?}");
-        assert!(
-            !rendered.contains("source excerpts are shortened"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn repeated_advice_keeps_distinct_locations() {
+    fn advice_locations_stay_distinct() {
         let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page")
             .with_note("the home page needs content")
             .with_note("the home page needs content");
@@ -581,21 +575,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_styling_follows_color_choice() {
-        let mut diagnostic = Diagnostic::new(COMPILE, Severity::Error, "missing page");
-        diagnostic.trace.push(TraceFrame {
-            message: "while calling `page`".into(),
-            location: Some(snippet(1, "#page[]")),
-        });
-        let styled = render(&diagnostic, None, true);
-        assert!(styled.contains('\u{1b}'), "{styled:?}");
-        let plain = render(&diagnostic, None, false);
-        assert!(!plain.contains('\u{1b}'), "{plain:?}");
-        assert!(plain.contains("site.typ:1:0"), "{plain}");
-    }
-
-    #[test]
-    fn anonymous_trace_keeps_location() {
+    fn anonymous_trace_shows_location() {
         let mut diagnostic = Diagnostic::at_location(
             COMPILE,
             Severity::Error,

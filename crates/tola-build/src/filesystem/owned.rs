@@ -102,48 +102,38 @@ mod tests {
         std::fs::write(path, "").unwrap();
     }
 
+    /// A site owns what an author reads: reserved build directories, a declared vendor tree,
+    /// ignored subtrees, and hidden entries never join the walk. Each row owns its own site, so
+    /// one exclusion cannot mask another.
     #[test]
-    fn reserved_directories_are_not_walked() {
-        let site = OwnedSiteConfig::new("");
-        let root = site.config.get_root();
-        for directory in ["target", "node_modules", INTERNAL_DIR, "public"] {
-            write_file(root, &format!("{directory}/page.typ"));
+    fn owned_files_exclude_non_author_paths() {
+        for excluded in [
+            "target/page.typ",
+            "node_modules/page.typ",
+            "public/page.typ",
+            &format!("{INTERNAL_DIR}/page.typ"),
+            ".draft.typ",
+            ".cache/value.typ",
+        ] {
+            let site = OwnedSiteConfig::new("");
+            write_file(site.config.get_root(), excluded);
+            assert_eq!(listed_files(&site), ["tola.toml"], "walked `{excluded}`");
         }
 
-        assert_eq!(listed_files(&site), ["tola.toml"]);
-    }
-
-    #[test]
-    fn declared_vendor_directory_is_not_walked() {
-        let site = OwnedSiteConfig::new(VENDORED_SITE_SOURCE);
+        let vendored = OwnedSiteConfig::new(VENDORED_SITE_SOURCE);
         write_file(
-            site.config.get_root(),
+            vendored.config.get_root(),
             "vendor/typst-packages/preview/demo/1.0.0/lib.typ",
         );
+        assert_eq!(listed_files(&vendored), ["tola.toml"], "walked vendor tree");
 
-        assert_eq!(listed_files(&site), ["tola.toml"]);
-    }
-
-    #[test]
-    fn author_ignore_files_exclude_what_they_list() {
-        let site = OwnedSiteConfig::new("");
-        let root = site.config.get_root();
+        let ignored = OwnedSiteConfig::new("");
+        let root = ignored.config.get_root();
         write_file(root, "drafts/page.typ");
         write_file(root, "scratch.typ");
         std::fs::write(root.join(".gitignore"), "drafts/\n").unwrap();
         std::fs::write(root.join(".ignore"), "scratch.typ\n").unwrap();
-
-        assert_eq!(listed_files(&site), ["tola.toml"]);
-    }
-
-    #[test]
-    fn hidden_entries_are_not_walked() {
-        let site = OwnedSiteConfig::new("");
-        let root = site.config.get_root();
-        write_file(root, ".draft.typ");
-        write_file(root, ".cache/value.typ");
-
-        assert_eq!(listed_files(&site), ["tola.toml"]);
+        assert_eq!(listed_files(&ignored), ["tola.toml"], "walked ignored path");
     }
 
     #[test]

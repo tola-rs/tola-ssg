@@ -114,25 +114,21 @@ mod tests {
         );
     }
 
+    /// The home prefix shortens to `~`.
     #[test]
-    fn paths_under_home_shorten_to_tilde() {
+    fn home_prefix_shortens_to_tilde() {
         let home = Path::new("/home/reader");
 
         assert_eq!(
             display_path_with_home(&home.join("site/index.typ"), Some(home)),
             format!("~/site{}index.typ", std::path::MAIN_SEPARATOR)
         );
-    }
-
-    #[test]
-    fn home_itself_renders_as_tilde() {
-        let home = Path::new("/home/reader");
-
         assert_eq!(display_path_with_home(home, Some(home)), "~");
     }
 
+    /// A path outside the home directory keeps its normalized spelling.
     #[test]
-    fn paths_outside_home_stay_unchanged() {
+    fn paths_outside_home_stay_normalized() {
         let home = Path::new("/home/reader");
 
         for outside in [

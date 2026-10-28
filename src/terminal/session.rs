@@ -715,6 +715,201 @@ mod tests {
         }
     }
 
+    /// The frame loop's input pump: a key release is not an event, an interrupted poll is
+    /// retried, end of input or a caller cancellation ends the view, and an empty poll reports
+    /// nothing.
+    #[test]
+    fn event_pump_answers_input_or_ends_view() {
+        fn release_then_key(terminal: &mut FakeTerminal) {
+            let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+            release.kind = KeyEventKind::Release;
+            terminal.events.push_back(Ok(Event::Key(release)));
+            terminal.events.push_back(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::NONE,
+            ))));
+        }
+        fn interrupted_then_key(terminal: &mut FakeTerminal) {
+            terminal
+                .events
+                .push_back(Err(io::Error::from(io::ErrorKind::Interrupted)));
+            terminal.events.push_back(Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('b'),
+                KeyModifiers::NONE,
+            ))));
+        }
+        fn end_of_input(terminal: &mut FakeTerminal) {
+            terminal
+                .events
+                .push_back(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
+        }
+        fn empty(terminal: &mut FakeTerminal) {
+            terminal.polls.push_back(Ok(false));
+        }
+        #[derive(PartialEq, Debug)]
+        enum Answer {
+            Key,
+            Nothing,
+            Cancelled,
+        }
+        for (label, script, cancelled, expected) in [
+            (
+                "release",
+                release_then_key as fn(&mut FakeTerminal),
+                false,
+                Answer::Key,
+            ),
+            ("interrupted poll", interrupted_then_key, false, Answer::Key),
+            ("end of input", end_of_input, false, Answer::Cancelled),
+            ("empty poll", empty, false, Answer::Nothing),
+            ("caller cancellation", empty, true, Answer::Cancelled),
+        ] {
+            let mut terminal = FakeTerminal::new();
+            script(&mut terminal);
+            let cancelled = || cancelled;
+            let answer = match next_event(&mut terminal, Duration::ZERO, &cancelled) {
+                Ok(Some(Event::Key(key))) => {
+                    assert_eq!(key.code, KeyCode::Char('b'), "{label}");
+                    Answer::Key
+                }
+                Ok(None) => Answer::Nothing,
+                Ok(Some(_)) => panic!("{label}: unexpected event"),
+                Err(error) => {
+                    assert!(error.downcast_ref::<InputCancelled>().is_some(), "{label}");
+                    Answer::Cancelled
+                }
+            };
+            assert_eq!(answer, expected, "{label}");
+        }
+    }
+
+    /// A surface that takes the pointer, and ends the view the way it was built to.
+    struct Mousey(Step);
+
+    impl Surface for Mousey {
+        fn draw(&mut self, _frame: &mut Frame, _palette: Palette) {}
+
+        fn answer(&mut self, _action: Action) -> Step {
+            self.0
+        }
+
+        fn live(&self) -> Vec<Action> {
+            vec![Action::Quit]
+        }
+
+        fn wants_mouse(&self) -> bool {
+            true
+        }
+    }
+
+    /// The pointer is captured only for a surface that asks for the wheel, and released however
+    /// the view ends.
+    #[test]
+    fn pointer_captured_only_for_wheel_surfaces() {
+        let _terminal = terminal();
+        #[derive(Clone, Copy, PartialEq)]
+        enum Surface {
+            WantsWheel,
+            Plain,
+        }
+        for (label, kind, ending, expected) in [
+            (
+                "wheel surface finishes",
+                Surface::WantsWheel,
+                Step::Done,
+                &[true, false][..],
+            ),
+            (
+                "wheel surface cancels",
+                Surface::WantsWheel,
+                Step::Cancel,
+                &[true, false][..],
+            ),
+            ("other surface", Surface::Plain, Step::Done, &[][..]),
+        ] {
+            let (sink, _output) = OutputSink::buffered();
+            let cancelled = || false;
+            let mut terminal = FakeTerminal::new().press(quit_key());
+            let result = match kind {
+                Surface::WantsWheel => {
+                    let mut surface = Mousey(ending);
+                    run(
+                        &mut terminal,
+                        &sink,
+                        Palette::new(false),
+                        &cancelled,
+                        &mut surface,
+                    )
+                }
+                Surface::Plain => {
+                    let mut surface = Answer(Step::Done);
+                    run(
+                        &mut terminal,
+                        &sink,
+                        Palette::new(false),
+                        &cancelled,
+                        &mut surface,
+                    )
+                }
+            };
+            match ending {
+                Step::Cancel => assert!(result.is_err(), "{label}"),
+                _ => assert_eq!(result.expect("the view ran"), Shown::Interactive, "{label}"),
+            }
+            assert_eq!(terminal.captures(), expected, "{label}");
+        }
+    }
+
+    /// A terminal that cannot host the view shows plain text and enters no mode; one that is
+    /// not interactive at all refuses the view.
+    #[test]
+    fn terminal_that_cannot_draw_shows_plain_text() {
+        let _terminal = terminal();
+        #[derive(Clone, Copy, PartialEq)]
+        enum Outcome {
+            Plain,
+            Refused,
+        }
+        for (label, interactive, drawable, size, expected) in [
+            ("dumb terminal", true, false, (80, 24), Outcome::Plain),
+            ("zero-sized window", true, true, (0, 0), Outcome::Plain),
+            ("not a terminal", false, true, (80, 24), Outcome::Refused),
+        ] {
+            let (sink, _output) = OutputSink::buffered();
+            let cancelled = || false;
+            let mut terminal = FakeTerminal::new();
+            terminal.interactive = interactive;
+            terminal.drawable = drawable;
+            terminal.size = size;
+            let mut surface = Titled {
+                title: Some("tola help - [site]".to_owned()),
+                next: None,
+            };
+            let result = run(
+                &mut terminal,
+                &sink,
+                Palette::new(false),
+                &cancelled,
+                &mut surface,
+            );
+            match expected {
+                Outcome::Plain => {
+                    assert_eq!(result.expect("the view ran"), Shown::Plain, "{label}");
+                    assert!(terminal.titles().is_empty(), "{label}");
+                    assert!(terminal.updates().is_empty(), "{label}");
+                }
+                Outcome::Refused => {
+                    let error = result.expect_err(label);
+                    assert!(
+                        matches!(error.downcast_ref(), Some(TerminalRefused::NotTerminal)),
+                        "{label}"
+                    );
+                }
+            }
+            assert!(terminal.calls().is_empty(), "{label}");
+        }
+    }
+
     #[test]
     fn failed_modes_are_released() {
         let _terminal = terminal();
@@ -762,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn window_title_follows_the_surface() {
+    fn title_matches_surface_title() {
         let _terminal = terminal();
         let (sink, _output) = OutputSink::buffered();
         let cancelled = || false;
@@ -794,52 +989,6 @@ mod tests {
     }
 
     #[test]
-    fn dumb_terminal_gets_no_title_and_no_frames() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut surface = Titled {
-            title: Some("tola help - [site]".to_owned()),
-            next: None,
-        };
-        let mut terminal = FakeTerminal::new();
-        terminal.drawable = false;
-        let result = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut surface,
-        );
-
-        assert_eq!(result.unwrap(), Shown::Plain);
-        assert!(
-            terminal.titles().is_empty(),
-            "nothing is drawn on a dumb terminal"
-        );
-        assert!(terminal.updates().is_empty());
-    }
-
-    /// A surface that takes the pointer, and ends the view the way it was built to.
-    struct Mousey(Step);
-
-    impl Surface for Mousey {
-        fn draw(&mut self, _frame: &mut Frame, _palette: Palette) {}
-
-        fn answer(&mut self, _action: Action) -> Step {
-            self.0
-        }
-
-        fn live(&self) -> Vec<Action> {
-            vec![Action::Quit]
-        }
-
-        fn wants_mouse(&self) -> bool {
-            true
-        }
-    }
-
-    #[test]
     fn abort_path_leaves_every_mode_it_could_have_entered() {
         let mut bytes = Vec::new();
         leave_commands(&mut bytes).unwrap();
@@ -858,67 +1007,6 @@ mod tests {
             text.contains("\x1b[?1049l"),
             "the alternate screen goes: {text:?}"
         );
-    }
-
-    #[test]
-    fn mouse_capture_wraps_runs_that_want_the_wheel() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut surface = Mousey(Step::Done);
-        let mut terminal = FakeTerminal::new().press(quit_key());
-        let result = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut surface,
-        );
-
-        assert_eq!(result.unwrap(), Shown::Interactive);
-        assert_eq!(
-            terminal.captures(),
-            [true, false],
-            "captured, then released"
-        );
-    }
-
-    #[test]
-    fn mouse_capture_releases_on_cancel() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut surface = Mousey(Step::Cancel);
-        let mut terminal = FakeTerminal::new().press(quit_key());
-        let result = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut surface,
-        );
-
-        assert!(result.is_err(), "a cancelled view reports cancellation");
-        assert_eq!(terminal.captures(), [true, false]);
-    }
-
-    #[test]
-    fn mouse_capture_stays_off_when_no_surface_asks() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut surface = Answer(Step::Done);
-        let mut terminal = FakeTerminal::new().press(quit_key());
-        let result = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut surface,
-        );
-
-        assert_eq!(result.unwrap(), Shown::Interactive);
-        assert!(terminal.captures().is_empty(), "the pointer is left alone");
     }
 
     #[test]
@@ -1038,66 +1126,6 @@ mod tests {
     }
 
     #[test]
-    fn no_terminal_refuses_the_view() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut terminal = FakeTerminal::new();
-        terminal.interactive = false;
-        let error = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut Answer(Step::Done),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref(),
-            Some(TerminalRefused::NotTerminal)
-        ));
-        assert!(terminal.calls().is_empty());
-    }
-
-    #[test]
-    fn dumb_terminals_show_plain_text() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut terminal = FakeTerminal::new();
-        terminal.drawable = false;
-        let shown = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut Answer(Step::Done),
-        )
-        .unwrap();
-        assert_eq!(shown, Shown::Plain);
-        assert!(terminal.calls().is_empty());
-    }
-
-    #[test]
-    fn zero_sized_windows_show_plain_text() {
-        let _terminal = terminal();
-        let (sink, _output) = OutputSink::buffered();
-        let cancelled = || false;
-        let mut terminal = FakeTerminal::new();
-        terminal.size = (0, 0);
-        let shown = run(
-            &mut terminal,
-            &sink,
-            Palette::new(false),
-            &cancelled,
-            &mut Answer(Step::Done),
-        )
-        .unwrap();
-        assert_eq!(shown, Shown::Plain);
-        assert!(terminal.calls().is_empty());
-    }
-
-    #[test]
     fn terminal_restore_frees_the_view() {
         let _terminal = terminal();
         let (sink, _output) = OutputSink::buffered();
@@ -1192,73 +1220,5 @@ mod tests {
             .expect("the parked writer ends")
             .expect("the parked write lands");
         assert!(String::from_utf8_lossy(&output.bytes()).contains("late"));
-    }
-
-    #[test]
-    fn key_releases_are_skipped() {
-        let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        release.kind = KeyEventKind::Release;
-        let mut terminal = FakeTerminal::new();
-        terminal.events.push_back(Ok(Event::Key(release)));
-        terminal.events.push_back(Ok(Event::Key(KeyEvent::new(
-            KeyCode::Char('b'),
-            KeyModifiers::NONE,
-        ))));
-        let cancelled = || false;
-        let event = next_event(&mut terminal, Duration::ZERO, &cancelled).unwrap();
-        assert!(matches!(
-            event,
-            Some(Event::Key(KeyEvent {
-                code: KeyCode::Char('b'),
-                ..
-            }))
-        ));
-    }
-
-    #[test]
-    fn interrupted_waits_are_retried() {
-        let mut terminal = FakeTerminal::new().press(KeyCode::Char('x'));
-        terminal
-            .polls
-            .push_back(Err(io::Error::from(io::ErrorKind::Interrupted)));
-        let cancelled = || false;
-        let event = next_event(&mut terminal, Duration::ZERO, &cancelled).unwrap();
-        assert!(matches!(
-            event,
-            Some(Event::Key(KeyEvent {
-                code: KeyCode::Char('x'),
-                ..
-            }))
-        ));
-    }
-
-    #[test]
-    fn closed_input_cancels_the_view() {
-        let mut terminal = FakeTerminal::new();
-        terminal
-            .events
-            .push_back(Err(io::Error::from(io::ErrorKind::UnexpectedEof)));
-        let cancelled = || false;
-        let error = next_event(&mut terminal, Duration::ZERO, &cancelled).unwrap_err();
-        assert!(error.downcast_ref::<InputCancelled>().is_some());
-    }
-
-    #[test]
-    fn empty_waits_return_nothing() {
-        let mut terminal = FakeTerminal::new();
-        let cancelled = || false;
-        assert!(
-            next_event(&mut terminal, Duration::ZERO, &cancelled)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn caller_cancellation_stops_the_wait() {
-        let mut terminal = FakeTerminal::new().press(KeyCode::Char('x'));
-        let cancelled = || true;
-        let error = next_event(&mut terminal, Duration::ZERO, &cancelled).unwrap_err();
-        assert!(error.downcast_ref::<InputCancelled>().is_some());
     }
 }

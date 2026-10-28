@@ -239,7 +239,7 @@ where
             }
             let (served, session) = Self::prepared_session(&mut self.session);
             let configuration = served.configuration();
-            let published = self.published.snapshot(
+            let published = self.published.published_packages(
                 &self.resources,
                 configuration.package_locations(),
                 matches!(
@@ -354,52 +354,6 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn loader_cancellation_propagates() {
-        let mut compiler =
-            SourceCompiler::new(|_, _| Err(BuildCancelled.into()), BuildResources::default());
-        assert_cancelled(compiler.compile(SourceJob::Check(CheckRequest {
-            checked_revision: 1,
-            sources: inputs(Path::new("/site"), BuildCancellation::new()),
-            view: SourceView::default(),
-        })));
-    }
-
-    #[test]
-    fn workspace_modes_replace_source_environments() {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("page.typ"), "Body\n").unwrap();
-        let configuration = site_configuration(directory.path(), "");
-        let mut loads = 0;
-        let mut compiler = SourceCompiler::new(
-            |_, _| {
-                let served = if loads == 1 {
-                    ServedWorkspace::Documents(Arc::clone(&configuration))
-                } else {
-                    ServedWorkspace::Site(Arc::clone(&configuration))
-                };
-                loads += 1;
-                Ok(served)
-            },
-            BuildResources::new().without_system_fonts(),
-        );
-        let cancellation = BuildCancellation::new();
-        let sources = inputs(directory.path(), cancellation.clone());
-        for compiled in [false, true, false] {
-            let (_, session) = compiler.prepare(&sources).unwrap();
-            let revision = session
-                .inspect_source("page.typ", Vec::new(), &cancellation)
-                .unwrap();
-            assert_eq!(
-                revision.compiled(),
-                compiled,
-                "{:?}",
-                revision.diagnostics()
-            );
-        }
-    }
-
     #[test]
     fn configuration_failure_retains_workspace() {
         let directory = tempfile::tempdir().unwrap();

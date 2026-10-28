@@ -129,23 +129,13 @@ mod tests {
         })
     }
 
+    /// The two variables, with `less` on `PATH` as the fallback, decide the pager: the first
+    /// present variable wins, and an empty, `cat`, or malformed value disables paging.
     #[test]
-    fn tola_pager_decides_before_pager() {
-        assert_eq!(
-            resolve(
-                Some(OsStr::new("more")),
-                Some(OsStr::new("less -S")),
-                Some(Path::new("/usr/bin/less")),
-            )
-            .unwrap(),
-            resolved("more", &[])
-        );
-    }
-
-    #[test]
-    fn empty_or_cat_variable_disables_paging() {
+    fn pager_resolution_follows_the_first_present_setting() {
         let less = Some(Path::new("/usr/bin/less"));
-        for value in ["", "  ", "cat", "/bin/cat", "cat -u"] {
+        let disabled = ["", "  ", "cat", "/bin/cat", "cat -u"];
+        for value in disabled {
             let configured = Some(OsStr::new(value));
             assert_eq!(
                 resolve(configured, None, less).unwrap(),
@@ -158,39 +148,19 @@ mod tests {
                 "PAGER={value:?}"
             );
         }
-    }
-
-    #[test]
-    fn bare_less_receives_documentation_arguments() {
-        assert_eq!(
-            resolve(Some(OsStr::new("less")), None, None).unwrap(),
-            resolved("less", LESS_ARGUMENTS)
-        );
-    }
-
-    #[test]
-    fn written_less_arguments_are_kept() {
-        assert_eq!(
-            resolve(Some(OsStr::new("less -S")), None, None).unwrap(),
-            resolved("less", &["-S"])
-        );
-    }
-
-    #[test]
-    fn unset_variables_use_path_less() {
-        assert_eq!(
-            resolve(None, None, Some(Path::new("/usr/bin/less"))).unwrap(),
-            resolved("/usr/bin/less", LESS_ARGUMENTS)
-        );
-    }
-
-    #[test]
-    fn missing_pager_leaves_stdout_unpaged() {
-        assert_eq!(resolve(None, None, None).unwrap(), None);
-    }
-
-    #[test]
-    fn malformed_preference_stops_pager_selection() {
+        for (tola_pager, pager, less, expected) in [
+            (Some("more"), Some("less -S"), less, resolved("more", &[])),
+            (None, Some("less -S"), None, resolved("less", &["-S"])),
+            (Some("less"), None, None, resolved("less", LESS_ARGUMENTS)),
+            (None, None, less, resolved("/usr/bin/less", LESS_ARGUMENTS)),
+            (None, None, None, None),
+        ] {
+            assert_eq!(
+                resolve(tola_pager.map(OsStr::new), pager.map(OsStr::new), less).unwrap(),
+                expected,
+                "{tola_pager:?} / {pager:?} / {less:?}"
+            );
+        }
         assert!(resolve(Some(OsStr::new("'pager")), Some(OsStr::new("less")), None).is_err());
     }
 

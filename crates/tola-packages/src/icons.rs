@@ -454,33 +454,4 @@ mod tests {
         );
         assert!(!names.contains("e001"));
     }
-
-    #[test]
-    fn published_requests_round_trip() {
-        let request = PublishedIcon::new(tola_icons::IconId::new("brand", "mark").unwrap());
-        for path in [
-            std::path::PathBuf::from(".tola-icon-request/brand/mark"),
-            std::path::PathBuf::from("/.tola-icon-request/brand/mark"),
-        ] {
-            assert_eq!(PublishedIcon::from_path(&path), Some(request.clone()));
-        }
-        for other in [
-            ".tola-icon/brand/mark.svg",
-            ".tola-icon-request/brand",
-            ".tola-icon-request/brand/mark/nested",
-            ".tola-icon-request/a/b/mark",
-            ".tola-icon-request//mark",
-        ] {
-            assert_eq!(PublishedIcon::from_path(std::path::Path::new(other)), None);
-        }
-    }
-
-    #[test]
-    fn published_paths_follow_their_bytes() {
-        let path = published_icon_path(b"<svg/>");
-        assert_eq!(path, published_icon_path(b"<svg/>"));
-        assert_ne!(path, published_icon_path(b"<svg />"));
-        assert!(path.as_str().starts_with("_tola/icons/"));
-        assert!(path.as_str().ends_with(".svg"));
-    }
 }

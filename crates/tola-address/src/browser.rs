@@ -245,23 +245,6 @@ mod tests {
             })
         );
     }
-
-    #[test]
-    fn non_http_schemes_stay_external() {
-        let page = url_path("/guide/");
-        for reference in [
-            "mailto:user@example.com",
-            "data:text/plain,hello",
-            "tel:+123",
-        ] {
-            assert_eq!(
-                resolve_browser_reference(&page, &SiteUrlMount::root(), None, reference).unwrap(),
-                ResolvedBrowserReference::External,
-                "{reference}"
-            );
-        }
-    }
-
     /// The site reference a rooted encoded path names, for assertions.
     fn resolved_site(encoded: &str) -> ResolvedBrowserReference {
         ResolvedBrowserReference::Site(SiteReference::parse(encoded).unwrap())

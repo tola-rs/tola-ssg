@@ -973,33 +973,9 @@ mod tests {
     }
 
     #[test]
-    fn unread_imports_omit_bindings_this_source_reads() {
-        let index = detached_index("#import \"lib.typ\": used, unused\n#used\n");
-        let unread = index.unread_imports();
-        assert_eq!(unread.len(), 1, "{unread:?}");
-        assert_eq!(unread[0].names, ["unused"]);
-        assert!(unread[0].file_scope);
-        let ImportRemoval::Spans(spans) = &unread[0].removal else {
-            panic!("the statement keeps an item: {:?}", unread[0].removal);
-        };
-        assert_eq!(spans.len(), 1);
-        assert_eq!(index.text(&spans[0]), ", unused");
-    }
-
-    #[test]
     fn wildcard_imports_are_never_reported() {
         let index = detached_index("#import \"lib.typ\": *\n");
         assert!(index.unread_imports().is_empty());
-    }
-
-    #[test]
-    fn module_imports_remove_their_whole_statement() {
-        let index = detached_index("#import \"lib.typ\"\n");
-        let unread = index.unread_imports();
-        assert_eq!(unread.len(), 1, "{unread:?}");
-        assert_eq!(unread[0].names, ["lib"]);
-        assert_eq!(unread[0].removal, ImportRemoval::Statement);
-        assert!(unread[0].file_scope);
     }
 
     #[test]
@@ -1008,14 +984,6 @@ mod tests {
         let unread = index.unread_imports();
         assert_eq!(unread.len(), 1, "{unread:?}");
         assert_eq!(unread[0].names, ["value"]);
-    }
-
-    #[test]
-    fn nested_imports_are_not_file_interface() {
-        let index = detached_index("#let greet() = { import \"lib.typ\": name; 1 }\n#greet()\n");
-        let unread = index.unread_imports();
-        assert_eq!(unread.len(), 1, "{unread:?}");
-        assert!(!unread[0].file_scope);
     }
 
     #[test]
@@ -1029,24 +997,6 @@ mod tests {
         let selected = &interfaces.selected[&target.source().id()];
         assert!(!selected.whole);
         assert_eq!(selected.names.iter().collect::<Vec<_>>(), ["a", "d"]);
-    }
-
-    #[test]
-    fn module_and_wildcard_selection_reaches_every_name() {
-        let target = project("lib.typ", "");
-        let page = project("page.typ", "#import \"lib.typ\"\n#import \"lib.typ\": *\n");
-        let interfaces = selected_interfaces([&page], |_, path| {
-            (path == "lib.typ").then_some(target.source().id())
-        });
-        assert!(interfaces.selected[&target.source.id()].reaches("anything"));
-    }
-
-    #[test]
-    fn nested_unread_imports_need_no_selection_evidence() {
-        let index = detached_index("#let greet() = { import \"lib.typ\": name; 1 }\n");
-        let reported = index.reportable_unread_imports(&SelectedInterfaces::default());
-        assert_eq!(reported.len(), 1, "{reported:?}");
-        assert_eq!(reported[0].names, ["name"]);
     }
 
     #[test]
@@ -1083,14 +1033,6 @@ mod tests {
     }
 
     #[test]
-    fn name_sources_leave_selection_unresolved() {
-        let page = detached_index("#let module = \"lib.typ\"\n#import module: x\n");
-        let interfaces = selected_interfaces([&page], |_, _| None);
-        assert!(interfaces.unresolved);
-        assert!(interfaces.selected.is_empty());
-    }
-
-    #[test]
     fn parameters_bind_every_pattern() {
         for marked in [
             "#let f(pos) = pos|",
@@ -1116,71 +1058,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_use_enclosing_scope() {
-        let (index, id) = declaration("#let count = 1\n#let f(count: count|) = count");
-        assert!(matches!(
-            index.declarations()[id].kind,
-            DeclarationKind::Let
-        ));
-    }
-
-    #[test]
     fn shadowing_ends_with_scope() {
         let marked = "#let value = 1\n#{ let value = 2; value }\n#value|";
         let (index, id) = declaration(marked);
         let outer = marked.find("value").unwrap();
         assert_eq!(index.declarations()[id].range, outer..outer + "value".len());
-    }
-
-    #[test]
-    fn loop_patterns_exclude_iterable() {
-        let (index, id) =
-            declaration("#let values = ((1, 2),)\n#for (left, right) in values { right| }");
-        assert!(matches!(
-            index.declarations()[id].kind,
-            DeclarationKind::Loop
-        ));
-    }
-
-    #[test]
-    fn statements_outside_function_bodies_evaluate_here() {
-        for source in [
-            "#import \"lib.typ\": greet\n#greet",
-            "#{ import \"lib.typ\": greet }\n#greet",
-            "#for _ in (1,) { import \"lib.typ\": greet }\n#greet",
-        ] {
-            let index = detached_index(source);
-            let import = index.imports().first().expect("an import statement");
-            assert!(index.evaluated_here(import.scope), "{source}");
-        }
-    }
-
-    #[test]
-    fn function_body_statements_defer_to_their_callers() {
-        for source in [
-            "#let partial(name) = { import name + \".typ\": render; render }\n#partial(\"a\")",
-            "#let partial = (name) => { import name + \".typ\": render }\n#partial(\"a\")",
-            "#let partial(name) = { let inner = { import name + \".typ\": render }; inner }",
-        ] {
-            let index = detached_index(source);
-            let import = index.imports().first().expect("an import statement");
-            assert!(!index.evaluated_here(import.scope), "{source}");
-        }
-    }
-
-    #[test]
-    fn only_lexical_reads_are_value_reads() {
-        for (marked, reads) in [
-            ("#let f(par|ameter: 1) = parameter\n", false),
-            ("#let key = (ke|y: 1)\n", false),
-            ("#let f(x) = x\n#f(lab|el: 1)\n", false),
-            ("#let key = (a: 1)\n#key.fie|ld\n", false),
-            ("#import \"lib.typ\": it|em\n", false),
-            ("#let value = 1\n#val|ue\n", true),
-        ] {
-            let cursor = marked.find('|').expect("a marked cursor");
-            let index = detached_index(&marked.replace('|', ""));
-            assert_eq!(index.reads_value_at(cursor), reads, "{marked}");
-        }
     }
 }

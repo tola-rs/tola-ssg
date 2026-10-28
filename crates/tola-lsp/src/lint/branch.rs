@@ -105,15 +105,38 @@ mod tests {
             )]
         );
     }
-
+    /// The construct that encloses a branch decides whether it is hinted: a loop encloses its
+    /// own head and body, a closure and a default expression are their own function.
     #[test]
-    fn loop_encloses_its_branches() {
-        assert!(source_messages("#for x in (1, 2) { if x == 1 { break } }\n").is_empty());
-        // A closure is its own function: the loop outside it does not enclose the branch.
-        assert_eq!(
-            source_messages("#for x in (1, 2) { let f = () => { break }; f() }\n").len(),
-            1
-        );
+    fn enclosing_construct_decides_the_hint() {
+        // Rows: (source, the hint it justifies, if any).
+        let cases = [
+            ("#for x in (1, 2) { if x == 1 { break } }\n", None),
+            (
+                "#for x in (1, 2) { let f = () => { break }; f() }\n",
+                Some(("editor.branch_outside_loop", "break")),
+            ),
+            ("#for x in { break; () } {\n}\n", None),
+            ("#while { false; break } {\n}\n", None),
+            ("#while { true; break } {\n}\n", None),
+            (
+                "#for x in (1, 2) {\n  let f = (a: { break }) => a\n}\n",
+                None,
+            ),
+            ("#let f() = { return 1 }\n#f()\n", None),
+            (
+                "#let outer() = {\n  let f = (a: { return }) => a\n}\n",
+                None,
+            ),
+        ];
+        for (text, expected) in cases {
+            let expected = expected.map(|(code, covered)| (code.to_owned(), covered.to_owned()));
+            let found: Vec<_> = findings(text);
+            match expected {
+                Some(one) => assert_eq!(found, [one], "{text:?}"),
+                None => assert!(found.is_empty(), "{text:?} justified {found:?}"),
+            }
+        }
     }
 
     #[test]
@@ -125,34 +148,5 @@ mod tests {
                 "move it into a function, or remove it".to_owned()
             )]
         );
-        assert!(source_messages("#let f() = { return 1 }\n#f()\n").is_empty());
-    }
-
-    #[test]
-    fn closure_default_break_belongs_to_the_loop() {
-        assert!(findings("#for x in (1, 2) {\n  let f = (a: { break }) => a\n}\n").is_empty());
-    }
-
-    #[test]
-    fn closure_default_return_belongs_to_the_function() {
-        assert!(findings("#let outer() = {\n  let f = (a: { return }) => a\n}\n").is_empty());
-        assert_eq!(
-            findings("#let f = (a: { return }) => a\n"),
-            [(
-                "editor.return_outside_function".to_owned(),
-                "return".to_owned()
-            )]
-        );
-    }
-
-    #[test]
-    fn loop_head_break_stays_with_the_loop() {
-        for text in [
-            "#for x in { break; () } {\n}\n",
-            "#while { false; break } {\n}\n",
-            "#while { true; break } {\n}\n",
-        ] {
-            assert!(findings(text).is_empty(), "{text:?}");
-        }
     }
 }

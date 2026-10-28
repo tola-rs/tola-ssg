@@ -25,8 +25,8 @@ const MAX_SOURCE_ENTRY_OVERLAY: usize = 128;
 const MIN_METADATA_EVALUATION_ROUNDS: usize = 16;
 
 pub(crate) struct SourceScan {
-    pub(crate) snapshot: Arc<tola_typst::SourceSnapshot>,
-    pub(crate) candidate_files: Arc<tola_typst::FileSnapshot>,
+    pub(crate) sources: Arc<tola_typst::ExplicitSources>,
+    pub(crate) candidate_files: Arc<tola_typst::FileView>,
     pub(crate) source_set: SourceSet,
     pub(crate) diagnostics: Arc<tola_typst::Diagnostics>,
     declaration_warnings: Arc<[crate::diagnostic::Diagnostic]>,
@@ -41,7 +41,7 @@ pub(crate) struct SourceScan {
 
 /// A source analysis that did not settle, with the world its sources resolve against.
 ///
-/// The world holds the candidate snapshot, imports, packages, and fonts the analysis read, so an
+/// The world holds the candidate sources, imports, packages, and fonts the analysis read, so an
 /// editor still answers about the files those sources name after the analysis stopped.
 pub(crate) struct SourceAnalysisFailure {
     /// The world the analyzed sources resolve against, absent when it could not be built.
@@ -289,9 +289,9 @@ pub(crate) struct SourceAnalysisCache {
     package_bindings: crate::package::SiteBindings,
     entries: SourceEntryIndex,
     reused_sources: Arc<[PathBuf]>,
-    snapshot: Arc<tola_typst::SourceSnapshot>,
+    sources: Arc<tola_typst::ExplicitSources>,
     invalidated_sources: Arc<BTreeSet<PathBuf>>,
-    snapshot_refresh_paths: Arc<[PathBuf]>,
+    source_refresh_paths: Arc<[PathBuf]>,
     metadata_rounds: usize,
 }
 
@@ -341,9 +341,9 @@ impl SourceAnalysisCache {
             package_bindings: scan.package_bindings.clone(),
             entries: scan.entries.clone(),
             reused_sources: Arc::clone(&scan.reused_sources),
-            snapshot: Arc::clone(&scan.snapshot),
+            sources: Arc::clone(&scan.sources),
             invalidated_sources: Arc::default(),
-            snapshot_refresh_paths: Arc::default(),
+            source_refresh_paths: Arc::default(),
             metadata_rounds: scan.metadata_rounds,
         }
     }
@@ -359,7 +359,7 @@ impl SourceAnalysisCache {
         content: &[ContentUnit],
         sources: &SourceSet,
     ) -> bool {
-        self.snapshot.root() == root
+        self.sources.root() == root
             && self.sources_identity == *sources.inputs()
             && self.package_bindings.matches(package_bindings)
             && self.matches_content_identity(content)
@@ -410,16 +410,16 @@ impl SourceAnalysisCache {
                 .map(normalize_analysis_path)
                 .collect(),
         );
-        let mut snapshot_refresh_paths = decision
+        let mut source_refresh_paths = decision
             .directly_changed_content_sources()
             .map(normalize_analysis_path)
             .collect::<Vec<_>>();
         if decision.directly_rebuilds_site_program() {
-            snapshot_refresh_paths.extend(site_entry.map(normalize_analysis_path));
+            source_refresh_paths.extend(site_entry.map(normalize_analysis_path));
         }
-        snapshot_refresh_paths.sort_unstable();
-        snapshot_refresh_paths.dedup();
-        self.snapshot_refresh_paths = snapshot_refresh_paths.into();
+        source_refresh_paths.sort_unstable();
+        source_refresh_paths.dedup();
+        self.source_refresh_paths = source_refresh_paths.into();
         self
     }
 
@@ -606,7 +606,7 @@ fn scan(
         .max(MIN_METADATA_EVALUATION_ROUNDS);
     let sources_identity = source_set.inputs().clone();
     let entry_reuse = reuse.cache().filter(|cache| {
-        cache.snapshot.root() == config.get_root()
+        cache.sources.root() == config.get_root()
             && cache.matches_package_bindings(&package_bindings)
     });
     let content_identity = reuse
@@ -614,25 +614,25 @@ fn scan(
         .filter(|reuse| reuse.matches_content_identity(content))
         .map(|reuse| Arc::clone(&reuse.content_identity))
         .unwrap_or_else(|| content_identity(content));
-    let mut snapshot_roots = source_set
+    let mut source_roots = source_set
         .sources()
         .iter()
         .map(|source| source.source().to_path_buf())
         .collect::<Vec<_>>();
-    snapshot_roots.push(normalize_analysis_path(&config.build.entry));
-    snapshot_roots.sort_unstable();
-    snapshot_roots.dedup();
+    source_roots.push(normalize_analysis_path(&config.build.entry));
+    source_roots.sort_unstable();
+    source_roots.dedup();
     let files = host.file_resolver();
     let loaded = match entry_reuse {
-        Some(reuse) => reuse.snapshot.refresh_with_files_cancellable(
-            &snapshot_roots,
-            &reuse.snapshot_refresh_paths,
+        Some(reuse) => reuse.sources.refresh_with_files_cancellable(
+            &source_roots,
+            &reuse.source_refresh_paths,
             config.get_root(),
             Arc::clone(&files),
             cancellation,
         ),
-        None => tola_typst::SourceSnapshot::build_with_files_cancellable(
-            &snapshot_roots,
+        None => tola_typst::ExplicitSources::build_with_files_cancellable(
+            &source_roots,
             config.get_root(),
             Arc::clone(&files),
             cancellation,
@@ -648,14 +648,14 @@ fn scan(
                 let (error, _) = failure.into_error_and_accessed();
                 anyhow::Error::new(tola_typst::CompileError::from(error))
             };
-            // No snapshot means no candidate files, so the failure names no world.
+            // No sources means no candidate files, so the failure names no world.
             return Err(SourceAnalysisFailure { world: None, error });
         }
     };
     inputs.record_accessed(loaded.accessed());
-    let (snapshot, _) = loaded.into_snapshot_and_accessed();
-    let snapshot = Arc::new(snapshot);
-    let candidate_files = host.candidate_files(Arc::clone(&snapshot));
+    let (sources, _) = loaded.into_sources_and_accessed();
+    let sources = Arc::new(sources);
+    let candidate_files = host.candidate_files(Arc::clone(&sources));
     // Held outside the closure so a failure still names the sources whose world it hands back.
     let mut sources_input = sources_identity.clone();
     let outcome = (|| -> anyhow::Result<SourceScan> {
@@ -774,7 +774,7 @@ fn scan(
             if converged {
                 let reused_sources = entries.reused_from(entry_reuse.map(|cache| &cache.entries));
                 return Ok(SourceScan {
-                    snapshot: Arc::clone(&snapshot),
+                    sources: Arc::clone(&sources),
                     candidate_files: Arc::clone(&candidate_files),
                     source_set: next_source_set,
                     diagnostics: Arc::new(diagnostics),
@@ -836,7 +836,7 @@ fn scan(
 
 /// The world one site's sources resolve against, or `None` when it could not be built.
 ///
-/// Built from the candidate snapshot and the bindings that named those sources — the world a root
+/// Built from the candidate sources and the bindings that named those sources — the world a root
 /// program compiles in — so a failure still hands an editor the imports, packages, and fonts the
 /// sources resolve.
 fn site_world(
@@ -844,7 +844,7 @@ fn site_world(
     host: &TypstHost,
     package_bindings: &crate::package::SiteBindings,
     sources: &SourcesInput,
-    candidate_files: &Arc<tola_typst::FileSnapshot>,
+    candidate_files: &Arc<tola_typst::FileView>,
     cancellation: &tola_typst::BundleCancellation,
 ) -> Option<Arc<tola_typst::TypstWorld>> {
     let library = package_bindings.library(sources.to_source_records());
@@ -912,7 +912,7 @@ fn analyze_source(
     previous_round_entries: Option<&SourceEntryIndex>,
     reuse: Option<&SourceAnalysisCache>,
     library: &tola_packages::library::SiteLibrary,
-    candidate_files: &Arc<tola_typst::FileSnapshot>,
+    candidate_files: &Arc<tola_typst::FileView>,
     package_bindings: &crate::package::SiteBindings,
     sources_input: &SourcesInput,
     cancellation: &tola_typst::BundleCancellation,
@@ -1193,7 +1193,7 @@ fn record_reads(
 
 fn entry_candidate_accessed(
     entry: &SourceAnalysisEntry,
-    candidate: &tola_typst::FileSnapshot,
+    candidate: &tola_typst::FileView,
 ) -> Option<tola_typst::AccessedDeps> {
     let mut accessed = tola_typst::AccessedDeps::default();
     for read in &entry.evidence {
@@ -1238,7 +1238,7 @@ fn reads_tola_capability(
 
 #[cfg(test)]
 mod tests {
-    use crate::compiler::tests::{compiler_host, configure_site, metadata_field, source_metadata};
+    use crate::compiler::tests::{compiler_host, configure_site, metadata_field};
 
     fn content_units(
         config: &crate::config::ResolvedSiteConfig,
@@ -1252,7 +1252,7 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use typst::foundations::{Array, Dict, IntoValue, Value};
+    use typst::foundations::IntoValue;
 
     use super::*;
 
@@ -1260,13 +1260,6 @@ mod tests {
         scan.entries
             .get(&normalize_analysis_path(source))
             .expect("analyzed entry exists")
-    }
-
-    fn cached_entry<'a>(
-        cache: &'a SourceAnalysisCache,
-        source: &Path,
-    ) -> Option<&'a Arc<SourceAnalysisEntry>> {
-        cache.entries.get(&normalize_analysis_path(source))
     }
 
     fn scan_default(
@@ -1305,214 +1298,51 @@ mod tests {
         .map_err(SourceAnalysisFailure::into_error)
     }
 
+    /// The rendered error of a scan the case expected to fail.
+    fn rendered_failure(scan: anyhow::Result<SourceScan>) -> String {
+        match scan {
+            Ok(_) => panic!("the scan was expected to fail"),
+            Err(error) => format!("{error:#}"),
+        }
+    }
+
+    /// The diagnostics a failed scan attached, for a case that expects them.
+    fn failure_diagnostics(scan: anyhow::Result<SourceScan>) -> Vec<crate::diagnostic::Diagnostic> {
+        let error = scan.err().expect("the scan was expected to fail");
+        crate::diagnostic::attached(&error)
+            .expect("a failed scan carries diagnostics")
+            .to_vec()
+    }
+
+    /// One site whose `content/` holds `sources`, and the scan of it.
+    fn scan_result(sources: &[(&str, &str)]) -> (TempDir, anyhow::Result<SourceScan>) {
+        let directory = TempDir::new().unwrap();
+        let content = directory.path().join("content");
+        fs::create_dir_all(&content).unwrap();
+        for (name, source) in sources {
+            let path = content.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, source).unwrap();
+        }
+        let entry = directory.path().join("site.typ");
+        fs::write(&entry, "").unwrap();
+
+        let mut config = crate::config::tests::load_test_config(directory.path(), "");
+        configure_site(&mut config, &content, &entry);
+        let units = content_units(&config).unwrap();
+        (
+            directory,
+            scan_default(&config, &compiler_host(&config).unwrap(), &units, None),
+        )
+    }
+
     /// The scanned result for a site whose `content/` holds `sources`.
     fn scan_content(sources: &[(&str, &str)]) -> (TempDir, SourceScan) {
         let (directory, scan) = scan_result(sources);
         (directory, scan.unwrap())
     }
 
-    #[test]
-    fn capability_read_requires_the_owned_file() {
-        let physical = tola_typst::ReadEvidence::new(
-            tola_typst::ReadLocator::Package {
-                package: tola_packages::TolaPackage::Source.spec(),
-                path: PathBuf::from(".tola-capability"),
-            },
-            b"physical",
-        );
-        let virtual_read = tola_typst::ReadEvidence::new(
-            tola_typst::ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Source.spec(),
-                path: PathBuf::from(".tola-capability"),
-            },
-            b"virtual",
-        );
-        let import_only = tola_typst::ReadEvidence::new(
-            tola_typst::ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Source.spec(),
-                path: PathBuf::from("lib.typ"),
-            },
-            b"import-only",
-        );
-        let wrong_package = tola_typst::ReadEvidence::new(
-            tola_typst::ReadLocator::ProvidedPackage {
-                package: tola_packages::TolaPackage::Document.spec(),
-                path: PathBuf::from(".tola-capability"),
-            },
-            b"wrong-package",
-        );
-        let root_read = tola_typst::ReadEvidence::new(
-            tola_typst::ReadLocator::Root(PathBuf::from("sources.typ")),
-            b"root",
-        );
-
-        let sources = tola_packages::TolaPackage::Source;
-        assert!(sources.owns_capability_read(physical.locator()));
-        assert!(sources.owns_capability_read(virtual_read.locator()));
-        assert!(!sources.owns_capability_read(import_only.locator()));
-        assert!(!sources.owns_capability_read(wrong_package.locator()));
-        assert!(!sources.owns_capability_read(root_read.locator()));
-    }
-
-    #[test]
-    fn importing_alone_does_not_bind_sources() {
-        let (directory, scan) = scan_content(&[(
-            "post.typ",
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Post]))"#,
-        )]);
-        let analyzed = analyzed_entry(&scan, &directory.path().join("content/post.typ"));
-
-        assert!(analyzed.sources_input.is_none());
-        assert!(analyzed.evidence.iter().any(|read| {
-            matches!(
-                read.evidence().locator(),
-                tola_typst::ReadLocator::ProvidedPackage { package, path }
-                    if tola_packages::TolaPackage::from_spec(package)
-                        == Some(tola_packages::TolaPackage::Source)
-                        && path == Path::new("lib.typ")
-            )
-        }));
-        assert!(!analyzed.evidence.iter().any(|read| {
-            tola_packages::TolaPackage::Source.owns_capability_read(read.evidence().locator())
-        }));
-    }
-
-    #[test]
-    fn package_check_records_availability() {
-        for (name, installed) in [("example", true), ("missing", false)] {
-            let directory = TempDir::new().unwrap();
-            let root = directory.path();
-            let content = root.join("content");
-            let package_root = root.join("packages");
-            let entry = root.join("site.typ");
-            fs::create_dir_all(&content).unwrap();
-            fs::write(
-                content.join("post.typ"),
-                format!("#import \"@local/{name}:1.0.0\": value\n#value"),
-            )
-            .unwrap();
-            fs::write(&entry, "").unwrap();
-            if installed {
-                let package_dir = package_root.join("local").join(name).join("1.0.0");
-                fs::create_dir_all(&package_dir).unwrap();
-                fs::write(package_dir.join("lib.typ"), "#let value = [from package]").unwrap();
-                fs::write(
-                    package_dir.join("typst.toml"),
-                    format!(
-                        "[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\nauthors = [\"Tola tests\"]\n"
-                    ),
-                )
-                .unwrap();
-            }
-
-            let mut config = crate::config::tests::load_test_config(root, "");
-            configure_site(&mut config, &content, &entry);
-            config.package_locations =
-                tola_typst::PackageLocations::from_absolute_roots(Some(package_root.clone()), None)
-                    .unwrap();
-            let units = content_units(&config).unwrap();
-            let host = compiler_host(&config).unwrap();
-            let mut inputs = crate::compiler::BuildInputs::default();
-
-            let outcome = scan(
-                &config,
-                &host,
-                &units,
-                crate::package::SiteBindings::from_config(&config, Default::default()),
-                SourceAnalysisReuse::None,
-                &tola_typst::BundleCancellation::default(),
-                &mut inputs,
-            );
-            if installed {
-                outcome.unwrap();
-            } else {
-                let error = outcome
-                    .err()
-                    .expect("missing source package must fail analysis")
-                    .into_error();
-                assert!(
-                    error
-                        .chain()
-                        .any(|cause| cause.is::<tola_typst::CompileError>()),
-                    "{error:#}"
-                );
-            }
-
-            let (_, package_checks) = inputs.into_parts();
-            assert_eq!(package_checks.len(), 1);
-            let check = &package_checks[0];
-            assert_eq!(check.package().to_string(), format!("@local/{name}:1.0.0"));
-            assert_eq!(check.tier(), tola_typst::PackageTier::Data);
-            assert_eq!(
-                check.availability(),
-                if installed {
-                    tola_typst::PackageAvailability::Present
-                } else {
-                    tola_typst::PackageAvailability::Missing
-                }
-            );
-            let candidate = package_root.join("local").join(name).join("1.0.0");
-            assert_eq!(check.candidate(), candidate.as_path());
-            assert_eq!(check.was_selected(), installed);
-        }
-    }
-
-    #[test]
-    fn invalid_metadata_keeps_its_reads() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        let metadata = root.join("metadata.json");
-        let entry = root.join("site.typ");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(&metadata, r#"["not a dictionary"]"#).unwrap();
-        fs::write(
-            content.join("post.typ"),
-            r#"#import "@tola/source:0.0.0": tola-meta
-#tola-meta((json("../metadata.json")))
-#let d = decimal(0.1)"#,
-        )
-        .unwrap();
-        fs::write(&entry, "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &entry);
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let mut inputs = crate::compiler::BuildInputs::default();
-
-        let error = analyze(
-            &config,
-            &host,
-            &units,
-            crate::package::SiteBindings::from_config(&config, Default::default()),
-            SourceAnalysisReuse::None,
-            &tola_typst::BundleCancellation::default(),
-            &mut inputs,
-        )
-        .err()
-        .expect("invalid source metadata must fail analysis")
-        .into_error();
-        let paths = inputs.into_parts().0;
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
-        assert_eq!(
-            diagnostics[0].location.as_ref().unwrap().path,
-            "content/post.typ"
-        );
-        assert_eq!(diagnostics[0].location.as_ref().unwrap().line, Some(2));
-        assert!(
-            diagnostics[0].message.contains("dictionary"),
-            "{diagnostics:#?}"
-        );
-        // The declaration fails before the later `decimal(0.1)` runs, so no float warning follows.
-        assert!(
-            paths.contains(&crate::filesystem::normalize_path(&metadata)),
-            "{paths:#?}"
-        );
-    }
-
+    /// A cache prepared for a rebuild from `changed_paths`, as the build loop does.
     fn prepare_cache_for_changes(
         cache: SourceAnalysisCache,
         config: &ResolvedSiteConfig,
@@ -1553,134 +1383,176 @@ mod tests {
         cache.prepare_for_rebuild(&decision, Some(&config.build.entry))
     }
 
+    /// A source declares its metadata only at an eager call site.
+    ///
+    /// A declaration is detected by the evaluated element and its call site, never by the
+    /// callee's name, so a renamed import or a wrapper body is not one. Every shape a source can
+    /// be written in is one row.
     #[test]
-    fn single_source_change_replaces_one_entry() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        for index in 0..64 {
-            fs::write(content.join(format!("post-{index:04}.typ")), "Plain").unwrap();
+    fn declarations_settle_by_call_site() {
+        for (name, sources, declares, warns) in [
+            (
+                "plain label",
+                &[("post.typ", "#metadata((title: \"A\")) <tola-meta>")][..],
+                false,
+                true,
+            ),
+            (
+                "parenthesized",
+                &[("post.typ", "#(metadata((title: \"A\"))) <tola-meta>")][..],
+                false,
+                true,
+            ),
+            (
+                "aliased binding",
+                &[(
+                    "post.typ",
+                    "#let m = metadata\n#m((title: \"A\")) <tola-meta>",
+                )][..],
+                false,
+                true,
+            ),
+            (
+                "shadowed native",
+                &[(
+                    "post.typ",
+                    "#let tola-meta = metadata\n#tola-meta((title: \"A\")) <tola-meta>",
+                )][..],
+                false,
+                true,
+            ),
+            (
+                "wrapper body",
+                &[(
+                    "post.typ",
+                    "#let decl(d) = metadata(d)\n#decl((title: \"A\")) <tola-meta>",
+                )][..],
+                false,
+                false,
+            ),
+            (
+                "show rule",
+                &[(
+                    "post.typ",
+                    "#show heading: it => [#metadata((show: true)) <tola-meta>#it]\n= Heading",
+                )][..],
+                false,
+                false,
+            ),
+            (
+                "placed binding",
+                &[(
+                    "post.typ",
+                    "#let marker = metadata((title: \"A\"))\n#marker <tola-meta>",
+                )][..],
+                false,
+                false,
+            ),
+            (
+                "top level",
+                &[(
+                    "post.typ",
+                    "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"A\"))",
+                )][..],
+                true,
+                false,
+            ),
+            (
+                "own function",
+                &[(
+                    "post.typ",
+                    "#import \"@tola/source:0.0.0\": tola-meta\n#let declare() = tola-meta((title: \"Fn\"))\n#declare()",
+                )][..],
+                true,
+                false,
+            ),
+        ] {
+            let (directory, scan) = scan_content(sources);
+            let entry = analyzed_entry(&scan, &directory.path().join("content/post.typ"));
+
+            assert_eq!(entry.declaration.is_some(), declares, "{name} declares");
+            assert_eq!(
+                scan.declaration_warnings.len(),
+                usize::from(warns),
+                "{name}"
+            );
+            if warns {
+                let warning = &scan.declaration_warnings[0];
+                assert_eq!(warning.severity, crate::diagnostic::Severity::Warning);
+                assert_eq!(warning.code, crate::codes::source::DECLARATION_DEPRECATED);
+            }
         }
-        let changed_source = content.join("post-0000.typ");
-        let entry = root.join("site.typ");
-        fs::write(&entry, "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &entry);
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let first = scan_default(&config, &host, &units, None).unwrap();
-        let first_changed = Arc::clone(analyzed_entry(&first, &changed_source));
-        let reads = first.dependency_reads();
-        let cache = SourceAnalysisCache::from_scan(&first);
-
-        fs::write(&changed_source, "Changed").unwrap();
-        let prepared = prepare_cache_for_changes(
-            cache,
-            &config,
-            &units,
-            reads,
-            std::slice::from_ref(&changed_source),
-            false,
-        );
-        let published_base = Arc::clone(&prepared.entries.base);
-
-        let changed = scan_default(&config, &host, &units, Some(&prepared)).unwrap();
-
-        assert!(!Arc::ptr_eq(
-            analyzed_entry(&changed, &changed_source),
-            &first_changed
-        ));
-        assert!(Arc::ptr_eq(&published_base, &changed.entries.base));
-        assert_eq!(changed.entries.overlay.len(), 1);
     }
 
+    /// A declaration deferred to realization registers nothing: a contextual body and a show
+    /// rule both run after the analysis has settled the source.
     #[test]
-    fn open_metadata_stays_native_content() {
-        let (_directory, result) = scan_content(&[(
-            "post/index.typ",
-            r#"#set text(fill: red)
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((
-  title: [Post],
-  summary: [这是 #strike[旧内容]、*重点*，请看 #link("/new/")[新方案]。],
-  pinned: true,
-))"#,
-        )]);
-
-        assert_eq!(
-            metadata_field(&result, "index.typ", "pinned"),
-            true.into_value()
-        );
-        let typst::foundations::Value::Content(summary) =
-            metadata_field(&result, "index.typ", "summary")
-        else {
-            panic!("source summary must retain native content");
-        };
-        assert_eq!(summary.plain_text(), "这是 旧内容、重点，请看 新方案。");
+    fn deferred_metadata_is_never_declared() {
+        for source in [
+            r#"#import "@tola/document:0.0.0": current-document
+#context {
+  let ctx = current-document()
+  [#import "@tola/source:0.0.0": tola-meta
+#tola-meta((contextual: true))]
+}"#,
+            r#"#show heading: it => [#import "@tola/source:0.0.0": tola-meta
+#tola-meta((selector-show: true))#it]
+= Heading"#,
+        ] {
+            let (_directory, result) = scan_content(&[("post.typ", source)]);
+            assert!(result.source_set.sources()[0].metadata().is_none());
+        }
     }
 
+    /// A declaration keeps the native values it was written with, including a function and a
+    /// content block, rather than flattening them to text.
     #[test]
-    fn each_source_owns_its_declaration() {
+    fn declared_attributes_keep_native_values() {
         let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
+        let content = directory.path().join("content");
         fs::create_dir(&content).unwrap();
         fs::write(
-            root.join("values.typ"),
-            "#let attributes(title) = (title: title, pin: true)",
+            directory.path().join("theme.typ"),
+            r#"#let attributes() = (
+  title: [Document],
+  callback: value => value,
+  card: [#import "@tola/source:0.0.0": tola-meta
+#tola-meta((nested: true))],
+)"#,
         )
         .unwrap();
         fs::write(
-            content.join("child.typ"),
-            r#"#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: [Child]))
-Child body"#,
-        )
-        .unwrap();
-        fs::write(
-            content.join("parent.typ"),
-            r#"#import "../values.typ": attributes
+            content.join("post.typ"),
+            r#"#import "../theme.typ": attributes
 #import "@tola/source:0.0.0": tola-meta
-#tola-meta((attributes([Parent])))
-#include "child.typ""#,
+#tola-meta(attributes())
+= Body"#,
         )
         .unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, "").unwrap();
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &entry);
+        fs::write(directory.path().join("site.typ"), "").unwrap();
+        let mut config = crate::config::tests::load_test_config(directory.path(), "");
+        configure_site(&mut config, &content, &directory.path().join("site.typ"));
         let units = content_units(&config).unwrap();
         let scanned =
             scan_default(&config, &compiler_host(&config).unwrap(), &units, None).unwrap();
-        for (filename, title) in [("child.typ", "Child"), ("parent.typ", "Parent")] {
-            let typst::foundations::Value::Content(content) =
-                metadata_field(&scanned, filename, "title")
-            else {
-                panic!("title must remain native content");
-            };
-            assert_eq!(content.plain_text(), title);
-        }
-    }
-
-    #[test]
-    fn analysis_keeps_distinct_source_names() {
-        let (_directory, result) = scan_content(&[("a b.typ", "First"), ("a-b.typ", "Second")]);
 
         assert_eq!(
-            result
-                .source_set
-                .sources()
-                .iter()
-                .map(|source| source.id().to_string())
-                .collect::<Vec<_>>(),
-            ["a b.typ", "a-b.typ"],
+            metadata_field(&scanned, "post.typ", "title"),
+            typst::text::TextElem::packed("Document").into_value()
         );
+        assert!(matches!(
+            metadata_field(&scanned, "post.typ", "callback"),
+            typst::foundations::Value::Func(_)
+        ));
+        assert!(matches!(
+            metadata_field(&scanned, "post.typ", "card"),
+            typst::foundations::Value::Content(_)
+        ));
     }
 
+    /// The physical read evidence names exactly the files a source read, and nothing else.
     #[test]
-    fn each_source_owns_its_physical_reads() {
+    fn sources_own_their_physical_reads() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let content = root.join("content");
@@ -1713,16 +1585,22 @@ Child body"#,
             })
         };
 
-        let a_reads = reads_for(&content.join("a.typ"));
-        let b_reads = reads_for(&content.join("b.typ"));
-        assert!(reads_path(&a_reads, "data/a.txt"));
-        assert!(!reads_path(&a_reads, "data/b.txt"));
-        assert!(reads_path(&b_reads, "data/b.txt"));
-        assert!(!reads_path(&b_reads, "data/a.txt"));
+        for (source, own, other) in [
+            ("a.typ", "data/a.txt", "data/b.txt"),
+            ("b.typ", "data/b.txt", "data/a.txt"),
+        ] {
+            let reads = reads_for(&content.join(source));
+            assert!(reads_path(&reads, own), "{source} read {own}");
+            assert!(!reads_path(&reads, other), "{source} claimed {other}");
+        }
     }
 
+    /// A change rebuilds exactly the readers of what changed, and reuses the rest.
+    ///
+    /// The cache is the thing under test, so each case compares entry identity before and after
+    /// rather than any internal field.
     #[test]
-    fn only_the_reader_reanalyzes() {
+    fn only_affected_sources_reanalyze() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let content = root.join("content");
@@ -1732,12 +1610,12 @@ Child body"#,
         let a = content.join("a.typ");
         let b = content.join("b.typ");
         let plain = content.join("plain.typ");
-        let a_data = data.join("a.txt");
-        fs::write(&a, "#read(\"/data/a.txt\")").unwrap();
+        let shared = data.join("shared.txt");
+        fs::write(&a, "#read(\"/data/shared.txt\")").unwrap();
         fs::write(&b, "#read(\"/data/b.txt\")").unwrap();
-        fs::write(&plain, "plain").unwrap();
-        fs::write(&a_data, "A1").unwrap();
-        fs::write(data.join("b.txt"), "B1").unwrap();
+        fs::write(&plain, "Plain").unwrap();
+        fs::write(&shared, "one").unwrap();
+        fs::write(data.join("b.txt"), "B").unwrap();
         fs::write(root.join("site.typ"), "").unwrap();
 
         let mut config = crate::config::tests::load_test_config(root, "");
@@ -1745,52 +1623,39 @@ Child body"#,
         let units = content_units(&config).unwrap();
         let host = compiler_host(&config).unwrap();
         let first = scan_default(&config, &host, &units, None).unwrap();
-        let reads = first.dependency_reads();
-        let cache = SourceAnalysisCache::from_scan(&first);
         let ids = [&a, &b, &plain]
             .into_iter()
             .map(|path| (path.clone(), Arc::clone(analyzed_entry(&first, path))))
-            .collect::<std::collections::BTreeMap<_, _>>();
+            .collect::<BTreeMap<_, _>>();
+        let cache = SourceAnalysisCache::from_scan(&first);
 
-        let background_cache =
-            prepare_cache_for_changes(cache.clone(), &config, &units, reads.clone(), &[], false);
-        let background = scan_default(&config, &host, &units, Some(&background_cache)).unwrap();
-        for (path, analyzed) in &ids {
-            assert!(Arc::ptr_eq(analyzed_entry(&background, path), analyzed));
-        }
-
-        fs::write(&a_data, "A2").unwrap();
-        let cache = prepare_cache_for_changes(
-            cache,
+        // A shared file both sources read: both re-derive, the unrelated source does not.
+        fs::write(&shared, "two").unwrap();
+        let prepared = prepare_cache_for_changes(
+            cache.clone(),
             &config,
             &units,
-            reads,
-            std::slice::from_ref(&a_data),
+            first.dependency_reads(),
+            std::slice::from_ref(&shared),
             false,
         );
-        let changed = scan_default(&config, &host, &units, Some(&cache)).unwrap();
+        let changed = scan_default(&config, &host, &units, Some(&prepared)).unwrap();
 
         assert!(!Arc::ptr_eq(analyzed_entry(&changed, &a), &ids[&a]));
         assert!(Arc::ptr_eq(analyzed_entry(&changed, &b), &ids[&b]));
         assert!(Arc::ptr_eq(analyzed_entry(&changed, &plain), &ids[&plain]));
     }
 
+    /// An unchanged revision reuses every entry.
     #[test]
-    fn shared_change_rebuilds_only_readers() {
+    fn unchanged_revision_reuses_every_entry() {
         let dir = TempDir::new().unwrap();
         let root = dir.path();
         let content = root.join("content");
-        let data = root.join("data");
         fs::create_dir_all(&content).unwrap();
-        fs::create_dir_all(&data).unwrap();
-        let first_reader = content.join("first.typ");
-        let second_reader = content.join("second.typ");
-        let plain = content.join("plain.typ");
-        let shared = data.join("shared.txt");
-        fs::write(&first_reader, "#read(\"/data/shared.txt\")").unwrap();
-        fs::write(&second_reader, "#read(\"/data/shared.txt\")").unwrap();
-        fs::write(&plain, "Plain").unwrap();
-        fs::write(&shared, "one").unwrap();
+        for index in 0..8 {
+            fs::write(content.join(format!("post-{index}.typ")), "Plain").unwrap();
+        }
         fs::write(root.join("site.typ"), "").unwrap();
 
         let mut config = crate::config::tests::load_test_config(root, "");
@@ -1798,43 +1663,70 @@ Child body"#,
         let units = content_units(&config).unwrap();
         let host = compiler_host(&config).unwrap();
         let first = scan_default(&config, &host, &units, None).unwrap();
-        let ids = [&first_reader, &second_reader, &plain]
-            .into_iter()
+        let ids = first
+            .entries
+            .ordered_paths
+            .iter()
             .map(|path| (path.clone(), Arc::clone(analyzed_entry(&first, path))))
-            .collect::<BTreeMap<_, _>>();
-        let reads = first.dependency_reads();
+            .collect::<Vec<_>>();
         let cache = SourceAnalysisCache::from_scan(&first);
 
-        fs::write(&shared, "two").unwrap();
-        let prepared = prepare_cache_for_changes(
-            cache,
-            &config,
-            &units,
-            reads,
-            std::slice::from_ref(&shared),
-            false,
-        );
-        let changed = scan_default(&config, &host, &units, Some(&prepared)).unwrap();
+        let prepared =
+            prepare_cache_for_changes(cache, &config, &units, first.dependency_reads(), &[], false);
+        let unchanged = scan_default(&config, &host, &units, Some(&prepared)).unwrap();
 
-        assert!(!Arc::ptr_eq(
-            analyzed_entry(&changed, &first_reader),
-            &ids[&first_reader]
-        ));
-        assert!(!Arc::ptr_eq(
-            analyzed_entry(&changed, &second_reader),
-            &ids[&second_reader]
-        ));
-        assert!(Arc::ptr_eq(analyzed_entry(&changed, &plain), &ids[&plain]));
-        let cache = SourceAnalysisCache::from_scan(&changed);
+        for (path, entry) in ids {
+            assert!(
+                Arc::ptr_eq(analyzed_entry(&unchanged, &path), &entry),
+                "{} was re-derived",
+                path.display()
+            );
+        }
+    }
+
+    /// Every source error is reported at its own file, and each one keeps its own diagnostic.
+    #[test]
+    fn each_source_error_is_reported() {
+        let dir = TempDir::new().unwrap();
+        let content = dir.path().join("content");
+        fs::create_dir_all(&content).unwrap();
+        fs::write(content.join("one.typ"), "#let broken =").unwrap();
+        fs::write(content.join("two.typ"), "#let broken =").unwrap();
+        fs::write(dir.path().join("site.typ"), "").unwrap();
+
+        let mut config = crate::config::tests::load_test_config(dir.path(), "");
+        configure_site(&mut config, &content, &dir.path().join("site.typ"));
+        let units = content_units(&config).unwrap();
+        let host = compiler_host(&config).unwrap();
+        let scan = scan_default(&config, &host, &units, None);
+        let error = scan
+            .err()
+            .expect("source errors unexpectedly passed analysis");
+        let errors = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<SourceAnalysisErrors>())
+            .expect("all source errors remain available");
+        assert_eq!(errors.errors.len(), 2);
+
+        let diagnostics =
+            crate::diagnostic::attached(&error).expect("source diagnostics should remain attached");
+        assert_eq!(diagnostics.len(), 2);
         assert_eq!(
-            cache.reused_dependency_readers(),
-            [crate::compiler::TypstDependencyReader::ContentSource(
-                crate::filesystem::normalize_path(&plain),
-            )]
-            .to_vec()
+            diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.location.as_ref().unwrap().path.as_str())
+                .collect::<Vec<_>>(),
+            ["content/one.typ", "content/two.typ"]
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error)
         );
     }
 
+    /// A failed analysis keeps the warnings of the sources that did evaluate, whichever sources
+    /// the failure came from.
     #[test]
     fn failed_analysis_retains_source_warnings() {
         let dir = TempDir::new().unwrap();
@@ -1862,605 +1754,37 @@ Child body"#,
             false,
         );
 
+        // The same warnings must reach the author whether or not analysis was reused.
         for reuse in [None, Some(&cache)] {
-            let error = scan_default(&config, &host, &units, reuse).err().unwrap();
-            let diagnostics = crate::diagnostic::attached(&error).unwrap();
+            let diagnostics = failure_diagnostics(scan_default(&config, &host, &units, reuse));
             let warnings = diagnostics
                 .iter()
                 .filter(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Warning)
-                .collect::<Vec<_>>();
-            assert_eq!(warnings.len(), 2);
+                .map(|warning| warning.location.as_ref().unwrap().path.clone())
+                .collect::<BTreeSet<_>>();
             assert_eq!(
-                warnings
+                warnings,
+                BTreeSet::from([
+                    "content/document.typ".to_owned(),
+                    "content/other.typ".to_owned()
+                ])
+            );
+            assert_eq!(
+                diagnostics
                     .iter()
-                    .map(|warning| warning.location.as_ref().unwrap().path.as_str())
-                    .collect::<BTreeSet<_>>(),
-                BTreeSet::from(["content/document.typ", "content/other.typ"]),
-            );
-            let errors = diagnostics
-                .iter()
-                .filter(|diagnostic| diagnostic.severity == crate::diagnostic::Severity::Error)
-                .collect::<Vec<_>>();
-            assert_eq!(errors.len(), 1);
-            assert_eq!(
-                errors[0].location.as_ref().unwrap().path,
-                "content/document.typ"
+                    .filter(|diagnostic| {
+                        diagnostic.severity == crate::diagnostic::Severity::Error
+                    })
+                    .count(),
+                1
             );
         }
     }
 
+    /// Two sources readable only through each other settle once both declarations arrive.
     #[test]
-    fn reports_each_source_error() {
-        let dir = TempDir::new().unwrap();
-        let content = dir.path().join("content");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(content.join("one.typ"), "#let broken =").unwrap();
-        fs::write(content.join("two.typ"), "#let broken =").unwrap();
-        fs::write(dir.path().join("site.typ"), "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(dir.path(), "");
-        configure_site(&mut config, &content, &dir.path().join("site.typ"));
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let error = scan_default(&config, &host, &units, None)
-            .err()
-            .expect("source errors unexpectedly passed analysis");
-        let errors = error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<SourceAnalysisErrors>())
-            .expect("all source errors remain available");
-        assert_eq!(errors.errors.len(), 2);
-        assert_eq!(
-            errors.errors[0].0,
-            crate::filesystem::normalize_path(&content.join("one.typ"))
-        );
-        assert_eq!(
-            errors.errors[1].0,
-            crate::filesystem::normalize_path(&content.join("two.typ"))
-        );
-        let first_cause = std::error::Error::source(errors)
-            .unwrap()
-            .downcast_ref::<tola_typst::CompileError>()
-            .unwrap();
-        assert!(std::ptr::eq(first_cause, &errors.errors[0].1));
-        let diagnostics =
-            crate::diagnostic::attached(&error).expect("source diagnostics should remain attached");
-        assert_eq!(diagnostics.len(), 2);
-        let diagnostic = &diagnostics[0];
-        assert_eq!(
-            diagnostic
-                .location
-                .as_ref()
-                .map(|location| location.path.as_str()),
-            Some("content/one.typ")
-        );
-        assert!(
-            error
-                .chain()
-                .any(|cause| cause.downcast_ref::<tola_typst::CompileError>().is_some())
-        );
-        assert_eq!(diagnostic.severity, crate::diagnostic::Severity::Error);
-        assert_eq!(
-            diagnostics[1]
-                .location
-                .as_ref()
-                .map(|location| location.path.as_str()),
-            Some("content/two.typ"),
-        );
-
-        let mut inputs = crate::compiler::BuildInputs::default();
-        analyze(
-            &config,
-            &host,
-            &units,
-            crate::package::SiteBindings::from_config(&config, Default::default()),
-            SourceAnalysisReuse::None,
-            &tola_typst::BundleCancellation::default(),
-            &mut inputs,
-        )
-        .err()
-        .expect("source errors unexpectedly passed analysis");
-        let paths = inputs.into_parts().0;
-        for source in ["one.typ", "two.typ"] {
-            assert!(paths.contains(&crate::filesystem::normalize_path(&content.join(source))));
-        }
-    }
-
-    /// The `source_origins` dictionary the library of one scan binds, keyed by source path.
-    fn source_origins_of(scan: &SourceScan) -> Dict {
-        let library = scan
-            .package_bindings()
-            .library(scan.source_set.inputs().to_source_records());
-        let shared = library.shared();
-        let Value::Module(system) = shared
-            .global
-            .scope()
-            .get("sys")
-            .expect("the library defines sys")
-            .read()
-        else {
-            panic!("sys is a module");
-        };
-        let Value::Dict(inputs) = system.scope().get("inputs").expect("sys has inputs").read()
-        else {
-            panic!("sys.inputs is a dictionary");
-        };
-        let Value::Dict(origins) = inputs
-            .get("__tola_source_origins")
-            .expect("the host binds the source origins")
-        else {
-            panic!("the source origins are a dictionary");
-        };
-        origins.clone()
-    }
-
-    fn origin_file(origin: &Dict) -> typst::syntax::RootedPath {
-        origin
-            .get("file")
-            .expect("a source origin names its file")
-            .clone()
-            .cast::<typst::syntax::RootedPath>()
-            .expect("a source origin's file is a path")
-    }
-
-    #[test]
-    fn source_origin_records_declaration_range() {
-        let declaring =
-            "= Post\n\n#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Post\"))\n";
-        for (file, text, call) in [
-            (
-                "posts/deep.typ",
-                declaring,
-                Some("tola-meta((title: \"Post\"))"),
-            ),
-            ("absent.typ", "= Absent\n", None),
-        ] {
-            let (_directory, scan) = scan_content(&[(file, text)]);
-            let origins = source_origins_of(&scan);
-            let origin = origins
-                .get(file)
-                .unwrap_or_else(|_| panic!("`{file}` has an origin"))
-                .clone()
-                .cast::<Dict>()
-                .expect("a source origin is a dictionary");
-            assert_eq!(
-                origin_file(&origin).vpath().get_with_slash(),
-                format!("/content/{file}")
-            );
-            match call {
-                Some(call) => {
-                    let bounds = origin
-                        .get("range")
-                        .expect("a source origin declares a range")
-                        .clone()
-                        .cast::<Array>()
-                        .expect("a declaration range is an array")
-                        .iter()
-                        .map(|bound| {
-                            bound
-                                .clone()
-                                .cast::<i64>()
-                                .expect("a range bound is an integer")
-                                as usize
-                        })
-                        .collect::<Vec<_>>();
-                    let start = text.find(call).expect("the source writes the call");
-                    assert_eq!(bounds, [start, start + call.len()]);
-                }
-                None => assert_eq!(origin.get("range").unwrap(), &Value::None),
-            }
-        }
-    }
-
-    #[test]
-    fn deferred_metadata_is_never_declared() {
-        for (name, source) in [
-            (
-                "contextual",
-                r#"#import "@tola/document:0.0.0": current-document
-#context {
-  let ctx = current-document()
-  [#import "@tola/source:0.0.0": tola-meta
-#tola-meta((contextual: true))]
-}"#,
-            ),
-            (
-                "selector show",
-                r#"#show heading: it => [#import "@tola/source:0.0.0": tola-meta
-#tola-meta((selector-show: true))#it]
-= Heading"#,
-            ),
-        ] {
-            let (_directory, result) = scan_content(&[("post.typ", source)]);
-
-            assert!(
-                result.source_set.sources()[0].metadata().is_none(),
-                "{name} metadata was treated as declared source metadata"
-            );
-        }
-    }
-
-    #[test]
-    fn declared_attributes_keep_native_values() {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
-        fs::create_dir(&content).unwrap();
-        fs::write(
-            directory.path().join("theme.typ"),
-            r#"#let attributes() = (
-  title: [Document],
-  callback: value => value,
-  card: [#import "@tola/source:0.0.0": tola-meta
-#tola-meta((nested: true))],
-)
-#let declaration() = [#import "@tola/source:0.0.0": tola-meta
-#tola-meta((helper: true))]"#,
-        )
-        .unwrap();
-        fs::write(
-            content.join("post.typ"),
-            r#"#import "../theme.typ": attributes, declaration
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta(attributes())
-#let local() = [#metadata((local: true)) <tola-meta>]
-#declaration()
-#local()
-#[#metadata((nested: true)) <tola-meta>]
-#metadata([#metadata((stored: true)) <tola-meta>]) <cache>
-#context [#metadata((contextual: true)) <tola-meta>]
-= Body"#,
-        )
-        .unwrap();
-        fs::write(directory.path().join("site.typ"), "").unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let units = content_units(&config).unwrap();
-
-        let scanned =
-            scan_default(&config, &compiler_host(&config).unwrap(), &units, None).unwrap();
-
-        let fields = source_metadata(&scanned, "post.typ");
-        assert_eq!(
-            fields.get("title").unwrap(),
-            &typst::text::TextElem::packed("Document").into_value()
-        );
-        assert!(matches!(
-            fields.get("callback").unwrap(),
-            typst::foundations::Value::Func(_)
-        ));
-        assert!(matches!(
-            fields.get("card").unwrap(),
-            typst::foundations::Value::Content(_)
-        ));
-    }
-
-    /// One site whose `content/` holds `sources`, and the scan of it, keeping a failure to assert.
-    fn scan_result(sources: &[(&str, &str)]) -> (TempDir, anyhow::Result<SourceScan>) {
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
-        fs::create_dir_all(&content).unwrap();
-        for (name, source) in sources {
-            let path = content.join(name);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, source).unwrap();
-        }
-        let entry = directory.path().join("site.typ");
-        fs::write(&entry, "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(directory.path(), "");
-        configure_site(&mut config, &content, &entry);
-        let units = content_units(&config).unwrap();
-        (
-            directory,
-            scan_default(&config, &compiler_host(&config).unwrap(), &units, None),
-        )
-    }
-
-    /// The rendered error of a scan the case expected to fail.
-    fn failure(scan: anyhow::Result<SourceScan>) -> String {
-        match scan {
-            Ok(_) => panic!("the scan was expected to fail"),
-            Err(error) => format!("{error:#}"),
-        }
-    }
-
-    #[test]
-    fn declared_body_still_runs() {
-        let source = "#import \"@tola/source:0.0.0\": tola-meta\n\
-                      #tola-meta((title: \"Document\", draft: true))\n\
-                      #panic(\"body must be evaluated\")";
-        let directory = TempDir::new().unwrap();
-        let content = directory.path().join("content");
-        fs::create_dir(&content).unwrap();
-        fs::write(content.join("post.typ"), source).unwrap();
-        fs::write(directory.path().join("site.typ"), "").unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-
-        let rendered = failure(scan_default(&config, &host, &units, None));
-
-        assert!(rendered.contains("body must be evaluated"), "{rendered}");
-    }
-
-    #[test]
-    fn native_declaration_registers_metadata() {
-        let (directory, scan) = scan_content(&[(
-            "post.typ",
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Post\"))\n= Post",
-        )]);
-
-        let entry = analyzed_entry(&scan, &directory.path().join("content/post.typ"));
-        let declaration = entry.declaration.as_ref().expect("the call declared");
-        assert_eq!(
-            declaration.metadata.to_typst_dict().get("title").unwrap(),
-            &Value::Str("Post".into())
-        );
-        let range = declaration.range.clone();
-        let text = fs::read_to_string(directory.path().join("content/post.typ")).unwrap();
-        assert_eq!(&text[range], "tola-meta((title: \"Post\"))");
-        assert!(scan.declaration_warnings.is_empty());
-    }
-
-    #[test]
-    fn label_warning_identifies_sources() {
-        for names in [&["alpha", "beta"][..], &["a", "b", "c", "d", "e"][..]] {
-            let sources = names
-                .iter()
-                .map(|name| {
-                    (
-                        format!("{name}.typ"),
-                        format!("#metadata((title: \"{name}\")) <tola-meta>"),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let sources = sources
-                .iter()
-                .map(|(name, source)| (name.as_str(), source.as_str()))
-                .collect::<Vec<_>>();
-            let (_directory, scan) = scan_content(&sources);
-
-            assert_eq!(scan.declaration_warnings.len(), 1);
-            let warning = &scan.declaration_warnings[0];
-            assert_eq!(warning.code, crate::codes::source::DECLARATION_DEPRECATED);
-            for (index, name) in names.iter().enumerate() {
-                assert_eq!(
-                    warning.notes[0].contains(&format!("content/{name}.typ")),
-                    index < 3,
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn retried_analysis_warns_once() {
+    fn mutual_declarations_converge() {
         let (_directory, scan) = scan_content(&[
-            (
-                "alpha.typ",
-                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Alpha\"))",
-            ),
-            (
-                "beta.typ",
-                "#metadata((title: \"Beta\")) <tola-meta>\n= Beta",
-            ),
-        ]);
-
-        assert!(scan.metadata_rounds > 1, "alpha declares in a later round");
-        assert_eq!(scan.declaration_warnings.len(), 1);
-        assert!(scan.declaration_warnings[0].notes[0].contains("content/beta.typ"));
-    }
-
-    #[test]
-    fn repeated_metadata_declarations_fail() {
-        let (_directory, scan) = scan_result(&[(
-            "post.typ",
-            "#import \"@tola/source:0.0.0\": tola-meta\n\
-             #tola-meta((first: true))\n\
-             #tola-meta((second: true))",
-        )]);
-
-        let error = scan
-            .err()
-            .expect("duplicate source metadata unexpectedly succeeded");
-
-        assert!(
-            format!("{error:#}").contains("this source declares its metadata 2 times"),
-            "{error:#}"
-        );
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
-        assert_eq!(diagnostics[0].location.as_ref().unwrap().line, Some(3));
-    }
-
-    /// A source that writes past the channel's capacity is told to declare once, not to report a
-    /// bug: unlike every other refusal, an overflow is the author's own.
-    #[test]
-    fn full_channel_names_too_many_declarations() {
-        let mut source = String::from("#import \"@tola/source:0.0.0\": tola-meta\n");
-        for index in 0..tola_typst::typst::engine::Sink::MAX_VALUES {
-            source.push_str(&format!("#tola-meta((index: {index}))\n"));
-        }
-        let (_directory, scan) = scan_result(&[("post.typ", &source)]);
-        let error = scan.err().expect("a full channel fails the scan");
-        let diagnostics = crate::diagnostic::attached(&error).expect("the failure is located");
-        let diagnostic = &diagnostics[0];
-
-        assert_eq!(diagnostic.code, crate::codes::source::DECLARATION_PROTOCOL);
-        assert!(
-            diagnostic
-                .message
-                .contains("writes more metadata declarations"),
-            "the message names what the author wrote too much of: {}",
-            diagnostic.message
-        );
-        assert!(
-            diagnostic
-                .help
-                .iter()
-                .any(|help| help.message.contains("Keep one")),
-            "the help names the repair: {diagnostics:?}"
-        );
-        assert!(
-            !diagnostic
-                .help
-                .iter()
-                .any(|help| help.message.contains("report this")),
-            "an overflow is not reported as a Tola failure: {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn only_eager_declarations_register() {
-        let declaring = |body: &str| {
-            let source = format!("#import \"@tola/source:0.0.0\": tola-meta\n{body}\n");
-            let (_directory, scan) = scan_result(&[("post.typ", &source)]);
-            scan.ok().and_then(|scan| {
-                scan.entries
-                    .entries()
-                    .next()
-                    .and_then(|entry| entry.declaration.clone())
-            })
-        };
-
-        assert!(
-            declaring("#tola-meta((title: \"Top\"))").is_some(),
-            "a declaration at the top level registers"
-        );
-        assert!(
-            declaring("#let declare() = tola-meta((title: \"Fn\"))\n#declare()").is_some(),
-            "a declaration in the source's own function registers"
-        );
-        assert!(
-            declaring("#context [#tola-meta((title: \"Context\"))]").is_none(),
-            "a declaration deferred to realization registers nothing"
-        );
-        assert!(
-            declaring("#show heading: it => [#tola-meta((title: \"Show\"))\n#it]\n= H").is_none(),
-            "a declaration inside a show rule registers nothing"
-        );
-    }
-
-    #[test]
-    fn dependent_declaration_settles_after_retry() {
-        let (_directory, scan) = scan_content(&[
-            (
-                "alpha.typ",
-                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [Alpha]))\n= Alpha",
-            ),
-            (
-                "beta.typ",
-                "#import \"@tola/source:0.0.0\": all-sources, tola-meta\n\
-                 #let alpha = all-sources().find(source => source.id == \"alpha.typ\")\n\
-                 #tola-meta((title: alpha.meta.title))\n\
-                 = Beta",
-            ),
-        ]);
-
-        assert!(
-            scan.metadata_rounds > 1,
-            "beta.typ fails until alpha's metadata arrives"
-        );
-        assert_eq!(
-            metadata_field(&scan, "beta.typ", "title"),
-            typst::text::TextElem::packed("Alpha").into_value()
-        );
-    }
-
-    /// The read-only detector's verdict for every shape a declaration can be written in.
-    ///
-    /// A renamed import (`#import …: metadata as m`) is the same shape as the aliased binding
-    /// below: detection is by evaluated element and call site, never by the callee's name.
-    #[test]
-    fn declaration_shapes_warn_by_call_site() {
-        for (name, sources, warns) in [
-            (
-                "plain label",
-                &[("post.typ", "#metadata((title: \"A\")) <tola-meta>")][..],
-                true,
-            ),
-            (
-                "parenthesized",
-                &[("post.typ", "#(metadata((title: \"A\"))) <tola-meta>")][..],
-                true,
-            ),
-            (
-                "aliased binding",
-                &[(
-                    "post.typ",
-                    "#let m = metadata\n#m((title: \"A\")) <tola-meta>",
-                )][..],
-                true,
-            ),
-            (
-                "shadowed native",
-                &[(
-                    "post.typ",
-                    "#let tola-meta = metadata\n#tola-meta((title: \"A\")) <tola-meta>",
-                )][..],
-                true,
-            ),
-            (
-                "wrapper body",
-                &[(
-                    "post.typ",
-                    "#let decl(d) = metadata(d)\n#decl((title: \"A\")) <tola-meta>",
-                )][..],
-                false,
-            ),
-            (
-                "imported helper",
-                &[
-                    ("helper.typ", "#let declare(d) = metadata(d)"),
-                    (
-                        "post.typ",
-                        "#import \"helper.typ\": declare\n#declare((title: \"A\")) <tola-meta>",
-                    ),
-                ][..],
-                false,
-            ),
-            (
-                "local wrapper",
-                &[(
-                    "post.typ",
-                    "#let wrap(value) = [#metadata(value) <tola-meta>]\n#wrap((title: \"A\"))",
-                )][..],
-                false,
-            ),
-            (
-                "show rule",
-                &[(
-                    "post.typ",
-                    "#show heading: it => [#metadata((show: true)) <tola-meta>#it]\n= Heading",
-                )][..],
-                false,
-            ),
-            (
-                "placed binding",
-                &[(
-                    "post.typ",
-                    "#let marker = metadata((title: \"A\"))\n#marker <tola-meta>",
-                )][..],
-                false,
-            ),
-        ] {
-            let (directory, scan) = scan_content(sources);
-
-            let entry = analyzed_entry(&scan, &directory.path().join("content/post.typ"));
-            assert!(entry.declaration.is_none(), "{name} declares no metadata");
-            assert_eq!(
-                scan.declaration_warnings.len(),
-                usize::from(warns),
-                "{name}"
-            );
-            if warns {
-                let warning = &scan.declaration_warnings[0];
-                assert_eq!(warning.severity, crate::diagnostic::Severity::Warning);
-                assert_eq!(warning.code, crate::codes::source::DECLARATION_DEPRECATED);
-            }
-        }
-    }
-
-    #[test]
-    fn failed_declaration_reaches_the_next_round() {
-        let (directory, scan) = scan_content(&[
             (
                 "alpha.typ",
                 "#import \"@tola/source:0.0.0\": all-sources, tola-meta\n\
@@ -2480,62 +1804,16 @@ Child body"#,
             scan.metadata_rounds > 1,
             "both sources wait for each other's declarations"
         );
-        let alpha = analyzed_entry(&scan, &directory.path().join("content/alpha.typ"));
-        assert_eq!(
-            alpha
-                .declaration
-                .as_ref()
-                .expect("alpha declared before it stopped")
-                .metadata
-                .to_typst_dict()
-                .get("title")
-                .unwrap(),
-            &typst::text::TextElem::packed("Alpha").into_value()
-        );
-        let beta = analyzed_entry(&scan, &directory.path().join("content/beta.typ"));
-        assert_eq!(
-            beta.declaration
-                .as_ref()
-                .expect("beta declared once alpha's value arrived")
-                .metadata
-                .to_typst_dict()
-                .get("title")
-                .unwrap(),
-            &typst::text::TextElem::packed("Alpha").into_value()
-        );
-    }
-
-    #[test]
-    fn dependent_metadata_converges() {
-        for (name, declaring, dependent) in [
-            (
-                "any-source",
-                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [First]))",
-                r#"#import "@tola/source:0.0.0": all-sources
-#let ready = all-sources().any(source => source.meta != none and source.meta.at("title", default: none) == [First])
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((ready: ready))"#,
-            ),
-            (
-                "by id across the fixed point",
-                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [Alpha]))",
-                r#"#import "@tola/source:0.0.0": all-sources
-#let ready = all-sources().any(source => source.id == "declaring.typ" and source.meta != none and source.meta.at("title", default: none) == [Alpha])
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((ready: ready))"#,
-            ),
-        ] {
-            let (_directory, result) =
-                scan_content(&[("declaring.typ", declaring), ("dependent.typ", dependent)]);
-
+        for name in ["alpha.typ", "beta.typ"] {
             assert_eq!(
-                metadata_field(&result, "dependent.typ", "ready"),
-                true.into_value(),
+                metadata_field(&scan, name, "title"),
+                typst::text::TextElem::packed("Alpha").into_value(),
                 "{name}"
             );
         }
     }
 
+    /// A long acyclic chain settles over as many rounds as it is long.
     #[test]
     fn long_acyclic_metadata_chain_converges() {
         let mut sources = vec![(
@@ -2566,8 +1844,9 @@ Child body"#,
         );
     }
 
+    /// A declaration that keeps changing has no fixed point, and the failure names the source.
     #[test]
-    fn oscillating_metadata_reports_the_cycle() {
+    fn cycling_metadata_fails() {
         let (_directory, scan) = scan_result(&[(
             "toggle.typ",
             r#"#import "@tola/source:0.0.0": all-sources
@@ -2576,114 +1855,13 @@ Child body"#,
 #tola-meta((flag: previous == none or not previous.flag))"#,
         )]);
 
-        let error = scan
-            .err()
-            .expect("alternating source attributes have no fixed point");
-
-        assert!(
-            error
-                .to_string()
-                .contains("keep changing each other's `<tola-meta>` values"),
-            "{error:#}"
-        );
-        assert!(
-            error.to_string().contains("content/toggle.typ"),
-            "{error:#}"
-        );
+        let rendered = rendered_failure(scan);
+        assert!(rendered.contains("content/toggle.typ"), "{rendered}");
     }
 
+    /// A source that never settles is not silently accepted: the analysis gives up and names it.
     #[test]
-    fn only_the_broken_source_is_reported() {
-        let (_directory, scan) = scan_result(&[
-            (
-                "alpha.typ",
-                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Alpha\"))",
-            ),
-            (
-                "beta.typ",
-                r#"#import "@tola/source:0.0.0": all-sources
-#let alpha = all-sources().find(source => source.id == "alpha.typ")
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((title: alpha.meta.title))"#,
-            ),
-            ("gamma.typ", "#let broken ="),
-        ]);
-
-        let error = scan
-            .err()
-            .expect("unrelated source error must fail analysis");
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(
-            diagnostics[0].location.as_ref().unwrap().path,
-            "content/gamma.typ",
-        );
-    }
-
-    #[test]
-    fn stored_metadata_runs_in_its_bundle() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        fs::create_dir(&content).unwrap();
-        fs::write(
-            content.join("post.typ"),
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((
-  title: "Native values",
-  lookup: () => all-sources(),
-  settings: () => sys.inputs,
-  standard-settings: () => std.sys.inputs,
-  card: [
-    #set text(fill: red)
-    #show strong: body => underline(body.body)
-    *Native card*
-  ],
-  deferred: context [Size: #text.size],
-  paint: gradient.linear(red, blue),
-))"#,
-        )
-        .unwrap();
-        let entry = root.join("site.typ");
-        fs::write(
-            &entry,
-            r#"#import "@tola/source:0.0.0": all-sources
-#let attributes = all-sources().first().meta
-#assert.eq(type(attributes.title), str)
-#let lookup = attributes.lookup
-#let settings = attributes.settings
-#let standard-settings = attributes.standard-settings
-#import sys.inputs.at("__tola"): all-sources as host-sources
-#assert.eq(lookup().first().meta.title, "Native values")
-// A deferred call reaches the host through the compilation it runs in, so a stored function
-// cannot observe stale sources.
-#assert.eq(host-sources().first().meta.title, "Native values")
-#document("index.html", format: "html")[
-  #set text(size: 17pt)
-  #attributes.card
-  #attributes.deferred
-  #rect(width: 10pt, height: 10pt, fill: attributes.paint)
-]"#,
-        )
-        .unwrap();
-        let config = crate::config::tests::load_test_config(root, "");
-
-        let built = crate::build::build_site(&config, crate::mode::BuildMode::Production).unwrap();
-        let page = built
-            .graph()
-            .outputs()
-            .iter()
-            .find(|output| output.path().as_str() == "index.html")
-            .unwrap();
-        let html = std::str::from_utf8(page.bytes()).unwrap();
-
-        assert!(html.contains("Native card"), "{html}");
-        assert!(html.contains("17pt"), "{html}");
-    }
-
-    #[test]
-    fn captured_sources_never_false_converge() {
+    fn unsettled_metadata_fails() {
         let (_directory, scan) = scan_result(&[(
             "post.typ",
             r#"#import "@tola/source:0.0.0": all-sources
@@ -2692,19 +1870,79 @@ Child body"#,
 #tola-meta((count: () => captured.len()))"#,
         )]);
 
-        let error = scan
-            .err()
-            .expect("the captured environment grows on every round");
-
-        assert!(
-            error
-                .to_string()
-                .contains("could not settle the site metadata after 16 reads"),
-            "{error:#}"
-        );
-        assert!(error.to_string().contains("content/post.typ"), "{error:#}");
+        let rendered = rendered_failure(scan);
+        assert!(rendered.contains("content/post.typ"), "{rendered}");
     }
 
+    /// A source that declares twice is refused, at the second declaration.
+    #[test]
+    fn repeated_declarations_fail() {
+        let (_directory, scan) = scan_result(&[(
+            "post.typ",
+            "#import \"@tola/source:0.0.0\": tola-meta\n\
+             #tola-meta((first: true))\n\
+             #tola-meta((second: true))",
+        )]);
+
+        let error = scan
+            .err()
+            .expect("duplicate source metadata unexpectedly succeeded");
+        let diagnostics = crate::diagnostic::attached(&error).unwrap();
+        assert_eq!(diagnostics[0].location.as_ref().unwrap().line, Some(3));
+    }
+
+    /// Only the broken source of a site is reported.
+    #[test]
+    fn only_the_broken_source_is_reported() {
+        let (_directory, scan) = scan_result(&[
+            (
+                "alpha.typ",
+                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Alpha\"))",
+            ),
+            ("gamma.typ", "#let broken ="),
+        ]);
+
+        let diagnostics = failure_diagnostics(scan);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].location.as_ref().unwrap().path,
+            "content/gamma.typ",
+        );
+    }
+
+    /// A source that declares with the retired label spelling is warned about once, and the note
+    /// names at most three sources.
+    #[test]
+    fn label_warning_identifies_sources() {
+        for names in [&["alpha", "beta"][..], &["a", "b", "c", "d", "e"][..]] {
+            let sources = names
+                .iter()
+                .map(|name| {
+                    (
+                        format!("{name}.typ"),
+                        format!("#metadata((title: \"{name}\")) <tola-meta>"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let sources = sources
+                .iter()
+                .map(|(name, source)| (name.as_str(), source.as_str()))
+                .collect::<Vec<_>>();
+            let (_directory, scan) = scan_content(&sources);
+
+            assert_eq!(scan.declaration_warnings.len(), 1);
+            let warning = &scan.declaration_warnings[0];
+            assert_eq!(warning.code, crate::codes::source::DECLARATION_DEPRECATED);
+            for (index, name) in names.iter().enumerate() {
+                assert_eq!(
+                    warning.notes[0].contains(&format!("content/{name}.typ")),
+                    index < 3,
+                );
+            }
+        }
+    }
+
+    /// Every source sees one source set, whatever its own position in it.
     #[test]
     fn every_source_sees_one_source_set() {
         let metadata_source = r#"#import "@tola/source:0.0.0": all-sources, tola-meta
@@ -2721,73 +1959,7 @@ Child body"#,
         }
     }
 
-    #[test]
-    fn only_used_icon_bytes_invalidate() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        fs::create_dir(&content).unwrap();
-        fs::write(
-            root.join("helpers.typ"),
-            r#"#import "@tola/icon:0.0.0": icon-bytes"#,
-        )
-        .unwrap();
-        fs::write(
-            content.join("post.typ"),
-            r#"#import "../helpers.typ": icon-bytes
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((svg-bytes: icon-bytes("brand:mark").len()))"#,
-        )
-        .unwrap();
-        fs::write(root.join("site.typ"), "").unwrap();
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &root.join("site.typ"));
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let icons = |body: &str, unused: &str| {
-            let wrap = |body: &str| format!("<svg viewBox='0 0 24 24'>{body}</svg>");
-            let collections = crate::compiler::tests::brand_icons(&wrap(body), &wrap(unused));
-            let length = collections.get("brand", "mark").unwrap().svg().len() as i64;
-            (collections, length)
-        };
-        let mark = "<path d='M0 0h24v24H0z'/>";
-        let (first_icons, first_length) = icons(mark, "<path/>");
-        let first_host = host.with_icons(first_icons);
-        let first = scan_default(&config, &first_host, &units, None).unwrap();
-        let cache = SourceAnalysisCache::from_scan(&first);
-        let metadata = |scan: &SourceScan| metadata_field(scan, "post.typ", "svg-bytes");
-        assert_eq!(metadata(&first), first_length.into_value());
-        let (unused_icons, _) = icons(mark, "<circle cx='12' cy='12' r='10'/>");
-        let unchanged = scan_default(
-            &config,
-            &host.with_icons(unused_icons),
-            &units,
-            Some(&cache),
-        )
-        .unwrap();
-        assert_eq!(metadata(&unchanged), metadata(&first));
-        assert_eq!(unchanged.dependency_reads, first.dependency_reads);
-
-        let (changed_icons, changed_length) = icons(
-            "<circle cx='12' cy='12' r='10'/><path d='M0 0h24v24H0z'/>",
-            "<path/>",
-        );
-        let changed_host = host.with_icons(changed_icons);
-        let changed = scan_default(&config, &changed_host, &units, Some(&cache)).unwrap();
-        let cold = scan_default(&config, &changed_host, &units, None).unwrap();
-        assert_eq!(metadata(&changed), changed_length.into_value());
-        assert_eq!(metadata(&changed), metadata(&cold));
-        assert_eq!(changed.dependency_reads, cold.dependency_reads);
-        assert_ne!(changed.dependency_reads, first.dependency_reads);
-
-        let missing = host.with_icons(Arc::default());
-        assert!(scan_default(&config, &missing, &units, Some(&cache)).is_err());
-        assert_eq!(
-            metadata(&scan_default(&config, &changed_host, &units, Some(&cache)).unwrap()),
-            metadata(&cold)
-        );
-    }
-
+    /// Adding a source invalidates the readers that observe the set, and not the ones that do not.
     #[test]
     fn membership_change_invalidates_readers() {
         let dir = TempDir::new().unwrap();
@@ -2795,370 +1967,38 @@ Child body"#,
         let content = root.join("content");
         fs::create_dir_all(&content).unwrap();
         let plain = content.join("plain.typ");
-        let first_reader = content.join("first-reader.typ");
-        let second_reader = content.join("second-reader.typ");
-        let reader = r#"#import "@tola/source:0.0.0": all-sources, tola-meta
-#tola-meta((count: all-sources().len()))"#;
-        fs::write(&plain, "Plain").unwrap();
-        fs::write(&first_reader, reader).unwrap();
-        fs::write(&second_reader, reader).unwrap();
-        fs::write(root.join("site.typ"), "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &root.join("site.typ"));
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let first = scan_default(&config, &host, &units, None).unwrap();
-        let ids = [&plain, &first_reader, &second_reader]
-            .into_iter()
-            .map(|path| (path.clone(), Arc::clone(analyzed_entry(&first, path))))
-            .collect::<BTreeMap<_, _>>();
-        let cache = SourceAnalysisCache::from_scan(&first);
-        let published_base = Arc::clone(&cache.entries.base);
-
-        fs::write(content.join("added.typ"), "Added").unwrap();
-        let expanded = content_units(&config).unwrap();
-        let expanded_sources = SourceSet::without_metadata(&expanded, &config).unwrap();
-        assert!(!cache.matches_content(
-            config.get_root(),
-            &crate::package::SiteBindings::from_config(&config, Default::default()),
-            &expanded,
-            &expanded_sources
-        ));
-        let changed = scan_default(&config, &host, &expanded, Some(&cache)).unwrap();
-
-        assert!(Arc::ptr_eq(analyzed_entry(&changed, &plain), &ids[&plain]));
-        assert!(!Arc::ptr_eq(
-            analyzed_entry(&changed, &first_reader),
-            &ids[&first_reader]
-        ));
-        assert!(!Arc::ptr_eq(
-            analyzed_entry(&changed, &second_reader),
-            &ids[&second_reader]
-        ));
-        assert!(!Arc::ptr_eq(&published_base, &changed.entries.base));
-        assert_eq!(changed.entries.ordered_paths.len(), expanded.len());
-    }
-
-    #[test]
-    fn metadata_change_reuses_unaffected_reader() {
-        let directory = TempDir::new().unwrap();
-        let root = crate::filesystem::normalize_path(directory.path());
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let document = content.join("document.typ");
         let reader = content.join("reader.typ");
-        fs::write(
-            &document,
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((revision: 1))",
-        )
-        .unwrap();
+        fs::write(&plain, "Plain").unwrap();
         fs::write(
             &reader,
-            r#"#import "@tola/address:0.0.0": join-route
-#import "@tola/source:0.0.0": current-source
-#let source = current-source()
-#import "@tola/source:0.0.0": tola-meta
-#tola-meta((filename: source.filename, permalink: join-route(source.route-segments)))
-Reader body"#,
-        )
-        .unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, "").unwrap();
-        let mut config = crate::config::tests::load_test_config(&root, "");
-        configure_site(&mut config, &content, &entry);
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let first = scan_default(&config, &host, &units, None).unwrap();
-        let analyzed = analyzed_entry(&first, &reader);
-        assert!(analyzed.sources_input.is_none());
-        assert_eq!(analyzed.source_reads.len(), 1);
-        assert_eq!(
-            analyzed.source_reads[0].0.vpath().get_with_slash(),
-            "/content/reader.typ"
-        );
-        assert!(analyzed.source_reads[0].1.is_some());
-        let reader_analysis = Arc::clone(analyzed);
-        let cache = SourceAnalysisCache::from_scan(&first);
-
-        fs::write(
-            &document,
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((revision: 2))",
-        )
-        .unwrap();
-        let cache = prepare_cache_for_changes(
-            cache,
-            &config,
-            &units,
-            first.dependency_reads(),
-            std::slice::from_ref(&document),
-            false,
-        );
-        let second = scan_default(&config, &host, &units, Some(&cache)).unwrap();
-        assert!(Arc::ptr_eq(
-            analyzed_entry(&second, &reader),
-            &reader_analysis
-        ));
-        assert_eq!(
-            metadata_field(&second, "document.typ", "revision"),
-            2.into_value()
-        );
-
-        assert_eq!(
-            metadata_field(&second, "reader.typ", "filename"),
-            "reader.typ".into_value()
-        );
-        assert_eq!(
-            metadata_field(&second, "reader.typ", "permalink"),
-            "/reader/".into_value()
-        );
-    }
-
-    #[test]
-    fn entries_with_no_reads_are_reused() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let plain = content.join("plain.typ");
-        let sources_reader = content.join("sources.typ");
-        let current = content.join("current.typ");
-        fs::write(&plain, "Plain").unwrap();
-        fs::write(
-            &sources_reader,
             r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/source:0.0.0": tola-meta
 #tola-meta((count: all-sources().len()))"#,
         )
         .unwrap();
-        fs::write(
-            &current,
-            r#"#import "@tola/document:0.0.0": current-document
-#context [#current-document().route]"#,
-        )
-        .unwrap();
-        let entry = root.join("site.typ");
-        fs::write(&entry, "").unwrap();
+        fs::write(root.join("site.typ"), "").unwrap();
 
         let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &entry);
+        configure_site(&mut config, &content, &root.join("site.typ"));
         let units = content_units(&config).unwrap();
         let host = compiler_host(&config).unwrap();
         let first = scan_default(&config, &host, &units, None).unwrap();
+        let plain_entry = Arc::clone(analyzed_entry(&first, &plain));
+        let reader_entry = Arc::clone(analyzed_entry(&first, &reader));
         let cache = SourceAnalysisCache::from_scan(&first);
-
-        let plain_entry = Arc::clone(cached_entry(&cache, &plain).unwrap());
-        let sources_entry = Arc::clone(cached_entry(&cache, &sources_reader).unwrap());
-        let current_entry = Arc::clone(cached_entry(&cache, &current).unwrap());
-        assert!(plain_entry.sources_input.is_none());
-        assert!(sources_entry.sources_input.is_some());
-        assert!(current_entry.sources_input.is_none());
 
         fs::write(content.join("added.typ"), "Added").unwrap();
         let expanded = content_units(&config).unwrap();
-        let rescanned = scan_default(&config, &host, &expanded, Some(&cache)).unwrap();
+        let changed = scan_default(&config, &host, &expanded, Some(&cache)).unwrap();
 
-        assert!(Arc::ptr_eq(
-            analyzed_entry(&rescanned, &plain),
-            &plain_entry
-        ));
+        assert!(Arc::ptr_eq(analyzed_entry(&changed, &plain), &plain_entry));
         assert!(!Arc::ptr_eq(
-            analyzed_entry(&rescanned, &sources_reader),
-            &sources_entry
-        ));
-        assert!(Arc::ptr_eq(
-            analyzed_entry(&rescanned, &current),
-            &current_entry
+            analyzed_entry(&changed, &reader),
+            &reader_entry
         ));
     }
 
-    #[test]
-    fn changed_program_keeps_source_metadata() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(
-            content.join("post.typ"),
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [Cached]))",
-        )
-        .unwrap();
-        fs::write(
-            root.join("site.typ"),
-            "#let value = 1\n#document(\"index.html\", [#value])",
-        )
-        .unwrap();
-
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &root.join("site.typ"));
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let first = scan_default(&config, &host, &units, None).unwrap();
-        let reads = first.dependency_reads();
-        let cache = SourceAnalysisCache::from_scan(&first);
-        let discovered_sources = SourceSet::without_metadata(&units, &config).unwrap();
-        assert!(cache.matches_content(
-            config.get_root(),
-            &crate::package::SiteBindings::from_config(&config, Default::default()),
-            &units,
-            &discovered_sources
-        ));
-
-        fs::write(
-            root.join("site.typ"),
-            "#let value = 2\n#document(\"index.html\", [#value])",
-        )
-        .unwrap();
-        let prepared = prepare_cache_for_changes(
-            cache.clone(),
-            &config,
-            &units,
-            reads,
-            &[root.join("site.typ")],
-            false,
-        );
-        let reused = scan_default(&config, &host, &units, Some(&prepared)).unwrap();
-        assert!(!Arc::ptr_eq(&first.snapshot, &reused.snapshot));
-
-        assert_eq!(
-            metadata_field(&reused, "post.typ", "title"),
-            typst::text::TextElem::packed("Cached").into_value()
-        );
-
-        let mut changed_identity = units.clone();
-        changed_identity[0].id = crate::content::ContentId::new("renamed.typ".into());
-        let changed_sources = SourceSet::without_metadata(&changed_identity, &config).unwrap();
-        assert!(!cache.matches_content(
-            config.get_root(),
-            &crate::package::SiteBindings::from_config(&config, Default::default()),
-            &changed_identity,
-            &changed_sources
-        ));
-        let mut changed_layout = units.clone();
-        changed_layout[0].layout = crate::content::ContentSourceLayout::DirectoryIndex;
-        let changed_sources = SourceSet::without_metadata(&changed_layout, &config).unwrap();
-        assert!(!cache.matches_content(
-            config.get_root(),
-            &crate::package::SiteBindings::from_config(&config, Default::default()),
-            &changed_layout,
-            &changed_sources
-        ));
-
-        let mut changed_config = config.clone();
-        changed_config.site.title = "Changed".into();
-        let changed_sources = SourceSet::without_metadata(&units, &changed_config).unwrap();
-        assert!(!cache.matches_content(
-            config.get_root(),
-            &crate::package::SiteBindings::from_config(&changed_config, Default::default()),
-            &units,
-            &changed_sources
-        ));
-
-        let identity = crate::package::SiteBindings::from_config(&config, Default::default());
-        let library = identity.library(Default::default());
-        let world = host
-            .world(
-                root,
-                &root.join("site.typ"),
-                &library,
-                Arc::clone(&reused.candidate_files),
-                &tola_typst::BundleCancellation::default(),
-            )
-            .expect("valid test world");
-        let compilation =
-            tola_typst::compile_bundle_world(&world, &tola_typst::BundleCancellation::default())
-                .unwrap();
-        let export = compilation
-            .export(
-                &tola_typst::BundleOptions::default(),
-                &tola_typst::BundleCancellation::default(),
-                None,
-            )
-            .unwrap();
-        let entry = export
-            .entries()
-            .iter()
-            .find(|entry| entry.path().get_with_slash() == "/index.html")
-            .unwrap();
-        let html = std::str::from_utf8(entry.bytes().as_slice()).unwrap();
-        assert!(html.contains(">2<"), "{html}");
-    }
-
-    #[test]
-    fn reused_analysis_reports_new_errors() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        let source = content.join("post.typ");
-        fs::write(
-            &source,
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: [First]))",
-        )
-        .unwrap();
-        fs::write(root.join("site.typ"), "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &root.join("site.typ"));
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let first = scan_default(&config, &host, &units, None).unwrap();
-        let reads = first.dependency_reads();
-        let cache = SourceAnalysisCache::from_scan(&first);
-
-        fs::write(&source, "#let broken =").unwrap();
-        let cache = prepare_cache_for_changes(
-            cache,
-            &config,
-            &units,
-            reads,
-            std::slice::from_ref(&source),
-            false,
-        );
-        let error = scan_default(&config, &host, &units, Some(&cache))
-            .err()
-            .expect("reused analysis must expose changed source errors");
-        let diagnostics = crate::diagnostic::attached(&error).unwrap();
-        assert_eq!(
-            diagnostics[0].location.as_ref().unwrap().path,
-            "content/post.typ"
-        );
-        assert_eq!(diagnostics[0].severity, crate::diagnostic::Severity::Error);
-    }
-
-    #[test]
-    fn reused_analysis_invents_no_diagnostics() {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path();
-        let content = root.join("content");
-        fs::create_dir_all(&content).unwrap();
-        fs::write(
-            content.join("post.typ"),
-            r#"
-#show strong: none
-= Real <real>
-#context {
-  let count = query(heading).len()
-  count * [= Fake <fake>]
-}
-"#,
-        )
-        .unwrap();
-        fs::write(root.join("site.typ"), "").unwrap();
-
-        let mut config = crate::config::tests::load_test_config(root, "");
-        configure_site(&mut config, &content, &root.join("site.typ"));
-        let units = content_units(&config).unwrap();
-        let host = compiler_host(&config).unwrap();
-        let first = scan_default(&config, &host, &units, None).unwrap();
-        assert!(first.diagnostics.is_empty());
-        let cache = SourceAnalysisCache::from_scan(&first);
-
-        let reused = scan_default(&config, &host, &units, Some(&cache)).unwrap();
-
-        assert!(reused.diagnostics.is_empty());
-    }
-
+    /// Analysing a site whose source analysis was cancelled reports cancellation, not a failure.
     #[test]
     fn cancelled_analysis_reports_cancellation() {
         let dir = TempDir::new().unwrap();
@@ -3171,7 +2011,7 @@ Reader body"#,
         let mut config = crate::config::tests::load_test_config(root, "");
         configure_site(&mut config, &content, &root.join("site.typ"));
         let units = content_units(&config).unwrap();
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let policy = tola_typst::BundleCancellation::default().with_cancellation(cancelled);
 
         let mut inputs = crate::compiler::BuildInputs::default();

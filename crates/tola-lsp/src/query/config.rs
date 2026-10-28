@@ -590,12 +590,20 @@ mod tests {
         hover_in(&[], text)
     }
 
-    /// The hover markdown a declared path answers with: the path as code, then its documentation.
-    fn documented(path: &str) -> String {
-        format!(
-            "`{path}`\n\n{}",
-            field_documentation(path).expect("a declared path")
-        )
+    /// The declared path a hover names and the documentation it carries.
+    ///
+    /// The expected text is written here, never read back from `field_documentation`: a hover
+    /// compared against the schema it renders from would pass however wrong the rendering is.
+    fn documented_path(hover: &str) -> (&str, &str) {
+        let (head, body) = hover
+            .split_once("\n\n")
+            .unwrap_or_else(|| panic!("a path line and its documentation: {hover:?}"));
+        let path = head
+            .strip_prefix('`')
+            .and_then(|head| head.strip_suffix('`'))
+            .unwrap_or_else(|| panic!("the path as code: {hover:?}"));
+        assert!(!body.trim().is_empty(), "documentation: {hover:?}");
+        (path, body)
     }
 
     /// A host's own declarations, as the server receives them: one section's field list per entry,
@@ -620,10 +628,22 @@ mod tests {
     /// A host declaration of a path the core schema owns leaves the core documentation in place.
     #[test]
     fn core_documentation_wins_over_host() {
-        assert_eq!(
-            hover_in(HOST, "[build]\nent|ry = \"site.typ\"\n"),
-            Some(documented("build.entry"))
+        let answer = hover_in(HOST, "[build]\nent|ry = \"site.typ\"\n").expect("a hover");
+        let (path, documentation) = documented_path(&answer);
+        assert_eq!(path, "build.entry");
+        assert!(
+            !documentation.contains("Host-declared"),
+            "the core schema's documentation wins: {answer}"
         );
+    }
+
+    /// A declared path answers a hover, with documentation its declaration wrote.
+    #[test]
+    fn declared_path_answers_its_documentation() {
+        let answer = hover("[build]\nentr|y = \"content\"\n").expect("a hover");
+        let (path, documentation) = documented_path(&answer);
+        assert_eq!(path, "build.entry");
+        assert!(!documentation.is_empty(), "{answer}");
     }
 
     /// A host-declared key completes inside its own section.
@@ -644,8 +664,8 @@ mod tests {
     #[test]
     fn value_answers_its_field() {
         assert_eq!(
-            hover("[site]\nlanguage = \"z|h\"\n"),
-            Some(documented("site.language"))
+            documented_path(&hover("[site]\nlanguage = \"z|h\"\n").expect("a hover")).0,
+            "site.language"
         );
     }
 
@@ -777,7 +797,8 @@ mod tests {
             ),
         ];
         for (source, path) in cases {
-            assert_eq!(hover(source), Some(documented(path)), "{source:?}");
+            let answer = hover(source).unwrap_or_else(|| panic!("a hover for {source:?}"));
+            assert_eq!(documented_path(&answer).0, path, "{source:?}");
         }
     }
 
@@ -786,8 +807,12 @@ mod tests {
     #[test]
     fn array_element_text_answers_its_field() {
         assert_eq!(
-            hover("[[build.hooks.before-build]]\ncommand = [\n  [\"s|ite\"],\n]\n"),
-            Some(documented("build.hooks.before-build.command"))
+            documented_path(
+                &hover("[[build.hooks.before-build]]\ncommand = [\n  [\"s|ite\"],\n]\n")
+                    .expect("a hover")
+            )
+            .0,
+            "build.hooks.before-build.command"
         );
     }
 
@@ -806,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_keys_replace_only_themselves() {
+    fn completion_edit_covers_the_typed_prefix() {
         let completed = completed("[build]\nent|");
         let [item] = &completed[..] else {
             panic!("expected one completion");
@@ -837,9 +862,13 @@ mod tests {
         }
     }
 
+    /// A hook completion answers the entry the cursor sits in, whatever sections are interleaved
+    /// between its own.
     #[test]
-    fn interleaved_hooks_keep_their_fields() {
-        let source = r#"[build]
+    fn hook_completion_answers_its_own_entry() {
+        for (source, expected) in [
+            (
+                r#"[build]
 entry = "site.typ"
 [[build.hooks.before-build]]
 name = "icons"
@@ -849,19 +878,21 @@ title = "Example"
 name = "deploy"
 [[build.hooks.before-build]]
 gen|
-"#;
-        assert_eq!(labels(source), ["generates"]);
-    }
-
-    #[test]
-    fn hook_keys_belong_to_each_entry() {
-        let source = r#"[[build.hooks.before-build]]
+"#,
+                ["generates"],
+            ),
+            (
+                r#"[[build.hooks.before-build]]
 name = "icons"
 command = ["icons"]
 [[build.hooks.before-build]]
 na|
-"#;
-        assert_eq!(labels(source), ["name"]);
+"#,
+                ["name"],
+            ),
+        ] {
+            assert_eq!(labels(source), expected);
+        }
     }
 
     #[test]

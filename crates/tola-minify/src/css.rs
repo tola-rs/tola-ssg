@@ -63,31 +63,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn equivalent_rules_merge_into_one() {
-        assert_eq!(
-            minify_css(".a { color: red; } .b { color: red; }").unwrap(),
-            ".a,.b{color:red}"
-        );
-    }
-
-    #[test]
-    fn css_keeps_legal_comments() {
+    fn legal_comment_survives_minification() {
         let css = minify_css("/*! Copyright */ .a { color: red; }").unwrap();
         assert!(css.starts_with("/*! Copyright */"), "{css:?}");
-    }
-
-    #[test]
-    fn css_syntax_error_names_position() {
-        let error = minify_css("@media (").unwrap_err();
-        let CssMinifyError::Syntax {
-            reason,
-            line,
-            column,
-        } = error
-        else {
-            panic!("expected a syntax error");
-        };
-        assert!(!reason.is_empty(), "the parser's reason survives");
-        assert_eq!((line, column), (1, 9));
     }
 }

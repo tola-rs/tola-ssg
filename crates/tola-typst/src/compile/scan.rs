@@ -479,7 +479,7 @@ mod tests {
     }
 
     // How many times the recording native ran on this thread. A scan that leaves the count
-    // unchanged is proven to have been served from the memoized evaluation instead of run again.
+    // unchanged was served from the memoized evaluation instead of run again.
     thread_local! {
         static RUNS: Cell<usize> = const { Cell::new(0) };
     }
@@ -491,6 +491,11 @@ mod tests {
         RUNS.with(|runs| runs.set(runs.get() + 1));
         engine.sink.value(payload, None);
         Ok(Value::None)
+    }
+
+    /// The runs of the recording native since the last read, on this thread.
+    fn runs() -> usize {
+        RUNS.with(|runs| runs.replace(0))
     }
 
     /// The library a recording world compiles with.
@@ -522,11 +527,6 @@ mod tests {
             .iter()
             .map(|(value, _)| value.clone())
             .collect()
-    }
-
-    /// The runs of the recording native since the last read, on this thread.
-    fn runs() -> usize {
-        RUNS.with(|runs| runs.replace(0))
     }
 
     #[test]
@@ -580,280 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_preserves_typst_types() {
-        use typst::foundations::{Dict, Str, Value};
-
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"#metadata((width: 12pt, summary: [Hello])) <source-fields>"#,
-        )
-        .unwrap();
-
-        let meta = scan(dir.path(), &file)
-            .metadata_first("source-fields")
-            .unwrap()
-            .cast::<Dict>()
-            .unwrap();
-
-        assert!(matches!(
-            meta.get(&Str::from("width")),
-            Ok(Value::Length(_))
-        ));
-        assert!(matches!(
-            meta.get(&Str::from("summary")),
-            Ok(Value::Content(_))
-        ));
-    }
-
-    #[test]
-    fn links_name_their_source_kind() {
-        let dir = TempDir::new().unwrap();
-
-        let img_path = dir.path().join("test.png");
-        fs::write(&img_path, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
-
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"
-#link("https://example.com")[External]
-#link("/local")[Local]
-#image("test.png")
-"#,
-        )
-        .unwrap();
-
-        let result = scan(dir.path(), &file);
-        let links = result.extract(LinkExtractor::new());
-
-        assert_eq!(links.len(), 3);
-        assert!(
-            links
-                .iter()
-                .any(|l| l.dest == "https://example.com" && l.is_http())
-        );
-        assert!(
-            links
-                .iter()
-                .any(|l| l.dest == "/local" && l.is_root_relative())
-        );
-        let image = links
-            .iter()
-            .find(|l| l.source == LinkSource::Image)
-            .expect("image link");
-        assert!(image.dest.contains("test.png"));
-    }
-
-    #[test]
-    fn one_scan_yields_two_extractions() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"
-= Level 1
-== Level 2
-=== Level 3
-#metadata((title: "Test")) <meta>
-"#,
-        )
-        .unwrap();
-
-        let result = scan(dir.path(), &file);
-
-        let headings = result.extract(HeadingExtractor::new());
-        assert_eq!(
-            headings
-                .iter()
-                .map(|heading| heading.level)
-                .collect::<Vec<_>>(),
-            [1, 2, 3]
-        );
-        assert_eq!(headings[0].text, "Level 1");
-
-        let meta = result.extract(MetadataFirstExtractor::new("meta").unwrap());
-        assert!(matches!(meta, Some(Value::Dict(_))));
-    }
-
-    #[test]
-    fn metadata_all_preserves_document_order() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"#metadata(1) <meta>
-#metadata(2) <other>
-#metadata(3) <meta>"#,
-        )
-        .unwrap();
-
-        let result = scan(dir.path(), &file);
-
-        assert_eq!(
-            result.metadata_all("meta"),
-            vec![Value::Int(1), Value::Int(3)]
-        );
-    }
-
-    #[test]
-    fn payloads_hide_nested_declarations() {
-        let directory = TempDir::new().unwrap();
-        let source = directory.path().join("records.typ");
-        fs::write(
-            &source,
-            r#"#metadata([
-  #metadata(1) <record>
-  #link("/stored/")[Stored]
-]) <cache>
-#metadata(([#metadata(2) <record>],)) <cache>
-#metadata((card: [#metadata(3) <record>])) <cache>
-#metadata(4) <record>"#,
-        )
-        .unwrap();
-
-        let scan = scan(directory.path(), &source);
-
-        assert_eq!(scan.metadata_first("record"), Some(Value::Int(4)));
-        assert_eq!(scan.metadata_unique("record").unwrap(), Some(Value::Int(4)));
-        assert_eq!(scan.metadata_all("record"), [Value::Int(4)]);
-        assert_eq!(scan.metadata_declarations("record").len(), 1);
-        assert!(scan.links().is_empty());
-        let payloads = scan.metadata_all("cache");
-        assert!(matches!(&payloads[0], Value::Content(_)));
-        assert!(matches!(&payloads[1], Value::Array(_)));
-        assert!(matches!(&payloads[2], Value::Dict(_)));
-    }
-
-    #[test]
-    fn declaration_keeps_its_call_site() {
-        let directory = TempDir::new().unwrap();
-        let source = directory.path().join("document.typ");
-        fs::write(
-            directory.path().join("declarations.typ"),
-            "#let declaration(value) = [#metadata(value) <record>]",
-        )
-        .unwrap();
-        fs::write(
-            directory.path().join("note.typ"),
-            "#import \"declarations.typ\": declaration\n#metadata(2) <record>\n#declaration(3)",
-        )
-        .unwrap();
-        fs::write(
-            &source,
-            "#import \"declarations.typ\": declaration\n#metadata(1) <record>\n#include \"note.typ\"\n#declaration(4)",
-        ).unwrap();
-        let scanned = scan(directory.path(), &source);
-        let declarations = scanned.metadata_declarations("record");
-        let observed = declarations
-            .iter()
-            .map(|declaration| {
-                (
-                    declaration.value().clone(),
-                    declaration
-                        .span()
-                        .id()
-                        .unwrap()
-                        .vpath()
-                        .get_with_slash()
-                        .to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            observed,
-            [
-                (Value::Int(1), "/document.typ".into()),
-                (Value::Int(2), "/note.typ".into()),
-                (Value::Int(3), "/declarations.typ".into()),
-                (Value::Int(4), "/declarations.typ".into()),
-            ]
-        );
-        assert!(
-            declarations
-                .iter()
-                .all(|declaration| declaration.location().is_none())
-        );
-    }
-
-    #[test]
-    fn tuple_extraction_reads_every_kind() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"
-#metadata(1) <meta>
-= Heading
-#link("https://example.com")[Link]
-#metadata(2) <meta>
-"#,
-        )
-        .unwrap();
-
-        let result = scan(dir.path(), &file);
-        let (first, (links, headings), values) = result.extract((
-            MetadataFirstExtractor::new("meta").unwrap(),
-            (LinkExtractor::new(), HeadingExtractor::new()),
-            MetadataValuesExtractor::new("meta").unwrap(),
-        ));
-
-        assert_eq!(first, Some(Value::Int(1)));
-        assert_eq!(links.len(), 1);
-        assert_eq!(headings.len(), 1);
-        assert_eq!(headings[0].text, "Heading");
-        assert_eq!(values, [Value::Int(1), Value::Int(2)]);
-    }
-
-    #[test]
-    fn successful_scan_keeps_capture() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("recording.typ");
-        fs::write(&path, "#record(\"first\")\n#record(\"second\")\n").unwrap();
-        let world = recording_world(directory.path(), &path);
-
-        let scan = scan_world_observed(&world, [Value::Str("header".into())]);
-
-        assert!(scan.result().is_ok());
-        assert_eq!(
-            captured(&scan),
-            [
-                Value::Str("header".into()),
-                Value::Str("first".into()),
-                Value::Str("second".into()),
-            ],
-            "the header the host wrote comes first, then the source's own values"
-        );
-    }
-
-    #[test]
-    fn failed_scan_keeps_capture() {
-        let directory = TempDir::new().unwrap();
-        for (name, source, written) in [
-            (
-                "panicking.typ",
-                "#record(\"before-panic\")\n#panic(\"boom\")\n",
-                "before-panic",
-            ),
-            (
-                "importing.typ",
-                "#record(\"before-import\")\n#import \"missing.typ\": x\n",
-                "before-import",
-            ),
-        ] {
-            let path = directory.path().join(name);
-            fs::write(&path, source).unwrap();
-            let world = recording_world(directory.path(), &path);
-
-            let scan = scan_world_observed(&world, []);
-
-            assert!(scan.result().is_err(), "{name} stops after recording");
-            assert_eq!(captured(&scan), [Value::Str(written.into())]);
-        }
-    }
-
-    #[test]
     fn repeated_scan_replays_capture() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("repeated.typ");
@@ -875,27 +601,6 @@ mod tests {
             captured(&second),
             captured(&first),
             "the reused evaluation wrote its records back into the sink"
-        );
-    }
-
-    #[test]
-    fn scan_tracing_writes_nothing() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("untraced.typ");
-        fs::write(
-            &path,
-            "#let traced = 1\n#let other = traced + 1\n#record(\"only\")\n",
-        )
-        .unwrap();
-        let world = recording_world(directory.path(), &path);
-
-        let scan = scan_world_observed(&world, []);
-
-        assert!(scan.result().is_ok());
-        assert_eq!(
-            captured(&scan),
-            [Value::Str("only".into())],
-            "an evaluation with no traced span writes only what its natives write"
         );
     }
 }

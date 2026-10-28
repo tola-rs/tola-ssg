@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn readys_take_only_the_latest_position() {
+    fn latest_clean_result_is_one_position() {
         let mut rounds = Rounds::default();
         rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
         assert_eq!(rounds.positions(), 1, "one diagnostic round");
@@ -957,8 +957,10 @@ mod tests {
         assert_eq!(rounds.positions(), 3, "the newest clean result walks again");
     }
 
+    /// History merges by the diagnostics a round reports, never by the time it arrived: the same
+    /// set refreshes its entry in place and keeps the position, a new set is its own entry.
     #[test]
-    fn repeated_diagnostics_refresh_history() {
+    fn rounds_merge_by_report_not_by_time() {
         let mut rounds = Rounds::default();
         let first = diagnostic("content/first.typ");
         let second = diagnostic("content/second.typ");
@@ -970,6 +972,7 @@ mod tests {
             2,
             "other report",
         ));
+        assert_eq!(rounds.entries.len(), 2, "a new report is its own entry");
         rounds.selected = rounds.entries.first().cloned();
         rounds.top = 9;
         rounds.push(round(vec![second, first], 3, "refreshed report"));
@@ -985,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn stamps_name_the_day_off_today() {
+    fn stamps_show_the_date_only_off_today() {
         let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
         let yesterday = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
         let at = |day, hour, minute, second| {
@@ -1013,14 +1016,6 @@ mod tests {
         assert!(rounds.live(Action::Copy), "a clean round copies its output");
         rounds.push(round(Vec::new(), 3, ""));
         assert!(!rounds.live(Action::Copy), "an empty round copies nothing");
-    }
-
-    #[test]
-    fn source_locations_keep_distinct_reports() {
-        let mut rounds = Rounds::default();
-        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "first"));
-        rounds.push(round(vec![diagnostic("content/second.typ")], 2, "second"));
-        assert_eq!(rounds.entries.len(), 2);
     }
 
     #[test]
@@ -1218,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn hints_follow_body_and_round_ends() {
+    fn scroll_hints_follow_the_body() {
         let mut rounds = Rounds::default();
         rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
         rounds.body_rows = 10;
@@ -1232,6 +1227,19 @@ mod tests {
         assert!(!rounds.live(Action::Last));
         assert!(rounds.live(Action::Up));
 
+        rounds.top = 0;
+        rounds.body_rows = 30;
+        assert!(
+            !rounds.live(Action::Down),
+            "a body that fits does not scroll"
+        );
+        assert!(!rounds.live(Action::Last));
+    }
+
+    #[test]
+    fn round_hints_follow_history() {
+        let mut rounds = Rounds::default();
+        rounds.push(round(vec![diagnostic("content/first.typ")], 1, "failed"));
         assert!(!rounds.live(Action::PreviousRound));
         assert!(!rounds.live(Action::NextRound));
         rounds.push(round(vec![diagnostic("content/second.typ")], 2, "again"));
@@ -1240,13 +1248,6 @@ mod tests {
         rounds.previous();
         assert!(!rounds.live(Action::PreviousRound));
         assert!(rounds.live(Action::NextRound));
-
-        rounds.body_rows = 30;
-        assert!(
-            !rounds.live(Action::Down),
-            "a body that fits does not scroll"
-        );
-        assert!(!rounds.live(Action::Last));
     }
 
     #[test]

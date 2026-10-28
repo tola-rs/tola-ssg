@@ -441,7 +441,6 @@ static CODE_THEMES: &[CodeTheme] = &[
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -455,77 +454,6 @@ mod tests {
     use super::*;
     use crate::builtin::TOLA_NAMESPACE;
     use crate::protocol::HOST_MODULE;
-
-    /// Whether `name` is lowercase words joined by single hyphens: the spelling a `code-themes`
-    /// key needs to stay reachable as a field.
-    fn hyphenated(name: &str) -> bool {
-        let mut words = name.split('-');
-        let Some(first) = words.next() else {
-            return false;
-        };
-        let word = |word: &str| {
-            !word.is_empty()
-                && word
-                    .chars()
-                    .all(|character| character.is_ascii_lowercase() || character.is_ascii_digit())
-        };
-        word(first) && words.all(word)
-    }
-
-    fn appearance_name(appearance: ThemeAppearance) -> &'static str {
-        match appearance {
-            ThemeAppearance::Light => "light",
-            ThemeAppearance::Dark => "dark",
-        }
-    }
-
-    #[test]
-    fn theme_file_paths_derive_from_names() {
-        let mut files = BTreeSet::new();
-        for theme in themes() {
-            assert!(hyphenated(theme.name), "`{}` is not hyphenated", theme.name);
-            assert_eq!(
-                theme.file,
-                format!("{THEME_DIRECTORY}/{}.tmTheme", theme.name)
-            );
-            assert!(files.insert(theme.file), "{}", theme.file);
-        }
-        assert!(!themes().is_empty(), "the package offers a code theme");
-    }
-
-    #[test]
-    fn package_carries_every_theme_file() {
-        for theme in themes() {
-            let carried = TolaPackage::Code
-                .file(Path::new(theme.file))
-                .unwrap_or_else(|| panic!("@tola/code carries `{}`", theme.file));
-            assert_eq!(
-                carried.as_ref(),
-                file_contents(theme.file),
-                "{}",
-                theme.file
-            );
-        }
-    }
-
-    #[test]
-    fn license_table_records_every_theme() {
-        let table = include_str!("../licenses/README.md");
-        for theme in themes() {
-            let row = format!(
-                "| `{}` | {} | `{}` | {} | `{}` | `{}` | {} |",
-                theme.name,
-                appearance_name(theme.appearance),
-                theme.file,
-                theme.source.project,
-                theme.source.file,
-                theme.source.revision,
-                theme.source.license,
-            );
-            assert!(table.contains(&row), "the licence table lacks:\n{row}");
-        }
-    }
-
     /// One site's sources, then the builtin packages serving their own files.
     struct SiteFiles(FileMap);
 

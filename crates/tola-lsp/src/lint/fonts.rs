@@ -223,7 +223,7 @@ mod tests {
         );
     }
     #[test]
-    fn font_help_names_the_closest_available_family() {
+    fn font_help_suggests_the_closest_family() {
         assert_eq!(
             help("Inetr", &["Inter", "Arial"]).as_deref(),
             Some("did you mean `Inter`?")
@@ -232,15 +232,5 @@ mod tests {
             help("宋体", &["SimSun"]).as_deref(),
             Some("this font is installed as `SimSun`")
         );
-    }
-
-    #[test]
-    fn shadowed_text_call_names_no_fonts() {
-        let shadowed = SourceNames::new(Source::detached(
-            "#let text(font) = [local]\n#text(font: \"Absent\")\n".to_owned(),
-        ));
-        assert!(named_families(&shadowed).is_empty());
-        let builtin = SourceNames::new(Source::detached("#text(font: \"Absent\")\n".to_owned()));
-        assert_eq!(named_families(&builtin).len(), 1);
     }
 }

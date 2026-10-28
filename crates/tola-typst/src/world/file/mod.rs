@@ -10,7 +10,7 @@ mod evidence;
 mod provider;
 mod read;
 mod resolver;
-mod snapshot;
+mod view;
 
 pub use cache::SharedFileCache;
 pub use evidence::{
@@ -21,4 +21,4 @@ pub(crate) use evidence::{Loaded, ReadAttempt};
 pub use provider::{EmptyFiles, FileMap, FileProvider, FileTarget};
 pub use read::{EMPTY_ID, STDIN_ID, decode_utf8, file_id, file_id_from_path, virtual_file_id};
 pub use resolver::FileResolver;
-pub use snapshot::FileSnapshot;
+pub use view::FileView;

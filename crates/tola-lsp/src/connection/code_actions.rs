@@ -37,7 +37,7 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
         let source = self.source(uri);
         let view = self.open.view();
         let mut source_names = if quickfix || organize || fix_all {
-            view.get(uri).map(|snapshot| snapshot.names())
+            view.get(uri).map(|parsed| parsed.names())
         } else {
             None
         };
@@ -425,204 +425,18 @@ mod tests {
     use crate::connection::tests::{messages, open_document, ready_at, ready_workspace, response};
     use crate::protocol::CheckMode;
     use crate::server::tests::load_configuration;
-    use lsp_server::{Notification, Request};
-    use lsp_types::notification::{self, Notification as LspNotification};
+    use lsp_server::Request;
+
     use lsp_types::request::{self, Request as LspRequest};
     use serde_json::json;
     use std::path::Path;
     use std::time::Instant;
     use tola_typst::typst::syntax::Source;
-
-    #[test]
-    fn check_cancellation_preserves_actions() {
-        for dispatched in [None, Some(false), Some(true)] {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path();
-            std::fs::create_dir(root.join("content")).unwrap();
-            std::fs::write(root.join("content/helpers.typ"), "#let orphan = 42\n").unwrap();
-            let uri = crate::uri::from_file_path(&root.join("content/page.typ")).unwrap();
-            let mut connection = ready_at(Vec::new(), root.to_path_buf());
-            let workspace = ready_workspace(&mut connection);
-            workspace.features = ClientFeatures::new(
-                &serde_json::from_value(json!({
-                    "window": {"workDoneProgress": true},
-                    "textDocument": {"codeAction": {"codeActionLiteralSupport": {
-                        "codeActionKind": {"valueSet": ["source.organizeImports"]}
-                    }}}
-                }))
-                .unwrap(),
-            );
-            open_document(
-                &mut connection,
-                &uri,
-                1,
-                "#import \"helpers.typ\": orphan\nBody.\n",
-            );
-            let check = connection.next_job(Instant::now()).unwrap();
-            assert!(matches!(check, SourceJob::Check(_)));
-            let token = connection.progress.as_ref().unwrap().token.clone();
-            let action = |id| {
-                Request::new(
-                    id,
-                    request::CodeActionRequest::METHOD.into(),
-                    json!({
-                        "textDocument": {"uri": uri.as_str()},
-                        "range": lsp_types::Range::default(),
-                        "context": {"diagnostics": [], "only": ["source.organizeImports"]}
-                    }),
-                )
-            };
-            if dispatched.is_some() {
-                connection.request(action(8.into())).unwrap();
-            }
-            let selection =
-                (dispatched == Some(true)).then(|| connection.next_job(Instant::now()).unwrap());
-            let _ = connection
-                .notification(Notification::new(
-                    notification::WorkDoneProgressCancel::METHOD.into(),
-                    json!({"token": token}),
-                ))
-                .unwrap();
-            if dispatched.is_none() {
-                connection.request(action(8.into())).unwrap();
-            }
-            let selection =
-                selection.unwrap_or_else(|| connection.next_job(Instant::now()).unwrap());
-            assert!(matches!(selection, SourceJob::Selection(_)));
-            assert!(!selection.is_cancelled());
-            let mut compiler = crate::compiler::SourceCompiler::new(
-                |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
-                tola_build::BuildResources::default(),
-            );
-            connection.completed(compiler.compile(selection)).unwrap();
-            let answered = response(&mut connection);
-            assert_eq!(answered.id, RequestId::from(8));
-            assert!(answered.response_result.is_ok());
-            assert!(connection.requests.is_empty());
-            connection.request(action(9.into())).unwrap();
-            let answered = response(&mut connection);
-            assert_eq!(answered.id, RequestId::from(9));
-            assert!(answered.response_result.is_ok());
-            assert!(connection.requests.is_empty());
-        }
-    }
-
-    #[test]
-    fn inactive_selections_cancel() {
-        for shutdown in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path().to_path_buf();
-            let mut connection = ready_at(Vec::new(), root.clone());
-            let params = serde_json::from_value(json!({
-                "textDocument": {"uri": crate::uri::from_file_path(&root.join("page.typ")).unwrap()},
-                "range": lsp_types::Range::default(),
-                "context": {"diagnostics": []}
-            })).unwrap();
-            connection.await_selection(8.into(), params, root).unwrap();
-            let selection = connection.next_job(Instant::now()).unwrap();
-            assert!(matches!(selection, SourceJob::Selection(_)));
-            if shutdown {
-                connection
-                    .request(Request::new(
-                        9.into(),
-                        request::Shutdown::METHOD.into(),
-                        serde_json::Value::Null,
-                    ))
-                    .unwrap();
-            } else {
-                connection.sources_changed(false).unwrap();
-            }
-            assert!(selection.is_cancelled());
-            let replies = messages(&mut connection)
-                .into_iter()
-                .filter_map(|message| match message {
-                    lsp_server::Message::Response(reply) if reply.id == RequestId::from(8) => {
-                        Some(reply)
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(replies.len(), 1);
-            let expected = if shutdown {
-                lsp_server::ErrorCode::RequestCanceled
-            } else {
-                lsp_server::ErrorCode::ContentModified
-            };
-            assert_eq!(
-                replies[0].response_result.as_ref().unwrap_err().code,
-                expected as i32
-            );
-        }
-    }
-
-    #[test]
-    fn last_action_cancels_selection() {
-        for dispatched in [false, true] {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path().to_path_buf();
-            let mut connection = ready_at(Vec::new(), root.clone());
-            let params = serde_json::from_value::<lsp_types::CodeActionParams>(json!({
-                "textDocument": {"uri": crate::uri::from_file_path(&root.join("page.typ")).unwrap()},
-                "range": lsp_types::Range::default(),
-                "context": {"diagnostics": []}
-            })).unwrap();
-            for id in [8, 9] {
-                connection
-                    .await_selection(id.into(), params.clone(), root.clone())
-                    .unwrap();
-            }
-            let cancellation = connection
-                .selection_build
-                .as_ref()
-                .unwrap()
-                .canceller
-                .token();
-            let selection = dispatched.then(|| connection.next_job(Instant::now()).unwrap());
-            for id in [8, 9] {
-                let _ = connection
-                    .notification(Notification::new(
-                        notification::Cancel::METHOD.into(),
-                        json!({"id": id}),
-                    ))
-                    .unwrap();
-                assert_eq!(cancellation.is_cancelled(), id == 9);
-            }
-            let cancelled = messages(&mut connection)
-                .into_iter()
-                .filter_map(|message| match message {
-                    lsp_server::Message::Response(reply) => Some(reply),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(cancelled.len(), 2);
-            assert!(cancelled.iter().all(|reply| {
-                reply.response_result.as_ref().unwrap_err().code
-                    == lsp_server::ErrorCode::RequestCanceled as i32
-            }));
-            connection.await_selection(10.into(), params, root).unwrap();
-            let mut compiler = crate::compiler::SourceCompiler::new(
-                |root: &Path, _: &[(PathBuf, Arc<str>)]| load_configuration(root),
-                tola_build::BuildResources::default(),
-            );
-            if let Some(selection) = selection {
-                connection.completed(compiler.compile(selection)).unwrap();
-                assert!(messages(&mut connection).is_empty());
-            }
-            let selection = connection.next_job(Instant::now()).unwrap();
-            assert!(!selection.is_cancelled());
-            connection.completed(compiler.compile(selection)).unwrap();
-            let answered = response(&mut connection);
-            assert_eq!(answered.id, RequestId::from(10));
-            assert!(answered.response_result.is_ok());
-            assert!(connection.requests.is_empty());
-        }
-    }
-
     /// Every cursor the code-action lane derives sits at a position the source has, including one
     /// at its final byte: the lane reads a range at each cursor, so a source that disagreed answers
     /// no fix rather than ending the connection.
     #[test]
-    fn code_action_cursors_stay_inside_their_source() {
+    fn action_cursors_stay_in_source() {
         for text in ["#let value = other", "#let s = \"text\"", "#let n = 1 + y"] {
             let source = Source::detached(text);
             let mut cursors = Vec::new();

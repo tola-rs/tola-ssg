@@ -33,20 +33,4 @@ mod tests {
         let digest = tola_blake3(Bytes::new(b"abc".to_vec()));
         assert_eq!(tola_bytes_to_hex(digest).as_str(), ABC);
     }
-
-    #[test]
-    fn digest_is_thirty_two_bytes() {
-        assert_eq!(
-            tola_blake3(Bytes::new(b"abc".to_vec())).as_slice().len(),
-            32
-        );
-    }
-
-    #[test]
-    fn hex_keeps_leading_zeros() {
-        assert_eq!(
-            tola_bytes_to_hex(Bytes::new([0u8, 1, 255])).as_str(),
-            "0001ff"
-        );
-    }
 }

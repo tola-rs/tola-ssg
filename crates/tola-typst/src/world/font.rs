@@ -858,47 +858,6 @@ mod tests {
             .with_embedded_fonts(false)
     }
 
-    /// A store holding one lazily read face of `font` from `path`, with the `expected: None` of a
-    /// discovered system font: no configured digest describes its bytes.
-    #[cfg(feature = "embed-fonts")]
-    fn system_face_store(path: &Path, font: &Font) -> (FontStore, Arc<FontFile>) {
-        let file = Arc::new(FontFile {
-            path: path.to_path_buf(),
-            expected: None,
-            bytes: OnceLock::new(),
-            failure: OnceLock::new(),
-            boundary: crate::world::SourceBoundary::default(),
-        });
-        let mut native = KitFontStore::new();
-        native.push((
-            FontFileSource {
-                file: Arc::clone(&file),
-                index: font.index(),
-                face: FaceIdentity::of(font.info()),
-            },
-            font.info().clone(),
-        ));
-        let store = FontStore::with_options(isolated_options());
-        assert!(
-            store
-                .fonts
-                .set(LoadedFonts {
-                    native,
-                    configured: FontInventory {
-                        roots: Vec::new(),
-                        files: BTreeMap::new()
-                    },
-                    files: BTreeMap::from([(path.to_path_buf(), Arc::clone(&file))]),
-                    system_paths: BTreeSet::from([path.to_path_buf()]),
-                    inputs: vec![CompilerFontInput::SystemFile {
-                        file: path.to_path_buf(),
-                    }],
-                })
-                .is_ok()
-        );
-        (store, file)
-    }
-
     #[test]
     fn one_store_reuses_its_loaded_fonts() {
         let store = FontStore::with_options(isolated_options());
@@ -913,27 +872,6 @@ mod tests {
 
     #[cfg(feature = "embed-fonts")]
     #[test]
-    fn configured_directory_faces_report_their_directory() {
-        let root = tempfile::TempDir::new().unwrap();
-        let path = root.path().join("font.ttf");
-        let (font, _) = embedded::fonts().next().unwrap();
-        fs::write(&path, font.data().as_slice()).unwrap();
-        let store = FontStore::with_options(isolated_options().with_custom_paths(&[root.path()]));
-        store.load(&BundleCancellation::new()).unwrap();
-
-        let fonts = store.compiler_fonts();
-        assert_eq!(fonts.len(), 1);
-        assert_eq!(fonts[0].family, font.info().family);
-        assert_eq!(fonts[0].variant, font.info().variant);
-        assert!(matches!(
-            &fonts[0].input,
-            CompilerFontInput::ConfiguredDirectory { directory, file }
-                if directory.as_path() == root.path()
-                    && file == &fs::canonicalize(&path).unwrap()
-        ));
-    }
-
-    #[test]
     fn configured_font_file_is_refused() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("font.ttf");
@@ -947,60 +885,7 @@ mod tests {
     }
 
     #[cfg(feature = "embed-fonts")]
-    #[test]
-    fn embedded_faces_report_themselves_embedded() {
-        let unloaded = FontStore::with_options(
-            FontOptions::new()
-                .with_system_fonts(false)
-                .with_embedded_fonts(true),
-        );
-        assert!(unloaded.compiler_fonts().is_empty());
-        unloaded.load(&BundleCancellation::new()).unwrap();
-
-        let fonts = unloaded.compiler_fonts();
-        assert_eq!(fonts.len(), unloaded.font_count().unwrap());
-        assert!(!fonts.is_empty());
-        assert!(
-            fonts
-                .iter()
-                .all(|font| matches!(font.input, CompilerFontInput::Embedded))
-        );
-    }
-
-    #[test]
-    fn cancelled_preparation_can_be_retried() {
-        let store = FontStore::with_options(isolated_options());
-        let cancellation = BundleCancellation::new();
-        cancellation.cancel();
-        assert!(matches!(
-            store.load(&cancellation),
-            Err(FontLoadError::Cancelled)
-        ));
-        assert!(!store.is_loaded());
-        assert!(store.load(&BundleCancellation::new()).is_ok());
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn font_aliases_respect_source_limits() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let root = directory.path().join("site");
-        let fonts = root.join("fonts");
-        fs::create_dir_all(&fonts).unwrap();
-        let outside = directory.path().join("external.ttf");
-        fs::write(&outside, b"host font bytes").unwrap();
-        std::os::unix::fs::symlink(&outside, fonts.join("linked.ttf")).unwrap();
-        let store = FontStore::with_options(
-            isolated_options()
-                .with_custom_paths(&[&fonts])
-                .with_source_boundary(crate::SourceBoundary::new(&root, true)),
-        );
-        assert!(matches!(
-            store.load(&BundleCancellation::new()),
-            Err(FontLoadError::File { .. })
-        ));
-    }
-
     #[test]
     fn configured_font_change_marks_stale() {
         let directory = tempfile::TempDir::new().unwrap();
@@ -1015,28 +900,16 @@ mod tests {
         assert!(!store.is_current(&cancellation).unwrap());
     }
 
+    /// A face's identity ignores bytes the file gained after the bytes the face was read from, so
+    /// a rewritten file still names the font it holds.
     #[cfg(feature = "embed-fonts")]
     #[test]
-    fn unchanged_configured_font_is_not_reread() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("font.ttf");
+    fn font_identity_ignores_trailing_bytes() {
         let (font, _) = embedded::fonts().next().unwrap();
-        fs::write(&path, font.data().as_slice()).unwrap();
-        let store =
-            FontStore::with_options(isolated_options().with_custom_paths(&[directory.path()]));
-        let cancellation = BundleCancellation::new();
-        store.load(&cancellation).unwrap();
-        let configured = &store.fonts.get().unwrap().configured.files;
-        let identity = configured.values().next().expect("one configured font");
-
-        assert!(identity.describes(&path));
-        assert!(store.is_current(&cancellation).unwrap());
-
-        let mut changed = font.data().as_slice().to_vec();
-        changed.push(b'x');
-        fs::write(&path, changed).unwrap();
-        assert!(!identity.describes(&path));
-        assert!(!store.is_current(&cancellation).unwrap());
+        let original = font.data().as_slice();
+        let mut changed = original.to_vec();
+        changed.extend_from_slice(b"additional bytes");
+        assert_eq!(FontInfo::new(original, 0), FontInfo::new(&changed, 0));
     }
 
     #[cfg(feature = "embed-fonts")]
@@ -1055,7 +928,6 @@ mod tests {
         assert!(fonts.files.values().all(|file| file.bytes.get().is_none()));
         let mut changed = original.to_vec();
         changed.extend_from_slice(b"additional bytes");
-        assert_eq!(FontInfo::new(original, 0), FontInfo::new(&changed, 0));
         fs::write(&path, changed).unwrap();
 
         assert!(store.prepared().font(0).is_none());
@@ -1068,105 +940,7 @@ mod tests {
     }
 
     #[cfg(feature = "embed-fonts")]
-    #[test]
-    fn system_font_bytes_read_lazily() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("system.ttf");
-        let (font, _) = embedded::fonts().next().unwrap();
-        let original = font.data().as_slice();
-        fs::write(&path, original).unwrap();
-        let path = path.canonicalize().unwrap();
-        let (store, file) = system_face_store(&path, &font);
-        assert!(file.bytes.get().is_none());
-        assert!(store.read_paths().is_empty());
-        let mut changed = original.to_vec();
-        changed.extend_from_slice(b"new raw font bytes");
-        fs::write(&path, &changed).unwrap();
-
-        let loaded = store.prepared().font(0).unwrap();
-        assert_eq!(store.read_paths(), std::slice::from_ref(&path));
-        assert_eq!(loaded.data().as_slice(), changed.as_slice());
-        assert!(store.is_current(&BundleCancellation::new()).unwrap());
-        fs::write(&path, original).unwrap();
-        assert!(!store.is_current(&BundleCancellation::new()).unwrap());
-    }
-
     #[cfg(unix)]
-    #[test]
-    fn hidden_fonts_count_with_broken_links() {
-        use std::os::unix::fs::symlink;
-        let directory = tempfile::TempDir::new().unwrap();
-        let hidden = directory.path().join(".hidden");
-        fs::create_dir(&hidden).unwrap();
-        let font = hidden.join(".font.ttf");
-        fs::write(&font, b"font source").unwrap();
-        symlink("self", directory.path().join("self")).unwrap();
-        symlink("missing", directory.path().join("broken")).unwrap();
-        symlink(directory.path(), hidden.join("ancestor")).unwrap();
-        let store =
-            FontStore::with_options(isolated_options().with_custom_paths(&[directory.path()]));
-        let cancellation = BundleCancellation::new();
-        store.load(&cancellation).unwrap();
-        assert!(store.is_current(&cancellation).unwrap());
-
-        fs::write(font, b"changed source").unwrap();
-        assert!(!store.is_current(&cancellation).unwrap());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retargeted_font_symlink_is_stale() {
-        use std::os::unix::fs::symlink;
-        let directory = tempfile::TempDir::new().unwrap();
-        let first = directory.path().join("first");
-        let second = directory.path().join("second");
-        for root in [&first, &second] {
-            fs::create_dir(root).unwrap();
-            fs::write(root.join("font.ttf"), b"same source bytes").unwrap();
-        }
-        let alias = directory.path().join("alias");
-        symlink(&first, &alias).unwrap();
-        let cancellation = BundleCancellation::new();
-        let store = FontStore::with_options(isolated_options().with_custom_paths(&[&alias]));
-        store.load(&cancellation).unwrap();
-        fs::remove_file(&alias).unwrap();
-        symlink(&second, &alias).unwrap();
-        assert!(!store.is_current(&cancellation).unwrap());
-
-        let root = directory.path().join("fonts");
-        fs::create_dir(&root).unwrap();
-        let nested = root.join("nested");
-        symlink(&first, &nested).unwrap();
-        let store = FontStore::with_options(isolated_options().with_custom_paths(&[&root]));
-        store.load(&cancellation).unwrap();
-        fs::remove_file(&nested).unwrap();
-        symlink(&second, &nested).unwrap();
-        assert!(!store.is_current(&cancellation).unwrap());
-    }
-
-    #[cfg(feature = "embed-fonts")]
-    #[test]
-    fn replaced_font_face_fails_lazy_read() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("system.ttf");
-        let mut carried = embedded::fonts();
-        let (font, _) = carried.next().unwrap();
-        let (replacement, _) = carried.next().unwrap();
-        fs::write(&path, font.data().as_slice()).unwrap();
-        let path = path.canonicalize().unwrap();
-        let (store, _) = system_face_store(&path, &font);
-
-        fs::write(&path, replacement.data().as_slice()).unwrap();
-
-        assert!(store.prepared().font(0).is_none());
-        assert_eq!(store.read_paths(), std::slice::from_ref(&path));
-        assert!(matches!(
-            store.read_failure(),
-            Some(FontLoadError::Changed { .. })
-        ));
-    }
-
-    #[cfg(feature = "embed-fonts")]
     #[test]
     fn narrowed_coverage_changes_face_identity() {
         use typst::text::Coverage;

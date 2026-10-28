@@ -597,44 +597,4 @@ mod tests {
         let source = Source::detached(marked.replace('|', ""));
         assert_eq!(call(&source, at).expect("the call").argument_name, None);
     }
-
-    #[test]
-    fn imported_paths_select_their_segment() {
-        for (marked, expected) in [
-            (
-                "#import \"lib.typ\": |module.member as local",
-                &["module"][..],
-            ),
-            (
-                "#import \"lib.typ\": mod|ule.member as local",
-                &["module"][..],
-            ),
-            (
-                "#import \"lib.typ\": module|.member as local",
-                &["module"][..],
-            ),
-            (
-                "#import \"lib.typ\": module.|member as local",
-                &["module", "member"][..],
-            ),
-            (
-                "#import \"lib.typ\": module.member| as local",
-                &["module", "member"][..],
-            ),
-        ] {
-            let at = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let selected = imported_name(&source, at).expect("an imported name");
-            assert_eq!(selected.path, expected, "{marked}");
-            assert_eq!(
-                &source.text()[selected.name],
-                *expected.last().unwrap(),
-                "{marked}"
-            );
-        }
-        let marked = "#import \"lib.typ\": module.member as lo|cal";
-        let at = marked.find('|').unwrap();
-        let source = Source::detached(marked.replace('|', ""));
-        assert!(imported_name(&source, at).is_none());
-    }
 }

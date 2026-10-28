@@ -1216,174 +1216,182 @@ mod tests {
             .collect()
     }
 
+    /// A binding nothing reads is reported unused, and a binding read anywhere is not — the
+    /// end of the file included, which is where an exported name is read.
     #[test]
-    fn shadowed_binding_is_unused() {
-        let text = "#let x = 1\n#let x = 2\n#x\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(liveness.unused_bindings, [0]);
-        assert!(unused_names(&names, &liveness) == ["x"]);
-        assert!(liveness.dead_stores.is_empty());
+    fn unused_bindings_name_the_dead_lets() {
+        for (label, text, exports_are_read, expected) in [
+            (
+                "shadowed",
+                "#let x = 1\n#let x = 2\n#x\n",
+                false,
+                &["x"][..],
+            ),
+            (
+                "after return",
+                "#let f() = {\n  let y = 1\n  return\n  y\n}\n#f()\n",
+                false,
+                &["y"][..],
+            ),
+            (
+                "self recursive",
+                "#let f() = {\n  f()\n}\n",
+                false,
+                &["f"][..],
+            ),
+            ("write only", "#let x = 0\n#(x = 1)\n", false, &["x"][..]),
+            (
+                "loop binding",
+                "#for item in (1, 2) {\n}\n",
+                false,
+                &["item"][..],
+            ),
+            (
+                "destruct field target",
+                "#let d = (k: 1)\n#let other = 0\n#((d.k, other) = (2, 3))\n",
+                false,
+                &["other"][..],
+            ),
+            (
+                "read at end",
+                "#let x = 0\n#(x = 1)\n#(x = 2)\n#x\n",
+                false,
+                &[][..],
+            ),
+            (
+                "shadowed export",
+                "#let value = 1\n#let value = 2\n",
+                true,
+                &["value"][..],
+            ),
+        ] {
+            let selected = SelectedInterfaces {
+                unresolved: exports_are_read,
+                ..SelectedInterfaces::default()
+            };
+            let (names, liveness) = analyzed_with(text, &selected);
+            assert_eq!(unused_names(&names, &liveness), expected, "{label}");
+        }
+    }
+
+    /// A store no read reaches is dead: overwritten, unreachable, or written after the reader
+    /// that would have consumed it. The offset is the store's, so the finding points at the
+    /// write the author should delete.
+    #[test]
+    fn dead_stores_name_unreached_writes() {
+        for (label, text, dead, exports_are_read) in [
+            (
+                "overwritten",
+                "#let x = 0\n#(x = 1)\n#(x = 2)\n#x\n",
+                &["x = 0", "x = 1"][..],
+                false,
+            ),
+            (
+                "branch overwrite",
+                "#let x = 0\n#if true {\n  x = 1\n} else {\n  x = 2\n}\n#x\n",
+                &["x = 0"][..],
+                false,
+            ),
+            (
+                "iteration local",
+                "#let x = 0\n#for i in (1, 2) {\n  x = i\n  x = i + 1\n}\n#x\n",
+                &["x = i\n"][..],
+                false,
+            ),
+            (
+                "closure capture at creation",
+                "#let x = 0\n#let f = () => x\n#(x = 1)\n",
+                &["x = 1"][..],
+                false,
+            ),
+            (
+                "context capture at creation",
+                "#let x = 0\n#let c = context x\n#(x = 1)\n",
+                &["x = 1"][..],
+                false,
+            ),
+            (
+                "parameter default at creation",
+                "#let x = 0\n#let f = (value: x) => value\n#(x = 1)\n",
+                &["x = 1"][..],
+                false,
+            ),
+            (
+                "short circuit read",
+                "#let x = 0\n#let y = false and x > 0\n#(x = 1)\n",
+                &["x = 1"][..],
+                false,
+            ),
+            (
+                "default writes precede captures",
+                "#let value = 0\n#let f = (p: { value = 1; none }) => value\n#f()\n",
+                &["value = 0"][..],
+                false,
+            ),
+            (
+                "assignment reads after its value",
+                "#let value = 0\n#(value += { value = 3; 2 })\n#value\n",
+                &["value = 0"][..],
+                false,
+            ),
+            (
+                "destructuring reads follow each target",
+                "#let index = 0\n#let values = (0, 0)\n#((index, values.at(index)) = (1, 2))\n#values\n",
+                &["index = 0"][..],
+                false,
+            ),
+            (
+                "export read keeps the final value",
+                "#let x = 0\n#(x = 1)\n",
+                &["x = 0"][..],
+                true,
+            ),
+            (
+                "captured compound write",
+                "#let x = 0\n#let f = () => {\n  x += 1\n}\n#f()\n#(x = 2)\n",
+                &["x = 2"][..],
+                false,
+            ),
+        ] {
+            let selected = SelectedInterfaces {
+                unresolved: exports_are_read,
+                ..SelectedInterfaces::default()
+            };
+            let liveness = analyzed_with(text, &selected).1;
+            let expected: Vec<usize> = dead
+                .iter()
+                .map(|needle| text.find(needle).unwrap())
+                .collect();
+            assert_eq!(dead_offsets(&liveness), expected, "{label}");
+        }
     }
 
     #[test]
-    fn overwritten_stores_are_dead() {
-        let text = "#let x = 0\n#(x = 1)\n#(x = 2)\n#x\n";
-        let liveness = liveness(text);
-        assert_eq!(
-            dead_offsets(&liveness),
-            [text.find("x = 0").unwrap(), text.find("x = 1").unwrap()]
-        );
-        assert!(liveness.unused_bindings.is_empty());
+    fn read_path_prevents_dead_store() {
+        for text in [
+            "#let x = 0\n#if true { x } else { x = 1 }\n#x\n",
+            "#let x = 0\n#for i in (1, 2) {\n  x\n  x = i\n}\n#x\n",
+            "#let x = 0\n#for i in (1, 2) {\n  break\n  x = 1\n}\n#x\n",
+            "#let x = 0\n#for i in (1, 2) {\n}\n#x\n",
+            "#let x = 0\n#for i in (1, 2) {\n  #(x = 1)\n}\n#x\n",
+            "#let x = 0\n#let f = () => {\n  x = 1\n}\n#x\n",
+        ] {
+            assert!(liveness(text).dead_stores.is_empty(), "{text}");
+        }
     }
 
     #[test]
-    fn branch_overwrite_makes_store_dead() {
-        let text = "#let x = 0\n#if true {\n  x = 1\n} else {\n  x = 2\n}\n#x\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 0").unwrap()]);
-    }
-
-    #[test]
-    fn branch_read_keeps_store_live() {
-        let text = "#let x = 0\n#if true { x } else { x = 1 }\n#x\n";
-        let liveness = liveness(text);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn loop_carried_value_keeps_store_live() {
-        let text = "#let x = 0\n#for i in (1, 2) {\n  x\n  x = i\n}\n";
-        let liveness = liveness(text);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn iteration_local_overwrite_is_dead() {
-        let text = "#let x = 0\n#for i in (1, 2) {\n  x = i\n  x = i + 1\n}\n#x\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("x = i\n").unwrap()]);
-    }
-
-    #[test]
-    fn statement_after_break_is_unreachable() {
-        let text = "#let x = 0\n#for i in (1, 2) {\n  break\n  x = 1\n}\n#x\n";
-        let liveness = liveness(text);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn read_after_return_is_unreachable() {
-        let text = "#let f() = {\n  let y = 1\n  return\n  y\n}\n#f()\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(unused_names(&names, &liveness), ["y"]);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn closure_capture_reads_at_creation() {
-        let text = "#let x = 0\n#let f = () => x\n#(x = 1)\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 1").unwrap()]);
-    }
-
-    #[test]
-    fn context_capture_reads_at_creation() {
-        let text = "#let x = 0\n#let c = context x\n#(x = 1)\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 1").unwrap()]);
-    }
-
-    #[test]
-    fn parameter_default_reads_at_creation() {
-        let text = "#let x = 0\n#let f = (value: x) => value\n#(x = 1)\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 1").unwrap()]);
-    }
-
-    #[test]
-    fn self_recursive_function_is_unused() {
-        let text = "#let f() = {\n  f()\n}\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(unused_names(&names, &liveness), ["f"]);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn externally_called_function_is_used() {
-        let text = "#let f() = {\n  f()\n}\n#f()\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn math_identifier_reads_its_binding() {
-        let text = "#let alpha = 1\n$alpha$\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-    }
-
-    #[test]
-    fn math_text_stays_unread() {
-        let text = "#let b = 1\n$b$\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(unused_names(&names, &liveness), ["b"]);
-    }
-
-    #[test]
-    fn import_binding_is_not_reported() {
-        let text = "#import \"lib.typ\": item\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn parameter_is_not_reported() {
-        let text = "#let f(parameter) = {\n  parameter\n}\n#f(1)\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn compound_assignment_reads_its_target() {
-        let text = "#let x = 0\n#(x += 1)\n#x\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn write_only_binding_is_unused() {
-        let text = "#let x = 0\n#(x = 1)\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(unused_names(&names, &liveness), ["x"]);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn export_read_keeps_the_final_value() {
-        let text = "#let x = 0\n#(x = 1)\n";
-        let selected = SelectedInterfaces {
-            unresolved: true,
-            ..SelectedInterfaces::default()
-        };
-        let liveness = analyzed_with(text, &selected).1;
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 0").unwrap()]);
-    }
-
-    #[test]
-    fn shadowed_export_reads_only_the_final_binding() {
-        let text = "#let value = 1\n#let value = 2\n";
-        let selected = SelectedInterfaces {
-            unresolved: true,
-            ..SelectedInterfaces::default()
-        };
-        let (names, liveness) = analyzed_with(text, &selected);
-        assert_eq!(liveness.unused_bindings, [0]);
-        assert_eq!(unused_names(&names, &liveness), ["value"]);
-        assert!(liveness.dead_stores.is_empty());
+    fn unreportable_binding_is_never_reported() {
+        for text in [
+            "#let f() = {\n  f()\n}\n#f()\n",
+            "#import \"lib.typ\": item\n",
+            "#let f(parameter) = {\n  parameter\n}\n#f(1)\n",
+            "#let x = 0\n#(x += 1)\n#x\n",
+        ] {
+            let liveness = liveness(text);
+            assert!(liveness.unused_bindings.is_empty(), "{text}");
+            assert!(liveness.dead_stores.is_empty(), "{text}");
+        }
     }
 
     #[test]
@@ -1410,35 +1418,6 @@ mod tests {
     }
 
     #[test]
-    fn captured_write_is_no_store() {
-        let text = "#let x = 0\n#let f = () => {\n  x = 1\n}\n#x\n";
-        let liveness = liveness(text);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn captured_compound_read_keeps_binding_used() {
-        let text = "#let x = 0\n#let f = () => {\n  x += 1\n}\n#f()\n#(x = 2)\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 2").unwrap()]);
-    }
-
-    #[test]
-    fn short_circuit_read_keeps_binding_live() {
-        let text = "#let x = 0\n#let y = false and x > 0\n#(x = 1)\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("x = 1").unwrap()]);
-    }
-
-    #[test]
-    fn loop_binding_is_unused() {
-        let text = "#for item in (1, 2) {\n}\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(unused_names(&names, &liveness), ["item"]);
-    }
-
-    #[test]
     fn cancellation_returns_none() {
         let names = SourceNames::new(Source::detached("#let x = 1\n#x\n".to_owned()));
         assert!(
@@ -1460,53 +1439,12 @@ mod tests {
         assert!(calls.get() >= 3, "cancellation observed mid-analysis");
     }
 
+    /// Input the analysis cannot read answers nothing rather than guessing: a parse error, a
+    /// loop header that breaks before yielding, and the other ways a loop yields no values.
     #[test]
-    fn parse_error_answers_no_findings() {
-        let text = "#let x = 1\n#let broken = (]\n";
-        let liveness = liveness(text);
-        assert!(liveness.unused_bindings.is_empty());
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn default_writes_precede_captures() {
-        let text = "#let value = 0\n#let f = (p: { value = 1; none }) => value\n#f()\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("value = 0").unwrap()]);
-    }
-
-    #[test]
-    fn assignment_reads_after_its_value() {
-        let text = "#let value = 0\n#(value += { value = 3; 2 })\n#value\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("value = 0").unwrap()]);
-    }
-
-    #[test]
-    fn destruct_field_target_reads_its_base() {
-        let text = "#let d = (k: 1)\n#let other = 0\n#((d.k, other) = (2, 3))\n";
-        let (names, liveness) = analyzed_with(text, &SelectedInterfaces::default());
-        assert_eq!(unused_names(&names, &liveness), ["other"]);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn destructuring_reads_follow_each_target() {
-        let text = "#let index = 0\n#let values = (0, 0)\n#((index, values.at(index)) = (1, 2))\n#values\n";
-        let liveness = liveness(text);
-        assert_eq!(dead_offsets(&liveness), [text.find("index = 0").unwrap()]);
-    }
-
-    #[test]
-    fn zero_iteration_loop_keeps_the_previous_value_live() {
-        let text = "#let x = 0\n#for i in (1, 2) {\n  #(x = 1)\n}\n#x\n";
-        let liveness = liveness(text);
-        assert!(liveness.dead_stores.is_empty());
-    }
-
-    #[test]
-    fn loop_header_break_answers_no_findings() {
+    fn unanalysable_input_answers_no_findings() {
         for text in [
+            "#let x = 1\n#let broken = (]\n",
             "#let before = 0\n#for i in { (); break } {\n}\n#before\n",
             "#let before = 0\n#for i in { (1,); break } {\n}\n#before\n",
             "#let before = 0\n#while { break } {\n}\n#before\n",

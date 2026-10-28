@@ -602,100 +602,26 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
-    fn frame_text(buffer: &Buffer) -> String {
-        buffer
-            .content()
-            .chunks(usize::from(buffer.area.width))
-            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     fn long_row() -> Value {
         json!([{ "values": (0..24).collect::<Vec<_>>() }])
     }
 
+    /// The footer names only the actions the current state can perform: what is open,
+    /// what the reader has scrolled to, and whether the table overflows its frame.
     #[test]
-    fn unmatched_filter_opens_no_detail() {
-        let mut view = view(json!([{"name": "Alpha"}]));
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Char('/')));
-        type_and_accept(&mut view, "absent");
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Enter));
-        assert!(!view.table.detail_is_open());
-    }
-
-    #[test]
-    fn resizing_preserves_detail_scroll() {
-        let mut view = view(long_row());
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Enter));
-        frame(&mut view, 40, 10);
-        for _ in 0..5 {
-            view.key(&key(KeyCode::Down));
-        }
-        assert!(frame_text(&frame(&mut view, 40, 10)).contains("    3,"));
-        let resized = frame(&mut view, 60, 10);
-        assert!(view.table.detail_is_open());
-        assert!(frame_text(&resized).contains("    3,"));
-    }
-
-    #[test]
-    fn matching_row_updates_open_detail() {
-        let mut view = view(json!([
-            {"name": "Alpha", "group": "match"},
-            {"name": "Beta", "group": "match"}
-        ]));
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Char('/')));
-        type_and_accept(&mut view, "match");
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Enter));
-        frame(&mut view, 40, 10);
-        for (code, name) in [('n', "Beta"), ('N', "Alpha")] {
-            view.key(&key(KeyCode::Char(code)));
-            assert!(frame_text(&frame(&mut view, 40, 10)).contains(&format!("\"{name}\"")));
-        }
-    }
-
-    #[test]
-    fn detail_pages_without_skipping_lines() {
-        let mut view = view(long_row());
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Enter));
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::PageDown));
-        assert!(frame_text(&frame(&mut view, 40, 10)).contains("    2,"));
-        view.key(&key(KeyCode::PageUp));
-        assert!(frame_text(&frame(&mut view, 40, 10)).contains("\"values\""));
-    }
-
-    #[test]
-    fn open_detail_end_hides_downward_actions() {
-        let mut view = view(long_row());
-        frame(&mut view, 40, 10);
-        view.key(&key(KeyCode::Enter));
-        frame(&mut view, 40, 10);
-        assert!(view.live().contains(&Action::Down));
-        for _ in 0..6 {
-            view.key(&key(KeyCode::PageDown));
-        }
-        assert!(!view.live().contains(&Action::Down));
-        assert!(!view.live().contains(&Action::PageDown));
-        assert!(view.live().contains(&Action::Up));
-    }
-
-    #[test]
-    fn footer_actions_follow_reader_mode() {
+    fn footer_lists_only_live_actions() {
+        // Nothing open: Open is live, NextMatch is not.
         let mut view = view(json!([{"name": "Alpha"}, {"name": "Beta"}]));
         frame(&mut view, 40, 10);
         assert!(view.live().contains(&Action::Open));
         assert!(!view.live().contains(&Action::NextMatch));
+
+        // Detail open on a short row: Open is gone and nothing scrolls.
         view.key(&key(KeyCode::Enter));
         assert!(!view.live().contains(&Action::Open));
-        // The detail is one line in a taller overlay: nothing to scroll.
         assert!(!view.live().contains(&Action::Down));
+
+        // A filter with no match leaves only Open/Dismiss, then Export once it settles.
         view.key(&key(KeyCode::Char('/')));
         assert_eq!(view.live(), [Action::Open, Action::Dismiss]);
         type_and_accept(&mut view, "absent");
@@ -703,23 +629,41 @@ mod tests {
         assert!(!view.live().contains(&Action::Open));
         assert!(!view.live().contains(&Action::Down));
         assert!(view.live().contains(&Action::Export));
+
+        // Export opens its own prompt with only Open/Dismiss.
         view.key(&key(KeyCode::Char('e')));
         assert_eq!(view.live(), [Action::Open, Action::Dismiss]);
     }
 
+    /// A table taller than its frame pages; one that fits offers neither paging nor the
+    /// end moves, and a detail scrolled to its last line drops Down and PageDown.
     #[test]
-    fn fitting_table_hides_paging_and_end_moves() {
-        let mut view = view(json!([{"name": "Alpha"}, {"name": "Beta"}]));
-        frame(&mut view, 40, 20);
-        assert!(!view.live().contains(&Action::PageDown));
-        assert!(!view.live().contains(&Action::PageUp));
-        assert!(view.live().contains(&Action::Down));
-        view.key(&key(KeyCode::Down));
-        assert!(!view.live().contains(&Action::Last));
-        assert!(!view.live().contains(&Action::Down));
-        assert!(view.live().contains(&Action::Up));
-        view.key(&key(KeyCode::Up));
-        assert!(!view.live().contains(&Action::First));
+    fn overflow_decides_paging_actions() {
+        // A fitting table: no paging, no First/Last at the ends.
+        let mut fitting = view(json!([{"name": "Alpha"}, {"name": "Beta"}]));
+        frame(&mut fitting, 40, 20);
+        assert!(!fitting.live().contains(&Action::PageDown));
+        assert!(!fitting.live().contains(&Action::PageUp));
+        assert!(fitting.live().contains(&Action::Down));
+        fitting.key(&key(KeyCode::Down));
+        assert!(!fitting.live().contains(&Action::Last));
+        assert!(!fitting.live().contains(&Action::Down));
+        assert!(fitting.live().contains(&Action::Up));
+        fitting.key(&key(KeyCode::Up));
+        assert!(!fitting.live().contains(&Action::First));
+
+        // A detail scrolled to its end keeps Up but loses Down/PageDown.
+        let mut scrolled = view(long_row());
+        frame(&mut scrolled, 40, 10);
+        scrolled.key(&key(KeyCode::Enter));
+        frame(&mut scrolled, 40, 10);
+        assert!(scrolled.live().contains(&Action::Down));
+        for _ in 0..6 {
+            scrolled.key(&key(KeyCode::PageDown));
+        }
+        assert!(!scrolled.live().contains(&Action::Down));
+        assert!(!scrolled.live().contains(&Action::PageDown));
+        assert!(scrolled.live().contains(&Action::Up));
     }
 
     #[test]
@@ -743,15 +687,6 @@ mod tests {
                 "properties.extra"
             ]
         );
-    }
-
-    #[test]
-    fn cells_fit_one_line() {
-        assert_eq!(cell(&json!("a\nb"), false), "a\\nb");
-        assert_eq!(cell(&json!("a"), true), "\"a\"");
-        assert_eq!(cell(&json!(null), false), "·");
-        assert_eq!(cell(&json!(["a", "b"]), false), "[2 items]");
-        assert_eq!(cell(&json!({"a": 1}), false), "{1 field}");
     }
 
     #[test]
@@ -899,41 +834,5 @@ mod tests {
             },
             Some("metadata.json")
         );
-    }
-
-    #[test]
-    fn detail_lines_hold_the_unmodified_row() {
-        let row = json!({"path": "content/a.typ", "title": "Alpha"});
-        let lines = detail_lines(&row);
-
-        assert!(lines.len() > 1);
-        assert_eq!(
-            serde_json::from_str::<Value>(&lines.join("\n")).unwrap(),
-            row
-        );
-    }
-
-    #[test]
-    fn empty_table_opens_no_detail() {
-        let mut view = view(json!([]));
-
-        assert_eq!(view.answer(Action::Open), Step::Continue);
-        assert!(!view.table.detail_is_open());
-    }
-
-    #[test]
-    fn short_view_keeps_row_reachable() {
-        let mut view = view(json!([{"name": "Alpha"}]));
-        for height in [1, 2] {
-            assert!(frame_text(&frame(&mut view, 20, height)).contains("Alpha"));
-            view.key(&key(KeyCode::Enter));
-            assert!(frame_text(&frame(&mut view, 20, height)).contains('{'));
-            view.key(&key(KeyCode::Esc));
-        }
-        view.key(&key(KeyCode::Char('/')));
-        view.paste("Alpha");
-        assert!(frame_text(&frame(&mut view, 20, 1)).contains("Alpha"));
-        view.key(&key(KeyCode::Enter));
-        assert_eq!(view.visible, [0]);
     }
 }

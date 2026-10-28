@@ -67,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_variant_is_read_back() {
+    fn stored_variant_survives_lookup() {
         let (_directory, cache) = cache();
         let key = ContentDigest::of(b"request");
         cache.store(key, b"encoded").unwrap();

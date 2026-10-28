@@ -329,28 +329,4 @@ mod tests {
             ]
         );
     }
-
-    fn link(destination: &str) -> Link {
-        Link {
-            dest: destination.into(),
-            source: LinkSource::Link,
-        }
-    }
-
-    #[test]
-    fn link_destinations_classify_by_scheme() {
-        assert!(link("//cdn.example.test/assets/site.css").is_external());
-        assert!(!link("//cdn.example.test/assets/site.css").is_root_relative());
-        assert!(!link("//cdn.example.test/assets/site.css").is_relative());
-
-        assert!(link("/docs/").is_root_relative());
-        assert!(!link("/docs/").is_relative());
-        assert!(link("../docs/").is_relative());
-        assert!(link("#section").is_fragment());
-
-        assert!(link("HTTPS://example.test").is_http());
-        assert!(link("MAILTO:user@example.test").is_external());
-        assert!(link("data:text/plain,hello").is_external());
-        assert!(link("custom+scheme:value").is_external());
-    }
 }

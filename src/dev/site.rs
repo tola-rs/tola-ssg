@@ -167,39 +167,22 @@ mod tests {
     use super::*;
     use tola_build::config::ResolvedSiteConfig;
 
-    /// Build one candidate through `session`, so it has the origin
-    /// [`BuildSession::install_revision`] requires.
+    /// A site whose entry documents `index.html`, titled `title`, built through `session` so it
+    /// has the origin [`BuildSession::install_revision`] requires.
     fn candidate(
         session: &mut BuildSession,
         root: &std::path::Path,
         title: &str,
     ) -> (CheckedRevision, Arc<ResolvedSiteConfig>) {
-        std::fs::create_dir_all(root.join("content")).unwrap();
-        std::fs::write(root.join("site.typ"), "#document(\"index.html\")[Site]").unwrap();
         let source = format!(
             "[site]\ntitle = {}\n",
             serde_json::to_string(title).unwrap()
         );
-        let config = tola_build::config::loading::resolve_site_config(
-            &root.join("tola.toml"),
-            &source,
-            tola_typst::PackageLocations::from_absolute_roots(None, None).unwrap(),
-            &tola_build::config::loading::BuildOverrides::default(),
+        crate::dev::tests::checked_candidate(
+            session,
+            crate::dev::tests::write_site(root, "#document(\"index.html\")[Site]", &source),
+            tola_build::build::BuildMode::Production,
         )
-        .unwrap()
-        .into_config();
-        let attempt = session.prepare(
-            Arc::new(config),
-            tola_build::build::BuildRequest::new(tola_build::build::BuildMode::Production),
-        );
-        let candidate = attempt.run().unwrap().into_unchecked_revision(None);
-        let config = Arc::clone(candidate.site().config());
-        let checked = candidate
-            .check(&tola_build::cancellation::BuildCancellation::new())
-            .unwrap()
-            .into_checked()
-            .unwrap();
-        (checked, config)
     }
 
     #[test]

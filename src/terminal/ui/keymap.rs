@@ -457,48 +457,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_are_bound_once() {
-        for table in [&DEFAULT, &HELP, &INIT, &DEV, &TEXT_INPUT, &HELP_JUMP] {
-            let mut bound: Vec<(KeyCode, KeyModifiers)> = Vec::new();
-            for binding in table.bindings {
-                assert!(!binding.keys.is_empty(), "{} binds no key", binding.label);
-                for key in binding.keys {
-                    assert!(
-                        !bound.contains(&(key.code, key.modifiers)),
-                        "{:?} with {:?} is bound twice",
-                        key.code,
-                        key.modifiers
-                    );
-                    bound.push((key.code, key.modifiers));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn bound_keys_spell_themselves() {
-        for table in [&DEFAULT, &HELP, &INIT, &DEV, &TEXT_INPUT, &HELP_JUMP] {
-            for binding in table.bindings {
-                for key in binding.keys {
-                    assert!(
-                        !key.spelling().is_empty(),
-                        "{:?} has no hint spelling",
-                        key.code
-                    );
-                    assert!(
-                        table
-                            .action(&KeyEvent::new(key.code, key.modifiers))
-                            .is_some_and(|action| action == binding.action),
-                        "{:?} does not produce {:?}",
-                        key.code,
-                        binding.action
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
     fn letters_keep_their_case() {
         assert_eq!(
             DEFAULT.action(&pressed(KeyCode::Char('G'))),

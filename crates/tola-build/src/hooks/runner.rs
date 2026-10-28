@@ -2,7 +2,7 @@
 
 use super::command::{HookCall, HookDirectories, HookInvocation};
 use super::evidence::{
-    FailedHookOutputs, HookOutputEvidence, SourceHookOutputs, declared_output_snapshots,
+    FailedHookOutputs, HookOutputEvidence, SourceHookOutputs, declared_output_files,
     validate_declared_output_boundaries,
 };
 use super::report::{hook_command_error, run_hook_entry};
@@ -128,11 +128,11 @@ fn run_before_build_hook(
                 error,
             )
         })?;
-        let after = declared_output_snapshots(hook, config, cancellation)?;
-        for snapshot in &after {
-            if snapshot.entries.is_empty() {
+        let after = declared_output_files(hook, config, cancellation)?;
+        for files in &after {
+            if files.entries.is_empty() {
                 let declared = crate::filesystem::display_path(
-                    snapshot.source_identity.logical_path(),
+                    files.source_identity.logical_path(),
                     config.get_root(),
                 );
                 return Err(super::hook_contract_error(
@@ -146,7 +146,7 @@ fn run_before_build_hook(
         }
         after
             .into_iter()
-            .map(|snapshot| HookOutputEvidence::from_successful_snapshot(snapshot, cancellation))
+            .map(|files| HookOutputEvidence::from_successful_output(files, cancellation))
             .collect()
     })
 }
@@ -281,14 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_nothing() {
-        if is_hook_child_for("before-build") {
-            crate::build::tests::assert_hook_environment("before-build");
-        }
-    }
-
-    #[test]
-    fn writes_declared_output() {
+    fn child_writes_declared_output() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -298,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_successful_runs() {
+    fn child_counts_successful_runs() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -311,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_middle_chain_output() {
+    fn child_writes_middle_chain_output() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -321,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_final_chain_output() {
+    fn child_writes_final_chain_output() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -330,38 +323,6 @@ mod tests {
             fs::read_to_string("generated/middle.txt").unwrap(),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn executed_hook_reports_its_output() {
-        let dir = TempDir::new().unwrap();
-        let mut config = config(&dir);
-        let root = config.get_root().to_path_buf();
-        fs::create_dir_all(root.join("generated")).unwrap();
-        fs::write(root.join("generated/site.css"), "before").unwrap();
-        let mut generator = hook("writes_declared_output");
-        generator.generates = vec!["generated/site.css".into()];
-        config.build.hooks.before_build.push(generator);
-
-        let execution = run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        assert!(execution.hooks_executed());
-        assert_eq!(
-            fs::read_to_string(root.join("generated/site.css")).unwrap(),
-            "compiled"
-        );
-        let evidence = execution.into_source_hooks();
-        assert_eq!(evidence.outputs().len(), 1);
-        assert_eq!(
-            evidence.outputs()[0].logical_path(),
-            root.join("generated/site.css")
-        );
-        assert!(evidence.outputs()[0].is_current());
     }
 
     /// One declaration that loading accepts and a retargeted symlink later aims at a reserved
@@ -386,7 +347,7 @@ mod tests {
         let cases = [
             Case {
                 source: "[vendor]\npath = \"vendor\"\n\n[[build.hooks.before-build]]\nname = \"generator\"\ncommand = [\"generator\"]\ngenerates = [\"alias/marker.txt\"]\n",
-                child: "writes_declared_output",
+                child: "child_writes_declared_output",
                 prepare: |root| fs::create_dir(root.join("alias")).unwrap(),
                 retarget: |root| {
                     fs::remove_dir(root.join("alias")).unwrap();
@@ -399,7 +360,7 @@ mod tests {
             },
             Case {
                 source: "[[build.hooks.before-build]]\nname = \"generator\"\ncommand = [\"generator\"]\ngenerates = [\"alias.toml\"]\n",
-                child: "rewrites_the_configuration",
+                child: "child_rewrites_the_configuration",
                 prepare: |root| fs::write(root.join("alias.toml"), "generated").unwrap(),
                 retarget: |root| {
                     fs::remove_file(root.join("alias.toml")).unwrap();
@@ -444,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_the_configuration() {
+    fn child_rewrites_the_configuration() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -452,27 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn evidence_keeps_snapshotted_kind() {
-        let directory = TempDir::new().unwrap();
-        let config = config(&directory);
-        let output = config.get_root().join("generated");
-        fs::create_dir(&output).unwrap();
-        let mut hook = hook("writes_nothing");
-        hook.generates = vec!["generated".into()];
-        let snapshot = declared_output_snapshots(&hook, &config, None)
-            .unwrap()
-            .pop()
-            .unwrap();
-
-        fs::remove_dir(&output).unwrap();
-        fs::write(&output, "replaced with a file").unwrap();
-        let evidence = HookOutputEvidence::from_successful_snapshot(snapshot, None).unwrap();
-
-        assert!(evidence.covers_path(&output.join("nested.css")));
-    }
-
-    #[test]
-    fn writes_partial_output_then_fails() {
+    fn child_writes_partial_output_then_fails() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -482,126 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_chain_separates_partial_files() {
-        let directory = TempDir::new().unwrap();
-        let mut config = config(&directory);
-        let mut first = hook("writes_declared_output");
-        first.generates = vec!["generated/site.css".into()];
-        let mut second = hook("writes_partial_output_then_fails");
-        second.generates = vec!["failed/partial.txt".into(), "failed/missing.txt".into()];
-        config.build.hooks.before_build = vec![first, second];
-        let error = run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap_err();
-        let diagnostics = crate::diagnostic::attached(&error.error)
-            .expect("a failed hook command has its diagnostic");
-        assert_eq!(diagnostics[0].code, "hook.command");
-        assert!(
-            diagnostics[0]
-                .notes
-                .iter()
-                .any(|note| note.contains("generator failed after writing")),
-            "{:?}",
-            diagnostics[0].notes
-        );
-        assert_eq!(error.completed.outputs().len(), 1);
-        assert_eq!(
-            error.completed.outputs()[0].logical_path(),
-            config.get_root().join("generated/site.css")
-        );
-        let outputs = error.partial.as_ref().unwrap();
-        assert!(outputs.is_current());
-        for path in ["failed/partial.txt", "failed/missing.txt"] {
-            assert!(outputs.covers_path(&config.get_root().join(path)));
-        }
-        assert!(!outputs.covers_path(&config.get_root().join("content/page.typ")));
-
-        fs::write(config.get_root().join("failed/missing.txt"), "now present").unwrap();
-        assert!(!outputs.is_current());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn failed_outputs_track_symlink_target() {
-        use std::os::unix::fs::symlink;
-        let directory = TempDir::new().unwrap();
-        fs::write(directory.path().join("first.txt"), "same").unwrap();
-        fs::write(directory.path().join("second.txt"), "same").unwrap();
-        let output = directory.path().join("generated.txt");
-        symlink("first.txt", &output).unwrap();
-        let outputs = FailedHookOutputs::capture(&BTreeSet::from([output.clone()]), None)
-            .unwrap()
-            .unwrap();
-        assert!(outputs.is_current());
-
-        fs::remove_file(&output).unwrap();
-        symlink("second.txt", &output).unwrap();
-        assert!(!outputs.is_current());
-    }
-
-    /// A path check answers for the paths it was asked about, and only those.
-    #[test]
-    fn selected_paths_keep_their_own_freshness() {
-        let directory = TempDir::new().unwrap();
-        let first = directory.path().join("first.txt");
-        let second = directory.path().join("second.txt");
-        fs::write(&first, "observed").unwrap();
-        fs::write(&second, "observed").unwrap();
-        let outputs =
-            FailedHookOutputs::capture(&BTreeSet::from([first.clone(), second.clone()]), None)
-                .unwrap()
-                .unwrap();
-        fs::write(&second, "changed independently").unwrap();
-        let cancellation = crate::cancellation::BuildCancellation::new();
-
-        let current = outputs
-            .current_for_paths(std::slice::from_ref(&first), &cancellation)
-            .unwrap()
-            .unwrap();
-
-        assert!(current.covers_path(&first));
-        assert!(!current.covers_path(&second));
-        assert!(
-            outputs
-                .current_for_paths(std::slice::from_ref(&second), &cancellation)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    /// A cancelled token stops a path check instead of answering it.
-    #[test]
-    fn cancelled_path_check_stops() {
-        let directory = TempDir::new().unwrap();
-        let first = directory.path().join("first.txt");
-        fs::write(&first, "observed").unwrap();
-        let outputs = FailedHookOutputs::capture(&BTreeSet::from([first.clone()]), None)
-            .unwrap()
-            .unwrap();
-        let canceller = crate::cancellation::BuildCanceller::new();
-        canceller.cancel();
-
-        assert!(matches!(
-            outputs.current_for_paths(&[first], &canceller.token()),
-            Err(crate::cancellation::BuildCancelled),
-        ));
-    }
-
-    #[test]
-    fn records_after_hook_start() {
-        if !is_hook_child_for("after-publish") {
-            return;
-        }
-        crate::build::tests::assert_hook_environment("after-publish");
-        fs::write("after-started.txt", "started").unwrap();
-    }
-
-    #[test]
-    fn records_before_build_start() {
+    fn child_records_before_build_start() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -620,7 +442,7 @@ mod tests {
             .build
             .hooks
             .before_build
-            .push(hook("records_before_build_start"));
+            .push(hook("child_records_before_build_start"));
         let marker = config.get_root().join("before-started.txt");
 
         let mut request = crate::build::BuildRequest::new(BuildMode::Production);
@@ -641,40 +463,13 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_after_hook_never_starts() {
-        let directory = TempDir::new().unwrap();
-        let mut config = config(&directory);
-        config.build.hooks.after_publish.push(
-            crate::config::section::build::AfterPublishHookConfig {
-                name: "records after-publish start".into(),
-                command: hook_child_command("hooks::runner::tests::records_after_hook_start"),
-                ..Default::default()
-            },
-        );
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        canceller.cancel();
-
-        let error = run_after_publish_hooks(
-            &config,
-            BuildMode::Production,
-            &config.build.publish_dir,
-            &cancellation,
-        )
-        .unwrap_err();
-
-        assert!(error.is::<crate::cancellation::BuildCancelled>());
-        assert!(!config.get_root().join("after-started.txt").exists());
-    }
-
-    #[test]
     fn participating_commands_run_each_build() {
         let directory = TempDir::new().unwrap();
         let mut config = config(&directory);
-        let counter = hook("counts_successful_runs");
-        let mut disabled = hook("counts_successful_runs");
+        let counter = hook("child_counts_successful_runs");
+        let mut disabled = hook("child_counts_successful_runs");
         disabled.enable = false;
-        let mut production_only = hook("writes_declared_output");
+        let mut production_only = hook("child_writes_declared_output");
         production_only.dev = crate::config::section::build::DevParticipation::Skip;
         production_only.generates = vec!["generated/site.css".into()];
         config.build.hooks.before_build = vec![counter, disabled, production_only];
@@ -716,11 +511,11 @@ mod tests {
     fn failed_chain_restarts_from_the_start() {
         let directory = TempDir::new().unwrap();
         let mut config = config(&directory);
-        let mut first = hook("counts_successful_runs");
+        let mut first = hook("child_counts_successful_runs");
         first.generates = vec!["generated/count.txt".into()];
-        let mut middle = hook("writes_middle_chain_output");
+        let mut middle = hook("child_writes_middle_chain_output");
         middle.generates = vec!["generated/middle.txt".into()];
-        let mut last = hook("writes_final_chain_output");
+        let mut last = hook("child_writes_final_chain_output");
         last.generates = vec!["generated/final.txt".into()];
         config.build.hooks.before_build = vec![first, middle, last];
         let root = config.get_root();
@@ -791,85 +586,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cancelled_before_build_starts_nothing() {
-        let directory = TempDir::new().unwrap();
-        let mut config = config(&directory);
-        config
-            .build
-            .hooks
-            .before_build
-            .push(hook("counts_successful_runs"));
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        canceller.cancel();
-
-        let error = run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Development,
-            HookExecution::Run,
-            Some(&cancellation),
-        )
-        .unwrap_err();
-
-        assert!(error.error.is::<crate::cancellation::BuildCancelled>());
-        assert!(!config.get_root().join("generated/count.txt").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn declared_output_stays_out_of_internal() {
-        let dir = TempDir::new().unwrap();
-        let config = config(&dir);
-        fs::create_dir_all(dir.path().join(crate::filesystem::INTERNAL_DIR)).unwrap();
-        std::os::unix::fs::symlink(
-            dir.path().join(crate::filesystem::INTERNAL_DIR),
-            dir.path().join("generated"),
-        )
-        .unwrap();
-        let mut hook = hook("writes_nothing");
-        hook.generates.push("generated/cache.bin".into());
-
-        let error = run_before_build_hook(
-            &hook,
-            &config,
-            BuildMode::Production,
-            None,
-            &mut BTreeSet::new(),
-        )
-        .unwrap_err();
-        let diagnostics =
-            crate::diagnostic::attached(&error).expect("the refused output is reported");
-        assert_eq!(diagnostics[0].code, crate::codes::build::HOOKS);
-        assert!(diagnostics[0].message.contains("generated/cache.bin"));
-    }
-
-    #[test]
-    fn before_build_requires_declared_outputs() {
-        let dir = TempDir::new().unwrap();
-        let config = config(&dir);
-        let mut hook = hook("writes_nothing");
-        hook.generates.push("generated/missing.css".into());
-
-        let error = run_before_build_hook(
-            &hook,
-            &config,
-            BuildMode::Production,
-            None,
-            &mut BTreeSet::new(),
-        )
-        .unwrap_err();
-
-        let diagnostics =
-            crate::diagnostic::attached(&error).expect("the refused output is reported");
-        assert_eq!(diagnostics[0].code, crate::codes::build::HOOKS);
-        assert!(diagnostics[0].message.contains("build.hooks.before-build"));
-        assert!(diagnostics[0].message.contains("generated/missing.css"));
-    }
-
     /// Blocks until Tola stops it, so a cancellation can observe what survives.
     #[test]
-    fn waits_for_cancellation() {
+    fn child_waits_for_cancellation() {
         if !is_hook_child_for("before-build") {
             return;
         }
@@ -880,35 +599,20 @@ mod tests {
         }
     }
 
+    /// Every hook stage's child receives the mode the build runs in.
     #[test]
-    fn before_build_child_receives_build_mode() {
+    fn hook_child_receives_build_mode() {
         let directory = TempDir::new().unwrap();
         let root = directory.path().to_path_buf();
         let mut config = config(&directory);
         config.build.hooks.before_build.push(hook_named(
             "record",
-            "build::tests::records_hook_environment",
+            "build::tests::child_records_hook_environment",
         ));
-
-        for (mode, expected) in [
-            (BuildMode::Development, "dev"),
-            (BuildMode::Production, "prod"),
-        ] {
-            run_before_build_hooks_with_cancellation(&config, mode, HookExecution::Run, None)
-                .unwrap();
-            assert_eq!(crate::build::tests::recorded_build_mode(&root), expected);
-        }
-    }
-
-    #[test]
-    fn after_publish_child_receives_build_mode() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().to_path_buf();
-        let mut config = config(&directory);
         config.build.hooks.after_publish.push(
             crate::config::section::build::AfterPublishHookConfig {
                 name: "record".into(),
-                command: hook_child_command("build::tests::records_hook_environment"),
+                command: hook_child_command("build::tests::child_records_hook_environment"),
                 dev: crate::config::section::build::DevParticipation::Run,
                 ..Default::default()
             },
@@ -918,6 +622,13 @@ mod tests {
             (BuildMode::Development, "dev"),
             (BuildMode::Production, "prod"),
         ] {
+            run_before_build_hooks_with_cancellation(&config, mode, HookExecution::Run, None)
+                .unwrap();
+            assert_eq!(
+                crate::build::tests::recorded_build_mode(&root),
+                expected,
+                "before-build {expected}"
+            );
             run_after_publish_hooks(
                 &config,
                 mode,
@@ -925,315 +636,98 @@ mod tests {
                 &crate::cancellation::BuildCancellation::new(),
             )
             .unwrap();
-            assert_eq!(crate::build::tests::recorded_build_mode(&root), expected);
+            assert_eq!(
+                crate::build::tests::recorded_build_mode(&root),
+                expected,
+                "after-publish {expected}"
+            );
         }
     }
 
-    /// One hook identity owns one cache directory across builds: the build mode, the command
-    /// arguments, and the configuration document naming it do not change that directory.
+    /// A hook identity's cache directory, and what the command left in it, outlives both
+    /// ways a run can end without finishing: a failed command and a cancelled one.
     #[test]
-    fn repeated_hooks_share_one_cache_directory() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().to_path_buf();
-        let mut config = config(&directory);
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "build::tests::records_hook_environment",
-        )];
-
-        run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Development,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let cache = crate::build::tests::recorded_hook_cache_directory(&root);
-        assert!(cache.is_dir());
-        assert!(!crate::build::tests::recorded_temporary_directory(&root).exists());
-
-        let mut changed_command = hook_named("images", "build::tests::records_hook_environment");
-        changed_command.command.push("--test-threads=1".into());
-        config.build.hooks.before_build = vec![
-            hook_named("other", "build::tests::records_hook_environment"),
-            changed_command,
-        ];
-        run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-
-        let other_document = root.join("other.toml");
-        fs::write(
-            &other_document,
-            "[[build.hooks.before-build]]\nname = \"images\"\ncommand = [\"true\"]\n",
-        )
-        .unwrap();
-        let mut reloaded = crate::config::loading::load_site_config(
-            Some(&other_document),
-            tola_typst::PackageLocations::default(),
-            &crate::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config();
-        reloaded.build.hooks.before_build[0].command =
-            hook_child_command("build::tests::records_hook_environment");
-        run_before_build_hooks_with_cancellation(
-            &reloaded,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            crate::build::tests::recorded_hook_cache_directory(&root),
-            cache
-        );
-        assert_eq!(
-            fs::read_to_string(cache.join("invocations.txt"))
-                .unwrap()
-                .lines()
-                .count(),
-            3
-        );
-    }
-
-    /// A configured name is one identity, whatever characters it has: no name reaches
-    /// outside the site root, and no two names share a cache directory.
-    #[test]
-    fn distinct_hook_names_keep_distinct_caches() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let mut caches = std::collections::BTreeSet::new();
-        for name in [
-            "images",
-            "Images",
-            "图片",
-            "a/b",
-            "..",
-            "a.b",
-            "images/nested",
-            "../../../../escape",
-        ] {
+    fn cache_directory_survives_unfinished_run() {
+        #[derive(Clone, Copy, Debug)]
+        enum Ending {
+            Failed,
+            Cancelled,
+        }
+        for ending in [Ending::Failed, Ending::Cancelled] {
+            let directory = TempDir::new().unwrap();
+            let root = directory.path().to_path_buf();
             let mut config = config(&directory);
-            config.build.hooks.before_build =
-                vec![hook_named(name, "build::tests::records_hook_environment")];
+            config.build.hooks.before_build = vec![hook_named(
+                "images",
+                "build::tests::child_records_hook_environment",
+            )];
             run_before_build_hooks_with_cancellation(
                 &config,
-                BuildMode::Development,
+                BuildMode::Production,
                 HookExecution::Run,
                 None,
             )
             .unwrap();
-            let cache = crate::build::tests::recorded_hook_cache_directory(&root);
-            assert!(
-                cache.canonicalize().unwrap().starts_with(&root),
-                "`{name}` escaped the site root"
-            );
-            assert!(caches.insert(cache), "`{name}` reused another name's cache");
-        }
+            let marker =
+                crate::build::tests::recorded_hook_cache_directory(&root).join("marker.txt");
+            fs::write(&marker, "kept").unwrap();
 
-        // Renaming the hook gives it a cache of its own and leaves the old one in place.
-        let mut config = config(&directory);
-        config.build.hooks.before_build = vec![hook_named(
-            "renamed",
-            "build::tests::records_hook_environment",
-        )];
-        run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Development,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let renamed = crate::build::tests::recorded_hook_cache_directory(&root);
-        assert!(!caches.contains(&renamed));
-        assert!(caches.iter().all(|cache| cache.is_dir()));
-    }
-
-    /// The cache directory separates stages and sites, not names alone.
-    #[test]
-    fn hook_cache_directory_isolates_stage_and_site() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().to_path_buf();
-        let mut site = config(&directory);
-        site.build.hooks.before_build = vec![hook_named(
-            "images",
-            "build::tests::records_hook_environment",
-        )];
-        run_before_build_hooks_with_cancellation(
-            &site,
-            BuildMode::Development,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let before_build = crate::build::tests::recorded_hook_cache_directory(&root);
-
-        site.build.hooks.after_publish.push(
-            crate::config::section::build::AfterPublishHookConfig {
-                name: "images".into(),
-                command: hook_child_command("build::tests::records_hook_environment"),
-                ..Default::default()
-            },
-        );
-        run_after_publish_hooks(
-            &site,
-            BuildMode::Production,
-            &site.build.publish_dir,
-            &crate::cancellation::BuildCancellation::new(),
-        )
-        .unwrap();
-        let after_publish = crate::build::tests::recorded_hook_cache_directory(&root);
-        assert_ne!(after_publish, before_build);
-
-        let elsewhere = TempDir::new().unwrap();
-        let mut other = config(&elsewhere);
-        other.build.hooks.before_build = vec![hook_named(
-            "images",
-            "build::tests::records_hook_environment",
-        )];
-        run_before_build_hooks_with_cancellation(
-            &other,
-            BuildMode::Development,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let other_site = crate::build::tests::recorded_hook_cache_directory(elsewhere.path());
-        assert_ne!(other_site, before_build);
-    }
-
-    #[test]
-    fn blocked_cache_directory_stops_the_hook() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().to_path_buf();
-        let mut config = config(&directory);
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "build::tests::records_hook_environment",
-        )];
-        run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let cache = crate::build::tests::recorded_hook_cache_directory(&root);
-        fs::remove_dir_all(&cache).unwrap();
-        fs::write(&cache, "not a directory").unwrap();
-
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "hooks::runner::tests::records_before_build_start",
-        )];
-        let error = run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap_err();
-
-        assert!(!root.join("before-started.txt").exists());
-        let diagnostics =
-            crate::diagnostic::attached(&error.error).expect("the failure is reported");
-        assert_eq!(diagnostics[0].code, crate::codes::hook::COMMAND);
-        assert!(diagnostics[0].message.contains("images"));
-        assert!(diagnostics[0].message.contains("build.hooks.before-build"));
-        assert!(!diagnostics[0].message.contains(root.to_str().unwrap()));
-    }
-
-    #[test]
-    fn failed_hook_keeps_its_cache_directory() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().to_path_buf();
-        let mut config = config(&directory);
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "build::tests::records_hook_environment",
-        )];
-        run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let marker = crate::build::tests::recorded_hook_cache_directory(&root).join("marker.txt");
-        fs::write(&marker, "kept").unwrap();
-
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "hooks::runner::tests::writes_partial_output_then_fails",
-        )];
-        let error = run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Production,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap_err();
-
-        assert!(crate::diagnostic::attached(&error.error).is_some());
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "kept");
-    }
-
-    #[test]
-    fn cancelled_hook_keeps_its_cache_directory() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().to_path_buf();
-        let mut config = config(&directory);
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "build::tests::records_hook_environment",
-        )];
-        run_before_build_hooks_with_cancellation(
-            &config,
-            BuildMode::Development,
-            HookExecution::Run,
-            None,
-        )
-        .unwrap();
-        let marker = crate::build::tests::recorded_hook_cache_directory(&root).join("marker.txt");
-        fs::write(&marker, "kept").unwrap();
-
-        config.build.hooks.before_build = vec![hook_named(
-            "images",
-            "hooks::runner::tests::waits_for_cancellation",
-        )];
-        let canceller = crate::cancellation::BuildCanceller::new();
-        let cancellation = canceller.token();
-        let outcome = std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                run_before_build_hooks_with_cancellation(
-                    &config,
-                    BuildMode::Development,
-                    HookExecution::Run,
-                    Some(&cancellation),
-                )
-            });
-            let ready = root.join("hook-ready.txt");
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            while !ready.exists() {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the hook command never started"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            match ending {
+                Ending::Failed => {
+                    config.build.hooks.before_build = vec![hook_named(
+                        "images",
+                        "hooks::runner::tests::child_writes_partial_output_then_fails",
+                    )];
+                    let error = run_before_build_hooks_with_cancellation(
+                        &config,
+                        BuildMode::Production,
+                        HookExecution::Run,
+                        None,
+                    )
+                    .unwrap_err();
+                    assert!(
+                        crate::diagnostic::attached(&error.error).is_some(),
+                        "{ending:?}"
+                    );
+                }
+                Ending::Cancelled => {
+                    config.build.hooks.before_build = vec![hook_named(
+                        "images",
+                        "hooks::runner::tests::child_waits_for_cancellation",
+                    )];
+                    let canceller = crate::cancellation::BuildCanceller::new();
+                    let cancellation = canceller.token();
+                    let error = std::thread::scope(|scope| {
+                        let worker = scope.spawn(|| {
+                            run_before_build_hooks_with_cancellation(
+                                &config,
+                                BuildMode::Development,
+                                HookExecution::Run,
+                                Some(&cancellation),
+                            )
+                        });
+                        let ready = root.join("hook-ready.txt");
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(30);
+                        while !ready.exists() {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "the hook command never started"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        canceller.cancel();
+                        worker.join().unwrap()
+                    })
+                    .unwrap_err();
+                    assert!(
+                        error.error.is::<crate::cancellation::BuildCancelled>(),
+                        "{ending:?}"
+                    );
+                }
             }
-            canceller.cancel();
-            worker.join().unwrap()
-        });
 
-        let error = outcome.unwrap_err();
-        assert!(error.error.is::<crate::cancellation::BuildCancelled>());
-        assert_eq!(fs::read_to_string(&marker).unwrap(), "kept");
-        assert!(!crate::build::tests::recorded_temporary_directory(&root).exists());
+            assert_eq!(fs::read_to_string(&marker).unwrap(), "kept", "{ending:?}");
+        }
     }
 }

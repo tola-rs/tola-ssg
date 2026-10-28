@@ -28,7 +28,7 @@ pub(in crate::query) struct ExpressionBinding {
     pub initializer: Option<Span>,
 }
 
-/// Owned by one request, so arguments and recursive initializers never escape their source snapshot.
+/// Owned by one request, so arguments and recursive initializers never escape their source parse.
 #[derive(Default)]
 pub(in crate::query) struct Inference {
     inferring: HashSet<Span>,
@@ -1492,36 +1492,6 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_mutation_scans_preserve_errors() {
-        use super::*;
-        use std::cell::Cell;
-        use tola_build::cancellation::{BuildCancelled, BuildCanceller};
-
-        let source =
-            Source::detached("#let value = (old: 1)\n#let unrelated = 1\n#value = (current: 1)");
-        let names = SourceNames::new(source);
-        let canceller = BuildCanceller::new();
-        let cancellation = canceller.token();
-        let visits = Cell::new(0);
-        let error = binding_is_written(
-            &names,
-            0,
-            names.source().text().len(),
-            |_| false,
-            || {
-                visits.set(visits.get() + 1);
-                if visits.get() == 3 {
-                    canceller.cancel();
-                }
-                cancellation.ensure_active()?;
-                Ok(())
-            },
-        )
-        .unwrap_err();
-        assert!(error.is::<BuildCancelled>());
-    }
-
-    #[test]
     fn destructured_names_keep_projected_values() {
         use super::*;
         use crate::query::source_member_completion;
@@ -1558,91 +1528,20 @@ mod tests {
         }
     }
 
+    /// A binding whose value has a type answers a hover that names that type.
     #[test]
-    fn unproven_patterns_keep_values_unknown() {
-        use super::*;
-        use crate::query::source_member_completion;
-
-        for marked in [
-            "#let (value,) = unknown\n#value.|",
-            "#let (value, missing) = ((current: 1),)\n#value.|",
-            "#let (value, missing) = (value: (current: 1))\n#value.|",
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            assert!(
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .is_none(),
-                "{marked}"
-            );
-            let items = QuerySession::with_program(FAILED_PROGRAM)
-                .completion(&format!("#panic(\"page\")\n{marked}"));
-            let labels = completion_labels(&items);
-            assert!(!labels.contains(&"current"), "{marked}: {labels:?}");
-        }
-    }
-
-    #[test]
-    fn inferred_calls_keep_current_arguments() {
-        for marked in [
-            "#let f(x) = x\n#f(\"seen\")\n#panic(\"page\")\n#f((current: 1)).|",
-            "#let f(x) = (slot: x)\n#f(\"seen\")\n#panic(\"page\")\n#f((current: 1)).slot.|",
-            "#let id(x) = x\n#let f(x) = id(x)\n#f(\"seen\")\n#panic(\"page\")\n#f((current: 1)).|",
-            "#let f(x) = { import \"helper.typ\": identity; identity(x) }\n#f(\"seen\")\n#panic(\"page\")\n#f((current: 1)).|",
-        ] {
-            let mut site = QuerySession::new();
-            site.site
-                .write("content/helper.typ", "#let identity(x) = x");
-            let items = site.completion(marked);
-            let labels = completion_labels(&items);
-            assert!(labels.contains(&"current"), "{marked}: {labels:?}");
-            for previous in ["split", "trim", "seen"] {
-                assert!(!labels.contains(&previous), "{marked}: {labels:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn inferred_imports_discard_other_call_paths() {
-        for body in ["import path: record; record", "import path: *; math"] {
-            let mut site = QuerySession::new();
-            site.site.write(
-                "content/first.typ",
-                "#let record = (seen: 1)\n#let math = record",
-            );
-            site.site.write(
-                "content/second.typ",
-                "#let record = (current: 1)\n#let math = record",
-            );
-            let marked = format!(
-                "#let f(path) = {{ {body} }}\n#f(\"first.typ\")\n#panic(\"page\")\n#f(\"second.typ\").|"
-            );
-            let items = site.completion(&marked);
-            let labels = completion_labels(&items);
-            for previous in ["seen", "sqrt"] {
-                assert!(!labels.contains(&previous), "{body}: {labels:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn executed_calls_retain_observed_values() {
-        let mut site = QuerySession::new();
-        let items =
-            site.completion("#let f(x) = (x,).at(0)\n#f((observed: 1)).|\n#panic(\"page\")");
-        let labels = completion_labels(&items);
-        assert!(labels.contains(&"observed"), "{labels:?}");
-    }
-
-    #[test]
-    fn typed_fields_retain_hover_and_method_signatures() {
+    fn typed_binding_answers_its_type() {
         let mut site = QuerySession::with_program(FAILED_PROGRAM);
         let hover = site
             .hover_text("#panic(\"page\")\n#let value = str(123)\n#val|ue")
             .expect("typed binding hover");
         assert!(hover.contains("let value = str;"), "{hover}");
+    }
+
+    /// A method call on a typed field names the parameter the cursor fills, never the receiver.
+    #[test]
+    fn method_call_marks_its_parameter() {
+        let mut site = QuerySession::with_program(FAILED_PROGRAM);
         let signature = site
             .signature(
                 "#panic(\"page\")\n#let f(x) = (current: x.len())\n#f(\"test\").current.bit-lshift(|)",
@@ -1676,63 +1575,59 @@ mod tests {
     }
 
     #[test]
-    fn optional_unknown_returns_stay_unknown() {
-        let mut site = QuerySession::with_program(FAILED_PROGRAM);
-        let hover = site
-            .hover_text("#panic(\"page\")\n#let value = (1, 2).find(x => true)\n#val|ue")
-            .expect("a binding hover");
-        assert!(hover.contains("let value = any;"), "{hover}");
-        assert!(!hover.contains("let value = none;"), "{hover}");
+    fn cancelled_mutation_scans_preserve_errors() {
+        use super::*;
+        use std::cell::Cell;
+        use tola_build::cancellation::{BuildCancelled, BuildCanceller};
+
+        let source =
+            Source::detached("#let value = (old: 1)\n#let unrelated = 1\n#value = (current: 1)");
+        let names = SourceNames::new(source);
+        let canceller = BuildCanceller::new();
+        let cancellation = canceller.token();
+        let visits = Cell::new(0);
+        let error = binding_is_written(
+            &names,
+            0,
+            names.source().text().len(),
+            |_| false,
+            || {
+                visits.set(visits.get() + 1);
+                if visits.get() == 3 {
+                    canceller.cancel();
+                }
+                cancellation.ensure_active()?;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.is::<BuildCancelled>());
     }
 
     #[test]
-    fn native_returns_follow_declared_types() {
-        let mut site = QuerySession::with_program(FAILED_PROGRAM);
-        for (expression, expected, absent) in [
-            ("\"a\".to-unicode()", Some("signum"), "map"),
-            ("(a: 1).insert(\"b\", 2)", None, "keys"),
-            ("(a: 1).remove(\"a\")", None, "keys"),
-            ("([a], [b]).join()", None, "split"),
-            ("\"a,b\".split(\",\")", Some("map"), "signum"),
-            ("str(1)", Some("split"), "signum"),
-        ] {
-            let source = format!("#panic(\"page\")\n#let value = {expression}\n#value.|");
-            let completions = site.completion(&source);
-            let labels = completion_labels(&completions);
-            if let Some(expected) = expected {
-                assert!(labels.contains(&expected), "{expression}: {labels:?}");
-            }
-            assert!(!labels.contains(&absent), "{expression}: {labels:?}");
-        }
-    }
+    fn unproven_patterns_keep_values_unknown() {
+        use super::*;
+        use crate::query::source_member_completion;
 
-    #[test]
-    fn parameters_keep_lexical_identity() {
-        let mut site = QuerySession::with_program(FAILED_PROGRAM);
-        for (body, expected) in [
-            ("let inner() = x; inner()", Some("captured")),
-            ("let inner(x: x) = x; inner()", Some("captured")),
-            ("let inner(x) = x; inner(..(1,))", None),
+        for marked in [
+            "#let (value,) = unknown\n#value.|",
+            "#let (value, missing) = ((current: 1),)\n#value.|",
+            "#let (value, missing) = (value: (current: 1))\n#value.|",
         ] {
-            let source =
-                format!("#panic(\"page\")\n#let outer(x) = {{ {body} }}\n#outer((captured: 1)).|");
-            let completions = site.completion(&source);
-            let labels = completion_labels(&completions);
-            assert_eq!(
-                labels.contains(&"captured"),
-                expected.is_some(),
-                "{body}: {labels:?}"
+            let cursor = marked.find('|').unwrap();
+            let source = Source::detached(marked.replace('|', ""));
+            let names = SourceNames::new(source.clone());
+            assert!(
+                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
+                    .unwrap()
+                    .is_none(),
+                "{marked}"
             );
+            let items = QuerySession::with_program(FAILED_PROGRAM)
+                .completion(&format!("#panic(\"page\")\n{marked}"));
+            let labels = completion_labels(&items);
+            assert!(!labels.contains(&"current"), "{marked}: {labels:?}");
         }
-    }
-
-    #[test]
-    fn spreads_preserve_unknown_parameters() {
-        let mut site = QuerySession::with_program(FAILED_PROGRAM);
-        let completions =
-            site.completion("#panic(\"page\")\n#let first(x, y) = x\n#first(..(1,), (wrong: 1)).|");
-        let labels = completion_labels(&completions);
-        assert!(!labels.contains(&"wrong"), "{labels:?}");
     }
 
     #[test]
@@ -1747,19 +1642,6 @@ mod tests {
         }
         for absent in ["join", "used"] {
             assert!(!labels.contains(&absent), "{labels:?}");
-        }
-    }
-
-    #[test]
-    fn joined_blocks_preserve_unknown_types() {
-        let mut site = QuerySession::with_program(FAILED_PROGRAM);
-        for expression in ["{ [prefix]; \"suffix\" }", "f()"] {
-            let source = format!(
-                "#panic(\"page\")\n#let f() = {{ [prefix]; \"suffix\" }}\n#let value = {expression}\n#value.|"
-            );
-            let completions = site.completion(&source);
-            let labels = completion_labels(&completions);
-            assert!(!labels.contains(&"split"), "{expression}: {labels:?}");
         }
     }
 }

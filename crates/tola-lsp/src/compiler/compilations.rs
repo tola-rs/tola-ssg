@@ -196,376 +196,43 @@ fn same_sources(left: &[(PathBuf, Arc<str>)], right: &[(PathBuf, Arc<str>)]) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::compiler::tests::{compiler, inputs_at, site_configuration};
-    use crate::compiler::{CheckRequest, QueryRequest, SourceCompilation, SourceJob};
-    use crate::protocol::{CheckProgress, SourceQuery};
-    use crate::sources::SourceView;
-    use lsp_server::RequestId;
-    use std::path::Path;
-    use tola_build::BuildResources;
-    use tola_build::cancellation::{BuildCancellation, BuildCanceller};
+    use std::sync::Arc;
 
-    /// A request that names the sources a revision already resolved reads its compilation.
-    ///
-    /// A query pins the file it asks about. When that pin has the text the revision read, the
-    /// compilation a fresh read would produce resolves to the same sources, so the revision's own
-    /// compilation answers — with the diagnostics the fresh read would have reported.
+    use tola_build::cancellation::BuildCancellation;
+    use tola_build::check::SourceDiagnosticSession;
+
+    use super::RevisionCompilations;
+    use crate::compiler::tests::site_configuration;
+
+    /// Retaining a compilation is an optimization, never a second semantics: a read answered from
+    /// the cache says exactly what compiling those sources again says.
     #[test]
-    fn pinned_source_reuses_the_revision_compilation() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        std::fs::create_dir(&content).unwrap();
-        let document = content.join("document.typ");
-        std::fs::write(&document, "Document body.\n").unwrap();
-        std::fs::write(
-            root.join("site.typ"),
-            "#document(\"index.html\", format: \"html\")[#include \"content/document.typ\"]",
-        )
-        .unwrap();
-        let configuration = site_configuration(root, "[build]\nentry = \"site.typ\"\n");
-
-        let cancellation = BuildCancellation::new();
-        let mut compilations = RevisionCompilations::new();
-        let mut session = SourceDiagnosticSession::with_resources(
-            Arc::clone(&configuration),
-            BuildResources::default(),
-        );
-        let checked = compilations
-            .inspect(&mut session, &configuration, 1, Vec::new(), &cancellation)
-            .unwrap();
-
-        let resolved: Arc<str> = Arc::from(std::fs::read_to_string(&document).unwrap());
-        let pinned = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                vec![(document.clone(), Arc::clone(&resolved))],
-                &cancellation,
-            )
-            .unwrap();
-        assert!(
-            Arc::ptr_eq(&checked, &pinned),
-            "a pin with the text the revision read reuses its compilation"
-        );
-        assert_eq!(diagnostics(&pinned), diagnostics(&checked));
-
-        // A pin with different text is a change the revision cannot answer.
-        let changed: Arc<str> = Arc::from("#unknown_in_the_pinned_source\n");
-        let edited = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                vec![(document.clone(), Arc::clone(&changed))],
-                &cancellation,
-            )
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&checked, &edited),
-            "different text derives its own compilation"
-        );
-
-        // And the derived compilation reports what a session that never reused reports.
-        let mut cold = SourceDiagnosticSession::with_resources(
-            Arc::clone(&configuration),
-            BuildResources::default(),
-        );
-        let mut cold_compilations = RevisionCompilations::new();
-        let cold_revision = cold_compilations
-            .inspect(
-                &mut cold,
-                &configuration,
-                1,
-                vec![(document.clone(), changed)],
-                &cancellation,
-            )
-            .unwrap();
-        assert_eq!(diagnostics(&edited), diagnostics(&cold_revision));
-    }
-
-    /// One revision's diagnostics in the shape a comparison can hold.
-    fn diagnostics(revision: &SourceRevision) -> Vec<String> {
-        revision
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| format!("{diagnostic:?}"))
-            .collect()
-    }
-
-    /// A revision answers a query exactly as a session that never derived it does.
-    ///
-    /// The query pins the document it asks about. Where the pin has the text the revision read,
-    /// reuse answers from the revision's compilation and a session without it derives its own — the
-    /// reply has to be the same answer either way.
-    #[test]
-    fn reuse_answers_like_fresh_derivation() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let content = root.join("content");
-        std::fs::create_dir(&content).unwrap();
-        let text = "= Document\n\n#let marker = 41\n\nValue: #marker\n";
-        let document = content.join("document.typ");
-        std::fs::write(&document, text).unwrap();
-        std::fs::write(
-            root.join("site.typ"),
-            "#document(\"index.html\", format: \"html\")[#include \"content/document.typ\"]",
-        )
-        .unwrap();
-        let configuration = site_configuration(root, "[build]\nentry = \"site.typ\"\n");
-
-        let uri = crate::uri::from_file_path(&document).unwrap();
-        let source = tola_typst::typst::syntax::Source::detached(text.to_owned());
-        let cursor = text.find("#marker\n").unwrap() + "#marker".len() - 1;
-        let position = crate::position::utf16_range(source.lines(), cursor..cursor)
-            .unwrap()
-            .start;
-        let pinned: Arc<str> = Arc::from(text);
-        let query = |serial: u64| {
-            SourceJob::Query(QueryRequest {
-                id: RequestId::from(serial as i32),
-                serial,
-                sources: inputs_at(
-                    root,
-                    1,
-                    Arc::from([(document.clone(), Arc::clone(&pinned))]),
-                ),
-                view: SourceView::default(),
-                package_sources: None,
-                routes_as_hints: false,
-                check_progress: CheckProgress::NotChecked,
-                query: SourceQuery::Hover(lsp_types::TextDocumentPositionParams {
-                    text_document: lsp_types::TextDocumentIdentifier::new(uri.clone()),
-                    position,
-                }),
-            })
-        };
-        let answered = |completion: SourceCompilation| -> serde_json::Value {
-            let SourceCompilation::Answered { response, .. } = completion else {
-                panic!("a query is answered")
-            };
-            serde_json::to_value(response.expect("the query is answerable")).unwrap()
-        };
-
-        // One session derives the revision and then answers the query from it.
-        let mut reused = compiler(&configuration);
-        let SourceCompilation::Checked { .. } = reused.compile(SourceJob::Check(CheckRequest {
-            checked_revision: 1,
-            sources: inputs_at(root, 1, Arc::default()),
-            view: SourceView::default(),
-        })) else {
-            panic!("a check is checked")
-        };
-        let warm = answered(reused.compile(query(2)));
-
-        // A session that never derived the revision derives the query's own compilation.
-        let mut fresh = compiler(&configuration);
-        let cold = answered(fresh.compile(query(3)));
-
-        assert_eq!(
-            warm, cold,
-            "a reused revision answered differently from a fresh derivation"
-        );
-    }
-
-    /// A failed revision that kept a world still answers a read of exactly what that world holds.
-    ///
-    /// A realization failure hands back the world the site's inputs resolved, so a pin with
-    /// the text that world already read reads the revision instead of deriving the same failure
-    /// again — and a pin with anything else is a change the revision cannot answer.
-    #[test]
-    fn failed_revision_licenses_reuse_of_its_world() {
+    fn cached_read_matches_fresh_compile() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::create_dir(root.join("content")).unwrap();
-        let document = root.join("content/document.typ");
-        std::fs::write(&document, "Document body.\n").unwrap();
         std::fs::write(
             root.join("site.typ"),
-            "#document(\"index.html\", format: \"html\")[#include \"content/document.typ\"\n\
-             #unknown_in_the_program]\n",
+            "#document(\"index.html\", format: \"html\")[#include \"content/page.typ\"]",
         )
         .unwrap();
+        let document = root.join("content/page.typ");
+        std::fs::write(&document, "saved\n").unwrap();
         let configuration = site_configuration(root, "[build]\nentry = \"site.typ\"\n");
-        let cancellation = BuildCancellation::new();
-        let mut compilations = RevisionCompilations::new();
-        let mut session = SourceDiagnosticSession::with_resources(
-            Arc::clone(&configuration),
-            BuildResources::default(),
-        );
-
-        let failed = compilations
-            .inspect(&mut session, &configuration, 1, Vec::new(), &cancellation)
-            .unwrap();
-        assert!(!failed.compiled(), "{:?}", failed.diagnostics());
-        assert!(
-            failed.checked().is_some(),
-            "a failed realization kept the world it resolved"
-        );
-
-        let resolved: Arc<str> = Arc::from(std::fs::read_to_string(&document).unwrap());
-        let answered = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                vec![(document.clone(), Arc::clone(&resolved))],
-                &cancellation,
-            )
-            .unwrap();
-        assert!(
-            Arc::ptr_eq(&failed, &answered),
-            "a failed revision's world answers the text it resolved"
-        );
-
-        let changed: Arc<str> = Arc::from("#unknown_in_the_pinned_source\n");
-        let edited = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                vec![(document, changed)],
-                &cancellation,
-            )
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&failed, &edited),
-            "text the world never resolved derives its own revision"
-        );
-    }
-
-    /// A newer revision drops the compilation the previous one retained.
-    ///
-    /// The reused value belongs to the revision it was built from: a source change starts a new
-    /// revision, whose first read must derive its own compilation, and the superseded one must not
-    /// stay alive behind the cache.
-    #[test]
-    fn revision_bump_drops_the_retained_compilation() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        std::fs::create_dir(root.join("content")).unwrap();
-        std::fs::write(root.join("content/document.typ"), "Document body.\n").unwrap();
-        std::fs::write(
-            root.join("site.typ"),
-            "#document(\"index.html\", format: \"html\")[#include \"content/document.typ\"]",
-        )
-        .unwrap();
-        let configuration = site_configuration(root, "[build]\nentry = \"site.typ\"\n");
-
-        let cancellation = BuildCancellation::new();
-        let mut compilations = RevisionCompilations::new();
-        let mut session = SourceDiagnosticSession::with_resources(
-            Arc::clone(&configuration),
-            BuildResources::default(),
-        );
-        let first = compilations
-            .inspect(&mut session, &configuration, 1, Vec::new(), &cancellation)
-            .unwrap();
-        let second = compilations
-            .inspect(&mut session, &configuration, 2, Vec::new(), &cancellation)
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&first, &second),
-            "a newer revision derived the compilation rather than reusing a superseded one"
-        );
-        assert_eq!(
-            Arc::strong_count(&first),
-            1,
-            "the superseded compilation is not kept alive by the cache"
-        );
-    }
-
-    /// A site whose entry program compiles, with the configuration a compiler lane resolves.
-    fn compilable_site() -> (tempfile::TempDir, Arc<ResolvedSiteConfig>) {
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::create_dir(directory.path().join("content")).unwrap();
-        let configuration = site_configuration(directory.path(), "");
-        (directory, configuration)
-    }
-
-    /// One unsaved source of `root`, written to disk so the path names a real file.
-    fn unsaved(root: &Path, name: &str, text: &str) -> Vec<(PathBuf, Arc<str>)> {
-        let path = root.join(name);
-        std::fs::write(&path, text).unwrap();
-        vec![(path, Arc::from(text))]
-    }
-
-    #[test]
-    fn reuse_follows_revision_and_sources() {
-        // Every row keeps its own site: one row's read must never answer another's.
-        for (first_key, second_key, expect_same) in [
-            ((1, "one"), (1, "one"), true),
-            ((1, "one"), (2, "one"), false),
-            ((1, "one"), (1, "two"), false),
-        ] {
-            let (directory, configuration) = compilable_site();
-            let mut compilations = RevisionCompilations::new();
-            let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-            let sources = |(revision, name): (u64, &str)| {
-                (
-                    revision,
-                    unsaved(
-                        directory.path(),
-                        &format!("content/{name}.typ"),
-                        &format!("= {name} <{name}>\n"),
-                    ),
-                )
-            };
-            let compiled = |compilations: &mut RevisionCompilations,
-                            session: &mut SourceDiagnosticSession,
-                            revision: u64,
-                            sources: Vec<(PathBuf, Arc<str>)>| {
-                compilations
-                    .inspect(
-                        session,
-                        &configuration,
-                        revision,
-                        sources,
-                        &BuildCancellation::new(),
-                    )
-                    .unwrap()
-            };
-            let (first_revision, first_sources) = sources(first_key);
-            let (second_revision, second_sources) = sources(second_key);
-            let first = compiled(
-                &mut compilations,
-                &mut session,
-                first_revision,
-                first_sources,
-            );
-            let second = compiled(
-                &mut compilations,
-                &mut session,
-                second_revision,
-                second_sources,
-            );
-            assert_eq!(
-                Arc::ptr_eq(&first, &second),
-                expect_same,
-                "key {first_key:?} then {second_key:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn older_revision_keeps_the_retained_compilation() {
-        let (directory, configuration) = compilable_site();
-        let mut compilations = RevisionCompilations::new();
         let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-        let sources = unsaved(directory.path(), "content/one.typ", "= One <one>\n");
-        let newest = compilations
+        let sources = vec![(document, Arc::<str>::from("#let unused = 1\nunsaved\n"))];
+
+        let mut warm = RevisionCompilations::new();
+        let first = warm
             .inspect(
                 &mut session,
                 &configuration,
-                2,
+                1,
                 sources.clone(),
                 &BuildCancellation::new(),
             )
             .unwrap();
-        // A superseded check or repair still reaching the lane must not drop what it left.
-        let older = compilations
+        let cached = warm
             .inspect(
                 &mut session,
                 &configuration,
@@ -575,128 +242,33 @@ mod tests {
             )
             .unwrap();
         assert!(
-            !Arc::ptr_eq(&newest, &older),
-            "an older revision read a newer compilation"
+            Arc::ptr_eq(&first, &cached),
+            "the revision already compiled these exact sources"
         );
-        let again = compilations
+
+        let mut cold = RevisionCompilations::new();
+        let fresh = cold
             .inspect(
                 &mut session,
                 &configuration,
-                2,
+                1,
                 sources,
                 &BuildCancellation::new(),
             )
             .unwrap();
-        assert!(
-            Arc::ptr_eq(&newest, &again),
-            "an older request dropped the retained compilation"
-        );
-    }
 
-    #[test]
-    fn another_configuration_recompiles() {
-        let (directory, configuration) = compilable_site();
-        // The second site's directory guard stays alive for the whole test.
-        let (_other_directory, other) = compilable_site();
-        let mut compilations = RevisionCompilations::new();
-        let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-        let sources = unsaved(directory.path(), "content/one.typ", "= One <one>\n");
-        let first = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                sources.clone(),
-                &BuildCancellation::new(),
-            )
-            .unwrap();
-        let second = compilations
-            .inspect(&mut session, &other, 1, sources, &BuildCancellation::new())
-            .unwrap();
         assert!(
-            !Arc::ptr_eq(&first, &second),
-            "a new configuration answered from the previous one"
+            !Arc::ptr_eq(&cached, &fresh),
+            "a cache that never recompiled would compare a compilation with itself"
         );
-    }
-
-    #[test]
-    fn oldest_compilations_are_released() {
-        let (directory, configuration) = compilable_site();
-        let mut compilations = RevisionCompilations::new();
-        let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-        let mut first = None;
-        let mut last = None;
-        for index in 0..=RETAINED_COMPILATIONS {
-            let compiled = compilations
-                .inspect(
-                    &mut session,
-                    &configuration,
-                    1,
-                    unsaved(
-                        directory.path(),
-                        &format!("content/{index}.typ"),
-                        &format!("= Page {index} <page-{index}>\n"),
-                    ),
-                    &BuildCancellation::new(),
-                )
-                .unwrap();
-            first.get_or_insert_with(|| Arc::clone(&compiled));
-            last = Some(compiled);
-        }
-        let last = last.unwrap();
-        let repeated = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                unsaved(
-                    directory.path(),
-                    &format!("content/{RETAINED_COMPILATIONS}.typ"),
-                    &format!("= Page {RETAINED_COMPILATIONS} <page-{RETAINED_COMPILATIONS}>\n"),
-                ),
-                &BuildCancellation::new(),
-            )
-            .unwrap();
-        assert!(
-            Arc::ptr_eq(&last, &repeated),
-            "the newest compilation was released"
-        );
-        let oldest = compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                unsaved(directory.path(), "content/0.typ", "= Page 0 <page-0>\n"),
-                &BuildCancellation::new(),
-            )
-            .unwrap();
-        assert!(
-            !Arc::ptr_eq(&first.unwrap(), &oldest),
-            "retention grew past its bound"
-        );
-    }
-
-    #[test]
-    fn cancelled_reuse_reports_cancellation() {
-        let (directory, configuration) = compilable_site();
-        let mut compilations = RevisionCompilations::new();
-        let mut session = SourceDiagnosticSession::new(Arc::clone(&configuration));
-        let sources = unsaved(directory.path(), "content/one.typ", "= One <one>\n");
-        compilations
-            .inspect(
-                &mut session,
-                &configuration,
-                1,
-                sources.clone(),
-                &BuildCancellation::new(),
-            )
-            .unwrap();
-        let canceller = BuildCanceller::new();
-        canceller.cancel();
-        assert!(
-            compilations
-                .inspect(&mut session, &configuration, 1, sources, &canceller.token())
-                .is_err()
+        assert_eq!(cached.diagnostics(), fresh.diagnostics());
+        assert_eq!(cached.compiled(), fresh.compiled());
+        assert_eq!(
+            cached
+                .checked()
+                .map(|checked| checked.file_reads().to_vec()),
+            fresh.checked().map(|checked| checked.file_reads().to_vec()),
+            "a reused compilation reads what the same sources read"
         );
     }
 }

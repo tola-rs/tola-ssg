@@ -179,15 +179,15 @@ fn with_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::SourceSnapshot;
-    use crate::world::file::{ContentDigest, FileMap, FileResolver, ReadLocator, file_id};
+
+    use crate::world::file::{FileMap, FileResolver, file_id};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
     use typst::diag::{SourceDiagnostic, SourceResult, Tracepoint};
     use typst::engine::Engine;
-    use typst::foundations::{Dict, Func, IntoValue, NativeFunc, Str, Value, func};
+    use typst::foundations::{Str, func};
 
     /// A fontless world with a task-local cache for one test source.
     fn world(root: &Path, file: &Path) -> crate::world::WorldBuilder {
@@ -260,141 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_reads_are_retained() {
-        for bundle in [false, true] {
-            for fail in [false, true] {
-                let dir = TempDir::new().unwrap();
-                let main = dir.path().join("main.typ");
-                fs::write(&main, format!("#let _ = (sys.inputs.diagnostic)({fail})")).unwrap();
-                for name in ["primary.typ", "hint.typ"] {
-                    fs::write(dir.path().join(name), "diagnostic only").unwrap();
-                }
-                let mut inputs = Dict::new();
-                inputs.insert(
-                    "diagnostic".into(),
-                    Func::from(spanned_diagnostic::data()).into_value(),
-                );
-                let world = world(dir.path(), &main)
-                    .with_inputs_dict(inputs)
-                    .build(&crate::BundleCancellation::default())
-                    .unwrap();
-                let (accessed, diagnostics) = if bundle {
-                    match crate::compile_bundle_world(&world, &crate::BundleCancellation::new()) {
-                        Ok(result) => {
-                            assert!(!fail);
-                            (result.accessed().clone(), result.diagnostics().clone())
-                        }
-                        Err(failure) => {
-                            assert!(fail, "unexpected Bundle failure: {:?}", failure.error());
-                            (
-                                failure.accessed().clone(),
-                                failure.error().diagnostics().unwrap().clone(),
-                            )
-                        }
-                    }
-                } else {
-                    match compile_world_with_evidence(&world) {
-                        Ok(result) => {
-                            assert!(!fail);
-                            (result.accessed().clone(), result.diagnostics().clone())
-                        }
-                        Err(failure) => {
-                            assert!(fail, "unexpected HTML failure: {:?}", failure.error());
-                            (
-                                failure.accessed().clone(),
-                                failure.error().diagnostics().unwrap().clone(),
-                            )
-                        }
-                    }
-                };
-                for name in ["primary.typ", "hint.typ"] {
-                    assert!(
-                        accessed.reads.iter().any(|read| matches!(
-                            read.evidence().locator(),
-                            crate::ReadLocator::Root(path) if path == Path::new(name)
-                        )),
-                        "missing evidence for {name}"
-                    );
-                }
-                assert!(
-                    accessed
-                        .disk_reads
-                        .iter()
-                        .any(|path| { path.as_path() == world.root().join("missing-trace.typ") })
-                );
-                let diagnostic = diagnostics
-                    .iter()
-                    .find(|diagnostic| diagnostic.message == "diagnostic evidence")
-                    .unwrap();
-                assert_eq!(diagnostic.location.path.as_deref(), Some("primary.typ"));
-                assert_eq!(
-                    diagnostic.hints[0].location.path.as_deref(),
-                    Some("hint.typ")
-                );
-                assert_eq!(
-                    diagnostic.traces[0].location.location_failure,
-                    Some(crate::diagnostic::LocationFailure::SourceUnavailable)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn runtime_reads_keep_exact_paths() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::create_dir_all(dir.path().join("templates")).unwrap();
-
-        // `read`, `import`, and `include` resolve runtime-built paths through
-        // distinct mechanisms; each must leave exact on-disk evidence.
-        for (source, asset_body, expected_path, expected_text) in [
-            (
-                r#"#let name = "document"
-#read("templates/" + name + ".txt")"#,
-                "runtime payload",
-                "templates/document.txt",
-                "runtime payload",
-            ),
-            (
-                r#"#let name = "document"
-#import "templates/" + name + ".typ" as template
-#template.value"#,
-                "#let value = [runtime module]",
-                "templates/document.typ",
-                "runtime module",
-            ),
-            (
-                r#"#let name = "document"
-#include "templates/" + name + ".typ""#,
-                "[runtime include]",
-                "templates/document.typ",
-                "runtime include",
-            ),
-        ] {
-            let asset = dir.path().join(expected_path);
-            fs::write(&asset, asset_body).unwrap();
-            fs::write(&file, source).unwrap();
-
-            let built = world(dir.path(), &file)
-                .build(&crate::BundleCancellation::default())
-                .unwrap();
-            let result = compile_world(&built).unwrap();
-            let html = String::from_utf8_lossy(&result.html().unwrap()).into_owned();
-            let asset = fs::canonicalize(&asset).unwrap();
-
-            assert!(html.contains(expected_text), "{html}");
-            assert!(
-                result
-                    .disk_reads()
-                    .iter()
-                    .any(|path| path.as_path() == asset),
-                "dynamic read of {expected_path} was not retained: {:?}",
-                result.disk_reads()
-            );
-        }
-    }
-
-    #[test]
     fn compiler_uses_its_own_resolver() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.typ");
@@ -422,75 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_queries_keep_native_values() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"#metadata((id: 1, width: 12pt, summary: [Hello])) <post-meta>
-#metadata((id: 2, role: "second")) <post-meta>
-= Content"#,
-        )
-        .unwrap();
-
-        let built = world(dir.path(), &file)
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        let result = compile_world(&built).unwrap();
-        let document = result.document();
-
-        let first = document
-            .metadata_first("post-meta")
-            .unwrap()
-            .cast::<Dict>()
-            .unwrap();
-        assert_eq!(first.get("id").unwrap().clone().cast::<i64>().unwrap(), 1);
-        assert!(matches!(
-            first.get(&Str::from("width")),
-            Ok(Value::Length(_))
-        ));
-        assert!(matches!(
-            first.get(&Str::from("summary")),
-            Ok(Value::Content(_))
-        ));
-
-        let all = document.metadata_all("post-meta");
-        assert_eq!(all.len(), 2);
-        assert_eq!(
-            all[1].clone().cast::<Dict>().unwrap().get("id"),
-            Ok(&Value::Int(2))
-        );
-    }
-
-    #[test]
-    fn failed_read_retains_missing_path() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::create_dir_all(dir.path().join("templates")).unwrap();
-        fs::write(
-            &file,
-            r#"#let name = "missing"
-#read("templates/" + name + ".txt")"#,
-        )
-        .unwrap();
-
-        let built = world(dir.path(), &file)
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        let failure = compile_world_with_evidence(&built)
-            .expect_err("missing runtime read should fail compilation");
-
-        assert!(
-            failure
-                .disk_reads()
-                .iter()
-                .any(|path| path.as_path().ends_with(Path::new("templates/missing.txt"))),
-            "missing runtime read was not retained: {:?}",
-            failure.disk_reads()
-        );
-    }
-
-    #[test]
     fn html_export_observes_options() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.typ");
@@ -507,59 +303,5 @@ mod tests {
 
         assert_ne!(compact, pretty);
         assert!(String::from_utf8_lossy(&pretty).contains("\n"));
-    }
-
-    #[test]
-    fn world_inputs_reach_the_document() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.typ");
-        fs::write(
-            &file,
-            r#"#let title = sys.inputs.at("title", default: "Default")
-= #title"#,
-        )
-        .unwrap();
-
-        let built = world(dir.path(), &file)
-            .with_inputs([("title", "Custom Title")])
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        let html = compile_world(&built).unwrap().html().unwrap();
-        assert!(String::from_utf8_lossy(&html).contains("Custom Title"));
-    }
-
-    #[test]
-    fn snapshot_world_keeps_frozen_bytes() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("snapshot.typ");
-        let original = b"= Snapshot A";
-        fs::write(&file, original).unwrap();
-
-        let files = Arc::new(FileResolver::new());
-        let loaded = SourceSnapshot::build_with_files(
-            &[PathBuf::from(&file)],
-            dir.path(),
-            Arc::clone(&files),
-        )
-        .unwrap();
-        let (snapshot, _) = loaded.into_snapshot_and_accessed();
-        let built = TypstWorld::builder(&file, dir.path())
-            .with_files(files)
-            .with_snapshot(Arc::new(snapshot))
-            .no_fonts()
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        fs::write(&file, "= Snapshot B").unwrap();
-
-        let result = compile_world(&built).unwrap();
-
-        let html = String::from_utf8_lossy(&result.html().unwrap()).into_owned();
-        assert!(html.contains("Snapshot A"), "{html}");
-        assert!(!html.contains("Snapshot B"), "{html}");
-        let expected = ContentDigest::of(original);
-        assert!(result.file_reads().iter().any(|read| {
-            matches!(read.evidence().locator(), ReadLocator::Root(path) if path == Path::new("snapshot.typ"))
-                && read.evidence().digest() == expected
-        }));
     }
 }

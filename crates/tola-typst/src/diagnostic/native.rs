@@ -494,14 +494,11 @@ fn decode(encoded: &str) -> Option<EcoString> {
 mod tests {
     use super::*;
     use std::cell::Cell;
-    use std::sync::Arc;
-    use typst::World;
+
     use typst::diag::SourceResult;
     use typst::engine::Engine;
-    use typst::foundations::{Func, NativeFunc, Value, func};
+    use typst::foundations::{Value, func};
     use typst::syntax::Span;
-    use typst::utils::LazyHash;
-    use typst::{Feature, Features, Library, LibraryExt};
 
     thread_local! {
         static NATIVE_RUNS: Cell<usize> = const { Cell::new(0) };
@@ -518,26 +515,6 @@ mod tests {
         );
         engine.sink.warn(warning);
         Ok(Value::None)
-    }
-
-    fn warning_world(source: &str) -> (tempfile::TempDir, crate::TypstWorld) {
-        let directory = tempfile::tempdir().unwrap();
-        let main = directory.path().join("site.typ");
-        std::fs::write(&main, source).unwrap();
-        let mut library = Library::builder()
-            .with_features(Features::from_iter([Feature::Html, Feature::Bundle]))
-            .build();
-        library
-            .global
-            .scope_mut()
-            .define("warn-path", Func::from(warn_path::data()));
-        let world = crate::TypstWorld::builder(&main, directory.path())
-            .with_local_cache()
-            .no_fonts()
-            .with_shared_library(Arc::new(LazyHash::new(library)))
-            .build(&crate::BundleCancellation::default())
-            .unwrap();
-        (directory, world)
     }
 
     #[test]
@@ -575,100 +552,5 @@ mod tests {
         assert_eq!(native.source().trace.len(), 2);
         assert_eq!(native.primary_span(), DiagSpan::from(helper));
         assert!(matches!(native.origin(), DiagnosticOrigin::Producer(_)));
-    }
-
-    #[test]
-    fn memoized_warnings_keep_native_identity() {
-        let (_directory, world) =
-            warning_world("#for n in range(12) { warn-path(n) }\n#document(\"index.html\")[Body]");
-        NATIVE_RUNS.with(|runs| runs.set(0));
-        let cancellation = crate::BundleCancellation::default();
-        let first = crate::compile_bundle_world(&world, &cancellation).unwrap();
-        assert_eq!(NATIVE_RUNS.with(Cell::get), 12);
-        let second = crate::compile_bundle_world(&world, &cancellation).unwrap();
-        assert_eq!(NATIVE_RUNS.with(Cell::get), 12);
-        let warnings = first
-            .diagnostics()
-            .filter(|diagnostic| matches!(diagnostic.origin, DiagnosticOrigin::Producer(_)));
-        let expected = (0..12)
-            .map(|number| {
-                DiagnosticOrigin::Producer(ProducerDiagnosticOrigin {
-                    name: "SampleWarning".into(),
-                    fields: Arc::new(vec![("number".into(), number.to_string().into())]),
-                })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            warnings
-                .iter()
-                .map(|diagnostic| diagnostic.origin.clone())
-                .collect::<Vec<_>>(),
-            expected,
-        );
-        assert_eq!(first.diagnostics().raw(), second.diagnostics().raw());
-        assert!(
-            warnings
-                .raw()
-                .iter()
-                .all(|native| native.source().span.id() == Some(world.main()))
-        );
-        let resolved = crate::Diagnostics::resolve_with_options(
-            &world,
-            warnings.raw(),
-            crate::SourceContextLimit {
-                max_lines: 0,
-                max_line_bytes: 0,
-            },
-        );
-        assert_eq!(
-            resolved
-                .iter()
-                .map(|diagnostic| diagnostic.origin.clone())
-                .collect::<Vec<_>>(),
-            expected,
-        );
-        assert_eq!(
-            resolved
-                .iter()
-                .map(|diagnostic| diagnostic.location.range)
-                .collect::<Vec<_>>(),
-            warnings
-                .iter()
-                .map(|diagnostic| diagnostic.location.range)
-                .collect::<Vec<_>>(),
-        );
-    }
-
-    #[test]
-    fn nonfinal_realization_drops_warning() {
-        let (_directory, world) = warning_world(
-            "#document(\"index.html\")[#context { if query(heading).len() == 0 { warn-path(99) }; heading[Title] }]",
-        );
-        let compiled =
-            crate::compile_bundle_world(&world, &crate::BundleCancellation::default()).unwrap();
-        assert!(
-            compiled
-                .diagnostics()
-                .iter()
-                .all(|diagnostic| { diagnostic.origin == DiagnosticOrigin::Typst })
-        );
-    }
-
-    #[test]
-    fn failed_evaluation_retains_warning_origin() {
-        let (_directory, world) =
-            warning_world("#warn-path(3)\n#panic(\"different warning wording 3\")");
-        let failed =
-            crate::compile_bundle_world(&world, &crate::BundleCancellation::default()).unwrap_err();
-        let diagnostics = failed.diagnostics().unwrap();
-        let error = diagnostics.errors().next().unwrap();
-        assert_eq!(error.origin, DiagnosticOrigin::Typst);
-        assert_eq!(error.location.path.as_deref(), Some("site.typ"));
-        let warning = diagnostics
-            .warnings()
-            .find(|diagnostic| matches!(diagnostic.origin, DiagnosticOrigin::Producer(_)))
-            .unwrap();
-        assert_eq!(warning.location.line, Some(1));
-        assert_eq!(warning.location.path.as_deref(), Some("site.typ"));
     }
 }

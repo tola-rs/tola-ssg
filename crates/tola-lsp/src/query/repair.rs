@@ -2,7 +2,7 @@
 //!
 //! The official compiler refuses a source an author is still writing, so a query that needs the
 //! world compiles a copy in which the construct the cursor stands in is blanked or bound. The
-//! author's own snapshot stays untouched; only the override set has the copy.
+//! author's own source stays untouched; only the override set has the copy.
 
 use std::path::PathBuf;
 use std::sync::Arc;

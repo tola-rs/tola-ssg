@@ -14,30 +14,27 @@ use crate::resources::{BuildResources, HttpDownloadError};
 use super::IconError;
 use super::input::MAX_COLLECTION_BYTES;
 
-#[allow(clippy::too_many_arguments)]
+/// One remote collection request: which collection, where its copies may come from, and the
+/// request context every read in this build shares.
+pub(super) struct RemoteCollection<'a> {
+    pub namespace: &'a str,
+    pub urls: &'a [String],
+    pub sha256: Sha256Digest,
+    pub vendored: Option<&'a Path>,
+    pub cache_root: &'a Path,
+    pub cancellation: &'a BuildCancellation,
+    pub resources: &'a BuildResources,
+    pub boundary: &'a tola_typst::SourceBoundary,
+}
+
 pub(super) fn load_collection(
-    namespace: &str,
-    urls: &[String],
-    sha256: Sha256Digest,
-    vendored: Option<&Path>,
-    cache_root: &Path,
-    cancellation: &BuildCancellation,
-    resources: &BuildResources,
-    boundary: &tola_typst::SourceBoundary,
+    request: RemoteCollection<'_>,
 ) -> anyhow::Result<(
     tola_icons::IconCollection,
     Option<super::input::IconFileRead>,
 )> {
-    let verified = collection_bytes(
-        namespace,
-        urls,
-        sha256,
-        vendored,
-        cache_root,
-        cancellation,
-        resources,
-        boundary,
-    )?;
+    let verified = collection_bytes(&request)?;
+    let namespace = request.namespace;
     let collection =
         super::parse_collection(namespace, verified.read_from.as_deref(), &verified.bytes)
             .map_err(anyhow::Error::from)?;
@@ -70,17 +67,17 @@ pub(super) fn store_downloaded(namespace: &str, verified: &CollectionBytes) {
 /// The site's vendored copy is read first, then the collection cache, then the collection itself,
 /// trying each mirror in turn when one cannot deliver. Every source answers with the same bytes,
 /// because the digest decides which bytes count, so reusing one is never a second semantic path.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn collection_bytes(
-    namespace: &str,
-    urls: &[String],
-    sha256: Sha256Digest,
-    vendored: Option<&Path>,
-    cache_root: &Path,
-    cancellation: &BuildCancellation,
-    resources: &BuildResources,
-    boundary: &tola_typst::SourceBoundary,
-) -> anyhow::Result<CollectionBytes> {
+pub(super) fn collection_bytes(request: &RemoteCollection<'_>) -> anyhow::Result<CollectionBytes> {
+    let RemoteCollection {
+        namespace,
+        urls,
+        sha256,
+        vendored,
+        cache_root,
+        cancellation,
+        resources,
+        boundary,
+    } = *request;
     cancellation.ensure_active()?;
     let primary = urls
         .first()
@@ -302,16 +299,16 @@ mod tests {
         sha256: Sha256Digest,
         vendored: Option<&Path>,
     ) -> anyhow::Result<tola_icons::IconCollection> {
-        load_collection(
-            "ui",
-            &["http://127.0.0.1:1/icons.json".to_owned()],
+        load_collection(RemoteCollection {
+            namespace: "ui",
+            urls: &["http://127.0.0.1:1/icons.json".to_owned()],
             sha256,
             vendored,
             cache_root,
-            &BuildCancellation::new(),
-            &BuildResources::new().with_network_access(NetworkAccess::Denied),
-            &tola_typst::SourceBoundary::default(),
-        )
+            cancellation: &BuildCancellation::new(),
+            resources: &BuildResources::new().with_network_access(NetworkAccess::Denied),
+            boundary: &tola_typst::SourceBoundary::default(),
+        })
         .map(|(collection, _)| collection)
     }
 
@@ -328,16 +325,16 @@ mod tests {
         urls: &[String],
         sha256: Sha256Digest,
     ) -> anyhow::Result<tola_icons::IconCollection> {
-        load_collection(
-            "ui",
+        load_collection(RemoteCollection {
+            namespace: "ui",
             urls,
             sha256,
-            None,
+            vendored: None,
             cache_root,
-            &BuildCancellation::new(),
-            &BuildResources::new(),
-            &tola_typst::SourceBoundary::default(),
-        )
+            cancellation: &BuildCancellation::new(),
+            resources: &BuildResources::new(),
+            boundary: &tola_typst::SourceBoundary::default(),
+        })
         .map(|(collection, _)| collection)
     }
 

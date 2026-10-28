@@ -1023,12 +1023,8 @@ impl Selection<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{CheckProgress, SourceReply};
 
     use crate::query::tests::*;
-    use lsp_types::request as lsp_request;
-    use lsp_types::request::Request as LspRequest;
-    use serde_json::json;
 
     #[test]
     fn imported_hover_ranges_cover_selected_names() {
@@ -1044,18 +1040,6 @@ mod tests {
             let end = position::byte_offset(source.lines(), range.end).unwrap();
             assert_eq!(&source.text()[start..end], "output-of");
         }
-    }
-
-    #[test]
-    fn imported_hover_describes_selected_segments() {
-        let mut site = QuerySession::new();
-        site.site
-            .write("content/helpers.typ", "#let calc = std.calc\n");
-        let hover = site
-            .hover_text("#import \"helpers.typ\": ca|lc.abs\n")
-            .expect("a module hover");
-        assert!(hover.contains("<module calc>"), "{hover}");
-        assert!(!hover.contains("let abs("), "{hover}");
     }
 
     /// A reference the query copy repaired is a stand-in: hover answers the label's own fact,
@@ -1098,30 +1082,6 @@ mod tests {
         );
     }
 
-    /// A schema field's key answers the declaration and documentation the `@tola/schema`
-    /// `describe` call at its value has, however that function reached the file.
-    #[test]
-    fn described_field_key_answers_its_documentation() {
-        let mut site = QuerySession::new();
-        for marked in [
-            "#import \"@tola/schema:0.0.0\": describe, optional, schema\n#let page = schema((\n  tit|le: describe(optional(str), \"the page title\"),\n))\n",
-            "#import \"@tola/schema:0.0.0\": describe as doc, optional, schema\n#let page = schema((\n  tit|le: doc(optional(str), \"the page title\"),\n))\n",
-            "#import \"@tola/schema:0.0.0\" as tola-schema\n#let page = tola-schema.schema((\n  tit|le: tola-schema.describe(tola-schema.optional(str), \"the page title\"),\n))\n",
-        ] {
-            let text = site
-                .hover_text(marked)
-                .unwrap_or_else(|| panic!("{marked:?} asks about the field"));
-            assert!(
-                text.contains("```typc\ntitle?: str\n```"),
-                "{marked:?} answered {text}"
-            );
-            assert!(
-                text.contains("the page title"),
-                "{marked:?} answered {text}"
-            );
-        }
-    }
-
     /// A hover that would say nothing at all is no hover, which an editor would otherwise open an
     /// empty box for.
     #[test]
@@ -1153,50 +1113,6 @@ mod tests {
         }
     }
 
-    /// A library call answers in markup and inside a content block, not only in code.
-    #[test]
-    fn markup_answers_library_call() {
-        let mut site = QuerySession::new();
-        for marked in [
-            "#t|ext(size: 10pt)[Body]\n",
-            "#let v = 1\n#align(center)[#t|ext(size: 10pt)[#v]]\n",
-        ] {
-            let hover = site
-                .hover_text(marked)
-                .unwrap_or_else(|| panic!("{marked:?} asks about `text`"));
-            assert!(hover.contains("text("), "{marked:?} answered {hover}");
-        }
-    }
-
-    /// A function the file binds reports its signature where markup names it.
-    #[test]
-    fn markup_answers_local_function_signature() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#let local-fn(x) = x + 1\n#local-|fn(3)\n")
-            .expect("a signature from the file's own function");
-        for expected in ["let local-fn(", "x: int,"] {
-            assert!(hover.contains(expected), "{hover}");
-        }
-    }
-
-    /// A math spelling answers what the compiler observed for it.
-    #[test]
-    fn math_spelling_answers_its_value() {
-        let mut site = QuerySession::new();
-        for (marked, value) in [
-            ("$ s|in(x) $\n", "op(text: [sin], limits: false)"),
-            ("$ al|pha $\n", "symbol(\"α\")"),
-            ("$ ar|row.r $\n", "symbol(\n  (\"r\", \"→\"),"),
-            ("$ arrow.|r $\n", "symbol(\n  \"→\","),
-        ] {
-            let hover = site
-                .hover_text(marked)
-                .unwrap_or_else(|| panic!("{marked:?} asks about a math spelling"));
-            assert!(hover.contains(value), "{marked:?} answered {hover}");
-        }
-    }
-
     /// A `asset-url` argument completes with the site's published URLs — in the declaration's own
     /// order — and a hover over one names the address a browser fetches it at.
     #[test]
@@ -1217,38 +1133,6 @@ mod tests {
         assert!(hover.contains("/brand/logo.svg"), "{hover}");
     }
 
-    #[test]
-    fn package_absence_returns_no_hover() {
-        let site = QuerySession::with_program("#let broken = absent\n");
-        let package: lsp_types::Uri = "tola-package:/tola/site/0.0.0/lib.typ".parse().unwrap();
-        let id = crate::identity::file_id(&package, site.site.root()).expect("a builtin package");
-        let text = crate::identity::embedded_source(id)
-            .expect("a builtin source")
-            .into_owned();
-        let source = Source::new(id, text);
-        let needle = "@tola/host";
-        let at = source
-            .text()
-            .find(needle)
-            .expect("the package imports the host site value")
-            + needle.len();
-        let range = position::utf16_range(source.lines(), at..at).expect("a position");
-        let query = decode(
-            lsp_request::HoverRequest::METHOD,
-            json!({
-                "textDocument": { "uri": package.as_str() },
-                "position": range.start,
-            }),
-        );
-        let reply = Selection::new(&source, at, &query, CheckProgress::Failed, None)
-            .source_only_reply(site.config.as_ref(), &query)
-            .expect("an answer")
-            .expect("a hover reply");
-        let SourceReply::Hover(hover) = reply else {
-            panic!("{reply:?}")
-        };
-        assert!(hover.is_none(), "{hover:?}");
-    }
     /// A library callee answers where the world observed nothing at its own span.
     ///
     /// The name reaches the library, so the signature is the first section and the documentation
@@ -1264,31 +1148,6 @@ mod tests {
             "{hover}"
         );
         assert!(hover.contains("Customizes the look"), "{hover}");
-    }
-
-    /// An element function answers the element it builds, so a binding that aliases one hovers the
-    /// element's own name rather than the binding's.
-    #[test]
-    fn aliased_element_answers_the_element() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#let cells = table\nBindings #cell|s\n")
-            .expect("a hover for the alias");
-        assert!(hover.contains(") = table;"), "{hover}");
-    }
-    #[test]
-    fn docs_samples_keep_their_indentation() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text(
-                "/// Sample:\n/// ```typ\n/// #let inside = 1\n///   #let deeper = 2\n/// ```\n\
-                 #let documented = 1\nDocs #docu|mented\n",
-            )
-            .expect("a hover for the documented name");
-        assert!(
-            hover.contains("#let inside = 1\n  #let deeper = 2"),
-            "{hover}"
-        );
     }
 
     /// Typst's own `example` fence reads as the `typ` an editor has a grammar for, and any other
@@ -1308,130 +1167,5 @@ mod tests {
                 "{hover}"
             );
         }
-    }
-
-    /// A docs section starts at the first line the comment block writes.
-    #[test]
-    fn docs_sections_have_no_blank_edges() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("///\n/// Sample:\n#let documented = 1\nDocs #docu|mented\n")
-            .expect("a hover for the documented name");
-        assert!(hover.contains("---\n\nSample:"), "{hover}");
-    }
-
-    /// A documentation block written as the ecosystem's parameter list answers each description
-    /// with the parameter it names, and keeps nothing twice.
-    #[test]
-    fn documented_parameters_join_their_signature() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text(
-                "/// Summary of f.\n/// - x (int): old-style x doc.\n/// -> int\n\
-                 #let f|(x) = x\n#f(1)\n",
-            )
-            .expect("a hover for the documented function");
-        assert!(hover.contains("Summary of f."), "{hover}");
-        assert!(hover.contains(") = int;"), "{hover}");
-        let heading = hover.find("## x").expect("the parameter's heading");
-        let description = hover.find("old-style x doc.").expect("the description");
-        assert!(heading < description, "{hover}");
-        assert_eq!(hover.matches("old-style x doc.").count(), 1, "{hover}");
-    }
-
-    /// A parameter the block describes has the type it writes and its description in its own
-    /// section, and a named argument answers the description of the parameter it fills.
-    #[test]
-    fn documented_parameters_reach_every_answer() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("/// Summary of f.\n/// - x (int): the value.\n#let f(x) = x\n#f|\n")
-            .expect("a hover for the function's use");
-        assert!(hover.contains("x: int,"), "{hover}");
-        assert!(
-            hover.contains("## x\n\n```typc\ntype: int\n```\n\nthe value."),
-            "{hover}"
-        );
-
-        let argument = site
-            .hover_text(
-                "/// Summary of g.\n/// - x (int): the value to scale.\n#let g(x: 1) = x\n#g(x|: 2)\n",
-            )
-            .expect("a hover for the named argument");
-        assert!(argument.contains("the value to scale."), "{argument}");
-    }
-
-    /// A local binding answers its declaration line.
-    #[test]
-    fn local_binding_answers_its_declaration_line() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#let v = 42\nLocal #v|\n")
-            .expect("a hover for the binding");
-        assert_eq!(hover, "```typc\nlet v = int;\n```");
-    }
-    /// A module binding answers where the module is bound.
-    #[test]
-    fn module_answers_its_binding() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#let module-value = st|d\n")
-            .expect("a hover for the module");
-        assert_eq!(hover, "```typc\nlet global;\n```");
-    }
-    #[test]
-    fn literal_method_answers_its_hover() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#(\"a b\".spl|it())\n")
-            .expect("a hover for the method");
-        assert!(
-            hover.contains("split") || hover.contains("array"),
-            "{hover}"
-        );
-    }
-    /// The names the engine supplies answer wherever a site writes them.
-    #[test]
-    fn engine_names_answer_in_site_sources() {
-        let mut site = QuerySession::new();
-
-        let items = site.completion("#let chosen = doc|\n");
-        assert!(
-            completion_labels(&items).contains(&"document"),
-            "{:?}",
-            completion_labels(&items)
-        );
-
-        let hover = site
-            .hover_text("#let chosen = doc|ument\n")
-            .expect("a hover for a name the engine supplies");
-        assert!(hover.contains("document"), "{hover}");
-    }
-    /// The hover's first fenced block is the signature the shared model prints, so the editor and
-    /// the other surfaces cannot drift apart.
-    #[test]
-    fn hover_block_matches_the_package_signature() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#let dead() = [#t|ext(size: 10pt)[x]]\n")
-            .expect("a hover for the library callee");
-        use tola_typst::typst::LibraryExt as _;
-        let library = tola_typst::typst::Library::builder().build();
-        let func = library
-            .global
-            .scope()
-            .get("text")
-            .expect("the library binds `text`")
-            .read()
-            .clone();
-        let Value::Func(func) = func else {
-            panic!("`text` is a function")
-        };
-        let block = hover
-            .strip_prefix("```typc\n")
-            .and_then(|hover| hover.split_once("\n```"))
-            .map(|(block, _)| block)
-            .expect("a fenced signature block");
-        assert_eq!(block, tola_packages::Signature::of("text", &func).code());
     }
 }

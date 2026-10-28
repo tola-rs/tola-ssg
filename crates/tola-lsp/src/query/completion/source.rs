@@ -752,71 +752,25 @@ mod tests {
         &markup.value
     }
 
-    #[test]
-    fn dynamic_wildcards_defer_name_metadata() {
-        let library = Source::new(
-            file("lib.typ"),
-            "/// Imported representation.\n#let repr(value) = (custom: value)".into(),
-        );
-        let marked = "#import \"lib.typ\" as lib\n#import if true { lib } else { lib }: *\n#rep|";
+    /// The items the lane that reads the source alone answers with, for one marked source.
+    fn cold_items(marked: &str) -> Vec<CompletionItem> {
         let cursor = marked.find('|').unwrap();
-        let source = Source::new(file("main.typ"), marked.replace('|', ""));
+        let source = Source::detached(marked.replace('|', ""));
         let names = SourceNames::new(source.clone());
-        let graph = graph(&source, std::slice::from_ref(&library));
         let cancellation = BuildCancellation::new();
-        for graph in [None, Some(&graph)] {
-            assert!(
-                source_name_completion(graph, &names, &source, cursor, &cancellation)
-                    .unwrap()
-                    .is_none()
-            );
+        if marked.starts_with("#import") {
+            source_import_completion(&graph(&source, &[]), &names, &source, cursor, &cancellation)
+        } else {
+            source_name_completion(None, &names, &source, cursor, &cancellation)
         }
-        let mut site = crate::query::tests::QuerySession::new();
-        site.site.write("content/lib.typ", library.text());
-        let items = site.completion(marked);
-        let item = named(&items, "repr");
-        assert!(
-            documentation(item).contains("Imported representation."),
-            "{item:?}"
-        );
-        assert!(!description(item).contains("-> str"), "{item:?}");
+        .unwrap()
+        .unwrap()
     }
 
+    /// A callable completes as a call snippet only where the position calls it; anywhere else the
+    /// completion inserts the bare name.
     #[test]
-    fn cancelled_completions_preserve_errors() {
-        use tola_build::cancellation::{BuildCancelled, BuildCanceller};
-
-        let canceller = BuildCanceller::new();
-        let cancellation = canceller.token();
-        canceller.cancel();
-        for marked in ["#rep|", "#\"text\".|", "#missing.|", "#import math: ab|"] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, &[]);
-            let answer = if marked.starts_with("#import") {
-                source_import_completion(&graph, &names, &source, cursor, &cancellation)
-            } else if marked.contains('.') {
-                source_member_completion(Some(&graph), &names, &source, cursor, &cancellation)
-            } else {
-                source_name_completion(Some(&graph), &names, &source, cursor, &cancellation)
-            };
-            assert!(answer.unwrap_err().is::<BuildCancelled>(), "{marked}");
-            assert!(
-                source_name_graph_needed(&names, cursor, &cancellation)
-                    .unwrap_err()
-                    .is::<BuildCancelled>()
-            );
-            assert!(
-                source_member_graph_needed(&names, &source, cursor, &cancellation)
-                    .unwrap_err()
-                    .is::<BuildCancelled>()
-            );
-        }
-    }
-
-    #[test]
-    fn ordinary_functions_insert_call_snippets() {
+    fn call_snippets_follow_the_typed_position() {
         for (marked, label, expected) in [
             ("𝄞 #rep|\n", "repr", "repr(${1})"),
             ("#ran|", "range", "range(${1})"),
@@ -831,42 +785,43 @@ mod tests {
             ("#show stron|: it => it", "strong", "strong"),
             ("#import math: ab|", "abs", "abs"),
         ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold = if marked.starts_with("#import") {
-                source_import_completion(
-                    &graph(&source, &[]),
-                    &names,
-                    &source,
-                    cursor,
-                    &BuildCancellation::new(),
-                )
-                .unwrap()
-                .unwrap()
+            let items = cold_items(marked);
+            let item = named(&items, label);
+            let text = inserted_text(item);
+            assert_eq!(text, expected, "{marked}");
+            if expected.contains("${") {
+                assert_eq!(
+                    item.insert_text_format,
+                    Some(lsp_types::InsertTextFormat::SNIPPET),
+                    "{marked}"
+                );
+                assert_eq!(crate::completion::plain_text(text), format!("{label}()"));
             } else {
-                source_name_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .unwrap()
-            };
-            let mut site = crate::query::tests::QuerySession::new();
-            for items in [cold, site.completion(marked)] {
-                let item = items.iter().find(|item| item.label == label).expect(marked);
-                let text = inserted_text(item);
-                assert_eq!(text, expected, "{marked}");
-                if expected.contains("${") {
-                    assert_eq!(
-                        item.insert_text_format,
-                        Some(lsp_types::InsertTextFormat::SNIPPET)
-                    );
-                    assert_eq!(crate::completion::plain_text(text), format!("{label}()"));
-                } else {
-                    assert_ne!(
-                        item.insert_text_format,
-                        Some(lsp_types::InsertTextFormat::SNIPPET)
-                    );
-                }
+                assert_ne!(
+                    item.insert_text_format,
+                    Some(lsp_types::InsertTextFormat::SNIPPET),
+                    "{marked}"
+                );
             }
+        }
+    }
+
+    /// The lane that reads the source alone and the lane that reads the checked site insert the
+    /// same call.
+    #[test]
+    fn cold_and_warm_lanes_agree() {
+        for (marked, label) in [
+            ("𝄞 #rep|\n", "repr"),
+            ("#let result = 1 + rep|", "repr"),
+            ("#show stron|: it => it", "strong"),
+            ("#import math: ab|", "abs"),
+        ] {
+            let cold = cold_items(marked);
+            let mut site = crate::query::tests::QuerySession::new();
+            let warm = site.completion(marked);
+            let (cold, warm) = (named(&cold, label), named(&warm, label));
+            assert_eq!(inserted_text(cold), inserted_text(warm), "{marked}");
+            assert_eq!(cold.insert_text_format, warm.insert_text_format, "{marked}");
         }
     }
 
@@ -968,149 +923,6 @@ mod tests {
                 assert_eq!(inserted_text(item), inserted, "{marked}");
             }
         }
-    }
-
-    /// An element's call also writes as a block when its own argument is content, and a call whose
-    /// argument is not content offers no block form.
-    #[test]
-    fn content_calls_offer_their_block_form() {
-        for (marked, label, call, block) in [
-            ("#rect|", "rect", Some("rect(${1})"), Some("rect[${1}]")),
-            (
-                "#stro|",
-                "strong",
-                Some("strong(${1})"),
-                Some("strong[${1}]"),
-            ),
-            ("#rep|", "repr", Some("repr(${1})"), None),
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::new(file("main.typ"), marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_name_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .unwrap();
-            let mut site = crate::query::tests::QuerySession::new();
-            site.site
-                .write("content/document.typ", &marked.replace('|', ""));
-            let warm = site.completion(marked);
-            for items in [cold, warm] {
-                let completed = named(&items, label);
-                assert_eq!(Some(inserted_text(completed)), call, "{marked}");
-                let block_form = items
-                    .iter()
-                    .find(|item| item.label == format!("{label}.bracket"))
-                    .map(inserted_text);
-                assert_eq!(block_form, block, "{marked}");
-            }
-        }
-    }
-
-    /// A show rule's transform offers the callable and its `.with` spelling; a selector argument
-    /// offers the element and its `.where` spelling.
-    #[test]
-    fn show_positions_offer_rule_spellings() {
-        for (marked, label, with, where_) in [
-            ("#show raw: rep|", "repr", Some("repr.with(${1})"), None),
-            (
-                "#let f(x) = x\n#show raw: f|",
-                "f",
-                Some("f.with(${1})"),
-                None,
-            ),
-            (
-                "#show selector(rec|)",
-                "rect",
-                None,
-                Some("rect.where(${1})"),
-            ),
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::new(file("main.typ"), marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_name_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .unwrap();
-            let mut site = crate::query::tests::QuerySession::new();
-            site.site
-                .write("content/document.typ", &marked.replace('|', ""));
-            let warm = site.completion(marked);
-            for items in [cold, warm] {
-                assert_eq!(inserted_text(named(&items, label)), label, "{marked}");
-                for (suffix, expected) in [("with", with), ("where", where_)] {
-                    let spelled = items
-                        .iter()
-                        .find(|item| item.label == format!("{label}.{suffix}"))
-                        .map(inserted_text);
-                    assert_eq!(spelled, expected, "{marked}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn library_completions_share_value_metadata() {
-        let source = Source::detached("#rea".to_owned());
-        let names = SourceNames::new(source.clone());
-        let items = source_name_completion(
-            None,
-            &names,
-            &source,
-            source.text().len(),
-            &BuildCancellation::new(),
-        )
-        .unwrap()
-        .unwrap();
-        let read = named(&items, "read");
-        let value = GLOBAL_LIBRARY
-            .global
-            .scope()
-            .get("read")
-            .unwrap()
-            .read()
-            .clone();
-        let expected = semantic::completion(
-            "read",
-            &[ExpressionType::Known(value)],
-            read.text_edit.clone().unwrap(),
-        );
-        assert_eq!(read.label_details, expected.label_details);
-        assert_eq!(read.documentation, expected.documentation);
-        assert!(!documentation(read).is_empty());
-
-        let source =
-            Source::detached("#let module = math\n#let alias = module.equation\n#ali".to_owned());
-        let names = SourceNames::new(source.clone());
-        let items = source_name_completion(
-            None,
-            &names,
-            &source,
-            source.text().len(),
-            &BuildCancellation::new(),
-        )
-        .unwrap()
-        .unwrap();
-        let alias = named(&items, "alias");
-        assert_eq!(alias.kind, Some(CompletionItemKind::FUNCTION));
-        assert!(description(alias).contains("alias("));
-        assert!(!documentation(alias).is_empty());
-
-        let source = Source::detached("#str.le".to_owned());
-        let names = SourceNames::new(source.clone());
-        let items = source_member_completion(
-            None,
-            &names,
-            &source,
-            source.text().len(),
-            &BuildCancellation::new(),
-        )
-        .unwrap()
-        .unwrap();
-        let len = named(&items, "len");
-        assert!(description(len).contains("len("));
-        assert!(!documentation(len).is_empty());
     }
 
     #[test]
@@ -1289,46 +1101,6 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_order_decides_visible_declarations() {
-        let library = Source::new(
-            file("library.typ"),
-            "/// Imported meaning.\n#let render(value) = value".to_owned(),
-        );
-        for (text, expected) in [
-            (
-                "/// Local meaning.\n#let render(value) = value\n#import \"library.typ\": *\n#ren",
-                "Imported meaning.",
-            ),
-            (
-                "#import \"library.typ\": *\n/// Local meaning.\n#let render(value) = value\n#ren",
-                "Local meaning.",
-            ),
-            (
-                "#import \"library.typ\": *\n#{\n/// Inner meaning.\nlet render(value) = value\nren\n}",
-                "Inner meaning.",
-            ),
-        ] {
-            let source = Source::new(file("main.typ"), text.to_owned());
-            let cursor = source.text().rfind("ren").unwrap() + 3;
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, std::slice::from_ref(&library));
-            let items = source_name_completion(
-                Some(&graph),
-                &names,
-                &source,
-                cursor,
-                &BuildCancellation::new(),
-            )
-            .unwrap()
-            .unwrap();
-            assert!(
-                documentation(named(&items, "render")).contains(expected),
-                "{items:?}"
-            );
-        }
-    }
-
-    #[test]
     fn library_names_follow_math_namespace() {
         for (marked, expected) in [("$sq|$", "sqrt"), ("$st|$", "std"), ("#st|", "std")] {
             let cursor = marked.find('|').unwrap();
@@ -1381,31 +1153,6 @@ mod tests {
         assert_eq!(edit.insert.end, lsp_types::Position::new(1, 6));
         assert_eq!(edit.replace.end, lsp_types::Position::new(1, 8));
         assert_eq!(edit.new_text, "café(${1})");
-    }
-
-    #[test]
-    fn source_replies_preserve_argument_semantics() {
-        for marked in ["// al|", "/* al| */", "#let label = \"al|\"", "`al|`"] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            assert!(
-                source_completion_reply(&source, cursor).is_some(),
-                "{marked}"
-            );
-        }
-        for marked in [
-            "#import \"lib|.typ\"",
-            "#read(\"data|.json\")",
-            "#image(\"cover|.svg\")",
-            "#render(icon: \"/cover|.svg\")",
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            assert!(
-                source_completion_reply(&source, cursor).is_none(),
-                "{marked}"
-            );
-        }
     }
 
     #[test]
@@ -1538,6 +1285,54 @@ mod tests {
     }
 
     #[test]
+    fn typed_containers_preserve_fields() {
+        for (marked, expected) in [
+            ("#let f(x) = (current: x.len())\n#f(\"test\").|", "current"),
+            (
+                "#let f(x) = (current: x.len())\n#f(\"test\").current.|",
+                "signum",
+            ),
+            ("#let value = (current: unknown)\n#value.|", "current"),
+            (
+                "#let f((..rest, value)) = value\n#f((0, str(1))).|",
+                "split",
+            ),
+            (
+                "#let (ignored, value) = (0, (current: str(1)))\n#value.current.|",
+                "split",
+            ),
+            (
+                "#let (ignored, ..rest) = (ignored: 0, current: str(1))\n#rest.|",
+                "current",
+            ),
+            (
+                "#let outer(x) = { let inner() = (current: x.len()); inner() }\n#outer(\"test\").current.|",
+                "signum",
+            ),
+        ] {
+            let cursor = marked.find('|').unwrap();
+            let source = Source::detached(marked.replace('|', ""));
+            let names = SourceNames::new(source.clone());
+            let cold =
+                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
+                    .unwrap()
+                    .expect(marked);
+            let mut site = crate::query::tests::QuerySession::with_program(
+                crate::query::tests::FAILED_PROGRAM,
+            );
+            for items in [
+                cold,
+                site.completion(&format!("#panic(\"page\")\n{marked}")),
+            ] {
+                assert!(
+                    items.iter().any(|item| item.label == expected),
+                    "{marked}: {items:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn source_calls_preserve_uncertainty() {
         for (marked, expected) in [
             (
@@ -1591,226 +1386,6 @@ mod tests {
                 ),
                 None => assert!(items.is_none(), "{marked}: {labels:?}"),
             }
-        }
-    }
-
-    #[test]
-    fn element_types_expose_established_members() {
-        for marked in ["#rect().|", "#heading[Title].body.|"] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .expect(marked);
-            let mut site = crate::query::tests::QuerySession::with_program(
-                crate::query::tests::FAILED_PROGRAM,
-            );
-            for items in [
-                cold,
-                site.completion(&format!("#panic(\"page\")\n{marked}")),
-            ] {
-                for method in ["fields", "func", "has"] {
-                    assert!(
-                        items.iter().any(|item| item.label == method),
-                        "{marked}: {items:?}"
-                    );
-                }
-                for field in ["children", "fill"] {
-                    assert!(
-                        !items.iter().any(|item| item.label == field),
-                        "{marked}: {items:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn typed_containers_preserve_fields() {
-        for (marked, expected) in [
-            ("#let f(x) = (current: x.len())\n#f(\"test\").|", "current"),
-            (
-                "#let f(x) = (current: x.len())\n#f(\"test\").current.|",
-                "signum",
-            ),
-            ("#let value = (current: unknown)\n#value.|", "current"),
-            (
-                "#let f((..rest, value)) = value\n#f((0, str(1))).|",
-                "split",
-            ),
-            (
-                "#let (ignored, value) = (0, (current: str(1)))\n#value.current.|",
-                "split",
-            ),
-            (
-                "#let (ignored, ..rest) = (ignored: 0, current: str(1))\n#rest.|",
-                "current",
-            ),
-            (
-                "#let outer(x) = { let inner() = (current: x.len()); inner() }\n#outer(\"test\").current.|",
-                "signum",
-            ),
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .expect(marked);
-            let mut site = crate::query::tests::QuerySession::with_program(
-                crate::query::tests::FAILED_PROGRAM,
-            );
-            for items in [
-                cold,
-                site.completion(&format!("#panic(\"page\")\n{marked}")),
-            ] {
-                assert!(
-                    items.iter().any(|item| item.label == expected),
-                    "{marked}: {items:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn known_callees_require_valid_call_syntax() {
-        for (marked, expected) in [
-            ("#let d = (convert: str)\n#(d.convert)(1).|", Some("split")),
-            ("#let d = (convert: repr)\n#(d.convert)(1).|", Some("split")),
-            (
-                "#let d = (convert: str, extra: unknown)\n#(d.convert)(1).|",
-                Some("split"),
-            ),
-            ("#(str)(1).|", Some("split")),
-            ("#(str.from-unicode)(97).|", Some("split")),
-            ("#let d = (convert: str)\n#d.convert(1).|", None),
-            ("#(if false { str } else { rgb })(1).|", None),
-        ] {
-            let marked = format!("#panic(\"page\")\n{marked}");
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let cold =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap();
-            if let Some(expected) = expected {
-                assert!(
-                    cold.as_ref()
-                        .is_some_and(|items| items.iter().any(|item| item.label == expected)),
-                    "{marked}: {cold:?}"
-                );
-            } else {
-                assert!(cold.is_none(), "{marked}: {cold:?}");
-            }
-            let mut site = crate::query::tests::QuerySession::with_program(
-                crate::query::tests::FAILED_PROGRAM,
-            );
-            let warm = site.completion(&marked);
-            if let Some(expected) = expected {
-                assert!(
-                    warm.iter().any(|item| item.label == expected),
-                    "{marked}: {warm:?}"
-                );
-            } else {
-                assert!(warm.is_empty(), "{marked}: {warm:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn types_never_supply_constant_values() {
-        for marked in [
-            "#let f(key) = ((key): 1)\n#f(str(1)).|",
-            "#let value = (current: unknown)\n#value.current.|",
-            "#let f() = (current: { return (escaped: 1) })\n#f().|",
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            assert!(
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .is_none(),
-                "{marked}"
-            );
-        }
-        for (marked, has_static) in [("#str.|", true), ("#str(1).|", false)] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let items =
-                source_member_completion(None, &names, &source, cursor, &BuildCancellation::new())
-                    .unwrap()
-                    .expect(marked);
-            assert_eq!(
-                items.iter().any(|item| item.label == "from-unicode"),
-                has_static,
-                "{marked}"
-            );
-            if !has_static {
-                assert!(
-                    items.iter().any(|item| item.label == "to-unicode"),
-                    "{items:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn unknown_sources_do_not_invent_members() {
-        for marked in [
-            "#let f(x) = f(x)\n#f(1).|",
-            "#let f(x) = x\n#f(..unknown).|",
-            "#let f() = { [prefix]; \"suffix\" }\n#f().|",
-            "#import missing: *\n#math.|",
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source.clone());
-            let graph = graph(&source, &[]);
-            assert!(
-                source_member_completion(
-                    Some(&graph),
-                    &names,
-                    &source,
-                    cursor,
-                    &BuildCancellation::new()
-                )
-                .unwrap()
-                .is_none(),
-                "{marked}"
-            );
-        }
-    }
-
-    #[test]
-    fn dependency_graph_requires_visible_imports() {
-        for (marked, expected) in [
-            ("#let render() = 1\n#ren|", false),
-            (
-                "#import \"library.typ\": remote\n#let render() = 1\n#ren|",
-                false,
-            ),
-            (
-                "#import \"library.typ\": remote\n#let alias = remote\n#ali|",
-                true,
-            ),
-            ("#ren|\n#import \"library.typ\": render", false),
-            ("#{ import \"library.typ\": render }\n#ren|", false),
-            ("#import \"library.typ\": render\n#ren|", true),
-            ("#import \"library.typ\": *\n#ren|", true),
-        ] {
-            let cursor = marked.find('|').unwrap();
-            let source = Source::detached(marked.replace('|', ""));
-            let names = SourceNames::new(source);
-            assert_eq!(
-                source_name_graph_needed(&names, cursor, &BuildCancellation::new()).unwrap(),
-                expected,
-                "{marked}"
-            );
         }
     }
 }

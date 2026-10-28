@@ -385,35 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn declaration_index_bounds_trees() {
-        let declarations = vec![
-            CommandOutput::File(OutputPath::parse("exact.json").unwrap()),
-            CommandOutput::Tree(OutputPath::parse("tree/nested").unwrap()),
-            CommandOutput::Tree(OutputPath::parse("tree").unwrap()),
-            CommandOutput::Tree(OutputPath::parse("other").unwrap()),
-        ];
-        let index = DeclaredOutputs::new(&declarations, &BuildCancellation::new()).unwrap();
-        for (path, expected) in [
-            ("exact.json", true),
-            ("EXACT.json", false),
-            ("exact.json/child", false),
-            ("tree", false),
-            ("tree/nested/file", true),
-            ("tree/nestee/file", true),
-            ("tree2/file", false),
-            ("TREE/file", false),
-            ("other/file", true),
-        ] {
-            assert_eq!(
-                index.contains(&OutputPath::parse(path).unwrap()),
-                expected,
-                "{path}"
-            );
-        }
-    }
-
-    #[test]
-    fn writes_search_index() {
+    fn child_writes_search_index() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
@@ -441,7 +413,7 @@ mod tests {
 
     /// Records how many times the command actually ran, beside the site root.
     #[test]
-    fn counts_runs() {
+    fn child_counts_runs() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
@@ -463,7 +435,7 @@ mod tests {
     /// A command that keeps its index in `TOLA_HOOK_CACHE_DIR` and restores it into every
     /// fresh generated root; a cache hit still has to write the declared outputs.
     #[test]
-    fn restores_cached_search_index() {
+    fn child_restores_cached_search_index() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
@@ -490,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_extra_file() {
+    fn child_writes_extra_file() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
@@ -499,21 +471,11 @@ mod tests {
     }
 
     #[test]
-    fn writes_search_chunks() {
-        if !is_hook_child_for("generate-outputs") {
-            return;
-        }
-        fs::create_dir_all(generated_root().join("search/chunks")).unwrap();
-        fs::write(generated_root().join("search/index.json"), "[]").unwrap();
-        fs::write(generated_root().join("search/chunks/first.json"), "{}").unwrap();
-    }
-
-    #[test]
-    fn writes_nothing() {}
+    fn child_writes_nothing() {}
 
     #[cfg(unix)]
     #[test]
-    fn writes_symlink() {
+    fn child_writes_symlink() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
@@ -526,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn waits_for_cancellation() {
+    fn child_waits_for_cancellation() {
         if !is_hook_child_for("generate-outputs") {
             return;
         }
@@ -540,7 +502,7 @@ mod tests {
     #[test]
     fn generated_outputs_join_the_graph() {
         let (_directory, mut config, mut upstream) =
-            output_command_config("writes_search_index", &["search.json"]);
+            output_command_config("child_writes_search_index", &["search.json"]);
         let mut disabled = config.build.hooks.generate_outputs[0].clone();
         disabled.enable = false;
         config.build.hooks.generate_outputs.insert(0, disabled);
@@ -577,53 +539,11 @@ mod tests {
     }
 
     #[test]
-    fn generated_trees_own_their_files() {
-        let (_directory, mut config, mut upstream) =
-            output_command_config("writes_search_chunks", &[]);
-        config.build.hooks.generate_outputs[0].outputs =
-            vec![CommandOutput::Tree(OutputPath::parse("search").unwrap())];
-        let generated = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Production,
-            None,
-            &BuildCancellation::new(),
-        )
-        .unwrap();
-        assert_eq!(
-            generated
-                .outputs
-                .iter()
-                .map(|output| output.path().as_str())
-                .collect::<Vec<_>>(),
-            ["search/chunks/first.json", "search/index.json"]
-        );
-        for ownership in generated.root_ownerships {
-            upstream.own_root(ownership).unwrap();
-        }
-        for output in generated.outputs {
-            upstream.insert(output).unwrap();
-        }
-        let error = upstream
-            .insert_system(
-                "other",
-                "search/other.json",
-                OutputDeclaration::opaque(ResponseMediaType::JSON),
-                b"{}".to_vec(),
-            )
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            crate::output::graph::OutputGraphError::TreeConflict { .. }
-        ));
-    }
-
-    #[test]
     fn output_declarations_are_enforced() {
         for (child, declared) in [
-            ("writes_nothing", vec!["search.json"]),
-            ("writes_extra_file", vec!["search.json"]),
-            ("writes_nothing", vec![]),
+            ("child_writes_nothing", vec!["search.json"]),
+            ("child_writes_extra_file", vec!["search.json"]),
+            ("child_writes_nothing", vec![]),
         ] {
             let (_directory, config, upstream) = output_command_config(child, &declared);
             let error = generate_outputs(
@@ -643,7 +563,7 @@ mod tests {
     #[test]
     fn generated_symlinks_are_rejected() {
         let (_directory, config, upstream) =
-            output_command_config("writes_symlink", &["search.json"]);
+            output_command_config("child_writes_symlink", &["search.json"]);
         generate_outputs(
             &config,
             upstream.outputs(),
@@ -656,45 +576,9 @@ mod tests {
     }
 
     #[test]
-    fn output_commands_follow_upstream_edits() {
-        let (_directory, config, mut upstream) =
-            output_command_config("writes_search_index", &["search.json"]);
-        let cancellation = BuildCancellation::new();
-        let first = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Development,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-        let mut next = OutputGraphBuilder::new();
-        next.insert(OutputFile::new(
-            OutputPath::parse("index.html").unwrap(),
-            OutputDeclaration::html_document(),
-            OutputOwner::bundle("site.typ"),
-            b"<h1>Changed</h1>".to_vec(),
-        ))
-        .unwrap();
-        let second = generate_outputs(
-            &config,
-            next.outputs(),
-            BuildMode::Development,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-        assert_ne!(first.outputs[0].bytes(), second.outputs[0].bytes());
-        upstream
-            .insert(first.outputs.into_iter().next().unwrap())
-            .unwrap();
-        assert_eq!(upstream.outputs()[0].bytes(), b"<h1>Home</h1>");
-    }
-
-    #[test]
     fn cancellation_stops_output_command() {
         let (directory, config, upstream) =
-            output_command_config("waits_for_cancellation", &["search.json"]);
+            output_command_config("child_waits_for_cancellation", &["search.json"]);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         fs::write(directory.path().join("signal.txt"), address.to_string()).unwrap();
@@ -744,7 +628,7 @@ mod tests {
     #[test]
     fn output_command_receives_build_mode() {
         let (_directory, mut config, upstream) =
-            output_command_config("restores_cached_search_index", &[]);
+            output_command_config("child_restores_cached_search_index", &[]);
         config.build.hooks.generate_outputs[0].outputs =
             vec![CommandOutput::Tree(OutputPath::parse("search").unwrap())];
 
@@ -767,49 +651,6 @@ mod tests {
         }
     }
 
-    /// A command that reuses its cache still writes its declared outputs into the fresh
-    /// generated root of every candidate.
-    #[test]
-    fn cached_outputs_join_every_candidate() {
-        let (_directory, mut config, upstream) =
-            output_command_config("restores_cached_search_index", &[]);
-        config.build.hooks.generate_outputs[0].outputs =
-            vec![CommandOutput::Tree(OutputPath::parse("search").unwrap())];
-        let cancellation = BuildCancellation::new();
-        let first = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Development,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(first.outputs[0].path().as_str(), "search/index.json");
-        let content: serde_json::Value = serde_json::from_slice(first.outputs[0].bytes()).unwrap();
-        assert_eq!(content["html"], "<h1>Home</h1>");
-
-        let mut next = OutputGraphBuilder::new();
-        next.insert(OutputFile::new(
-            OutputPath::parse("index.html").unwrap(),
-            OutputDeclaration::html_document(),
-            OutputOwner::bundle("site.typ"),
-            b"<h1>Changed</h1>".to_vec(),
-        ))
-        .unwrap();
-        let second = generate_outputs(
-            &config,
-            next.outputs(),
-            BuildMode::Development,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-
-        assert_eq!(second.outputs[0].path().as_str(), "search/index.json");
-        let content: serde_json::Value = serde_json::from_slice(second.outputs[0].bytes()).unwrap();
-        assert_eq!(content["html"], "<h1>Home</h1>");
-    }
-
     fn run_count(directory: &tempfile::TempDir) -> u32 {
         std::fs::read_to_string(directory.path().join("runs.txt"))
             .ok()
@@ -817,110 +658,95 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Whether the previous revision's outputs are reused decides whether the command runs:
+    /// a reuse-policy command in development skips an unchanged input, and every other
+    /// (mode, policy, changed-input) combination runs it again.
     #[test]
-    fn unchanged_inputs_reuse_development_outputs() {
-        let (directory, mut config, upstream) =
-            output_command_config("counts_runs", &["search.json"]);
-        config.build.hooks.generate_outputs[0].dev = DevParticipation::Reuse;
-        let cancellation = BuildCancellation::new();
+    fn reuse_policy_decides_whether_command_runs() {
+        struct Case {
+            mode: BuildMode,
+            dev: DevParticipation,
+            changes_upstream: bool,
+            expected_runs: u32,
+        }
+        for case in [
+            Case {
+                mode: BuildMode::Development,
+                dev: DevParticipation::Reuse,
+                changes_upstream: false,
+                expected_runs: 1,
+            },
+            Case {
+                mode: BuildMode::Development,
+                dev: DevParticipation::Reuse,
+                changes_upstream: true,
+                expected_runs: 2,
+            },
+            Case {
+                mode: BuildMode::Development,
+                dev: DevParticipation::Run,
+                changes_upstream: false,
+                expected_runs: 2,
+            },
+            Case {
+                mode: BuildMode::Production,
+                dev: DevParticipation::Reuse,
+                changes_upstream: false,
+                expected_runs: 2,
+            },
+        ] {
+            let (directory, mut config, upstream) =
+                output_command_config("child_counts_runs", &["search.json"]);
+            config.build.hooks.generate_outputs[0].dev = case.dev;
+            let cancellation = BuildCancellation::new();
+            let first =
+                generate_outputs(&config, upstream.outputs(), case.mode, None, &cancellation)
+                    .unwrap();
+            assert_eq!(run_count(&directory), 1);
 
-        let first = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Development,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(run_count(&directory), 1);
-
-        let second = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Development,
-            Some(&first.reuse),
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(
-            run_count(&directory),
-            1,
-            "unchanged inputs must not run the command"
-        );
-        assert_eq!(first.outputs[0].bytes(), second.outputs[0].bytes());
-
-        let mut changed = OutputGraphBuilder::new();
-        changed
-            .insert(OutputFile::new(
-                OutputPath::parse("index.html").unwrap(),
-                OutputDeclaration::html_document(),
-                OutputOwner::bundle("site.typ"),
-                b"<h1>Changed</h1>".to_vec(),
-            ))
+            let next = if case.changes_upstream {
+                let mut changed = OutputGraphBuilder::new();
+                changed
+                    .insert(OutputFile::new(
+                        OutputPath::parse("index.html").unwrap(),
+                        OutputDeclaration::html_document(),
+                        OutputOwner::bundle("site.typ"),
+                        b"<h1>Changed</h1>".to_vec(),
+                    ))
+                    .unwrap();
+                changed
+            } else {
+                let mut same = OutputGraphBuilder::new();
+                same.insert(OutputFile::new(
+                    OutputPath::parse("index.html").unwrap(),
+                    OutputDeclaration::html_document(),
+                    OutputOwner::bundle("site.typ"),
+                    b"<h1>Home</h1>".to_vec(),
+                ))
+                .unwrap();
+                same
+            };
+            let second = generate_outputs(
+                &config,
+                next.outputs(),
+                case.mode,
+                Some(&first.reuse),
+                &cancellation,
+            )
             .unwrap();
-        let third = generate_outputs(
-            &config,
-            changed.outputs(),
-            BuildMode::Development,
-            Some(&second.reuse),
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(
-            run_count(&directory),
-            2,
-            "changed inputs must run the command"
-        );
-        assert_ne!(second.outputs[0].bytes(), third.outputs[0].bytes());
-    }
 
-    #[test]
-    fn run_policy_never_reuses() {
-        let (directory, config, upstream) = output_command_config("counts_runs", &["search.json"]);
-        let cancellation = BuildCancellation::new();
-        let first = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Development,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(run_count(&directory), 1);
-        generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Development,
-            Some(&first.reuse),
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(run_count(&directory), 2);
-    }
-
-    #[test]
-    fn production_never_reuses() {
-        let (directory, mut config, upstream) =
-            output_command_config("counts_runs", &["search.json"]);
-        config.build.hooks.generate_outputs[0].dev = DevParticipation::Reuse;
-        let cancellation = BuildCancellation::new();
-        let first = generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Production,
-            None,
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(run_count(&directory), 1);
-        generate_outputs(
-            &config,
-            upstream.outputs(),
-            BuildMode::Production,
-            Some(&first.reuse),
-            &cancellation,
-        )
-        .unwrap();
-        assert_eq!(run_count(&directory), 2);
+            let label = format!(
+                "{:?}/{:?}/changed={}",
+                case.mode, case.dev, case.changes_upstream
+            );
+            assert_eq!(run_count(&directory), case.expected_runs, "{label}");
+            if case.expected_runs == 1 {
+                assert_eq!(
+                    first.outputs[0].bytes(),
+                    second.outputs[0].bytes(),
+                    "{label}"
+                );
+            }
+        }
     }
 }

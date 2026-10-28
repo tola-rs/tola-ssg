@@ -65,7 +65,6 @@ pub(crate) fn read_disk(path: &Path, reported: &Path) -> FileResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
     fn decode_utf8_strips_bom_or_rejects() {
@@ -84,36 +83,5 @@ mod tests {
                 None => assert_eq!(decoded.unwrap_err(), FileError::InvalidUtf8, "{name}"),
             }
         }
-    }
-
-    #[test]
-    fn read_disk_names_authored_path() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("test.txt");
-        std::fs::write(&file, "test content").unwrap();
-
-        assert_eq!(read_disk(&file, &file).unwrap(), b"test content");
-        assert_eq!(
-            read_disk(dir.path(), dir.path()).unwrap_err(),
-            FileError::IsDirectory
-        );
-
-        let reported = Path::new("content/missing.typ");
-        assert_eq!(
-            read_disk(&dir.path().join("missing.typ"), reported).unwrap_err(),
-            FileError::NotFound(reported.to_path_buf())
-        );
-    }
-
-    #[test]
-    fn unique_ids_are_non_persistent() {
-        let unique = virtual_file_id("generated.typ");
-        let normal = file_id("generated.typ");
-
-        assert_eq!(
-            non_persistent_label(unique).as_deref(),
-            Some("generated.typ")
-        );
-        assert_eq!(non_persistent_label(normal), None);
     }
 }

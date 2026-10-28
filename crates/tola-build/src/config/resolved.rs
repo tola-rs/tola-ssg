@@ -309,7 +309,7 @@ mod tests {
     /// The exclusions name the state a build of this configuration writes: the output tree, the
     /// publication workspace beside it, and the vendor workspace.
     #[test]
-    fn generated_exclusions_name_the_output_and_vendor_state() {
+    fn exclusions_cover_output_and_vendor_state() {
         let directory = tempfile::TempDir::new().unwrap();
         let root = directory.path();
         std::fs::write(root.join("tola.toml"), "[vendor]\npath = \"vendor\"\n").unwrap();

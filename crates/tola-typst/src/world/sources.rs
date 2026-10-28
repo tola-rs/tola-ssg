@@ -1,4 +1,4 @@
-//! Immutable file snapshot for lock-free parallel compilation.
+//! Explicit sources frozen for lock-free parallel compilation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,13 +11,13 @@ use super::path::normalize_path;
 use crate::session::AccessedDeps;
 use crate::world::file::{FileResolver, Loaded, ReadAttempt, decode_utf8, file_id_from_path};
 
-/// Failure to construct one explicit source snapshot.
+/// Failure to construct the explicit sources.
 #[derive(Debug, thiserror::Error)]
-pub enum SnapshotError {
+pub enum SourceLoadError {
     /// A source could not be read or decoded.
     #[error("could not read a source")]
     File {
-        /// Source path requested for the snapshot.
+        /// Source path requested for the load.
         path: PathBuf,
         /// Structured file or decoding failure from the resolver.
         #[source]
@@ -29,20 +29,20 @@ pub enum SnapshotError {
         /// Rejected source path.
         path: PathBuf,
     },
-    /// A source snapshot cannot change its compilation root during refresh.
+    /// Explicit sources cannot change their compilation root during refresh.
     #[error("the sources were captured for a different compilation root")]
     RootMismatch {
-        /// Root owned by the existing snapshot.
-        snapshot: PathBuf,
+        /// Root of the existing sources.
+        existing: PathBuf,
         /// Root requested for the refresh.
         requested: PathBuf,
     },
-    /// The caller cancelled snapshot construction.
+    /// The caller cancelled source loading.
     #[error("source reading stopped before the build finished")]
     Cancelled,
 }
 
-impl SnapshotError {
+impl SourceLoadError {
     /// Source or root path associated with the failure, when one exists.
     pub fn path(&self) -> Option<&Path> {
         match self {
@@ -58,70 +58,70 @@ impl SnapshotError {
     }
 }
 
-/// One immutable source snapshot and the reads recorded while freezing it.
-pub struct SnapshotLoad {
-    snapshot: SourceSnapshot,
+/// The explicit sources one load produced and the reads recorded while loading them.
+pub struct SourceLoad {
+    sources: ExplicitSources,
     accessed: AccessedDeps,
 }
 
-impl SnapshotLoad {
-    /// Borrow the frozen snapshot.
-    pub fn snapshot(&self) -> &SourceSnapshot {
-        &self.snapshot
+impl SourceLoad {
+    /// Borrow the sources.
+    pub fn sources(&self) -> &ExplicitSources {
+        &self.sources
     }
 
-    /// Borrow every read observed while freezing the snapshot.
+    /// Borrow every read observed while loading the sources.
     pub fn accessed(&self) -> &AccessedDeps {
         &self.accessed
     }
 
-    /// Consume the load into its snapshot and observed reads.
-    pub fn into_snapshot_and_accessed(self) -> (SourceSnapshot, AccessedDeps) {
-        (self.snapshot, self.accessed)
+    /// Consume the load into its sources and observed reads.
+    pub fn into_sources_and_accessed(self) -> (ExplicitSources, AccessedDeps) {
+        (self.sources, self.accessed)
     }
 }
 
-/// A failed snapshot freeze and every read completed before failure.
+/// A failed source load and every read completed before failure.
 #[derive(Debug)]
-pub struct SnapshotLoadFailure {
-    error: SnapshotError,
+pub struct SourceLoadFailure {
+    error: SourceLoadError,
     accessed: Box<AccessedDeps>,
 }
 
-impl SnapshotLoadFailure {
-    /// Borrow every read observed before snapshot construction stopped.
+impl SourceLoadFailure {
+    /// Borrow every read observed before loading stopped.
     pub fn accessed(&self) -> &AccessedDeps {
         &self.accessed
     }
 
-    /// Whether snapshot construction stopped because the caller cancelled it.
+    /// Whether loading stopped because the caller cancelled it.
     pub fn is_cancelled(&self) -> bool {
         self.error.is_cancelled()
     }
 
     /// Consume the failure into its error and observed reads.
-    pub fn into_error_and_accessed(self) -> (SnapshotError, AccessedDeps) {
+    pub fn into_error_and_accessed(self) -> (SourceLoadError, AccessedDeps) {
         (self.error, *self.accessed)
     }
 }
 
-impl std::fmt::Display for SnapshotLoadFailure {
+impl std::fmt::Display for SourceLoadFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.error.fmt(formatter)
     }
 }
 
-impl std::error::Error for SnapshotLoadFailure {
+impl std::error::Error for SourceLoadFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
 }
 
-/// Immutable source snapshot for lock-free parallel access.
+/// The explicit sources one compilation reads, frozen for lock-free parallel access.
 ///
 /// Built once before parallel compilation, then shared across all threads.
 #[derive(Clone)]
-pub struct SourceSnapshot {
+pub struct ExplicitSources {
     base: Arc<FxHashMap<FileId, Loaded<FrozenSource>>>,
     overlay: Arc<FxHashMap<FileId, Loaded<FrozenSource>>>,
     members: Arc<FxHashSet<FileId>>,
@@ -136,38 +136,35 @@ struct FrozenSource {
 }
 
 /// Compact after this many overlay sources. Lookups access at most two hash maps.
-const MAX_SNAPSHOT_OVERLAY_SOURCES: usize = 64;
-/// Limits temporary read results retained while assembling a source snapshot.
-const SNAPSHOT_LOAD_CHUNK_SIZE: usize = 128;
+const MAX_OVERLAY_SOURCES: usize = 64;
+/// Limits temporary read results retained while loading explicit sources.
+const LOAD_CHUNK_SIZE: usize = 128;
 
-impl SourceSnapshot {
-    /// Build a snapshot from the explicitly listed source files.
-    pub fn build(
-        content_files: &[PathBuf],
-        root: &Path,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+impl ExplicitSources {
+    /// Load the explicitly listed source files.
+    pub fn build(content_files: &[PathBuf], root: &Path) -> Result<SourceLoad, SourceLoadFailure> {
         Self::build_with_files(content_files, root, Arc::new(FileResolver::new()))
     }
 
-    /// Build a snapshot resolving every source through a caller-supplied resolver.
+    /// Load the same sources through a caller-supplied resolver.
     pub fn build_with_files(
         content_files: &[PathBuf],
         root: &Path,
         files: Arc<FileResolver>,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+    ) -> Result<SourceLoad, SourceLoadFailure> {
         Self::build_with_files_and_cancellation(content_files, root, files, None)
     }
 
-    /// Build a snapshot while checking cancellation around each source read.
+    /// Load the sources while checking cancellation around each source read.
     ///
     /// Reads completed by the parallel load remain available through
-    /// [`SnapshotLoadFailure::accessed`] on cancellation.
+    /// [`SourceLoadFailure::accessed`] on cancellation.
     pub fn build_with_files_cancellable(
         content_files: &[PathBuf],
         root: &Path,
         files: Arc<FileResolver>,
         cancellation: &crate::BundleCancellation,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+    ) -> Result<SourceLoad, SourceLoadFailure> {
         Self::build_with_files_and_cancellation(content_files, root, files, Some(cancellation))
     }
 
@@ -176,21 +173,21 @@ impl SourceSnapshot {
         root: &Path,
         files: Arc<FileResolver>,
         cancellation: Option<&crate::BundleCancellation>,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+    ) -> Result<SourceLoad, SourceLoadFailure> {
         if cancellation.is_some_and(|token| token.is_cancelled()) {
-            return Err(SnapshotLoadFailure::cancelled(AccessedDeps::default()));
+            return Err(SourceLoadFailure::cancelled(AccessedDeps::default()));
         }
         validate_source_paths(content_files, files.source_boundary())
-            .map_err(SnapshotLoadFailure::without_reads)?;
+            .map_err(SourceLoadFailure::without_reads)?;
         let root = normalize_path(root);
-        let content_files = normalize_snapshot_paths(content_files, &root)
-            .map_err(SnapshotLoadFailure::without_reads)?;
+        let content_files = normalize_source_paths(content_files, &root)
+            .map_err(SourceLoadFailure::without_reads)?;
 
         let (sources, accessed) = load_sources(&content_files, &root, &files, cancellation, None)?;
         let members = sources.keys().copied().collect();
 
-        Ok(SnapshotLoad {
-            snapshot: Self {
+        Ok(SourceLoad {
+            sources: Self {
                 base: Arc::new(sources),
                 overlay: Arc::new(FxHashMap::default()),
                 members: Arc::new(members),
@@ -212,11 +209,11 @@ impl SourceSnapshot {
         reload: &[PathBuf],
         root: &Path,
         files: Arc<FileResolver>,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+    ) -> Result<SourceLoad, SourceLoadFailure> {
         self.refresh_with_files_and_cancellation(content_files, reload, root, files, None)
     }
 
-    /// Refresh a snapshot while checking cancellation around each source read.
+    /// Refresh the sources while checking cancellation around each source read.
     ///
     /// The returned failure retains all reads completed before cancellation.
     pub fn refresh_with_files_cancellable(
@@ -226,7 +223,7 @@ impl SourceSnapshot {
         root: &Path,
         files: Arc<FileResolver>,
         cancellation: &crate::BundleCancellation,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+    ) -> Result<SourceLoad, SourceLoadFailure> {
         self.refresh_with_files_and_cancellation(
             content_files,
             reload,
@@ -243,15 +240,15 @@ impl SourceSnapshot {
         root: &Path,
         files: Arc<FileResolver>,
         cancellation: Option<&crate::BundleCancellation>,
-    ) -> Result<SnapshotLoad, SnapshotLoadFailure> {
+    ) -> Result<SourceLoad, SourceLoadFailure> {
         if cancellation.is_some_and(|token| token.is_cancelled()) {
-            return Err(SnapshotLoadFailure::cancelled(AccessedDeps::default()));
+            return Err(SourceLoadFailure::cancelled(AccessedDeps::default()));
         }
         let root = normalize_path(root);
         if root != self.root {
-            return Err(SnapshotLoadFailure::without_reads(
-                SnapshotError::RootMismatch {
-                    snapshot: self.root.clone(),
+            return Err(SourceLoadFailure::without_reads(
+                SourceLoadError::RootMismatch {
+                    existing: self.root.clone(),
                     requested: root,
                 },
             ));
@@ -265,23 +262,23 @@ impl SourceSnapshot {
             );
         }
         validate_source_paths(content_files, files.source_boundary())
-            .map_err(SnapshotLoadFailure::without_reads)?;
+            .map_err(SourceLoadFailure::without_reads)?;
 
-        let content_files = normalize_snapshot_paths(content_files, &root)
-            .map_err(SnapshotLoadFailure::without_reads)?;
+        let content_files = normalize_source_paths(content_files, &root)
+            .map_err(SourceLoadFailure::without_reads)?;
         let desired = content_files
             .iter()
             .map(|path| {
-                file_id_from_path(path, &root).expect("validated snapshot path has a file ID")
+                file_id_from_path(path, &root).expect("validated source path has a file ID")
             })
             .collect::<FxHashSet<_>>();
-        let mut reload_paths = normalize_snapshot_paths(reload, &root)
-            .map_err(SnapshotLoadFailure::without_reads)?
+        let mut reload_paths = normalize_source_paths(reload, &root)
+            .map_err(SourceLoadFailure::without_reads)?
             .into_iter()
             .filter(|path| file_id_from_path(path, &root).is_some_and(|id| desired.contains(&id)))
             .collect::<Vec<_>>();
         reload_paths.extend(content_files.iter().filter_map(|path| {
-            let id = file_id_from_path(path, &root).expect("validated snapshot path has a file ID");
+            let id = file_id_from_path(path, &root).expect("validated source path has a file ID");
             (!self.members.contains(&id)).then(|| path.clone())
         }));
         reload_paths.sort_unstable();
@@ -296,8 +293,8 @@ impl SourceSnapshot {
         };
         let removed = self.members.iter().any(|id| !members.contains(id));
         if refreshed.is_empty() && !removed {
-            return Ok(SnapshotLoad {
-                snapshot: Self {
+            return Ok(SourceLoad {
+                sources: Self {
                     base: Arc::clone(&self.base),
                     overlay: Arc::clone(&self.overlay),
                     members,
@@ -310,7 +307,7 @@ impl SourceSnapshot {
 
         let mut overlay = (*self.overlay).clone();
         overlay.extend(refreshed);
-        let (base, overlay) = if !removed && overlay.len() <= MAX_SNAPSHOT_OVERLAY_SOURCES {
+        let (base, overlay) = if !removed && overlay.len() <= MAX_OVERLAY_SOURCES {
             (Arc::clone(&self.base), Arc::new(overlay))
         } else {
             let compacted = members
@@ -322,15 +319,15 @@ impl SourceSnapshot {
                             .get(id)
                             .or_else(|| self.base.get(id))
                             .cloned()
-                            .expect("every snapshot member has a source value"),
+                            .expect("every explicit source has a value"),
                     )
                 })
                 .collect();
             (Arc::new(compacted), Arc::new(FxHashMap::default()))
         };
 
-        Ok(SnapshotLoad {
-            snapshot: Self {
+        Ok(SourceLoad {
+            sources: Self {
                 base,
                 overlay,
                 members,
@@ -365,7 +362,7 @@ impl SourceSnapshot {
         self.overlay.get(&id).or_else(|| self.base.get(&id))
     }
 
-    /// Return the normalized compilation root this snapshot belongs to.
+    /// Return the normalized compilation root these sources belong to.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -374,12 +371,12 @@ impl SourceSnapshot {
         &self.boundary
     }
 
-    /// Whether this snapshot explicitly contains the given source identity.
+    /// Whether these sources explicitly contain the given source identity.
     pub fn contains(&self, id: FileId) -> bool {
         self.members.contains(&id)
     }
 
-    /// Number of explicit sources in this snapshot's membership.
+    /// Number of explicit sources in the membership.
     #[inline]
     pub fn source_count(&self) -> usize {
         self.members.len()
@@ -389,17 +386,19 @@ impl SourceSnapshot {
 fn validate_source_paths(
     paths: &[PathBuf],
     boundary: &crate::world::SourceBoundary,
-) -> Result<(), SnapshotError> {
+) -> Result<(), SourceLoadError> {
     for path in paths {
-        boundary.check(path).map_err(|error| SnapshotError::File {
-            path: path.clone(),
-            error,
-        })?;
+        boundary
+            .check(path)
+            .map_err(|error| SourceLoadError::File {
+                path: path.clone(),
+                error,
+            })?;
     }
     Ok(())
 }
 
-fn normalize_snapshot_paths(paths: &[PathBuf], root: &Path) -> Result<Vec<PathBuf>, SnapshotError> {
+fn normalize_source_paths(paths: &[PathBuf], root: &Path) -> Result<Vec<PathBuf>, SourceLoadError> {
     let paths = paths
         .iter()
         .map(|path| normalize_path(path))
@@ -408,7 +407,7 @@ fn normalize_snapshot_paths(paths: &[PathBuf], root: &Path) -> Result<Vec<PathBu
         .iter()
         .find(|path| file_id_from_path(path, root).is_none())
     {
-        return Err(SnapshotError::OutsideRoot { path: path.clone() });
+        return Err(SourceLoadError::OutsideRoot { path: path.clone() });
     }
     Ok(paths)
 }
@@ -418,14 +417,14 @@ fn load_sources(
     root: &Path,
     files: &FileResolver,
     cancellation: Option<&crate::BundleCancellation>,
-    previous: Option<&SourceSnapshot>,
-) -> Result<(FxHashMap<FileId, Loaded<FrozenSource>>, AccessedDeps), SnapshotLoadFailure> {
+    previous: Option<&ExplicitSources>,
+) -> Result<(FxHashMap<FileId, Loaded<FrozenSource>>, AccessedDeps), SourceLoadFailure> {
     let mut sources = FxHashMap::default();
     let mut accessed = AccessedDeps::default();
     let mut first_error = None;
     let mut cancelled = false;
 
-    for chunk in content_files.chunks(SNAPSHOT_LOAD_CHUNK_SIZE) {
+    for chunk in content_files.chunks(LOAD_CHUNK_SIZE) {
         #[cfg(feature = "parallel")]
         let loaded = {
             use rayon::prelude::*;
@@ -451,10 +450,10 @@ fn load_sources(
     }
 
     if cancelled {
-        return Err(SnapshotLoadFailure::cancelled(accessed));
+        return Err(SourceLoadFailure::cancelled(accessed));
     }
     match first_error {
-        Some(error) => Err(SnapshotLoadFailure {
+        Some(error) => Err(SourceLoadFailure {
             error,
             accessed: Box::new(accessed),
         }),
@@ -467,7 +466,7 @@ fn merge_loaded_sources(
     cancellation: Option<&crate::BundleCancellation>,
     sources: &mut FxHashMap<FileId, Loaded<FrozenSource>>,
     accessed: &mut AccessedDeps,
-    first_error: &mut Option<SnapshotError>,
+    first_error: &mut Option<SourceLoadError>,
 ) -> bool {
     let mut cancelled = false;
     for (path, id, attempt) in loaded {
@@ -483,7 +482,7 @@ fn merge_loaded_sources(
                 sources.insert(id, source);
             }
             Err(error) if first_error.is_none() => {
-                *first_error = Some(SnapshotError::File { path, error });
+                *first_error = Some(SourceLoadError::File { path, error });
             }
             Err(_) => {}
         }
@@ -497,13 +496,13 @@ fn load_source(
     root: &Path,
     files: &FileResolver,
     cancellation: Option<&crate::BundleCancellation>,
-    previous: Option<&SourceSnapshot>,
+    previous: Option<&ExplicitSources>,
 ) -> (PathBuf, FileId, Option<ReadAttempt<Loaded<FrozenSource>>>) {
-    let id = file_id_from_path(path, root).expect("validated snapshot path has a file ID");
+    let id = file_id_from_path(path, root).expect("validated source path has a file ID");
     if cancellation.is_some_and(|cancellation| cancellation.is_cancelled()) {
         return (path.to_path_buf(), id, None);
     }
-    let previous = previous.and_then(|snapshot| snapshot.get_source(id).map(|loaded| loaded.value));
+    let previous = previous.and_then(|sources| sources.get_source(id).map(|loaded| loaded.value));
     let attempt = files.read_attempt(id, root).map_loaded(move |bytes| {
         let text = decode_utf8(&bytes)?;
         let source = match previous {
@@ -521,8 +520,8 @@ fn load_source(
     (path.to_path_buf(), id, Some(attempt))
 }
 
-impl SnapshotLoadFailure {
-    fn without_reads(error: SnapshotError) -> Self {
+impl SourceLoadFailure {
+    fn without_reads(error: SourceLoadError) -> Self {
         Self {
             error,
             accessed: Box::default(),
@@ -531,7 +530,7 @@ impl SnapshotLoadFailure {
 
     fn cancelled(accessed: AccessedDeps) -> Self {
         Self {
-            error: SnapshotError::Cancelled,
+            error: SourceLoadError::Cancelled,
             accessed: Box::new(accessed),
         }
     }
@@ -546,7 +545,7 @@ mod tests {
     use tempfile::TempDir;
     use typst::syntax::FileId;
 
-    use super::{MAX_SNAPSHOT_OVERLAY_SOURCES, SourceSnapshot, file_id_from_path};
+    use super::{ExplicitSources, file_id_from_path};
     use crate::world::file::{FileProvider, FileResolver, FileTarget};
 
     struct CancelAfterResolution {
@@ -560,36 +559,15 @@ mod tests {
         }
     }
 
-    fn snapshot(paths: &[PathBuf], root: &Path) -> SourceSnapshot {
-        SourceSnapshot::build(paths, root)
+    fn explicit_sources(paths: &[PathBuf], root: &Path) -> ExplicitSources {
+        ExplicitSources::build(paths, root)
             .unwrap()
-            .into_snapshot_and_accessed()
+            .into_sources_and_accessed()
             .0
     }
 
     #[test]
-    fn tighter_scope_rejects_frozen_sources() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("cached.typ");
-        fs::write(&path, "previously allowed").unwrap();
-        let frozen = snapshot(std::slice::from_ref(&path), directory.path());
-        let files = Arc::new(FileResolver::new().with_source_boundary(
-            crate::SourceBoundary::new(directory.path(), true).excluding(path.clone()),
-        ));
-        let refreshed =
-            frozen.refresh_with_files(std::slice::from_ref(&path), &[], directory.path(), files);
-        assert!(matches!(
-            refreshed
-                .err()
-                .expect("restricted snapshot must be rejected")
-                .into_error_and_accessed()
-                .0,
-            super::SnapshotError::File { .. }
-        ));
-    }
-
-    #[test]
-    fn snapshot_freezes_exactly_listed_sources() {
+    fn explicit_sources_freeze_exactly_listed_files() {
         let dir = TempDir::new().unwrap();
         let main = dir.path().join("main.typ");
         fs::write(&main, "#import \"shared.typ\": value\n#value").unwrap();
@@ -598,88 +576,20 @@ mod tests {
         let root = dir.path().join("root.typ");
         fs::write(&root, "#let root = 2").unwrap();
 
-        let frozen = snapshot(std::slice::from_ref(&main), dir.path());
+        let frozen = explicit_sources(std::slice::from_ref(&main), dir.path());
 
         assert_eq!(frozen.source_count(), 1);
         assert_eq!(frozen.root(), super::normalize_path(dir.path()));
         assert!(frozen.contains(file_id_from_path(&main, dir.path()).unwrap()));
         assert!(!frozen.contains(file_id_from_path(&shared, dir.path()).unwrap()));
 
-        let frozen = snapshot(&[main, shared, root], dir.path());
+        let frozen = explicit_sources(&[main, shared, root], dir.path());
 
         assert_eq!(frozen.source_count(), 3);
     }
 
     #[test]
-    fn failed_snapshot_keeps_completed_reads() {
-        let dir = TempDir::new().unwrap();
-        let invalid = dir.path().join("z-invalid.typ");
-        fs::write(&invalid, [0xff, 0xfe]).unwrap();
-        let mut paths = vec![invalid.clone()];
-        for index in 0..super::SNAPSHOT_LOAD_CHUNK_SIZE {
-            let valid = dir.path().join(format!("valid-{index}.typ"));
-            fs::write(&valid, "= Valid").unwrap();
-            paths.push(valid);
-        }
-        let later_invalid = dir.path().join("a-invalid.typ");
-        fs::write(&later_invalid, [0xff, 0xfe]).unwrap();
-        paths.push(later_invalid);
-
-        let failure = SourceSnapshot::build(&paths, dir.path())
-            .err()
-            .expect("invalid UTF-8 unexpectedly produced a snapshot");
-
-        let mut disk_reads = failure
-            .accessed()
-            .disk_reads
-            .iter()
-            .map(|path| path.as_path().to_path_buf())
-            .collect::<Vec<_>>();
-        disk_reads.sort();
-        let mut expected = paths
-            .iter()
-            .map(|path| super::normalize_path(path))
-            .collect::<Vec<_>>();
-        expected.sort();
-        assert_eq!(disk_reads, expected);
-        let invalid = super::normalize_path(&invalid);
-        let (error, _) = failure.into_error_and_accessed();
-        assert!(matches!(
-            error,
-            super::SnapshotError::File {
-                error: typst::diag::FileError::InvalidUtf8,
-                path,
-            } if path == invalid
-        ));
-    }
-
-    #[test]
-    fn cancelled_snapshot_skips_source_reads() {
-        let dir = TempDir::new().unwrap();
-        let source = dir.path().join("source.typ");
-        fs::write(&source, "source").unwrap();
-        let cancellation = crate::BundleCancellation::default();
-        cancellation.cancel();
-
-        let failure = SourceSnapshot::build_with_files_cancellable(
-            &[source],
-            dir.path(),
-            Arc::new(FileResolver::new()),
-            &cancellation,
-        )
-        .err()
-        .expect("cancelled snapshot unexpectedly loaded");
-
-        assert!(failure.is_cancelled());
-        assert!(failure.accessed().reads.is_empty());
-        assert!(failure.accessed().disk_reads.is_empty());
-        let (error, _) = failure.into_error_and_accessed();
-        assert!(error.is_cancelled());
-        assert!(crate::diagnostic::CompileError::from(error).is_cancelled());
-    }
-
-    #[test]
-    fn cancelled_snapshot_keeps_earlier_reads() {
+    fn cancelled_load_keeps_earlier_reads() {
         let dir = TempDir::new().unwrap();
         let source = dir.path().join("source.typ");
         let cancellation = crate::BundleCancellation::default();
@@ -687,14 +597,14 @@ mod tests {
             cancellation: cancellation.clone(),
         });
 
-        let failure = SourceSnapshot::build_with_files_cancellable(
+        let failure = ExplicitSources::build_with_files_cancellable(
             &[source],
             dir.path(),
             Arc::new(files),
             &cancellation,
         )
         .err()
-        .expect("snapshot cancelled after resolution unexpectedly loaded");
+        .expect("load cancelled after resolution unexpectedly loaded");
 
         assert!(failure.is_cancelled());
         assert_eq!(failure.accessed().reads.len(), 1);
@@ -710,7 +620,7 @@ mod tests {
         fs::write(&first, "first-v1").unwrap();
         fs::write(&second, "second-v1").unwrap();
 
-        let initial = snapshot(&[first.clone(), second.clone()], dir.path());
+        let initial = explicit_sources(&[first.clone(), second.clone()], dir.path());
         fs::write(&first, "first-v2").unwrap();
         fs::write(&third, "third-v1").unwrap();
         let loaded = initial
@@ -722,84 +632,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(loaded.accessed().disk_reads.len(), 2);
-        let refreshed = loaded.into_snapshot_and_accessed().0;
+        let refreshed = loaded.into_sources_and_accessed().0;
 
         assert_eq!(refreshed.source_count(), 3);
-        let source_text = |snapshot: &SourceSnapshot, path: &std::path::Path| {
+        let source_text = |sources: &ExplicitSources, path: &std::path::Path| {
             let id = file_id_from_path(path, dir.path()).unwrap();
-            snapshot.get_source(id).unwrap().value.text().to_owned()
+            sources.get_source(id).unwrap().value.text().to_owned()
         };
         assert_eq!(source_text(&refreshed, &first), "first-v2");
         assert_eq!(source_text(&refreshed, &second), "second-v1");
         assert_eq!(source_text(&refreshed, &third), "third-v1");
         assert_eq!(source_text(&initial, &first), "first-v1");
-    }
-
-    #[test]
-    fn refresh_drops_removed_members() {
-        let dir = TempDir::new().unwrap();
-        let kept = dir.path().join("kept.typ");
-        let removed = dir.path().join("removed.typ");
-        fs::write(&kept, "kept").unwrap();
-        fs::write(&removed, "removed").unwrap();
-        let initial = snapshot(&[kept.clone(), removed.clone()], dir.path());
-        let removed_id = file_id_from_path(&removed, dir.path()).unwrap();
-        let previous = Arc::downgrade(&initial.base);
-
-        let loaded = initial
-            .refresh_with_files(
-                std::slice::from_ref(&kept),
-                std::slice::from_ref(&removed),
-                dir.path(),
-                Arc::new(FileResolver::new()),
-            )
-            .unwrap();
-        assert!(loaded.accessed().disk_reads.is_empty());
-        let refreshed = loaded.into_snapshot_and_accessed().0;
-
-        assert_eq!(refreshed.source_count(), 1);
-        assert!(refreshed.get_source(removed_id).is_none());
-        assert!(refreshed.get_file(removed_id).is_none());
-        assert!(initial.get_source(removed_id).is_some());
-        assert_eq!(
-            initial.get_file(removed_id).unwrap().value.as_slice(),
-            b"removed"
-        );
-        drop(initial);
-        assert!(previous.upgrade().is_none());
-    }
-
-    #[test]
-    fn overlay_compacts_after_bounded_changes() {
-        let dir = TempDir::new().unwrap();
-        let sources = (0..=(MAX_SNAPSHOT_OVERLAY_SOURCES + 3))
-            .map(|index| dir.path().join(format!("source-{index}.typ")))
-            .collect::<Vec<_>>();
-        for source in &sources {
-            fs::write(source, "0").unwrap();
-        }
-        let mut snapshot = snapshot(&sources, dir.path());
-
-        for (version, source) in sources.iter().enumerate() {
-            fs::write(source, version.to_string()).unwrap();
-            snapshot = snapshot
-                .refresh_with_files(
-                    &sources,
-                    std::slice::from_ref(source),
-                    dir.path(),
-                    Arc::new(FileResolver::new()),
-                )
-                .unwrap()
-                .into_snapshot_and_accessed()
-                .0;
-            assert!(snapshot.overlay.len() <= MAX_SNAPSHOT_OVERLAY_SOURCES);
-        }
-        for (version, source) in sources.iter().enumerate() {
-            let id = file_id_from_path(source, dir.path()).unwrap();
-            assert_eq!(
-                snapshot.get_source(id).unwrap().value.text(),
-                version.to_string()
-            );
-        }
     }
 }

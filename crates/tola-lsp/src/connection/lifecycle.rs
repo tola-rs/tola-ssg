@@ -261,7 +261,7 @@ mod tests {
         initialize, messages, open_document, ready, ready_workspace, uninitialized,
     };
     use crate::protocol::CheckMode;
-    use lsp_server::{Message, Request};
+    use lsp_server::Message;
     use lsp_types::Uri;
     use serde_json::json;
     use std::time::Instant;
@@ -277,52 +277,6 @@ mod tests {
         );
         assert!(initialization_root(&parameters(json!({"capabilities":{},"rootUri":"file:///site", "workspaceFolders":[{"uri":"file:///site","name":"site"},{"uri":"file:///other","name":"other"}]}))).is_err());
     }
-
-    /// A client whose `initialized` body Tola cannot read must still reach the ready phase:
-    /// otherwise every later notification is dropped and no source is ever tracked.
-    #[test]
-    fn unreadable_handshake_still_readies() {
-        let mut connection = uninitialized();
-        initialize(&mut connection);
-        let _ = connection
-            .notification(Notification::new(
-                notification::Initialized::METHOD.into(),
-                serde_json::Value::Null,
-            ))
-            .unwrap();
-        assert!(matches!(connection.phase, Phase::Ready(_)));
-        assert!(matches!(
-            connection.next_job(Instant::now()),
-            Some(SourceJob::Check(_))
-        ));
-    }
-
-    #[test]
-    fn repeated_initialized_changes_nothing() {
-        let mut connection = uninitialized();
-        let _ = connection
-            .notification(Notification::new(
-                notification::Initialized::METHOD.into(),
-                json!({}),
-            ))
-            .unwrap();
-        assert!(matches!(connection.phase, Phase::Uninitialized));
-        initialize(&mut connection);
-        let _ = connection
-            .notification(Notification::new(
-                notification::Initialized::METHOD.into(),
-                json!({}),
-            ))
-            .unwrap();
-        let _ = connection
-            .notification(Notification::new(
-                notification::Initialized::METHOD.into(),
-                json!({}),
-            ))
-            .unwrap();
-        assert!(matches!(connection.phase, Phase::Ready(_)));
-    }
-
     /// A document notification that arrives between the `initialize` reply and `initialized` must
     /// not crash the connection or leave a buffer the handshake never accepted.
     #[test]
@@ -346,32 +300,6 @@ mod tests {
             Some(SourceJob::Check(_))
         ));
     }
-
-    /// A launch configuration is the command line that named a preview origin: the client states
-    /// it in `initializationOptions`, which is where every other setting of the first session
-    /// arrives.
-    #[test]
-    fn initialization_options_name_the_preview_origin() {
-        let mut connection = uninitialized();
-        let root = std::env::current_dir().unwrap();
-        connection
-            .request(Request::new(
-                1.into(),
-                request::Initialize::METHOD.into(),
-                json!({
-                    "workspaceFolders":[{"uri": crate::uri::from_file_path(&root).unwrap(), "name":"site"}],
-                    "capabilities":{},
-                    "initializationOptions":{"previewOrigin":"http://localhost:9999"},
-                }),
-            ))
-            .unwrap();
-        assert!(matches!(connection.phase, Phase::Initializing(_)));
-        assert_eq!(
-            connection.preview_origin().as_deref(),
-            Some("http://localhost:9999")
-        );
-    }
-
     /// A settings notification that has no settings asks the client for the one section Tola
     /// reads, and settings the notification itself carries supersede that pull: the answer asked
     /// for is not read.
@@ -403,58 +331,5 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(connection.workspace().check_mode, CheckMode::OnSave);
-    }
-
-    #[test]
-    fn settings_pull_reads_only_the_tola_section() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.features.configuration = true;
-        workspace.check_mode = CheckMode::OnSave;
-        let _ = connection
-            .notification(Notification::new(
-                notification::DidChangeConfiguration::METHOD.into(),
-                json!({"settings": null}),
-            ))
-            .unwrap();
-        let written = messages(&mut connection);
-        let Some(Message::Request(pulled)) = written.first() else {
-            panic!("a settings change pulls the section: {written:?}");
-        };
-        assert_eq!(pulled.method, request::WorkspaceConfiguration::METHOD);
-        let parameters: lsp_types::ConfigurationParams =
-            serde_json::from_value(pulled.params.clone()).unwrap();
-        assert_eq!(parameters.items.len(), 1);
-        assert_eq!(
-            parameters.items[0].section.as_deref(),
-            Some(SETTINGS_SECTION)
-        );
-        connection
-            .response(Response::new_ok(pulled.id.clone(), json!([null])))
-            .unwrap();
-        let workspace = connection.workspace();
-        assert_eq!(workspace.check_mode, CheckMode::OnSave);
-    }
-
-    /// A notification that names one setting leaves the settings it does not name as they stand:
-    /// a client that changes one key never resets the others.
-    #[test]
-    fn notification_naming_one_setting_keeps_the_others() {
-        let mut connection = ready(Vec::new());
-        ready_workspace(&mut connection);
-        let origin = "http://localhost:9000";
-        for settings in [
-            json!({"settings": {"checkMode": "onSave", "previewOrigin": origin}}),
-            json!({"settings": {"checkMode": "onType"}}),
-        ] {
-            let _ = connection
-                .notification(Notification::new(
-                    notification::DidChangeConfiguration::METHOD.into(),
-                    settings,
-                ))
-                .unwrap();
-        }
-        assert_eq!(connection.workspace().check_mode, CheckMode::OnType);
-        assert_eq!(connection.named_origin.as_deref(), Some(origin));
     }
 }

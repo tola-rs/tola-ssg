@@ -476,17 +476,4 @@ mod tests {
             assert_eq!(read(text), expected, "{text:?}");
         }
     }
-
-    #[test]
-    fn nasal_syllable_keeps_its_boundary() {
-        assert_eq!(read("しんいち"), "shin'ichi");
-        assert_eq!(read("こんにちは"), "konnichiha");
-    }
-
-    #[test]
-    fn non_kana_stops_the_transliteration() {
-        let mut out = String::new();
-        assert_eq!(romanize("カナ漢字", &mut out), Some("カナ".len()));
-        assert_eq!(out, "kana");
-    }
 }

@@ -3,7 +3,7 @@ name = "tola-webp"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "Pure-Rust, deterministic still-image WebP encoder for tola-image"
+description = "Pure-Rust lossy WebP encoder"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 

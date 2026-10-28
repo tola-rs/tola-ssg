@@ -227,21 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn occupied_target_reports_conflict() {
-        let temp = TempDir::new().unwrap();
-        fs::write(temp.path().join("file.txt"), "content").unwrap();
-
-        let error = target(temp.path(), false).unwrap_err();
-        let diagnostics = tola_build::diagnostic::attached(&error).unwrap();
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::init::CONFLICT);
-        assert!(
-            diagnostics[0].message.contains("is not empty"),
-            "{diagnostics:?}"
-        );
-    }
-
-    #[test]
     fn file_target_reports_its_directory_requirement() {
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("site");

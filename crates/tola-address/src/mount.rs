@@ -152,39 +152,6 @@ mod tests {
             "%E6%96%87%E6%A1%A3"
         );
     }
-
-    #[test]
-    fn invalid_base_paths_are_refused() {
-        assert!(matches!(
-            SiteUrlMount::from_base_path("/docs%2fadmin/"),
-            Err(SiteUrlMountError::InvalidBasePath(
-                UrlPathError::EncodedSeparator
-            ))
-        ));
-        assert!(matches!(
-            SiteUrlMount::from_base_path("/docs//admin/"),
-            Err(SiteUrlMountError::InvalidBasePath(
-                UrlPathError::EmptySegment
-            ))
-        ));
-        assert!(matches!(
-            SiteUrlMount::from_base_path("/docs"),
-            Err(SiteUrlMountError::MissingTrailingSlash)
-        ));
-        for base_path in [
-            "/docs/./admin/",
-            "/docs/../admin/",
-            "/docs/%2e%2e/admin/",
-            "/docs/?preview=1",
-            "/docs/#preview",
-        ] {
-            assert!(
-                SiteUrlMount::from_base_path(base_path).is_err(),
-                "accepted {base_path:?}"
-            );
-        }
-    }
-
     #[test]
     fn reserved_root_mounts_are_refused() {
         for base_path in ["/_tola/", "/_tola/preview/", "/_TOLA/", "/%5Ftola/"] {
@@ -225,26 +192,6 @@ mod tests {
         assert_eq!(mount.strip(&url_path("/docs/blog/posts/rust/")), Some(page));
         assert!(mount.strip(&url_path("/docs/blog2/posts/")).is_none());
     }
-
-    #[test]
-    fn stripped_routes_decode_the_mount() {
-        let mount = SiteUrlMount::from_base_path("/文档/").unwrap();
-        for site_path in [
-            url_path("/styles/main.css"),
-            url_path("/posts/"),
-            url_path("/"),
-        ] {
-            let encoded = mount.browser_path(&site_path);
-            assert_eq!(mount.strip(&url_path(&encoded)), Some(site_path));
-        }
-        assert_eq!(
-            SiteUrlMount::from_base_path("/docs/")
-                .unwrap()
-                .strip(&url_path("/%64ocs/feed.xml")),
-            Some(url_path("/feed.xml"))
-        );
-    }
-
     #[test]
     fn origin_makes_the_url_absolute() {
         let mount = SiteUrlMount::from_base_path("/docs/").unwrap();

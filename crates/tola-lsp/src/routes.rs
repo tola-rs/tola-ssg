@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn index_names_each_page_by_its_own_source() {
+    fn index_maps_each_page_to_its_source() {
         let (_directory, configuration) = site(&[
             (
                 "content/one.typ",

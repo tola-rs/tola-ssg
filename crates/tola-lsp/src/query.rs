@@ -119,7 +119,7 @@ pub(super) fn respond(
         }
     }
     let (source, indexed_names) = match view.by_id(id) {
-        Some(snapshot) => (Some(snapshot.source.clone()), Some(snapshot.names())),
+        Some(parsed) => (Some(parsed.source.clone()), Some(parsed.names())),
         None => (
             load_source(id, config, overrides, &package_access.boundary)?,
             None,
@@ -621,27 +621,12 @@ mod tests {
         DocumentHighlight, InlayHint, Location, WorkspaceEdit, request as lsp_request,
     };
     use lsp_types::{Hover, InlayHintLabel, Position, SignatureHelp};
-    use std::path::Path;
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
-    use tola_typst::typst::syntax::Source;
     /// A site whose evaluation stops before it includes the page being edited.
     pub(crate) const FAILED_PROGRAM: &str = r#"#panic("early")
 #document("index.html", format: "html")[#include "content/document.typ"]
 "#;
 
-    pub(crate) const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/site:0.0.0": site
-#import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify
-#for source in all-sources() {
-  let declared = if source.meta == none { none } else { source.meta.at("permalink", default: none) }
-  let route = if declared == none {
-    join-route(source.route-segments.map(segment => slugify(segment, language: site.language.lang)))
-  } else {
-    decode-url-path(declared)
-  }
-  document(output-of(route))[#include source.file]
-}
-"#;
+    pub(crate) use crate::server::tests::fixtures::ENTRY_PROGRAM;
     pub(crate) const TWO_DOCUMENT_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
 #for source in all-sources() {
   document("a.html")[#include source.file]
@@ -649,57 +634,17 @@ mod tests {
 }
 "#;
 
-    pub(crate) struct SiteDirectory(tempfile::TempDir);
-    impl SiteDirectory {
-        pub(crate) fn new() -> Self {
-            let site = Self(tempfile::tempdir().unwrap());
-            site.write("tola.toml", "");
-            std::fs::create_dir_all(site.path("content")).unwrap();
-            site
-        }
-        pub(crate) fn root(&self) -> &Path {
-            self.0.path()
-        }
-        pub(crate) fn path(&self, relative: &str) -> PathBuf {
-            self.root().join(relative)
-        }
-        pub(crate) fn write(&self, relative: &str, text: &str) {
-            let path = self.path(relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        }
-    }
+    pub(crate) use crate::server::tests::fixtures::{
+        SiteDirectory, announcing_client, marked_cursor, site_configuration as load_configuration,
+    };
 
-    pub(crate) fn load_configuration(root: &Path) -> Result<Arc<ResolvedSiteConfig>> {
-        Ok(Arc::new(
-            load_site_config(
-                Some(&root.join("tola.toml")),
-                tola_typst::PackageLocations::from_absolute_roots(None, None)?,
-                &BuildOverrides::default(),
-            )?
-            .into_config(),
-        ))
-    }
-
-    pub(crate) fn marked_cursor(marked: &str) -> (String, Position) {
-        let at = marked.find('|').unwrap();
-        let text = marked.replacen('|', "", 1);
-        let source = Source::detached(text.clone());
-        (
-            text,
-            position::utf16_range(source.lines(), at..at).unwrap().start,
-        )
-    }
-
-    pub(crate) fn announcing_client() -> lsp_types::ClientCapabilities {
-        lsp_types::ClientCapabilities {
-            text_document: Some(lsp_types::TextDocumentClientCapabilities {
-                code_lens: Some(lsp_types::CodeLensClientCapabilities::default()),
-                inlay_hint: Some(lsp_types::InlayHintClientCapabilities::default()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
+    /// A site root in the spelling the compiler resolves it to.
+    ///
+    /// The world locates a site's files through the filesystem, so a lane that turns a path into a
+    /// file id must read the root this way: macOS reports `/var` for `/private/var`, and an answer
+    /// keyed by the temporary directory's own spelling misses.
+    pub(crate) fn resolved_root(site: &SiteDirectory) -> PathBuf {
+        tola_build::filesystem::normalize_existing_prefix(site.root())
     }
 
     pub(crate) struct QuerySession {
@@ -1088,50 +1033,6 @@ mod tests {
 #let page = (title: "Page")
 "#;
 
-    /// A site program whose records flow through a project file's own function: the scaffold's
-    /// shape, with the parse and the map in `site/selection.typ` and one entry parameter rendered.
-    pub(crate) const MAPPED_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
-#import "@tola/site:0.0.0": site
-#import "site/selection.typ": select-pages
-#import "site/page.typ": page-template
-
-#let pages = select-pages(all-sources())
-#for entry in pages { page-template(entry) }
-"#;
-
-    /// The project file the mapped program parses and maps its records in, with the schema and
-    /// the record literal an answer derives its fields from.
-    pub(crate) fn mapped_pages() -> String {
-        format!(
-            r#"#import "@tola/address:0.0.0": join-route, output-of, slugify
-#import "@tola/schema:0.0.0": describe, optional, schema
-#import "@tola/source:0.0.0": parse-sources
-
-#let page-schema = schema((
-{PAGE_SCHEMA}
-))
-
-#let entry-title(record, language) = {{
-  if record.meta.draft {{ "" }} else {{ record.meta.title }}
-}}
-
-#let select-pages(sources) = {{
-  let declared = parse-sources(sources, page-schema)
-  let published = declared.filter(record => not record.meta.draft)
-  published.map(record => (
-    source: record,
-    output: output-of(join-route(record.route-segments.map(segment => slugify(segment, language: "en")))),
-    title: entry-title(record, "en"),
-  ))
-}}
-"#
-        )
-    }
-
-    /// The project file the mapped program renders each entry in.
-    pub(crate) const MAPPED_PAGE: &str = r#"#let page-template(page) = document(page.output, format: "html")[#page.source.path]
-"#;
-
     /// One piece of source with the cursor marker placed directly before `at`.
     pub(crate) fn marked_before(text: &str, at: &str) -> String {
         text.replacen(at, &format!("|{at}"), 1)
@@ -1160,32 +1061,6 @@ mod tests {
             serde_json::json!({}),
         ))
         .expect("a hover response");
-        let lsp_types::HoverContents::Markup(markup) = hover?.contents else {
-            panic!("a markdown hover");
-        };
-        Some(markup.value)
-    }
-
-    /// The hover text for one cursor in a site file outside the content root, whose records no
-    /// `parse-sources` call covers.
-    pub(crate) fn template_hover(
-        site: &mut QuerySession,
-        relative: &str,
-        marked: &str,
-    ) -> Option<String> {
-        let (text, position) = marked_cursor(marked);
-        let path = site.site.path(relative);
-        let uri = crate::uri::from_file_path(&path).expect("a site path is addressable");
-        let reply = site
-            .try_reply_at(
-                lsp_request::HoverRequest::METHOD,
-                uri.as_str(),
-                position,
-                Some((path, text)),
-                serde_json::json!({}),
-            )
-            .expect("a completed query");
-        let hover: Option<Hover> = serde_json::from_value(reply).expect("a hover response");
         let lsp_types::HoverContents::Markup(markup) = hover?.contents else {
             panic!("a markdown hover");
         };

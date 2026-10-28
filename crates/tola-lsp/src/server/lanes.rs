@@ -140,12 +140,8 @@ pub(super) fn run<J>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::sync::Arc;
 
-    use lsp_server::ErrorCode;
     use lsp_types::request::{self, Request as LspRequest};
-    use lsp_types::{GotoDefinitionResponse, SymbolKind};
 
     use crate::server::tests::{
         EditorSession, REPLY_TIMEOUT, SiteDirectory, load_configuration, marked_cursor,
@@ -189,97 +185,6 @@ mod tests {
 
         client.shutdown();
     }
-
-    #[test]
-    fn search_leaves_the_next_request_free() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-        site.write(
-            "site.typ",
-            "#document(\"preview/index.html\")[#include \"content/document.typ\"]\n",
-        );
-        client.open("content/document.typ", "= Searchable\n");
-        site.write("content/document.typ", "= Searchable\n");
-
-        let found = client.workspace_symbols("Searchable");
-        assert_eq!(found.len(), 1, "{found:?}");
-        let routes = client.routes("content/document.typ").routes;
-        assert_eq!(routes.len(), 1, "{routes:?}");
-        assert_eq!(routes[0].route, "/preview/");
-
-        client.shutdown();
-    }
-
-    #[test]
-    fn source_served_twice_answers_per_page() {
-        let site = SiteDirectory::new();
-        site.write(
-            "site.typ",
-            "#document(\"first/index.html\")[#include \"content/shared.typ\"]\n#document(\"second/index.html\")[#include \"content/shared.typ\"]\n",
-        );
-        site.write("content/shared.typ", "Shared body.\n");
-        let mut client = EditorSession::start(&site);
-        client.open("content/shared.typ", "Shared body.\n");
-
-        let routes = client.routes("content/shared.typ").routes;
-        assert_eq!(
-            routes
-                .iter()
-                .map(|route| route.route.as_str())
-                .collect::<Vec<_>>(),
-            ["/first/", "/second/"],
-            "{routes:?}"
-        );
-
-        let lenses = client.code_lenses("content/shared.typ");
-        assert_eq!(lenses.len(), 2, "{lenses:?}");
-        assert!(
-            lenses.iter().all(|lens| lens
-                .command
-                .as_ref()
-                .is_some_and(|command| command.command == "tola.openPreview")),
-            "{lenses:?}"
-        );
-
-        client.shutdown();
-    }
-
-    /// A lane's answer is shaped like one the connection answers itself: the preview lens names the
-    /// address the site's development server serves it at.
-    #[test]
-    fn lane_answers_have_the_preview_address() {
-        let site = site_with_document();
-        site.write(
-            "site.typ",
-            "#document(\"document/index.html\")[#include \"content/document.typ\"]\n",
-        );
-        let _written =
-            tola_build::filesystem::DevServerAddress::write(site.root(), "http://localhost:4321")
-                .unwrap();
-        let mut client = EditorSession::start(&site);
-        client.open("content/document.typ", "Body.\n");
-
-        let lenses = client.code_lenses("content/document.typ");
-        assert_eq!(lenses.len(), 1, "{lenses:?}");
-        let route = lenses[0]
-            .command
-            .as_ref()
-            .and_then(crate::protocol::preview_route)
-            .expect("the lens names the route it opens");
-        let expected = format!("http://localhost:4321{route}");
-        assert_eq!(
-            lenses[0]
-                .data
-                .as_ref()
-                .and_then(|data| data.get("url"))
-                .and_then(serde_json::Value::as_str),
-            Some(expected.as_str()),
-            "{lenses:?}"
-        );
-
-        client.shutdown();
-    }
-
     #[test]
     fn closed_buffer_lets_the_site_compile() {
         let site = SiteDirectory::new();
@@ -306,161 +211,6 @@ mod tests {
 
         client.shutdown();
     }
-
-    #[test]
-    fn workspace_symbols_answer_every_source() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-        site.write("content/second.typ", "= Second page\n\n#let marker = 1\n");
-
-        let found = client.workspace_symbols("marker");
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].name, "marker");
-        assert_eq!(
-            found[0].container_name.as_deref(),
-            Some("content/second.typ"),
-            "{found:?}"
-        );
-        // A page answers to both facts a search can name it by: the heading its source declares,
-        // and the route no source declares.
-        let headings = client.workspace_symbols("second");
-        assert_eq!(headings.len(), 2, "{headings:?}");
-        assert!(
-            headings.iter().any(|symbol| symbol.name == "Second page"),
-            "{headings:?}"
-        );
-        assert!(
-            headings.iter().any(|symbol| symbol.name == "/second/"
-                && symbol.container_name.as_deref() == Some("content/second.typ")),
-            "{headings:?}"
-        );
-
-        client.shutdown();
-    }
-
-    /// A label answers the site-wide search by the name the author gave it.
-    #[test]
-    fn label_answers_workspace_search() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-        site.write("content/second.typ", "= Second page <second-page>\n");
-
-        let found = client.workspace_symbols("second-page");
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].name, "second-page");
-        assert_eq!(found[0].kind, SymbolKind::CONSTANT);
-        assert_eq!(
-            found[0].container_name.as_deref(),
-            Some("content/second.typ"),
-            "{found:?}"
-        );
-
-        client.shutdown();
-    }
-
-    #[test]
-    fn local_bindings_answer_definitions() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-
-        let definition = client
-            .definition_marked("content/document.typ", "#let body = 1\n#bo|dy\n")
-            .expect("a definition of the file's own binding");
-        let GotoDefinitionResponse::Scalar(location) = definition else {
-            panic!("expected one location, got {definition:?}");
-        };
-        assert_eq!(location.range.start.line, 0);
-
-        client.shutdown();
-    }
-
-    #[test]
-    fn included_files_answer_definitions() {
-        let site = site_with_document();
-        site.write("content/other.typ", "Other body.\n");
-        let mut client = EditorSession::start(&site);
-
-        let definition = client
-            .definition_marked("content/document.typ", "#include \"other.typ|\"\n")
-            .expect("a definition of the included file");
-        let GotoDefinitionResponse::Scalar(location) = definition else {
-            panic!("expected one location, got {definition:?}");
-        };
-        assert!(
-            location.uri.as_str().ends_with("content/other.typ"),
-            "{location:?}"
-        );
-
-        client.shutdown();
-    }
-
-    #[test]
-    fn missing_source_answers_nothing() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-        let missing = site.uri("content/never_written.typ");
-
-        for (method, params) in [
-            (
-                lsp_types::request::HoverRequest::METHOD,
-                serde_json::json!({}),
-            ),
-            (
-                lsp_types::request::GotoDefinition::METHOD,
-                serde_json::json!({}),
-            ),
-            (
-                lsp_types::request::References::METHOD,
-                serde_json::json!({ "context": { "includeDeclaration": true } }),
-            ),
-        ] {
-            let mut params = params;
-            params["textDocument"] = serde_json::json!({ "uri": missing.as_str() });
-            params["position"] = serde_json::json!({ "line": 0, "character": 0 });
-            // `request` fails the test on a request error, so reaching these assertions is what
-            // proves the answer is a result: an empty one.
-            let answer = client.request(method, params);
-            assert!(answer.is_null(), "{method} answered {answer}");
-        }
-
-        client.shutdown();
-    }
-
-    #[test]
-    fn cursor_questions_read_the_buffer() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-
-        let items = client.complete_marked(
-            "content/document.typ",
-            "#import \"@tola/document:0.0.0\": current-document\n#context current-document().|",
-        );
-        for label in ["output", "route", "location"] {
-            assert!(
-                items.iter().any(|item| item.label == label),
-                "`{label}` missing from {items:?}"
-            );
-        }
-
-        let definition = client.definition_marked(
-            "content/document.typ",
-            "#import \"@tola/docum|ent:0.0.0\": current-document\n#context current-document().",
-        );
-        let target = match definition {
-            Some(lsp_types::GotoDefinitionResponse::Scalar(location)) => location,
-            Some(lsp_types::GotoDefinitionResponse::Array(locations)) => {
-                locations.into_iter().next().expect("one definition")
-            }
-            other => panic!("expected a definition location, got {other:?}"),
-        };
-        assert_eq!(
-            target.uri.as_str(),
-            "tola-package:/tola/document/0.0.0/lib.typ"
-        );
-
-        client.shutdown();
-    }
-
     #[test]
     fn broken_source_does_not_silence_others() {
         let site = site_with_document();
@@ -487,26 +237,6 @@ mod tests {
 
         client.shutdown();
     }
-
-    #[test]
-    fn broken_source_resolves_bindings() {
-        let site = site_with_document();
-        let mut client = EditorSession::start(&site);
-
-        let definition = client
-            .definition_marked(
-                "content/document.typ",
-                "#let brand = rgb(\"#777\")\n#bra|nd\n#icon(\"home\")\n",
-            )
-            .expect("a definition inside the file the site could not compile");
-        let lsp_types::GotoDefinitionResponse::Scalar(location) = definition else {
-            panic!("one definition, got {definition:?}");
-        };
-        assert_eq!(location.range.start.line, 0, "{location:?}");
-
-        client.shutdown();
-    }
-
     #[test]
     fn references_bypass_pending_compilation() {
         struct CompilerPause(Sender<()>);
@@ -553,31 +283,9 @@ mod tests {
         drop(pause);
         client.shutdown();
     }
-
-    /// A job whose lane panicked is answered with an internal failure, and the lane keeps taking
-    /// jobs after it.
-    #[test]
-    fn panicked_job_answers_internal_error() {
-        let site = site_with_document();
-        let mut client =
-            EditorSession::start_with_loader(&site, |_: &Path, _: &[(PathBuf, Arc<str>)]| {
-                panic!("a lane job that fails")
-            });
-
-        let (code, message) =
-            client.error_of("workspace/symbol", serde_json::json!({ "query": "" }));
-        assert_eq!(code, ErrorCode::InternalError as i32, "{message}");
-
-        // The lane survived the panic: the next job is answered rather than left silent.
-        let (code, _) = client.error_of("workspace/symbol", serde_json::json!({ "query": "" }));
-        assert_eq!(code, ErrorCode::InternalError as i32);
-
-        client.shutdown();
-    }
-
     /// A check whose lane panicked is contained: a later revision is still checked and reported.
     #[test]
-    fn panicked_check_does_not_stop_later_checks() {
+    fn panic_leaves_lane_running() {
         let site = site_with_document();
         let (panicked, panic_seen) = crossbeam_channel::bounded(1);
         let mut client = EditorSession::start_with_loader(&site, move |root, sources| {

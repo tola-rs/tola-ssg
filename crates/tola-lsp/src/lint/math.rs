@@ -130,21 +130,21 @@ mod tests {
             })
             .collect()
     }
-
+    /// A math spelling is hinted only when no scope, import, or library entry defines it: every
+    /// spelling a site already establishes stays quiet.
     #[test]
-    fn single_letter_stays_math_text() {
-        assert!(pass_findings("$x$").is_empty());
-        assert!(pass_findings("#let x = 1\n$x$\n").is_empty());
-    }
-
-    #[test]
-    fn math_names_resolve_through_scopes() {
+    fn defined_math_names_stay_quiet() {
         for text in [
+            "$x$",
+            "#let x = 1\n$x$\n",
             "$alpha$",
             "$#x$",
             "$std$",
             "#let alhpa = 1\n$alhpa$",
             "#import \"m.typ\": alhpa\n$alhpa$",
+            // A wildcard or dynamic import may supply any name, so the hint would be a guess.
+            "#import \"m.typ\": *\n$zzz$",
+            "#import modules.at(0)\n$zzz$",
         ] {
             assert!(pass_findings(text).is_empty(), "{text:?}");
         }
@@ -178,29 +178,6 @@ mod tests {
         // A check that resolved no world cannot tell a name no scope defines from a math builtin.
         assert!(findings("$alhpa$").is_empty());
     }
-
-    #[test]
-    fn uncertain_imports_hide_missing_names() {
-        for text in [
-            "#import \"m.typ\": *\n$zzz$",
-            "#import modules.at(0)\n$zzz$",
-        ] {
-            assert!(pass_findings(text).is_empty(), "{text:?}");
-        }
-    }
-
-    #[test]
-    fn math_field_spelling_produces_no_hint() {
-        assert_eq!(
-            pass_findings("$sym.alpha$"),
-            [(
-                "editor.unknown_math_variable".to_owned(),
-                "sym".to_owned(),
-                Some("sym".to_owned())
-            )]
-        );
-    }
-
     #[test]
     fn unevaluated_function_body_is_hinted() {
         assert_eq!(
@@ -211,36 +188,5 @@ mod tests {
                 Some("alhpa".to_owned())
             )]
         );
-    }
-
-    #[test]
-    fn later_wildcard_does_not_hide_earlier_math_name() {
-        assert_eq!(
-            pass_findings("$zzz$\n#import \"m.typ\": *\n"),
-            [(
-                "editor.unknown_math_variable".to_owned(),
-                "zzz".to_owned(),
-                Some("zzz".to_owned())
-            )]
-        );
-        assert!(pass_findings("#import \"m.typ\": *\n$zzz$").is_empty());
-    }
-
-    #[test]
-    fn explicit_dynamic_import_does_not_hide_math_name() {
-        for text in [
-            "#import modules.at(0): other\n$alhpa$",
-            "#import modules.at(0) as m\n$alhpa$",
-        ] {
-            assert_eq!(
-                pass_findings(text),
-                [(
-                    "editor.unknown_math_variable".to_owned(),
-                    "alhpa".to_owned(),
-                    Some("alhpa".to_owned())
-                )],
-                "{text:?}"
-            );
-        }
     }
 }

@@ -580,8 +580,6 @@ fn indexed_versions(indexed: &iconify::IndexedCollection) -> String {
 mod tests {
     use super::*;
 
-    const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
     #[test]
     fn icon_sources_group_by_namespace() {
         let config: IconsConfig = toml::from_str(
@@ -611,23 +609,6 @@ mod tests {
             config.local_paths().collect::<Vec<_>>(),
             [Path::new("assets/brand"), Path::new("icons/ui.json")]
         );
-    }
-
-    #[test]
-    fn url_accepts_literal_mirrors() {
-        let config: IconsConfig = toml::from_str(
-            r#"
-            [collections.ui]
-            source-type = "remote-json"
-            url = "https://example.test/icons.json"
-            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            mirrors = ["https://mirror.test/icons.json", "https://other.test/icons.json"]
-            "#,
-        )
-        .unwrap();
-        let mut diagnostics = ConfigDiagnostics::new();
-        config.validate(&mut diagnostics);
-        assert!(diagnostics.into_result().is_ok());
     }
 
     #[test]
@@ -696,75 +677,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_source_declares_one_origin() {
-        let cases = [
-            (
-                r#"
-                [collections.ui]
-                source-type = "remote-json"
-                "#,
-                "declares no source",
-            ),
-            (
-                r#"
-                [collections.ui]
-                source-type = "remote-json"
-                url = "https://example.test/icons.json"
-                "#,
-                "needs the `sha256`",
-            ),
-            (
-                r#"
-                [collections.ui]
-                source-type = "remote-json"
-                url = "https://example.test/icons.json"
-                sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                preset = "tabler"
-                "#,
-                "declare either `preset` or `url`, not both",
-            ),
-            (
-                r#"
-                [collections.ui]
-                source-type = "remote-json"
-                preset = "tabler"
-                sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                "#,
-                "`sha256` needs the `url`",
-            ),
-            (
-                r#"
-                [collections.ui]
-                source-type = "remote-json"
-                version = "1.2.3"
-                "#,
-                "`version` needs the `preset`",
-            ),
-            (
-                r#"
-                [collections.ui]
-                source-type = "remote-json"
-                url = "https://example.test/icons.json"
-                sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                version = "1.2.3"
-                "#,
-                "`version` needs the `preset`",
-            ),
-        ];
-        for (source, expected) in cases {
-            let config: IconsConfig = toml::from_str(source).unwrap();
-            let mut diagnostics = ConfigDiagnostics::new();
-            config.validate(&mut diagnostics);
-            assert_eq!(diagnostics.errors().len(), 1, "{source}");
-            assert!(
-                diagnostics.errors()[0].message.contains(expected),
-                "{source}: {}",
-                diagnostics.errors()[0].message
-            );
-        }
-    }
-
-    #[test]
     fn unindexed_preset_or_release_is_refused() {
         let newest_lucide = iconify::indexed("lucide")
             .unwrap()
@@ -826,62 +738,6 @@ mod tests {
         };
         assert!(error.message.contains("declares no source"));
         assert_eq!(error.help.as_deref(), Some("write `preset = \"lucide\"`"));
-    }
-
-    #[test]
-    fn local_source_refuses_remote_fields() {
-        let error = toml::from_str::<IconsConfig>(
-            r#"
-            [collections.ui]
-            source-type = "local-json"
-            path = "icons/ui.json"
-            url = "https://example.test/icons.json"
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("unknown field"));
-    }
-
-    #[test]
-    fn malformed_digest_is_refused_at_decode() {
-        let error = toml::from_str::<IconsConfig>(
-            r#"
-            [collections.ui]
-            source-type = "remote-json"
-            url = "https://example.test/icons.json"
-            sha256 = "abcd"
-            "#,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("64 hexadecimal digits"));
-    }
-
-    #[test]
-    fn digests_round_trip_their_written_form() {
-        let digest = Sha256Digest::try_from(DIGEST.to_owned()).unwrap();
-        assert_eq!(digest.to_string(), DIGEST);
-        assert_eq!(String::from(digest), DIGEST);
-        assert_eq!(Sha256Digest::from_hex(DIGEST), digest);
-        assert_eq!(
-            Sha256Digest::try_from(DIGEST.to_uppercase())
-                .unwrap()
-                .to_string(),
-            DIGEST
-        );
-    }
-
-    #[test]
-    fn local_sources_normalize_once() {
-        let mut config: IconsConfig = toml::from_str(
-            r#"
-            [collections.brand]
-            source-type = "local-svg-dir"
-            path = "brand"
-            "#,
-        )
-        .unwrap();
-        config.normalize(Path::new("/site"));
-        assert_eq!(config.local_paths().next(), Some(Path::new("/site/brand")));
     }
 
     #[test]

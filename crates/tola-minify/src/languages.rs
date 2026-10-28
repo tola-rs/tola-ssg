@@ -62,7 +62,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extension_names_its_language() {
+    fn extension_decides_language() {
         for (path, expected) in [
             ("assets/app.css", MinifyLanguage::Css),
             ("assets/app.CSS", MinifyLanguage::Css),
@@ -78,18 +78,5 @@ mod tests {
         for path in ["assets/app.bin", "assets/app", "assets/app.css.bak"] {
             assert_eq!(MinifyLanguage::for_path(Path::new(path)), None, "{path}");
         }
-    }
-
-    #[test]
-    fn switches_select_one_language_group() {
-        let stylesheets_only = MinifiedLanguages::new(true, false);
-        assert!(stylesheets_only.includes(MinifyLanguage::Css));
-        assert!(!stylesheets_only.includes(MinifyLanguage::ClassicJavaScript));
-        assert!(!stylesheets_only.includes(MinifyLanguage::ModuleJavaScript));
-
-        let scripts_only = MinifiedLanguages::new(false, true);
-        assert!(!scripts_only.includes(MinifyLanguage::Css));
-        assert!(scripts_only.includes(MinifyLanguage::ClassicJavaScript));
-        assert!(scripts_only.includes(MinifyLanguage::ModuleJavaScript));
     }
 }

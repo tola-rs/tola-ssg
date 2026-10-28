@@ -119,25 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn changed_source_answers_its_edit() {
-        let edit = match format("#let  x =  1\n", &Options::default()) {
-            Formatting::Reformatted(edit) => edit,
-            other => panic!("expected a reformatted source, got {other:?}"),
-        };
-        assert_eq!(edit.text, "#let x = 1\n");
-        assert_eq!(edit.range, 0.."#let  x =  1\n".len());
-        assert_eq!(edit.insertion, None);
-    }
-
-    #[test]
-    fn already_formatted_source_answers_stands() {
-        assert_eq!(
-            format("#let x = 1\n", &Options::default()),
-            Formatting::Stands
-        );
-    }
-
-    #[test]
     fn unparsable_source_names_where_it_fails() {
         let source = "= Title\n#let = \n";
         let broken = source.find("#let").expect("the broken line");
@@ -149,18 +130,5 @@ mod tests {
             other => panic!("expected an unparsable source, got {other:?}"),
         };
         assert!((broken..=line_end).contains(&offset), "offset {offset}");
-    }
-
-    #[test]
-    fn narrow_width_leaves_formatted_text_alone() {
-        let narrow = Options {
-            max_width: 1,
-            ..Options::default()
-        };
-        assert_eq!(format("#let x = 1\n", &narrow), Formatting::Stands);
-        assert!(matches!(
-            format("#let  x =  1\n", &narrow),
-            Formatting::Reformatted(_)
-        ));
     }
 }

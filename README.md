@@ -74,7 +74,7 @@ The `@tola/pages` package provides access to all page metadata (title, date, per
 
 - **parallel compilation** — Process pages concurrently
 - **font preloading** — Fonts loaded once at startup, shared across all compilations
-- **snapshot sharing** — Typst compiler snapshot reused across batch compilations, avoiding repeated initialization
+- **shared compiler sources** — one Typst source set reused across batch compilations, avoiding repeated initialization
 
 ### Development Experience
 

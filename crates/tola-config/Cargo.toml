@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 license = "MIT"
-description = "Configuration field paths, templates, and diagnostics for Tola"
+description = "Canonical TOML key paths, configuration templates, and typed field diagnostics"
 
 [dependencies]
 rustc-hash = "2.1.3"

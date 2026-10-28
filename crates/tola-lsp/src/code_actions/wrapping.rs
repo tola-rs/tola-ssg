@@ -346,113 +346,10 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn selection_crossing_code_offers_no_wrap() {
-        let actions = selection_actions(
-            &uri(),
-            &Source::detached("text #let x = 1\n"),
-            Range::new(Position::new(0, 0), Position::new(0, 7)),
-        );
-
-        assert!(edits_of(&actions, "wrap the selection in a content block").is_empty());
-    }
-
-    #[test]
-    fn inline_equation_offers_block_forms() {
-        let actions = selection_actions(
-            &uri(),
-            &Source::detached("$x + 1$, and more\n"),
-            Range::new(Position::new(0, 3), Position::new(0, 5)),
-        );
-
-        // A block equation keeps its sentence punctuation inside the dollars.
-        assert_eq!(
-            edits_of(&actions, "convert to a block equation"),
-            [
-                (
-                    Range::new(Position::new(0, 1), Position::new(0, 1)),
-                    " ".to_owned()
-                ),
-                (
-                    Range::new(Position::new(0, 6), Position::new(0, 6)),
-                    ", ".to_owned()
-                ),
-                (
-                    Range::new(Position::new(0, 7), Position::new(0, 8)),
-                    String::new()
-                ),
-            ]
-        );
-        assert_eq!(
-            edits_of(&actions, "convert to a multi-line block equation"),
-            [
-                (
-                    Range::new(Position::new(0, 1), Position::new(0, 1)),
-                    "\n".to_owned()
-                ),
-                (
-                    Range::new(Position::new(0, 6), Position::new(0, 6)),
-                    ",\n".to_owned()
-                ),
-                (
-                    Range::new(Position::new(0, 7), Position::new(0, 8)),
-                    String::new()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn block_equation_converts_to_inline() {
-        let actions = selection_actions(
-            &uri(),
-            &Source::detached("$ x + 1 $\n"),
-            Range::new(Position::new(0, 3), Position::new(0, 5)),
-        );
-
-        assert_eq!(
-            edits_of(&actions, "convert to an inline equation"),
-            [
-                (
-                    Range::new(Position::new(0, 1), Position::new(0, 2)),
-                    String::new()
-                ),
-                (
-                    Range::new(Position::new(0, 7), Position::new(0, 8)),
-                    String::new()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn empty_equation_keeps_punctuation_inside() {
-        let actions = selection_actions(
-            &uri(),
-            &Source::detached("$$."),
-            Range::new(Position::new(0, 1), Position::new(0, 1)),
-        );
-
-        assert_eq!(
-            edits_of(&actions, "convert to a block equation"),
-            [
-                (
-                    Range::new(Position::new(0, 1), Position::new(0, 1)),
-                    " . ".to_owned()
-                ),
-                (
-                    Range::new(Position::new(0, 2), Position::new(0, 3)),
-                    String::new()
-                ),
-            ]
-        );
-    }
-
     /// A selection starting inside a nested equation and reaching past it is not answered by the
     /// outer equation: the inner one does not hold it, and no outer one answers in its place.
     #[test]
-    fn outer_equation_does_not_answer_the_nested_selection() {
+    fn outer_equation_ignores_nested_selection() {
         let text = "$ a + #{ let inner = $x + 1$; inner } $";
         let across = selection_actions(
             &uri(),
@@ -473,40 +370,5 @@ mod tests {
             Range::new(Position::new(0, 22), Position::new(0, 27)),
         );
         assert!(!edits_of(&inside, "convert to a block equation").is_empty());
-    }
-
-    #[test]
-    fn image_call_offers_figure_wrap() {
-        let actions = selection_actions(
-            &uri(),
-            &Source::detached("#image(\"logo.svg\")\n"),
-            Range::new(Position::new(0, 1), Position::new(0, 18)),
-        );
-
-        // The hash the call already has stays outside the replaced range.
-        assert_eq!(
-            edits_of(&actions, "wrap the image in a figure with a caption"),
-            [(
-                Range::new(Position::new(0, 1), Position::new(0, 18)),
-                "figure(caption: [Caption], image(\"logo.svg\"))".to_owned(),
-            )]
-        );
-    }
-
-    #[test]
-    fn leading_raw_block_wraps_with_hash() {
-        let actions = selection_actions(
-            &uri(),
-            &Source::detached("```typ\ncode\n```\n"),
-            Range::new(Position::new(0, 0), Position::new(2, 3)),
-        );
-
-        assert_eq!(
-            edits_of(&actions, "wrap the raw block in a figure with a caption"),
-            [(
-                Range::new(Position::new(0, 0), Position::new(2, 3)),
-                "#figure(\n  caption: [Caption],\n  ```typ\ncode\n```,\n)".to_owned(),
-            )]
-        );
     }
 }

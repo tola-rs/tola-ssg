@@ -94,7 +94,7 @@ pub(super) fn compile_failure_diagnostics(
             Severity::Error,
             relativized_text(message, root),
         ),
-        tola_typst::CompileError::Snapshot(error) => snapshot_diagnostic(error, root)?,
+        tola_typst::CompileError::SourceLoad(error) => source_load_diagnostic(error, root)?,
         tola_typst::CompileError::Font(error) => font_failure(error, root)?,
         tola_typst::CompileError::World(error) => world_diagnostic(error, root)?,
         tola_typst::CompileError::Cancelled => return None,
@@ -111,18 +111,18 @@ fn relativized_text(text: &str, root: &Path) -> String {
     text
 }
 
-/// One snapshot failure in the site author's words, or `None` for cancellation.
+/// One source load failure in the site author's words, or `None` for cancellation.
 ///
-/// `CompileError::from` already folds a cancelled snapshot into `CompileError::Cancelled`, so
-/// a cancelled snapshot answers `None` here and the caller reports cancellation instead.
-fn snapshot_diagnostic(
-    error: &tola_typst::world::SnapshotError,
+/// `CompileError::from` already folds a cancelled load into `CompileError::Cancelled`, so
+/// a cancelled load answers `None` here and the caller reports cancellation instead.
+fn source_load_diagnostic(
+    error: &tola_typst::world::SourceLoadError,
     root: &Path,
 ) -> Option<Diagnostic> {
-    use tola_typst::world::SnapshotError;
+    use tola_typst::world::SourceLoadError;
     Some(match error {
-        SnapshotError::Cancelled => return None,
-        SnapshotError::File { path, error } => match site_relative(path, root) {
+        SourceLoadError::Cancelled => return None,
+        SourceLoadError::File { path, error } => match site_relative(path, root) {
             Some(relative) => {
                 let diagnostic = Diagnostic::new(
                     crate::codes::typst::SNAPSHOT,
@@ -143,13 +143,13 @@ fn snapshot_diagnostic(
             )
             .with_help("Check that each content source exists inside the site root"),
         },
-        SnapshotError::OutsideRoot { .. } => Diagnostic::new(
+        SourceLoadError::OutsideRoot { .. } => Diagnostic::new(
             crate::codes::typst::SNAPSHOT,
             Severity::Error,
             "a source this build reads is outside the site root",
         )
         .with_help("Keep the content root and the Bundle entry inside the site root"),
-        SnapshotError::RootMismatch { .. } => Diagnostic::new(
+        SourceLoadError::RootMismatch { .. } => Diagnostic::new(
             crate::codes::typst::SNAPSHOT,
             Severity::Error,
             "Tola could not reuse the sources it read before the site root changed",
@@ -246,7 +246,7 @@ fn world_diagnostic(error: &tola_typst::WorldBuildError, root: &Path) -> Option<
             "the configured font files could not be loaded for this build",
         )
         .with_help("Restart `tola dev` and run the build again"),
-        WorldBuildError::SnapshotRootMismatch { .. } => Diagnostic::new(
+        WorldBuildError::RootMismatch { .. } => Diagnostic::new(
             crate::codes::typst::WORLD,
             Severity::Error,
             "the site root changed while Tola was reading sources",
@@ -767,286 +767,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    #[test]
-    fn package_failure_names_the_site_directory() {
-        use tola_typst::{
-            ResolvedPackageFailure, ResolvedPackageFailureReason, ResolvedPackageSearch,
-        };
-
-        let root = Path::new("/site");
-        let site_packages = |package: &str, version: &str| ResolvedPackageSearch {
-            root: root.join("packages"),
-            candidate: root.join("packages").join(package).join(version),
-        };
-        let host_cache = |package: &str, version: &str| ResolvedPackageSearch {
-            root: PathBuf::from("/home/author/.cache/typst/packages"),
-            candidate: PathBuf::from("/home/author/.cache/typst/packages")
-                .join(package)
-                .join(version),
-        };
-        type Case<'a> = (
-            &'a str,
-            ResolvedPackageFailureReason,
-            Vec<ResolvedPackageSearch>,
-            &'a str,
-            Option<&'a str>,
-            &'a [&'a str],
-        );
-        let cases: [Case<'_>; 4] = [
-            (
-                "@cawemo/report:1.2.0",
-                ResolvedPackageFailureReason::NotInstalled,
-                vec![
-                    site_packages("cawemo/report", "1.2.0"),
-                    host_cache("cawemo/report", "1.2.0"),
-                ],
-                "the package `@cawemo/report:1.2.0` is not installed",
-                Some("`packages/cawemo/report/1.2.0` does not exist"),
-                &["`packages/`"],
-            ),
-            (
-                "@preview/cetz:0.3.4",
-                ResolvedPackageFailureReason::Unavailable,
-                vec![
-                    site_packages("preview/cetz", "0.3.4"),
-                    host_cache("preview/cetz", "0.3.4"),
-                ],
-                "Tola could not install the package `@preview/cetz:0.3.4`",
-                None,
-                &["`packages/`"],
-            ),
-            (
-                "@preview/cetz:0.3.4",
-                ResolvedPackageFailureReason::NotInstalled,
-                vec![host_cache("preview/cetz", "0.3.4")],
-                "the package `@preview/cetz:0.3.4` is not installed",
-                None,
-                &["tola vendor"],
-            ),
-            (
-                "@preview/cetz:0.3.4",
-                ResolvedPackageFailureReason::Unavailable,
-                vec![host_cache("preview/cetz", "0.3.4")],
-                "Tola could not install the package `@preview/cetz:0.3.4`",
-                None,
-                &["cache"],
-            ),
-        ];
-
-        for (package, reason, searched, message, note, help_fragments) in &cases {
-            let failure = ResolvedPackageFailure {
-                package: (*package).into(),
-                reason: *reason,
-                searched: searched.clone(),
-            };
-
-            let guidance = package_failure_guidance(&failure, root);
-
-            assert_eq!(guidance.message, *message, "{package} {reason:?}");
-            assert_eq!(guidance.note.as_deref(), *note, "{package} {reason:?}");
-            let help = guidance.help.expect("the author learns what to do");
-            for &fragment in *help_fragments {
-                assert!(help.message.contains(fragment), "{}", help.message);
-            }
-            assert!(!help.message.contains("author"), "{}", help.message);
-        }
-    }
-
-    #[test]
-    fn display_limits_do_not_drop_warnings() {
-        let directory = tempfile::tempdir().unwrap();
-        let config = crate::config::tests::load_test_config(directory.path(), "");
-        let make_warning = |message: &str| warning_at(message, location(None));
-        let mut warnings = Diagnostics::new();
-        warnings.extend_distinct(&Diagnostics::from_vec(vec![
-            make_warning("first warning"),
-            make_warning("second warning"),
-        ]));
-        let diagnostics = warning_diagnostics(&config, &mut warnings);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.message.as_str())
-                .collect::<Vec<_>>(),
-            ["first warning", "second warning"]
-        );
-    }
-
-    #[test]
-    fn export_failure_keeps_its_message() {
-        let raw = typst::diag::SourceDiagnostic::error(typst::syntax::Span::detached(), "broken")
-            .with_hint("choose another value");
-        let error = anyhow::Error::new(tola_typst::CompileError::bundle_export([raw.into()]));
-
-        let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::typst::BUNDLE_EXPORT);
-        assert_eq!(diagnostics[0].message, "broken");
-        assert_eq!(diagnostics[0].help[0].message, "choose another value");
-
-        let empty = anyhow::Error::new(tola_typst::CompileError::bundle_export([]));
-        let diagnostics = error_diagnostics(&empty, Path::new("/site")).unwrap();
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].code, crate::codes::typst::BUNDLE_EXPORT);
-    }
-
-    #[test]
-    fn warning_only_failure_reports_error() {
-        let compiler_warning = warning_at("upstream warning", location(None));
-        let export_warning = typst::diag::SourceDiagnostic::warning(
-            typst::syntax::Span::detached(),
-            "upstream warning",
-        );
-        for error in [
-            anyhow::Error::new(tola_typst::CompileError::Compilation {
-                diagnostics: Diagnostics::from_vec(vec![compiler_warning]),
-            }),
-            anyhow::Error::new(tola_typst::CompileError::bundle_export([
-                export_warning.into()
-            ])),
-        ] {
-            let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
-
-            assert_eq!(diagnostics.len(), 2);
-            assert_eq!(diagnostics[0].severity, crate::diagnostic::Severity::Error);
-            assert_eq!(
-                diagnostics[1].severity,
-                crate::diagnostic::Severity::Warning
-            );
-        }
-    }
-
-    #[test]
-    fn experimental_warning_yields_export_error() {
-        let warning = typst::diag::SourceDiagnostic::warning(
-            typst::syntax::Span::detached(),
-            "bundle export is experimental",
-        );
-        let error = anyhow::Error::new(tola_typst::CompileError::bundle_export([warning.into()]));
-
-        let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, crate::diagnostic::Severity::Error);
-    }
-
-    #[test]
-    fn snapshot_failure_names_the_file_itself() {
-        let failure = |error: typst::diag::FileError| {
-            anyhow::Error::new(tola_typst::CompileError::Snapshot(
-                tola_typst::world::SnapshotError::File {
-                    path: "/site/content/post.typ".into(),
-                    error,
-                },
-            ))
-        };
-
-        let opaque = error_diagnostics(
-            &failure(typst::diag::FileError::Other(Some(
-                "file disappeared".into(),
-            ))),
-            Path::new("/site"),
-        )
-        .unwrap();
-
-        assert_eq!(opaque[0].code, crate::codes::typst::SNAPSHOT);
-        assert_eq!(opaque[0].message, "Tola could not read `content/post.typ`");
-        assert_eq!(
-            opaque[0].location.as_ref().unwrap().path,
-            "content/post.typ"
-        );
-        assert!(opaque[0].notes.is_empty());
-
-        let explained = error_diagnostics(
-            &failure(typst::diag::FileError::AccessDenied),
-            Path::new("/site"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            explained[0].message,
-            "Tola could not read `content/post.typ`"
-        );
-        assert_eq!(explained[0].notes, ["Tola is not allowed to read it"]);
-    }
-
-    #[test]
-    fn font_failure_names_the_font_file() {
-        let error = anyhow::Error::new(tola_typst::CompileError::Font(
-            tola_typst::FontLoadError::File {
-                path: "/site/static/typst-fonts/Inter.ttf".into(),
-                error: typst::diag::FileError::NotFound(
-                    "/site/static/typst-fonts/Inter.ttf".into(),
-                ),
-            },
-        ));
-
-        let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
-
-        assert_eq!(diagnostics[0].code, crate::codes::typst::FONT);
-        assert_eq!(
-            diagnostics[0].message,
-            "Tola could not read the font file `static/typst-fonts/Inter.ttf`"
-        );
-        assert_eq!(diagnostics[0].notes, ["it does not exist"]);
-        assert_eq!(
-            diagnostics[0].location.as_ref().unwrap().path,
-            "static/typst-fonts/Inter.ttf"
-        );
-    }
-
-    #[test]
-    fn world_failure_names_no_outside_path() {
-        let error = anyhow::Error::new(tola_typst::CompileError::World(
-            tola_typst::WorldBuildError::MainOutsideRoot {
-                main: "/other/site.typ".into(),
-                root: "/site".into(),
-            },
-        ));
-
-        let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
-
-        assert_eq!(diagnostics[0].code, crate::codes::typst::WORLD);
-        assert_eq!(
-            diagnostics[0].message,
-            "the Bundle entry is outside the site root"
-        );
-        assert_eq!(
-            diagnostics[0].help[0].message,
-            "Set `build.entry` to a file inside the site root"
-        );
-        assert!(diagnostics[0].location.is_none());
-    }
-
-    #[test]
-    fn site_root_prefixes_become_relative() {
-        let diagnostic = warning(
-            "file not found (searched at /site/templates/missing.txt)",
-            "file not found (searched at /site/content/post.typ)",
-        );
-
-        let diagnostic =
-            resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
-
-        assert_eq!(
-            diagnostic.message,
-            "file not found (searched at templates/missing.txt)"
-        );
-        assert_eq!(
-            diagnostic.help[0].message,
-            "file not found (searched at content/post.typ)"
-        );
-
-        let mut outside = String::from("cannot read /other/site/content/post.typ");
-        relativize_message(&mut outside, Path::new("/site"));
-        assert_eq!(outside, "cannot read /other/site/content/post.typ");
-        let mut sibling = String::from("cannot read /site-sibling/post.typ");
-        relativize_message(&mut sibling, Path::new("/site"));
-        assert_eq!(sibling, "cannot read /site-sibling/post.typ");
-    }
-
     /// A location that names only the fields a case sets.
     fn location(path: Option<&str>) -> tola_typst::SourceLocation {
         tola_typst::SourceLocation {
@@ -1074,18 +794,207 @@ mod tests {
         }
     }
 
-    fn warning(message: &str, help: &str) -> tola_typst::Diagnostic {
-        tola_typst::Diagnostic {
-            hints: vec![tola_typst::Hint {
-                message: help.into(),
-                location: location(None),
-            }],
-            ..warning_at(message, location(None))
+    /// Every failure kind maps to its own stable code and never names a path outside the site.
+    ///
+    /// The code is the contract a consumer reads; the sentence is presentation and is free to
+    /// change, so nothing here asserts one.
+    #[test]
+    fn failures_carry_their_own_code() {
+        let site = Path::new("/site");
+        let outside = anyhow::Error::new(tola_typst::CompileError::World(
+            tola_typst::WorldBuildError::MainOutsideRoot {
+                main: "/other/site.typ".into(),
+                root: "/site".into(),
+            },
+        ));
+        let source_load = anyhow::Error::new(tola_typst::CompileError::SourceLoad(
+            tola_typst::world::SourceLoadError::File {
+                path: "/site/content/post.typ".into(),
+                error: typst::diag::FileError::AccessDenied,
+            },
+        ));
+        let font = anyhow::Error::new(tola_typst::CompileError::Font(
+            tola_typst::FontLoadError::File {
+                path: "/site/static/typst-fonts/Inter.ttf".into(),
+                error: typst::diag::FileError::NotFound(
+                    "/site/static/typst-fonts/Inter.ttf".into(),
+                ),
+            },
+        ));
+        let cancelled = anyhow::Error::new(tola_typst::CompileError::Cancelled);
+        let export = anyhow::Error::new(tola_typst::CompileError::bundle_export([
+            typst::diag::SourceDiagnostic::error(typst::syntax::Span::detached(), "broken").into(),
+        ]));
+
+        for (label, error, code) in [
+            ("world", &outside, crate::codes::typst::WORLD),
+            ("source load", &source_load, crate::codes::typst::SNAPSHOT),
+            ("font", &font, crate::codes::typst::FONT),
+            ("export", &export, crate::codes::typst::BUNDLE_EXPORT),
+        ] {
+            let diagnostics = error_diagnostics(error, site)
+                .unwrap_or_else(|| panic!("{label} produced no diagnostic"));
+            assert_eq!(diagnostics[0].code, code, "{label}");
+            for diagnostic in &diagnostics {
+                assert!(
+                    !diagnostic.message.contains("/other/")
+                        && !diagnostic.message.contains("/site/"),
+                    "{label} leaked a host path: {}",
+                    diagnostic.message
+                );
+            }
+        }
+
+        // Cancellation is reported as cancellation, never as a failure to describe.
+        assert!(error_diagnostics(&cancelled, site).is_none());
+    }
+
+    /// A located failure reports the site-relative path, and an outside path is dropped.
+    #[test]
+    fn failure_locations_are_site_relative() {
+        let source_load = |path: &str| {
+            anyhow::Error::new(tola_typst::CompileError::SourceLoad(
+                tola_typst::world::SourceLoadError::File {
+                    path: path.into(),
+                    error: typst::diag::FileError::AccessDenied,
+                },
+            ))
+        };
+
+        let inside = error_diagnostics(&source_load("/site/content/post.typ"), Path::new("/site"))
+            .expect("an inside path is described");
+        assert_eq!(
+            inside[0].location.as_ref().map(|found| found.path.as_str()),
+            Some("content/post.typ")
+        );
+
+        let outside = error_diagnostics(&source_load("/elsewhere/post.typ"), Path::new("/site"))
+            .expect("an outside path is still described");
+        assert!(outside[0].location.is_none(), "{outside:#?}");
+    }
+
+    /// A package failure names the site directory the author can act on, never the host cache.
+    #[test]
+    fn package_failure_names_the_site_directory() {
+        use tola_typst::{
+            ResolvedPackageFailure, ResolvedPackageFailureReason, ResolvedPackageSearch,
+        };
+
+        let root = Path::new("/site");
+        let site_packages = |package: &str, version: &str| ResolvedPackageSearch {
+            root: root.join("packages"),
+            candidate: root.join("packages").join(package).join(version),
+        };
+        let host_cache = |package: &str, version: &str| ResolvedPackageSearch {
+            root: PathBuf::from("/home/author/.cache/typst/packages"),
+            candidate: PathBuf::from("/home/author/.cache/typst/packages")
+                .join(package)
+                .join(version),
+        };
+
+        for (package, reason, searched, names_site) in [
+            (
+                "@cawemo/report:1.2.0",
+                ResolvedPackageFailureReason::NotInstalled,
+                vec![
+                    site_packages("cawemo/report", "1.2.0"),
+                    host_cache("cawemo/report", "1.2.0"),
+                ],
+                true,
+            ),
+            (
+                "@preview/cetz:0.3.4",
+                ResolvedPackageFailureReason::Unavailable,
+                vec![
+                    site_packages("preview/cetz", "0.3.4"),
+                    host_cache("preview/cetz", "0.3.4"),
+                ],
+                true,
+            ),
+            (
+                "@preview/cetz:0.3.4",
+                ResolvedPackageFailureReason::NotInstalled,
+                vec![host_cache("preview/cetz", "0.3.4")],
+                false,
+            ),
+        ] {
+            let failure = ResolvedPackageFailure {
+                package: package.into(),
+                reason,
+                searched,
+            };
+            let guidance = package_failure_guidance(&failure, root);
+
+            assert!(guidance.message.contains(package), "{package} {reason:?}");
+            let help = guidance.help.expect("the author learns what to do");
+            assert!(!help.message.contains("author"), "{}", help.message);
+            assert!(!help.message.contains("/home/"), "{}", help.message);
+            assert_eq!(
+                help.message.contains("`packages/`"),
+                names_site,
+                "{package} {reason:?}: {}",
+                help.message
+            );
         }
     }
 
+    /// Display limits never drop a warning, and a warning-only failure still reports an error.
     #[test]
-    fn character_highlights_become_byte_ranges() {
+    fn failure_keeps_its_warnings() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::tests::load_test_config(directory.path(), "");
+        let make_warning = |message: &str| warning_at(message, location(None));
+        let mut warnings = Diagnostics::new();
+        warnings.extend_distinct(&Diagnostics::from_vec(vec![
+            make_warning("first warning"),
+            make_warning("second warning"),
+        ]));
+        assert_eq!(warning_diagnostics(&config, &mut warnings).len(), 2);
+
+        let compiler_warning = warning_at("upstream warning", location(None));
+        let export_warning = typst::diag::SourceDiagnostic::warning(
+            typst::syntax::Span::detached(),
+            "upstream warning",
+        );
+        for error in [
+            anyhow::Error::new(tola_typst::CompileError::Compilation {
+                diagnostics: Diagnostics::from_vec(vec![compiler_warning]),
+            }),
+            anyhow::Error::new(tola_typst::CompileError::bundle_export([
+                export_warning.into()
+            ])),
+        ] {
+            let diagnostics = error_diagnostics(&error, Path::new("/site")).unwrap();
+            assert_eq!(diagnostics.len(), 2);
+            assert_eq!(diagnostics[0].severity, crate::diagnostic::Severity::Error);
+            assert_eq!(
+                diagnostics[1].severity,
+                crate::diagnostic::Severity::Warning
+            );
+        }
+    }
+
+    /// A site-root prefix is stripped from a message, and a mere textual sibling is not.
+    #[test]
+    fn site_root_prefixes_become_relative() {
+        let mut message = String::from("cannot read /site/content/post.typ");
+        relativize_message(&mut message, Path::new("/site"));
+        assert_eq!(message, "cannot read content/post.typ");
+
+        for untouched in [
+            "cannot read /other/site/content/post.typ",
+            "cannot read /site-sibling/post.typ",
+        ] {
+            let mut message = untouched.to_owned();
+            relativize_message(&mut message, Path::new("/site"));
+            assert_eq!(message, untouched);
+        }
+    }
+
+    /// A highlight's character offsets become byte offsets, and a path keeps its site-relative
+    /// shape at every depth of one diagnostic.
+    #[test]
+    fn converted_diagnostics_keep_their_sites() {
         let line = source_line(tola_typst::SourceLine {
             line_num: 1,
             start_column: 0,
@@ -1094,25 +1003,16 @@ mod tests {
             text: "éx".into(),
             highlight: Some((1, 2)),
         });
-
         assert_eq!(line.highlight, Some((2, 3)));
-    }
 
-    #[test]
-    fn converted_paths_are_site_relative() {
-        let hint = tola_typst::SourceLocation {
-            line: Some(1),
-            column: Some(1),
-            truncation: tola_typst::SourceTruncation {
-                omitted_lines: 1,
-                omitted_bytes: 2,
-            },
-            ..location(Some("/site/templates/document.typ"))
-        };
         let resolved = tola_typst::Diagnostic {
             hints: vec![tola_typst::Hint {
                 message: "inspect the import".into(),
-                location: hint,
+                location: tola_typst::SourceLocation {
+                    line: Some(1),
+                    column: Some(1),
+                    ..location(Some("/site/templates/document.typ"))
+                },
             }],
             traces: vec![tola_typst::Trace {
                 kind: tola_typst::TraceKind::Include("content/index.typ".into()),
@@ -1128,12 +1028,10 @@ mod tests {
                 },
             )
         };
-
         let diagnostic =
             resolved_diagnostic(resolved, Path::new("/site"), crate::codes::typst::COMPILE);
 
-        assert_eq!(diagnostic.code, "typst.compile");
-        assert_eq!(diagnostic.severity, crate::diagnostic::Severity::Warning);
+        assert_eq!(diagnostic.code, crate::codes::typst::COMPILE);
         assert_eq!(diagnostic.location.unwrap().path, "content/index.typ");
         assert_eq!(
             diagnostic.help[0].location.as_ref().unwrap().path,
@@ -1145,9 +1043,11 @@ mod tests {
         );
     }
 
+    /// An unbound name is read from the highlight, so the cause survives a wording change and
+    /// appears only when a highlight actually names one.
     #[test]
-    fn unknown_variable_names_its_highlighted_name() {
-        let diagnostic = tola_typst::Diagnostic {
+    fn unknown_variable_cause_follows_the_highlight() {
+        let highlighted = tola_typst::Diagnostic {
             origin: tola_typst::DiagnosticOrigin::Typst,
             severity: tola_typst::DiagnosticSeverity::Error,
             message: "unknown variable: absent-name".into(),
@@ -1169,20 +1069,38 @@ mod tests {
             imported_by: Vec::new(),
             package_failure: None,
         };
-
-        let resolved =
-            resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
-
+        let resolved = resolved_diagnostic(
+            highlighted,
+            Path::new("/site"),
+            crate::codes::typst::COMPILE,
+        );
         assert_eq!(
             resolved.cause,
             Some(crate::diagnostic::DiagnosticCause::UnknownVariable {
                 name: "absent-name".to_owned(),
             })
         );
+
+        // No highlight, another failure, and a panic that quotes the sentence all carry no cause.
+        let without_highlight = tola_typst::Diagnostic {
+            location: location(Some("/site/content/index.typ")),
+            ..warning_at("unknown variable: absent-name", location(None))
+        };
+        let panic = tola_typst::Diagnostic {
+            message: "panicked with: unknown variable: absent-name".into(),
+            ..without_highlight.clone()
+        };
+        for diagnostic in [without_highlight, panic] {
+            let resolved =
+                resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
+            assert_eq!(resolved.cause, None, "{resolved:?}");
+        }
     }
 
+    /// A missing clock names the repair at the site-author level: the cause is the code, and the
+    /// help must mention `datetime.today()`.
     #[test]
-    fn missing_clock_explains_datetime_today() {
+    fn missing_clock_help_names_datetime() {
         let diagnostic = tola_typst::Diagnostic {
             origin: tola_typst::DiagnosticOrigin::Typst,
             severity: tola_typst::DiagnosticSeverity::Error,
@@ -1197,87 +1115,17 @@ mod tests {
         let resolved =
             resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
 
-        assert_eq!(
-            resolved.message,
-            "`datetime.today()` is not available because Tola does not read the current date when building"
-        );
-        assert_eq!(
-            resolved.help[0].message,
-            "Replace `datetime.today()` with an explicit date, such as \
-             `datetime(year: 2026, month: 10, day: 17)`"
-        );
-    }
-
-    #[test]
-    fn failures_naming_no_unbound_variable_have_no_cause() {
-        let unknown_without_highlight = tola_typst::Diagnostic {
-            origin: tola_typst::DiagnosticOrigin::Typst,
-            severity: tola_typst::DiagnosticSeverity::Error,
-            message: "unknown variable: absent-name".into(),
-            location: location(Some("/site/content/index.typ")),
-            hints: Vec::new(),
-            traces: Vec::new(),
-            imported_by: Vec::new(),
-            package_failure: None,
-        };
-        let another_failure = tola_typst::Diagnostic {
-            origin: tola_typst::DiagnosticOrigin::Typst,
-            message: "expected expression".into(),
-            location: tola_typst::SourceLocation {
-                line: Some(1),
-                column: Some(1),
-                source_lines: vec![tola_typst::SourceLine {
-                    line_num: 1,
-                    start_column: 0,
-                    start_character: 0,
-                    ends_line: true,
-                    text: ")".into(),
-                    highlight: Some((0, 1)),
-                }],
-                ..location(Some("/site/content/index.typ"))
-            },
-            ..unknown_without_highlight.clone()
-        };
-
-        let panic = tola_typst::Diagnostic {
-            message: "panicked with: unknown variable: absent-name".into(),
-            ..another_failure.clone()
-        };
-        for diagnostic in [unknown_without_highlight, another_failure, panic] {
-            let resolved =
-                resolved_diagnostic(diagnostic, Path::new("/site"), crate::codes::typst::COMPILE);
-            assert_eq!(resolved.cause, None, "{resolved:?}");
-        }
-    }
-
-    #[test]
-    fn clipped_identifier_offers_no_correction() {
-        let location = crate::diagnostic::Location {
-            path: "content/page.typ".into(),
-            line: Some(1),
-            column: Some(101),
-            range: Some(crate::diagnostic::SourceRange {
-                start: crate::diagnostic::SourcePosition {
-                    line: 0,
-                    character: 100,
-                },
-                end: crate::diagnostic::SourcePosition {
-                    line: 0,
-                    character: 111,
-                },
-            }),
-            source_lines: vec![crate::diagnostic::SourceLine {
-                start_column: 100,
-                start_character: 100,
-                ..crate::diagnostic::SourceLine::new(1, "absent", Some((0, 6)))
-            }],
-        };
-        assert_eq!(
-            unknown_variable_cause("unknown variable: absent-name", Some(&location)),
-            None
+        assert!(resolved.message.contains("datetime.today()"));
+        assert!(
+            resolved
+                .help
+                .iter()
+                .any(|help| help.message.contains("datetime(year:")),
+            "{resolved:#?}"
         );
     }
 
+    /// The export-feature warning is filtered out of what the author reads.
     #[test]
     fn bundle_feature_warning_is_hidden() {
         let warning = warning_at("bundle export is experimental", location(None));

@@ -108,6 +108,9 @@ mod tests {
     use std::os::fd::BorrowedFd;
     use std::os::unix::net::UnixStream;
 
+    // The `Read` contract both readers share — a completed read outranks a stop, a failed one
+    // reports it — is held here.
+
     /// A stream owning its fd — so the flag test has a descriptor to inspect — whose
     /// next read returns `outcome`, optionally requesting a stop first.
     struct ScriptedRead {

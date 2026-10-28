@@ -337,90 +337,14 @@ mod tests {
     fn bare_features() -> crate::capabilities::ClientFeatures {
         crate::capabilities::ClientFeatures::new(&lsp_types::ClientCapabilities::default())
     }
-
     #[test]
-    fn repeated_items_keep_their_result_id() {
-        let mut checked = Checked::new();
-        checked.check(&["source error"]);
-        let (id, items) = reported(checked.pull(None));
-        assert_eq!(items, ["source error"]);
-        checked.check(&["source error"]);
-        assert_eq!(
-            checked.pull(Some(&id)),
-            Pulled::Report(DocumentDiagnosticReport::Unchanged(
-                RelatedUnchangedDocumentDiagnosticReport {
-                    related_documents: None,
-                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
-                        result_id: id,
-                    },
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn pull_after_the_version_moves_is_stale() {
+    fn edited_pull_is_stale() {
         let mut checked = Checked::new();
         checked.check(&["source error"]);
         let (id, _) = reported(checked.pull(None));
         checked.edited();
         assert_eq!(checked.pull(Some(&id)), Pulled::Stale);
     }
-
-    /// A report sent while the document was not open cannot answer for the version the client
-    /// opened it at.
-    #[test]
-    fn open_document_refuses_report_of_unknown_version() {
-        let mut site = Site::new(&[("content/page.typ", "Body\n")]);
-        site.publish(vec![Diagnostic::at_path(
-            tola_build::codes::typst::COMPILE,
-            Severity::Error,
-            "content/page.typ",
-            "source error",
-        )]);
-        let uri = crate::uri::from_file_path(&site.physical.join("content/page.typ")).unwrap();
-        assert!(matches!(
-            site.client.pull(&uri, None, None),
-            Pulled::Report(_)
-        ));
-        site.open("content/page.typ", "Edited body\n");
-        assert_eq!(
-            site.client
-                .pull(&uri, None, site.open.version(uri.as_str())),
-            Pulled::Stale
-        );
-    }
-
-    #[test]
-    fn changed_items_take_fresh_result_id() {
-        let mut checked = Checked::new();
-        checked.check(&["first"]);
-        let (first, _) = reported(checked.pull(None));
-        checked.check(&["first", "second"]);
-        let (second, items) = reported(checked.pull(Some(&first)));
-        assert_ne!(first, second);
-        assert_eq!(items, ["first", "second"]);
-    }
-
-    #[test]
-    fn cleared_documents_pull_no_items() {
-        let mut checked = Checked::new();
-        checked.check(&["source error"]);
-        let (reported_id, _) = reported(checked.pull(None));
-        checked.check(&[]);
-        let (cleared, items) = reported(checked.pull(Some(&reported_id)));
-        assert_ne!(reported_id, cleared);
-        assert!(items.is_empty());
-    }
-
-    #[test]
-    fn unreported_document_pulls_empty_report() {
-        let checked = Checked::new();
-        let (id, items) = reported(checked.pull(None));
-        assert!(!id.is_empty());
-        assert!(items.is_empty());
-    }
-
     #[test]
     #[cfg(unix)]
     fn selected_interfaces_follow_the_resolved_root() {

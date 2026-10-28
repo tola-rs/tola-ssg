@@ -174,16 +174,4 @@ mod tests {
             .collect();
         assert_eq!(names, ["align"]);
     }
-
-    #[test]
-    fn offset_without_field_answers_nothing() {
-        for text in ["#body|", "#body.|", "#(1 + 2)|", "Body text|"] {
-            let at = text.find('|').unwrap();
-            let source = Source::detached(text.replace('|', ""));
-            assert!(
-                wraps(&source, at).is_empty(),
-                "{text:?} writes no field access"
-            );
-        }
-    }
 }

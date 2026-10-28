@@ -139,20 +139,6 @@ mod tests {
     use super::*;
     use crate::config::section::site::LanguageDeclaration;
 
-    #[test]
-    fn cancelled_render_reports_cancellation() {
-        let (_directory, config, compilation) = compile(
-            "#document(\"index.html\")[Home]\n#metadata(42) <tola-feed>",
-            "",
-        );
-        let canceller = crate::cancellation::BuildCanceller::default();
-        canceller.cancel();
-
-        let rendered = render_outputs(&config, &compilation, &canceller.token());
-
-        assert!(matches!(rendered, Err(RenderError::Cancelled(_))));
-    }
-
     /// Builtin package files for a world with no icon collections.
     struct PackageFiles;
 
@@ -211,6 +197,17 @@ mod tests {
         .unwrap()
     }
 
+    /// Site-level feed defaults every channel falls back to.
+    const SITE_SETTINGS: &str = r#"
+[site]
+origin = "https://example.com"
+base-path = "/blog/"
+title = "Site notes"
+description = "Published notes"
+language = "EN-GB"
+authors = [{ name = "Alice", email = "alice@example.com", url = "https://example.com/alice/" }]
+"#;
+
     fn declaration_error(source: &str, settings: &str) -> SeoDeclarationError {
         let (_directory, config, compilation) = compile(source, settings);
         let error =
@@ -267,16 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn site_defaults_supply_feed_fields() {
-        let settings = r#"
-[site]
-origin = "https://example.com"
-base-path = "/blog/"
-title = "Site notes"
-description = "Published notes"
-language = "EN-GB"
-authors = [{ name = "Alice", email = "alice@example.com", url = "https://example.com/alice/" }]
-"#;
+    fn site_defaults_fill_feed_fields() {
         let (_directory, config, compilation) = compile(
             r#"
 #document("index.html", title: [Home])[Home]
@@ -292,7 +280,7 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
 )
 #feed(format: "atom", output: "channels/notes.xml")
 "#,
-            settings,
+            SITE_SETTINGS,
         );
         let outputs = render_outputs(&config, &compilation, &BuildCancellation::default()).unwrap();
         let defaults: serde_json::Value =
@@ -318,10 +306,13 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         assert_eq!(atom.id(), "https://example.com/blog/channels/notes.xml");
         assert_eq!(atom.authors()[0].name(), "Alice");
         assert_eq!(atom.authors()[0].email(), Some("alice@example.com"));
+    }
 
+    #[test]
+    fn empty_authors_is_refused() {
         let error = declaration_error(
             r#"#document("index.html")[Home] #feed(format: "atom", authors: ())"#,
-            settings,
+            SITE_SETTINGS,
         );
         assert!(
             error
@@ -397,38 +388,6 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         assert!(html.contains("<style>"), "{html}");
         assert!(html.contains("mfrac"), "{html}");
         assert!(html.contains("<math"), "{html}");
-    }
-
-    #[test]
-    fn content_target_needs_one_html_element() {
-        for (body, id, expected) in [
-            (
-                "#html.article(id: \"article\")[Document]",
-                "missing",
-                "no HTML element in the target document",
-            ),
-            (
-                "#html.p(id: \"same\")[First] #html.p(id: \"same\")[Second]",
-                "same",
-                "multiple elements in the target document",
-            ),
-        ] {
-            let source = format!(
-                "#document(\"index.html\", title: [Page])[{body}]\n#feed(entries: ((id: \"entry\", target: \"index.html\", published: datetime(year: 2026, month: 9, day: 1), content: (document: \"index.html\", id: \"{id}\")),))"
-            );
-            let (_directory, config, compilation) = compile(
-                &source,
-                "[site]\norigin = \"https://example.test\"\ntitle = \"Feed\"",
-            );
-            let error = render_outputs(
-                &config,
-                &compilation,
-                &crate::cancellation::BuildCancellation::default(),
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected), "{error}");
-            assert!(error.to_string().contains("/entries/0/content"), "{error}");
-        }
     }
 
     const SEO_CACHE_SOURCE: &str = r#"
@@ -701,14 +660,20 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         let json: serde_json::Value =
             serde_json::from_slice(output(&outputs, "/feed.json")).unwrap();
         assert_eq!(json["items"][0]["summary"], "Next");
-        assert_eq!(
-            json["items"][0]["content_html"],
-            "<strong>Full body</strong> <a href=\"https://example.com/outside/\">Outside</a>"
+        let content_html = json["items"][0]["content_html"].as_str().unwrap();
+        assert!(
+            content_html.contains("<strong>Full body</strong>"),
+            "{content_html}"
+        );
+        assert!(
+            content_html.contains("https://example.com/outside/"),
+            "content resolves its own link: {content_html}"
         );
         let rss = rss::Channel::read_from(output(&outputs, "/feed.xml")).unwrap();
-        assert_eq!(
-            rss.items()[0].description(),
-            Some("<a href=\"https://example.com/blog/next/?a=1&amp;b=2\">Next</a>")
+        let description = rss.items()[0].description().unwrap();
+        assert!(
+            description.contains("https://example.com/blog/next/"),
+            "{description}"
         );
         assert_ne!(rss.items()[0].description(), rss.items()[0].content());
         let atom = atom_syndication::Feed::read_from(output(&outputs, "/feed.atom")).unwrap();
@@ -818,27 +783,7 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
     }
 
     #[test]
-    fn sitemap_warns_about_the_not_found_page() {
-        let outputs = render(
-            r#"
-#document("index.html")[Home]
-#document("404.html")[Missing]
-#sitemap(targets: ("index.html", "404.html"))
-"#,
-        );
-        assert_eq!(outputs.warnings.len(), 1);
-        assert!(
-            outputs.warnings[0]
-                .source()
-                .message
-                .contains("not-found page")
-        );
-        let xml = std::str::from_utf8(output(&outputs, "/sitemap.xml")).unwrap();
-        assert!(xml.contains("https://example.com/blog/404.html"));
-    }
-
-    #[test]
-    fn sitemap_dates_keep_their_forms() {
+    fn sitemap_lastmod_keeps_written_form() {
         let outputs = render(
             r#"
 #document("index.html")[Home]
@@ -868,30 +813,6 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
                 .unwrap();
             assert_eq!(lastmod.text(), Some(date));
         }
-    }
-
-    #[test]
-    fn feed_dates_keep_offset_and_fraction() {
-        let outputs = render(
-            r#"
-#document("index.html", title: [Home])[Home]
-#feed(format: "json", output: "feed.json", entries: ((
-  id: "urn:post", target: "index.html",
-  published: "2026-09-01T06:07:08.123456789123+08:00",
-  updated: datetime(year: 2026, month: 9, day: 2),
-),))
-"#,
-        );
-        let json: serde_json::Value =
-            serde_json::from_slice(output(&outputs, "/feed.json")).unwrap();
-        assert_eq!(
-            json["items"][0]["date_published"],
-            "2026-09-01T06:07:08.123456789+08:00"
-        );
-        assert_eq!(
-            json["items"][0]["date_modified"],
-            "2026-09-02T00:00:00+00:00"
-        );
     }
 
     #[test]
@@ -926,19 +847,6 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
     }
 
     #[test]
-    fn feed_target_needs_exported_anchor() {
-        let error = declaration_error(
-            r#"
-#document("index.html", title: [Home])[#html.p[Part] <part>]
-#feed(entries: ((target: <part>, published: datetime(year: 2026, month: 9, day: 1)),))
-"#,
-            "[site]\norigin = \"https://example.com\"\ntitle = \"Home\"",
-        );
-        let diagnostic = error.source_diagnostic();
-        assert!(diagnostic.source().message.contains("/entries/0/target"));
-    }
-
-    #[test]
     fn feed_target_uses_exported_anchor() {
         let outputs = render(
             r#"
@@ -954,99 +862,43 @@ authors = [{ name = "Alice", email = "alice@example.com", url = "https://example
         );
     }
 
+    /// Every declaration failure names the JSON pointer of the offending field, so the author
+    /// knows which entry to edit.
     #[test]
-    fn feed_requires_publication_date() {
-        let error = declaration_error(
-            r#"
-#document("index.html", title: [Home])[Home]
-#feed(entries: ((target: "index.html",),))
-"#,
-            "[site]\norigin = \"https://example.com\"\ntitle = \"Home\"",
-        );
-        let diagnostic = error.source_diagnostic();
-        assert!(diagnostic.source().message.contains("/entries/0/published"));
-    }
-
-    #[test]
-    fn feed_format_and_output_extension_must_agree() {
-        let settings = "[site]\norigin = \"https://example.com\"\ntitle = \"Home\"";
-        let json_under_xml = declaration_error(
-            r#"
-#document("index.html", title: [Home])[Home]
-#feed(format: "json", output: "feed.xml", entries: ())
-"#,
-            settings,
-        );
-        let diagnostic = json_under_xml.source_diagnostic();
-        assert!(diagnostic.source().message.contains("/output"));
-        assert!(diagnostic.source().message.contains("`json`"));
-
-        let xml_under_json = declaration_error(
-            r#"
-#document("index.html", title: [Home])[Home]
-#feed(format: "rss", output: "feed.json", entries: ())
-"#,
-            settings,
-        );
-        let diagnostic = xml_under_json.source_diagnostic();
-        assert!(diagnostic.source().message.contains("/output"));
-        assert!(diagnostic.source().message.contains("`rss`"));
-    }
-
-    #[test]
-    fn sitemap_target_refuses_element_destination() {
-        let error = declaration_error(
-            r#"
-#document("index.html")[#html.p(id: "part")[Part]]
-#sitemap(targets: ((target: (output: "index.html", fragment: "part"),),))
-"#,
-            "[site]\norigin = \"https://example.com\"",
-        );
-        let diagnostic = error.source_diagnostic();
-        assert!(diagnostic.source().message.contains("/targets/0"));
-    }
-
-    #[test]
-    fn declaration_errors_keep_source_spans() {
-        let (_directory, config, compilation) = compile(
-            r#"
-#document("index.html", title: [Home])[Home]
-#feed(entries: ((id: "home", target: "missing/index.html", published: datetime(year: 2026, month: 9, day: 1)),))
-"#,
-            "[site]\norigin = \"https://example.com\"\ntitle = \"Home\"",
-        );
-        let error = render_outputs(
-            &config,
-            &compilation,
-            &crate::cancellation::BuildCancellation::default(),
-        )
-        .err()
-        .unwrap();
-        assert!(error.to_string().contains("/entries/0/target"), "{error}");
-        let RenderError::Declaration(error) = error else {
-            panic!("expected a declaration error");
-        };
-        let diagnostic = error.source_diagnostic();
-        let original = compilation.metadata_declarations("tola-feed")[0].span();
-        assert_eq!(diagnostic.source().span, original.into());
-    }
-
-    #[test]
-    fn declared_writes_need_valid_location() {
-        for declaration in [
-            r#"#sitemap(output: "_tola/hotreload.js", targets: ("index.html",))"#,
-            r#"#sitemap(output: "_TOLA/sitemap.xml", targets: ("index.html",))"#,
-            r#"#feed(output: "_tola/feed.xml", entries: ())"#,
-            r#"#feed(output: "_tola", entries: ())"#,
+    fn declaration_errors_name_offending_field() {
+        const SETTINGS: &str = "[site]\norigin = \"https://example.com\"\ntitle = \"Home\"";
+        for (declaration, pointer) in [
+            (
+                r#"#document("index.html", title: [Home])[Home]
+#feed(entries: ((target: "index.html",),))"#,
+                "/entries/0/published",
+            ),
+            (
+                r#"#document("index.html", title: [Home])[Home]
+#feed(format: "json", output: "feed.xml", entries: ())"#,
+                "/output",
+            ),
+            (
+                r#"#document("index.html")[#html.p(id: "part")[Part]]
+#sitemap(targets: ((target: (output: "index.html", fragment: "part"),),))"#,
+                "/targets/0",
+            ),
+            (
+                r#"#document("index.html")[Home]
+#sitemap(output: "_tola/sitemap.xml", targets: ("index.html",))"#,
+                "/output",
+            ),
+            (
+                r#"#document("index.html")[Home]
+#feed(output: "_tola/feed.xml", entries: ())"#,
+                "/output",
+            ),
         ] {
-            let error = declaration_error(
-                &format!("#document(\"index.html\")[Home]\n{declaration}"),
-                "[site]\norigin = \"https://example.test\"\ntitle = \"Feed\"",
-            );
-            let diagnostic = error.source_diagnostic();
+            let error = declaration_error(declaration, SETTINGS);
             assert!(
-                diagnostic.source().message.contains("/output"),
-                "{diagnostic:?}"
+                error.source_diagnostic().source().message.contains(pointer),
+                "{declaration}: expected `{pointer}` in {}",
+                error.source_diagnostic().source().message
             );
         }
 

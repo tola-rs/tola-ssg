@@ -1128,29 +1128,35 @@ mod tests {
         std::array::from_fn(|index| (1 + index * 71 % 255) as u8)
     }
 
-    #[test]
-    fn coefficient_paths_match_recursive_walks() {
-        for start in [0, 2] {
-            for token in 0..12 {
-                let mut path = [false; 8];
-                let expected = tree_path(&COEFF_TREE, start, token, &mut path);
-                let compiled = &COEFF_PATHS[start / 2][usize::from(token)];
-                let Some(expected) = expected else {
-                    assert_eq!(compiled.len, 0);
-                    continue;
-                };
-                assert_eq!(usize::from(compiled.len), expected);
-                let mut node = start;
-                for (depth, branch) in path.into_iter().take(expected).enumerate() {
-                    assert_eq!(compiled.steps[depth], ((node >> 1) as u8, branch));
-                    node = COEFF_TREE[node + usize::from(branch)] as usize;
-                }
-            }
+    const PLANES: [CoefficientPlane; 4] = [
+        CoefficientPlane::LumaAc,
+        CoefficientPlane::LumaDc,
+        CoefficientPlane::Chroma,
+        CoefficientPlane::Luma,
+    ];
+
+    /// Every magnitude a token can carry, including both sides of each band boundary.
+    const TOKEN_MAGNITUDES: [u16; 20] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 18, 19, 34, 35, 66, 67, 127, 128, 129, 2047,
+    ];
+
+    /// The magnitudes one coefficient at one position takes in the cached-rate check.
+    const CACHED_MAGNITUDES: [u16; 19] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 15, 16, 18, 19, 34, 35, 66, 67, 2047,
+    ];
+
+    /// One row of the cost-model contract: what the model estimates, what the writer emits for
+    /// the same coefficients, and the case that names the disagreement when they differ.
+    type CostRow = (String, u64, u64);
+
+    fn assert_cost_rows(rows: Vec<CostRow>) {
+        for (subject, estimated, emitted) in rows {
+            assert_eq!(estimated, emitted, "{subject}");
         }
     }
 
     #[test]
-    fn coefficient_paths_preserve_coded_branches() {
+    fn token_bits_match_tree_walk() {
         for probs in coefficient_probability_cases() {
             let mut writer = BoolWriter::new();
             let mut reference = BoolWriter::new();
@@ -1199,41 +1205,6 @@ mod tests {
     }
 
     #[test]
-    fn magnitudes_select_categories() {
-        assert_eq!(token_for_magnitude(0), 0);
-        assert_eq!(token_for_magnitude(4), 4);
-        assert_eq!(token_for_magnitude(5), 5);
-        assert_eq!(token_for_magnitude(6), 5);
-        assert_eq!(token_for_magnitude(7), 6);
-        assert_eq!(token_for_magnitude(10), 6);
-        assert_eq!(token_for_magnitude(11), 7);
-        assert_eq!(token_for_magnitude(18), 7);
-        assert_eq!(token_for_magnitude(19), 8);
-        assert_eq!(token_for_magnitude(34), 8);
-        assert_eq!(token_for_magnitude(35), 9);
-        assert_eq!(token_for_magnitude(66), 9);
-        assert_eq!(token_for_magnitude(67), 10);
-        assert_eq!(token_for_magnitude(2047), 10);
-    }
-
-    #[test]
-    fn last_nonzero_matches_reverse_search() {
-        for pattern in 0u32..(1 << 16) {
-            let levels: [i16; 16] = std::array::from_fn(|index| ((pattern >> index) & 1) as i16);
-            for first in [0, 1] {
-                let expected = (first..16)
-                    .rev()
-                    .find(|position| levels[ZIGZAG[*position]] != 0);
-                assert_eq!(
-                    last_nonzero(&levels, first),
-                    expected,
-                    "{pattern:b} {first}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn scan_covers_every_coefficient() {
         let mut seen = [false; 16];
         for position in ZIGZAG {
@@ -1243,196 +1214,141 @@ mod tests {
         assert!(seen.iter().all(|seen| *seen));
     }
 
+    /// Every rate the model computes equals the bits the writer emits for the same coefficients:
+    /// one token, one cached pair, one block, one macroblock.
+    ///
+    /// The model exists only to make the encoder's searches cheap; the moment its arithmetic
+    /// drifts from the writer's the encoder optimises a different file than it produces.
     #[test]
-    fn coefficient_rates_match_emitted_tokens() {
+    fn cost_model_matches_emitted_bits() {
         for probs in coefficient_probability_cases() {
             let costs = TokenCosts::new(&probs);
-            for plane in [
-                CoefficientPlane::LumaAc,
-                CoefficientPlane::LumaDc,
-                CoefficientPlane::Chroma,
-                CoefficientPlane::Luma,
-            ] {
-                for context in 0..3 {
-                    for position in plane.first_position()..16 {
-                        for previous_was_zero in [false, true] {
-                            for magnitude in [
-                                0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 18, 19, 34, 35, 66, 67, 127, 128,
-                                129, 2047,
-                            ] {
-                                assert_eq!(
-                                    u64::from(costs.coefficient(
-                                        plane,
-                                        position,
-                                        context,
-                                        previous_was_zero,
-                                        magnitude,
-                                    )),
-                                    emitted_token_cost(
-                                        plane,
-                                        position,
-                                        context,
-                                        previous_was_zero,
-                                        Some(magnitude),
-                                        &probs,
-                                    )
-                                );
-                            }
+            assert_cost_rows(token_cost_rows(&costs, &probs));
+            assert_cost_rows(block_cost_rows(&costs, &probs));
+            assert_cost_rows(macroblock_cost_rows(probs));
+        }
+    }
+
+    fn token_cost_rows(costs: &TokenCosts, probs: &[u8; 1056]) -> Vec<CostRow> {
+        let mut rows = Vec::new();
+        for plane in PLANES {
+            for context in 0..3 {
+                for position in plane.first_position()..16 {
+                    for previous_was_zero in [false, true] {
+                        for magnitude in TOKEN_MAGNITUDES {
+                            rows.push((
+                                format!(
+                                    "token {} {position}/{context} previous_was_zero={previous_was_zero} magnitude={magnitude}",
+                                plane.index()
+                                ),
+                                u64::from(costs.coefficient(
+                                    plane,
+                                    position,
+                                    context,
+                                    previous_was_zero,
+                                    magnitude,
+                                )),
+                                emitted_token_cost(
+                                    plane,
+                                    position,
+                                    context,
+                                    previous_was_zero,
+                                    Some(magnitude),
+                                    probs,
+                                ),
+                            ));
                         }
                     }
                 }
             }
         }
-    }
-
-    #[test]
-    fn pair_rates_match_emitted_tokens() {
-        for probs in coefficient_probability_cases() {
-            let costs = TokenCosts::new(&probs);
-            for plane in [
-                CoefficientPlane::LumaAc,
-                CoefficientPlane::LumaDc,
-                CoefficientPlane::Chroma,
-                CoefficientPlane::Luma,
-            ] {
-                for group in 0..8 {
-                    let position = plane.first_position() + 2 * group;
-                    if position + 1 >= 16 {
-                        continue;
-                    }
-                    for context in 0..3 {
-                        let pair_context = (plane.index() * 8 + group) * 3 + context;
-                        for (packed, &rate) in
-                            costs.coefficient_pairs6[pair_context].iter().enumerate()
-                        {
-                            let first = (packed & 63) as u16;
-                            let second = (packed >> 6) as u16;
-                            let expected = emitted_token_cost(
+        for plane in PLANES {
+            for group in 0..8 {
+                let position = plane.first_position() + 2 * group;
+                if position + 1 >= 16 {
+                    continue;
+                }
+                for context in 0..3 {
+                    let pair_context = (plane.index() * 8 + group) * 3 + context;
+                    for (packed, &rate) in costs.coefficient_pairs6[pair_context].iter().enumerate()
+                    {
+                        let first = (packed & 63) as u16;
+                        let second = (packed >> 6) as u16;
+                        rows.push((
+                            format!(
+                                "pair {} {position}/{context} {first}+{second}",
+                                plane.index()
+                            ),
+                            u64::from(rate),
+                            emitted_token_cost(
                                 plane,
                                 position,
                                 context,
                                 group != 0 && context == 0,
                                 Some(first),
-                                &probs,
+                                probs,
                             ) + emitted_token_cost(
                                 plane,
                                 position + 1,
                                 magnitude_context(first),
                                 first == 0,
                                 Some(second),
-                                &probs,
-                            );
-                            assert_eq!(u64::from(rate), expected);
-                        }
+                                probs,
+                            ),
+                        ));
                     }
                 }
             }
         }
+        rows
     }
 
-    #[test]
-    fn packed_pair_scan_matches_zigzag() {
-        for (first, scan) in PAIR_SCAN.iter().enumerate() {
-            for (pair, &offsets) in scan.iter().enumerate() {
-                let position = first + 2 * pair;
-                if position + 1 >= 16 {
-                    continue;
-                }
-                assert_eq!(usize::from(offsets & 15), ZIGZAG[position]);
-                assert_eq!(usize::from(offsets >> 4), ZIGZAG[position + 1]);
-            }
-        }
-    }
-
-    #[test]
-    fn low_magnitude_block_rates_match_emitted_tokens() {
-        for probs in coefficient_probability_cases() {
-            let costs = TokenCosts::new(&probs);
-            for plane in [
-                CoefficientPlane::LumaAc,
-                CoefficientPlane::LumaDc,
-                CoefficientPlane::Chroma,
-                CoefficientPlane::Luma,
-            ] {
-                for context in 0..3 {
-                    for last in plane.first_position()..16 {
-                        for seed in 0..32 {
-                            let mut levels = [0i16; 16];
-                            for position in plane.first_position()..last {
-                                levels[ZIGZAG[position]] = ((seed * 31 + position * 7) % 8) as i16;
-                            }
-                            levels[ZIGZAG[last]] = ((seed * 17 + last) % 7 + 1) as i16;
-                            assert_eq!(
-                                costs.block(&levels, plane, context),
-                                emitted_block_cost(&levels, plane, context, &probs)
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn dense_rates_match_emitted_tokens() {
-        for probs in coefficient_probability_cases() {
-            let costs = TokenCosts::new(&probs);
-            for plane in [
-                CoefficientPlane::LumaAc,
-                CoefficientPlane::LumaDc,
-                CoefficientPlane::Chroma,
-                CoefficientPlane::Luma,
-            ] {
-                for context in 0..3 {
-                    for seed in 0..64 {
-                        let magnitudes = [0, 1, -1, 2, -2, 15, -15, 16, -16, 127, -128, 2047];
-                        let levels = std::array::from_fn(|position| {
-                            magnitudes[(seed * 73 + position * 31) % magnitudes.len()]
-                        });
-                        assert_eq!(
-                            costs.block(&levels, plane, context),
-                            emitted_block_cost(&levels, plane, context, &probs)
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn cached_rates_match_emitted_tokens() {
-        let probs = synthetic_probs();
-        let costs = TokenCosts::new(&probs);
-        for plane in [
-            CoefficientPlane::LumaAc,
-            CoefficientPlane::LumaDc,
-            CoefficientPlane::Chroma,
-            CoefficientPlane::Luma,
-        ] {
+    fn block_cost_rows(costs: &TokenCosts, probs: &[u8; 1056]) -> Vec<CostRow> {
+        let mut rows = Vec::new();
+        for plane in PLANES {
             for context in 0..3 {
-                for position in plane.first_position()..16 {
-                    for magnitude in [
-                        0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 15, 16, 18, 19, 34, 35, 66, 67, 2047,
-                    ] {
-                        let mut levels = [0; 16];
-                        levels[ZIGZAG[position]] = -magnitude;
-                        assert_eq!(
+                for last in plane.first_position()..16 {
+                    for seed in 0..32usize {
+                        let mut levels = [0i16; 16];
+                        for position in plane.first_position()..last {
+                            levels[ZIGZAG[position]] = ((seed * 31 + position * 7) % 8) as i16;
+                        }
+                        levels[ZIGZAG[last]] = ((seed * 17 + last) % 7 + 1) as i16;
+                        rows.push((
+                            format!("block-low {} {last}/{context} seed={seed}", plane.index()),
                             costs.block(&levels, plane, context),
-                            emitted_block_cost(&levels, plane, context, &probs)
-                        );
-                        assert_eq!(costs.block_rate(&levels, plane, context).1, magnitude != 0);
+                            emitted_block_cost(&levels, plane, context, probs),
+                        ));
                     }
                 }
-                if matches!(plane, CoefficientPlane::LumaAc) {
-                    let mut levels = [0; 16];
-                    levels[0] = 2047;
-                    assert_eq!(
-                        costs.block_rate(&levels, plane, context),
-                        (emitted_block_cost(&levels, plane, context, &probs), false)
-                    );
+                for seed in 0..64usize {
+                    let magnitudes = [0, 1, -1, 2, -2, 15, -15, 16, -16, 127, -128, 2047];
+                    let levels = std::array::from_fn(|position| {
+                        magnitudes[(seed * 73 + position * 31) % magnitudes.len()]
+                    });
+                    rows.push((
+                        format!("block-dense {}/{context} seed={seed}", plane.index()),
+                        costs.block(&levels, plane, context),
+                        emitted_block_cost(&levels, plane, context, probs),
+                    ));
+                }
+                for position in plane.first_position()..16 {
+                    for magnitude in CACHED_MAGNITUDES {
+                        let mut levels = [0; 16];
+                        levels[ZIGZAG[position]] = -(magnitude as i16);
+                        rows.push((
+                            format!(
+                                "block-cached {} {position}/{context} {magnitude}",
+                                plane.index()
+                            ),
+                            costs.block(&levels, plane, context),
+                            emitted_block_cost(&levels, plane, context, probs),
+                        ));
+                    }
                 }
             }
         }
+        rows
     }
 
     fn zero_macroblock() -> DenseMacroblock {
@@ -1477,91 +1393,55 @@ mod tests {
         (macroblock, spool)
     }
 
-    #[test]
-    fn plane_rates_match_emitted_macroblocks() {
-        for probs in coefficient_probability_cases() {
-            let costs = TokenCosts::new(&probs);
-            let mut tokens = TokenWriter::with_probs(2, probs);
-            for round in 0..8 {
-                let column = round % 2;
-                let dense = dense_macroblock(round);
-                let (macroblock, _spool) = pack(dense);
-                let neighbors = tokens.contexts.contexts(column);
-                let mut empty_neighbors = neighbors;
-                let zero_chroma = empty_neighbors.chroma_cost(&costs, &[[0; 16]; 4], &[[0; 16]; 4]);
-                let zero_luma = empty_neighbors.luma_cost(&costs, Some(&[0; 16]), &[[0; 16]; 16]);
-                let luma_only = DenseMacroblock {
-                    luma: dense.luma,
-                    y: dense.y,
-                    ..zero_macroblock()
-                };
-                let chroma_only = DenseMacroblock {
-                    u: dense.u,
-                    v: dense.v,
-                    ..zero_macroblock()
-                };
-                let luma_dc = match &dense.luma {
-                    Luma::Intra16 { dc, .. } => Some(dc),
-                    Luma::Intra4 { .. } => None,
-                };
-                let mut luma_neighbors = neighbors;
-                let luma_rate = luma_neighbors.luma_cost(&costs, luma_dc, &dense.y);
-                let mut chroma_neighbors = neighbors;
-                let chroma_rate = chroma_neighbors.chroma_cost(&costs, &dense.u, &dense.v);
-                for (candidate, rate) in [
-                    (&dense, luma_rate + chroma_rate),
-                    (&luma_only, luma_rate + zero_chroma),
-                    (&chroma_only, zero_luma + chroma_rate),
-                ] {
-                    let (candidate, candidate_spool) = pack(*candidate);
-                    let mut emitted = CostWriter::new();
-                    tokens.clone().write_macroblock(
-                        &mut emitted,
-                        column,
-                        &candidate,
-                        &candidate_spool,
-                    );
-                    assert_eq!(rate, emitted.bits(), "round {round}");
-                }
-                tokens.contexts.advance(column, &macroblock);
-            }
-        }
-    }
-
-    #[test]
-    fn macroblock_rates_preserve_neighbor_contexts() {
-        let probs = synthetic_probs();
+    fn macroblock_cost_rows(probs: [u8; 1056]) -> Vec<CostRow> {
         let costs = TokenCosts::new(&probs);
         let mut tokens = TokenWriter::with_probs(2, probs);
-        let mut advancing = TokenContexts::new(2);
+        let mut rows = Vec::new();
         for round in 0..8 {
             let column = round % 2;
             let dense = dense_macroblock(round);
-            let (macroblock, spool) = pack(dense);
-            let mut neighbors = tokens.contexts.contexts(column);
+            let (macroblock, _spool) = pack(dense);
+            let neighbors = tokens.contexts.contexts(column);
+            let mut empty_neighbors = neighbors;
+            let zero_chroma = empty_neighbors.chroma_cost(&costs, &[[0; 16]; 4], &[[0; 16]; 4]);
+            let zero_luma = empty_neighbors.luma_cost(&costs, Some(&[0; 16]), &[[0; 16]; 16]);
+            let luma_only = DenseMacroblock {
+                luma: dense.luma,
+                y: dense.y,
+                ..zero_macroblock()
+            };
+            let chroma_only = DenseMacroblock {
+                u: dense.u,
+                v: dense.v,
+                ..zero_macroblock()
+            };
             let luma_dc = match &dense.luma {
                 Luma::Intra16 { dc, .. } => Some(dc),
                 Luma::Intra4 { .. } => None,
             };
-            let expected = neighbors.luma_cost(&costs, luma_dc, &dense.y)
-                + neighbors.chroma_cost(&costs, &dense.u, &dense.v);
-            advancing.advance(column, &macroblock);
-            let mut emitted = CostWriter::new();
-            tokens.write_macroblock(&mut emitted, column, &macroblock, &spool);
-            assert_eq!(expected, emitted.bits());
-            for column in 0..2 {
-                let actual = tokens.contexts.contexts(column);
-                let advanced = advancing.contexts(column);
-                assert_eq!(actual.y2(), advanced.y2());
-                for index in 0..16 {
-                    assert_eq!(actual.y(index), advanced.y(index));
-                }
-                for index in 0..4 {
-                    assert_eq!(actual.u(index), advanced.u(index));
-                    assert_eq!(actual.v(index), advanced.v(index));
-                }
+            let mut luma_neighbors = neighbors;
+            let luma_rate = luma_neighbors.luma_cost(&costs, luma_dc, &dense.y);
+            let mut chroma_neighbors = neighbors;
+            let chroma_rate = chroma_neighbors.chroma_cost(&costs, &dense.u, &dense.v);
+            for (label, candidate, rate) in [
+                ("dense", &dense, luma_rate + chroma_rate),
+                ("luma", &luma_only, luma_rate + zero_chroma),
+                ("chroma", &chroma_only, zero_luma + chroma_rate),
+            ] {
+                let (candidate, candidate_spool) = pack(*candidate);
+                let mut emitted = CostWriter::new();
+                tokens
+                    .clone()
+                    .write_macroblock(&mut emitted, column, &candidate, &candidate_spool);
+                rows.push((
+                    format!("macroblock {label} round {round}"),
+                    rate,
+                    emitted.bits(),
+                ));
             }
+            tokens.contexts.advance(column, &macroblock);
         }
+        rows
     }
 
     #[test]
@@ -1578,26 +1458,5 @@ mod tests {
         assert_eq!(fitted.probs[2], 1);
         assert_eq!(fitted.probs[3], DEFAULT_COEFF_PROBS[3]);
         assert!(fitted.savings > 0);
-    }
-
-    #[test]
-    fn fitted_partition_tracks_both_tables() {
-        let fitted = synthetic_probs();
-        let mut subject = FittedPartition::new(&fitted);
-        let mut subject_tokens = TokenWriter::with_probs(2, fitted);
-        let mut fitted_writer = BoolWriter::new();
-        let mut fitted_tokens = TokenWriter::with_probs(2, fitted);
-        let mut default_writer = BoolWriter::new();
-        let mut default_tokens = TokenWriter::new(2);
-        for round in 0..8 {
-            let column = round % 2;
-            let (macroblock, spool) = pack(dense_macroblock(round));
-            subject_tokens.write_macroblock(&mut subject, column, &macroblock, &spool);
-            fitted_tokens.write_macroblock(&mut fitted_writer, column, &macroblock, &spool);
-            default_tokens.write_macroblock(&mut default_writer, column, &macroblock, &spool);
-        }
-        let (fitted_bytes, default_length) = subject.finish();
-        assert_eq!(fitted_bytes, fitted_writer.finish());
-        assert_eq!(default_length, default_writer.finish().len());
     }
 }

@@ -803,8 +803,9 @@ mod tests {
         assert_eq!(view.key(&cancel), Step::Cancel);
     }
 
+    /// A filter matching nothing says so and leaves the cursor on no row.
     #[test]
-    fn unmatched_filter_keeps_selection() {
+    fn unmatched_filter_reports_no_rows() {
         let mut view = view(&[Feature::Feed]);
         view.key(&key(KeyCode::Char('/')));
         view.paste("no-matching-feature");
@@ -814,6 +815,14 @@ mod tests {
                 .any(|line| line.contains("no matching"))
         );
         assert_eq!(cursor_row(&view), None);
+    }
+
+    /// With no row to act on, the list offers no movement and answers each without a change.
+    #[test]
+    fn unmatched_filter_offers_no_moves() {
+        let mut view = view(&[Feature::Feed]);
+        view.key(&key(KeyCode::Char('/')));
+        view.paste("no-matching-feature");
         for action in [
             Action::Down,
             Action::Up,
@@ -835,9 +844,27 @@ mod tests {
             assert_eq!(cursor_row(&view), None);
             assert_eq!(view.selection(), set(&[Feature::Feed]));
         }
+    }
+
+    /// Closing the filter keeps an unmatched query and its empty result.
+    #[test]
+    fn unmatched_filter_keeps_the_selection() {
+        let mut view = view(&[Feature::Feed]);
+        view.key(&key(KeyCode::Char('/')));
+        view.paste("no-matching-feature");
+        view.key(&key(KeyCode::Enter));
         view.key(&key(KeyCode::Char('/')));
         view.key(&key(KeyCode::Esc));
         assert_eq!(cursor_row(&view), None);
+        assert_eq!(view.selection(), set(&[Feature::Feed]));
+    }
+
+    /// Clearing the filter brings the rows back and the cursor onto one.
+    #[test]
+    fn cleared_filter_restores_rows() {
+        let mut view = view(&[Feature::Feed]);
+        view.key(&key(KeyCode::Char('/')));
+        view.paste("no-matching-feature");
         view.key(&key(KeyCode::Char('/')));
         for _ in 0.."no-matching-feature".len() {
             view.key(&key(KeyCode::Backspace));
@@ -923,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn movement_hints_follow_the_list_ends() {
+    fn only_reachable_moves_are_offered() {
         let mut view = view(&[Feature::Feed]);
         assert!(!view.live().contains(&Action::First));
         assert!(!view.live().contains(&Action::Up));

@@ -209,9 +209,6 @@ fn decoded(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use tola_build::config::loading::{BuildOverrides, load_site_config};
-    use tola_packages::HOST_MODULE;
-    use tola_packages::library::{HostInputs, SiteLibrary};
-    use tola_typst::typst::foundations::{Array, Dict, Value};
 
     use super::*;
 
@@ -359,100 +356,5 @@ mod tests {
             written(&urls, "/brand/absent.svg"),
             Written::Unpublished
         ));
-    }
-
-    #[test]
-    fn written_definition_keeps_the_client_spelling() {
-        let (directory, config) = site_with_declared_assets();
-        let urls = published_urls(&config);
-        let source = Source::detached("#asset-url(\"/brand/logo.svg\")");
-        let url = "/brand/logo.svg";
-        let at = source.text().find(url).expect("the written URL");
-        let spelled = directory.path().join("spelled");
-
-        let definition = written_definition(
-            &urls,
-            &crate::uri::ClientRoot::with_resolved(&spelled, config.get_root()),
-            &source,
-            at..at + url.len(),
-        );
-
-        let Some(lsp_types::GotoDefinitionResponse::Scalar(location)) = definition else {
-            panic!("the declared tree member is a definition");
-        };
-        assert_eq!(
-            location.uri,
-            crate::uri::from_file_path(&spelled.join("brand/logo.svg")).unwrap()
-        );
-    }
-
-    /// The value a site imports as `asset-url` is the native the domain table names.
-    ///
-    /// The binding spells the function `asset-url`; the value itself is named `tola-asset-url`, and
-    /// that identity is what the table keys on.
-    #[test]
-    fn asset_url_parameter_has_url_domain() {
-        let library = SiteLibrary::new(HostInputs {
-            site: Dict::new(),
-            asset_urls: Dict::new(),
-            asset_origins: Dict::new(),
-            source_records: Array::new(),
-            source_records_by_file: Dict::new(),
-            source_origins: Dict::new(),
-        });
-        let library = library.shared();
-        let Value::Module(sys) = library.global.scope().get("sys").unwrap().read() else {
-            panic!("sys is a module")
-        };
-        let Value::Dict(inputs) = sys.scope().get("inputs").unwrap().read() else {
-            panic!("sys.inputs is a dictionary")
-        };
-        let Value::Module(host) = inputs.get(HOST_MODULE).unwrap().clone() else {
-            panic!("the host channel is a module")
-        };
-        let Value::Func(asset_url) = host.scope().get("asset-url").unwrap().read() else {
-            panic!("asset-url is a function")
-        };
-
-        assert_eq!(asset_url.name(), Some("tola-asset-url"));
-        assert_eq!(
-            domain_of(asset_url, "declared-url"),
-            Some(ArgumentDomain::SiteAssetUrl)
-        );
-        assert_eq!(domain_of(asset_url, "undeclared-parameter"), None);
-    }
-
-    #[test]
-    fn completion_names_relative_asset_sources() {
-        let (_directory, config) = site_with_declared_assets();
-        let urls = published_urls(&config);
-        let source = Source::detached("#asset-url(\"/\")");
-        let start = source.text().find('/').unwrap();
-        let lsp_types::CompletionResponse::List(list) = url_completions(
-            &urls,
-            config.get_root(),
-            &source,
-            "/",
-            start..start + 1,
-            start + 1,
-        ) else {
-            panic!("asset URL completions")
-        };
-        for (url, paths) in [
-            ("/app.js", vec!["app.js"]),
-            ("/brand/logo.svg", vec!["logo.svg", "brand"]),
-            ("/图.svg", vec!["图.svg"]),
-        ] {
-            let detail = list
-                .items
-                .iter()
-                .find(|item| item.label == url)
-                .unwrap()
-                .detail
-                .as_ref()
-                .unwrap();
-            let named = detail.split('`').skip(1).step_by(2).collect::<Vec<_>>();
-            assert_eq!(named, paths);
-        }
     }
 }

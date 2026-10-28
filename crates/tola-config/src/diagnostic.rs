@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn severity_is_independent_of_message_text() {
+    fn constructors_decide_severity() {
         let error = ConfigDiagnostic::new(FieldPath::new("theme"), "experimental field");
         assert_eq!(error.severity(), ConfigDiagnosticSeverity::Error);
 

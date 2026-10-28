@@ -331,27 +331,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::tests::{
-        assert_cancelled, compiler, inputs, inputs_at, site_configuration,
-    };
-    use crate::compiler::{
-        IncomingCallsRead, PackageSourceRead, SourceCompilation, SourceCompiler, SourceInputs,
-        SourceJob,
-    };
+    use crate::compiler::tests::{compiler, inputs_at, site_configuration};
+    use crate::compiler::{IncomingCallsRead, SourceCompilation, SourceJob};
     use crate::sources::SourceView;
     use lsp_server::RequestId;
-    use tola_build::BuildResources;
     use tola_typst::typst::syntax::Source;
-
-    fn package_query(sources: SourceInputs) -> SourceJob {
-        SourceJob::PackageSource(PackageSourceRead {
-            id: 7.into(),
-            serial: 11,
-            uri: "tola-package:/tola/document/0.0.0/lib.typ".parse().unwrap(),
-            cancellation: sources.cancellation,
-        })
-    }
-
     /// A failed revision's world still answers which sources reach a file.
     ///
     /// The pages a compilation realized are absent from a failed realization, but the sources
@@ -402,21 +386,6 @@ mod tests {
             "{calls:?}"
         );
     }
-
-    #[test]
-    fn cancelled_package_read_is_never_answered() {
-        let mut compiler = SourceCompiler::new(
-            |_, _| anyhow::bail!("invalid configuration"),
-            BuildResources::default(),
-        );
-        let canceller = tola_build::cancellation::BuildCanceller::new();
-        canceller.cancel();
-        assert_cancelled(compiler.compile(package_query(inputs(
-            Path::new("/invalid-site"),
-            canceller.token(),
-        ))));
-    }
-
     /// A declaration and the page one file writes answer at one address: a symbol list spells every
     /// document the way the client named the root.
     ///

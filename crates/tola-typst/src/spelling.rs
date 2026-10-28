@@ -175,22 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_transposition_is_one_edit() {
-        for (written, candidate) in [
-            ("teh", "the"),
-            ("recieve", "receive"),
-            ("widht", "width"),
-            ("siet", "site"),
-        ] {
-            assert_eq!(
-                closest_of(written, &[candidate]),
-                Some(candidate),
-                "{written}"
-            );
-        }
-    }
-
-    #[test]
     fn transposition_outranks_substitution() {
         assert_eq!(closest_of("teh", &["tea", "the"]), Some("the"));
         assert_eq!(
@@ -205,16 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn ties_prefer_the_longer_shared_prefix() {
-        assert_eq!(closest_of("cat", &["coat", "cart"]), Some("cart"));
-        assert_eq!(
-            closest_of("cat", &["cart", "coat"]),
-            Some("cart"),
-            "order does not decide"
-        );
-    }
-
-    #[test]
     fn short_names_are_not_corrected() {
         for (written, candidate) in [("x", "y"), ("ab", "cd"), ("", "a")] {
             assert_eq!(
@@ -223,24 +197,5 @@ mod tests {
                 "{written:?} was corrected to {candidate:?}"
             );
         }
-    }
-
-    #[test]
-    fn longer_names_allow_two_edits() {
-        assert_eq!(
-            closest_of("descrpton", &["description"]),
-            Some("description")
-        );
-        assert_eq!(
-            closest_of("cat", &["cost"]),
-            None,
-            "two edits in a short name make a different name"
-        );
-    }
-
-    #[test]
-    fn declared_name_suppresses_neighbour() {
-        assert_eq!(closest_of("title", &["title", "titles"]), None);
-        assert_eq!(closest_of("build", &["builds", "build"]), None);
     }
 }

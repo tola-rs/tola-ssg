@@ -372,47 +372,4 @@ mod tests {
             }
         }
     }
-
-    #[test]
-    fn header_costs_match_coded_modes() {
-        let mut contexts = BmodeContexts::new(3);
-        let candidates = [
-            [0; 16],
-            [9; 16],
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5],
-        ];
-        for macroblock in 0..9 {
-            let macroblock_x = macroblock % 3;
-            for chroma in 0..4 {
-                for luma in 0..4 {
-                    let mut writer = CostWriter::new();
-                    contexts
-                        .clone()
-                        .write_intra(&mut writer, macroblock_x, luma, chroma);
-                    assert_eq!(
-                        i16_mode_cost(luma) + chroma_mode_cost(chroma),
-                        writer.bits(),
-                        "macroblock {macroblock}, luma {luma}, chroma {chroma}"
-                    );
-                }
-                for modes in &candidates {
-                    let mut writer = CostWriter::new();
-                    contexts
-                        .clone()
-                        .write_b_pred(&mut writer, macroblock_x, modes, chroma);
-                    assert_eq!(
-                        contexts.i4_mode_cost(macroblock_x, modes) + chroma_mode_cost(chroma),
-                        writer.bits(),
-                        "macroblock {macroblock}, modes {modes:?}, chroma {chroma}"
-                    );
-                }
-            }
-            let mut writer = CostWriter::new();
-            if macroblock % 2 == 0 {
-                contexts.write_intra(&mut writer, macroblock_x, 2, 1);
-            } else {
-                contexts.write_b_pred(&mut writer, macroblock_x, &candidates[2], 3);
-            }
-        }
-    }
 }

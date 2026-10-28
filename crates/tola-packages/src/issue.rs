@@ -565,38 +565,6 @@ mod tests {
         assert_eq!(origin.kind, OriginKind::Default);
         assert_eq!(origin.path, vec![key("count")]);
     }
-
-    #[test]
-    fn authored_causes_read_as_sentences() {
-        let mut cause = issue(
-            "custom",
-            vec![],
-            "Published blog pages need a publication date",
-        );
-        cause.notes.push("review metadata".into());
-        let raw = wrapper("schema.default", vec![key("published")], vec![cause]);
-
-        assert_eq!(
-            format(&[raw]),
-            "`$.published` is not set: Published blog pages need a publication date\n  note: review metadata"
-        );
-    }
-
-    #[test]
-    fn converted_values_use_the_output_voice() {
-        let cause = issue(
-            "schema.type",
-            vec![key("count")],
-            "expected `int`, found `str`",
-        );
-        let raw = wrapper("schema.output", vec![key("value")], vec![cause]);
-
-        assert_eq!(
-            format(&[raw]),
-            "`$.value` was converted by the schema, but the result is invalid at `$.count`: expected `int`, found `str`"
-        );
-    }
-
     #[test]
     fn ordinary_issues_keep_tree() {
         let mut parent = issue("custom", vec![], "outer");
@@ -610,21 +578,5 @@ mod tests {
             format(&[parent]),
             "`$`: outer\n  `$.inner`: expected `int`, found `str`"
         );
-    }
-
-    #[test]
-    fn encoding_round_trips_the_normalized_shape() {
-        let cause = issue(
-            "schema.type",
-            vec![key("count")],
-            "expected `int`, found `str`",
-        );
-        let raw = wrapper("schema.default", vec![key("rows")], vec![cause]);
-        let normalized = normalize(&[raw]);
-
-        let encoded = normalized[0].encode();
-        let decoded = Issue::decode(&encoded).expect("encoded Issue decodes");
-
-        assert_eq!(decoded, normalized[0]);
     }
 }

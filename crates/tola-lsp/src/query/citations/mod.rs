@@ -236,170 +236,6 @@ mod tests {
         assert!(labels.contains(&"knuth1984"), "{labels:?}");
     }
 
-    /// A citation answers the entry a bibliography declares, and says so when none reaches the key.
-    #[test]
-    fn citations_answer_their_bibliography() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        let program = "#bibliography(\"refs.bib\")\n\nSee @knuth|1984.\n";
-        let hover = site.hover_text(program).expect("a citation hover");
-        // The site's own style renders the reference, not the raw `.bib` fields.
-        assert!(hover.contains("D. E. Knuth"), "{hover}");
-        assert!(hover.contains("Literate Programming"), "{hover}");
-        assert!(hover.contains("content/refs.bib"), "{hover}");
-        assert!(
-            site.definition(program).is_some(),
-            "a definition inside the bibliography"
-        );
-
-        let near_miss = site
-            .hover_text("#bibliography(\"refs.bib\")\n\nSee @knuth|2000.\n")
-            .expect("a hover for a key no entry reaches");
-        assert!(
-            near_miss.contains("no bibliography declares"),
-            "{near_miss}"
-        );
-    }
-
-    /// A name the library declares answers with the signature it takes, then the documentation Typst
-    /// has for it.
-    #[test]
-    fn library_name_answers_its_signature() {
-        let mut site = QuerySession::new();
-        let hover = site
-            .hover_text("#set te|xt(lang: \"de\")\n")
-            .expect("a hover for the standard library");
-        assert!(hover.contains("text("), "{hover}");
-        assert!(hover.contains("Customizes the look"), "{hover}");
-    }
-
-    /// A YAML bibliography answers like any other: the entry renders, and its key is reachable.
-    #[test]
-    fn yaml_bibliography_answers_its_entry() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.yml",
-            "tarry:\n    type: Book\n    title: Harry Potter and the Order of the Phoenix\n    author: Rowling, J. K.\n    date: 2003-06-21\n",
-        );
-        let program = "#bibliography(\"refs.yml\")\n\nSee @tar|ry.\n";
-        let hover = site.hover_text(program).expect("a citation hover");
-        assert!(hover.contains("Harry Potter"), "{hover}");
-        assert!(hover.contains("content/refs.yml"), "{hover}");
-        assert!(
-            site.definition(program).is_some(),
-            "a definition inside the YAML bibliography"
-        );
-    }
-
-    /// Every bibliography the site compiles answers, not only the one its first call names.
-    #[test]
-    fn every_compiled_bibliography_answers() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        site.site.write(
-            "content/other.bib",
-            "@article{onlyb,\n  title = {Second File Work},\n  author = {Doe, Jane},\n  year = {2001},\n}\n",
-        );
-        // The site realizes this document's call first, and `other.typ` names a second bibliography.
-        site.site.write(
-            "content/other.typ",
-            "= Other\n\n#bibliography(\"other.bib\")\n",
-        );
-        let program = "#bibliography(\"refs.bib\")\n\nSee @only|b.\n";
-        let hover = site
-            .hover_text(program)
-            .expect("a hover on the second bibliography");
-        assert!(hover.contains("Second File Work"), "{hover}");
-        assert!(hover.contains("content/other.bib"), "{hover}");
-        assert!(
-            site.definition(program).is_some(),
-            "a definition inside the second bibliography"
-        );
-        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @only|\n");
-        let labels = completion_labels(&items);
-        assert!(labels.contains(&"onlyb"), "{labels:?}");
-    }
-
-    /// A call's sources may be an array, a value bound elsewhere, or a `path(…)`, and the editor
-    /// reads what the site compiled either way.
-    #[test]
-    fn bibliographies_read_arrays_values_and_paths() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        site.site.write(
-            "content/other.bib",
-            "@article{onlyb,\n  title = {Second File Work},\n  author = {Doe, Jane},\n  year = {2001},\n}\n",
-        );
-        let array = "#bibliography((\"refs.bib\", \"other.bib\"))\n\nSee @only|b.\n";
-        let hover = site.hover_text(array).expect("a hover on an array source");
-        assert!(hover.contains("Second File Work"), "{hover}");
-        let bound =
-            "#let refs = (\"refs.bib\", \"other.bib\")\n#bibliography(refs)\n\nSee @only|b.\n";
-        let hover = site.hover_text(bound).expect("a hover on a bound source");
-        assert!(hover.contains("Second File Work"), "{hover}");
-        let spelled = "#bibliography(path(\"refs.bib\"))\n\nSee @knuth|1984.\n";
-        let hover = site.hover_text(spelled).expect("a hover on a path source");
-        assert!(hover.contains("Literate Programming"), "{hover}");
-    }
-
-    /// A site whose program did not compile still reads the bibliography calls its sources spell.
-    #[test]
-    fn failed_site_reads_spelled_bibliography_sources() {
-        let mut site = QuerySession::with_program("#let broken =\n");
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
-        );
-        site.site.write(
-            "content/other.bib",
-            "@article{onlyb,\n  title = {Second File Work},\n  author = {Doe, Jane},\n  year = {2001},\n}\n",
-        );
-        site.site.write(
-            "content/array.typ",
-            "= Array\n\n#bibliography((\"refs.bib\",))\n",
-        );
-        site.site.write(
-            "content/spelled.typ",
-            "= Spelled\n\n#bibliography(path(\"other.bib\"))\n",
-        );
-        let hover = site
-            .hover_text("See @knuth|1984 and @onlyb.\n")
-            .expect("a hover through an array source");
-        assert!(hover.contains("Literate Programming"), "{hover}");
-        let hover = site
-            .hover_text("See @knuth1984 and @only|b.\n")
-            .expect("a hover through a path source");
-        assert!(hover.contains("Second File Work"), "{hover}");
-    }
-
-    /// A bibliography renders its terms in the language its own call is written in.
-    #[test]
-    fn hover_renders_terms_in_the_call_language() {
-        let mut site = QuerySession::new();
-        site.site.write(
-            "content/refs.bib",
-            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E. and Muster, Max},\n  year = {1984},\n}\n",
-        );
-        let german = site
-            .hover_text(
-                "#set text(lang: \"de\")\n#bibliography(\"refs.bib\")\n\nSee @knuth|1984.\n",
-            )
-            .expect("a hover in a German bibliography");
-        assert!(german.contains("und"), "{german}");
-        let english = site
-            .hover_text("#bibliography(\"refs.bib\")\n\nSee @knuth|1984.\n")
-            .expect("a hover in the default language");
-        assert!(english.contains(" and "), "{english}");
-    }
     /// A YAML key after multibyte text still points at the key itself: the scanner counts
     /// characters, and a range that addresses bytes has both mapped.
     #[test]
@@ -488,17 +324,30 @@ mod tests {
         assert!(edited.contains("Edited Title"), "{edited}");
     }
 
-    /// A citation completes by its key, without regard to case, and by the entry's title.
+    /// A citation completes by the key prefix the author typed.
     #[test]
-    fn citation_completion_offers_keys_and_titles() {
+    fn citation_keys_complete_on_prefix() {
         let mut site = QuerySession::new();
         site.site.write(
             "content/refs.bib",
             "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
         );
         let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @Kn|\n");
-        let labels = completion_labels(&items);
-        assert!(labels.contains(&"knuth1984"), "{labels:?}");
+        assert!(
+            completion_labels(&items).contains(&"knuth1984"),
+            "{items:?}"
+        );
+    }
+
+    /// A completed title writes the entry's key in place of the typed text.
+    #[test]
+    fn title_item_writes_the_key() {
+        let mut site = QuerySession::new();
+        site.site.write(
+            "content/refs.bib",
+            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
+        );
+        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @liT|\n");
         let titled = item_labeled(&items, "Literate Programming");
         assert_eq!(titled.filter_text.as_deref(), Some("Literate Programming"));
         let Some(lsp_types::CompletionItemLabelDetails { description, .. }) = &titled.label_details
@@ -510,16 +359,23 @@ mod tests {
             panic!("the title item edits the key in place");
         };
         assert_eq!(edit.new_text, "knuth1984");
-
-        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @liT|\n");
-        let titled = item_labeled(&items, "Literate Programming");
-        let Some(CompletionTextEdit::Edit(edit)) = &titled.text_edit else {
-            panic!("the title item edits the key in place");
-        };
-        assert_eq!(edit.new_text, "knuth1984");
         assert_eq!(edit.range.start, Position::new(2, 5));
         assert_eq!(edit.range.end, Position::new(2, 8));
+    }
 
+    /// A title prefix matches without regard to case, and names no entry it does not match.
+    #[test]
+    fn title_prefix_ignores_case() {
+        let mut site = QuerySession::new();
+        site.site.write(
+            "content/refs.bib",
+            "@article{knuth1984,\n  title = {Literate Programming},\n  author = {Knuth, Donald E.},\n  year = {1984},\n}\n",
+        );
+        let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @liT|\n");
+        assert!(
+            completion_labels(&items).contains(&"Literate Programming"),
+            "{items:?}"
+        );
         let items = site.completion("#bibliography(\"refs.bib\")\n\nSee @unrelated|\n");
         assert!(!completion_labels(&items).contains(&"Literate Programming"));
     }

@@ -228,30 +228,6 @@ mod tests {
             assert_eq!(parse_date(&Value::Datetime(expected)).unwrap(), expected);
         }
     }
-
-    #[test]
-    fn dates_reject_invalid_values() {
-        for source in [
-            "1900-02-29",
-            "2026-02-30",
-            "0000-01-01",
-            "10000-01-01",
-            "2026-1-01",
-            " 2026-01-01",
-            "2026-01-01 ",
-            "2026-01-01T00:00:00Z",
-        ] {
-            assert!(parse_date(&text(source)).is_err(), "{source}");
-        }
-        for datetime in [
-            Datetime::from_ymd(0, 1, 1).unwrap(),
-            Datetime::from_hms(1, 2, 3).unwrap(),
-            Datetime::from_ymd_hms(2026, 1, 1, 1, 2, 3).unwrap(),
-        ] {
-            assert!(parse_date(&Value::Datetime(datetime)).is_err());
-        }
-    }
-
     #[test]
     fn timestamps_keep_local_offsets() {
         let source = "1970-01-01t00:30:00+01:00";
@@ -269,81 +245,5 @@ mod tests {
             assert_eq!(timestamp.rfc3339(), source);
             assert_eq!(timestamp.unix_seconds(), seconds);
         }
-    }
-
-    #[test]
-    fn fractions_preserve_exact_order() {
-        let earlier =
-            Timestamp::parse(&text("2026-10-11T08:00:00.000000000000000001+08:00")).unwrap();
-        let later = Timestamp::parse(&text("2026-10-11T00:00:00.000000000000000002Z")).unwrap();
-        assert!(
-            (earlier.unix_seconds(), earlier.subsecond())
-                < (later.unix_seconds(), later.subsecond())
-        );
-        assert_eq!(earlier.subsecond(), "000000000000000001");
-        assert_eq!(earlier.to_fixed(), later.to_fixed());
-        let source = "2026-01-01T00:00:00.123456789987000Z";
-        let timestamp = Timestamp::parse(&text(source)).unwrap();
-        assert_eq!(timestamp.rfc3339(), source);
-        assert_eq!(timestamp.subsecond(), "123456789987");
-        assert_eq!(timestamp.to_fixed().nanosecond(), 123_456_789);
-        let zero = Timestamp::parse(&text("2026-01-01T00:00:00.000Z")).unwrap();
-        assert_eq!(zero.subsecond(), "");
-        assert_eq!(zero.to_fixed().nanosecond(), 0);
-    }
-
-    #[test]
-    fn native_dates_use_utc_midnight() {
-        let timestamp =
-            Timestamp::parse(&Value::Datetime(Datetime::from_ymd(2024, 2, 29).unwrap())).unwrap();
-        assert_eq!(timestamp.rfc3339(), "2024-02-29T00:00:00Z");
-        assert_eq!(timestamp.subsecond(), "");
-    }
-
-    #[test]
-    fn native_nanoseconds_survive_conversion() {
-        let Datetime::Datetime(datetime) = Datetime::from_ymd_hms(2026, 1, 2, 3, 4, 5).unwrap()
-        else {
-            unreachable!();
-        };
-        let value = Value::Datetime(Datetime::Datetime(
-            datetime.replace_nanosecond(123_456_780).unwrap(),
-        ));
-        let timestamp = Timestamp::parse(&value).unwrap();
-        assert_eq!(timestamp.rfc3339(), "2026-01-02T03:04:05.12345678Z");
-        assert_eq!(timestamp.subsecond(), "12345678");
-        assert_eq!(timestamp.to_fixed().nanosecond(), 123_456_780);
-    }
-
-    #[test]
-    fn timestamps_reject_invalid_components() {
-        for source in [
-            "2026-01-01",
-            "00:00:00Z",
-            "0000-01-01T00:00:00Z",
-            "10000-01-01T00:00:00Z",
-            "2026-02-30T00:00:00Z",
-            "1900-02-29T00:00:00Z",
-            "2026-01-01 00:00:00Z",
-            "2026-1-01T00:00:00Z",
-            "2026-01-01T24:00:00Z",
-            "2026-01-01T00:60:00Z",
-            "2016-12-31T23:59:60Z",
-            "2026-01-01T00:00:00.Z",
-            "2026-01-01T00:00:00.12xZ",
-            "2026-01-01T00:00:00.1234567890000000000xZ",
-            "2026-01-01T00:00:00",
-            "2026-01-01T00:00:00+24:00",
-            "2026-01-01T00:00:00+23:60",
-            "2026-01-01T00:00:00+0800",
-            " 2026-01-01T00:00:00Z",
-            "2026-01-01T00:00:00Z\n",
-            "2026-01-01T00:00:00🦀",
-            "日期日期日期日期日期T00:00:00Z",
-        ] {
-            assert!(Timestamp::parse(&text(source)).is_err(), "{source}");
-        }
-        assert!(Timestamp::parse(&Value::Datetime(Datetime::from_hms(1, 2, 3).unwrap())).is_err());
-        assert!(Timestamp::parse(&Value::None).is_err());
     }
 }

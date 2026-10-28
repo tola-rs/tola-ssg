@@ -21,33 +21,45 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use anyhow::{Context, Result};
+    use anyhow::Result;
     use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
     use lsp_server::{Message, Notification, Request, RequestId, Response};
     use lsp_types::notification::{self, Notification as LspNotification};
     use lsp_types::request::Request as LspRequest;
     use lsp_types::{
-        CodeLens, CompletionItem, CompletionResponse, DidChangeTextDocumentParams,
+        CompletionItem, CompletionResponse, DidChangeTextDocumentParams,
         DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-        DocumentFormattingParams, DocumentLink, DocumentLinkParams, DocumentSymbolParams,
-        DocumentSymbolResponse, FileChangeType, FileEvent, FoldingRange, FoldingRangeParams,
-        FormattingOptions, GotoDefinitionResponse, Hover, InitializeParams, InitializeResult,
-        Position, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-        TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
-        WorkspaceSymbol, WorkspaceSymbolResponse, request as lsp_request,
+        FileChangeType, FileEvent, Hover, InitializeParams, InitializeResult, Position,
+        TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+        TextDocumentPositionParams, VersionedTextDocumentIdentifier, request as lsp_request,
     };
     use tola_build::BuildResources;
     use tola_build::cancellation::BuildCanceller;
-    use tola_build::config::loading::{BuildOverrides, load_site_config};
     use tola_build::diagnostic::Diagnostic;
-    use tola_typst::typst::syntax::Source;
 
     use crate::server::ServedWorkspace;
-    use crate::{position, uri};
+    use crate::uri;
+
+    pub(crate) use fixtures::{SiteDirectory, announcing_client, marked_cursor};
 
     pub(super) const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
-    const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
+    /// The site fixtures the query lane and the connection lane both build a test site with.
+    pub(crate) mod fixtures {
+        use std::path::{Path, PathBuf};
+
+        use std::sync::Arc;
+
+        use anyhow::Result;
+        use lsp_types::{Position, Uri};
+        use tola_build::config::ResolvedSiteConfig;
+        use tola_build::config::loading::{BuildOverrides, load_site_config};
+        use tola_typst::typst::syntax::Source;
+
+        use crate::{position, uri};
+
+        /// The scaffold-shaped entry program: every content file becomes one page.
+        pub(crate) const ENTRY_PROGRAM: &str = r#"#import "@tola/source:0.0.0": all-sources
 #import "@tola/site:0.0.0": site
 #import "@tola/address:0.0.0": decode-url-path, join-route, output-of, slugify
 #for source in all-sources() {
@@ -63,53 +75,104 @@ pub(crate) mod tests {
 }
 "#;
 
-    pub(super) struct SiteDirectory {
-        directory: tempfile::TempDir,
-    }
-
-    impl SiteDirectory {
-        pub(super) fn new() -> Self {
-            let site = Self::empty();
-            site.write("site.typ", ENTRY_PROGRAM);
-            site
+        /// A site on disk: its configuration, its content root, and whatever it writes under them.
+        pub(crate) struct SiteDirectory {
+            directory: tempfile::TempDir,
         }
 
-        pub(super) fn empty() -> Self {
-            let directory = tempfile::tempdir().expect("a temporary site directory");
-            let site = Self { directory };
-            site.write("tola.toml", "");
-            std::fs::create_dir_all(site.path("content")).expect("a content root");
-            site
-        }
-
-        /// A workspace that holds no site configuration: no `tola.toml` at or above its root.
-        pub(super) fn documents() -> Self {
-            let directory = tempfile::tempdir().expect("a temporary workspace directory");
-            Self { directory }
-        }
-
-        pub(super) fn root(&self) -> &Path {
-            self.directory.path()
-        }
-
-        pub(super) fn path(&self, relative: &str) -> PathBuf {
-            self.root().join(relative)
-        }
-
-        pub(super) fn uri(&self, relative: &str) -> Uri {
-            uri::from_file_path(&self.path(relative)).expect("a site file is addressable")
-        }
-
-        pub(super) fn write(&self, relative: &str, text: &str) {
-            let path = self.path(relative);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("a site directory");
+        impl SiteDirectory {
+            /// A site whose entry program publishes every content file.
+            pub(crate) fn new() -> Self {
+                let site = Self::empty();
+                site.write("site.typ", ENTRY_PROGRAM);
+                site
             }
-            std::fs::write(&path, text).expect("a site file");
+
+            /// A site with no entry program: the caller writes the one its test reads.
+            pub(crate) fn empty() -> Self {
+                let directory = tempfile::tempdir().expect("a temporary site directory");
+                let site = Self { directory };
+                site.write("tola.toml", "");
+                std::fs::create_dir_all(site.path("content")).expect("a content root");
+                site
+            }
+
+            pub(crate) fn root(&self) -> &Path {
+                self.directory.path()
+            }
+
+            pub(crate) fn path(&self, relative: &str) -> PathBuf {
+                self.root().join(relative)
+            }
+
+            pub(crate) fn uri(&self, relative: &str) -> Uri {
+                uri::from_file_path(&self.path(relative)).expect("a site file is addressable")
+            }
+
+            pub(crate) fn write(&self, relative: &str, text: &str) {
+                let path = self.path(relative);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).expect("a site directory");
+                }
+                std::fs::write(&path, text).expect("a site file");
+            }
         }
 
-        pub(super) fn read(&self, relative: &str) -> String {
-            std::fs::read_to_string(self.path(relative)).expect("a site file")
+        /// The site configuration an empty `tola.toml` below `root` resolves.
+        pub(crate) fn site_configuration(root: &Path) -> Result<Arc<ResolvedSiteConfig>> {
+            Ok(Arc::new(
+                load_site_config(
+                    Some(&root.join("tola.toml")),
+                    tola_typst::PackageLocations::from_absolute_roots(None, None)?,
+                    &BuildOverrides::default(),
+                )?
+                .into_config(),
+            ))
+        }
+
+        /// The capabilities every test client announces.
+        pub(crate) fn announcing_client() -> lsp_types::ClientCapabilities {
+            serde_json::from_value(serde_json::json!({
+                "textDocument": {
+                    "publishDiagnostics": { "versionSupport": true, "relatedInformation": true, "dataSupport": true },
+                    "codeLens": {},
+                    "inlayHint": {},
+                    "hover": { "contentFormat": ["markdown"] },
+                    "completion": {
+                        "completionItem": {
+                            "snippetSupport": true,
+                            "documentationFormat": ["markdown"]
+                        }
+                    },
+                    "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
+                    "codeAction": {
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": { "valueSet": ["quickfix"] }
+                        },
+                        "honorsChangeAnnotations": true,
+                        "isPreferredSupport": true
+                    }
+                },
+                "workspace": {
+                    "workspaceEdit": {
+                        "documentChanges": true,
+                        "resourceOperations": ["create", "rename", "delete"],
+                        "changeAnnotationSupport": {}
+                    }
+                }
+            }))
+            .expect("editor capabilities")
+        }
+
+        /// One source with a cursor marker, and the position that marker sits at.
+        pub(crate) fn marked_cursor(marked: &str) -> (String, Position) {
+            let offset = marked.find('|').expect("a marked source has a cursor");
+            let text = marked.replacen('|', "", 1);
+            let source = Source::detached(text.clone());
+            let cursor = position::utf16_range(source.lines(), offset..offset)
+                .expect("the cursor lies inside the source")
+                .start;
+            (text, cursor)
         }
     }
 
@@ -129,16 +192,6 @@ pub(crate) mod tests {
         pub(super) fn start(site: &SiteDirectory) -> Self {
             Self::start_configured(site, |root, _| load_configuration(root), None)
         }
-
-        /// A session whose site selects its configuration by name, as `--config` does.
-        pub(super) fn start_named(site: &SiteDirectory, configuration: PathBuf) -> Self {
-            Self::start_configured(
-                site,
-                |root, _| load_configuration(root),
-                Some(configuration),
-            )
-        }
-
         pub(super) fn start_with_loader<F>(site: &SiteDirectory, load: F) -> Self
         where
             F: FnMut(&Path, &[(PathBuf, Arc<str>)]) -> Result<ServedWorkspace> + Send + 'static,
@@ -298,97 +351,12 @@ pub(crate) mod tests {
             ))
             .expect("a hover response")
         }
-
-        pub(super) fn definition_marked(
-            &mut self,
-            relative: &str,
-            marked: &str,
-        ) -> Option<GotoDefinitionResponse> {
-            let position = self.type_marked(relative, marked);
-            serde_json::from_value(self.query(
-                lsp_request::GotoDefinition::METHOD,
-                relative,
-                position,
-            ))
-            .expect("a definition response")
-        }
-
         pub(super) fn package_source(&mut self, package_uri: &str) -> String {
             let result = self.request("tola/source", serde_json::json!({ "uri": package_uri }));
             serde_json::from_value::<crate::protocol::PackageSourceText>(result)
                 .expect("a package source response")
                 .text
         }
-
-        pub(super) fn formatting(
-            &mut self,
-            relative: &str,
-            options: FormattingOptions,
-        ) -> Option<Vec<TextEdit>> {
-            let result = self.request(
-                lsp_request::Formatting::METHOD,
-                serde_json::to_value(DocumentFormattingParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: uri_string(&self.root, relative)
-                            .parse()
-                            .expect("a document URI"),
-                    },
-                    options,
-                    work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
-                })
-                .expect("formatting parameters"),
-            );
-            serde_json::from_value(result).expect("a formatting response")
-        }
-
-        pub(super) fn range_formatting(
-            &mut self,
-            relative: &str,
-            range: lsp_types::Range,
-            options: FormattingOptions,
-        ) -> Option<Vec<TextEdit>> {
-            let uri = uri_string(&self.root, relative);
-            let reply = self.request(
-        lsp_types::request::RangeFormatting::METHOD,
-        serde_json::json!({ "textDocument": { "uri": uri }, "range": range, "options": options }),
-    );
-            serde_json::from_value(reply).expect("a range formatting response")
-        }
-
-        pub(super) fn folding(&mut self, relative: &str) -> Option<Vec<FoldingRange>> {
-            let result = self.request(
-                lsp_request::FoldingRangeRequest::METHOD,
-                serde_json::to_value(FoldingRangeParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: uri_string(&self.root, relative)
-                            .parse()
-                            .expect("a document URI"),
-                    },
-                    work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
-                    partial_result_params: lsp_types::PartialResultParams::default(),
-                })
-                .expect("folding parameters"),
-            );
-            serde_json::from_value(result).expect("a folding response")
-        }
-
-        pub(super) fn symbols(&mut self, relative: &str) -> Option<DocumentSymbolResponse> {
-            let result = self.request(
-                lsp_request::DocumentSymbolRequest::METHOD,
-                serde_json::to_value(DocumentSymbolParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: uri_string(&self.root, relative)
-                            .parse()
-                            .expect("a document URI"),
-                    },
-                    work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
-                    partial_result_params: lsp_types::PartialResultParams::default(),
-                })
-                .expect("symbol parameters"),
-            );
-            serde_json::from_value(result).expect("a symbol response")
-        }
-
         pub(super) fn routes(&mut self, relative: &str) -> crate::protocol::RouteReply {
             let result = self.request(
                 "tola/route",
@@ -435,36 +403,6 @@ pub(crate) mod tests {
         ) -> Vec<serde_json::Value> {
             self.code_actions(relative, marked, diagnostics, &["quickfix"])
         }
-
-        pub(super) fn code_lenses(&mut self, relative: &str) -> Vec<CodeLens> {
-            let result = self.request(
-                lsp_request::CodeLensRequest::METHOD,
-                serde_json::json!({
-                    "textDocument": { "uri": uri_string(&self.root, relative) },
-                }),
-            );
-            serde_json::from_value::<Option<Vec<CodeLens>>>(result)
-                .expect("a code lens reply")
-                .unwrap_or_default()
-        }
-
-        pub(super) fn links(&mut self, relative: &str) -> Option<Vec<DocumentLink>> {
-            let result = self.request(
-                lsp_request::DocumentLinkRequest::METHOD,
-                serde_json::to_value(DocumentLinkParams {
-                    text_document: TextDocumentIdentifier {
-                        uri: uri_string(&self.root, relative)
-                            .parse()
-                            .expect("a document URI"),
-                    },
-                    work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
-                    partial_result_params: lsp_types::PartialResultParams::default(),
-                })
-                .expect("link parameters"),
-            );
-            serde_json::from_value(result).expect("a link response")
-        }
-
         pub(super) fn changed_on_disk(&mut self, relative: &str) {
             let uri = uri_string(&self.root, relative);
             self.send(Message::Notification(Notification::new(
@@ -550,58 +488,6 @@ pub(crate) mod tests {
             )));
             version
         }
-
-        pub(super) fn enter_marked(
-            &mut self,
-            relative: &str,
-            marked: &str,
-        ) -> Option<Vec<TextEdit>> {
-            let position = self.type_marked(relative, marked);
-            let uri = uri_string(&self.root, relative);
-            let reply = self.request(
-                "tola/onEnter",
-                serde_json::json!({ "uri": uri, "position": position }),
-            );
-            serde_json::from_value::<crate::protocol::EnterReply>(reply)
-                .expect("an enter reply")
-                .edits
-        }
-
-        pub(super) fn selection(
-            &mut self,
-            relative: &str,
-            position: Position,
-        ) -> serde_json::Value {
-            let uri = uri_string(&self.root, relative);
-            self.request(
-                "textDocument/selectionRange",
-                serde_json::json!({
-                    "textDocument": { "uri": uri },
-                    "positions": [position],
-                }),
-            )
-        }
-
-        pub(super) fn workspace_symbols(&mut self, query: &str) -> Vec<WorkspaceSymbol> {
-            let reply = self.request("workspace/symbol", serde_json::json!({ "query": query }));
-            match serde_json::from_value::<WorkspaceSymbolResponse>(reply).expect("a symbol reply")
-            {
-                WorkspaceSymbolResponse::Nested(symbols) => symbols,
-                // Both shapes hold the same fields, and the protocol lets a client read either.
-                WorkspaceSymbolResponse::Flat(items) => items
-                    .into_iter()
-                    .map(|item| WorkspaceSymbol {
-                        name: item.name,
-                        kind: item.kind,
-                        tags: None,
-                        container_name: item.container_name,
-                        location: lsp_types::OneOf::Left(item.location),
-                        data: None,
-                    })
-                    .collect(),
-            }
-        }
-
         fn query(&mut self, method: &str, relative: &str, position: Position) -> serde_json::Value {
             self.request(
                 method,
@@ -728,18 +614,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// The site configuration below `root`, as every test's loader resolves it.
+    /// The workspace below `root`, as every test's connection loader resolves it.
     pub(crate) fn load_configuration(root: &Path) -> Result<ServedWorkspace> {
-        let config = root.join("tola.toml");
-        Ok(ServedWorkspace::Site(Arc::new(
-            load_site_config(
-                Some(&config),
-                tola_typst::PackageLocations::from_absolute_roots(None, None)?,
-                &BuildOverrides::default(),
-            )
-            .context("the site configuration loads")?
-            .into_config(),
-        )))
+        Ok(ServedWorkspace::Site(fixtures::site_configuration(root)?))
     }
 
     pub(super) fn uri_string(root: &Path, relative: &str) -> String {
@@ -747,56 +624,6 @@ pub(crate) mod tests {
             .expect("a site file is addressable")
             .as_str()
             .to_owned()
-    }
-
-    pub(super) fn marked_cursor(marked: &str) -> (String, Position) {
-        let offset = marked.find('|').expect("a marked source has a cursor");
-        let text = marked.replacen('|', "", 1);
-        let source = Source::detached(text.clone());
-        let cursor = position::utf16_range(source.lines(), offset..offset)
-            .expect("the cursor lies inside the source")
-            .start;
-        (text, cursor)
-    }
-
-    pub(super) fn announcing_client() -> lsp_types::ClientCapabilities {
-        serde_json::from_value(serde_json::json!({
-            "textDocument": {
-                "publishDiagnostics": { "versionSupport": true, "relatedInformation": true, "dataSupport": true },
-                "codeLens": {},
-                "inlayHint": {},
-                "hover": { "contentFormat": ["markdown"] },
-                "completion": {
-                    "completionItem": {
-                        "snippetSupport": true,
-                        "documentationFormat": ["markdown"]
-                    }
-                },
-                "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                "codeAction": {
-                    "codeActionLiteralSupport": {
-                        "codeActionKind": { "valueSet": ["quickfix"] }
-                    },
-                    "honorsChangeAnnotations": true,
-                    "isPreferredSupport": true
-                }
-            },
-            "workspace": {
-                "workspaceEdit": {
-                    "documentChanges": true,
-                    "resourceOperations": ["create", "rename", "delete"],
-                    "changeAnnotationSupport": {}
-                }
-            }
-        }))
-        .expect("editor capabilities")
-    }
-
-    pub(super) fn diagnostic_messages(diagnostics: &[lsp_types::Diagnostic]) -> Vec<&str> {
-        diagnostics
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect()
     }
 
     pub(super) fn site_with_document() -> SiteDirectory {

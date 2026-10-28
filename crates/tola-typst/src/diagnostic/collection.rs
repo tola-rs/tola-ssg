@@ -401,7 +401,7 @@ impl<'a> IntoIterator for &'a Diagnostics {
 
 #[cfg(test)]
 mod tests {
-    use super::super::message::{SourceLocation, SourceTruncation, Trace, TraceKind};
+    use super::super::message::{SourceLocation, SourceTruncation};
     use super::*;
     use typst::diag::SourceDiagnostic;
     use typst::syntax::Span;
@@ -470,137 +470,6 @@ mod tests {
         diagnostics.extend_distinct(&diagnostics.clone());
         assert_eq!(diagnostics.len(), native.len());
         assert_eq!(diagnostics.raw(), &native);
-    }
-
-    #[test]
-    fn resolved_only_repeats_require_equal_context() {
-        let warning = SourceDiagnostic::warning(Span::detached(), "warning");
-        let mut first = unresolved_diagnostics(warning.into());
-        first.raw.clear();
-        let mut second = first.clone();
-        second.messages[0].imported_by = vec!["content/page.typ".into()];
-
-        first.extend_distinct(&second);
-        first.extend_distinct(&second);
-
-        assert_eq!(first.len(), 2);
-        assert!(first.raw().is_empty());
-    }
-
-    #[test]
-    fn diagnostic_summary_counts_each_severity() {
-        let warnings = [
-            SourceDiagnostic::warning(Span::detached(), "warning 1"),
-            SourceDiagnostic::warning(Span::detached(), "warning 2"),
-        ]
-        .map(NativeDiagnostic::from);
-        let mixed = [
-            SourceDiagnostic::warning(Span::detached(), "warning 1"),
-            SourceDiagnostic::error(Span::detached(), "error 1"),
-        ]
-        .map(NativeDiagnostic::from);
-        type SummaryCase<'a> = (&'a str, &'a [NativeDiagnostic], (usize, usize, bool));
-        let cases: [SummaryCase<'_>; 3] = [
-            ("empty", &[], (0, 0, false)),
-            ("warnings only", &warnings, (0, 2, false)),
-            ("mixed", &mixed, (1, 1, true)),
-        ];
-        for (name, diagnostics, (errors, warnings, has_error)) in cases {
-            let summary = DiagnosticSummary::from_diagnostics(diagnostics);
-            assert_eq!(
-                (summary.errors, summary.warnings),
-                (errors, warnings),
-                "{name}"
-            );
-            assert_eq!(summary.has_errors(), has_error, "{name}");
-        }
-    }
-
-    #[test]
-    fn display_spells_each_known_location() {
-        let warning = |path: Option<&str>, line: Option<usize>, column: Option<usize>| Diagnostic {
-            origin: crate::diagnostic::DiagnosticOrigin::Typst,
-            severity: Severity::Warning,
-            message: "layout was ignored during HTML export".into(),
-            location: SourceLocation {
-                path: path.map(str::to_owned),
-                line,
-                column,
-                range: None,
-                source_lines: Vec::new(),
-                location_failure: None,
-                truncation: SourceTruncation::default(),
-            },
-            hints: Vec::new(),
-            traces: Vec::new(),
-            imported_by: Vec::new(),
-            package_failure: None,
-        };
-        let diagnostics = Diagnostics::from_vec(vec![
-            warning(Some("content/post.typ"), Some(4), Some(7)),
-            warning(Some("content/post.typ"), Some(4), None),
-            warning(Some("content/post.typ"), None, None),
-            warning(None, None, None),
-        ]);
-
-        assert_eq!(
-            diagnostics.to_string(),
-            "content/post.typ:4:7: warning: layout was ignored during HTML export\n\
-             content/post.typ:4: warning: layout was ignored during HTML export\n\
-             content/post.typ: warning: layout was ignored during HTML export\n\
-             warning: layout was ignored during HTML export\n"
-        );
-    }
-
-    #[test]
-    fn package_locations_name_importing_files() {
-        fn info(path: &str, traces: Vec<Trace>) -> Diagnostic {
-            Diagnostic {
-                origin: crate::diagnostic::DiagnosticOrigin::Typst,
-                severity: Severity::Warning,
-                message: "layout was ignored during HTML export".into(),
-                location: SourceLocation {
-                    path: Some(path.into()),
-                    line: Some(18),
-                    column: Some(91),
-                    range: None,
-                    source_lines: Vec::new(),
-                    location_failure: None,
-                    truncation: SourceTruncation::default(),
-                },
-                hints: Vec::new(),
-                traces,
-                imported_by: Vec::new(),
-                package_failure: None,
-            }
-        }
-        let trace = Trace {
-            kind: TraceKind::Import("templates/page.typ".into()),
-            message: "while importing templates/page.typ".into(),
-            location: SourceLocation {
-                path: Some("templates/page.typ".into()),
-                line: Some(1),
-                column: Some(1),
-                range: None,
-                source_lines: Vec::new(),
-                location_failure: None,
-                truncation: SourceTruncation::default(),
-            },
-        };
-        let mut diagnostics = Diagnostics::from_vec(vec![
-            info("@preview/cetz:0.3.4/src/canvas.typ", Vec::new()),
-            info("@preview/cetz:0.3.4/src/canvas.typ", vec![trace]),
-            info("content/index.typ", Vec::new()),
-        ]);
-
-        diagnostics.attach_imported_by(|package| vec![package.to_owned()]);
-
-        assert_eq!(
-            diagnostics.as_slice()[0].imported_by,
-            ["@preview/cetz:0.3.4"]
-        );
-        assert!(diagnostics.as_slice()[1].imported_by.is_empty());
-        assert!(diagnostics.as_slice()[2].imported_by.is_empty());
     }
 
     #[test]

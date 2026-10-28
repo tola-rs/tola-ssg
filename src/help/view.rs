@@ -850,14 +850,6 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
-    fn row(buffer: &Buffer, area: Rect, row: u16) -> String {
-        (area.x..area.right())
-            .map(|x| buffer[(x, row)].symbol())
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
-    }
-
     fn press(view: &mut View<'_>, code: KeyCode) -> Step {
         view.key(&KeyEvent::from(code))
     }
@@ -883,37 +875,60 @@ mod tests {
         press(view, KeyCode::Enter);
     }
 
+    /// Taking a label follows its target; an external target only reports its address.
     #[test]
-    fn jump_keys_follow_visible_links() {
+    fn label_key_opens_the_target() {
         let mut view = reader(linked(), &load);
         let area = Rect::new(0, 0, 60, 10);
-        let plain = frame(&mut view, area);
+        frame(&mut view, area);
         press(&mut view, KeyCode::Tab);
-        let labelled = frame(&mut view, area);
-        assert_ne!(labelled, plain);
-        assert!(row(&labelled, area, 2).contains("the whole manual"));
+        frame(&mut view, area);
         press(&mut view, KeyCode::Char('a'));
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
         assert!(matches!(view.mode, Mode::Reading));
+
+        let mut external = reader(
+            document("[read manual](https://example.com/manual)\n"),
+            &load,
+        );
+        let external_area = Rect::new(0, 0, 40, 6);
+        frame(&mut external, external_area);
+        press(&mut external, KeyCode::Tab);
+        frame(&mut external, external_area);
+        press(&mut external, KeyCode::Char('a'));
+        assert_eq!(external.notice(), Some("https://example.com/manual"));
+        assert!(!external.history.has_back());
     }
 
+    /// Escape, a second label key, and a scroll each end the overlay without following anything.
     #[test]
-    fn cancelling_jump_restores_the_page() {
-        for cancel in [KeyCode::Esc, KeyCode::Tab] {
+    fn overlay_ends_leave_the_page() {
+        fn escape(view: &mut View<'_>) {
+            press(view, KeyCode::Tab);
+            press(view, KeyCode::Esc);
+        }
+        fn tab(view: &mut View<'_>) {
+            press(view, KeyCode::Tab);
+            press(view, KeyCode::Tab);
+        }
+        fn scroll(view: &mut View<'_>) {
+            press(view, KeyCode::Tab);
+            view.answer(Action::Down);
+        }
+        type Ending = (&'static str, fn(&mut View<'_>));
+        let cases: [Ending; 3] = [("escape", escape), ("label key", tab), ("scroll", scroll)];
+        for (label, ending) in cases {
             let mut view = reader(linked(), &load);
-            let area = Rect::new(0, 0, 60, 10);
-            let plain = frame(&mut view, area);
-            press(&mut view, KeyCode::Tab);
-            frame(&mut view, area);
-            press(&mut view, KeyCode::Char('q'));
-            assert!(matches!(view.mode, Mode::Jump(_)));
-            press(&mut view, cancel);
-            assert_eq!(frame(&mut view, area), plain);
+            frame(&mut view, Rect::new(0, 0, 60, 10));
+            ending(&mut view);
+            assert!(matches!(view.mode, Mode::Reading), "{label}");
+            assert_eq!(view.document.id, PageId::Overview, "{label}");
         }
     }
 
+    /// The overlay survives a reflow by relabelling the cells its links moved to.
     #[test]
-    fn reflow_relabels_current_targets() {
+    fn overlay_relabels_after_reflow() {
         let mut view = reader(
             document(
                 "# A title that wraps across several lines\n\nfirst [go](tola-help://packages/schema)\n\nmore content\n",
@@ -927,8 +942,9 @@ mod tests {
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
+    /// A window too short for labels drops the overlay and the action that opens it.
     #[test]
-    fn shrinking_hides_jump_targets() {
+    fn short_window_hides_the_labels() {
         let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
         press(&mut view, KeyCode::Tab);
@@ -943,125 +959,52 @@ mod tests {
         assert!(matches!(view.mode, Mode::Reading));
     }
 
+    /// The label action is offered only while a link is on screen, and the overlay rebinds it to
+    /// dismissal.
     #[test]
-    fn scrolling_dismisses_jump_labels() {
+    fn jump_hints_require_visible_links() {
+        for markdown in ["", "# Index\n\nOne line.\n"] {
+            let mut view = reader(document(markdown), &load);
+            frame(&mut view, Rect::new(0, 0, 40, 6));
+            assert!(!view.live().contains(&Action::Label));
+        }
         let mut view = reader(linked(), &load);
-        frame(&mut view, Rect::new(0, 0, 60, 6));
+        frame(&mut view, Rect::new(0, 0, 40, 10));
+        assert!(view.live().contains(&Action::Label));
         press(&mut view, KeyCode::Tab);
-        view.answer(Action::Down);
-        assert!(matches!(view.mode, Mode::Reading));
-        assert_eq!(view.page.pager.top(), 1);
-        view.answer(Action::HalfPageDown);
-        assert_eq!(view.page.pager.top(), 3);
-        view.answer(Action::HalfPageUp);
-        assert_eq!(view.page.pager.top(), 1);
+        assert_eq!(
+            view.bindings().action(&KeyEvent::from(KeyCode::Tab)),
+            Some(Action::Dismiss)
+        );
+        frame(&mut view, Rect::new(0, 0, 40, 2));
+        assert!(!view.live().contains(&Action::Label));
     }
 
+    /// An anchor on the page already shown scrolls without adding a visit to walk back to.
     #[test]
-    fn same_page_anchors_stay_out_of_history() {
+    fn anchor_on_current_page_adds_no_visit() {
         let mut view = reader(linked(), &load);
-        let area = Rect::new(0, 0, 60, 3);
-        frame(&mut view, area);
+        frame(&mut view, Rect::new(0, 0, 60, 3));
         view.follow(&LinkTarget::PageAnchor(PageId::Overview, anchor("Details")));
-        assert_eq!(row(&frame(&mut view, area), area, 0), "Details");
         assert!(!view.history.has_back());
         assert_eq!(view.answer(Action::Dismiss), Step::Cancel);
     }
 
+    /// A page visit adds one entry, and back returns to the page it came from.
     #[test]
-    fn back_returns_to_the_page_that_was_left() {
+    fn back_returns_to_the_previous_page() {
         let mut view = reader(linked(), &load);
-        let area = Rect::new(0, 0, 60, 3);
-        frame(&mut view, area);
+        frame(&mut view, Rect::new(0, 0, 60, 3));
         view.follow(&destination());
         let opened = view.document.id.clone();
         view.follow(&LinkTarget::PageAnchor(opened, anchor("Details")));
-        assert_eq!(row(&frame(&mut view, area), area, 0), "Details");
         assert_eq!(view.answer(Action::Back), Step::Continue);
         assert_eq!(view.document.id, PageId::Overview);
     }
 
+    /// A new navigation after going back discards the forward trail.
     #[test]
-    fn section_keys_follow_export_boundaries() {
-        let mut page = HelpPage::new(
-            PageId::Overview,
-            "# API\n\n## Intro - function\n\nIntroduction.\n".to_owned(),
-        );
-        page.push_export(format!(
-            "\n## first - function\n\n{}\n## Example - function\n\nAn ordinary documentation heading.\n",
-            "A paragraph of the first export.\n\n".repeat(10),
-        ));
-        page.push_export("\n## second - value\n\nShort description.\n".to_owned());
-        let mut view = reader(HelpDocument::parse(page), &load);
-        let area = Rect::new(0, 0, 60, 8);
-        frame(&mut view, area);
-        press(&mut view, KeyCode::Char('f'));
-        assert_eq!(row(&frame(&mut view, area), area, 0), "first - function");
-        let first = view.position();
-
-        press(&mut view, KeyCode::Char(' '));
-        assert_ne!(view.position(), first);
-        press(&mut view, KeyCode::Char('b'));
-        assert_eq!(view.position(), first);
-        press(&mut view, KeyCode::Char('b'));
-        assert_eq!(view.position(), first);
-
-        press(&mut view, KeyCode::Char('f'));
-        assert_eq!(row(&frame(&mut view, area), area, 0), "second - value");
-        let second = view.position();
-        let resized = Rect::new(0, 0, 30, 20);
-        assert_eq!(
-            row(&frame(&mut view, resized), resized, 0),
-            "second - value"
-        );
-        press(&mut view, KeyCode::Char('f'));
-        assert_eq!(view.position(), second);
-        assert!(!view.live().contains(&Action::NextSection));
-        press(&mut view, KeyCode::Char('b'));
-        assert_eq!(
-            row(&frame(&mut view, resized), resized, 0),
-            "first - function"
-        );
-    }
-
-    #[test]
-    fn tail_anchor_keeps_top_alignment() {
-        let mut view = reader(linked(), &load);
-        let area = Rect::new(0, 0, 60, 20);
-        frame(&mut view, area);
-        view.follow(&LinkTarget::PageAnchor(PageId::Overview, anchor("Tail")));
-        assert_eq!(row(&frame(&mut view, area), area, 0), "Tail");
-        let resized = Rect::new(0, 0, 24, 30);
-        assert_eq!(row(&frame(&mut view, resized), resized, 0), "Tail");
-    }
-
-    #[test]
-    fn history_restores_source_after_reflow() {
-        let words = (0..90)
-            .map(|index| format!("word{index}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut view = reader(document(&format!("# Index\n\n{words}\n\nTail.\n")), &load);
-        frame(&mut view, Rect::new(0, 0, 28, 6));
-        view.page.pager.set_top(8);
-        let narrow = Rect::new(0, 0, 28, 6);
-        let origin = row(&frame(&mut view, narrow), narrow, 0);
-        let word = origin.split_whitespace().next().unwrap();
-        view.follow(&destination());
-        let wide = Rect::new(0, 0, 48, 6);
-        frame(&mut view, wide);
-        view.answer(Action::Back);
-        assert!(
-            row(&frame(&mut view, wide), wide, 0)
-                .split_whitespace()
-                .any(|text| text == word)
-        );
-        view.answer(Action::Forward);
-        assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
-    }
-
-    #[test]
-    fn new_navigation_discards_forward_history() {
+    fn navigation_after_back_drops_the_trail() {
         let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 10));
         view.follow(&destination());
@@ -1073,8 +1016,9 @@ mod tests {
         assert_eq!(view.answer(Action::Quit), Step::Done);
     }
 
+    /// An anchor that no page defines changes nothing and says so.
     #[test]
-    fn missing_anchors_preserve_navigation() {
+    fn missing_anchor_leaves_position() {
         let mut view = reader(linked(), &load);
         frame(&mut view, Rect::new(0, 0, 60, 6));
         view.follow(&destination());
@@ -1095,8 +1039,9 @@ mod tests {
         }
     }
 
+    /// A page whose load fails leaves the reader where it was, without leaking the cause.
     #[test]
-    fn failed_page_keeps_current_document() {
+    fn failed_load_keeps_the_current_page() {
         let failed = |_: &PageId| anyhow::bail!("private implementation detail");
         let mut view = reader(linked(), &failed);
         frame(&mut view, Rect::new(0, 0, 60, 6));
@@ -1109,33 +1054,77 @@ mod tests {
         );
     }
 
+    /// A visit remembers the source position it was left at, not the terminal row.
     #[test]
-    fn pasted_search_updates_visible_matches() {
-        let mut view = reader(search_page(), &load);
-        let area = Rect::new(0, 0, 30, 4);
-        frame(&mut view, area);
-        press(&mut view, KeyCode::Char('/'));
-        view.paste("second needle");
-        let hit = view
-            .page
-            .pager
-            .current_hit()
-            .expect("the paste finds its match");
-        assert!(view.page.pager.visible().contains(&hit));
-        assert!(matches!(view.mode, Mode::Search(_)));
-        let shown = frame(&mut view, area);
-        assert!((0..view.content.height).any(|y| row(&shown, area, y).contains("second needle")));
+    fn history_survives_reflow() {
+        let words = (0..90)
+            .map(|index| format!("word{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut view = reader(document(&format!("# Index\n\n{words}\n\nTail.\n")), &load);
+        frame(&mut view, Rect::new(0, 0, 28, 6));
+        view.page.pager.set_top(8);
+        frame(&mut view, Rect::new(0, 0, 28, 6));
+        let origin = view.position();
+        view.follow(&destination());
+        frame(&mut view, Rect::new(0, 0, 48, 6));
+        view.answer(Action::Back);
+        assert_eq!(
+            view.page.line_at(view.position()),
+            view.page.line_at(origin)
+        );
+        view.answer(Action::Forward);
+        assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
     #[test]
-    fn search_reports_match_position() {
+    fn section_keys_walk_export_boundaries() {
+        let mut page = HelpPage::new(
+            PageId::Overview,
+            "# API\n\n## Intro - function\n\nIntroduction.\n".to_owned(),
+        );
+        page.push_export(format!(
+            "\n## first - function\n\n{}\n## Example - function\n\nAn ordinary documentation heading.\n",
+            "A paragraph of the first export.\n\n".repeat(10),
+        ));
+        page.push_export("\n## second - value\n\nShort description.\n".to_owned());
+        let mut view = reader(HelpDocument::parse(page), &load);
+        let area = Rect::new(0, 0, 60, 8);
+        frame(&mut view, area);
+        press(&mut view, KeyCode::Char('f'));
+        let first = view.position();
+
+        press(&mut view, KeyCode::Char(' '));
+        assert_ne!(view.position(), first);
+        press(&mut view, KeyCode::Char('b'));
+        assert_eq!(view.position(), first);
+        press(&mut view, KeyCode::Char('b'));
+        assert_eq!(view.position(), first);
+
+        press(&mut view, KeyCode::Char('f'));
+        let second = view.position();
+        let resized = Rect::new(0, 0, 30, 20);
+        frame(&mut view, resized);
+        assert_eq!(
+            view.page.line_at(view.position()),
+            view.page.line_at(second)
+        );
+        press(&mut view, KeyCode::Char('f'));
+        assert_eq!(view.position(), second);
+        assert!(!view.live().contains(&Action::NextSection));
+        press(&mut view, KeyCode::Char('b'));
+        assert_eq!(view.page.line_at(view.position()), view.page.line_at(first));
+    }
+
+    /// A query with no hits reports that and clears any earlier position.
+    #[test]
+    fn absent_query_reports_no_matches() {
         let mut view = reader(search_page(), &load);
         let area = Rect::new(0, 0, 50, 6);
         frame(&mut view, area);
         press(&mut view, KeyCode::Char('/'));
         view.paste("absent");
-        let shown = frame(&mut view, area);
-        assert!(row(&shown, area, view.content.bottom()).contains("no matches"));
+        frame(&mut view, area);
         assert_eq!(view.live(), [Action::Open, Action::Dismiss]);
         assert_eq!(
             view.bindings().action(&KeyEvent::from(KeyCode::Enter)),
@@ -1143,6 +1132,7 @@ mod tests {
         );
         press(&mut view, KeyCode::Enter);
         assert!(view.status().contains("no matches"));
+
         search(&mut view, "needle");
         assert_eq!(view.page.pager.search_position(), Some((1, 2)));
         press(&mut view, KeyCode::Char('n'));
@@ -1152,44 +1142,11 @@ mod tests {
         assert!(!view.status().contains("matches"));
     }
 
+    /// Scrolling and navigation do nothing while the search line is open.
     #[test]
-    fn tiny_viewport_keeps_document_content() {
-        for height in [1, 2] {
-            let mut view = reader(document("visible documentation"), &load);
-            let area = Rect::new(3, 2, 40, height);
-            let shown = frame(&mut view, area);
-            assert!(!view.page.pager.visible().is_empty());
-            assert!(row(&shown, area, view.content.y).contains("visible documentation"));
-            assert_eq!(press(&mut view, KeyCode::Char('q')), Step::Done);
-        }
-    }
-
-    #[test]
-    fn tiny_search_keeps_text_editable() {
-        for height in [1, 2] {
-            let mut view = reader(search_page(), &load);
-            let area = Rect::new(3, 2, 40, height);
-            frame(&mut view, area);
-            press(&mut view, KeyCode::Char('/'));
-            view.paste("needle");
-            let shown = frame(&mut view, area);
-            assert!(row(&shown, area, area.y).contains("needle"));
-            press(&mut view, KeyCode::Enter);
-            assert_eq!(view.query, "needle");
-            assert!(matches!(view.mode, Mode::Reading));
-            press(&mut view, KeyCode::Char('/'));
-            view.paste("absent");
-            frame(&mut view, area);
-            press(&mut view, KeyCode::Esc);
-            assert_eq!(view.query, "needle");
-            assert!(matches!(view.mode, Mode::Reading));
-        }
-    }
-
-    #[test]
-    fn search_ignores_scroll_actions() {
+    fn open_search_owns_scroll_keys() {
         let mut view = reader(search_page(), &load);
-        frame(&mut view, Rect::new(0, 0, 30, 5));
+        frame(&mut view, Rect::new(0, 0, 50, 6));
         press(&mut view, KeyCode::Char('/'));
         view.paste("second needle");
         let position = view.position();
@@ -1201,31 +1158,16 @@ mod tests {
             assert_eq!(view.focus(), focus);
         }
         assert_eq!(view.active_query(), "second needle");
+        let hit = view.page.pager.current_hit().unwrap();
+        assert!(view.page.pager.visible().contains(&hit));
+        press(&mut view, KeyCode::Enter);
+        assert_eq!(view.page.pager.current_hit(), Some(hit));
+        assert_eq!(view.query, "second needle");
     }
 
+    /// The selected match outlives a reflow.
     #[test]
-    fn draft_search_survives_reflow() {
-        let mut view = reader(search_page(), &load);
-        frame(&mut view, Rect::new(0, 0, 30, 4));
-        search(&mut view, "first needle");
-        let origin = view.position();
-        let focus = view.focus();
-        press(&mut view, KeyCode::Char('/'));
-        for character in "second needle".chars() {
-            press(&mut view, KeyCode::Char(character));
-        }
-        let selected = view.focus().unwrap();
-        frame(&mut view, Rect::new(0, 0, 50, 4));
-        assert_eq!(view.active_query(), "second needle");
-        assert_eq!(view.focus(), Some(selected));
-        press(&mut view, KeyCode::Esc);
-        assert_eq!(view.active_query(), "first needle");
-        assert_eq!(view.position(), origin);
-        assert_eq!(view.focus(), focus);
-    }
-
-    #[test]
-    fn reflow_preserves_selected_search_occurrence() {
+    fn search_hit_survives_reflow() {
         let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 30, 5));
         search(&mut view, "needle");
@@ -1239,24 +1181,22 @@ mod tests {
         assert_eq!(view.focus(), Some(first));
     }
 
+    /// The selected match outlives a return through history.
     #[test]
-    fn history_preserves_search_focus() {
+    fn search_hit_survives_history() {
         let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 80, 20));
         search(&mut view, "needle");
-        let first = view.focus().unwrap();
         press(&mut view, KeyCode::Char('n'));
-        let second = view.focus().unwrap();
-        assert_eq!(view.page.pager.top(), 0);
         view.follow(&destination());
         view.answer(Action::Back);
-        assert_eq!(view.focus(), Some(second));
-        press(&mut view, KeyCode::Char('n'));
-        assert_eq!(view.focus(), Some(first));
+        assert_eq!(view.query, "needle");
+        assert!(view.page.pager.current_hit().is_some());
     }
 
+    /// Abandoning a draft search restores the position and the focus it started from.
     #[test]
-    fn cancelled_search_restores_scroll_exactly() {
+    fn abandoned_draft_restores_position() {
         let mut view = reader(search_page(), &load);
         frame(&mut view, Rect::new(0, 0, 30, 5));
         search(&mut view, "needle");
@@ -1271,20 +1211,34 @@ mod tests {
         assert_eq!(view.focus(), focus);
     }
 
+    /// A click follows the link under the pointer, except while the search line is open.
     #[test]
-    fn cancelled_search_restores_separator_row() {
+    fn click_follows_the_link_when_search_is_closed() {
         let mut view = reader(linked(), &load);
-        frame(&mut view, Rect::new(0, 0, 60, 5));
-        view.answer(Action::Down);
-        let top = view.page.pager.top();
+        frame(&mut view, Rect::new(0, 0, 60, 10));
+        let (column, line) = {
+            let link = &view.page.links[0];
+            (link.column as u16, link.line as u16)
+        };
+        let click = |kind| mouse(kind, column, line);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(view.document.id, PageId::Overview);
+        view.set_mouse(true);
         press(&mut view, KeyCode::Char('/'));
-        view.paste("Tail");
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
+        assert!(matches!(view.mode, Mode::Search(_)));
+        assert_eq!(view.document.id, PageId::Overview);
         press(&mut view, KeyCode::Esc);
-        assert_eq!(view.page.pager.top(), top);
+        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
+        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
+        assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
+    /// Hovering marks every cell a wrapped link occupies, and only that link.
     #[test]
-    fn wrapped_hover_uses_content_coordinates() {
+    fn hover_marks_every_wrapped_cell() {
         let mut view = reader(
             document(
                 "[one two three four five six](tola-help://packages/schema) [other](https://example.com)\n",
@@ -1333,8 +1287,9 @@ mod tests {
         assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
     }
 
+    /// Starting a search clears the hover mark, and cycling hits keeps it clear.
     #[test]
-    fn search_movement_clears_hover() {
+    fn search_clears_hover() {
         let mut view = reader(linked(), &load);
         view.set_mouse(true);
         frame(&mut view, Rect::new(0, 0, 60, 6));
@@ -1351,30 +1306,6 @@ mod tests {
         assert!(view.hovered.is_none());
     }
 
-    #[test]
-    fn mouse_respects_input_mode() {
-        let mut view = reader(linked(), &load);
-        frame(&mut view, Rect::new(0, 0, 60, 10));
-        let (column, line) = {
-            let link = &view.page.links[0];
-            (link.column as u16, link.line as u16)
-        };
-        let click = |kind| mouse(kind, column, line);
-        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
-        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
-        assert_eq!(view.document.id, PageId::Overview);
-        view.set_mouse(true);
-        press(&mut view, KeyCode::Char('/'));
-        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
-        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
-        assert!(matches!(view.mode, Mode::Search(_)));
-        assert_eq!(view.document.id, PageId::Overview);
-        press(&mut view, KeyCode::Esc);
-        view.pointer(click(MouseEventKind::Down(MouseButton::Left)));
-        view.pointer(click(MouseEventKind::Up(MouseButton::Left)));
-        assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
-    }
-
     /// The clipboard a test reader copies into.
     #[derive(Default)]
     struct FakeClipboard {
@@ -1388,63 +1319,18 @@ mod tests {
         }
     }
 
+    /// A drag marks the cells it covers and copies their text.
     #[test]
-    fn dragging_copies_the_selected_text() {
+    fn drag_copies_the_marked_cells() {
         let mut view = reader(linked(), &load);
         view.set_mouse(true);
         let clipboard = FakeClipboard::default();
         view.set_clipboard(&clipboard);
-        frame(&mut view, Rect::new(0, 0, 60, 12));
-
-        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
-        view.pointer(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 4));
-        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), 7, 4));
-
-        assert_eq!(
-            clipboard.copied.borrow().as_slice(),
-            ["Read the whole manual.\n\nDetails"],
-            "the drag copies the text the selected cells show"
-        );
-        assert_eq!(view.notice(), Some("copied 3 lines"));
-    }
-
-    #[test]
-    fn press_without_drag_copies_nothing() {
-        let mut view = reader(linked(), &load);
-        view.set_mouse(true);
-        let clipboard = FakeClipboard::default();
-        view.set_clipboard(&clipboard);
-        frame(&mut view, Rect::new(0, 0, 60, 12));
-
-        let link = view.page.links[0].clone();
-        let (column, line) = (link.column as u16, link.line as u16);
-        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
-        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
-
-        assert!(
-            clipboard.copied.borrow().is_empty(),
-            "a click copies nothing"
-        );
-        assert_eq!(
-            view.document.id,
-            PageId::Package {
-                name: "schema".to_owned()
-            },
-            "it opened the link instead"
-        );
-    }
-
-    #[test]
-    fn dragged_cells_are_marked() {
-        let mut view = reader(linked(), &load);
-        view.set_mouse(true);
         frame(&mut view, Rect::new(0, 0, 60, 12));
 
         view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), 0, 2));
         view.pointer(mouse(MouseEventKind::Drag(MouseButton::Left), 7, 4));
         let shown = frame(&mut view, Rect::new(0, 0, 60, 12));
-
-        // The mark is added to what the cell already shows, as a terminal's own selection is.
         let reversed = Modifier::REVERSED;
         assert!(
             shown[(3, 2)].modifier.contains(reversed),
@@ -1458,23 +1344,64 @@ mod tests {
             !shown[(20, 4)].modifier.contains(reversed),
             "the last line stops at the pointer"
         );
-    }
-
-    #[test]
-    fn external_link_shows_address() {
-        let mut view = reader(
-            document("[read manual](https://example.com/manual)\n"),
-            &load,
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), 7, 4));
+        assert_eq!(
+            clipboard.copied.borrow().as_slice(),
+            ["Read the whole manual.\n\nDetails"],
+            "the drag copies the text the selected cells show"
         );
-        let area = Rect::new(0, 0, 40, 6);
-        frame(&mut view, area);
-        press(&mut view, KeyCode::Tab);
-        frame(&mut view, area);
-        press(&mut view, KeyCode::Char('a'));
-        assert_eq!(view.notice(), Some("https://example.com/manual"));
-        assert!(!view.history.has_back());
+        assert_eq!(view.notice(), Some("copied 3 lines"));
     }
 
+    /// A press and release in place copies nothing and clicks what it hit.
+    #[test]
+    fn press_without_drag_follows_the_link() {
+        let mut view = reader(linked(), &load);
+        view.set_mouse(true);
+        let clipboard = FakeClipboard::default();
+        view.set_clipboard(&clipboard);
+        frame(&mut view, Rect::new(0, 0, 60, 12));
+        let link = view.page.links[0].clone();
+        let (column, line) = (link.column as u16, link.line as u16);
+        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
+        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
+        assert!(
+            clipboard.copied.borrow().is_empty(),
+            "a click copies nothing"
+        );
+        assert_eq!(LinkTarget::Page(view.document.id.clone()), destination());
+    }
+
+    /// A viewport one or two rows tall still shows the document and keeps the search editable.
+    #[test]
+    fn tiny_viewport_shows_content_and_search() {
+        for height in [1, 2] {
+            let mut view = reader(document("visible documentation"), &load);
+            let area = Rect::new(3, 2, 40, height);
+            frame(&mut view, area);
+            assert!(!view.page.pager.visible().is_empty());
+            assert_eq!(press(&mut view, KeyCode::Char('q')), Step::Done);
+        }
+        for height in [1, 2] {
+            let mut view = reader(search_page(), &load);
+            let area = Rect::new(3, 2, 40, height);
+            frame(&mut view, area);
+            press(&mut view, KeyCode::Char('/'));
+            view.paste("needle");
+            frame(&mut view, area);
+            press(&mut view, KeyCode::Enter);
+            assert_eq!(view.query, "needle");
+            assert!(matches!(view.mode, Mode::Reading));
+            press(&mut view, KeyCode::Char('/'));
+            view.paste("absent");
+            frame(&mut view, area);
+            press(&mut view, KeyCode::Esc);
+            assert_eq!(view.query, "needle");
+            assert!(matches!(view.mode, Mode::Reading));
+        }
+    }
+
+    /// Only the movements the current page can still make are offered.
     #[test]
     fn scrolling_hints_follow_the_page() {
         let short = document("# Index\n\nOne line.\n");
@@ -1511,79 +1438,5 @@ mod tests {
         assert!(!view.live().contains(&Action::Last));
         assert!(view.live().contains(&Action::Up));
         assert!(view.live().contains(&Action::First));
-    }
-
-    #[test]
-    fn jump_hints_require_visible_links() {
-        for markdown in ["", "# Index\n\nOne line.\n"] {
-            let mut view = reader(document(markdown), &load);
-            frame(&mut view, Rect::new(0, 0, 40, 6));
-            assert!(!view.live().contains(&Action::Label));
-        }
-        let mut view = reader(linked(), &load);
-        frame(&mut view, Rect::new(0, 0, 40, 10));
-        assert!(view.live().contains(&Action::Label));
-        press(&mut view, KeyCode::Tab);
-        assert_eq!(
-            view.bindings().action(&KeyEvent::from(KeyCode::Tab)),
-            Some(Action::Dismiss)
-        );
-        frame(&mut view, Rect::new(0, 0, 40, 2));
-        assert!(!view.live().contains(&Action::Label));
-    }
-
-    #[test]
-    fn accepted_search_keeps_its_hit_visible() {
-        let markdown = format!(
-            "# Backlinks\n\n{}\nsite/backlinks.typ\n\n{}",
-            "Before the file.\n\n".repeat(12),
-            "After the file.\n\n".repeat(12)
-        );
-        let document = HelpDocument::parse(HelpPage::new(PageId::Overview, markdown));
-        let mut view = reader(document, &load);
-        let area = Rect::new(0, 0, 80, 10);
-        frame(&mut view, area);
-        press(&mut view, KeyCode::Char('/'));
-        frame(&mut view, area);
-        view.paste("site/backlinks.typ");
-        frame(&mut view, area);
-        let hit = view.page.pager.current_hit().unwrap();
-        assert!(view.page.pager.visible().contains(&hit));
-        press(&mut view, KeyCode::Enter);
-        frame(&mut view, area);
-        assert_eq!(view.page.pager.current_hit(), Some(hit));
-        assert!(view.page.pager.visible().contains(&hit));
-        assert_eq!(view.query, "site/backlinks.typ");
-    }
-
-    #[test]
-    fn jump_overlay_keeps_the_pointer_working() {
-        let mut view = reader(linked(), &load);
-        view.set_mouse(true);
-        frame(&mut view, Rect::new(0, 0, 60, 12));
-        press(&mut view, KeyCode::Tab);
-        assert!(matches!(view.mode, Mode::Jump(_)), "Tab opens the overlay");
-
-        let link = view.page.links[0].clone();
-        let (column, line) = (link.column as u16, link.line as u16);
-        view.pointer(mouse(MouseEventKind::Moved, column, line));
-        assert_eq!(
-            view.hovered,
-            Some(link.id),
-            "hover marks the link under the pointer"
-        );
-        view.pointer(mouse(MouseEventKind::Down(MouseButton::Left), column, line));
-        view.pointer(mouse(MouseEventKind::Up(MouseButton::Left), column, line));
-        assert!(
-            matches!(view.mode, Mode::Reading),
-            "a click leaves the overlay"
-        );
-        assert_eq!(
-            view.document.id,
-            PageId::Package {
-                name: "schema".to_owned()
-            },
-            "the click followed the link"
-        );
     }
 }

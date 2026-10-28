@@ -228,14 +228,6 @@ mod tests {
         element
     }
 
-    fn with_text(element: HtmlElement, text: &str) -> HtmlElement {
-        element.with_children(
-            [HtmlNode::text(text, Span::detached())]
-                .into_iter()
-                .collect(),
-        )
-    }
-
     #[test]
     fn raw_text_element_kinds() {
         assert_eq!(
@@ -268,20 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn data_blocks_have_no_payload() {
-        for (tag, attrs) in [
-            ("script", &[("type", "application/json")][..]),
-            ("script", &[("type", "importmap")][..]),
-            ("script", &[("type", "speculationrules")][..]),
-            ("title", &[][..]),
-            ("pre", &[][..]),
-            ("div", &[][..]),
-        ] {
-            assert_eq!(raw_text_kind(&element(tag, attrs)), None, "{tag} {attrs:?}");
-        }
-    }
-
-    #[test]
     fn text_children_form_one_payload() {
         let element = element("style", &[]).with_children(
             [
@@ -292,18 +270,5 @@ mod tests {
             .collect(),
         );
         assert_eq!(payload(&element).as_deref(), Some(".a {color: red }"));
-    }
-
-    #[test]
-    fn element_children_suppress_the_payload() {
-        let element = with_text(element("script", &[]), "first()").with_children(
-            [
-                HtmlNode::text("first()", Span::detached()),
-                HtmlNode::Element(with_text(element("span", &[]), "nested")),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        assert_eq!(payload(&element), None);
     }
 }

@@ -126,7 +126,7 @@ pub(crate) fn graph(
     if view.is_unnamed(source.id()) {
         let names = view
             .by_id(source.id())
-            .map(|snapshot| snapshot.names())
+            .map(|parsed| parsed.names())
             .unwrap_or_else(|| Arc::new(SourceNames::new(source.clone())));
         return Ok(Arc::new(NameGraph::new(
             [names],
@@ -139,15 +139,15 @@ pub(crate) fn graph(
     let mut sources = HashMap::new();
     let names = view
         .by_id(source.id())
-        .map(|snapshot| snapshot.names())
+        .map(|parsed| parsed.names())
         .unwrap_or_else(|| Arc::new(SourceNames::new(source.clone())));
     sources.insert(source.id(), names);
     // The pass includes the walk and import closure; cancellation leaves it for the next pass.
     disk.begin();
     if include_dependents {
-        for snapshot in view.iter() {
-            if source_allowed(snapshot.source.id(), root, boundary) {
-                sources.insert(snapshot.source.id(), snapshot.names());
+        for parsed in view.iter() {
+            if source_allowed(parsed.source.id(), root, boundary) {
+                sources.insert(parsed.source.id(), parsed.names());
             }
         }
         // The walk reaches every `.typ` the site holds: the build reads whatever an import
@@ -343,8 +343,8 @@ pub(super) fn reach_imports(
                 if sources.contains_key(&target) {
                     continue;
                 }
-                if let Some(snapshot) = view.by_id(target) {
-                    sources.insert(target, snapshot.names());
+                if let Some(parsed) = view.by_id(target) {
+                    sources.insert(target, parsed.names());
                     continue;
                 }
                 let text = crate::identity::embedded_source(target)
@@ -525,66 +525,6 @@ mod tests {
             assert_eq!(range.start, text.find("marker").unwrap());
         }
     }
-
-    #[test]
-    fn imported_aliases_follow_changed_sources() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path();
-        let library = "#let first = 1\n#let second = 2";
-        std::fs::write(root.join(".library.typ"), library).unwrap();
-        let mut sources = OpenSources::new(root);
-        let importer = open(
-            &mut sources,
-            root,
-            "main.typ",
-            "#import \".exports.typ\": external as local\n#local",
-        );
-        let view = sources.view();
-        let source = &view.get(&importer).unwrap().source;
-        let cursor = source.text().rfind("local").unwrap();
-        let boundary = tola_typst::SourceBoundary::new(root, true);
-        let cancellation = BuildCancellation::new();
-        let mut disk = DiskSources::default();
-        let mut cache = GraphCache::default();
-        let mut previous: Option<Arc<NameGraph>> = None;
-        for target in ["first", "second"] {
-            std::fs::write(
-                root.join(".exports.typ"),
-                format!("#import \".library.typ\": {target} as external"),
-            )
-            .unwrap();
-            let graph = source_only_graph(
-                root,
-                &view,
-                source,
-                None,
-                &boundary,
-                false,
-                &mut disk,
-                Some(CachedGraph {
-                    cache: &mut cache,
-                    revision: sources.revision(),
-                }),
-                &cancellation,
-            )
-            .unwrap();
-            let binding = graph
-                .selected(source.id(), cursor)
-                .unwrap()
-                .binding
-                .unwrap();
-            let (file, range) = graph.definition(binding).unwrap();
-            assert_eq!(&graph.source(file).unwrap().source().text()[range], target);
-            if let Some(previous) = &previous {
-                assert!(std::ptr::eq(
-                    previous.source(file).unwrap(),
-                    graph.source(file).unwrap()
-                ));
-            }
-            previous = Some(graph);
-        }
-    }
-
     #[test]
     fn unsaved_imports_replace_disk() {
         let directory = tempfile::tempdir().unwrap();

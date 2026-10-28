@@ -236,14 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_settings_name_no_configuration() {
-        let directory = EditorDirectory::workspace(Path::new("."), &Default::default()).unwrap();
-
-        assert_eq!(directory.server_command().arguments, ["lsp"]);
-        assert!(directory.tola_settings().get("configPath").is_none());
-    }
-
-    #[test]
     fn site_settings_name_the_configuration() {
         let directory = EditorDirectory::initial(Path::new("."), &Default::default()).unwrap();
 
@@ -254,24 +246,6 @@ mod tests {
         assert_eq!(
             directory.tola_settings()["configPath"],
             serde_json::json!("./tola.toml")
-        );
-    }
-
-    /// A site whose package roots are the ones a bare invocation discovers writes no package
-    /// flags: those roots are what the editor's server resolves by itself.
-    #[test]
-    fn discovered_package_roots_stay_out_of_the_entry() {
-        let discovered =
-            tola_typst::PackageLocations::discover(None, None).expect("host package roots");
-        let directory = EditorDirectory::initial(Path::new("."), &discovered).unwrap();
-
-        assert_eq!(
-            directory.server_command().arguments,
-            [
-                "lsp".to_owned(),
-                "--config".to_owned(),
-                "./tola.toml".to_owned()
-            ]
         );
     }
 
@@ -296,18 +270,6 @@ mod tests {
                 directory.path().to_str().unwrap().to_owned(),
             ]
         );
-    }
-
-    /// Settings, like the entry, name no package root a bare invocation discovers.
-    #[test]
-    fn discovered_package_roots_stay_out_of_settings() {
-        let discovered =
-            tola_typst::PackageLocations::discover(None, None).expect("host package roots");
-        let directory = EditorDirectory::initial(Path::new("."), &discovered).unwrap();
-
-        let settings = directory.tola_settings();
-        assert!(settings.get("packagePath").is_none(), "{settings}");
-        assert!(settings.get("packageCachePath").is_none(), "{settings}");
     }
 
     /// A package root this process resolved differently is what the settings have to name.

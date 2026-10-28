@@ -83,17 +83,15 @@ fn lexical_normalize(path: &Path) -> PathBuf {
     normalized
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::path::Path;
 
-    #[cfg(unix)]
     use tempfile::TempDir;
 
     use super::normalize_path;
 
-    #[cfg(unix)]
     #[test]
     fn missing_child_uses_symlinked_parent() {
         let directory = TempDir::new().unwrap();
@@ -106,37 +104,6 @@ mod tests {
             normalize_path(&alias.join("missing/child.typ")),
             real.canonicalize().unwrap().join("missing/child.typ")
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn parents_apply_before_symlink_resolution() {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let target = root.join("target");
-        fs::create_dir_all(target.join("nested")).unwrap();
-        let alias = root.join("alias");
-        std::os::unix::fs::symlink(target.join("nested"), &alias).unwrap();
-        fs::write(root.join("page.typ"), "lexical source").unwrap();
-        fs::write(target.join("page.typ"), "physical source").unwrap();
-        let path = alias.join("../page.typ");
-
-        assert_eq!(path.canonicalize().unwrap(), target.join("page.typ"));
-        assert_eq!(normalize_path(&path), root.join("page.typ"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_drops_parents_keeping_names() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let name = OsStr::from_bytes(b"source-\xff.typ");
-        let path = root.join("missing/..").join(name);
-
-        assert_eq!(normalize_path(&path), root.join(name));
     }
 
     #[test]

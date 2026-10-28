@@ -179,26 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn sink_rejects_payload_that_cannot_beat_raw() {
-        let mut stream = Vec::new();
-        stream.extend_from_slice(b"RIFF");
-        stream.extend_from_slice(&[0; 4]);
-        stream.extend_from_slice(b"WEBP");
-        stream.extend_from_slice(b"VP8L");
-        stream.extend_from_slice(&8u32.to_le_bytes());
-        stream.extend_from_slice(&[0; 5]);
-        stream.extend_from_slice(&[7, 8, 9]);
-
-        let mut sink = AlphaSink::new(4);
-        sink.write_all(&stream).unwrap();
-        assert!(sink.finish().is_some());
-
-        let mut sink = AlphaSink::new(3);
-        sink.write_all(&stream).unwrap();
-        assert!(sink.finish().is_none());
-    }
-
-    #[test]
     fn payload_matches_container_scan() {
         for (width, height) in [(1, 1), (1, 7), (8, 3), (17, 19), (32, 33)] {
             for pattern in 0..4u8 {

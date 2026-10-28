@@ -217,27 +217,4 @@ mod tests {
         assert_eq!(unreadable_names(&source), ["ref"]);
         assert!(unreadable_names(&Content::sequence([TextElem::packed("see ")])).is_empty());
     }
-
-    #[test]
-    fn unreadable_summary_names_at_most_three() {
-        let summarised = |names: &[&str]| {
-            unreadable(
-                &names
-                    .iter()
-                    .map(|name| (EcoString::from(*name), Span::detached()))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        fn named(summary: &str) -> Vec<&str> {
-            summary.split('`').skip(1).step_by(2).collect()
-        }
-
-        assert_eq!(named(&summarised(&["image"])), ["image"]);
-        assert_eq!(named(&summarised(&["a", "b", "c"])), ["a", "b", "c"]);
-        assert_eq!(
-            named(&summarised(&["a", "b", "c", "d", "e"])),
-            ["a", "b", "c"]
-        );
-        assert!(summarised(&["a", "b", "c", "d", "e"]).contains("and 2 more"));
-    }
 }

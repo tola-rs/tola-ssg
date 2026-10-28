@@ -139,12 +139,34 @@ mod tests {
 
     use tola_build::output::summary::{ChangedOutputGroups, OutputCounts};
 
+    /// The palette decides whether a line carries escapes, and never the text around them.
     #[test]
-    fn colorless_output_stays_unstyled() {
-        assert_eq!(
-            serving_line("http://127.0.0.1:5277", Palette::new(false)),
-            "Serving http://127.0.0.1:5277"
-        );
+    fn palette_choice_decides_escapes() {
+        for (plain, colored) in [
+            (
+                serving_line("http://127.0.0.1:5277", Palette::new(false)),
+                serving_line("http://127.0.0.1:5277", Palette::new(true)),
+            ),
+            (
+                summary("Built site in 615 ms", Palette::new(false)),
+                summary("Built site in 615 ms", Palette::new(true)),
+            ),
+            (
+                notice("first\nsecond", Palette::new(false)),
+                notice("first\nsecond", Palette::new(true)),
+            ),
+            (
+                secondary("Watching for changes", Palette::new(false)),
+                secondary("Watching for changes", Palette::new(true)),
+            ),
+            (
+                stream_label("assets", Palette::new(false)),
+                stream_label("assets", Palette::new(true)),
+            ),
+        ] {
+            assert!(!plain.contains('\u{1b}'), "{plain:?} stays unstyled");
+            assert!(colored.contains('\u{1b}'), "{colored:?} is styled");
+        }
         assert_eq!(
             summary("Built site in 615 ms", Palette::new(false)),
             "Built site in 615 ms"
@@ -158,14 +180,6 @@ mod tests {
             "Watching for changes"
         );
         assert_eq!(stream_label("assets", Palette::new(false)), "[assets] ");
-    }
-
-    #[test]
-    fn colored_output_stays_styled() {
-        assert!(summary("Built site in 615 ms", Palette::new(true)).contains('\u{1b}'));
-        assert!(notice("first\nsecond", Palette::new(true)).contains('\u{1b}'));
-        assert!(secondary("Watching for changes", Palette::new(true)).contains('\u{1b}'));
-        assert!(stream_label("assets", Palette::new(true)).contains('\u{1b}'));
     }
 
     #[test]

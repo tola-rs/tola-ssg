@@ -67,7 +67,7 @@ pub(super) fn load_source(
     };
     Ok(Some(Source::new(id, text)))
 }
-/// Selection and edits refer to the original snapshot, not its repaired tree.
+/// Selection and edits refer to the original source, not its repaired tree.
 pub(super) struct Selection<'a> {
     pub(super) source: &'a Source,
     pub(super) cursor: usize,

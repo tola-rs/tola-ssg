@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_lock_path_keeps_its_typed_verdict() {
+    fn directory_at_lock_path_is_refused() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory
             .path()

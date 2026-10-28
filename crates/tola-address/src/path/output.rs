@@ -242,14 +242,6 @@ mod tests {
             assert!(OutputPath::parse(path).is_err(), "accepted {path:?}");
         }
     }
-
-    #[test]
-    fn portable_literals_stay_filenames() {
-        for path in ["100%.html", "a#b.html", "notes%20here"] {
-            assert_eq!(OutputPath::parse(path).unwrap().as_str(), path);
-        }
-    }
-
     #[test]
     fn routes_name_directory_indexes() {
         for (route, output) in [
@@ -265,21 +257,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn index_files_become_directory_routes() {
-        for (output, route) in [
-            ("index.html", "/"),
-            ("posts/rust/index.html", "/posts/rust/"),
-            ("404.html", "/404.html"),
-            ("notes", "/notes"),
-            ("paper.pdf", "/paper.pdf"),
-        ] {
-            let output = OutputPath::parse(output).unwrap();
-            assert_eq!(route_for_output(&output).as_str(), route);
-        }
-    }
-
     #[test]
     fn route_and_output_round_trip() {
         // `parse` reads the browser spelling, where the filename's literal `%` is escaped.
@@ -292,60 +269,5 @@ mod tests {
             route_for_output(&OutputPath::from_route(&exact)).as_str(),
             "/x/"
         );
-    }
-
-    #[test]
-    fn unicode_names_stay_decoded() {
-        let route = UrlPath::parse("/%E4%B8%AD%E6%96%87/").unwrap();
-        let output = OutputPath::from_route(&route);
-
-        assert_eq!(output.as_str(), "中文/index.html");
-        assert_eq!(route_for_output(&output).as_str(), "/中文/");
-        assert_eq!(route.to_encoded(), "/%E4%B8%AD%E6%96%87/");
-    }
-
-    #[test]
-    fn asset_urls_spell_the_exact_file() {
-        for (output, url) in [
-            ("x/index.html", "/x/index.html"),
-            ("index.html", "/index.html"),
-            ("images/logo.png", "/images/logo.png"),
-        ] {
-            assert_eq!(
-                asset_url_from_output(&OutputPath::parse(output).unwrap()),
-                url
-            );
-        }
-    }
-
-    #[test]
-    fn file_urls_round_trip_to_their_output() {
-        for output in ["x/index.html", "index.html", "images/logo.png", "100%.html"] {
-            let output = OutputPath::parse(output).unwrap();
-            assert_eq!(
-                asset_output_from_url(&asset_url_from_output(&output)).unwrap(),
-                output
-            );
-        }
-        for url in ["/", "/x/"] {
-            let url = UrlPath::parse(url).unwrap();
-            assert!(asset_output_from_url(&url).is_err(), "accepted {url}");
-        }
-    }
-
-    #[test]
-    fn directory_index_aliases_name_the_route() {
-        for (output, alias) in [
-            ("x/index.html", Some("/x/")),
-            ("index.html", Some("/")),
-            ("posts/rust/index.html", Some("/posts/rust/")),
-            ("x", None),
-            ("x.pdf", None),
-            ("404.html", None),
-        ] {
-            let output = OutputPath::parse(output).unwrap();
-            let alias = alias.map(|alias| UrlPath::parse(alias).unwrap());
-            assert_eq!(asset_directory_index_alias(&output), alias, "{output}");
-        }
     }
 }

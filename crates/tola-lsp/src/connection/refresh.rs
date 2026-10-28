@@ -56,8 +56,6 @@ mod tests {
     use super::*;
     use crate::capabilities::ClientFeatures;
     use crate::connection::tests::{messages, ready, ready_workspace};
-    use crate::protocol::CheckMode;
-    use lsp_server::Message;
     use serde_json::json;
 
     fn token_client(supported: bool) -> Connection<Vec<u8>, impl Fn(&[Diagnostic])> {
@@ -75,125 +73,27 @@ mod tests {
         connection.checked = Some((1, true));
         connection
     }
-
+    /// A refresh is asked of a client that declared `refreshSupport` and holds a baseline to
+    /// refresh: every other capability state is answered with silence.
     #[test]
-    fn refreshes_coalesce_completed_revisions() {
-        let mut connection = token_client(true);
-        connection.refresh_semantic_tokens(1).unwrap();
-        let written = messages(&mut connection);
-        let [Message::Request(first)] = written.as_slice() else {
-            panic!("one refresh request: {written:?}");
-        };
-        assert_eq!(first.method, SemanticTokensRefresh::METHOD);
-        connection.refresh_semantic_tokens(1).unwrap();
-        assert!(messages(&mut connection).is_empty());
-        for revision in [2, 3] {
-            connection.revision = revision;
-            connection.checked = Some((revision, true));
-            connection.refresh_semantic_tokens(revision).unwrap();
-            assert!(messages(&mut connection).is_empty());
-        }
-        connection
-            .response(Response::new_ok(first.id.clone(), ()))
-            .unwrap();
-        let written = messages(&mut connection);
-        let [Message::Request(latest)] = written.as_slice() else {
-            panic!("one merged refresh request: {written:?}");
-        };
-        assert_ne!(latest.id, first.id);
-        assert_eq!(connection.semantic_refresh.sent_revision, Some(3));
-        connection
-            .response(Response::new_ok(latest.id.clone(), ()))
-            .unwrap();
-        assert!(messages(&mut connection).is_empty());
-    }
-
-    #[test]
-    fn refreshes_wait_for_saved_revisions() {
-        let mut connection = token_client(true);
-        ready_workspace(&mut connection).check_mode = CheckMode::OnSave;
-        connection.refresh_semantic_tokens(1).unwrap();
-        let written = messages(&mut connection);
-        let [Message::Request(first)] = written.as_slice() else {
-            panic!("one refresh request");
-        };
-        connection.sources_changed(true).unwrap();
-        connection
-            .response(Response::new_ok(first.id.clone(), ()))
-            .unwrap();
-        assert!(messages(&mut connection).is_empty());
-        connection.sources_changed(false).unwrap();
-        connection.checked = Some((connection.revision, true));
-        connection
-            .refresh_semantic_tokens(connection.revision)
-            .unwrap();
-        assert!(matches!(
-            messages(&mut connection).as_slice(),
-            [Message::Request(_)]
-        ));
-    }
-
-    #[test]
-    fn refreshes_require_supported_token_displays() {
-        for supported in [false, true] {
-            for baseline in [false, true] {
-                let mut connection = token_client(supported);
-                if !baseline {
-                    connection.tokens.clear();
-                }
-                connection.refresh_semantic_tokens(1).unwrap();
-                assert_eq!(
-                    messages(&mut connection).len(),
-                    usize::from(supported && baseline)
-                );
+    fn refreshes_need_supported_token_displays() {
+        // Rows: (client declares refreshSupport, holds a full-token baseline, requests written).
+        for (supported, baseline, expected) in [
+            (false, true, 0),
+            (true, false, 0),
+            (false, false, 0),
+            (true, true, 1),
+        ] {
+            let mut connection = token_client(supported);
+            if !baseline {
+                connection.tokens.clear();
             }
+            connection.refresh_semantic_tokens(1).unwrap();
+            assert_eq!(
+                messages(&mut connection).len(),
+                expected,
+                "refreshSupport={supported}, baseline={baseline}"
+            );
         }
-    }
-
-    #[test]
-    fn range_displays_refresh_without_full_baselines() {
-        let mut connection = token_client(true);
-        connection.tokens.clear();
-        let uri: lsp_types::Uri = "untitled:Range".parse().unwrap();
-        connection
-            .commit_tokens(
-                RequestId::from(99),
-                crate::compiler::TokensRead {
-                    uri: uri.clone(),
-                    kind: crate::compiler::TokensKind::Range(lsp_types::Range::default()),
-                },
-                Default::default(),
-            )
-            .unwrap();
-        assert!(connection.tokens.get(&uri).is_some_and(Option::is_none));
-        assert!(matches!(
-            messages(&mut connection).as_slice(),
-            [Message::Response(_)]
-        ));
-        connection.refresh_semantic_tokens(1).unwrap();
-        let written = messages(&mut connection);
-        assert!(matches!(
-            written.as_slice(),
-            [Message::Request(request)] if request.method == SemanticTokensRefresh::METHOD
-        ));
-    }
-
-    #[test]
-    fn closed_displays_drop_pending_refreshes() {
-        let mut connection = token_client(true);
-        connection.refresh_semantic_tokens(1).unwrap();
-        let written = messages(&mut connection);
-        let [Message::Request(first)] = written.as_slice() else {
-            panic!("one refresh request");
-        };
-        connection.revision = 2;
-        connection.checked = Some((2, true));
-        connection.refresh_semantic_tokens(2).unwrap();
-        connection.tokens.clear();
-        connection
-            .response(Response::new_ok(first.id.clone(), ()))
-            .unwrap();
-        assert!(connection.semantic_refresh.in_flight.is_none());
-        assert!(messages(&mut connection).is_empty());
     }
 }

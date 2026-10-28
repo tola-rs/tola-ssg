@@ -1094,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn preset_help_names_each_preset_with_its_composition() {
+    fn preset_help_spells_each_composition() {
         let mut command = Cli::command();
         let init = command
             .find_subcommand_mut("init")
@@ -1137,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn feature_help_names_each_feature_with_its_summary() {
+    fn feature_help_spells_each_summary() {
         let mut command = Cli::command();
         let help = command
             .find_subcommand_mut("init")

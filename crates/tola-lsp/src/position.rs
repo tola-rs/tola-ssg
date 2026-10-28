@@ -184,7 +184,7 @@ mod tests {
     /// A character the compiler's line model also breaks on stays inside the client's line, in
     /// both directions.
     #[test]
-    fn compiler_only_breaks_stay_inside_the_protocol_line() {
+    fn compiler_breaks_stay_on_client_line() {
         for break_character in ['\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}'] {
             let lines = Lines::new(format!("a{break_character}b\r\nc"));
             let b = 1 + break_character.len_utf8();

@@ -442,28 +442,46 @@ mod tests {
         assert!(!root.join("nested").exists());
     }
 
+    /// Recorded evidence stops being fresh once the bytes behind the recorded path change:
+    /// rewriting the file, removing it, and retargeting a symlink all invalidate one claim.
     #[test]
-    fn evidence_stales_when_the_file_changes() {
+    fn changed_source_invalidates_evidence() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("collection.json");
         std::fs::write(&path, b"one").unwrap();
         let (_, evidence) = read_source(&path).unwrap();
-        assert!(
+        let fresh = |evidence: &IconFileRead| {
             evidence
                 .is_fresh(&SourceOverrides::default(), &BuildCancellation::new())
                 .unwrap()
-        );
+        };
+        assert!(fresh(&evidence), "unchanged source stays fresh");
+
         std::fs::write(&path, b"two").unwrap();
-        assert!(
-            !evidence
-                .is_fresh(&SourceOverrides::default(), &BuildCancellation::new())
-                .unwrap()
-        );
+        assert!(!fresh(&evidence), "rewritten source stays fresh");
         std::fs::remove_file(&path).unwrap();
+        assert!(!fresh(&evidence), "removed source stays fresh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retargeted_alias_invalidates_evidence() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.json");
+        let second = directory.path().join("second.json");
+        let alias = directory.path().join("collection.json");
+        std::fs::write(&first, "identical bytes").unwrap();
+        std::fs::write(&second, "identical bytes").unwrap();
+        symlink(&first, &alias).unwrap();
+        let (_, evidence) = read_source(&alias).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&second, &alias).unwrap();
         assert!(
             !evidence
                 .is_fresh(&SourceOverrides::default(), &BuildCancellation::new())
-                .unwrap()
+                .unwrap(),
+            "a retargeted alias invalidates evidence even with identical bytes"
         );
     }
 
@@ -609,27 +627,6 @@ mod tests {
             error.downcast_ref::<crate::cancellation::BuildCancelled>(),
             Some(crate::cancellation::BuildCancelled)
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn retargeted_alias_invalidates_evidence() {
-        use std::os::unix::fs::symlink;
-        let directory = tempfile::tempdir().unwrap();
-        let first = directory.path().join("first.json");
-        let second = directory.path().join("second.json");
-        let alias = directory.path().join("collection.json");
-        std::fs::write(&first, "identical bytes").unwrap();
-        std::fs::write(&second, "identical bytes").unwrap();
-        symlink(&first, &alias).unwrap();
-        let (_, evidence) = read_source(&alias).unwrap();
-        std::fs::remove_file(&alias).unwrap();
-        symlink(&second, &alias).unwrap();
-        assert!(
-            !evidence
-                .is_fresh(&SourceOverrides::default(), &BuildCancellation::new())
-                .unwrap()
-        );
     }
 
     #[cfg(unix)]

@@ -51,61 +51,40 @@ impl ServerPurpose {
 // and whether the view and its log should name the session they belong to.
 
 /// Start development with observation active before its first watched build.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run(
-    config: Arc<ResolvedSiteConfig>,
-    server: ServerConfig,
-    dev: DevConfig,
-    config_loader: ConfigLoader,
-    resources: tola_build::BuildResources,
-    output: CommandOutput,
-    shutdown: Cancellation,
-    disable_hook_reuse: bool,
-) -> Result<()> {
+/// What a server session needs to start, before the purpose decides how it runs.
+pub(crate) struct ServerLaunch {
+    pub config: Arc<ResolvedSiteConfig>,
+    pub server: ServerConfig,
+    pub config_loader: ConfigLoader,
+    pub resources: tola_build::BuildResources,
+    pub output: CommandOutput,
+    pub shutdown: Cancellation,
+}
+
+pub(crate) fn run(launch: ServerLaunch, dev: DevConfig, disable_hook_reuse: bool) -> Result<()> {
     run_server(
-        config,
-        server,
-        config_loader,
-        resources,
-        output,
+        launch,
         ServerPurpose::Development {
             dev,
             disable_hook_reuse,
         },
-        shutdown,
     )
 }
 
 /// Start a one-build local preview with production output and candidate checks.
-pub(crate) fn run_preview(
-    config: Arc<ResolvedSiteConfig>,
-    server: ServerConfig,
-    config_loader: ConfigLoader,
-    resources: tola_build::BuildResources,
-    output: CommandOutput,
-    shutdown: Cancellation,
-) -> Result<()> {
-    run_server(
+pub(crate) fn run_preview(launch: ServerLaunch) -> Result<()> {
+    run_server(launch, ServerPurpose::Preview)
+}
+
+fn run_server(launch: ServerLaunch, purpose: ServerPurpose) -> Result<()> {
+    let ServerLaunch {
         config,
         server,
         config_loader,
         resources,
         output,
-        ServerPurpose::Preview,
         shutdown,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_server(
-    config: Arc<ResolvedSiteConfig>,
-    server: ServerConfig,
-    config_loader: ConfigLoader,
-    resources: tola_build::BuildResources,
-    output: CommandOutput,
-    purpose: ServerPurpose,
-    shutdown: Cancellation,
-) -> Result<()> {
+    } = launch;
     shutdown.token().ensure_active()?;
     let view = match &purpose {
         ServerPurpose::Development { .. } => output

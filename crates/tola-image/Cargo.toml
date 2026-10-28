@@ -3,7 +3,7 @@ name = "tola-image"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "Deterministic image decoding, colour management, resampling, and encoding for Tola"
+description = "Deterministic image decoding, colour management, resampling, and encoding"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 

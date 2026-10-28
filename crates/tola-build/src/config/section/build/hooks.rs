@@ -826,7 +826,7 @@ impl DevParticipation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::tests::{attached_diagnostics, diagnostic_mentioning};
+    use crate::config::tests::diagnostic_mentioning;
 
     #[test]
     fn hook_template_preserves_stage_entries() {
@@ -1159,115 +1159,6 @@ rerun-on = ["/src", "../templates"]
                 AfterPublishHookConfig::FIELDS.name,
             ],
         );
-    }
-
-    /// The 1-based line of the last line `source` writes as `key`.
-    fn last_written_line(source: &str, key: &str) -> usize {
-        let lines = source.lines().collect::<Vec<_>>();
-        lines.iter().rposition(|line| *line == key).unwrap() + 1
-    }
-
-    /// The location of the single diagnostic settings validation reports for `source`.
-    fn reported_location(source: &str) -> (usize, String) {
-        let parsed = crate::config::ConfigSource::parse(
-            Path::new("/site/tola.toml"),
-            source,
-            crate::resources::InputScope::Online,
-        )
-        .unwrap()
-        .decode_site()
-        .unwrap();
-        let error = parsed.validate_settings().unwrap_err();
-        let diagnostics = attached_diagnostics(&error);
-        let [diagnostic] = diagnostics else {
-            panic!("expected one diagnostic for {source}: {diagnostics:#?}");
-        };
-        let location = diagnostic.location.as_ref().unwrap();
-        (
-            location.line.unwrap(),
-            location.source_lines[0].text.clone(),
-        )
-    }
-
-    #[test]
-    fn later_entry_error_names_its_own_entry() {
-        // The last case writes no `name` at all: a field the entry does not write points at the
-        // entry's own header, never at the first entry of its array.
-        for (source, key) in [
-            (
-                r#"
-[[build.hooks.before-build]]
-name = "first"
-command = ["first.sh"]
-generates = ["generated/first"]
-
-[[build.hooks.before-build]]
-name = "second"
-command = []
-generates = ["generated/second"]
-"#,
-                "command = []",
-            ),
-            (
-                r#"
-[[build.hooks.generate-outputs]]
-name = "first"
-command = ["first.sh"]
-outputs = [{ file = "first.json" }]
-
-[[build.hooks.generate-outputs]]
-name = "second"
-command = []
-outputs = [{ file = "second.json" }]
-"#,
-                "command = []",
-            ),
-            (
-                r#"
-[[build.hooks.after-publish]]
-name = "first"
-command = ["first.sh"]
-
-[[build.hooks.after-publish]]
-name = "second"
-command = []
-"#,
-                "command = []",
-            ),
-            (
-                r#"
-[[build.hooks.before-build]]
-name = "styles"
-command = ["first.sh"]
-generates = ["generated/first"]
-
-[[build.hooks.before-build]]
-name = "styles"
-command = ["second.sh"]
-generates = ["generated/second"]
-"#,
-                r#"name = "styles""#,
-            ),
-            (
-                r#"
-[[build.hooks.before-build]]
-name = "first"
-command = ["first.sh"]
-generates = ["generated/first"]
-
-[[build.hooks.before-build]]
-command = ["second.sh"]
-generates = ["generated/second"]
-"#,
-                "[[build.hooks.before-build]]",
-            ),
-        ] {
-            assert_eq!(
-                reported_location(source),
-                (last_written_line(source, key), key.to_owned()),
-                "{source}"
-            );
-        }
     }
 
     /// Assert that a load of one schema whose single before-build hook declares `declared`

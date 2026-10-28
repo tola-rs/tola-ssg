@@ -509,7 +509,7 @@ mod tests {
     use tola_config::FieldPath;
 
     #[test]
-    fn warning_names_the_line_that_wrote_it() {
+    fn warning_points_at_the_writing_line() {
         let directory = tempfile::TempDir::new().unwrap();
         let mut config =
             crate::config::tests::load_test_config(directory.path(), "[site]\ntitle = \"Site\"\n");

@@ -224,7 +224,7 @@ async fn serve_connection(
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tola_build::build::{BuildMode, BuildRequest, BuildSession};
+    use tola_build::build::{BuildMode, BuildSession};
     use tola_build::config::ResolvedSiteConfig;
 
     use super::*;
@@ -235,39 +235,24 @@ mod tests {
     const SMALL_ASSET_BYTES: usize = 4 * 1024;
     const IDLE_LIFETIME: Duration = Duration::from_millis(250);
 
-    pub(super) fn site_config(root: &std::path::Path, configuration: &str) -> ResolvedSiteConfig {
-        tola_build::config::loading::resolve_site_config(
-            &root.join("tola.toml"),
-            configuration,
-            tola_typst::PackageLocations::default(),
-            &tola_build::config::loading::BuildOverrides::default(),
-        )
-        .unwrap()
-        .into_config()
-    }
+    pub(super) use crate::dev::tests::site_config;
 
     /// One published revision with `large.bin` and `small.bin`.
     fn served_site() -> (tempfile::TempDir, CurrentSite, Arc<ResolvedSiteConfig>) {
         let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("content")).unwrap();
-        std::fs::write(root.path().join("site.typ"), "").unwrap();
         std::fs::write(root.path().join("large.bin"), vec![0u8; LARGE_ASSET_BYTES]).unwrap();
         std::fs::write(root.path().join("small.bin"), vec![0u8; SMALL_ASSET_BYTES]).unwrap();
-        let config = Arc::new(site_config(
+        let config = crate::dev::tests::write_site(
             root.path(),
+            "",
             "[assets]\nfiles = [{ source = \"large.bin\", url = \"/large.bin\" }, { source = \"small.bin\", url = \"/small.bin\" }]\n",
-        ));
-        let mut session = BuildSession::new();
-        let attempt = session.prepare(
-            Arc::clone(&config),
-            BuildRequest::new(BuildMode::Production),
         );
-        let candidate = attempt.run().unwrap().into_unchecked_revision(None);
-        let checked = candidate
-            .check(&tola_build::cancellation::BuildCancellation::new())
-            .unwrap()
-            .into_checked()
-            .unwrap();
+        let mut session = BuildSession::new();
+        let (checked, _) = crate::dev::tests::checked_candidate(
+            &mut session,
+            Arc::clone(&config),
+            BuildMode::Production,
+        );
         let sites = CurrentSite::new();
         sites.replace(&mut session, checked).unwrap();
         (root, sites, config)

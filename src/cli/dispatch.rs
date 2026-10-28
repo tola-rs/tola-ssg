@@ -23,15 +23,15 @@ pub(crate) fn dispatch(
             packages,
             build,
             fonts,
-        } => commands::build::run(
-            config,
+        } => commands::build::run(commands::SiteRequest {
+            config_file: config,
             packages,
             scope,
             build,
-            crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+            resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
             output,
             cancellation,
-        ),
+        }),
         Commands::Dev {
             config,
             packages,
@@ -39,14 +39,16 @@ pub(crate) fn dispatch(
             fonts,
             development,
         } => commands::dev::run(
-            config,
-            packages,
-            scope,
-            build,
+            commands::SiteRequest {
+                config_file: config,
+                packages,
+                scope,
+                build,
+                resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+                output,
+                cancellation,
+            },
             development,
-            crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
-            output,
-            cancellation,
         ),
         Commands::Preview {
             config,
@@ -55,14 +57,16 @@ pub(crate) fn dispatch(
             fonts,
             server,
         } => commands::preview::run(
-            config,
-            packages,
-            scope,
-            build,
+            commands::SiteRequest {
+                config_file: config,
+                packages,
+                scope,
+                build,
+                resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+                output,
+                cancellation,
+            },
             server,
-            crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
-            output,
-            cancellation,
         ),
         Commands::Check {
             config,
@@ -74,15 +78,15 @@ pub(crate) fn dispatch(
             if no_build {
                 commands::check::sources(config, packages, scope, build, output, cancellation)
             } else {
-                commands::check::run(
-                    config,
+                commands::check::run(commands::SiteRequest {
+                    config_file: config,
                     packages,
                     scope,
                     build,
-                    crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
+                    resources: crate::cli::config::build_resources_with_fonts(scope, &fonts)?,
                     output,
                     cancellation,
-                )
+                })
             }
         }
         Commands::Fmt {

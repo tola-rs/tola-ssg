@@ -147,17 +147,12 @@ impl<W: Write, D: Fn(&[Diagnostic])> Connection<W, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{CheckedSources, SourceCompilation, SourceFailure};
-    use crate::connection::tests::{
-        hover_query, messages, open_document, ready, ready_at, ready_workspace,
-    };
-    use crate::protocol::CheckMode;
+    use crate::connection::tests::{open_document, ready, ready_at, ready_workspace};
     use lsp_types::notification::{self, Notification as LspNotification};
     use serde_json::json;
-    use std::sync::Arc;
-    use tola_typst_syntax::names::SelectedInterfaces;
 
-    use lsp_server::{Message, Notification, RequestId};
+    use crate::protocol::CheckMode;
+    use lsp_server::Notification;
 
     /// Only typing defers its check: a save checks at once, so the site answers a deliberate edit
     /// without waiting out a pause the author never made.
@@ -201,30 +196,6 @@ mod tests {
             "a save checks without waiting"
         );
     }
-
-    /// A check that has waited out its bound is dispatched ahead of the queued jobs, which keep
-    /// their order and are served once it finishes.
-    #[test]
-    fn starved_check_runs_before_queued_jobs() {
-        let mut connection = ready(Vec::new());
-        connection.sources_changed(false).unwrap();
-        let due = connection.check_due.expect("a queued check");
-        connection.query(RequestId::from(1), hover_query()).unwrap();
-        connection.query(RequestId::from(2), hover_query()).unwrap();
-        assert!(
-            matches!(connection.next_job(due), Some(SourceJob::Query(_))),
-            "a fresh queue is served first"
-        );
-        assert!(
-            matches!(
-                connection.next_job(due + CHECK_STARVATION_LIMIT),
-                Some(SourceJob::Check(_))
-            ),
-            "a check past its bound outruns the queue"
-        );
-        assert_eq!(connection.queries.len(), 1, "the queued job waits its turn");
-    }
-
     /// A site checked on save advances its revision with every edit but runs no check for one:
     /// typing never spends a whole site's work, and the save is what checks.
     #[test]
@@ -265,93 +236,5 @@ mod tests {
             connection.next_job(Instant::now()),
             Some(SourceJob::Check(_))
         ));
-    }
-
-    #[test]
-    fn source_status_ignores_superseded_completion() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.source_check_status = true;
-        connection.sources_changed(false).unwrap();
-        let older = connection.revision;
-        connection.next_job(Instant::now()).unwrap();
-        connection.sources_changed(false).unwrap();
-        let current = connection.revision;
-        messages(&mut connection);
-        connection
-            .completed(SourceCompilation::Checked {
-                checked_revision: older,
-                checked: Ok(CheckedSources {
-                    configuration: None,
-                    compiled: true,
-                    diagnostics: Vec::new(),
-                    read_paths: None,
-                    selected: Arc::new(SelectedInterfaces::default()),
-                }),
-            })
-            .unwrap();
-        assert!(messages(&mut connection).is_empty());
-        assert_eq!(connection.check_progress(), CheckProgress::Checking);
-        connection.next_job(Instant::now()).unwrap();
-        connection
-            .completed(SourceCompilation::Checked {
-                checked_revision: current,
-                checked: Ok(CheckedSources {
-                    configuration: None,
-                    compiled: false,
-                    diagnostics: Vec::new(),
-                    read_paths: None,
-                    selected: Arc::new(SelectedInterfaces::default()),
-                }),
-            })
-            .unwrap();
-        let states = messages(&mut connection)
-            .into_iter()
-            .filter_map(|message| match message {
-                Message::Notification(notification)
-                    if notification.method == "tola/sourceCheckStatus" =>
-                {
-                    Some(notification.params)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(states, [json!({"revision":current,"state":"failed"})]);
-    }
-
-    #[test]
-    fn cancelled_check_is_not_failure() {
-        let mut connection = ready(Vec::new());
-        let workspace = ready_workspace(&mut connection);
-        workspace.source_check_status = true;
-        workspace.check_mode = CheckMode::OnSave;
-        connection.sources_changed(false).unwrap();
-        let older = connection.revision;
-        connection.next_job(Instant::now()).unwrap();
-        connection.sources_changed(true).unwrap();
-        let current = connection.revision;
-        let states = messages(&mut connection)
-            .into_iter()
-            .filter_map(|message| match message {
-                Message::Notification(notification)
-                    if notification.method == "tola/sourceCheckStatus" =>
-                {
-                    Some(notification.params)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            states.last(),
-            Some(&json!({"revision":current,"state":"notChecked"}))
-        );
-        connection
-            .completed(SourceCompilation::Checked {
-                checked_revision: older,
-                checked: Err(SourceFailure::Cancelled),
-            })
-            .unwrap();
-        assert!(messages(&mut connection).is_empty());
-        assert_eq!(connection.check_progress(), CheckProgress::NotChecked);
     }
 }

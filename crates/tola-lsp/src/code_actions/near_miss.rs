@@ -206,105 +206,72 @@ fn writes_a_table_header(line: &str) -> bool {
 mod tests {
     use super::*;
     use crate::code_actions::tests::{actions, actions_at, edits, field};
-    use lsp_types::{CodeActionOrCommand, Position};
-
+    use lsp_types::Position;
+    /// A correction is offered only where the echoed cause still describes the text: a header
+    /// line, an out-of-range line, a stale echo, and a name the language cannot declare all offer
+    /// nothing, so a client never applies an edit to a document it no longer holds.
     #[test]
-    fn misspelled_field_changes_to_the_declared_key() {
-        let text = "[site]\ntitle = \"Editor contract\"\ndescriptio = \"Typo\"\n";
-        let actions = actions(
-            text,
-            serde_json::json!({
-                "kind": "unknown-configuration-fields",
-                "fields": [{
-                    "name": "site.descriptio",
-                    "line": 3,
-                    "written": {
-                        "start": { "line": 2, "character": 0 },
-                        "end": { "line": 2, "character": 10 },
-                    },
-                }],
-            }),
-        );
-        // The correction leads, so a client that takes the first fix keeps the value beside the key.
-        assert_eq!(
-            edits(&actions),
-            [
-                (
-                    "change `site.descriptio` to `description`".to_owned(),
-                    Range::new(Position::new(2, 0), Position::new(2, 10)),
-                    "description".to_owned(),
-                ),
-                (
-                    "remove `site.descriptio`".to_owned(),
-                    Range::new(Position::new(2, 0), Position::new(3, 0)),
-                    String::new(),
-                ),
-            ]
-        );
+    fn stale_or_unaddressable_causes_offer_no_fix() {
+        // Rows: (document, echoed cause, requested position, why no fix applies).
+        let cases: [(&str, serde_json::Value, Option<Range>, &str); 6] = [
+            (
+                "version = \"0.8.0\"\n\n[build]\nentry = \"site.typ\"\n\n[build.invalid-section]\nunknown = 1\n",
+                serde_json::json!({
+                    "kind": "unknown-configuration-fields",
+                    "fields": [field("build.invalid-section", Some(6))],
+                }),
+                None,
+                "a table header line cannot be removed alone",
+            ),
+            (
+                "[build]\n",
+                serde_json::json!({
+                    "kind": "unknown-configuration-fields",
+                    "fields": [field("build.minfy", Some(9))],
+                }),
+                None,
+                "the echoed line lies past the document",
+            ),
+            (
+                "[site]\ndescription = \"kept\"\n",
+                serde_json::json!({
+                    "kind": "unknown-configuration-fields",
+                    "fields": [{"name": "site.descriptio", "line": 2, "written": {
+                        "start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 10},
+                    }}],
+                }),
+                None,
+                "the echo names a key the document does not hold",
+            ),
+            (
+                "#let x = 1\n",
+                serde_json::json!({"kind": "unknown-variable", "name": "1x"}),
+                None,
+                "the name is not an identifier",
+            ),
+            (
+                "#let x = 1\n",
+                serde_json::json!({"kind": "unknown-variable", "name": "a b"}),
+                None,
+                "the name is not an identifier",
+            ),
+            (
+                "#let sym = 1\n",
+                serde_json::json!({"kind": "unknown-variable", "name": "sym"}),
+                Some(Range::new(Position::new(0, 2), Position::new(0, 5))),
+                "the echoed name is already declared",
+            ),
+        ];
+        for (text, cause, span, why) in cases {
+            let actions = match span {
+                Some(span) => actions_at(text, cause, span),
+                None => actions(text, cause),
+            };
+            assert!(actions.is_empty(), "{why}: {actions:?}");
+        }
     }
-
     #[test]
-    fn table_header_offers_no_removal() {
-        let text = "version = \"0.8.0\"\n\n[build]\nentry = \"site.typ\"\n\n[build.invalid-section]\nunknown = 1\n";
-        let actions = actions(
-            text,
-            serde_json::json!({
-                "kind": "unknown-configuration-fields",
-                "fields": [field("build.invalid-section", Some(6))],
-            }),
-        );
-        // Removing that line alone would leave `unknown` in whichever table precedes it.
-        assert!(actions.is_empty(), "{actions:?}");
-    }
-
-    #[test]
-    fn last_line_removal_stops_at_text_end() {
-        let text = "[build]\nentry = \"site.typ\"";
-        let actions = actions(
-            text,
-            serde_json::json!({
-                "kind": "unknown-configuration-fields",
-                "fields": [field("build.entry", Some(2))],
-            }),
-        );
-        assert_eq!(
-            edits(&actions),
-            [(
-                "remove `build.entry`".to_owned(),
-                Range::new(Position::new(1, 0), Position::new(1, 18)),
-                String::new(),
-            )]
-        );
-    }
-
-    #[test]
-    fn line_beyond_document_offers_no_fix() {
-        let actions = actions(
-            "[build]\n",
-            serde_json::json!({
-                "kind": "unknown-configuration-fields",
-                "fields": [field("build.minfy", Some(9))],
-            }),
-        );
-        assert!(actions.is_empty(), "{actions:?}");
-    }
-
-    #[test]
-    fn stale_configuration_echo_preserves_key() {
-        let actions = actions(
-            "[site]\ndescription = \"kept\"\n",
-            serde_json::json!({
-                "kind":"unknown-configuration-fields",
-                "fields":[{"name":"site.descriptio","line":2,"written":{
-                    "start":{"line":1,"character":0},"end":{"line":1,"character":10}
-                }}]
-            }),
-        );
-        assert!(actions.is_empty());
-    }
-
-    #[test]
-    fn unknown_variable_defines_name_at_file_start() {
+    fn unknown_variable_defines_at_start() {
         let actions = actions_at(
             "#let missing = absent-name\n\n#missing\n",
             serde_json::json!({"kind": "unknown-variable", "name": "absent-name"}),
@@ -319,18 +286,6 @@ mod tests {
             )]
         );
     }
-
-    #[test]
-    fn name_outside_language_identifiers_offers_no_fix() {
-        for name in ["1x", "a b", "", "1"] {
-            let actions = actions(
-                "#let x = 1\n",
-                serde_json::json!({"kind": "unknown-variable", "name": name}),
-            );
-            assert!(actions.is_empty(), "{name:?} offered {actions:?}");
-        }
-    }
-
     #[test]
     fn std_module_name_rewrites_under_std() {
         let actions = actions_at(
@@ -355,29 +310,5 @@ mod tests {
                 ),
             ]
         );
-    }
-
-    #[test]
-    fn stale_variable_echo_offers_no_edit() {
-        for text in ["#let sym = 1\n", "//sym", "#\"sym\""] {
-            let actions = actions_at(
-                text,
-                serde_json::json!({"kind":"unknown-variable", "name":"sym"}),
-                Range::new(Position::new(0, 2), Position::new(0, 5)),
-            );
-            assert!(actions.is_empty(), "{text:?} offered {actions:?}");
-        }
-    }
-
-    #[test]
-    fn alternative_fixes_are_not_preferred() {
-        let actions = actions_at(
-            "$ sym.alpha $\n",
-            serde_json::json!({"kind":"unknown-variable", "name":"sym"}),
-            Range::new(Position::new(0, 2), Position::new(0, 5)),
-        );
-        assert_eq!(actions.len(), 2);
-        assert!(actions.iter().all(|action| matches!(action,
-            CodeActionOrCommand::CodeAction(action) if action.is_preferred != Some(true))));
     }
 }

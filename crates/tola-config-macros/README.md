@@ -1,6 +1,6 @@
 # tola-config-macros
 
-The proc-macro half of `tola-config`. `#[derive(Config)]` generates field-path accessors
+Derive macros for `tola-config`. `#[derive(Config)]` generates field-path accessors
 (`FIELDS`) and the fallible TOML template methods (`try_template`, `try_template_with_header`,
 `try_template_with_header_from`).
 
@@ -26,6 +26,6 @@ pub struct SiteConfig {
 }
 ```
 
-Attributes: struct-level `section`, `crate`/`tola_config`, `collection`; field-level `skip`,
-`hidden`, `name`, `default`, `values`, `collection`, `status`, `sub`. Details are in the macro's
-rustdoc.
+Struct attributes: `section`, `crate`/`tola_config`, `collection`. Field attributes: `skip`,
+`hidden`, `name`, `default`, `values`, `collection`, `status`, `sub`. The macro's rustdoc
+has the details.

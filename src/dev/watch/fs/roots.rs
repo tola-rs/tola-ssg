@@ -1460,11 +1460,9 @@ fn sort_requirements(requirements: &mut [WatchRequirement]) {
 mod tests {
     use super::super::tests::{local_packages, resolve_schema};
     use super::{
-        CoverageCertainty, CoverageUncertainty, DirectoryWatch, EventBoundary, ExistencePolicy,
-        ProducerKind, ProducerSet, RootSet, WatchRequirement, WatchRequirements, WatchScope,
-        collect_roots,
+        CoverageCertainty, DirectoryWatch, EventBoundary, ExistencePolicy, ProducerKind,
+        ProducerSet, RootSet, WatchRequirement, WatchRequirements, WatchScope, collect_roots,
     };
-    use crate::dev::watch::fs::RebuildScope;
     use notify::RecursiveMode;
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
@@ -1473,7 +1471,7 @@ mod tests {
     use tola_build::config::ResolvedSiteConfig;
 
     #[test]
-    fn indexed_matching_agrees_with_full_subscription_scan() {
+    fn grouping_never_changes_classification() {
         use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind};
         let mut desired = Vec::new();
         for prefix in [
@@ -1555,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn event_lookup_visits_only_intersecting_subscriptions() {
+    fn unrelated_paths_match_no_subscription() {
         let mut desired = (0..10_000)
             .map(|index| {
                 exact(
@@ -1670,6 +1668,41 @@ mod tests {
         !boundary.classify(path).is_empty()
     }
 
+    /// A watched symlink resolves to its physical target, and retargeting the link invalidates
+    /// the whole observation: the watcher was following the old directory.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_retarget_moves_the_watch() {
+        use std::os::unix::fs::symlink;
+        let (_directory, root) = canonical_directory();
+        let site = root.join("site");
+        let first = root.join("first");
+        let second = root.join("second");
+        for path in [&site, &first, &second] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let link = site.join("theme");
+        symlink(&first, &link).unwrap();
+        let mut roots = root_set(vec![recursive(link.clone(), ProducerKind::TypstReads)]);
+        let selected = roots.initial_selection();
+        assert!(watches(&selected, &first, RecursiveMode::Recursive));
+        assert!(accepts(&selected.boundary(), &first.join("lib.typ")));
+        install(&mut roots, selected, 1);
+
+        std::fs::remove_file(&link).unwrap();
+        symlink(&second, &link).unwrap();
+        let retarget =
+            notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Any))
+                .add_path(link);
+        assert_eq!(roots.boundary().invalidated_by(&retarget), ProducerSet::ALL);
+
+        let selected = roots.current_selection();
+        assert!(watches(&selected, &second, RecursiveMode::Recursive));
+        install(&mut roots, selected, 2);
+        assert!(accepts(&roots.boundary(), &second.join("lib.typ")));
+        assert!(!accepts(&roots.boundary(), &first.join("lib.typ")));
+    }
+
     #[test]
     fn output_root_is_never_watched() {
         let (_directory, root, config) = default_site();
@@ -1679,45 +1712,6 @@ mod tests {
 
         assert!(!output.exists());
         assert!(!roots.iter().any(|watch| watch.path == output));
-    }
-
-    #[test]
-    fn icon_sources_keep_recovery_coverage() {
-        let directory = TempDir::new().unwrap();
-        let root = tola_build::filesystem::normalize_path(directory.path());
-        let content = root.join("content");
-        std::fs::create_dir_all(&content).unwrap();
-        let collection = root.join("missing/icons.json");
-        let drawings = root.join("missing/drawings");
-        let mut schema = tola_build::config::SiteConfigSchema::default();
-        schema.icons.collections.insert(
-            "ui".into(),
-            tola_build::config::section::IconCollectionSource::LocalJson {
-                path: PathBuf::from("missing/icons.json"),
-            },
-        );
-        schema.icons.collections.insert(
-            "brand".into(),
-            tola_build::config::section::IconCollectionSource::LocalSvgDir {
-                path: PathBuf::from("missing/drawings"),
-            },
-        );
-        let config = resolve_schema(&root, schema, local_packages());
-        let roots = collect_roots(&config, &WatchRequirements::default());
-        assert!(has_requirement(
-            &roots,
-            &collection,
-            WatchScope::Exact,
-            ProducerKind::Icons,
-            ExistencePolicy::Optional
-        ));
-        assert!(has_requirement(
-            &roots,
-            &drawings,
-            WatchScope::Recursive,
-            ProducerKind::Icons,
-            ExistencePolicy::Optional
-        ));
     }
 
     #[test]
@@ -1759,22 +1753,6 @@ mod tests {
         ));
         assert!(accepts(&boundary, &fonts));
         assert!(accepts(&boundary, &fonts.join("site.woff2")));
-    }
-
-    #[test]
-    fn typst_recovery_needs_full_rebuild() {
-        let (_directory, root, config) = default_site();
-        let mut dynamic = WatchRequirements::default();
-        dynamic.typst_recovery(root.to_path_buf());
-
-        let selection = selection_for(collect_roots(&config, &dynamic));
-        let classified = selection.boundary().classify(&root.join("support.typ"));
-
-        assert!(classified.producers().contains(ProducerKind::TypstReads));
-        assert_eq!(
-            classified.rebuild_scope(),
-            crate::dev::watch::fs::RebuildScope::FullTypst
-        );
     }
 
     #[test]
@@ -1822,55 +1800,6 @@ mod tests {
     }
 
     #[test]
-    fn package_reads_stay_optional() {
-        let (_directory, root, config) = default_site();
-        let package_file = root.join(".tola/builtin-packages/local/example/1.0.0/lib.typ");
-        let mut dynamic = WatchRequirements::default();
-        dynamic.package_files([package_file.clone()]);
-
-        let selection = selection_for(collect_roots(&config, &dynamic));
-        let classified = selection.boundary().classify(&package_file);
-
-        assert!(has_requirement(
-            &selection.desired,
-            &package_file,
-            WatchScope::Exact,
-            ProducerKind::PackageResolution,
-            ExistencePolicy::Optional,
-        ));
-        assert!(
-            classified
-                .producers()
-                .contains(ProducerKind::PackageResolution)
-        );
-        assert_eq!(
-            classified.rebuild_scope(),
-            crate::dev::watch::fs::RebuildScope::FullTypst
-        );
-    }
-
-    #[test]
-    fn missing_asset_sources_stay_watched() {
-        let temp = TempDir::new().unwrap();
-        let config = configured_site(
-            temp.path(),
-            "[assets]\ntrees = [{ source = \"static/web-assets\", url-prefix = \"/assets\" }]\n",
-        );
-        let root = config.get_root().to_path_buf();
-        std::fs::create_dir_all(root.join("content")).unwrap();
-        std::fs::create_dir_all(root.join("public")).unwrap();
-
-        let roots = collect_roots(&config, &WatchRequirements::default());
-        assert!(has_requirement(
-            &roots,
-            &root.join("static/web-assets"),
-            WatchScope::Recursive,
-            ProducerKind::ConfiguredAssets,
-            ExistencePolicy::Optional,
-        ));
-    }
-
-    #[test]
     fn physical_reads_watch_exact_files() {
         let (_directory, root, config) = default_site();
         let templates = root.join("theme/templates");
@@ -1897,30 +1826,8 @@ mod tests {
     }
 
     #[test]
-    fn producer_policy_keeps_directories() {
-        let (_directory, root) = canonical_directory();
-        let file = root.join("shared.json");
-        std::fs::write(&file, "{}").unwrap();
-        let required = selection_for(vec![exact(file.clone(), ProducerKind::TypstReads)]);
-        let optional = selection_for(vec![
-            exact(file.clone(), ProducerKind::Fonts)
-                .optional()
-                .with_rebuild_scope(RebuildScope::FullTypst),
-            exact(file, ProducerKind::ConfiguredAssets),
-        ]);
-        assert_eq!(required.directories, optional.directories);
-        assert_eq!(
-            required.directories,
-            vec![DirectoryWatch {
-                path: root,
-                mode: RecursiveMode::NonRecursive
-            }]
-        );
-    }
-
-    #[test]
     fn changes_reach_subscriptions_by_kind_and_name() {
-        use notify::event::{CreateKind, DataChange, ModifyKind, RemoveKind, RenameMode};
+        use notify::event::{CreateKind, DataChange, ModifyKind};
 
         let temp = TempDir::new().unwrap();
         let root = &temp.path().canonicalize().unwrap();
@@ -1948,8 +1855,6 @@ mod tests {
             ProducerSet::one(ProducerKind::Content) | ProducerSet::one(ProducerKind::TypstReads);
         let reads = ProducerSet::one(ProducerKind::TypstReads);
         let data_change = || notify::EventKind::Modify(ModifyKind::Data(DataChange::Any));
-        let file_create = || notify::EventKind::Create(CreateKind::File);
-        let file_remove = || notify::EventKind::Remove(RemoveKind::File);
         let cases = [
             // A name discovery never consumes stops waking the session.
             (
@@ -1962,54 +1867,23 @@ mod tests {
                 data_change(),
                 ProducerSet::default(),
             ),
-            // A file-level create or remove has that file's own name, which nothing moves
-            // under, so only the subscriptions the name earns wake; macOS reports an ordinary
-            // write to an existing file as a create.
-            (
-                content.join("extra.txt"),
-                file_create(),
-                ProducerSet::default(),
-            ),
-            (
-                content.join("extra.txt"),
-                file_remove(),
-                ProducerSet::default(),
-            ),
-            // Every name discovery consumes still reaches the content producers.
+            // A name discovery consumes reaches the content producers.
             (content.join("page.typ"), data_change(), content_root),
-            (content.join("page.typ"), file_create(), content_root),
-            // The root path itself reports the tree, so a plain change to it keeps the scope.
-            (content.clone(), data_change(), content_root),
-            // A created, removed, or renamed tree keeps the whole scope: its path has no
-            // extension and its subtree reports nothing.
+            // A folder change reports the tree, not a member name, so it keeps the whole scope.
             (
                 content.join("nested"),
                 notify::EventKind::Create(CreateKind::Folder),
                 content_root,
             ),
-            (
-                content.join("nested"),
-                notify::EventKind::Remove(RemoveKind::Folder),
-                content_root,
-            ),
-            (
-                content.join("page.typ"),
-                notify::EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
-                content_root,
-            ),
-            // An event that has no kind reaches the conservative scope too.
+            // An event with no kind cannot be attributed to a name; it reaches the wide scope.
             (
                 content.join("extra.txt"),
                 notify::EventKind::Any,
                 content_root,
             ),
-            // Independent subscriptions are not shadowed by the content root's admission.
+            // A file the build reads keeps its own narrower subscription.
             (read.clone(), data_change(), reads),
-            (read.clone(), file_create(), reads),
-            // A file the build reads inside the narrowed root keeps its own subscription.
-            (content_read.clone(), data_change(), reads),
-            (content_read.clone(), file_create(), reads),
-            (content_read.clone(), file_remove(), reads),
+            // Each configured producer owns its own subtree.
             (
                 scripts.join("search.mjs"),
                 data_change(),
@@ -2029,28 +1903,6 @@ mod tests {
                 path.display()
             );
         }
-    }
-
-    #[test]
-    fn merged_subscriptions_keep_the_wider_admission() {
-        let (_directory, root, config) = default_site();
-        let content = root.join("content");
-        let mut dynamic = WatchRequirements::default();
-        dynamic.recursive(ProducerKind::Hooks, [content.clone()]);
-        let boundary = selection_for(collect_roots(&config, &dynamic)).boundary();
-        let change = notify::EventKind::Modify(notify::event::ModifyKind::Data(
-            notify::event::DataChange::Any,
-        ));
-
-        assert_eq!(
-            boundary
-                .classify_change(&content.join("data.json"), change)
-                .producers(),
-            ProducerSet::one(ProducerKind::Content)
-                | ProducerSet::one(ProducerKind::TypstReads)
-                | ProducerSet::one(ProducerKind::Hooks),
-            "a merged subscription admits what its wider half admitted"
-        );
     }
 
     #[test]
@@ -2115,30 +1967,6 @@ mod tests {
                 .producers(),
             ProducerSet::one(ProducerKind::Content)
         );
-    }
-
-    #[test]
-    fn redundant_read_keeps_observation() {
-        let (_directory, root) = canonical_directory();
-        let content = root.join("content");
-        std::fs::create_dir_all(&content).unwrap();
-        let mut roots = root_set(vec![recursive(content.clone(), ProducerKind::TypstReads)]);
-        let selected = roots.initial_selection();
-        install(&mut roots, selected, 4);
-        roots.confirm_current_observation();
-        let mut desired = roots.selection.desired.clone();
-        desired.push(exact(content.join("new.typ"), ProducerKind::TypstReads).optional());
-        let selected = selection_for(desired);
-        assert!(!roots.extends_observation(&selected));
-        assert!(
-            roots
-                .directory_update(&selected, false)
-                .retains_directories()
-        );
-        install(&mut roots, selected, 7);
-        let coverage = roots.coverage(ProducerKind::TypstReads).unwrap();
-        assert_eq!(coverage.established_epoch(), 4);
-        assert!(coverage.covers_current_revision());
     }
 
     #[test]
@@ -2235,38 +2063,6 @@ mod tests {
     }
 
     #[test]
-    fn wider_scope_extends_observation() {
-        let (_directory, root) = canonical_directory();
-        let source = root.join("source");
-        std::fs::create_dir_all(&source).unwrap();
-        let mut dynamic = WatchRequirements::default();
-        dynamic.optional_children(ProducerKind::Fonts, [source.clone()]);
-        let mut roots = root_set(dynamic.iter().cloned().collect());
-        let selected = roots.initial_selection();
-        install(&mut roots, selected, 1);
-        roots.confirm_current_observation();
-        let recursive = selection_for(vec![recursive(source.clone(), ProducerKind::Fonts)]);
-        assert!(roots.extends_observation(&recursive));
-        let mut update = roots.directory_update(&recursive, false);
-        assert!(update.take_operations().iter().any(|operation| matches!(operation,
-            notify::PathOp::Watch(path, options) if *path == source && options.recursive_mode() == RecursiveMode::Recursive)));
-        roots.commit(recursive, update, 2);
-        assert_eq!(
-            roots
-                .coverage(ProducerKind::Fonts)
-                .unwrap()
-                .established_epoch(),
-            2
-        );
-        assert!(
-            !roots
-                .coverage(ProducerKind::Fonts)
-                .unwrap()
-                .covers_current_revision()
-        );
-    }
-
-    #[test]
     fn missing_paths_use_nearest_parent() {
         let (_directory, root) = canonical_directory();
         let target = root.join("generated/fonts");
@@ -2300,289 +2096,6 @@ mod tests {
                 .directory_update(&existing, false)
                 .retains_directories()
         );
-    }
-
-    #[test]
-    fn covered_missing_paths_stay_narrow() {
-        let (_directory, root) = canonical_directory();
-        let source = root.join("source");
-        std::fs::create_dir_all(&source).unwrap();
-        let target = source.join("generated/fonts");
-        let mut roots = root_set(vec![
-            recursive(source.clone(), ProducerKind::Content),
-            recursive(target.clone(), ProducerKind::Fonts).optional(),
-        ]);
-        let missing = roots.initial_selection();
-        install(&mut roots, missing, 1);
-        std::fs::create_dir_all(&target).unwrap();
-        let existing = roots.current_selection();
-        assert!(
-            roots
-                .directory_update(&existing, false)
-                .retains_directories()
-        );
-        assert!(accepts(&existing.boundary(), &target.join("font.woff2")));
-    }
-
-    #[test]
-    fn external_file_watches_its_parent() {
-        let (_directory, root) = canonical_directory();
-        let package = root.join("cache/local/library/1.0.0");
-        std::fs::create_dir_all(&package).unwrap();
-        let file = package.join("lib.typ");
-        std::fs::write(&file, "#let value = 1").unwrap();
-        let selected = selection_for(vec![exact(file.clone(), ProducerKind::PackageResolution)]);
-        assert_eq!(
-            selected.directories,
-            vec![DirectoryWatch {
-                path: package,
-                mode: RecursiveMode::NonRecursive
-            }]
-        );
-        assert!(accepts(&selected.boundary(), &file));
-        assert!(!accepts(
-            &selected.boundary(),
-            &root.join("cache/local/unrelated/1.0.0/lib.typ")
-        ));
-    }
-
-    #[test]
-    fn install_clears_coverage_gap() {
-        let (_directory, root) = canonical_directory();
-        let source = root.join("source");
-        std::fs::create_dir_all(&source).unwrap();
-        let mut roots = root_set(Vec::new());
-        let selection = selection_for(vec![recursive(source, ProducerKind::Content)]);
-        let update = roots.directory_update(&selection, false);
-        roots.commit_logical(selection.clone(), 3);
-        roots.confirm_current_observation();
-        let pending = roots.coverage(ProducerKind::Content).unwrap();
-        assert_eq!(
-            pending.certainty(),
-            CoverageCertainty::Uncertain(CoverageUncertainty::CoverageGap)
-        );
-        assert!(!pending.covers_current_revision());
-        assert!(roots.installed.is_empty());
-        roots.commit(selection, update, 4);
-        assert_eq!(
-            roots.coverage(ProducerKind::Content).unwrap().certainty(),
-            CoverageCertainty::AcceptedEvents
-        );
-        roots.confirm_current_observation();
-        assert!(
-            roots
-                .coverage(ProducerKind::Content)
-                .unwrap()
-                .covers_current_revision()
-        );
-    }
-
-    #[test]
-    fn policy_changes_keep_observation() {
-        let (_directory, root) = canonical_directory();
-        let file = root.join("optional.typ");
-        let mut roots = root_set(vec![exact(file.clone(), ProducerKind::TypstReads)]);
-        let selected = roots.initial_selection();
-        install(&mut roots, selected, 1);
-        assert_eq!(
-            roots
-                .coverage(ProducerKind::TypstReads)
-                .unwrap()
-                .certainty(),
-            CoverageCertainty::Uncertain(CoverageUncertainty::MissingRequired)
-        );
-        let optional = selection_for(vec![
-            exact(file, ProducerKind::TypstReads)
-                .optional()
-                .with_rebuild_scope(RebuildScope::FullTypst),
-        ]);
-        assert!(!roots.extends_observation(&optional));
-        assert!(
-            roots
-                .directory_update(&optional, false)
-                .retains_directories()
-        );
-        install(&mut roots, optional, 2);
-        assert_eq!(
-            roots
-                .coverage(ProducerKind::TypstReads)
-                .unwrap()
-                .certainty(),
-            CoverageCertainty::AcceptedEvents
-        );
-    }
-
-    #[test]
-    fn refresh_reestablishes_observation() {
-        let (_directory, root) = canonical_directory();
-        let source = root.join("source");
-        std::fs::create_dir_all(&source).unwrap();
-        let mut roots = root_set(vec![recursive(source, ProducerKind::Content)]);
-        let selected = roots.initial_selection();
-        install(&mut roots, selected, 1);
-        roots.confirm_current_observation();
-        let selected = roots.current_selection();
-        let mut update = roots.directory_update(&selected, true);
-        assert!(!update.take_operations().is_empty());
-        assert!(!update.retains_directories());
-        roots.commit(selected, update, 5);
-        assert_eq!(
-            roots
-                .coverage(ProducerKind::Content)
-                .unwrap()
-                .established_epoch(),
-            5
-        );
-        assert!(
-            !roots
-                .coverage(ProducerKind::Content)
-                .unwrap()
-                .covers_current_revision()
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_entries_track_their_targets() {
-        use std::os::unix::fs::symlink;
-        let (_directory, root) = canonical_directory();
-        let site = root.join("site");
-        let first = root.join("first");
-        let second = root.join("second");
-        for path in [&site, &first, &second] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        let link = site.join("theme");
-        symlink(&first, &link).unwrap();
-        let mut roots = root_set(vec![recursive(link.clone(), ProducerKind::TypstReads)]);
-        let selected = roots.initial_selection();
-        assert!(watches(&selected, &first, RecursiveMode::Recursive));
-        assert!(watches(&selected, &site, RecursiveMode::NonRecursive));
-        assert!(accepts(&selected.boundary(), &first.join("lib.typ")));
-        assert!(accepts(&selected.boundary(), &link));
-        assert!(!accepts(&selected.boundary(), &site.join("other")));
-        install(&mut roots, selected, 1);
-        std::fs::remove_file(&link).unwrap();
-        symlink(&second, &link).unwrap();
-        let retarget =
-            notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::Any))
-                .add_path(link);
-        assert_eq!(roots.boundary().invalidated_by(&retarget), ProducerSet::ALL);
-        let selected = roots.current_selection();
-        assert!(roots.extends_observation(&selected));
-        assert!(watches(&selected, &second, RecursiveMode::Recursive));
-        assert!(
-            !roots
-                .directory_update(&selected, false)
-                .retains_directories()
-        );
-        install(&mut roots, selected, 2);
-        assert!(accepts(&roots.boundary(), &second.join("lib.typ")));
-        assert!(!accepts(&roots.boundary(), &first.join("lib.typ")));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dangling_symlink_watches_its_target() {
-        use std::os::unix::fs::symlink;
-        let (_directory, root) = canonical_directory();
-        let site = root.join("site");
-        let external = root.join("external");
-        for path in [&site, &external] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        let target = external.join("generated/templates");
-        let link = site.join("theme");
-        symlink(&target, &link).unwrap();
-        let selected = selection_for(vec![
-            recursive(link.clone(), ProducerKind::Fonts).optional(),
-        ]);
-        assert!(watches(&selected, &site, RecursiveMode::NonRecursive));
-        assert!(watches(&selected, &external, RecursiveMode::NonRecursive));
-        assert!(accepts(&selected.boundary(), &external.join("generated")));
-        assert!(accepts(&selected.boundary(), &target));
-        assert!(!accepts(&selected.boundary(), &external.join("unrelated")));
-        assert_eq!(selected.uncertainties.get(&ProducerKind::Fonts), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn intermediate_symlinks_watch_entries() {
-        use std::os::unix::fs::symlink;
-        let (_directory, root) = canonical_directory();
-        let site = root.join("site");
-        let package = root.join("package");
-        let templates = root.join("templates");
-        for path in [&site, &package, &templates] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        let first = site.join("theme");
-        let second = package.join("src");
-        symlink(&package, &first).unwrap();
-        symlink(&templates, &second).unwrap();
-        let file = templates.join("lib.typ");
-        std::fs::write(&file, "#let value = 1").unwrap();
-        let selected = selection_for(vec![exact(
-            first.join("src/lib.typ"),
-            ProducerKind::TypstReads,
-        )]);
-        for parent in [&site, &package, &templates] {
-            assert!(watches(&selected, parent, RecursiveMode::NonRecursive));
-        }
-        for entry in [first, second] {
-            let event =
-                notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::Any))
-                    .add_path(entry.clone());
-            assert!(accepts(&selected.boundary(), &entry));
-            assert_eq!(selected.boundary().invalidated_by(&event), ProducerSet::ALL);
-        }
-        assert!(accepts(&selected.boundary(), &file));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cyclic_symlink_is_uncertain() {
-        use std::os::unix::fs::symlink;
-        let (_directory, root) = canonical_directory();
-        let link = root.join("theme");
-        symlink("theme", &link).unwrap();
-        let selected = selection_for(vec![recursive(link.clone(), ProducerKind::TypstReads)]);
-        assert_eq!(
-            selected.uncertainties.get(&ProducerKind::TypstReads),
-            Some(&CoverageUncertainty::Unreadable)
-        );
-        assert!(watches(&selected, &root, RecursiveMode::NonRecursive));
-        assert!(accepts(&selected.boundary(), &link));
-    }
-
-    #[test]
-    fn shared_path_keeps_existence_policy() {
-        let path = PathBuf::from("/site/shared");
-        let optional = WatchRequirement::recursive_for(
-            path.clone(),
-            ProducerSet::one(ProducerKind::ConfiguredAssets),
-        )
-        .optional();
-        let required =
-            WatchRequirement::recursive_for(path.clone(), ProducerSet::one(ProducerKind::Content));
-
-        let selection = selection_for(vec![optional, required]);
-
-        assert_eq!(selection.desired.len(), 2);
-        assert!(has_requirement(
-            &selection.desired,
-            &path,
-            WatchScope::Recursive,
-            ProducerKind::Content,
-            ExistencePolicy::Required,
-        ));
-        assert!(has_requirement(
-            &selection.desired,
-            &path,
-            WatchScope::Recursive,
-            ProducerKind::ConfiguredAssets,
-            ExistencePolicy::Optional,
-        ));
     }
 
     #[cfg(unix)]

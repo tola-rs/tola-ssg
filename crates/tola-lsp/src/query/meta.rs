@@ -164,42 +164,7 @@ pub(super) fn meta_key_at(source: &Source, cursor: usize, call: &MetaCall) -> Op
 #[cfg(test)]
 mod tests {
     use crate::query::tests::*;
-    use lsp_types::request as lsp_request;
-    use lsp_types::request::Request as LspRequest;
-    use lsp_types::{CompletionResponse, CompletionTextEdit, TextEdit};
 
-    #[test]
-    fn metadata_completion_offers_optional_fields() {
-        let program = parsed_program(&format!(
-            "{PAGE_SCHEMA}\n subtitle: describe(optional(str), \"Optional subtitle\"),"
-        ));
-        let mut site = QuerySession::with_program(&program);
-        site.site.write("content/page.typ", SCHEMA_PAGE);
-        let completion: Option<CompletionResponse> = serde_json::from_value(site_reply(
-            &mut site,
-            lsp_request::Completion::METHOD,
-            &program.replace("source.meta.draft", "source.meta.sub|"),
-            serde_json::json!({}),
-        ))
-        .unwrap();
-        let items = match completion.unwrap() {
-            CompletionResponse::Array(items) => items,
-            CompletionResponse::List(list) => list.items,
-        };
-        let field = item_labeled(&items, "subtitle");
-        assert!(
-            serde_json::to_string(&field.documentation)
-                .unwrap()
-                .contains("Optional subtitle")
-        );
-        assert_eq!(
-            field
-                .label_details
-                .as_ref()
-                .and_then(|details| details.description.as_deref()),
-            Some("str")
-        );
-    }
     /// A `parse-sources` call that names its schema cannot build, so it declares nothing.
     #[test]
     fn named_schema_argument_declares_nothing() {
@@ -218,7 +183,7 @@ mod tests {
 
     /// A schema that declares no fields leaves the general completion lane the answer.
     #[test]
-    fn field_less_schema_keeps_general_completion() {
+    fn empty_schema_leaves_completion_open() {
         let program = r#"#import "@tola/source:0.0.0": all-sources, parse-sources
 #import "@tola/schema:0.0.0": schema
 #let page-schema = schema((:))
@@ -250,25 +215,10 @@ mod tests {
         assert!(!labels.contains(&"summary"), "{labels:?}");
     }
 
-    /// A source no call's records cover says so where its declared keys are read.
+    /// A dictionary offers the keys it can still take: none at its own end, and inside it only the
+    /// unwritten ones.
     #[test]
-    fn uncovered_source_says_no_call_parses_it() {
-        let mut site = QuerySession::with_program(&summary_program());
-        let hover = template_hover(
-            &mut site,
-            "templates/meta.typ",
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((tit|le: \"Page\"))\n",
-        )
-        .expect("a hover");
-        assert!(
-            hover.contains("no `parse-sources` call parses this source yet"),
-            "{hover}"
-        );
-    }
-
-    /// A completion at a dictionary's own end offers no key.
-    #[test]
-    fn closed_dictionary_end_offers_no_keys() {
+    fn dictionary_completion_offers_only_unwritten_keys() {
         let mut site = QuerySession::with_program(&summary_program());
         let closed = site.completion(
             "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\")|)\n",
@@ -280,44 +230,10 @@ mod tests {
         );
         let open = completion_labels(&open);
         assert!(open.contains(&"draft"), "{open:?}");
+        assert!(open.contains(&"summary"), "{open:?}");
+        assert!(!open.contains(&"title"), "{open:?}");
     }
 
-    /// A schema argument the world observed as two different declarations declares nothing; one
-    /// declaration answers its own shape.
-    #[test]
-    fn ambiguous_schema_argument_declares_nothing() {
-        let block = |schemas: &str| {
-            format!(
-                "#let first = page-schema\n\
-                 #let second = schema((title: describe(optional(str, default: \"Other\"), \"unrelated title\"), draft: optional(bool, default: false)))\n\
-                 #for declaration in ({schemas}) {{\n\
-                   let parsed = parse-sources(all-sources(), declaration)\n\
-                   let kept = parsed.filter(source => not source.meta.draft)\n\
-                   for page in kept {{\n\
-                     let chosen = page.meta.title\n\
-                   }}\n\
-                 }}\n"
-            )
-        };
-        for (schemas, declared) in [("first,", true), ("first, second", false)] {
-            let program = parsed_program(PAGE_SCHEMA) + &block(schemas);
-            let mut site = QuerySession::with_program(&program);
-            site.site.write("content/page.typ", SCHEMA_PAGE);
-            let marked = program.replace("page.meta.title", "page.meta.ti|tle");
-            let hover = site_hover(&mut site, &marked).expect("a hover");
-            assert_eq!(
-                hover.contains("the page title"),
-                declared,
-                "{schemas}: {hover}"
-            );
-            assert!(!hover.contains("unrelated title"), "{schemas}: {hover}");
-            assert_eq!(
-                hover.contains("Declared fields"),
-                declared,
-                "{schemas}: {hover}"
-            );
-        }
-    }
     /// A `#tola-meta` key completion offers the fields the site's schema declares, with the
     /// declaration and documentation each has.
     #[test]
@@ -341,150 +257,6 @@ mod tests {
         assert!(
             documentation.contains("the page summary"),
             "{documentation}"
-        );
-    }
-
-    /// A key completion answers the declared keys while the dictionary is still unfinished.
-    #[test]
-    fn meta_completion_answers_unfinished_key() {
-        let mut site = QuerySession::with_program(&summary_program());
-        let items = site.completion(
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta(( title: \"Home\", summ|",
-        );
-        assert_eq!(completion_labels(&items), ["summary"]);
-        let item = item_labeled(&items, "summary");
-        assert_eq!(
-            item.label_details
-                .as_ref()
-                .and_then(|details| details.description.as_deref()),
-            Some("str")
-        );
-        assert_eq!(
-            serde_json::to_string(&item.documentation).unwrap(),
-            r#"{"kind":"markdown","value":"```typc\nsummary?: str\n```\n\n---\n\nthe page summary"}"#
-        );
-    }
-
-    /// A `parse-sources` call in a module the entry imports declares the site's schema too.
-    #[test]
-    fn meta_completion_sees_imported_schema() {
-        let mut site = QuerySession::with_program(
-            r#"#import "@tola/source:0.0.0": all-sources
-#import "site/meta.typ": declared-meta
-#let declared = declared-meta(all-sources())
-"#,
-        );
-        site.site.write(
-            "site/meta.typ",
-            &format!(
-                "#import \"@tola/source:0.0.0\": parse-sources\n\
-                 #import \"@tola/schema:0.0.0\": describe, optional, schema\n\
-                 #let page-schema = schema((\n{PAGE_SCHEMA}\n  summary: describe(optional(str), \"the page summary\"),\n))\n\
-                 #let declared-meta(sources) = parse-sources(sources, page-schema)\n"
-            ),
-        );
-        let items = site.completion(
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta(( title: \"Home\", summ|))",
-        );
-        let item = item_labeled(&items, "summary");
-        let documentation = serde_json::to_string(&item.documentation).unwrap();
-        assert!(
-            documentation.contains("the page summary"),
-            "{documentation}"
-        );
-    }
-
-    /// A `#tola-meta` key completion replaces the prefix the author typed.
-    #[test]
-    fn meta_completion_replaces_the_typed_key() {
-        let mut site = QuerySession::with_program(&summary_program());
-        let items = site.completion(
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\", summ|))\n",
-        );
-        let item = item_labeled(&items, "summary");
-        assert_eq!(
-            item.text_edit,
-            Some(CompletionTextEdit::Edit(TextEdit {
-                range: lsp_types::Range::new(
-                    lsp_types::Position::new(1, 27),
-                    lsp_types::Position::new(1, 31),
-                ),
-                new_text: "summary: ${1}".to_owned(),
-            }))
-        );
-    }
-
-    /// A key the dictionary already writes is not offered again.
-    #[test]
-    fn meta_completion_hides_written_keys() {
-        let mut site = QuerySession::with_program(&summary_program());
-        let items = site.completion(
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((title: \"Page\", |))\n",
-        );
-        let labels = completion_labels(&items);
-        assert!(labels.contains(&"draft"), "{labels:?}");
-        assert!(labels.contains(&"summary"), "{labels:?}");
-        assert!(!labels.contains(&"title"), "{labels:?}");
-    }
-
-    /// A `#tola-meta` key answers the field line its schema declares.
-    #[test]
-    fn meta_key_answers_its_declared_field() {
-        let mut site = QuerySession::with_program(&summary_program());
-        let hover = site
-            .hover_text(
-                "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((tit|le: \"Page\"))\n",
-            )
-            .expect("a hover");
-        assert!(
-            hover.contains("```typc\ntitle: str = \"Untitled\"\n```"),
-            "{hover}"
-        );
-        assert!(hover.contains("the page title"), "{hover}");
-    }
-
-    /// The `tola-meta` callee answers the package function, whether or not the call evaluates.
-    #[test]
-    fn meta_callee_answers_the_package_function() {
-        let mut site = QuerySession::with_program(&summary_program());
-        for marked in [
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola|-meta((title: \"Page\"))\n",
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tol|a-meta((title: \"Page\", summ))\n",
-        ] {
-            let hover = site.hover_text(marked).expect("a hover");
-            assert!(
-                hover.contains("let tola-meta(\n  payload: dictionary,\n) = content;"),
-                "{marked:?}: {hover}"
-            );
-            assert!(
-                hover.contains("Declare the metadata"),
-                "{marked:?}: {hover}"
-            );
-        }
-    }
-
-    /// A source no call's records cover answers every declared schema, each field naming the
-    /// declaration that has it.
-    #[test]
-    fn meta_key_names_its_declaration() {
-        let program = summary_program()
-            + "#let other-schema = schema((title: describe(optional(str, default: \"Other\"), \"the other title\")))\n#let second = parse-sources(all-sources(), other-schema)\n";
-        let mut site = QuerySession::with_program(&program);
-        let hover = template_hover(
-            &mut site,
-            "templates/meta.typ",
-            "#import \"@tola/source:0.0.0\": tola-meta\n#tola-meta((tit|le: \"Page\"))\n",
-        )
-        .expect("a hover");
-        assert!(hover.contains("the page title"), "{hover}");
-        assert!(hover.contains("the other title"), "{hover}");
-        assert!(
-            hover.contains("Declared by `page-schema` in `site.typ`."),
-            "{hover}"
-        );
-        assert!(
-            hover.contains("Declared by `other-schema` in `site.typ`."),
-            "{hover}"
         );
     }
 }

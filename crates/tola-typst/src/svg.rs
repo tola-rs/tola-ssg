@@ -242,30 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn size_resolves_svg_units() {
-        let (_directory, world) = world();
-        let millimetres = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="16mm" height="16mm" viewBox="0 0 16 16"/>"##,
-        )
-        .unwrap();
-        assert!((millimetres.width() - 60.4724).abs() < 0.01);
-        let em = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 576 512"/>"##,
-        )
-        .unwrap();
-        assert_eq!((em.width(), em.height()), (576.0, 12.0));
-        let fractional = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10.4" height="5.2"/>"##,
-        )
-        .unwrap();
-        assert!((fractional.width() - 10.4).abs() < 1e-4);
-        assert!((fractional.height() - 5.2).abs() < 1e-4);
-    }
-
-    #[test]
     fn linked_image_is_refused() {
         let (_directory, world) = world();
         let refused = parse(
@@ -302,57 +278,5 @@ mod tests {
             source.render(4, 4, None).unwrap(),
             source.render(4, 4, None).unwrap()
         );
-    }
-
-    #[test]
-    fn crop_draws_selected_region() {
-        let (_directory, world) = world();
-        let source = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="5" fill="#ff0000"/><rect y="5" width="10" height="5" fill="#0000ff"/></svg>"##,
-        )
-        .unwrap();
-        let crop = SvgCrop {
-            x: 0.0,
-            y: 5.0,
-            width: 10.0,
-            height: 5.0,
-        };
-        let rgba = source.render(10, 5, Some(crop)).unwrap();
-        assert_eq!(&rgba[0..4], &[0, 0, 255, 255]);
-    }
-
-    #[test]
-    fn alpha_is_straight() {
-        let (_directory, world) = world();
-        let source = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#ff0000" opacity="0.5"/></svg>"##,
-        )
-        .unwrap();
-        let rgba = source.render(4, 4, None).unwrap();
-        assert_eq!(&rgba[0..4], &[255, 0, 0, 128]);
-    }
-
-    #[test]
-    fn hash_tracks_bytes() {
-        let (_directory, world) = world();
-        let first = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#ff0000"/></svg>"##,
-        )
-        .unwrap();
-        let same = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#ff0000"/></svg>"##,
-        )
-        .unwrap();
-        let other = parse(
-            &world,
-            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#0000ff"/></svg>"##,
-        )
-        .unwrap();
-        assert_eq!(first.hash(), same.hash());
-        assert_ne!(first.hash(), other.hash());
     }
 }

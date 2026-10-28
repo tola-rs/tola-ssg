@@ -3,7 +3,7 @@ name = "tola-build"
 version.workspace = true
 edition = "2024"
 rust-version.workspace = true
-description = "The site construction engine for Tola"
+description = "Site build pipeline: source analysis, Typst Bundle compilation, and output-graph publication"
 license = "MIT"
 repository = "https://github.com/tola-rs/tola-ssg"
 

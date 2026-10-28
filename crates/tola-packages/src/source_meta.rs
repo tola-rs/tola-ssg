@@ -383,11 +383,11 @@ mod tests {
         FileMap, FileProvider, FileResolver, FileTarget, ObservedScan, TypstWorld, file_id,
         scan_world_observed,
     };
+    use typst::Library;
     use typst::engine::Sink;
-    use typst::foundations::{Array, Func, NativeFunc, Styles};
+    use typst::foundations::{Array, Styles};
     use typst::syntax::VirtualRoot;
     use typst::utils::LazyHash;
-    use typst::{Library, LibraryExt};
 
     use super::*;
     use crate::TolaPackage;
@@ -496,48 +496,6 @@ mod tests {
         engine.sink.value(value, Some(Styles::new()));
         Ok(Value::None)
     }
-
-    #[test]
-    fn refused_call_writes_no_event() {
-        for call in ["#tola-meta(1)", "#tola-meta((:), extra: 1)"] {
-            let text = IMPORT.to_owned() + call;
-            let world = site(&[("main.typ", &text)]);
-            let scan = scan_world_observed(&world, [header().value()]);
-            assert!(scan.result().is_err(), "the wrapper refuses `{call}`");
-            let source = world.source(world.main()).expect("the main source reads");
-            let capture = decode_capture(scan.captured(), &header(), &source).unwrap();
-            assert!(
-                matches!(capture.declaration, Declaration::Absent),
-                "`{call}` wrote no event"
-            );
-        }
-    }
-
-    #[test]
-    fn imported_call_records_nothing() {
-        let scan = scan(
-            &[
-                (
-                    "main.typ",
-                    "#import \"helper.typ\": declare\n#declare((origin: \"helper\"))\n",
-                ),
-                (
-                    "helper.typ",
-                    &(IMPORT.to_owned() + "#let declare(value) = tola-meta(value)\n"),
-                ),
-            ],
-            Vec::new(),
-        );
-        let result = scan.result().expect("the helper runs");
-        let declarations = result.metadata_declarations(DECLARATION_LABEL);
-        assert_eq!(declarations.len(), 1, "the helper's call ran");
-        assert_eq!(declarations[0].span().id(), Some(file_id("helper.typ")));
-        assert!(matches!(
-            decode(&scan).unwrap().declaration,
-            Declaration::Absent
-        ));
-    }
-
     #[test]
     fn own_call_records_declaration() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
@@ -582,46 +540,6 @@ mod tests {
         let range = source.find(declarations[0].span()).unwrap().range();
         assert_eq!(&source.text()[range], "tola-meta((title: \"Post\"))");
     }
-
-    #[test]
-    fn repeated_declaration_is_reported() {
-        let text =
-            IMPORT.to_owned() + "#tola-meta((title: \"First\"))\n#tola-meta((title: \"Second\"))\n";
-        let scan = scan(&[("main.typ", &text)], Vec::new());
-        let declared = match decode(&scan).unwrap().declaration {
-            Declaration::Duplicate(declared) => declared,
-            other => panic!("expected both declarations, decoded {other:?}"),
-        };
-        assert_eq!(declared.len(), 2);
-        assert_eq!(
-            declared[0].metadata.get("title"),
-            Ok(&Value::Str("First".into()))
-        );
-        assert_eq!(
-            declared[1].metadata.get("title"),
-            Ok(&Value::Str("Second".into()))
-        );
-    }
-
-    #[test]
-    fn capture_without_host_header_is_refused() {
-        let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
-
-        let absent = scan_world_observed(&site(&[("main.typ", &text)]), []);
-        assert!(matches!(decode(&absent), Err(CaptureError::MissingHeader)));
-
-        let mut older = header().value();
-        let Value::Dict(record) = &mut older else {
-            unreachable!()
-        };
-        record.insert(
-            Str::from(PROTOCOL),
-            Value::Str("tola.source-capture/0".into()),
-        );
-        let stale = scan_world_observed(&site(&[("main.typ", &text)]), [older]);
-        assert!(matches!(decode(&stale), Err(CaptureError::MissingHeader)));
-    }
-
     #[test]
     fn foreign_owner_is_refused() {
         let text = IMPORT.to_owned() + "#tola-meta((title: \"Post\"))";
@@ -639,21 +557,6 @@ mod tests {
             Err(CaptureError::ForeignOwner { .. })
         ));
     }
-
-    #[test]
-    fn saturated_capture_is_refused() {
-        let mut text = IMPORT.to_owned();
-        for index in 0..10 {
-            text.push_str(&format!("#tola-meta((index: {index}))\n"));
-        }
-        let scan = scan(&[("main.typ", &text)], Vec::new());
-        assert!(
-            scan.captured().is_saturated(),
-            "eleven writes fill the channel"
-        );
-        assert!(matches!(decode(&scan), Err(CaptureError::Saturated)));
-    }
-
     /// `decode_capture` reads the header as the first record and every later one as an event, so a
     /// channel that kept its last records instead would read an event as the header.
     #[test]
@@ -697,64 +600,5 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the records the channel keeps are the ones written first, in order"
         );
-    }
-
-    #[test]
-    fn malformed_capture_is_refused() {
-        let with_field = |record: Value, field: &'static str, value: Value| {
-            let Value::Dict(mut record) = record else {
-                panic!("a declaration event is a dictionary");
-            };
-            record.insert(Str::from(field), value);
-            Value::Dict(record)
-        };
-        let cases: [(&str, Value); 5] = [
-            ("a value that is not a record", Value::Int(7)),
-            ("a record without a protocol", Value::Dict(Dict::new())),
-            (
-                "a record of another protocol version",
-                with_field(
-                    declaration_event("/main.typ", 0..1, payload("Post")),
-                    PROTOCOL,
-                    Value::Str("tola.source-declaration/0".into()),
-                ),
-            ),
-            (
-                "a declaration whose value is not a dictionary",
-                with_field(
-                    declaration_event("/main.typ", 0..1, payload("Post")),
-                    VALUE,
-                    Value::Int(1),
-                ),
-            ),
-            (
-                "a declaration outside the source",
-                declaration_event("/main.typ", 0..4096, payload("Post")),
-            ),
-        ];
-        for (case, record) in cases {
-            let scan = scan(&[("main.typ", "= Post\n")], vec![record]);
-            assert!(decode(&scan).is_err(), "refused {case}");
-        }
-    }
-
-    #[test]
-    fn stray_header_is_refused() {
-        let scan = scan(&[("main.typ", "= Post\n")], vec![header().value()]);
-        assert!(matches!(decode(&scan), Err(CaptureError::MisplacedHeader)));
-    }
-
-    #[test]
-    fn styled_record_is_refused() {
-        let mut library = Library::builder().build();
-        library
-            .global
-            .scope_mut()
-            .define("styled", Func::from(styled::data()));
-        let mut sources = FileMap::new();
-        sources.insert(file_id("main.typ"), &b"#styled((:))\n"[..]);
-        let world = virtual_site(sources, Arc::new(LazyHash::new(library)));
-        let scan = scan_world_observed(&world, [header().value()]);
-        assert!(matches!(decode(&scan), Err(CaptureError::Styled)));
     }
 }

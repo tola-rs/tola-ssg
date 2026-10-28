@@ -1,14 +1,12 @@
 # tola-build
 
 Builds a Tola site: analyzes the sources, compiles the root Typst Bundle through `tola-typst`,
-and converges documents, assets, icons, feeds, sitemaps, and hook output into one validated
-output graph — written to disk as a complete site or installed as an immutable revision.
+and converges documents, assets, icons, feeds, sitemaps, and hook output into one output graph.
+Every attempt produces one candidate: its output graph and diagnostics. A validated candidate
+is published whole, or installed whole as the next revision; there is no partial publication.
 
-Every attempt produces one complete candidate — its output graph and diagnostics — and a
-validated candidate is published whole, or installed whole as the next revision; there is no
-partial publication. Hooks come in three stages: `before-build` prepares declared inputs,
-`generate-outputs` adds outputs to the candidate graph, and `after-publish` reads the committed
-output.
+Hooks run in three stages: `before-build` prepares declared inputs, `generate-outputs` adds
+outputs to the candidate graph, and `after-publish` reads the committed output.
 
 ## Build and write
 
@@ -34,20 +32,20 @@ if let Err(error) = written.run_after_publish(&Default::default()) {
 ```
 
 Keep the session and call `build_and_write` after edits. It recovers an interrupted publish, runs
-before-build hooks, builds, rechecks inputs, replaces the output directory, and reuses caches. A
-failure or cancellation before installation leaves the previous output untouched.
+the before-build hooks, builds, rechecks inputs, replaces the output directory, and reuses caches.
+A failure or cancellation before installation leaves the previous output untouched.
 
 After-publish hooks run as a separate step: `WriteOutcome` keeps the committed graph,
-configuration, and mode, and `run_after_publish` executes its consumers.
+configuration, and mode, and `run_after_publish` executes its consumers. For a build without
+publishing, `build_site` returns a `SiteBuild` with its graph and diagnostics.
 
-For checks without publishing, `build_site` returns a `SiteBuild` with its graph and diagnostics.
-Diagnostic records retain messages and call traces; `Diagnostic::display_message()` provides
-the site's panic sentence for presentation without changing the stored message. Source excerpts
-carry their starting columns, so clients can locate clipped text within the original UTF-16 range.
+Diagnostics keep their messages and call traces; `Diagnostic::display_message()` provides the
+site's panic sentence for presentation without changing the stored message. Source excerpts carry
+their starting columns, so clients can locate clipped text within the original UTF-16 range.
 
 ## Custom scheduling
 
 `BuildSession::prepare` with a `BuildRequest` produces a `BuildAttempt` to run on your own
-worker; `BuildResources` sets the invocation's input scope. When you keep your own revision
-store, check candidates with `UncheckedRevision::check` and install them through
+worker; `BuildResources` sets the invocation's input scope. With your own revision store, check
+candidates with `UncheckedRevision::check` and install them through
 `BuildSession::install_revision`.

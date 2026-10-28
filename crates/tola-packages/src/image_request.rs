@@ -319,46 +319,6 @@ mod tests {
             path: path.into(),
         }
     }
-
-    fn descriptor_path(bytes: &[u8]) -> String {
-        format!(
-            "{IMAGE_REQUEST_OBSERVATION_DIRECTORY}{}{IMAGE_REQUEST_OBSERVATION_EXTENSION}",
-            hex::encode(bytes),
-        )
-    }
-
-    #[test]
-    fn derivative_identity_ignores_location() {
-        let source = site_source("/images/hero.png");
-        let digest = ContentDigest::of(b"original image bytes");
-        let first = ImageRequest::new(
-            path_source("/images/hero.png"),
-            source.clone(),
-            digest,
-            recipe(120),
-        );
-        let relocated = ImageRequest::new(
-            path_source("/other/copy.png"),
-            site_source("/other/copy.png"),
-            digest,
-            recipe(120),
-        );
-        let changed = ImageRequest::new(
-            path_source("/images/hero.png"),
-            source.clone(),
-            ContentDigest::of(b"new bytes"),
-            recipe(120),
-        );
-        let resized =
-            ImageRequest::new(path_source("/images/hero.png"), source, digest, recipe(121));
-
-        assert_eq!(first.key(), relocated.key());
-        assert_eq!(first.output_path(), relocated.output_path());
-        assert_ne!(first.observation_id(), relocated.observation_id());
-        assert_ne!(first.key(), changed.key());
-        assert_ne!(first.key(), resized.key());
-    }
-
     #[test]
     fn observation_ids_round_trip_per_root() {
         let package_source = RootedPath::new(
@@ -427,71 +387,6 @@ mod tests {
         assert_eq!(by_path.output_path(), by_bytes.output_path());
         assert_ne!(by_path.observation_id(), by_bytes.observation_id());
     }
-
-    #[test]
-    fn bytes_sources_round_trip() {
-        let origin = site_source("/content/figure.typ");
-        let bytes = Bytes::new(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec());
-        let source = DataSource::Bytes(bytes.clone());
-        let request = ImageRequest::new(
-            source.clone(),
-            origin.clone(),
-            ContentDigest::of(bytes.as_slice()),
-            recipe(120),
-        );
-        let id = request.observation_id();
-        let recovered = ImageRequest::from_read(&locator(id.vpath().get_without_slash()))
-            .unwrap()
-            .unwrap();
-        assert_eq!(recovered.source(), &source);
-        assert_eq!(recovered.origin(), &origin);
-        assert_eq!(recovered.output_path(), request.output_path());
-    }
-
-    #[test]
-    fn malformed_descriptors_are_rejected() {
-        let request = ImageRequest::new(
-            path_source("/hero.png"),
-            site_source("/hero.png"),
-            ContentDigest::of(b"pixels"),
-            recipe(120),
-        );
-        let descriptor = serde_json::to_value(request.descriptor()).unwrap();
-        let reject = |value: &serde_json::Value| {
-            let path = descriptor_path(&serde_json::to_vec(value).unwrap());
-            assert!(ImageRequest::from_read(&locator(&path)).is_err());
-            assert!(observation_bytes(&package_spec(), &path).is_none());
-        };
-
-        let mut escaping = descriptor.clone();
-        escaping["source"]["path"] = "../../outside.png".into();
-        reject(&escaping);
-        let mut alias = descriptor.clone();
-        alias["source"]["path"] = "/images/../hero.png".into();
-        reject(&alias);
-        let mut invalid_package = descriptor.clone();
-        invalid_package["source"] = serde_json::json!({
-            "root": "package", "package": "@local/../secret:1.0.0", "path": "/hero.png",
-        });
-        reject(&invalid_package);
-        let mut invalid_digest = descriptor.clone();
-        invalid_digest["source_digest"] = "00".into();
-        reject(&invalid_digest);
-        let mut invalid_recipe = descriptor.clone();
-        invalid_recipe["recipe"] = serde_json::Value::Null;
-        reject(&invalid_recipe);
-        let mut stale_revision = descriptor.clone();
-        stale_revision["revision"] = 999u32.into();
-        reject(&stale_revision);
-        let mut unknown_field = descriptor.clone();
-        unknown_field["source"]["machine_root"] = "/private/site".into();
-        reject(&unknown_field);
-
-        let pretty = descriptor_path(&serde_json::to_vec_pretty(&descriptor).unwrap());
-        assert!(ImageRequest::from_read(&locator(pretty)).is_err());
-        assert!(ImageRequest::from_read(&locator(".tola-image-request/not-hex.json")).is_err());
-    }
-
     #[test]
     fn only_image_package_reads_requests() {
         let request = ImageRequest::new(

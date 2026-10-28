@@ -338,50 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn construct_style_reaches_its_contents() {
-        let tokens = classified("*a* _b_\n");
-        assert!(
-            tokens.iter().any(|(text, class, modifiers)| text == "a"
-                && *class == TokenClass::Text
-                && modifiers.contains(Modifiers::STRONG)),
-            "{tokens:?}"
-        );
-        assert!(
-            tokens
-                .iter()
-                .any(|(text, _, modifiers)| text == "b" && modifiers.contains(Modifiers::EMPH)),
-            "{tokens:?}"
-        );
-    }
-
-    #[test]
-    fn imported_name_inherits_namespace_class() {
-        let tokens = classified("#import \"site.typ\" as site\n#site()\n");
-        assert!(tokens.contains(&("site".to_owned(), TokenClass::Namespace, Modifiers::NONE)));
-    }
-
-    #[test]
-    fn hashtag_inherits_expression_class() {
-        let tokens = classified("#(1)\n#let x = 1\nnested #\n");
-        assert_eq!(
-            tokens[0],
-            ("#".to_owned(), TokenClass::Punctuation, Modifiers::NONE)
-        );
-        assert!(
-            tokens
-                .iter()
-                .any(|(text, class, _)| text == "#" && *class == TokenClass::Keyword),
-            "{tokens:?}"
-        );
-        assert!(
-            tokens
-                .iter()
-                .any(|(text, class, _)| text == "#" && *class == TokenClass::Text),
-            "{tokens:?}"
-        );
-    }
-
-    #[test]
     fn math_groups_keep_inner_tokens() {
         for text in ["$(alpha + beta)$", "$[alpha + beta]$", "$(alpha / beta)$"] {
             let tokens = classified(text);

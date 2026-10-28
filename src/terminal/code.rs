@@ -732,14 +732,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn toml_keys_and_values_are_different_runs() {
-        let runs = spans("title = \"Tola\"\n", "toml");
+    fn toml_fence_paints_names_values_and_numbers() {
+        let source = "title = \"Tola\"\njobs = 4\n";
+        let runs = spans(source, "toml");
 
         assert_eq!(
             runs.iter()
-                .map(|(span, kind)| (&"title = \"Tola\"\n"[span.clone()], *kind))
+                .map(|(span, kind)| (&source[span.clone()], *kind))
                 .collect::<Vec<_>>(),
-            [("title", CodeKind::Literal), ("\"Tola\"", CodeKind::String)]
+            [
+                ("title", CodeKind::Literal),
+                ("\"Tola\"", CodeKind::String),
+                ("jobs", CodeKind::Literal),
+                ("4", CodeKind::Number),
+            ]
         );
     }
 
@@ -761,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn typst_markup_and_code_fences_share_their_runs() {
+    fn typst_fence_spellings_style_the_same_markup() {
         for language in ["typ", "typst", "typc"] {
             let runs = spans("Let *this* be #emph[that].\n", language);
             assert!(!runs.is_empty(), "{language}");
@@ -781,25 +787,6 @@ mod tests {
     fn unknown_language_has_no_runs() {
         assert!(spans("anything at all\n", "text").is_empty());
         assert!(spans("anything at all\n", "").is_empty());
-    }
-
-    #[test]
-    fn styled_runs_style_each_kind() {
-        let text = styled("title = \"Tola\"\njobs = 4\n", "toml");
-        let runs = text
-            .spans
-            .iter()
-            .map(|(span, style)| (&text.text[span.clone()], *style))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            runs,
-            [
-                ("title", Style::Literal),
-                ("\"Tola\"", Style::String),
-                ("jobs", Style::Literal),
-                ("4", Style::Number),
-            ]
-        );
     }
 
     /// A JSON fence colours each member name apart from the string it maps to.
@@ -838,89 +825,58 @@ mod tests {
         assert_eq!(runs[5], ("'a # b'", CodeKind::String));
     }
 
-    /// A justfile fence colours each recipe header and every command in its body.
+    /// A justfile fence colours each region justfiles write: a recipe head and the dependencies
+    /// it names, the body lines that continue across a blank line, a `#` that opens no comment
+    /// inside a quoted word or a shell word, and the interpolation standing in its own quoted
+    /// word.
     #[test]
-    fn just_fence_styles_recipe_header_and_body() {
-        let source = "search:\n    pagefind --site x\n    echo done\n";
-        let runs = runs_of(source, "just");
-
-        assert_eq!(
-            runs,
-            [
-                ("search", CodeKind::Literal),
-                ("pagefind", CodeKind::Keyword),
-                ("echo", CodeKind::Keyword),
-            ]
-        );
-    }
-
-    /// A justfile fence colours the dependencies a recipe head names after its `:`.
-    #[test]
-    fn just_fence_styles_recipe_dependencies() {
-        let runs = runs_of("build target: fmt test\n", "just");
-
-        assert_eq!(
-            runs,
-            [
-                ("build", CodeKind::Literal),
-                ("fmt", CodeKind::Literal),
-                ("test", CodeKind::Literal),
-            ]
-        );
-    }
-
-    /// A recipe body continues across a blank line: `body : INDENT line+ DEDENT`.
-    #[test]
-    fn recipe_body_continues_after_blank_line() {
-        let runs = runs_of("fmt:\n    cargo fmt\n\n    cargo clippy\n", "just");
-
-        assert_eq!(
-            runs,
-            [
-                ("fmt", CodeKind::Literal),
-                ("cargo", CodeKind::Keyword),
-                ("cargo", CodeKind::Keyword),
-            ]
-        );
-    }
-
-    /// A `#` inside a quoted word opens no comment.
-    #[test]
-    fn quoted_hash_opens_no_comment() {
-        let runs = runs_of("x := \"#1\"\n", "just");
-
-        assert_eq!(
-            runs,
-            [("x", CodeKind::Literal), ("\"#1\"", CodeKind::String)]
-        );
-    }
-
-    /// In shell text, a `#` inside a word opens no comment.
-    #[test]
-    fn word_hash_opens_no_comment() {
-        let runs = runs_of("run:\n    echo a#b\n", "just");
-
-        assert_eq!(
-            runs,
-            [("run", CodeKind::Literal), ("echo", CodeKind::Keyword)]
-        );
-    }
-
-    /// An interpolation keeps its own run inside the quoted word it stands in.
-    #[test]
-    fn interpolation_has_its_own_run() {
-        let runs = runs_of("fmt:\n    echo \"{{target}}\"\n", "just");
-
-        assert_eq!(
-            runs,
-            [
-                ("fmt", CodeKind::Literal),
-                ("echo", CodeKind::Keyword),
-                ("\"", CodeKind::String),
-                ("{{target}}", CodeKind::Literal),
-                ("\"", CodeKind::String),
-            ]
-        );
+    fn just_fence_colors_each_syntax_region() {
+        for (source, expected) in [
+            (
+                "search:\n    pagefind --site x\n    echo done\n",
+                &[
+                    ("search", CodeKind::Literal),
+                    ("pagefind", CodeKind::Keyword),
+                    ("echo", CodeKind::Keyword),
+                ][..],
+            ),
+            (
+                "build target: fmt test\n",
+                &[
+                    ("build", CodeKind::Literal),
+                    ("fmt", CodeKind::Literal),
+                    ("test", CodeKind::Literal),
+                ][..],
+            ),
+            (
+                "fmt:\n    cargo fmt\n\n    cargo clippy\n",
+                &[
+                    ("fmt", CodeKind::Literal),
+                    ("cargo", CodeKind::Keyword),
+                    ("cargo", CodeKind::Keyword),
+                ][..],
+            ),
+            (
+                "x := \"#1\"\n",
+                &[("x", CodeKind::Literal), ("\"#1\"", CodeKind::String)][..],
+            ),
+            (
+                "run:\n    echo a#b\n",
+                &[("run", CodeKind::Literal), ("echo", CodeKind::Keyword)][..],
+            ),
+            (
+                "fmt:\n    echo \"{{target}}\"\n",
+                &[
+                    ("fmt", CodeKind::Literal),
+                    ("echo", CodeKind::Keyword),
+                    ("\"", CodeKind::String),
+                    ("{{target}}", CodeKind::Literal),
+                    ("\"", CodeKind::String),
+                ][..],
+            ),
+        ] {
+            assert_eq!(runs_of(source, "just"), expected, "{source:?}");
+        }
     }
 
     /// A Rust fence colours the keywords the language reserves, and skips string literals.

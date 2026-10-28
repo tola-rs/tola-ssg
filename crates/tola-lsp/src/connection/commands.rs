@@ -127,7 +127,7 @@ mod tests {
     /// A running server is the only source that knows the port it fell back to, so the address it
     /// wrote names where the site is served.
     #[test]
-    fn dev_server_address_names_where_the_site_is_served() {
+    fn dev_server_address_locates_the_site() {
         let directory = tempfile::tempdir().unwrap();
         let connection = ready_at(Vec::new(), directory.path().to_path_buf());
         assert_eq!(connection.preview_origin(), None);

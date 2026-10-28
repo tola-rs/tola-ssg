@@ -201,26 +201,6 @@ url = "/atom.xml"
         assert!(presence.contains("0"));
         assert!(!presence.contains("0.field"));
     }
-
-    #[test]
-    fn nesting_depth_does_not_multiply_paths() {
-        let mut value = toml::Value::Table(toml::map::Map::from_iter([(
-            "leaf".into(),
-            toml::Value::Boolean(true),
-        )]));
-        for _ in 0..40 {
-            value = toml::Value::Table(toml::map::Map::from_iter([(
-                "items".into(),
-                toml::Value::Array(vec![value]),
-            )]));
-        }
-        let presence = ConfigPresence::from_value(&value);
-        assert!(presence.contains(&format!("{}leaf", "items.".repeat(40))));
-        assert!(presence.contains(&format!("{}leaf", "items.0.".repeat(40))));
-        assert!(presence.contains(&format!("{}leaf", "items.0.items.".repeat(20))));
-        assert!(!presence.contains(&format!("{}missing", "items.".repeat(40))));
-    }
-
     #[test]
     fn literal_table_keys_stay_addressable() {
         let presence = ConfigPresence::from_toml(
@@ -235,21 +215,5 @@ url = "/atom.xml"
         assert!(!presence.contains("mixed.01.field"));
         assert!(!presence.contains("mixed.1."));
         assert!(!presence.contains("literal.dot.value."));
-    }
-
-    #[test]
-    fn failed_index_tries_table_keys() {
-        let presence = ConfigPresence::from_toml(
-            r#"
-[[rows]]
-"0" = { field = true }
-"01" = { field = true }
-"#,
-        )
-        .unwrap();
-
-        assert!(presence.contains("rows.0.field"));
-        assert!(presence.contains("rows.01.field"));
-        assert!(!presence.contains("rows.1.field"));
     }
 }

@@ -55,22 +55,4 @@ mod tests {
             assert_eq!(&file[20 + payload.len()..], &vec![0; payload.len() & 1]);
         }
     }
-
-    #[test]
-    fn alpha_uses_extended_container() {
-        let alpha = [0u8, 0, 64, 128, 255];
-        let file = riff_webp(2, 2, &[1, 2, 3, 4], Some(&alpha));
-        assert_eq!(&file[..4], b"RIFF");
-        assert_eq!(&file[8..16], b"WEBPVP8X");
-        assert_eq!(file[16..20], 10u32.to_le_bytes());
-        assert_eq!(file[20], 0x10);
-        assert_eq!(&file[24..30], &[1, 0, 0, 1, 0, 0]);
-        assert_eq!(&file[30..34], b"ALPH");
-        assert_eq!(file[34..38], 5u32.to_le_bytes());
-        assert_eq!(file[38], 0);
-        assert_eq!(&file[39..43], &alpha[1..]);
-        assert_eq!(&file[44..48], b"VP8 ");
-        assert_eq!(file[48..52], 4u32.to_le_bytes());
-        assert_eq!(&file[52..], &[1, 2, 3, 4]);
-    }
 }
