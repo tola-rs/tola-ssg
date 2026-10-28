@@ -16,13 +16,6 @@ pub enum AddressRegistrationError {
     UrlAlreadyRegistered { url: UrlPath },
     #[error("two Bundle documents emit `{output}`; pass a different path to `document(...)`")]
     DocumentOutputAlreadyRegistered { output: OutputPath },
-    #[error(
-        "`{output}` contains the id `{fragment}` more than once; give each element a unique `id`"
-    )]
-    FragmentTargetRepeated {
-        output: OutputPath,
-        fragment: String,
-    },
 }
 
 /// Complete address index for one realized site.
@@ -146,13 +139,11 @@ impl AddressSpace {
         if output_alias != permalink && self.url_is_registered(&output_alias) {
             return Err(AddressRegistrationError::UrlAlreadyRegistered { url: output_alias });
         }
-        let mut fragment_set = FxHashSet::default();
-        for fragment in fragments {
-            if fragment_set.contains(&fragment) {
-                return Err(AddressRegistrationError::FragmentTargetRepeated { output, fragment });
-            }
-            fragment_set.insert(fragment);
-        }
+        // A page may define one fragment target more than once: a tree that is both a page of its
+        // own and part of a parent repeats its anchor where the parent renders it. The index
+        // answers which fragments a page defines, and a repeated definition answers that the same
+        // way once.
+        let fragment_set: FxHashSet<String> = fragments.into_iter().collect();
         let resource = Resource::Page { document };
         self.register_resource(permalink.clone(), resource);
         self.by_output.insert(output, permalink.clone());
@@ -573,16 +564,22 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_registration_changes_nothing() {
+    fn repeated_fragment_target_is_indexed_once() {
         let mut space = AddressSpace::default();
         let route = html_page("/hello/", "hello/index.html");
         let permalink = route.permalink.clone();
-        assert!(matches!(
-            space.register_page(route, ["same".to_owned(), "same".to_owned()]),
-            Err(AddressRegistrationError::FragmentTargetRepeated { .. })
-        ));
-        assert!(space.get_by_url(&permalink).is_none());
+        space
+            .register_page(route, ["same".to_owned(), "same".to_owned()])
+            .unwrap();
+        assert_eq!(
+            space.fragments.get(&permalink).map(|f| f.as_ref()),
+            Some(["same".to_owned()].as_slice())
+        );
+    }
 
+    #[test]
+    fn duplicate_registration_changes_nothing() {
+        let mut space = AddressSpace::default();
         space
             .register_page(html_page("/same/", "first/index.html"), std::iter::empty())
             .unwrap();

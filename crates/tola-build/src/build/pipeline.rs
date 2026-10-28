@@ -1191,18 +1191,6 @@ mod tests {
                 recorded: &["site.typ", "templates/shared.typ", "templates/missing.txt"],
                 failure: "missing.txt",
             },
-            Case {
-                name: "output validation",
-                files: &[
-                    ("templates/shared.typ", "#let duplicate = [Duplicate]"),
-                    (
-                        "site.typ",
-                        "#import \"templates/shared.typ\": duplicate\n#document(\"index.html\")[\n  #duplicate\n  #html.div(id: \"same\")\n  #html.div(id: \"same\")\n]",
-                    ),
-                ],
-                recorded: &["site.typ", "templates/shared.typ"],
-                failure: "more than once",
-            },
         ];
 
         for case in cases {
